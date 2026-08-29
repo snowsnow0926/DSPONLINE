@@ -79,7 +79,8 @@ describe("native authority persistence App boundary", () => {
     );
     expect(nativeBranch).toMatch(/persistNativeAuthorityCheckpoint\("manual"\)/);
     expect(nativeBranch).toMatch(/exportAuthoritativeV47\(/);
-    expect(nativeBranch).toMatch(/latestRuntime\.revision !== exported\.result\.revision/);
+    expect(nativeBranch).toMatch(/verifyNativeAuthorityArtifactLineage\([\s\S]*?exported\.artifact\.identity,[\s\S]*?latestRuntime/);
+    expect(nativeBranch).toMatch(/exported\.artifact\.identity\.revision !== exported\.artifact\.export\.result\.revision/);
     expect(nativeBranch).not.toMatch(/readLocalSavePayload|compressSaveTextToGzipBlob|exportTextFile/);
   });
 

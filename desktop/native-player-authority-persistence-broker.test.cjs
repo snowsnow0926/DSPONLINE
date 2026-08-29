@@ -99,6 +99,11 @@ test("checkpoint reuses the Rust-ACKed lease checkpoint and never enters generic
   });
 
   assert.deepEqual(await value.broker.checkpoint(7), {
+    authority: {
+      sessionId: "core-main-1",
+      runId: "player-run-1",
+      revision: 41,
+    },
     checkpoint: CHECKPOINT,
     summary: summary(),
     reusedAcknowledgedCheckpoint: true,
@@ -118,6 +123,11 @@ test("export selects the active main-owned session and renderer cannot supply au
     savedAtMs: 20_000,
   });
   assert.equal(exported.result.revision, 41);
+  assert.deepEqual(exported.authority, {
+    sessionId: "core-main-1",
+    runId: "player-run-1",
+    revision: 41,
+  });
   assert.deepEqual(value.calls.at(-1), ["export", "main-player-authority", {
     sessionId: "core-main-1",
     exportId: "export-1",
@@ -132,6 +142,49 @@ test("export selects the active main-owned session and renderer cannot supply au
     }),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_INVALID",
   );
+});
+
+test("startup reconciliation holds the settled runtime boundary through the renderer challenge", async () => {
+  const gate = (() => {
+    let resolve;
+    const promise = new Promise((resolvePromise) => { resolve = resolvePromise; });
+    return { promise, resolve };
+  })();
+  let boundaryReleased = false;
+  const value = fixture({
+    runtime: {
+      async withSettledPersistenceBoundary(operation) {
+        try {
+          return await operation({
+            sessionId: "core-main-1",
+            runId: "player-run-1",
+            revision: 41,
+            checkpoint: CHECKPOINT,
+            acknowledgedSequence: 7,
+            settledDeadlineMs: 18_000,
+          });
+        } finally {
+          boundaryReleased = true;
+        }
+      },
+    },
+  });
+  let observed;
+  const pending = value.broker.withStartupReconciliation(7, async (receipt) => {
+    observed = receipt;
+    await gate.promise;
+    return "renderer-ack";
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(boundaryReleased, false);
+  assert.deepEqual(observed.authority, {
+    sessionId: "core-main-1",
+    runId: "player-run-1",
+    revision: 41,
+  });
+  gate.resolve();
+  assert.equal(await pending, "renderer-ack");
+  assert.equal(boundaryReleased, true);
 });
 
 test("untrusted callers, stale revisions, and non-exclusive owners fail closed", async () => {

@@ -462,6 +462,8 @@ test("handoff wiring is main-initiated, coverage-gated, and exposes no renderer 
   assert.doesNotMatch(main, /nativePlayerAuthorityDurableOwner/);
   assert.match(main, /desktop:native-player-authority-checkpoint/);
   assert.match(main, /nativePlayerAuthorityPersistenceBroker\.checkpoint\(rendererOwnerId\)/);
+  assert.match(main, /nativePlayerAuthorityPersistenceBroker\.withStartupReconciliation\(/);
+  assert.match(main, /nativePlayerAuthorityStartupReconcileCompleted = terminalResolved/);
   assert.match(main, /desktop:native-player-authority-export-v47/);
   assert.match(main, /nativePlayerAuthorityPersistenceBroker\.exportV47\(rendererOwnerId/);
   assert.match(preload, /onNativePlayerAuthorityHandoffRequest:/);

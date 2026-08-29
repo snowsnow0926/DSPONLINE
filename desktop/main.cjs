@@ -53,6 +53,7 @@ const {
   RENDERER_READY_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_READY_KIND,
   RESPONSE_CHANNEL: NATIVE_PLAYER_AUTHORITY_HANDOFF_RESPONSE_CHANNEL,
   STARTUP_RECONCILE_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_STARTUP_RECONCILE_REQUEST_KIND,
+  startupReconciliationIsTerminalResolved,
 } = require("./native-player-authority-handoff-ipc.cjs");
 const {
   NativePlayerAuthorityCommandBroker,
@@ -495,6 +496,13 @@ async function performNativePlayerAuthorityHandoff(rendererOwnerId, opened) {
         });
       }
       const durable = await nativePlayerAuthorityPersistenceBroker.checkpoint(rendererOwnerId);
+      if (durable.authority.sessionId !== identity.sessionId ||
+          durable.authority.runId !== identity.runId ||
+          durable.authority.revision !== durable.checkpoint.revision) {
+        throw Object.assign(new Error("native player-authority completion lineage changed"), {
+          code: "NATIVE_PLAYER_AUTHORITY_HANDOFF_COMPLETION_STALE",
+        });
+      }
       await nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
         kind: NATIVE_PLAYER_AUTHORITY_HANDOFF_COMPLETE_REQUEST_KIND,
         ...identity,
@@ -528,49 +536,62 @@ async function reconcileNativePlayerAuthorityStartupWithRenderer(rendererOwnerId
   const operation = (async () => {
     let observation = nativePlayerAuthorityStartupReconcileObservation;
     const recoveredRuntimePhase = nativePlayerAuthorityRuntime?.snapshot().phase ?? null;
+    if (observation.state === "active" &&
+        !["active", "macro-active"].includes(recoveredRuntimePhase)) {
+      observation = Object.freeze({ state: "unknown" });
+    }
+    const handoffId = `startup-reconcile-${randomUUID()}`;
+    const challenge = (rustLease) => nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
+      kind: NATIVE_PLAYER_AUTHORITY_STARTUP_RECONCILE_REQUEST_KIND,
+      handoffId,
+      rustLease,
+      releaseAuthorized: rustLease.state === "absent",
+      timeoutMs: NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS,
+    }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
+    let result;
     if (observation.state === "active" && recoveredRuntimePhase === "active" &&
         nativePlayerAuthorityPersistenceBroker) {
-      // Startup recovery immediately resumes the exact clock. Refresh the
-      // latest ACKed checkpoint instead of challenging the renderer with the
-      // older hello receipt after catch-up ticks have already committed.
+      // Keep the exact clock frozen from checkpoint capture through renderer
+      // drain and ACK. Releasing this boundary before IPC allowed a normal tick
+      // to turn startup recovery into a false revision mismatch.
       const deadline = Date.now() + Math.min(2_000, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
-      let refreshed = false;
-      while (Date.now() <= deadline) {
+      while (true) {
         try {
-          const durable = await nativePlayerAuthorityPersistenceBroker.checkpoint(rendererOwnerId);
-          observation = Object.freeze({
-            ...observation,
-            checkpoint: durable.checkpoint,
-            summary: durable.summary,
-          });
-          refreshed = true;
+          result = await nativePlayerAuthorityPersistenceBroker.withStartupReconciliation(
+            rendererOwnerId,
+            (durable) => {
+              if (durable.authority.sessionId !== observation.sessionId ||
+                  durable.authority.runId !== observation.runId ||
+                  durable.authority.revision !== durable.checkpoint.revision) {
+                throw Object.assign(new Error("native player-authority startup lineage changed"), {
+                  code: "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_STALE",
+                });
+              }
+              return challenge(Object.freeze({
+                ...observation,
+                checkpoint: durable.checkpoint,
+                summary: durable.summary,
+              }));
+            },
+          );
           break;
         } catch (error) {
-          if (error?.code !== "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY") {
-            observation = Object.freeze({ state: "unknown" });
-            break;
+          if (error?.code !== "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY" || Date.now() > deadline) {
+            throw error;
           }
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
       }
-      if (!refreshed || observation.state === "active" &&
-          observation.checkpoint.revision !== observation.summary.revision) {
-        observation = Object.freeze({ state: "unknown" });
-      }
-    } else if (observation.state === "active" && recoveredRuntimePhase !== "macro-active") {
-      observation = Object.freeze({ state: "unknown" });
+    } else {
+      result = await challenge(observation);
     }
-    const result = await nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
-      kind: NATIVE_PLAYER_AUTHORITY_STARTUP_RECONCILE_REQUEST_KIND,
-      handoffId: `startup-reconcile-${randomUUID()}`,
-      rustLease: observation,
-      releaseAuthorized: observation.state === "absent",
-      timeoutMs: NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS,
-    }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
-    nativePlayerAuthorityStartupReconcileCompleted = true;
-    const deferred = nativePlayerAuthorityDeferredHandoff;
-    nativePlayerAuthorityDeferredHandoff = null;
-    if (deferred) scheduleNativePlayerAuthorityHandoff(deferred.rendererOwnerId, deferred.opened);
+    const terminalResolved = startupReconciliationIsTerminalResolved(result);
+    nativePlayerAuthorityStartupReconcileCompleted = terminalResolved;
+    if (terminalResolved) {
+      const deferred = nativePlayerAuthorityDeferredHandoff;
+      nativePlayerAuthorityDeferredHandoff = null;
+      if (deferred) scheduleNativePlayerAuthorityHandoff(deferred.rendererOwnerId, deferred.opened);
+    }
     return result;
   })();
   nativePlayerAuthorityStartupReconcileAttempt = operation;
@@ -2033,13 +2054,18 @@ ipcMain.handle("desktop:native-player-authority-export-v47", async (event, reque
       });
     }
     const prepared = normalizeRendererNativeResult(
-      "coreExport",
+      "playerAuthorityExport",
       await nativePlayerAuthorityPersistenceBroker.exportV47(rendererOwnerId, {
         exportId: request.exportId,
         savedAtMs: request.savedAtMs,
       }),
     );
-    return await deliverNativeV47Export(prepared, suggestedNativeExportName(request.suggestedName));
+    const delivered = await deliverNativeV47Export({
+      exportId: prepared.exportId,
+      mode: prepared.mode,
+      result: prepared.result,
+    }, suggestedNativeExportName(request.suggestedName));
+    return { authority: prepared.authority, ...delivered };
   } catch (error) {
     throw createRendererNativeError(error, {
       fallbackCode: "NATIVE_PLAYER_AUTHORITY_EXPORT_FAILED",

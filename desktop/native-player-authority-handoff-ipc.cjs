@@ -25,6 +25,9 @@ const COMPLETE_REQUEST_KIND = "native-player-authority-handoff-complete-v1";
 const COMPLETED_RESULT_KIND = "native-player-authority-handoff-completed-v1";
 const STARTUP_RECONCILE_REQUEST_KIND = "native-player-authority-startup-reconcile-v1";
 const STARTUP_RECONCILED_RESULT_KIND = "native-player-authority-startup-reconciled-v1";
+const TERMINAL_STARTUP_RECONCILE_ACTIONS = new Set([
+  "resumed-native", "released-browser-fence", "no-browser-fence",
+]);
 
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
@@ -267,6 +270,11 @@ function normalizeStartupReconciledResult(value, request) {
   });
 }
 
+function startupReconciliationIsTerminalResolved(result) {
+  return isRecord(result) && result.kind === STARTUP_RECONCILED_RESULT_KIND &&
+    TERMINAL_STARTUP_RECONCILE_ACTIONS.has(result.action);
+}
+
 function normalizeResultForRequest(value, request) {
   switch (request.kind) {
     case PREPARE_REQUEST_KIND: return normalizePreparedResult(value, request);
@@ -449,5 +457,6 @@ module.exports = {
   RESPONSE_CHANNEL,
   STARTUP_RECONCILE_REQUEST_KIND,
   STARTUP_RECONCILED_RESULT_KIND,
+  startupReconciliationIsTerminalResolved,
   subscribeRendererToNativePlayerAuthorityHandoff,
 };

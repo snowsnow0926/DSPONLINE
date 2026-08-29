@@ -73,6 +73,8 @@ const PUBLIC_NATIVE_ERROR_CODES = new Set([
   "NATIVE_HOST_UNAVAILABLE", "NATIVE_HOST_WRITE_FAILED", "NATIVE_OPERATION_FAILED",
   "NATIVE_PERFORMANCE_POLICY_READ_FAILED", "NATIVE_PERFORMANCE_POLICY_WRITE_FAILED",
   "NATIVE_PLAYER_AUTHORITY_STATE_FAILED", "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+  "NATIVE_PLAYER_AUTHORITY_CHECKPOINT_FAILED", "NATIVE_PLAYER_AUTHORITY_EXPORT_FAILED",
+  "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY", "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_STALE",
   "NATIVE_PROTOCOL_INVALID", "NATIVE_SAVE_ABORT_FAILED", "NATIVE_SAVE_BEGIN_FAILED",
   "NATIVE_SAVE_COMMIT_FAILED", "NATIVE_SAVE_COMPACT_FAILED", "NATIVE_SAVE_READ_FAILED",
   "NATIVE_SAVE_RECOVER_FAILED", "NATIVE_SAVE_WRITE_FAILED", "NATIVE_STATUS_FAILED",
@@ -4231,11 +4233,24 @@ function normalizeCoreCheckpoint(value) {
   return { checkpoint, summary, encodedRecords: safeInteger(source.encodedRecords, "native checkpoint encoded records"), reusedRecords: safeInteger(source.reusedRecords, "native checkpoint reused records") };
 }
 
+function normalizePlayerAuthorityArtifactIdentity(value, label) {
+  const source = exactObject(value, ["sessionId", "runId", "revision"], label);
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    runId: logicalId(source.runId, `${label} run`, 128),
+    revision: safeInteger(source.revision, `${label} revision`),
+  };
+}
+
 function normalizePlayerAuthorityCheckpoint(value) {
   const source = exactObject(
     value,
-    ["checkpoint", "summary", "reusedAcknowledgedCheckpoint"],
+    ["authority", "checkpoint", "summary", "reusedAcknowledgedCheckpoint"],
     "native player-authority checkpoint result",
+  );
+  const authority = normalizePlayerAuthorityArtifactIdentity(
+    source.authority,
+    "native player-authority checkpoint authority",
   );
   const checkpointSource = exactObject(
     source.checkpoint,
@@ -4259,11 +4274,12 @@ function normalizePlayerAuthorityCheckpoint(value) {
   };
   const summary = normalizeCoreSummary(source.summary);
   if (source.reusedAcknowledgedCheckpoint !== true || checkpoint.revision !== summary.revision ||
+      authority.revision !== checkpoint.revision ||
       summary.stateVersion !== 47 || summary.mode !== "normal" || summary.paused !== false ||
       summary.coverage.authorityEligible !== true) {
     throw protocolError("native player-authority checkpoint binding");
   }
-  return { checkpoint, summary, reusedAcknowledgedCheckpoint: true };
+  return { authority, checkpoint, summary, reusedAcknowledgedCheckpoint: true };
 }
 
 function normalizeCoreExport(value) {
@@ -4278,6 +4294,27 @@ function normalizeCoreExport(value) {
       stateChecksum: checksum(proof.stateChecksum, "native export state checksum"),
     },
   };
+}
+
+function normalizePlayerAuthorityExport(value) {
+  const source = exactObject(
+    value,
+    ["authority", "exportId", "mode", "result"],
+    "native player-authority v47 export result",
+  );
+  const authority = normalizePlayerAuthorityArtifactIdentity(
+    source.authority,
+    "native player-authority export authority",
+  );
+  const exported = normalizeCoreExport({
+    exportId: source.exportId,
+    mode: source.mode,
+    result: source.result,
+  });
+  if (exported.mode !== "normal" || authority.revision !== exported.result.revision) {
+    throw protocolError("native player-authority export binding");
+  }
+  return { authority, ...exported };
 }
 
 function normalizeCoreCompare(value) {
@@ -4602,6 +4639,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreCheckpoint: normalizeCoreCheckpoint,
   playerAuthorityCheckpoint: normalizePlayerAuthorityCheckpoint,
   coreExport: normalizeCoreExport,
+  playerAuthorityExport: normalizePlayerAuthorityExport,
   coreCompare: normalizeCoreCompare,
   coreClose: normalizeCoreClose,
   playerAuthorityState: normalizePlayerAuthorityState,

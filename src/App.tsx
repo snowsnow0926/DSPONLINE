@@ -417,6 +417,7 @@ import { WindowsNativeCoreBetaController } from "./game/nativeCoreBetaController
 import {
   evaluateNativeAuthorityPersistenceBoundary,
   nativeAuthorityReplacementBlockedMessage,
+  verifyNativeAuthorityArtifactLineage,
   verifyNativeAuthorityCheckpointReceipt,
   type NativeAuthorityPersistenceBoundary,
   type NativeAuthorityRuntimeObservation,
@@ -2208,12 +2209,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       ? null
       : controllerSnapshot?.authority.sessionId ?? clockSnapshot.expectedSessionId;
     const macro = selectNativePlayerAuthorityMacroStatus(clockSnapshot, sessionId);
-    if (macro) return { kind: "macro", sessionId, revision: macro.revision };
+    if (macro) return { kind: "macro", sessionId, runId: null, revision: macro.revision };
     const active = selectActiveNativePlayerAuthorityFrame(clockSnapshot, sessionId);
-    if (active) return { kind: "active", sessionId: active.sessionId, revision: active.revision };
+    if (active) {
+      return { kind: "active", sessionId: active.sessionId, runId: active.runId, revision: active.revision };
+    }
     const bound = selectBoundNativePlayerAuthorityFrame(clockSnapshot, sessionId);
-    if (bound) return { kind: "bound-paused", sessionId: bound.sessionId, revision: bound.revision };
-    return { kind: "inactive", sessionId: null, revision: null };
+    if (bound) {
+      return { kind: "bound-paused", sessionId: bound.sessionId, runId: bound.runId, revision: bound.revision };
+    }
+    return { kind: "inactive", sessionId: null, runId: null, revision: null };
   }, [nativePlayerAuthorityClock]);
   const readNativeAuthorityPersistenceBoundary = useCallback((): NativeAuthorityPersistenceBoundary => {
     if (nativeAuthorityHandoffRef.current && nativeAuthorityHandoffRef.current.phase !== "native-active") {
@@ -5755,7 +5760,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       if (!verifyNativeAuthorityCheckpointReceipt(token, receipt, runtime)) {
         throw new Error("Windows 原生 durable 检查点回执已过期或与当前 revision 不一致");
       }
-      const revision = receipt.summary?.revision;
+      const revision = receipt.artifact.identity.revision;
       const result: SaveGameResult = {
         success: true,
         message: `Windows 原生 durable 检查点已确认（revision ${revision}）；未写入公共 JavaScript 主档或云档`,
@@ -11762,11 +11767,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         );
         await nativePlayerAuthorityClock.refresh();
         const latestRuntime = readNativeAuthorityRuntimeObservation();
-        if (latestRuntime.kind !== "active" || latestRuntime.sessionId !== exportBoundary.checkpointToken.sessionId ||
-          latestRuntime.revision !== exported.result.revision) {
-          throw new Error("Windows 原生导出回执不再对应最新 settled revision；未读取或导出旧 JavaScript 镜像");
+        if (!verifyNativeAuthorityArtifactLineage(
+          exportBoundary.checkpointToken,
+          exported.artifact.identity,
+          latestRuntime,
+        ) || exported.artifact.identity.revision !== exported.artifact.export.result.revision) {
+          throw new Error("Windows 原生导出回执不属于当前 session/run lineage；未读取或导出旧 JavaScript 镜像");
         }
-        return exported.cancelled ? "cancelled" as const : "native-json" as const;
+        return exported.artifact.export.cancelled ? "cancelled" as const : "native-json" as const;
       }
       const saved = await persistPrimarySave(undefined, "manual");
       if (!saved.success) throw new Error(saved.message);

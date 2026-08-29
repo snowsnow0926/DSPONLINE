@@ -5,6 +5,7 @@ import type {
   DesktopNativeCoreDomainCoverage,
   DesktopNativeCoreStellarIndustryV2ProjectionResult,
   DesktopNativeCoreSummary,
+  DesktopNativePlayerAuthorityExportResult,
   DesktopNativeSaveCommitResult,
 } from "../desktop";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
@@ -1090,7 +1091,13 @@ describe("Windows native core invitation-Beta controller", () => {
       revision: 2,
     };
     const authoritySummary = summary(2, true);
+    const authorityIdentity = {
+      sessionId: session.sessionId,
+      runId: "player-run-1",
+      revision: 2,
+    };
     const checkpointBridge = vi.fn(async () => ({
+      authority: authorityIdentity,
       checkpoint: authorityCheckpoint,
       summary: authoritySummary,
       reusedAcknowledgedCheckpoint: true as const,
@@ -1100,6 +1107,7 @@ describe("Windows native core invitation-Beta controller", () => {
       savedAtMs: number;
       suggestedName?: string;
     }) => ({
+      authority: authorityIdentity,
       exportId: request.exportId,
       mode: "normal" as const,
       result: {
@@ -1134,14 +1142,20 @@ describe("Windows native core invitation-Beta controller", () => {
     });
 
     const checkpointed = await controller.createAuthorityCheckpoint(undefined, 20_000);
-    expect(checkpointed.authority).toMatchObject({ phase: "native-authoritative", authority: "native" });
+    expect(checkpointed.snapshot.authority).toMatchObject({ phase: "native-authoritative", authority: "native" });
+    expect(checkpointed.artifact.identity).toEqual(authorityIdentity);
     expect(checkpointBridge).toHaveBeenCalledTimes(1);
     expect(session.checkpointCalls).toBe(0);
 
     await expect(controller.exportAuthoritativeV47("export-1", "factory.json", 21_000)).resolves.toMatchObject({
-      exportId: "export-1",
-      mode: "normal",
-      result: { revision: 2, savedAtMs: 21_000 },
+      artifact: {
+        identity: authorityIdentity,
+        export: {
+          exportId: "export-1",
+          mode: "normal",
+          result: { revision: 2, savedAtMs: 21_000 },
+        },
+      },
     });
     expect(exportBridge).toHaveBeenCalledWith({
       exportId: "export-1",
@@ -1149,6 +1163,7 @@ describe("Windows native core invitation-Beta controller", () => {
       suggestedName: "factory.json",
     });
     exportBridge.mockResolvedValueOnce({
+      authority: { ...authorityIdentity, revision: 3 },
       exportId: "export-after-clock-tick",
       mode: "normal" as const,
       result: {
@@ -1165,8 +1180,91 @@ describe("Windows native core invitation-Beta controller", () => {
       "export-after-clock-tick",
       "factory-after-clock-tick.json",
       22_000,
-    )).resolves.toMatchObject({ result: { revision: 3 } });
+    )).resolves.toMatchObject({ artifact: { export: { result: { revision: 3 } } } });
     expect(session.exportCalls).toBe(0);
+  });
+
+  it("keeps main-owned authority active when persistence is busy and accepts an older ACKed artifact on the same lineage", async () => {
+    const session = new FakeNativeSession();
+    const controller = await gatedController(session);
+    const authorityCheckpoint = { generation: 5, rootHash: "f".repeat(64), revision: 2 };
+    const authoritySummary = summary(2, true);
+    const busy = Object.assign(new Error("persistence boundary busy"), {
+      code: "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+    });
+    const checkpointBridge = vi.fn()
+      .mockRejectedValueOnce(busy)
+      .mockResolvedValueOnce({
+        authority: { sessionId: session.sessionId, runId: "player-run-race", revision: 2 },
+        checkpoint: authorityCheckpoint,
+        summary: authoritySummary,
+        reusedAcknowledgedCheckpoint: true as const,
+      });
+    let resolveExport!: (value: DesktopNativePlayerAuthorityExportResult) => void;
+    const pendingExportBridge = new Promise<DesktopNativePlayerAuthorityExportResult>((resolve) => {
+      resolveExport = resolve;
+    });
+    const exportBridge = vi.fn(() => pendingExportBridge);
+    vi.stubGlobal("window", {
+      dspDesktop: {
+        checkpointNativePlayerAuthority: checkpointBridge,
+        exportNativePlayerAuthorityV47: exportBridge,
+      },
+    });
+    controller.bindMainOwnedPlayerAuthority({
+      sessionId: session.sessionId,
+      runId: "player-run-race",
+      checkpoint: authorityCheckpoint,
+      summary: authoritySummary,
+      source: "handoff",
+    });
+
+    await expect(controller.createAuthorityCheckpoint()).rejects.toBe(busy);
+    expect(controller.snapshot().authority).toMatchObject({
+      phase: "native-authoritative",
+      authority: "native",
+      shadowRevision: 2,
+    });
+
+    const exportWhileClockAdvances = controller.exportAuthoritativeV47(
+      "export-before-next-tick",
+      "before-next-tick.json",
+      30_000,
+    );
+    await Promise.resolve();
+    await controller.commitAuthoritativeOperation({
+      commandId: "tick-won-after-artifact",
+      baseRevision: 2,
+      simulationSeconds: 1,
+      wallSeconds: 1,
+    });
+    resolveExport({
+      authority: { sessionId: session.sessionId, runId: "player-run-race", revision: 2 },
+      exportId: "export-before-next-tick",
+      mode: "normal",
+      result: {
+        revision: 2,
+        savedAtMs: 30_000,
+        byteLength: 123,
+        envelopeSha256: "e".repeat(64),
+        stateChecksum: "12345678",
+      },
+      cancelled: false,
+      fileName: "before-next-tick.json",
+    });
+    await expect(exportWhileClockAdvances).resolves.toMatchObject({
+      artifact: {
+        identity: { revision: 2 },
+        export: { result: { revision: 2 } },
+      },
+    });
+    const receipt = await controller.createAuthorityCheckpoint();
+    expect(receipt.artifact.identity.revision).toBe(2);
+    expect(receipt.snapshot.authority).toMatchObject({
+      phase: "native-authoritative",
+      authority: "native",
+      shadowRevision: 3,
+    });
   });
 
   it("recovers a main-owned startup session only from a complete v47 eligible receipt", async () => {

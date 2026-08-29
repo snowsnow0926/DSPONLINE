@@ -4,6 +4,7 @@ import type { NativeCoreBetaControllerSnapshot } from "./nativeCoreBetaControlle
 import {
   evaluateNativeAuthorityPersistenceBoundary,
   nativeAuthorityReplacementBlockedMessage,
+  verifyNativeAuthorityArtifactLineage,
   verifyNativeAuthorityCheckpointReceipt,
   type NativeAuthorityRuntimeObservation,
 } from "./nativeAuthorityPersistenceBoundary";
@@ -54,14 +55,35 @@ function nativeSnapshot(revision = 12): NativeCoreBetaControllerSnapshot {
         topologyIndexBytes: 1,
         estimatedRuntimeBytes: 3,
       },
-      coverage: { authorityEligible: false } as DesktopNativeCoreDomainCoverage,
+      coverage: { authorityEligible: true } as DesktopNativeCoreDomainCoverage,
     },
     recoveryRootHash: HASH_A,
   };
 }
 
 function runtime(kind: NativeAuthorityRuntimeObservation["kind"], revision: number | null = 12): NativeAuthorityRuntimeObservation {
-  return { kind, sessionId: kind === "inactive" ? null : "native-session", revision: kind === "inactive" ? null : revision };
+  return {
+    kind,
+    sessionId: kind === "inactive" ? null : "native-session",
+    runId: kind === "active" || kind === "bound-paused" ? "native-run" : null,
+    revision: kind === "inactive" ? null : revision,
+  };
+}
+
+function checkpointReceipt(artifactRevision = 13, snapshotRevision = artifactRevision) {
+  const artifactSnapshot = nativeSnapshot(artifactRevision);
+  return {
+    artifact: {
+      identity: {
+        sessionId: "native-session",
+        runId: "native-run",
+        revision: artifactRevision,
+      },
+      checkpoint: { generation: 3, rootHash: HASH_A, revision: artifactRevision },
+      summary: artifactSnapshot.summary!,
+    },
+    snapshot: nativeSnapshot(snapshotRevision),
+  };
 }
 
 describe("native authority persistence boundary", () => {
@@ -113,24 +135,37 @@ describe("native authority persistence boundary", () => {
     expect(boundary).toMatchObject({
       protected: true,
       runtimeKind: "active",
-      checkpointToken: { sessionId: "native-session", minimumRevision: 12 },
+      checkpointToken: { sessionId: "native-session", runId: "native-run", minimumRevision: 12 },
       canExportAuthoritativeV47: true,
     });
   });
 
-  it("rejects stale, cross-session, and internally inconsistent checkpoint receipts", () => {
+  it("accepts same-lineage forward clock progress and rejects rollback, replacement, or corrupt artifacts", () => {
     const token = evaluateNativeAuthorityPersistenceBoundary(nativeSnapshot(), runtime("active")).checkpointToken!;
-    expect(verifyNativeAuthorityCheckpointReceipt(token, nativeSnapshot(13), runtime("active", 13))).toBe(true);
-    expect(verifyNativeAuthorityCheckpointReceipt(token, nativeSnapshot(13), runtime("active", 14))).toBe(false);
-    expect(verifyNativeAuthorityCheckpointReceipt(token, nativeSnapshot(11), runtime("active", 11))).toBe(false);
-    expect(verifyNativeAuthorityCheckpointReceipt(token, nativeSnapshot(13), {
+    expect(verifyNativeAuthorityCheckpointReceipt(token, checkpointReceipt(13), runtime("active", 13))).toBe(true);
+    expect(verifyNativeAuthorityCheckpointReceipt(token, checkpointReceipt(13, 14), runtime("active", 15))).toBe(true);
+    expect(verifyNativeAuthorityCheckpointReceipt(token, checkpointReceipt(11), runtime("active", 15))).toBe(false);
+    expect(verifyNativeAuthorityCheckpointReceipt(token, checkpointReceipt(13), runtime("active", 12))).toBe(false);
+    expect(verifyNativeAuthorityCheckpointReceipt(token, checkpointReceipt(13), {
       kind: "active",
       sessionId: "replacement-session",
+      runId: "native-run",
       revision: 13,
     })).toBe(false);
-    const corrupt = nativeSnapshot(13);
-    corrupt.recoveryRootHash = HASH_B;
+    expect(verifyNativeAuthorityCheckpointReceipt(token, checkpointReceipt(13), {
+      kind: "active",
+      sessionId: "native-session",
+      runId: "replacement-run",
+      revision: 13,
+    })).toBe(false);
+    const corrupt = checkpointReceipt(13);
+    corrupt.snapshot.recoveryRootHash = HASH_B;
     expect(verifyNativeAuthorityCheckpointReceipt(token, corrupt, runtime("active", 13))).toBe(false);
+    expect(verifyNativeAuthorityArtifactLineage(token, {
+      sessionId: "native-session",
+      runId: "native-run",
+      revision: 13,
+    }, runtime("active", 99))).toBe(true);
   });
 
   it("does not mutate source state when a replacement is rejected", () => {

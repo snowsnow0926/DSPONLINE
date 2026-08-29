@@ -279,7 +279,7 @@ export interface DesktopBridge {
   /** Main selects the active authority session; renderer supplies only export presentation data. */
   exportNativePlayerAuthorityV47?: (
     request: DesktopNativePlayerAuthorityExportRequest,
-  ) => Promise<DesktopNativeCoreExportResult>;
+  ) => Promise<DesktopNativePlayerAuthorityExportResult>;
   /** Budget-only request; session/run/operation IDs cannot be supplied by the renderer. */
   startNativePlayerAuthorityMacro?: (
     request: DesktopNativePlayerAuthorityMacroBudgetRequest,
@@ -1952,9 +1952,16 @@ export interface DesktopNativeCoreCheckpointResult {
 }
 
 export interface DesktopNativePlayerAuthorityCheckpointResult {
+  authority: DesktopNativePlayerAuthorityArtifactIdentity;
   checkpoint: LocalSaveNativeAuthorityCheckpoint;
   summary: DesktopNativeCoreSummary;
   reusedAcknowledgedCheckpoint: true;
+}
+
+export interface DesktopNativePlayerAuthorityArtifactIdentity {
+  sessionId: string;
+  runId: string;
+  revision: number;
 }
 
 export interface DesktopNativePlayerAuthorityExportRequest {
@@ -1984,6 +1991,10 @@ export interface DesktopNativeCoreExportResult {
   };
   cancelled: boolean;
   fileName?: string;
+}
+
+export interface DesktopNativePlayerAuthorityExportResult extends DesktopNativeCoreExportResult {
+  authority: DesktopNativePlayerAuthorityArtifactIdentity;
 }
 
 export interface DesktopNativeCoreCompareRequest extends DesktopNativeCoreSessionRequest {

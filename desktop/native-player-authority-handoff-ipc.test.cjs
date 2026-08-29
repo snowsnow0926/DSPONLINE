@@ -14,6 +14,7 @@ const {
   REQUEST_CHANNEL,
   RESPONSE_CHANNEL,
   STARTUP_RECONCILE_REQUEST_KIND,
+  startupReconciliationIsTerminalResolved,
   subscribeRendererToNativePlayerAuthorityHandoff,
 } = require("./native-player-authority-handoff-ipc.cjs");
 
@@ -309,6 +310,22 @@ test("startup reconciliation actions are constrained by main's active/absent/unk
     }));
     assert.equal((await pending).action, action);
   }
+  assert.equal(startupReconciliationIsTerminalResolved({
+    kind: "native-player-authority-startup-reconciled-v1",
+    action: "resumed-native",
+  }), true);
+  assert.equal(startupReconciliationIsTerminalResolved({
+    kind: "native-player-authority-startup-reconciled-v1",
+    action: "released-browser-fence",
+  }), true);
+  assert.equal(startupReconciliationIsTerminalResolved({
+    kind: "native-player-authority-startup-reconciled-v1",
+    action: "no-browser-fence",
+  }), true);
+  assert.equal(startupReconciliationIsTerminalResolved({
+    kind: "native-player-authority-startup-reconciled-v1",
+    action: "fail-closed",
+  }), false);
 
   for (const [state, action] of [
     ["active", "released-browser-fence"],

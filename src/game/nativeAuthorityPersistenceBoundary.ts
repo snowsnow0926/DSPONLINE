@@ -1,15 +1,21 @@
-import type { NativeCoreBetaControllerSnapshot } from "./nativeCoreBetaController";
+import type {
+  NativeCoreAuthorityCheckpointReceipt,
+  NativeCoreBetaControllerSnapshot,
+  NativeCoreDurableArtifactIdentity,
+} from "./nativeCoreBetaController";
 
 export type NativeAuthorityRuntimeKind = "inactive" | "active" | "bound-paused" | "macro";
 
 export interface NativeAuthorityRuntimeObservation {
   kind: NativeAuthorityRuntimeKind;
   sessionId: string | null;
+  runId: string | null;
   revision: number | null;
 }
 
 export interface NativeAuthorityCheckpointToken {
   sessionId: string;
+  runId: string;
   minimumRevision: number;
 }
 
@@ -88,7 +94,8 @@ export function evaluateNativeAuthorityPersistenceBoundary(
   }
   const controllerSessionId = snapshot.authority.sessionId;
   if (!controllerOwnsNative(snapshot) || typeof controllerSessionId !== "string" ||
-    runtime.sessionId !== controllerSessionId || !validRevision(runtime.revision)) {
+    runtime.sessionId !== controllerSessionId || typeof runtime.runId !== "string" ||
+    runtime.runId.length < 1 || !validRevision(runtime.revision)) {
     return {
       protected: true,
       runtimeKind: "active",
@@ -102,6 +109,7 @@ export function evaluateNativeAuthorityPersistenceBoundary(
     runtimeKind: "active",
     checkpointToken: {
       sessionId: controllerSessionId,
+      runId: runtime.runId,
       minimumRevision: runtime.revision,
     },
     canExportAuthoritativeV47: true,
@@ -110,22 +118,42 @@ export function evaluateNativeAuthorityPersistenceBoundary(
 }
 
 /**
- * Accepts only a durable checkpoint that is internally complete and still
- * matches the latest settled main-owned authority clock.  The revision may
- * advance while the checkpoint request waits in the native queue, but a later
- * clock revision invalidates the renderer receipt instead of allowing a stale
- * success message.
+ * A durable artifact is immutable once ACKed, while the live clock is allowed
+ * to advance. Bind both ends to the same session/run lineage and require only
+ * monotonic revisions; equality with the post-dialog clock would turn normal
+ * one-second ticks into false save failures.
  */
-export function verifyNativeAuthorityCheckpointReceipt(
+export function verifyNativeAuthorityArtifactLineage(
   token: NativeAuthorityCheckpointToken,
-  snapshot: NativeCoreBetaControllerSnapshot,
+  artifact: NativeCoreDurableArtifactIdentity,
   runtime: NativeAuthorityRuntimeObservation,
 ): boolean {
-  if (runtime.kind !== "active" || runtime.sessionId !== token.sessionId ||
-    !validRevision(runtime.revision) || !controllerOwnsNative(snapshot) ||
-    snapshot.authority.sessionId !== token.sessionId || !controllerProofIsSelfConsistent(snapshot)) return false;
-  const revision = snapshot.summary?.revision;
-  return typeof revision === "number" && revision >= token.minimumRevision && revision === runtime.revision;
+  return runtime.kind === "active" && runtime.sessionId === token.sessionId &&
+    runtime.runId === token.runId && artifact.sessionId === token.sessionId &&
+    artifact.runId === token.runId && validRevision(runtime.revision) &&
+    validRevision(artifact.revision) && artifact.revision >= token.minimumRevision &&
+    runtime.revision >= artifact.revision;
+}
+
+export function verifyNativeAuthorityCheckpointReceipt(
+  token: NativeAuthorityCheckpointToken,
+  receipt: NativeCoreAuthorityCheckpointReceipt,
+  runtime: NativeAuthorityRuntimeObservation,
+): boolean {
+  const { artifact, snapshot } = receipt;
+  if (!verifyNativeAuthorityArtifactLineage(token, artifact.identity, runtime) ||
+    !controllerOwnsNative(snapshot) || snapshot.authority.sessionId !== token.sessionId ||
+    !controllerProofIsSelfConsistent(snapshot) || artifact.checkpoint.revision !== artifact.identity.revision ||
+    artifact.summary.revision !== artifact.identity.revision || artifact.summary.stateVersion !== 47 ||
+    artifact.summary.mode !== "normal" || artifact.summary.paused !== false ||
+    artifact.summary.coverage.authorityEligible !== true) return false;
+  const latestProof = snapshot.authority.latestVerifiedProof;
+  if (!latestProof || latestProof.revision < artifact.identity.revision ||
+    latestProof.registryFingerprint !== artifact.summary.registryFingerprint) return false;
+  return latestProof.revision > artifact.identity.revision ||
+    (latestProof.rootHash === artifact.checkpoint.rootHash &&
+      latestProof.canonicalSha256 === artifact.summary.canonicalSha256 &&
+      latestProof.domainSha256 === artifact.summary.domainSha256);
 }
 
 export function nativeAuthorityReplacementBlockedMessage(

@@ -56,6 +56,14 @@ function validateBoundary(boundary, summary) {
   }
 }
 
+function authorityIdentity(boundary) {
+  return Object.freeze({
+    sessionId: boundary.sessionId,
+    runId: boundary.runId,
+    revision: boundary.revision,
+  });
+}
+
 class NativePlayerAuthorityPersistenceBroker {
   constructor(options) {
     if (!isRecord(options) || !options.runtime ||
@@ -103,10 +111,22 @@ class NativePlayerAuthorityPersistenceBroker {
 
   checkpoint(rendererOwnerId) {
     return this.withBoundary(rendererOwnerId, async (boundary, summary) => Object.freeze({
+      authority: authorityIdentity(boundary),
       checkpoint: Object.freeze({ ...boundary.checkpoint }),
       summary,
       reusedAcknowledgedCheckpoint: true,
     }));
+  }
+
+  withStartupReconciliation(rendererOwnerId, operation) {
+    if (typeof operation !== "function") {
+      throw new TypeError("native player-authority startup reconciliation is invalid");
+    }
+    return this.withBoundary(rendererOwnerId, async (boundary, summary) => operation(Object.freeze({
+      authority: authorityIdentity(boundary),
+      checkpoint: Object.freeze({ ...boundary.checkpoint }),
+      summary,
+    })));
   }
 
   exportV47(rendererOwnerId, request) {
@@ -127,7 +147,12 @@ class NativePlayerAuthorityPersistenceBroker {
           "NATIVE_PLAYER_AUTHORITY_EXPORT_STALE",
         );
       }
-      return result;
+      return Object.freeze({
+        authority: authorityIdentity(boundary),
+        exportId: result.exportId,
+        mode: result.mode,
+        result: result.result,
+      });
     });
   }
 }

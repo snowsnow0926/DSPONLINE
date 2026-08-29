@@ -561,6 +561,14 @@ test("Electron invoke rejection is reconstructed from only a published suffix", 
     message: "原生操作失败，请重试",
   });
   assert.equal(unknown.code, "NATIVE_OPERATION_FAILED");
+
+  const busy = createRendererNativeRejection(new Error(
+    "Error invoking remote method（NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY）",
+  ), {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_CHECKPOINT_FAILED",
+    message: "Windows 原生权威检查点验证失败，请重试",
+  });
+  assert.equal(busy.code, "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY");
 });
 
 test("AbortError identity remains public without its private message", () => {
@@ -656,6 +664,23 @@ test("v47 import and export receipts use exact Host key sets", () => {
     ...exported,
     result: { ...exported.result, hostStderr: SECRET_BODY },
   }), /native v47 export proof is invalid/);
+
+  const playerAuthorityExport = {
+    authority: { sessionId: "core-7", runId: "player-run-7", revision: 2 },
+    ...exported,
+  };
+  assert.deepEqual(
+    normalizeRendererNativeResult("playerAuthorityExport", playerAuthorityExport),
+    playerAuthorityExport,
+  );
+  assert.throws(() => normalizeRendererNativeResult("playerAuthorityExport", {
+    ...playerAuthorityExport,
+    authority: { ...playerAuthorityExport.authority, revision: 3 },
+  }), /native player-authority export binding is invalid/);
+  assert.throws(() => normalizeRendererNativeResult("playerAuthorityExport", {
+    ...playerAuthorityExport,
+    authority: { ...playerAuthorityExport.authority, ownerId: "forged-owner" },
+  }), /native player-authority export authority is invalid/);
 });
 
 test("save/open/advance/checkpoint/compare receipts fail closed on Host-only fields", () => {
@@ -749,6 +774,7 @@ test("save/open/advance/checkpoint/compare receipts fail closed on Host-only fie
   assert.throws(() => normalizeRendererNativeResult("coreCheckpoint", { ...checkpoint, stderr: SECRET_BODY }), /native core checkpoint result is invalid/);
 
   const playerAuthorityCheckpoint = {
+    authority: { sessionId: "core-7", runId: "player-run-7", revision: 2 },
     checkpoint: {
       generation: 9,
       rootHash: SHA_A,
@@ -781,6 +807,14 @@ test("save/open/advance/checkpoint/compare receipts fail closed on Host-only fie
       checkpoint: { ...playerAuthorityCheckpoint.checkpoint, revision: 3 },
     }),
     /native player-authority checkpoint binding is invalid/,
+  );
+  assert.throws(
+    () => normalizeRendererNativeResult("playerAuthorityCheckpoint", {
+      ...playerAuthorityCheckpoint,
+      authority: { ...playerAuthorityCheckpoint.authority, runId: "replacement-run" },
+      ownerId: "renderer-forged-owner",
+    }),
+    /native player-authority checkpoint result is invalid/,
   );
 
   const compared = {

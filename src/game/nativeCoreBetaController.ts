@@ -19,7 +19,9 @@ import {
   type DesktopNativeCoreSummary,
   type DesktopNativeSaveCommitResult,
   type DesktopNativeCoreExportResult,
+  type DesktopNativePlayerAuthorityArtifactIdentity,
   type DesktopNativePlayerAuthorityCheckpointResult,
+  type DesktopNativePlayerAuthorityExportResult,
 } from "../desktop";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
 import {
@@ -84,6 +86,28 @@ export interface NativeCoreAuthoritativeOperationResult {
   commit: DesktopNativeCoreCommitOperationResult;
   projection?: DesktopNativeCoreProjectionResult;
   state: NativeCoreAuthorityState;
+}
+
+export interface NativeCoreDurableArtifactIdentity {
+  sessionId: string;
+  runId: string | null;
+  revision: number;
+}
+
+export interface NativeCoreAuthorityCheckpointReceipt {
+  artifact: {
+    identity: NativeCoreDurableArtifactIdentity;
+    checkpoint: DesktopNativePlayerAuthorityCheckpointResult["checkpoint"];
+    summary: DesktopNativeCoreSummary;
+  };
+  snapshot: NativeCoreBetaControllerSnapshot;
+}
+
+export interface NativeCoreAuthorityExportReceipt {
+  artifact: {
+    identity: NativeCoreDurableArtifactIdentity;
+    export: DesktopNativeCoreExportResult;
+  };
 }
 
 export class NativeCoreAuthorityPausedError extends Error {
@@ -164,6 +188,32 @@ function validateCommandId(commandId: string): void {
   if (!COMMAND_ID_PATTERN.test(commandId)) throw new RangeError("原生权威命令 ID 非法");
 }
 
+function sameMainOwnedArtifactIdentity(
+  expected: { sessionId: string; runId: string },
+  actual: DesktopNativePlayerAuthorityArtifactIdentity,
+  revision: number,
+): boolean {
+  return actual.sessionId === expected.sessionId && actual.runId === expected.runId &&
+    actual.revision === revision;
+}
+
+function playerAuthorityArtifactIdentity(value: unknown): DesktopNativePlayerAuthorityArtifactIdentity | null {
+  if (!value || typeof value !== "object" || !("authority" in value)) return null;
+  const authority = value.authority;
+  return authority && typeof authority === "object" &&
+    "sessionId" in authority && typeof authority.sessionId === "string" &&
+    "runId" in authority && typeof authority.runId === "string" &&
+    "revision" in authority && Number.isSafeInteger(authority.revision)
+    ? authority as DesktopNativePlayerAuthorityArtifactIdentity
+    : null;
+}
+
+function nativeErrorCode(error: unknown): string | null {
+  return error && typeof error === "object" && "code" in error && typeof error.code === "string"
+    ? error.code
+    : null;
+}
+
 /**
  * Owns the invitation-Beta transition without changing the public v47 save
  * contract. JavaScript remains authoritative during shadow mode. Once native
@@ -176,7 +226,7 @@ export class WindowsNativeCoreBetaController {
   private lastSummary: DesktopNativeCoreSummary | null = null;
   private recoveryRootHash: string | null = null;
   private operationInFlight = false;
-  private mainOwnedPlayerAuthority = false;
+  private mainOwnedPlayerAuthority: { sessionId: string; runId: string } | null = null;
 
   constructor(
     private readonly opener: NativeCoreShadowOpener = openWindowsNativeCoreShadow,
@@ -436,7 +486,10 @@ export class WindowsNativeCoreBetaController {
     this.authorityState = nextAuthorityState;
     this.recoveryRootHash = input.checkpoint.rootHash;
     this.lastSummary = input.summary;
-    this.mainOwnedPlayerAuthority = true;
+    this.mainOwnedPlayerAuthority = Object.freeze({
+      sessionId: input.sessionId,
+      runId: input.runId,
+    });
     return this.snapshot();
   }
 
@@ -485,14 +538,15 @@ export class WindowsNativeCoreBetaController {
   async createAuthorityCheckpoint(
     exactCompatibleCheckpoint?: NativeCoreRevisionProof,
     savedAtMs = this.now(),
-  ): Promise<NativeCoreBetaControllerSnapshot> {
+  ): Promise<NativeCoreAuthorityCheckpointReceipt> {
     if (this.authorityState.phase !== "native-authoritative" ||
       this.authorityState.authority !== "native" || !this.session) {
       throw new Error("只有原生权威可以创建检查点");
     }
     try {
+      const mainOwnedIdentity = this.mainOwnedPlayerAuthority;
       const result: DesktopNativePlayerAuthorityCheckpointResult |
-        Awaited<ReturnType<WindowsNativeCoreShadow["createCheckpoint"]>> = this.mainOwnedPlayerAuthority
+        Awaited<ReturnType<WindowsNativeCoreShadow["createCheckpoint"]>> = mainOwnedIdentity
           ? await (() => {
             const desktop = getDesktopBridge();
             if (!desktop?.checkpointNativePlayerAuthority) {
@@ -501,15 +555,40 @@ export class WindowsNativeCoreBetaController {
             return desktop.checkpointNativePlayerAuthority();
           })()
           : await this.session.createCheckpoint(savedAtMs);
+      const resultAuthority = playerAuthorityArtifactIdentity(result);
+      if (result.checkpoint.revision !== result.summary.revision ||
+        mainOwnedIdentity && (!resultAuthority ||
+        !sameMainOwnedArtifactIdentity(mainOwnedIdentity, resultAuthority, result.summary.revision))) {
+        throw new Error("主进程原生权威检查点不属于当前 session/run lineage");
+      }
       const nativeProof = proofFromSummary(result.summary, result.checkpoint.rootHash);
-      this.recoveryRootHash = result.checkpoint.rootHash;
-      this.lastSummary = result.summary;
-      this.authorityState = exactCompatibleCheckpoint
-        ? recordNativeCoreAuthorityCheckpoint(this.authorityState, nativeProof, exactCompatibleCheckpoint)
-        : recordNativeCoreAuthorityProgress(this.authorityState, nativeProof);
-      return this.snapshot();
+      const currentProof = this.authorityState.latestVerifiedProof;
+      if (!currentProof || nativeProof.revision >= currentProof.revision || exactCompatibleCheckpoint) {
+        this.authorityState = exactCompatibleCheckpoint
+          ? recordNativeCoreAuthorityCheckpoint(this.authorityState, nativeProof, exactCompatibleCheckpoint)
+          : recordNativeCoreAuthorityProgress(this.authorityState, nativeProof);
+        this.recoveryRootHash = result.checkpoint.rootHash;
+        this.lastSummary = result.summary;
+      } else if (!mainOwnedIdentity || nativeProof.registryFingerprint !== currentProof.registryFingerprint) {
+        throw new Error("原生权威检查点 lineage 回退或发生替换");
+      }
+      const identity: NativeCoreDurableArtifactIdentity = resultAuthority
+        ? { ...resultAuthority }
+        : { sessionId: this.session.sessionId, runId: null, revision: result.summary.revision };
+      return {
+        artifact: {
+          identity,
+          checkpoint: { ...result.checkpoint },
+          summary: structuredClone(result.summary),
+        },
+        snapshot: this.snapshot(),
+      };
     } catch (error) {
       const reason = error instanceof Error ? error.message : "原生权威检查点失败";
+      if (this.mainOwnedPlayerAuthority &&
+        nativeErrorCode(error) === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY") {
+        throw error instanceof Error ? error : new Error(reason);
+      }
       this.authorityState = handleNativeCoreExit(this.authorityState, `authority-checkpoint-failed:${reason}`);
       throw new NativeCoreAuthorityPausedError(`原生检查点不确定，工厂已暂停：${reason}`, this.authorityState);
     }
@@ -519,13 +598,14 @@ export class WindowsNativeCoreBetaController {
     exportId: string,
     suggestedName?: string,
     savedAtMs = this.now(),
-  ): Promise<DesktopNativeCoreExportResult> {
+  ): Promise<NativeCoreAuthorityExportReceipt> {
     if (this.authorityState.phase !== "native-authoritative" ||
       this.authorityState.authority !== "native" || !this.session) {
       throw new Error("只有原生权威可以直接流式导出 v47 存档");
     }
     try {
-      const result = this.mainOwnedPlayerAuthority
+      const mainOwnedIdentity = this.mainOwnedPlayerAuthority;
+      const result: DesktopNativePlayerAuthorityExportResult | DesktopNativeCoreExportResult = mainOwnedIdentity
         ? await (() => {
           const desktop = getDesktopBridge();
           if (!desktop?.exportNativePlayerAuthorityV47) {
@@ -542,12 +622,23 @@ export class WindowsNativeCoreBetaController {
       // frozen export boundary. The dedicated main broker proves that export
       // belongs to the current lease, so forward progress is valid; a
       // renderer-owned shadow must still match its exact cached revision.
-      if (!this.lastSummary || (this.mainOwnedPlayerAuthority
-        ? result.result.revision < this.lastSummary.revision
-        : result.result.revision !== this.lastSummary.revision)) {
+      const resultAuthority = playerAuthorityArtifactIdentity(result);
+      if (mainOwnedIdentity && (result.mode !== "normal" || !resultAuthority ||
+        !sameMainOwnedArtifactIdentity(mainOwnedIdentity, resultAuthority, result.result.revision))) {
+        throw new Error("主进程原生权威导出不属于当前 session/run lineage");
+      }
+      if (!this.lastSummary || (!mainOwnedIdentity &&
+        result.result.revision !== this.lastSummary.revision)) {
         throw new Error("原生导出 revision 与当前权威状态不一致");
       }
-      return result;
+      return {
+        artifact: {
+          identity: resultAuthority
+            ? { ...resultAuthority }
+            : { sessionId: this.session.sessionId, runId: null, revision: result.result.revision },
+          export: result,
+        },
+      };
     } catch (error) {
       const reason = error instanceof Error ? error.message : "原生权威导出失败";
       throw new Error(`原生 v47 导出失败，权威工厂未改变：${reason}`);
@@ -914,7 +1005,7 @@ export class WindowsNativeCoreBetaController {
     const current = this.session;
     this.session = null;
     const mainOwned = this.mainOwnedPlayerAuthority;
-    this.mainOwnedPlayerAuthority = false;
+    this.mainOwnedPlayerAuthority = null;
     if (current && !mainOwned) await current.close().catch(() => undefined);
   }
 }

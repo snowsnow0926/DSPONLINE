@@ -370,6 +370,10 @@ pub(crate) struct InterstellarReadyStationScan {
 pub(crate) struct InterstellarRouteActivity {
     station_indices: Arc<[usize]>,
     active_demand_indices: Vec<usize>,
+    /// Runtime-only exact reverse dependency view used by quantum mode
+    /// transitions. Route dispatch/advance updates only the affected demand
+    /// rows on the transactional candidate. It is never persisted or hashed.
+    transition_route_view: crate::station_route_ledger::RemoteTransitionRouteView,
     /// Route-bearing rows that cannot be maintained by the legacy local or
     /// remote wake queues (custom station kinds and opaque/MOD scopes). They
     /// remain in the shared ledger scan until a record command rebuilds the
@@ -438,6 +442,7 @@ impl InterstellarRouteActivity {
                 .sum::<usize>()
             + self.warper_tray_amount_bits.capacity() * std::mem::size_of::<Option<u64>>())
             as u64
+            + self.transition_route_view.estimated_bytes()
     }
 
     fn has_remote_routes(&self) -> bool {
@@ -450,6 +455,22 @@ impl InterstellarRouteActivity {
 
     pub(crate) fn opaque_route_demand_indices(&self) -> &[usize] {
         &self.opaque_route_demand_indices
+    }
+
+    pub(crate) fn transition_route_view(
+        &self,
+        entities: &[Value],
+    ) -> Option<&crate::station_route_ledger::RemoteTransitionRouteView> {
+        let dense = !self.active_demand_indices.is_empty()
+            && self.active_demand_indices.len().saturating_mul(4)
+                >= entities.len().saturating_mul(3);
+        (!dense
+            && self.transition_route_view.is_exact_for(
+                entities,
+                &self.active_demand_indices,
+                &self.opaque_route_demand_indices,
+            ))
+        .then_some(&self.transition_route_view)
     }
 
     fn route_scan_indices(&self) -> (Vec<usize>, bool) {
@@ -1238,7 +1259,10 @@ pub(crate) fn prepare_route_activity(entities: &[Value]) -> InterstellarRouteAct
     let mut warper_planet_ranks = HashMap::<&str, usize>::new();
     let mut warper_refill_planets = Vec::<(String, Vec<usize>)>::new();
     let mut warper_refill_full_scan_required = false;
+    let mut transition_route_view =
+        crate::station_route_ledger::RemoteTransitionRouteView::for_entity_count(entities.len());
     for (entity_index, entity) in entities.iter().enumerate() {
+        transition_route_view.refresh_demand(entities, entity_index);
         let Some(entity) = entity.as_object() else {
             continue;
         };
@@ -1336,6 +1360,7 @@ pub(crate) fn prepare_route_activity(entities: &[Value]) -> InterstellarRouteAct
     InterstellarRouteActivity {
         station_indices: Arc::from(station_indices),
         active_demand_indices,
+        transition_route_view,
         opaque_route_demand_indices,
         pending_readiness_demand_indices: pending_dispatch_demand_indices.clone(),
         pending_dispatch_demand_indices,
@@ -3670,8 +3695,13 @@ fn dispatch_with_ledger_mode<L: InterstellarDispatchLedger + ?Sized>(
             }
         }
     }
+    activated_remote_demands.sort_unstable();
+    activated_remote_demands.dedup();
     for demand_index in activated_remote_demands {
         route_activity.update_remote_demand(demand_index, true);
+        route_activity
+            .transition_route_view
+            .refresh_demand(entities, demand_index);
     }
     Ok(dispatch_scan)
 }
@@ -3928,6 +3958,11 @@ fn advance_routes_with_activity<I: EntityIndexLookup + ?Sized>(
     let (route_scan_indices, _dense_fallback) = route_activity.route_scan_indices();
     let outcome =
         advance_routes_for_indices(entities, seconds, powers, indexes, &route_scan_indices)?;
+    for &(demand_index, _) in &outcome.activity_updates {
+        route_activity
+            .transition_route_view
+            .refresh_demand(entities, demand_index);
+    }
     route_activity.replace_scanned_activity(&outcome.activity_updates);
     Ok(outcome.changed_station_indices)
 }
@@ -8986,6 +9021,14 @@ mod tests {
             + item_amount(entities[7].as_object().unwrap(), "outputs", "iron_ore");
         let mut powers = route_activity_powers(entities.len(), 1.0);
         powers.insert(19, 0.0);
+        assert_eq!(
+            activity
+                .transition_route_view(&entities)
+                .unwrap()
+                .remote_routes("remote-station/00007/Ω")
+                .len(),
+            1
+        );
 
         advance_routes_with_activity(&mut entities, 60.0, &powers, &indexes, &mut activity)
             .unwrap();
@@ -8993,6 +9036,14 @@ mod tests {
         assert_eq!(
             entities[7]["stationRoutes"][1]["progress"],
             Value::from(0.0)
+        );
+        assert_eq!(
+            activity
+                .transition_route_view(&entities)
+                .unwrap()
+                .remote_routes("remote-station/00007/Ω")[0]
+                .progress,
+            0.0
         );
 
         powers.insert(19, 1.0);
@@ -9002,6 +9053,13 @@ mod tests {
         assert_eq!(changed, vec![0, 7, 19]);
         assert!(activity.active_demand_indices.is_empty());
         assert_eq!(entities[7]["stationRoutes"].as_array().unwrap().len(), 1);
+        assert!(
+            activity
+                .transition_route_view(&entities)
+                .unwrap()
+                .remote_routes("remote-station/00007/Ω")
+                .is_empty()
+        );
         let completed_total = item_amount(entities[0].as_object().unwrap(), "outputs", "iron_ore")
             + item_amount(entities[7].as_object().unwrap(), "outputs", "iron_ore");
         assert_eq!(completed_total, source_total);
@@ -9039,6 +9097,12 @@ mod tests {
         assert_eq!(error.to_string(), "native interstellar route is invalid");
         assert_eq!(source_activity.active_demand_indices, source_active);
         assert_eq!(candidate_activity.active_demand_indices, source_active);
+        assert!(source_activity.transition_route_view(&source).is_some());
+        assert!(
+            candidate_activity
+                .transition_route_view(&candidate)
+                .is_none()
+        );
         assert_eq!(serde_json::to_vec(&source).unwrap(), source_json);
         assert_ne!(serde_json::to_vec(&candidate).unwrap(), candidate_before);
     }

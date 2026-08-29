@@ -33,6 +33,8 @@ pub(crate) struct StationRouteLedgerScan {
 /// persisted entity/route order; opaque IDs are data, never lookup authority.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RemoteTransitionRoute {
+    demand_index: usize,
+    route_index: usize,
     pub demand_id: String,
     pub route_id: String,
     pub item_id: String,
@@ -40,11 +42,16 @@ pub(crate) struct RemoteTransitionRoute {
     pub cargo: u64,
     pub duration: f64,
     pub progress: f64,
+    station_ids: Vec<String>,
 }
 
-#[derive(Debug, Default)]
-struct RemoteTransitionRouteView {
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RemoteTransitionRouteView {
+    entity_count: usize,
     by_station_id: HashMap<String, Vec<Arc<RemoteTransitionRoute>>>,
+    demand_routes: HashMap<usize, Vec<Arc<RemoteTransitionRoute>>>,
+    demand_station_ids: HashMap<usize, Vec<String>>,
+    demand_indices: Vec<usize>,
     membership_rows: usize,
 }
 
@@ -89,11 +96,6 @@ pub(crate) struct StationRouteLedger {
     active_local_progress: HashMap<usize, f64>,
     active_local_stations: HashSet<usize>,
     active_remote_stations: HashSet<usize>,
-    /// Exact reverse view of every ordinary remote route by each referenced
-    /// station ID. It is produced by the same complete sparse/dense route
-    /// scan as the material ledger, so transition settlement does not rescan
-    /// dormant entity JSON. `None` means absence cannot be proven.
-    remote_transition_routes: Option<RemoteTransitionRouteView>,
     scan: Option<StationRouteLedgerScan>,
 }
 
@@ -121,6 +123,8 @@ fn push_unique_station_id(station_ids: &mut Vec<String>, station_id: &str) {
 
 fn record_remote_transition_route(
     view: &mut RemoteTransitionRouteView,
+    demand_index: usize,
+    route_index: usize,
     demand: &serde_json::Map<String, Value>,
     route: &serde_json::Map<String, Value>,
     referenced_station_ids: &mut Vec<String>,
@@ -141,6 +145,8 @@ fn record_remote_transition_route(
         }
     }
     let transition_route = Arc::new(RemoteTransitionRoute {
+        demand_index,
+        route_index,
         demand_id: demand_id.to_owned(),
         route_id: string_at(route, "id").unwrap_or_default().to_owned(),
         item_id: string_at(route, "itemId").unwrap_or_default().to_owned(),
@@ -148,13 +154,221 @@ fn record_remote_transition_route(
         cargo: floor_safe_u64(finite_number(route.get("cargo"))),
         duration: finite_number(route.get("duration")),
         progress: finite_number(route.get("progress")).clamp(0.0, 1.0),
+        station_ids: referenced_station_ids.clone(),
     });
+    view.demand_routes
+        .entry(demand_index)
+        .or_default()
+        .push(transition_route.clone());
     for station_id in referenced_station_ids {
-        view.by_station_id
-            .entry(station_id.clone())
-            .or_default()
-            .push(transition_route.clone());
+        let routes = view.by_station_id.entry(station_id.clone()).or_default();
+        let order = (demand_index, route_index);
+        let position =
+            routes.partition_point(|route| (route.demand_index, route.route_index) < order);
+        routes.insert(position, transition_route.clone());
+        let demand_station_ids = view.demand_station_ids.entry(demand_index).or_default();
+        if !demand_station_ids
+            .iter()
+            .any(|candidate| candidate == station_id)
+        {
+            demand_station_ids.push(station_id.clone());
+        }
         view.membership_rows = view.membership_rows.saturating_add(1);
+    }
+}
+
+impl RemoteTransitionRouteView {
+    pub(crate) fn for_entity_count(entity_count: usize) -> Self {
+        Self {
+            entity_count,
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn build(entities: &[Value]) -> Self {
+        let mut view = Self::for_entity_count(entities.len());
+        for demand_index in 0..entities.len() {
+            view.refresh_demand(entities, demand_index);
+        }
+        view
+    }
+
+    pub(crate) fn refresh_demand(&mut self, entities: &[Value], demand_index: usize) {
+        self.demand_routes.remove(&demand_index);
+        if let Some(station_ids) = self.demand_station_ids.remove(&demand_index) {
+            for station_id in station_ids {
+                let mut remove_station = false;
+                if let Some(routes) = self.by_station_id.get_mut(&station_id) {
+                    let before = routes.len();
+                    routes.retain(|route| route.demand_index != demand_index);
+                    self.membership_rows = self
+                        .membership_rows
+                        .saturating_sub(before.saturating_sub(routes.len()));
+                    remove_station = routes.is_empty();
+                }
+                if remove_station {
+                    self.by_station_id.remove(&station_id);
+                }
+            }
+        }
+        if let Ok(position) = self.demand_indices.binary_search(&demand_index) {
+            self.demand_indices.remove(position);
+        }
+        let Some(demand) = entities.get(demand_index).and_then(Value::as_object) else {
+            return;
+        };
+        let Some(routes) = demand.get("stationRoutes").and_then(Value::as_array) else {
+            return;
+        };
+        let mut referenced_station_ids = Vec::<String>::with_capacity(8);
+        let mut has_remote_route = false;
+        for (route_index, route) in routes.iter().enumerate() {
+            let Some(route) = route.as_object() else {
+                continue;
+            };
+            if string_at(route, "scope") != Some("remote") {
+                continue;
+            }
+            has_remote_route = true;
+            record_remote_transition_route(
+                self,
+                demand_index,
+                route_index,
+                demand,
+                route,
+                &mut referenced_station_ids,
+            );
+        }
+        if has_remote_route {
+            let position = self
+                .demand_indices
+                .binary_search(&demand_index)
+                .unwrap_or_else(|position| position);
+            self.demand_indices.insert(position, demand_index);
+        }
+    }
+
+    pub(crate) fn is_exact_for(
+        &self,
+        entities: &[Value],
+        active_demand_indices: &[usize],
+        opaque_demand_indices: &[usize],
+    ) -> bool {
+        self.entity_count == entities.len()
+            && opaque_demand_indices.is_empty()
+            && self.demand_indices == active_demand_indices
+            && active_demand_indices
+                .iter()
+                .all(|&demand_index| self.demand_is_exact(entities, demand_index))
+    }
+
+    fn demand_is_exact(&self, entities: &[Value], demand_index: usize) -> bool {
+        let Some(demand) = entities.get(demand_index).and_then(Value::as_object) else {
+            return false;
+        };
+        let demand_id = string_at(demand, "id").unwrap_or_default();
+        let Some(route_values) = demand.get("stationRoutes").and_then(Value::as_array) else {
+            return false;
+        };
+        let Some(expected_routes) = self.demand_routes.get(&demand_index) else {
+            return false;
+        };
+        let mut expected_index = 0usize;
+        let mut station_ids = Vec::<String>::with_capacity(8);
+        for (route_index, route) in route_values.iter().enumerate() {
+            let Some(route) = route.as_object() else {
+                continue;
+            };
+            if string_at(route, "scope") != Some("remote") {
+                continue;
+            }
+            let Some(expected) = expected_routes.get(expected_index) else {
+                return false;
+            };
+            let peer_id = string_at(route, "peerId").unwrap_or_default();
+            let vehicle_station_id = string_at(route, "vehicleStationId").unwrap_or(demand_id);
+            station_ids.clear();
+            push_unique_station_id(&mut station_ids, demand_id);
+            push_unique_station_id(&mut station_ids, peer_id);
+            push_unique_station_id(&mut station_ids, vehicle_station_id);
+            if let Some(waypoints) = route.get("waypointStationIds").and_then(Value::as_array) {
+                for station_id in waypoints.iter().filter_map(Value::as_str) {
+                    push_unique_station_id(&mut station_ids, station_id);
+                }
+            }
+            if expected.demand_index != demand_index
+                || expected.route_index != route_index
+                || expected.demand_id != demand_id
+                || expected.route_id != string_at(route, "id").unwrap_or_default()
+                || expected.item_id != string_at(route, "itemId").unwrap_or_default()
+                || expected.peer_id != peer_id
+                || expected.cargo != floor_safe_u64(finite_number(route.get("cargo")))
+                || expected.duration.to_bits() != finite_number(route.get("duration")).to_bits()
+                || expected.progress.to_bits()
+                    != finite_number(route.get("progress"))
+                        .clamp(0.0, 1.0)
+                        .to_bits()
+                || expected.station_ids != station_ids
+            {
+                return false;
+            }
+            expected_index = expected_index.saturating_add(1);
+        }
+        expected_index == expected_routes.len()
+    }
+
+    pub(crate) fn remote_routes(&self, station_id: &str) -> &[Arc<RemoteTransitionRoute>] {
+        self.by_station_id
+            .get(station_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn membership_rows(&self) -> usize {
+        self.membership_rows
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> u64 {
+        let station_rows = self
+            .by_station_id
+            .iter()
+            .map(|(station_id, routes)| {
+                station_id.capacity()
+                    + routes.capacity() * std::mem::size_of::<Arc<RemoteTransitionRoute>>()
+            })
+            .sum::<usize>();
+        let demand_rows = self
+            .demand_station_ids
+            .values()
+            .map(|station_ids| {
+                station_ids.capacity() * std::mem::size_of::<String>()
+                    + station_ids.iter().map(String::capacity).sum::<usize>()
+            })
+            .sum::<usize>();
+        let route_rows = self
+            .demand_routes
+            .values()
+            .flat_map(|routes| routes.iter())
+            .map(|route| {
+                std::mem::size_of::<RemoteTransitionRoute>()
+                    + route.demand_id.capacity()
+                    + route.route_id.capacity()
+                    + route.item_id.capacity()
+                    + route.peer_id.capacity()
+                    + route.station_ids.capacity() * std::mem::size_of::<String>()
+                    + route
+                        .station_ids
+                        .iter()
+                        .map(String::capacity)
+                        .sum::<usize>()
+            })
+            .sum::<usize>();
+        (std::mem::size_of::<Self>()
+            + station_rows
+            + demand_rows
+            + route_rows
+            + self.demand_indices.capacity() * std::mem::size_of::<usize>()) as u64
     }
 }
 
@@ -322,39 +536,13 @@ impl StationRouteLedger {
         local_directory: &LocalPeerDirectory,
         remote_activity: &InterstellarRouteActivity,
     ) -> Self {
-        Self::build_internal(state, entities, local_directory, remote_activity, false)
-    }
-
-    pub(crate) fn build_with_remote_transition_view(
-        state: &CoreState,
-        entities: &[Value],
-        local_directory: &LocalPeerDirectory,
-        remote_activity: &InterstellarRouteActivity,
-    ) -> Self {
-        Self::build_internal(state, entities, local_directory, remote_activity, true)
-    }
-
-    fn build_internal(
-        state: &CoreState,
-        entities: &[Value],
-        local_directory: &LocalPeerDirectory,
-        remote_activity: &InterstellarRouteActivity,
-        include_remote_transition_view: bool,
-    ) -> Self {
         let (scan_indices, scan) = ordered_scan_indices(
             &state.factory_topology.station_indices,
             entities,
             local_directory,
             remote_activity,
         );
-        Self::build_for_indices(
-            state,
-            entities,
-            local_directory,
-            &scan_indices,
-            scan,
-            include_remote_transition_view,
-        )
+        Self::build_for_indices(state, entities, local_directory, &scan_indices, scan)
     }
 
     fn build_for_indices(
@@ -363,17 +551,13 @@ impl StationRouteLedger {
         local_directory: &LocalPeerDirectory,
         scan_indices: &[usize],
         scan: StationRouteLedgerScan,
-        include_remote_transition_view: bool,
     ) -> Self {
         let mut ledger = Self {
             local_station_ranks: local_directory.shared_station_ranks(),
-            remote_transition_routes: include_remote_transition_view
-                .then(RemoteTransitionRouteView::default),
             scan: Some(scan),
             ..Self::default()
         };
         let mut active_stations = Vec::<usize>::with_capacity(8);
-        let mut referenced_station_ids = Vec::<String>::with_capacity(8);
         for &demand_index in scan_indices {
             let Some(demand) = entities.get(demand_index).and_then(Value::as_object) else {
                 continue;
@@ -388,14 +572,6 @@ impl StationRouteLedger {
             let visible_to_local = local_directory.contains_local_station(demand_index);
             for route in routes.iter().filter_map(Value::as_object) {
                 let scope = string_at(route, "scope");
-                if let Some(view) = ledger.remote_transition_routes.as_mut() {
-                    record_remote_transition_route(
-                        view,
-                        demand,
-                        route,
-                        &mut referenced_station_ids,
-                    );
-                }
                 let owner = string_at(route, "vehicleStationId")
                     .or_else(|| string_at(demand, "id"))
                     .and_then(|id| state.entity_index.get(id))
@@ -528,7 +704,6 @@ impl StationRouteLedger {
                 active_order_duplicate_rows: 0,
                 active_order_fallback: false,
             },
-            false,
         )
     }
 
@@ -541,24 +716,6 @@ impl StationRouteLedger {
             active_order_duplicate_rows: 0,
             active_order_fallback: false,
         })
-    }
-
-    pub(crate) fn remote_transition_routes(
-        &self,
-        station_id: &str,
-    ) -> Option<&[Arc<RemoteTransitionRoute>]> {
-        self.remote_transition_routes.as_ref().map(|view| {
-            view.by_station_id
-                .get(station_id)
-                .map(Vec::as_slice)
-                .unwrap_or_default()
-        })
-    }
-
-    pub(crate) fn remote_transition_membership_rows(&self) -> Option<usize> {
-        self.remote_transition_routes
-            .as_ref()
-            .map(|view| view.membership_rows)
     }
 
     pub(crate) fn local_busy_floor(&self, station_index: usize) -> f64 {
@@ -849,21 +1006,12 @@ mod tests {
         entities: &[Value],
         indices: impl IntoIterator<Item = usize>,
     ) -> RemoteTransitionRouteView {
-        let mut view = RemoteTransitionRouteView::default();
-        let mut station_ids = Vec::new();
+        let mut view = RemoteTransitionRouteView {
+            entity_count: entities.len(),
+            ..RemoteTransitionRouteView::default()
+        };
         for index in indices {
-            let Some(demand) = entities.get(index).and_then(Value::as_object) else {
-                continue;
-            };
-            for route in demand
-                .get("stationRoutes")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_object)
-            {
-                record_remote_transition_route(&mut view, demand, route, &mut station_ids);
-            }
+            view.refresh_demand(entities, index);
         }
         view
     }
@@ -873,20 +1021,36 @@ mod tests {
         station_id: &str,
     ) -> Vec<RemoteTransitionRoute> {
         let mut routes = Vec::new();
-        for demand in entities.iter().filter_map(Value::as_object) {
+        for (demand_index, demand) in entities
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| value.as_object().map(|object| (index, object)))
+        {
             let demand_id = string_at(demand, "id").unwrap_or_default();
-            for route in demand
+            for (route_index, route) in demand
                 .get("stationRoutes")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(Value::as_object)
+                .enumerate()
             {
+                let Some(route) = route.as_object() else {
+                    continue;
+                };
                 if string_at(route, "scope") != Some("remote") {
                     continue;
                 }
                 let peer_id = string_at(route, "peerId").unwrap_or_default();
                 let owner_id = string_at(route, "vehicleStationId").unwrap_or(demand_id);
+                let mut station_ids = Vec::new();
+                push_unique_station_id(&mut station_ids, demand_id);
+                push_unique_station_id(&mut station_ids, peer_id);
+                push_unique_station_id(&mut station_ids, owner_id);
+                if let Some(waypoints) = route.get("waypointStationIds").and_then(Value::as_array) {
+                    for waypoint in waypoints.iter().filter_map(Value::as_str) {
+                        push_unique_station_id(&mut station_ids, waypoint);
+                    }
+                }
                 let waypoint = route
                     .get("waypointStationIds")
                     .and_then(Value::as_array)
@@ -899,6 +1063,8 @@ mod tests {
                     continue;
                 }
                 routes.push(RemoteTransitionRoute {
+                    demand_index,
+                    route_index,
                     demand_id: demand_id.to_owned(),
                     route_id: string_at(route, "id").unwrap_or_default().to_owned(),
                     item_id: string_at(route, "itemId").unwrap_or_default().to_owned(),
@@ -906,6 +1072,7 @@ mod tests {
                     cargo: floor_safe_u64(finite_number(route.get("cargo"))),
                     duration: finite_number(route.get("duration")),
                     progress: finite_number(route.get("progress")).clamp(0.0, 1.0),
+                    station_ids,
                 });
             }
         }
@@ -1007,6 +1174,60 @@ mod tests {
                 legacy_transition_routes(&entities, station_id)
             );
         }
+    }
+
+    #[test]
+    fn remote_transition_incremental_refresh_preserves_global_persisted_route_order() {
+        let mut entities = (0..8)
+            .map(|index| json!({ "id": format!("station-{index}"), "stationRoutes": [] }))
+            .collect::<Vec<_>>();
+        for index in [2, 5] {
+            entities[index]["stationRoutes"] = json!([{
+                "id": format!("route-{index}"),
+                "scope": "remote",
+                "peerId": "target",
+                "itemId": "iron_ore",
+                "cargo": index + 1,
+                "duration": 10,
+                "progress": 0.1 * index as f64
+            }]);
+        }
+        let mut view = RemoteTransitionRouteView::build(&entities);
+        let assert_oracle = |view: &RemoteTransitionRouteView, entities: &[Value]| {
+            assert_eq!(
+                view.remote_routes("target")
+                    .iter()
+                    .map(|route| route.as_ref().clone())
+                    .collect::<Vec<_>>(),
+                legacy_transition_routes(entities, "target")
+            );
+        };
+        assert_oracle(&view, &entities);
+
+        entities[2]["stationRoutes"][0]["progress"] = Value::from(0.9);
+        view.refresh_demand(&entities, 2);
+        assert_oracle(&view, &entities);
+
+        entities[2]["stationRoutes"] = Value::Array(Vec::new());
+        view.refresh_demand(&entities, 2);
+        assert_oracle(&view, &entities);
+
+        entities[1]["stationRoutes"] = json!([{
+            "id": "route-1",
+            "scope": "remote",
+            "peerId": "target",
+            "itemId": "MOD/opaque-id",
+            "cargo": 4,
+            "duration": 7,
+            "progress": 0.2
+        }]);
+        view.refresh_demand(&entities, 1);
+        assert_oracle(&view, &entities);
+        assert!(view.is_exact_for(&entities, &[1, 5], &[]));
+        let mut drifted = entities.clone();
+        drifted.push(json!({ "id": "late" }));
+        assert!(!view.is_exact_for(&drifted, &[1, 5], &[]));
+        assert!(!view.is_exact_for(&entities, &[1, 5], &[6]));
     }
 
     #[test]

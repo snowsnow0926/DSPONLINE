@@ -558,6 +558,8 @@ pub(crate) struct QuantumTransitionScan {
     pub total_rows: usize,
     pub transition_rows: usize,
     pub route_membership_rows: usize,
+    pub route_validation_rows: usize,
+    pub route_rebuild_rows: usize,
     pub dense_fallback: bool,
     pub runtime_fallback: bool,
     pub ledger_fallback: bool,
@@ -4798,18 +4800,51 @@ fn settle_transitions_indexed_with_runtime(
     transition_runtime: &mut QuantumTransitionRuntime,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    route_ledger: &crate::station_route_ledger::StationRouteLedger,
+    route_activity: &crate::interstellar_logistics::InterstellarRouteActivity,
 ) -> anyhow::Result<(TransitionParallelDiagnostics, QuantumTransitionScan)> {
     let (selected_indices, mut scan) = transition_runtime.scan_indices(entities);
-    let ledger_fallback = route_ledger.remote_transition_membership_rows().is_none();
-    scan.ledger_fallback = ledger_fallback;
-    scan.route_membership_rows = route_ledger
-        .remote_transition_membership_rows()
-        .unwrap_or_default();
-    if selected_indices.is_none() || ledger_fallback {
-        if ledger_fallback && selected_indices.is_some() {
-            scan.selected_rows = entities.len();
+    let Some(selected_indices) = selected_indices else {
+        let diagnostics = settle_transitions_with_runtime(deterministic_runtime, base, entities)?;
+        *transition_runtime = QuantumTransitionRuntime::build(entities);
+        scan.transition_rows = {
+            #[cfg(test)]
+            {
+                diagnostics.transition_probe_count
+            }
+            #[cfg(not(test))]
+            {
+                transition_runtime.active_entity_indices.len()
+            }
+        };
+        return Ok((diagnostics, scan));
+    };
+
+    let quantum_tech_completed = completed_tech(base, "quantum_logistics_network");
+    let candidate_probes =
+        deterministic_runtime.indexed_map(&selected_indices, |_, &entity_index| {
+            entities
+                .get(entity_index)
+                .and_then(Value::as_object)
+                .and_then(|entity| {
+                    probe_transition_candidate(entity_index, entity, quantum_tech_completed)
+                })
+        });
+    let candidates = candidate_probes.into_iter().flatten().collect::<Vec<_>>();
+    scan.transition_rows = candidates.len();
+    if candidates.is_empty() {
+        #[allow(unused_mut)]
+        let mut diagnostics = TransitionParallelDiagnostics::default();
+        #[cfg(test)]
+        {
+            diagnostics.entity_probe_count = selected_indices.len();
         }
+        return Ok((diagnostics, scan));
+    }
+
+    let transition_route_view = route_activity.transition_route_view(entities);
+    scan.ledger_fallback = transition_route_view.is_none();
+    if transition_route_view.is_none() {
+        scan.selected_rows = entities.len();
         let diagnostics = settle_transitions_with_runtime(deterministic_runtime, base, entities)?;
         *transition_runtime = QuantumTransitionRuntime::build(entities);
         scan.transition_rows = {
@@ -4824,27 +4859,15 @@ fn settle_transitions_indexed_with_runtime(
         };
         return Ok((diagnostics, scan));
     }
-
-    let selected_indices = selected_indices.expect("sparse transition selection");
-    let quantum_tech_completed = completed_tech(base, "quantum_logistics_network");
-    let candidate_probes =
-        deterministic_runtime.indexed_map(&selected_indices, |_, &entity_index| {
-            entities
-                .get(entity_index)
-                .and_then(Value::as_object)
-                .and_then(|entity| {
-                    probe_transition_candidate(entity_index, entity, quantum_tech_completed)
-                })
-        });
-    let candidates = candidate_probes.into_iter().flatten().collect::<Vec<_>>();
-    scan.transition_rows = candidates.len();
+    let transition_route_view = transition_route_view.expect("checked transition route view");
+    scan.route_membership_rows = transition_route_view.membership_rows();
+    scan.route_validation_rows = route_activity.active_remote_route_demand_indices().len();
     let elapsed = finite_number(base.get("elapsedSeconds"));
     let candidate_routes = candidates
         .iter()
         .map(|candidate| {
-            let routes = route_ledger
-                .remote_transition_routes(&candidate.station_id)
-                .expect("exact route view was checked")
+            let routes = transition_route_view
+                .remote_routes(&candidate.station_id)
                 .iter()
                 .map(|route| TransitionRoute::from(route.as_ref()))
                 .collect::<Vec<_>>();
@@ -4871,14 +4894,14 @@ pub(crate) fn settle_transitions_indexed(
     transition_runtime: &mut QuantumTransitionRuntime,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    route_ledger: &crate::station_route_ledger::StationRouteLedger,
+    route_activity: &crate::interstellar_logistics::InterstellarRouteActivity,
 ) -> anyhow::Result<(bool, QuantumTransitionScan)> {
     settle_transitions_indexed_with_runtime(
         crate::deterministic_runtime::runtime(),
         transition_runtime,
         base,
         entities,
-        route_ledger,
+        route_activity,
     )
     .map(|(diagnostics, scan)| (diagnostics.topology_changed, scan))
 }
@@ -7965,19 +7988,11 @@ mod tests {
         .unwrap()
     }
 
-    fn indexed_transition_ledger(
-        state: &CoreState,
+    fn indexed_transition_activity(
+        _state: &CoreState,
         entities: &[Value],
-    ) -> crate::station_route_ledger::StationRouteLedger {
-        let local = crate::local_logistics::prepare_step_directory(
-            entities,
-            &state.factory_topology.station_indices,
-        )
-        .unwrap();
-        let remote = crate::interstellar_logistics::prepare_route_activity(entities);
-        crate::station_route_ledger::StationRouteLedger::build_with_remote_transition_view(
-            state, entities, &local, &remote,
-        )
+    ) -> crate::interstellar_logistics::InterstellarRouteActivity {
+        crate::interstellar_logistics::prepare_route_activity(entities)
     }
 
     fn sparse_transition_fixture(row_count: usize) -> Vec<Value> {
@@ -8022,8 +8037,9 @@ mod tests {
         });
         entities[777] = serde_json::json!({
             "id": "route-demand",
-            "kind": "machine",
+            "kind": "station",
             "planetId": "home",
+            "buildingId": "interstellar_logistics_station",
             "stationRoutes": [{
                 "id": "route-planned",
                 "scope": "remote",
@@ -8055,7 +8071,7 @@ mod tests {
 
             let mut actual_base = transition_base(elapsed);
             let mut actual_entities = source;
-            let ledger = indexed_transition_ledger(&state, &actual_entities);
+            let ledger = indexed_transition_activity(&state, &actual_entities);
             let mut transition_runtime = QuantumTransitionRuntime::build(&actual_entities);
             let (diagnostics, scan) = settle_transitions_indexed_with_runtime(
                 &DeterministicRuntime::for_test(4),
@@ -8074,8 +8090,59 @@ mod tests {
             assert!(!scan.ledger_fallback);
             assert_eq!(scan.transition_rows, 2);
             assert_eq!(scan.route_membership_rows, 3);
+            assert_eq!(scan.route_validation_rows, 1);
+            assert_eq!(scan.route_rebuild_rows, 0);
             assert_eq!(diagnostics.entity_probe_count, 2);
             assert_eq!(transition_runtime.active_row_count(), 2);
+        }
+    }
+
+    #[test]
+    fn sparse_transition_runtime_is_segment_and_reload_stable_without_route_rebuilds() {
+        let source = sparse_transition_fixture(1_024);
+        let mut oracle_base = transition_base(0.0);
+        let mut oracle_entities = source.clone();
+        let mut indexed_base = oracle_base.clone();
+        let mut indexed_entities = source;
+        let mut transition_runtime = QuantumTransitionRuntime::build(&indexed_entities);
+        let mut route_activity =
+            crate::interstellar_logistics::prepare_route_activity(&indexed_entities);
+
+        for elapsed in (5..=60).step_by(5) {
+            oracle_base.insert("elapsedSeconds".to_owned(), Value::from(elapsed as f64));
+            indexed_base.insert("elapsedSeconds".to_owned(), Value::from(elapsed as f64));
+            settle_transitions_with_runtime(
+                &DeterministicRuntime::for_test(4),
+                &mut oracle_base,
+                &mut oracle_entities,
+            )
+            .unwrap();
+            let (_, scan) = settle_transitions_indexed_with_runtime(
+                &DeterministicRuntime::for_test(4),
+                &mut transition_runtime,
+                &mut indexed_base,
+                &mut indexed_entities,
+                &route_activity,
+            )
+            .unwrap();
+            assert_eq!(indexed_base, oracle_base, "elapsed {elapsed}");
+            assert_eq!(indexed_entities, oracle_entities, "elapsed {elapsed}");
+            assert_eq!(scan.route_rebuild_rows, 0);
+            assert_eq!(scan.route_validation_rows, 1);
+
+            if elapsed == 30 {
+                indexed_base = serde_json::from_slice(
+                    &serde_json::to_vec(&indexed_base).expect("serialize transition base"),
+                )
+                .expect("reload transition base");
+                indexed_entities = serde_json::from_slice(
+                    &serde_json::to_vec(&indexed_entities).expect("serialize transition entities"),
+                )
+                .expect("reload transition entities");
+                transition_runtime = QuantumTransitionRuntime::build(&indexed_entities);
+                route_activity =
+                    crate::interstellar_logistics::prepare_route_activity(&indexed_entities);
+            }
         }
     }
 
@@ -8117,7 +8184,7 @@ mod tests {
             if label == "drift" {
                 actual_entities.push(serde_json::json!({ "id": "late-row" }));
             }
-            let ledger = indexed_transition_ledger(&state, &actual_entities);
+            let ledger = indexed_transition_activity(&state, &actual_entities);
             let (_, scan) = settle_transitions_indexed_with_runtime(
                 &DeterministicRuntime::for_test(4),
                 &mut transition_runtime,
@@ -8138,11 +8205,93 @@ mod tests {
     }
 
     #[test]
+    fn transition_route_runtime_opaque_dense_and_drift_use_full_oracle() {
+        let mut opaque = sparse_transition_fixture(1_024);
+        opaque[777]["kind"] = Value::from("machine");
+
+        let mut dense = sparse_transition_fixture(1_024);
+        for (index, entity) in dense.iter_mut().enumerate().take(769) {
+            if matches!(index, 7 | 509) {
+                continue;
+            }
+            *entity = serde_json::json!({
+                "id": format!("dense-route-{index:03}"),
+                "kind": "station",
+                "buildingId": "interstellar_logistics_station",
+                "stationRoutes": [{
+                    "id": format!("route-{index:03}"),
+                    "scope": "remote",
+                    "peerId": "planned-z",
+                    "vehicleStationId": "active-a",
+                    "waypointStationIds": [],
+                    "itemId": "iron_ore",
+                    "cargo": 1,
+                    "duration": 9,
+                    "progress": 0.25
+                }]
+            });
+        }
+
+        for (source, label) in [(opaque, "opaque"), (dense, "dense-route")] {
+            let mut expected_base = transition_base(11.0);
+            let mut expected_entities = source.clone();
+            settle_transitions_with_runtime(
+                &DeterministicRuntime::for_test(4),
+                &mut expected_base,
+                &mut expected_entities,
+            )
+            .unwrap();
+            let mut actual_base = transition_base(11.0);
+            let mut actual_entities = source;
+            let mut transition_runtime = QuantumTransitionRuntime::build(&actual_entities);
+            let activity = crate::interstellar_logistics::prepare_route_activity(&actual_entities);
+            let (_, scan) = settle_transitions_indexed_with_runtime(
+                &DeterministicRuntime::for_test(4),
+                &mut transition_runtime,
+                &mut actual_base,
+                &mut actual_entities,
+                &activity,
+            )
+            .unwrap();
+            assert_eq!(actual_base, expected_base, "{label}");
+            assert_eq!(actual_entities, expected_entities, "{label}");
+            assert!(scan.ledger_fallback, "{label}");
+            assert_eq!(scan.selected_rows, actual_entities.len(), "{label}");
+        }
+
+        let mut drifted = sparse_transition_fixture(1_024);
+        let activity = crate::interstellar_logistics::prepare_route_activity(&drifted);
+        drifted[777]["stationRoutes"][0]["progress"] = Value::from(0.75);
+        let mut expected_base = transition_base(11.0);
+        let mut expected_entities = drifted.clone();
+        settle_transitions_with_runtime(
+            &DeterministicRuntime::for_test(4),
+            &mut expected_base,
+            &mut expected_entities,
+        )
+        .unwrap();
+        let mut actual_base = transition_base(11.0);
+        let mut transition_runtime = QuantumTransitionRuntime::build(&drifted);
+        let (_, scan) = settle_transitions_indexed_with_runtime(
+            &DeterministicRuntime::for_test(4),
+            &mut transition_runtime,
+            &mut actual_base,
+            &mut drifted,
+            &activity,
+        )
+        .unwrap();
+        assert_eq!(actual_base, expected_base);
+        assert_eq!(drifted, expected_entities);
+        assert!(scan.ledger_fallback);
+        assert_eq!(scan.selected_rows, drifted.len());
+    }
+
+    #[test]
     fn sparse_transition_failure_preserves_source_bytes_and_runtime_index() {
         let mut entities = sparse_transition_fixture(1_024);
         entities[509]["quantumTransition"]["bridges"] = serde_json::json!([7]);
         let state = crate::simple_factory::tests::fixture_state(&entities);
-        let ledger = indexed_transition_ledger(&state, &entities);
+        let ledger = indexed_transition_activity(&state, &entities);
         let mut base = transition_base(11.0);
         let source_base = base.clone();
         let source_entities = entities.clone();
@@ -8187,7 +8336,7 @@ mod tests {
             &mut transition_runtime,
             &mut actual_base,
             &mut actual_entities,
-            &crate::station_route_ledger::StationRouteLedger::default(),
+            &crate::interstellar_logistics::InterstellarRouteActivity::default(),
         )
         .unwrap();
         assert_eq!(actual_base, expected_base);

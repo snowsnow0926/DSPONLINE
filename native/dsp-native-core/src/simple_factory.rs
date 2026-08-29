@@ -5224,13 +5224,12 @@ fn simulate_step(
     // reservation. Rebuild the already-required congestion ledger once here
     // so post-route warper refill reads the exact post-advance reservation
     // set without rescanning every entity a second time.
-    let congestion_route_ledger =
-        crate::station_route_ledger::StationRouteLedger::build_with_remote_transition_view(
-            state,
-            entities,
-            local_step_runtime,
-            interstellar_step_runtime,
-        );
+    let congestion_route_ledger = crate::station_route_ledger::StationRouteLedger::build(
+        state,
+        entities,
+        local_step_runtime,
+        interstellar_step_runtime,
+    );
     let (post_route_warper_changed_station_indices, post_route_warper_refill_scan) =
         crate::interstellar_logistics::refill_station_warpers(
             base,
@@ -5435,16 +5434,18 @@ fn simulate_step(
                     std::sync::Arc::make_mut(quantum_transition_runtime),
                     base,
                     entities,
-                    &congestion_route_ledger,
+                    interstellar_step_runtime,
                 )?;
             station_mode_topology_changed |= quantum_transition_changed;
             if profile_enabled {
                 eprintln!(
-                    "DSP_NATIVE_CORE_PROFILE\tquantum-transition-active\t{}/{}\ttransitions={}\troute-memberships={}\tdense={}\truntime-fallback={}\tledger-fallback={}",
+                    "DSP_NATIVE_CORE_PROFILE\tquantum-transition-active\t{}/{}\ttransitions={}\troute-memberships={}\troute-validation={}\troute-rebuild={}\tdense={}\truntime-fallback={}\tledger-fallback={}",
                     quantum_transition_scan.selected_rows,
                     quantum_transition_scan.total_rows,
                     quantum_transition_scan.transition_rows,
                     quantum_transition_scan.route_membership_rows,
+                    quantum_transition_scan.route_validation_rows,
+                    quantum_transition_scan.route_rebuild_rows,
                     quantum_transition_scan.dense_fallback,
                     quantum_transition_scan.runtime_fallback,
                     quantum_transition_scan.ledger_fallback,

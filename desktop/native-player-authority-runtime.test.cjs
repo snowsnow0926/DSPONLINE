@@ -34,12 +34,12 @@ function changeReceipt(overrides = {}) {
   };
 }
 
-function summary(revision, authorityEligible = true) {
+function summary(revision, authorityEligible = true, paused = false) {
   return {
     revision,
     stateVersion: 47,
     mode: "normal",
-    paused: false,
+    paused,
     canonicalSha256: HASH_B,
     domainSha256: HASH_C,
     coverage: { authorityEligible },
@@ -82,6 +82,20 @@ function playerCommand(baseRevision, commandId, value = true) {
       addedBelts: [],
       removedBeltIds: [],
     },
+  };
+}
+
+function pauseLifecycleReceipt(request, sequence, generation, duplicate = false) {
+  const revision = request.baseRevision + 1;
+  return {
+    sequence,
+    baseRevision: request.baseRevision,
+    revision,
+    targetPaused: request.targetPaused,
+    settledDeadlineMs: request.settledDeadlineMs,
+    checkpoint: { generation, rootHash: HASH_A, revision },
+    summary: summary(revision, true, request.targetPaused),
+    duplicate,
   };
 }
 
@@ -134,6 +148,21 @@ function fixture(overrides = {}) {
         ...changeReceipt(),
         checkpoint: { generation: 3 + revision - checkpoint.revision, rootHash: HASH_A, revision },
         summary: summary(revision),
+      };
+    },
+    async commitPlayerAuthorityPause(ownerId, request) {
+      calls.push(["pause", ownerId, request]);
+      const revision = request.baseRevision + 1;
+      const sequence = revision - checkpoint.revision;
+      return {
+        sequence,
+        baseRevision: request.baseRevision,
+        revision,
+        targetPaused: request.targetPaused,
+        settledDeadlineMs: request.settledDeadlineMs,
+        checkpoint: { generation: 3 + sequence, rootHash: HASH_A, revision },
+        summary: summary(revision, true, request.targetPaused),
+        duplicate: false,
       };
     },
     async commitPlayerAuthorityMacroAdvance(ownerId, request) {
@@ -213,6 +242,7 @@ function fixture(overrides = {}) {
       return token;
     }),
     cancel: overrides.cancel ?? ((token) => { token.cancelled = true; }),
+    onTransition: overrides.onTransition,
     minimumYieldMs: 1,
   });
   return {
@@ -246,6 +276,232 @@ test("activation stays main-owned and arms one anchored exact-second timer", asy
   ]);
 });
 
+test("pause drains every tick due at the request anchor and leaves no live timer", async () => {
+  const transitions = [];
+  const value = fixture({ onTransition: (state) => transitions.push(state) });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  value.setNow(12_500);
+
+  const paused = await value.runtime.setPaused(true);
+
+  assert.equal(paused.phase, "paused");
+  assert.equal(paused.revision, 10);
+  assert.equal(paused.acknowledgedSequence, 3);
+  assert.equal(paused.nextSequence, 4);
+  assert.equal(paused.nextDeadlineMs, 13_000);
+  assert.deepEqual(value.calls.filter(([operation]) => ["tick", "pause"].includes(operation)), [
+    ["tick", "main-player-authority", {
+      sessionId: "core-main-1", runId: "player-run-1", sequence: 1,
+    }],
+    ["tick", "main-player-authority", {
+      sessionId: "core-main-1", runId: "player-run-1", sequence: 2,
+    }],
+    ["pause", "main-player-authority", {
+      sessionId: "core-main-1",
+      runId: "player-run-1",
+      baseRevision: 9,
+      targetPaused: true,
+      settledDeadlineMs: 12_000,
+    }],
+  ]);
+  assert.equal(value.timers.filter((timer) => !timer.cancelled).length, 0);
+  assert.ok(transitions.some((state) => state.phase === "pausing"));
+  assert.ok(
+    transitions.filter((state) => state.phase === "pausing")
+      .every((state) => state.currentOperation === "pause"),
+  );
+  assert.deepEqual(transitions.at(-1), paused);
+  assert.equal(transitions.at(-1).inFlight, false);
+  assert.equal(transitions.at(-1).currentOperation, null);
+
+  value.setNow(90_000);
+  const stillPaused = await value.runtime.settleDue();
+  assert.equal(stillPaused.phase, "paused");
+  assert.equal(stillPaused.revision, 10);
+  assert.equal(value.calls.filter(([operation]) => operation === "tick").length, 2);
+});
+
+test("resume uses a fresh main-owned anchor and never backlogs paused wall time", async () => {
+  const value = fixture();
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  value.setNow(10_500);
+  await value.runtime.setPaused(true);
+  value.setNow(1_000_000);
+
+  const resumed = await value.runtime.setPaused(false);
+
+  assert.equal(resumed.phase, "active");
+  assert.equal(resumed.revision, 9);
+  assert.equal(resumed.acknowledgedSequence, 2);
+  assert.equal(resumed.nextDeadlineMs, 1_001_000);
+  assert.deepEqual(value.calls.filter(([operation]) => operation === "pause").map((call) => call[2]), [
+    {
+      sessionId: "core-main-1", runId: "player-run-1", baseRevision: 7,
+      targetPaused: true, settledDeadlineMs: 10_000,
+    },
+    {
+      sessionId: "core-main-1", runId: "player-run-1", baseRevision: 8,
+      targetPaused: false, settledDeadlineMs: 1_000_000,
+    },
+  ]);
+  assert.equal(value.calls.filter(([operation]) => operation === "tick").length, 0);
+  assert.equal(value.timers.filter((timer) => !timer.cancelled).length, 1);
+  assert.equal(value.timers.find((timer) => !timer.cancelled).delay, 1_000);
+
+  value.setNow(1_000_999);
+  await value.runtime.settleDue();
+  assert.equal(value.calls.filter(([operation]) => operation === "tick").length, 0);
+  value.setNow(1_001_000);
+  const ticked = await value.runtime.settleDue();
+  assert.equal(ticked.revision, 10);
+  assert.equal(value.calls.filter(([operation]) => operation === "tick").length, 1);
+});
+
+test("paused checkpoints remain saveable while gameplay commands stay closed", async () => {
+  const value = fixture();
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  await value.runtime.setPaused(true);
+  let boundary = null;
+  const persisted = await value.runtime.withSettledPersistenceBoundary((valueAtBoundary) => {
+    boundary = valueAtBoundary;
+    return "saved-while-paused";
+  });
+
+  assert.equal(persisted, "saved-while-paused");
+  assert.deepEqual(boundary, {
+    sessionId: "core-main-1",
+    runId: "player-run-1",
+    revision: 8,
+    checkpoint: { generation: 4, rootHash: HASH_A, revision: 8 },
+    acknowledgedSequence: 1,
+    settledDeadlineMs: 10_000,
+    paused: true,
+  });
+  assert.equal(value.runtime.snapshot().phase, "paused");
+  await assert.rejects(
+    value.runtime.commitCommand(playerCommand(8, "command-while-paused", true)),
+    /not accepting commands/,
+  );
+  assert.equal(value.calls.filter(([operation]) => operation === "command").length, 0);
+  assert.equal(value.timers.filter((timer) => !timer.cancelled).length, 0);
+});
+
+test("lost pause response retries byte-identical lifecycle input without a new clock sample", async () => {
+  let attempts = 0;
+  const value = fixture({
+    registry: {
+      async commitPlayerAuthorityPause(ownerId, request) {
+        value.calls.push(["pause", ownerId, request]);
+        attempts += 1;
+        if (attempts === 1) throw new Error("lost pause response");
+        return pauseLifecycleReceipt(request, 1, 4, true);
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  value.setNow(10_500);
+
+  await assert.rejects(
+    value.runtime.setPaused(true),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PAUSE_UNCERTAIN",
+  );
+  assert.equal(value.runtime.snapshot().phase, "pause-uncertain");
+  assert.equal(value.timers.filter((timer) => !timer.cancelled).length, 0);
+  value.setNow(99_000);
+  const recovered = await value.runtime.setPaused(true);
+
+  assert.equal(recovered.phase, "paused");
+  assert.equal(recovered.revision, 8);
+  const requests = value.calls.filter(([operation]) => operation === "pause").map((call) => call[2]);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[1], requests[0]);
+  assert.equal(requests[1].settledDeadlineMs, 10_000);
+});
+
+test("lost resume response remains on the exact original resume anchor", async () => {
+  const value = fixture();
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  await value.runtime.setPaused(true);
+  const successfulPauseCalls = value.calls.filter(([operation]) => operation === "pause").length;
+  let attempts = 0;
+  value.runtime.registry.commitPlayerAuthorityPause = async (ownerId, request) => {
+    value.calls.push(["pause", ownerId, request]);
+    attempts += 1;
+    if (attempts === 1) throw new Error("lost resume response");
+    return pauseLifecycleReceipt(request, 2, 5, true);
+  };
+  value.setNow(20_000);
+
+  await assert.rejects(
+    value.runtime.setPaused(false),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_RESUME_UNCERTAIN",
+  );
+  assert.equal(value.runtime.snapshot().phase, "resume-uncertain");
+  value.setNow(20_500);
+  const resumed = await value.runtime.retryUncertain();
+
+  assert.equal(resumed.phase, "active");
+  assert.equal(resumed.nextDeadlineMs, 21_000);
+  const requests = value.calls.filter(([operation]) => operation === "pause")
+    .slice(successfulPauseCalls).map((call) => call[2]);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[1], requests[0]);
+  assert.equal(requests[1].settledDeadlineMs, 20_000);
+});
+
+test("startup recovery preserves a durable paused phase until an explicit fresh resume", async () => {
+  const value = fixture();
+  const resumedPaused = value.runtime.resumeFromStartupRecovery({
+    schemaVersion: 1,
+    kind: "native-core-player-authority-startup-recovery-v1",
+    ownerId: "main-player-authority",
+    sessionId: "core-restarted-paused",
+    runId: "player-run-1",
+    registryFingerprint: "builtin:test",
+    revision: 11,
+    checkpoint: { generation: 8, rootHash: HASH_A, revision: 11 },
+    acknowledgedSequence: 4,
+    nextSequence: 5,
+    settledDeadlineMs: 10_000,
+    nextDeadlineMs: 11_000,
+    commandId: "pause-lifecycle-command",
+    commandBaseRevision: 10,
+    paused: true,
+    ...changeReceipt({ topologyDirty: false }),
+    summary: { ...summary(11, true, true), registryFingerprint: "builtin:test" },
+  });
+
+  assert.equal(resumedPaused.phase, "paused");
+  assert.equal(value.timers.length, 0);
+  value.setNow(80_000);
+  const resumed = await value.runtime.setPaused(false);
+  assert.equal(resumed.phase, "active");
+  assert.equal(resumed.nextDeadlineMs, 81_000);
+  assert.equal(value.calls.filter(([operation]) => operation === "tick").length, 0);
+  assert.deepEqual(value.calls.filter(([operation]) => operation === "pause")[0][2], {
+    sessionId: "core-restarted-paused",
+    runId: "player-run-1",
+    baseRevision: 11,
+    targetPaused: false,
+    settledDeadlineMs: 80_000,
+  });
+});
+
 test("main-owned persistence freezes an ACKed boundary and resumes queued gameplay only after it settles", async () => {
   const value = fixture();
   await value.runtime.activate({
@@ -276,6 +532,7 @@ test("main-owned persistence freezes an ACKed boundary and resumes queued gamepl
     checkpoint: value.checkpoint,
     acknowledgedSequence: 0,
     settledDeadlineMs: 10_000,
+    paused: false,
   });
 
   gate.resolve();
@@ -382,6 +639,7 @@ test("startup reconciliation freezes the current macro checkpoint without finish
     checkpoint: { generation: 4, rootHash: HASH_A, revision: 9 },
     acknowledgedSequence: 2,
     settledDeadlineMs: 15_000,
+    paused: false,
   });
   assert.equal(value.calls.filter(([operation]) => operation === "macro-advance").length, 1);
   assert.equal(value.calls.filter(([operation]) => operation === "macro-finish").length, 0);
@@ -1096,6 +1354,7 @@ test("startup macro recovery remains suspended and rejects partial macro identit
     nextDeadlineMs: 15_000,
     commandId: null,
     commandBaseRevision: null,
+    paused: false,
     ...changeReceipt({ topologyDirty: false }),
     macroSessionId: "macro-session-recovered",
     recoveredMacroOperationId: "macro-operation-recovered",
@@ -1217,6 +1476,7 @@ test("durable startup receipt adopts the main-owned Rust session and continues i
     nextDeadlineMs: 11_000,
     commandId: "durable-command-4",
     commandBaseRevision: 10,
+    paused: false,
     pendingMacroCleanupSessionId: "macro-session-finished-before-restart",
     pendingMacroCleanupRevision: 9,
     ...changeReceipt({ changedEntityIds: ["entity-a"], topologyDirty: false }),
@@ -1270,6 +1530,7 @@ test("clean startup immediately after activation resumes revision and sequence z
     nextDeadlineMs: 11_000,
     commandId: null,
     commandBaseRevision: null,
+    paused: false,
     ...changeReceipt({ topologyDirty: false }),
     summary: { ...summary(0), registryFingerprint: "builtin:test" },
   });
@@ -1308,6 +1569,7 @@ test("startup receipt owner and session ownership mismatches fault closed", () =
     nextDeadlineMs: 11_000,
     commandId: null,
     commandBaseRevision: null,
+    paused: false,
     ...changeReceipt({ topologyDirty: false }),
     summary: { ...summary(11), registryFingerprint: "builtin:test" },
   }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID");

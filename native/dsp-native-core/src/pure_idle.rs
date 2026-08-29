@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
-use serde_json::{Number, Value};
+use serde_json::{Map, Number, Value};
 
+use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
 use crate::simulation::{CoreAdvanceMode, CoreAdvanceRequest, CoreAdvanceResult};
 use crate::state::{CoreState, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS};
 
@@ -20,6 +22,7 @@ const EPSILON: f64 = 0.000_001;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 const TERMINAL_ROCKET_ITEM_ID: &str = "small_carrier_rocket";
 const TERMINAL_SAIL_ITEM_ID: &str = "solar_sail";
+const SETTLEMENT_ENTITY_ROWS_PER_CHUNK: usize = 256;
 
 type MaterialTotals = BTreeMap<String, i128>;
 type OrbitMaterialTotals = BTreeMap<String, MaterialTotals>;
@@ -108,6 +111,41 @@ struct SettlementProofSnapshot {
     dyson: DysonTerminalSnapshot,
     research: ResearchProofSnapshot,
     finite_veins: BTreeMap<String, FiniteVeinProofSnapshot>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SettlementRouteContribution {
+    route_id: String,
+    route: Map<String, Value>,
+}
+
+/// Private output of one fixed settlement-proof row chunk. Workers may only
+/// parse immutable entity rows and write their own chunk. The authoritative
+/// fold below consumes chunks and routes in ascending persisted order, so
+/// duplicate route IDs retain the frozen first-match behavior at every worker
+/// count.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SettlementEntityChunk {
+    owned: MaterialTotals,
+    consumed: MaterialTotals,
+    routes: Vec<SettlementRouteContribution>,
+    parsed_entity_count: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SettlementEntityTotals {
+    owned: MaterialTotals,
+    consumed: MaterialTotals,
+    route_reservations: HashMap<String, MaterialTotals>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SettlementEntityScanDiagnostics {
+    entity_count: usize,
+    parsed_entity_count: usize,
+    chunk_count: usize,
+    selected_worker_count: usize,
+    parallel_path: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1049,7 +1087,200 @@ fn capture_finite_veins(
     Ok(veins)
 }
 
+fn merge_material_totals(
+    target: &mut MaterialTotals,
+    source: &MaterialTotals,
+    label: &str,
+) -> anyhow::Result<()> {
+    for (item_id, amount) in source {
+        add_material_amount(target, item_id, *amount, label)?;
+    }
+    Ok(())
+}
+
+fn capture_settlement_entity_chunk(
+    state: &CoreState,
+    range: Range<usize>,
+) -> anyhow::Result<SettlementEntityChunk> {
+    let mut chunk = SettlementEntityChunk::default();
+    for entity_index in range {
+        let entity = state.parse_entity(entity_index)?;
+        let entity = entity
+            .as_object()
+            .ok_or_else(|| anyhow!("native settlement proof entity is not an object"))?;
+        let entity_id = entity
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        add_material_store(
+            &mut chunk.owned,
+            entity.get("inputs"),
+            &format!("entities.{entity_id}.inputs"),
+        )?;
+        add_material_store(
+            &mut chunk.owned,
+            entity.get("outputs"),
+            &format!("entities.{entity_id}.outputs"),
+        )?;
+        for (field, item_id) in [
+            ("stationWarpers", "space_warper"),
+            ("stationDrones", "logistics_drone"),
+            ("stationVessels", "logistics_vessel"),
+        ] {
+            if entity.contains_key(field) {
+                add_material_amount(
+                    &mut chunk.owned,
+                    item_id,
+                    proof_counter(entity.get(field), &format!("entities.{entity_id}.{field}"))?,
+                    &format!("entities.{entity_id}.{field}"),
+                )?;
+            }
+        }
+
+        if let Some(routes) = entity.get("stationRoutes")
+            && !routes.is_null()
+        {
+            let routes = routes
+                .as_array()
+                .ok_or_else(|| anyhow!("entities.{entity_id}.stationRoutes is not an array"))?;
+            for route in routes {
+                let route = route.as_object().ok_or_else(|| {
+                    anyhow!("entities.{entity_id}.stationRoutes contains a non-object")
+                })?;
+                let route_id = route
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("station route is missing an ID"))?;
+                chunk.routes.push(SettlementRouteContribution {
+                    route_id: route_id.to_owned(),
+                    route: route.clone(),
+                });
+            }
+        }
+
+        if let Some(ports) = entity.get("blackHolePorts")
+            && !ports.is_null()
+        {
+            let ports = ports
+                .as_array()
+                .ok_or_else(|| anyhow!("entities.{entity_id}.blackHolePorts is not an array"))?;
+            for (port_index, port) in ports.iter().enumerate() {
+                let Some(port) = port.as_object() else {
+                    bail!("entities.{entity_id}.blackHolePorts.{port_index} is not an object");
+                };
+                let Some(item_id) = port.get("currentItemId").and_then(Value::as_str) else {
+                    continue;
+                };
+                if item_id.is_empty() {
+                    continue;
+                }
+                add_consumption_entry(
+                    &mut chunk.consumed,
+                    item_id,
+                    port.get("totalDestroyed"),
+                    &format!("entities.{entity_id}.blackHolePorts.{port_index}.totalDestroyed"),
+                )?;
+            }
+        }
+        chunk.parsed_entity_count += 1;
+    }
+    Ok(chunk)
+}
+
+fn fold_settlement_entity_chunks(
+    chunks: Vec<anyhow::Result<SettlementEntityChunk>>,
+    entity_count: usize,
+    selected_worker_count: usize,
+) -> anyhow::Result<(SettlementEntityTotals, SettlementEntityScanDiagnostics)> {
+    let chunk_count = chunks.len();
+    let mut totals = SettlementEntityTotals::default();
+    let mut seen_route_ids = HashSet::<String>::new();
+    let mut parsed_entity_count = 0_usize;
+    for chunk in chunks {
+        let chunk = chunk?;
+        parsed_entity_count = parsed_entity_count
+            .checked_add(chunk.parsed_entity_count)
+            .ok_or_else(|| anyhow!("settlement proof parsed entity count overflow"))?;
+        merge_material_totals(&mut totals.owned, &chunk.owned, "entities")?;
+        merge_material_totals(&mut totals.consumed, &chunk.consumed, "entities.consumed")?;
+        for route in chunk.routes {
+            if !seen_route_ids.insert(route.route_id.clone()) {
+                continue;
+            }
+            let item_id = route
+                .route
+                .get("itemId")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("stationRoutes.{}.itemId is invalid", route.route_id))?;
+            let cargo = proof_counter(
+                route.route.get("cargo"),
+                &format!("stationRoutes.{}.cargo", route.route_id),
+            )?;
+            add_material_amount(
+                &mut totals.owned,
+                item_id,
+                cargo,
+                &format!("stationRoutes.{}", route.route_id),
+            )?;
+            if let Some(source_id) = route.route.get("peerId").and_then(Value::as_str) {
+                add_material_amount(
+                    totals
+                        .route_reservations
+                        .entry(source_id.to_owned())
+                        .or_default(),
+                    item_id,
+                    cargo,
+                    &format!("stationRoutes.{}.reservation", route.route_id),
+                )?;
+            }
+        }
+    }
+    if parsed_entity_count != entity_count {
+        bail!("settlement proof parsed {parsed_entity_count} of {entity_count} entity rows");
+    }
+    Ok((
+        totals,
+        SettlementEntityScanDiagnostics {
+            entity_count,
+            parsed_entity_count,
+            chunk_count,
+            selected_worker_count,
+            parallel_path: selected_worker_count > 1 && chunk_count > 1,
+        },
+    ))
+}
+
+fn capture_entity_settlement_with_runtime(
+    state: &CoreState,
+    runtime: &DeterministicRuntime,
+) -> anyhow::Result<(SettlementEntityTotals, SettlementEntityScanDiagnostics)> {
+    let entity_count = state.entity_index.len();
+    let selected_worker_count = runtime.worker_count_for_items(entity_count);
+    let chunks = runtime.ordered_chunk_map(
+        entity_count,
+        SETTLEMENT_ENTITY_ROWS_PER_CHUNK,
+        |_, range| capture_settlement_entity_chunk(state, range),
+    );
+    fold_settlement_entity_chunks(chunks, entity_count, selected_worker_count)
+}
+
+#[cfg(test)]
+fn capture_entity_settlement_serial_oracle(
+    state: &CoreState,
+) -> anyhow::Result<SettlementEntityTotals> {
+    let entity_count = state.entity_index.len();
+    let chunk = capture_settlement_entity_chunk(state, 0..entity_count)?;
+    fold_settlement_entity_chunks(vec![Ok(chunk)], entity_count, 1).map(|(totals, _)| totals)
+}
+
 fn capture_settlement_snapshot(state: &CoreState) -> anyhow::Result<SettlementProofSnapshot> {
+    capture_settlement_snapshot_with_runtime(state, deterministic_runtime())
+}
+
+fn capture_settlement_snapshot_with_runtime(
+    state: &CoreState,
+    runtime: &DeterministicRuntime,
+) -> anyhow::Result<SettlementProofSnapshot> {
     let base = state.base_value();
     let mut snapshot = SettlementProofSnapshot {
         granted: capture_cumulative_grants(state)?,
@@ -1096,109 +1327,37 @@ fn capture_settlement_snapshot(state: &CoreState) -> anyhow::Result<SettlementPr
         }
     }
 
-    let mut seen_route_ids = HashSet::<String>::new();
-    let mut route_reservations = HashMap::<String, MaterialTotals>::new();
-    for entity_index in 0..state.entity_index.len() {
-        let entity = state.parse_entity(entity_index)?;
-        let entity = entity
-            .as_object()
-            .ok_or_else(|| anyhow!("native settlement proof entity is not an object"))?;
-        let entity_id = entity
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        add_material_store(
-            &mut snapshot.owned,
-            entity.get("inputs"),
-            &format!("entities.{entity_id}.inputs"),
-        )?;
-        add_material_store(
-            &mut snapshot.owned,
-            entity.get("outputs"),
-            &format!("entities.{entity_id}.outputs"),
-        )?;
-        for (field, item_id) in [
-            ("stationWarpers", "space_warper"),
-            ("stationDrones", "logistics_drone"),
-            ("stationVessels", "logistics_vessel"),
-        ] {
-            if entity.contains_key(field) {
-                add_material_amount(
-                    &mut snapshot.owned,
-                    item_id,
-                    proof_counter(entity.get(field), &format!("entities.{entity_id}.{field}"))?,
-                    &format!("entities.{entity_id}.{field}"),
-                )?;
-            }
-        }
-
-        if let Some(routes) = entity.get("stationRoutes")
-            && !routes.is_null()
-        {
-            let routes = routes
-                .as_array()
-                .ok_or_else(|| anyhow!("entities.{entity_id}.stationRoutes is not an array"))?;
-            for route in routes {
-                let route = route.as_object().ok_or_else(|| {
-                    anyhow!("entities.{entity_id}.stationRoutes contains a non-object")
-                })?;
-                let route_id = route
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow!("station route is missing an ID"))?;
-                if !seen_route_ids.insert(route_id.to_owned()) {
-                    continue;
-                }
-                let item_id = route
-                    .get("itemId")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| anyhow!("stationRoutes.{route_id}.itemId is invalid"))?;
-                let cargo = proof_counter(
-                    route.get("cargo"),
-                    &format!("stationRoutes.{route_id}.cargo"),
-                )?;
-                add_material_amount(
-                    &mut snapshot.owned,
-                    item_id,
-                    cargo,
-                    &format!("stationRoutes.{route_id}"),
-                )?;
-                if let Some(source_id) = route.get("peerId").and_then(Value::as_str) {
-                    add_material_amount(
-                        route_reservations.entry(source_id.to_owned()).or_default(),
-                        item_id,
-                        cargo,
-                        &format!("stationRoutes.{route_id}.reservation"),
-                    )?;
-                }
-            }
-        }
-
-        if let Some(ports) = entity.get("blackHolePorts")
-            && !ports.is_null()
-        {
-            let ports = ports
-                .as_array()
-                .ok_or_else(|| anyhow!("entities.{entity_id}.blackHolePorts is not an array"))?;
-            for (port_index, port) in ports.iter().enumerate() {
-                let Some(port) = port.as_object() else {
-                    bail!("entities.{entity_id}.blackHolePorts.{port_index} is not an object");
-                };
-                let Some(item_id) = port.get("currentItemId").and_then(Value::as_str) else {
-                    continue;
-                };
-                if item_id.is_empty() {
-                    continue;
-                }
-                add_consumption_entry(
-                    &mut snapshot.consumed,
-                    item_id,
-                    port.get("totalDestroyed"),
-                    &format!("entities.{entity_id}.blackHolePorts.{port_index}.totalDestroyed"),
-                )?;
-            }
-        }
+    let entity_scan_started = std::time::Instant::now();
+    let (entity_totals, entity_scan) = capture_entity_settlement_with_runtime(state, runtime)?;
+    if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tpure-idle-settlement-entity-scan\t{:.3}",
+            entity_scan_started.elapsed().as_secs_f64() * 1_000.0
+        );
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tpure-idle-settlement-entity-count\t{}",
+            entity_scan.entity_count
+        );
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tpure-idle-settlement-entity-chunks\t{}",
+            entity_scan.chunk_count
+        );
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tpure-idle-settlement-selected-workers\t{}",
+            entity_scan.selected_worker_count
+        );
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tpure-idle-settlement-parallel-path\t{}",
+            u8::from(entity_scan.parallel_path)
+        );
     }
+    merge_material_totals(&mut snapshot.owned, &entity_totals.owned, "entities")?;
+    merge_material_totals(
+        &mut snapshot.consumed,
+        &entity_totals.consumed,
+        "entities.consumed",
+    )?;
+    let route_reservations = entity_totals.route_reservations;
 
     // Legacy station-route cargo stays reserved in the source output until
     // arrival. Replace that reserved portion with the explicit in-flight
@@ -5375,6 +5534,7 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     use serde_json::{Map, json};
+    use sha2::{Digest, Sha256};
 
     use super::*;
     use crate::canonical::fnv1a_utf8;
@@ -6830,6 +6990,180 @@ mod tests {
             wall_seconds,
             advance_mode: CoreAdvanceMode::PureIdleMacroV10,
             include_diagnostics: false,
+        }
+    }
+
+    fn settlement_parallel_entities(entity_count: usize) -> Vec<Value> {
+        (0..entity_count)
+            .map(|index| {
+                let mut entity = json!({
+                    "id": format!("settlement-scan-{index:05}"),
+                    "kind": "power",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "wind_turbine",
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": { "iron_ore": index % 7 },
+                    "outputs": { "iron_ingot": index % 11 },
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0
+                });
+                if index.is_multiple_of(521) {
+                    entity["blackHolePorts"] = json!([{
+                        "currentItemId": "iron_ore",
+                        "totalDestroyed": index / 521
+                    }]);
+                }
+                if index == 0 {
+                    entity["stationRoutes"] = json!([{
+                        "id": "first-route-wins",
+                        "peerId": "settlement-scan-00000",
+                        "itemId": "iron_ingot",
+                        "cargo": 3
+                    }]);
+                } else if index == 1 {
+                    // Frozen v47 semantics ignore every field after the first
+                    // occurrence of a station-route ID. Keeping this duplicate
+                    // malformed proves the parallel fold does not validate or
+                    // count a later copy first.
+                    entity["stationRoutes"] = json!([{
+                        "id": "first-route-wins",
+                        "cargo": "not-a-counter"
+                    }]);
+                } else if index == 2 {
+                    entity["stationRoutes"] = json!([{
+                        "id": "second-route",
+                        "peerId": "settlement-scan-00000",
+                        "itemId": "iron_ore",
+                        "cargo": 5
+                    }]);
+                }
+                entity
+            })
+            .collect()
+    }
+
+    fn settlement_parallel_fixture(entity_count: usize) -> CoreState {
+        fixture_state_from_parts(
+            powered_fixture_base(15.0, "infinite"),
+            settlement_parallel_entities(entity_count),
+        )
+    }
+
+    fn settlement_totals_hash(totals: &SettlementEntityTotals) -> String {
+        let route_reservations = totals
+            .route_reservations
+            .iter()
+            .map(|(source_id, by_item)| (source_id.clone(), by_item.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let bytes = serde_json::to_vec(&json!({
+            "owned": totals.owned,
+            "consumed": totals.consumed,
+            "routeReservations": route_reservations
+        }))
+        .unwrap();
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    fn settlement_snapshot_hash(snapshot: &SettlementProofSnapshot) -> String {
+        // Every collection in the persisted proof snapshot is ordered. Debug
+        // encoding stays private to this regression and avoids adding a wire
+        // representation for an ephemeral certificate input.
+        hex::encode(Sha256::digest(format!("{snapshot:?}").as_bytes()))
+    }
+
+    #[test]
+    fn settlement_entity_scan_matches_serial_oracle_and_hash_at_one_two_four_eight_workers() {
+        let entity_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257;
+        let state = settlement_parallel_fixture(entity_count);
+        let oracle = capture_entity_settlement_serial_oracle(&state).unwrap();
+        let oracle_hash = settlement_totals_hash(&oracle);
+        assert_eq!(
+            oracle
+                .route_reservations
+                .get("settlement-scan-00000")
+                .and_then(|by_item| by_item.get("iron_ingot")),
+            Some(&3)
+        );
+
+        for workers in [1, 2, 4, 8] {
+            let (actual, diagnostics) = capture_entity_settlement_with_runtime(
+                &state,
+                &DeterministicRuntime::for_test(workers),
+            )
+            .unwrap();
+            assert_eq!(actual, oracle, "worker count {workers}");
+            assert_eq!(settlement_totals_hash(&actual), oracle_hash);
+            assert_eq!(diagnostics.entity_count, entity_count);
+            assert_eq!(diagnostics.parsed_entity_count, entity_count);
+            assert_eq!(
+                diagnostics.chunk_count,
+                entity_count.div_ceil(SETTLEMENT_ENTITY_ROWS_PER_CHUNK)
+            );
+            assert_eq!(diagnostics.selected_worker_count, workers);
+            assert_eq!(diagnostics.parallel_path, workers > 1);
+        }
+    }
+
+    #[test]
+    fn settlement_entity_scan_keeps_small_batches_serial() {
+        let state = settlement_parallel_fixture(3);
+        let oracle = capture_entity_settlement_serial_oracle(&state).unwrap();
+        let (actual, diagnostics) =
+            capture_entity_settlement_with_runtime(&state, &DeterministicRuntime::for_test(8))
+                .unwrap();
+        assert_eq!(actual, oracle);
+        assert_eq!(diagnostics.entity_count, 3);
+        assert_eq!(diagnostics.parsed_entity_count, 3);
+        assert_eq!(diagnostics.chunk_count, 1);
+        assert_eq!(diagnostics.selected_worker_count, 1);
+        assert!(!diagnostics.parallel_path);
+    }
+
+    #[test]
+    fn settlement_snapshot_hash_is_identical_at_one_two_four_eight_workers() {
+        let entity_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257;
+        let state = settlement_parallel_fixture(entity_count);
+        let expected =
+            capture_settlement_snapshot_with_runtime(&state, &DeterministicRuntime::for_test(1))
+                .unwrap();
+        let expected_hash = settlement_snapshot_hash(&expected);
+
+        for workers in [1, 2, 4, 8] {
+            let actual = capture_settlement_snapshot_with_runtime(
+                &state,
+                &DeterministicRuntime::for_test(workers),
+            )
+            .unwrap();
+            assert_eq!(actual, expected, "worker count {workers}");
+            assert_eq!(settlement_snapshot_hash(&actual), expected_hash);
+        }
+    }
+
+    #[test]
+    fn settlement_entity_scan_failure_is_ordered_and_never_mutates_the_source() {
+        let entity_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257;
+        let mut entities = settlement_parallel_entities(entity_count);
+        entities[17]["blackHolePorts"] = json!([0]);
+        entities[crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 13]["blackHolePorts"] =
+            json!([0]);
+        let state = fixture_state_from_parts(powered_fixture_base(15.0, "infinite"), entities);
+        let source_hash = state.summary().unwrap().canonical_sha256;
+
+        for workers in [1, 2, 4, 8] {
+            let error = capture_entity_settlement_with_runtime(
+                &state,
+                &DeterministicRuntime::for_test(workers),
+            )
+            .unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "entities.settlement-scan-00017.blackHolePorts.0 is not an object"
+            );
+            assert_eq!(state.summary().unwrap().canonical_sha256, source_hash);
         }
     }
 

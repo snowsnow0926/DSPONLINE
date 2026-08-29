@@ -16,6 +16,7 @@ mod deterministic_runtime;
 mod dyson;
 mod dyson_workspace;
 mod entity_raw;
+mod factory_inventory;
 mod factory_read_model;
 mod galactic_exports;
 mod global_progress;

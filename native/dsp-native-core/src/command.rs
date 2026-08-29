@@ -302,6 +302,10 @@ fn top_level_change_is_projection_safe(change: &ValuePatch) -> bool {
                 | "canvasRegions"
                 | "timeWarp"
                 | "idleSettlement"
+                | "cargo"
+                | "tray"
+                | "planetTrayItemLimits"
+                | "portableFleet"
         )
     )
 }
@@ -5777,6 +5781,9 @@ impl CoreState {
         }
         if !command.changed_belts.is_empty() {
             return validate_belt_configuration_command(self, command);
+        }
+        if crate::factory_inventory::command_touches_factory_inventory(command) {
+            return crate::factory_inventory::validate_factory_inventory_command(self, command);
         }
         if !command.top_level_changes.is_empty() {
             return validate_player_pause_command(self, command);

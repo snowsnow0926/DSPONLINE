@@ -1035,9 +1035,88 @@ pub(crate) fn launch_factor(base: &Map<String, Value>, recipe_id: &str) -> f64 {
     finite(engineering.get("launchThrottle")).clamp(0.0, 1.0)
 }
 
-pub(crate) fn launch(
+/// Dyson launch state owned by one exact simulation step.
+///
+/// Launcher entities still enter this runtime in persisted entity order. The
+/// runtime intentionally applies every launch, reconciliation, generation
+/// refresh, and energy rounding separately; it only removes the deep
+/// clone/load/save cycle that used to surround every active launcher.
+pub(crate) struct LaunchStepRuntime {
+    dyson: DysonState,
+}
+
+impl LaunchStepRuntime {
+    fn load(base: &Map<String, Value>) -> anyhow::Result<Self> {
+        Ok(Self { dyson: load(base)? })
+    }
+
+    fn launch(
+        &mut self,
+        state: &CoreState,
+        base: &Map<String, Value>,
+        entity: &Map<String, Value>,
+        recipe_id: &str,
+        cycles: f64,
+    ) -> anyhow::Result<()> {
+        let system_id = system_for_planet(state, text(entity, "planetId").unwrap_or_default())
+            .ok_or_else(|| anyhow!("native Dyson launcher planet is unknown"))?;
+        if recipe_id == "solar_sail_launch" {
+            sync_swarm(base, &mut self.dyson)?;
+            let target_id = text(entity, "targetDysonOrbitId")
+                .ok_or_else(|| anyhow!("native Dyson ejector target is missing"))?;
+            let per_sail = sail_power(base, system_id);
+            let orbit = orbits_for_mut(&mut self.dyson, system_id)?
+                .iter_mut()
+                .filter_map(Value::as_object_mut)
+                .find(|orbit| text(orbit, "id") == Some(target_id))
+                .ok_or_else(|| anyhow!("native Dyson ejector target disappeared"))?;
+            let sails = finite(orbit.get("sailsInOrbit"));
+            let launched = finite(orbit.get("totalLaunched"));
+            set_number(orbit, "sailsInOrbit", (sails + cycles).floor())?;
+            set_number(orbit, "totalLaunched", (launched + cycles).floor())?;
+            set_number(orbit, "generationKw", (sails + cycles).floor() * per_sail)?;
+            aggregate_swarm(&mut self.dyson)?;
+        } else {
+            sync_sphere(&mut self.dyson)?;
+            let plan = self
+                .dyson
+                .plans
+                .get_mut(system_id)
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow!("native Dyson launcher plan is missing"))?;
+            let structure = finite(plan.get("structurePoints"));
+            set_number(plan, "structurePoints", structure + cycles.floor())?;
+            let total = finite(self.dyson.sphere.get("totalRocketsLaunched"));
+            set_number(
+                &mut self.dyson.sphere,
+                "totalRocketsLaunched",
+                (total + cycles).floor(),
+            )?;
+            reconcile_plan(plan)?;
+            update_generation(base, &mut self.dyson)?;
+        }
+        let spent = finite(self.dyson.engineering.get("launchEnergySpentMj"));
+        let per_cycle = if recipe_id == "solar_sail_launch" {
+            DYSON_SAIL_LAUNCH_ENERGY_MJ
+        } else {
+            DYSON_ROCKET_LAUNCH_ENERGY_MJ
+        };
+        set_number(
+            &mut self.dyson.engineering,
+            "launchEnergySpentMj",
+            rounded(spent + per_cycle * cycles, 3),
+        )
+    }
+
+    fn commit(self, base: &mut Map<String, Value>) {
+        save(base, self.dyson);
+    }
+}
+
+pub(crate) fn launch_deferred(
+    runtime: &mut Option<LaunchStepRuntime>,
     state: &CoreState,
-    base: &mut Map<String, Value>,
+    base: &Map<String, Value>,
     entity: &Map<String, Value>,
     recipe_id: &str,
     cycles: f64,
@@ -1045,57 +1124,22 @@ pub(crate) fn launch(
     if cycles <= 0.0 || !matches!(recipe_id, "solar_sail_launch" | "carrier_rocket_launch") {
         return Ok(());
     }
-    let system_id = system_for_planet(state, text(entity, "planetId").unwrap_or_default())
-        .ok_or_else(|| anyhow!("native Dyson launcher planet is unknown"))?;
-    let snapshot = base.clone();
-    let mut dyson = load(base)?;
-    if recipe_id == "solar_sail_launch" {
-        sync_swarm(&snapshot, &mut dyson)?;
-        let target_id = text(entity, "targetDysonOrbitId")
-            .ok_or_else(|| anyhow!("native Dyson ejector target is missing"))?;
-        let per_sail = sail_power(&snapshot, system_id);
-        let orbit = orbits_for_mut(&mut dyson, system_id)?
-            .iter_mut()
-            .filter_map(Value::as_object_mut)
-            .find(|orbit| text(orbit, "id") == Some(target_id))
-            .ok_or_else(|| anyhow!("native Dyson ejector target disappeared"))?;
-        let sails = finite(orbit.get("sailsInOrbit"));
-        let launched = finite(orbit.get("totalLaunched"));
-        set_number(orbit, "sailsInOrbit", (sails + cycles).floor())?;
-        set_number(orbit, "totalLaunched", (launched + cycles).floor())?;
-        set_number(orbit, "generationKw", (sails + cycles).floor() * per_sail)?;
-        aggregate_swarm(&mut dyson)?;
-    } else {
-        sync_sphere(&mut dyson)?;
-        let plan = dyson
-            .plans
-            .get_mut(system_id)
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| anyhow!("native Dyson launcher plan is missing"))?;
-        let structure = finite(plan.get("structurePoints"));
-        set_number(plan, "structurePoints", structure + cycles.floor())?;
-        let total = finite(dyson.sphere.get("totalRocketsLaunched"));
-        set_number(
-            &mut dyson.sphere,
-            "totalRocketsLaunched",
-            (total + cycles).floor(),
-        )?;
-        reconcile_plan(plan)?;
-        update_generation(&snapshot, &mut dyson)?;
+    if runtime.is_none() {
+        *runtime = Some(LaunchStepRuntime::load(base)?);
     }
-    let spent = finite(dyson.engineering.get("launchEnergySpentMj"));
-    let per_cycle = if recipe_id == "solar_sail_launch" {
-        DYSON_SAIL_LAUNCH_ENERGY_MJ
-    } else {
-        DYSON_ROCKET_LAUNCH_ENERGY_MJ
-    };
-    set_number(
-        &mut dyson.engineering,
-        "launchEnergySpentMj",
-        rounded(spent + per_cycle * cycles, 3),
-    )?;
-    save(base, dyson);
-    Ok(())
+    runtime
+        .as_mut()
+        .expect("native Dyson launch runtime disappeared")
+        .launch(state, base, entity, recipe_id, cycles)
+}
+
+pub(crate) fn commit_deferred_launches(
+    base: &mut Map<String, Value>,
+    runtime: Option<LaunchStepRuntime>,
+) {
+    if let Some(runtime) = runtime {
+        runtime.commit(base);
+    }
 }
 
 /// Returns the largest whole-second horizon for a stable per-system rocket
@@ -2744,6 +2788,238 @@ mod tests {
             fixture_catalog(),
         )
         .unwrap()
+    }
+
+    fn launch_fixture_base() -> Map<String, Value> {
+        let mut base = fixture_base().as_object().cloned().unwrap();
+        let mut orbits_by_system = Map::new();
+        let mut active_orbit_by_system = Map::new();
+        let mut plans = Map::new();
+        for system_id in SYSTEM_IDS {
+            let orbit_id = format!("orbit-{system_id}");
+            orbits_by_system.insert(
+                system_id.to_owned(),
+                json!([{
+                    "id": orbit_id,
+                    "name": system_id,
+                    "radius": 50000,
+                    "inclination": 0,
+                    "longitude": 0,
+                    "sailsInOrbit": 0,
+                    "totalLaunched": 0,
+                    "totalExpired": 0,
+                    "decayProgress": 0,
+                    "generationKw": 0
+                }]),
+            );
+            active_orbit_by_system.insert(system_id.to_owned(), Value::from(orbit_id));
+            plans.insert(
+                system_id.to_owned(),
+                json!({
+                    "structurePoints": 0,
+                    "shellSails": 0,
+                    "layers": []
+                }),
+            );
+        }
+        base.insert(
+            "dysonEngineering".to_owned(),
+            json!({
+                "launchEnabled": true,
+                "launchMode": "balanced",
+                "launchThrottle": 1,
+                "launchEnergySpentMj": 0,
+                "orbitsBySystem": orbits_by_system,
+                "activeOrbitBySystem": active_orbit_by_system
+            }),
+        );
+        base.insert("dysonPlans".to_owned(), Value::Object(plans));
+        base
+    }
+
+    fn launch_entity(planet_id: &str, target_orbit_id: Option<&str>) -> Map<String, Value> {
+        let mut entity = json!({ "planetId": planet_id })
+            .as_object()
+            .cloned()
+            .unwrap();
+        if let Some(target_orbit_id) = target_orbit_id {
+            entity.insert(
+                "targetDysonOrbitId".to_owned(),
+                Value::from(target_orbit_id),
+            );
+        }
+        entity
+    }
+
+    fn legacy_launch_per_entity(
+        state: &CoreState,
+        base: &mut Map<String, Value>,
+        entity: &Map<String, Value>,
+        recipe_id: &str,
+        cycles: f64,
+    ) -> anyhow::Result<()> {
+        if cycles <= 0.0 || !matches!(recipe_id, "solar_sail_launch" | "carrier_rocket_launch") {
+            return Ok(());
+        }
+        let system_id = system_for_planet(state, text(entity, "planetId").unwrap_or_default())
+            .ok_or_else(|| anyhow!("native Dyson launcher planet is unknown"))?;
+        let snapshot = base.clone();
+        let mut dyson = load(base)?;
+        if recipe_id == "solar_sail_launch" {
+            sync_swarm(&snapshot, &mut dyson)?;
+            let target_id = text(entity, "targetDysonOrbitId")
+                .ok_or_else(|| anyhow!("native Dyson ejector target is missing"))?;
+            let per_sail = sail_power(&snapshot, system_id);
+            let orbit = orbits_for_mut(&mut dyson, system_id)?
+                .iter_mut()
+                .filter_map(Value::as_object_mut)
+                .find(|orbit| text(orbit, "id") == Some(target_id))
+                .ok_or_else(|| anyhow!("native Dyson ejector target disappeared"))?;
+            let sails = finite(orbit.get("sailsInOrbit"));
+            let launched = finite(orbit.get("totalLaunched"));
+            set_number(orbit, "sailsInOrbit", (sails + cycles).floor())?;
+            set_number(orbit, "totalLaunched", (launched + cycles).floor())?;
+            set_number(orbit, "generationKw", (sails + cycles).floor() * per_sail)?;
+            aggregate_swarm(&mut dyson)?;
+        } else {
+            sync_sphere(&mut dyson)?;
+            let plan = dyson
+                .plans
+                .get_mut(system_id)
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow!("native Dyson launcher plan is missing"))?;
+            let structure = finite(plan.get("structurePoints"));
+            set_number(plan, "structurePoints", structure + cycles.floor())?;
+            let total = finite(dyson.sphere.get("totalRocketsLaunched"));
+            set_number(
+                &mut dyson.sphere,
+                "totalRocketsLaunched",
+                (total + cycles).floor(),
+            )?;
+            reconcile_plan(plan)?;
+            update_generation(&snapshot, &mut dyson)?;
+        }
+        let spent = finite(dyson.engineering.get("launchEnergySpentMj"));
+        let per_cycle = if recipe_id == "solar_sail_launch" {
+            DYSON_SAIL_LAUNCH_ENERGY_MJ
+        } else {
+            DYSON_ROCKET_LAUNCH_ENERGY_MJ
+        };
+        set_number(
+            &mut dyson.engineering,
+            "launchEnergySpentMj",
+            rounded(spent + per_cycle * cycles, 3),
+        )?;
+        save(base, dyson);
+        Ok(())
+    }
+
+    #[test]
+    fn deferred_launch_runtime_matches_per_entity_commits_with_interleaved_targets_and_research() {
+        let state = fixture_state(&[]);
+        let mut legacy = launch_fixture_base();
+        let mut deferred = legacy.clone();
+        let mut runtime = None;
+        let events = [
+            (
+                launch_entity("home", Some("orbit-helios")),
+                "solar_sail_launch",
+                3.0,
+            ),
+            (launch_entity("ice", None), "carrier_rocket_launch", 2.0),
+            (launch_entity("home", None), "carrier_rocket_launch", 4.0),
+            (
+                launch_entity("ice", Some("orbit-borealis")),
+                "solar_sail_launch",
+                5.0,
+            ),
+            (launch_entity("ice", None), "carrier_rocket_launch", 7.0),
+        ];
+        for (index, (entity, recipe_id, cycles)) in events.iter().enumerate() {
+            legacy_launch_per_entity(&state, &mut legacy, entity, recipe_id, *cycles).unwrap();
+            launch_deferred(&mut runtime, &state, &deferred, entity, recipe_id, *cycles).unwrap();
+            if index == 1 {
+                for base in [&mut legacy, &mut deferred] {
+                    base.get_mut("endgame")
+                        .and_then(Value::as_object_mut)
+                        .and_then(|endgame| endgame.get_mut("infiniteResearch"))
+                        .and_then(Value::as_object_mut)
+                        .and_then(|research| research.get_mut("stellar_harnessing"))
+                        .and_then(Value::as_object_mut)
+                        .unwrap()
+                        .insert("level".to_owned(), Value::from(9));
+                    base.get_mut("research")
+                        .and_then(Value::as_object_mut)
+                        .and_then(|research| research.get_mut("completedTechIds"))
+                        .and_then(Value::as_array_mut)
+                        .unwrap()
+                        .push(Value::from("dyson_absorption_1"));
+                }
+            }
+        }
+        commit_deferred_launches(&mut deferred, runtime);
+        assert_eq!(
+            serde_json::to_vec(&deferred).unwrap(),
+            serde_json::to_vec(&legacy).unwrap()
+        );
+    }
+
+    #[test]
+    fn deferred_launch_runtime_does_not_touch_base_without_material_cycles() {
+        let state = fixture_state(&[]);
+        let mut base = launch_fixture_base();
+        let expected = serde_json::to_vec(&base).unwrap();
+        let entity = launch_entity("home", None);
+        let mut runtime = None;
+        launch_deferred(
+            &mut runtime,
+            &state,
+            &base,
+            &entity,
+            "carrier_rocket_launch",
+            0.0,
+        )
+        .unwrap();
+        commit_deferred_launches(&mut base, runtime);
+        assert_eq!(serde_json::to_vec(&base).unwrap(), expected);
+    }
+
+    #[test]
+    fn deferred_launch_runtime_is_byte_identical_at_one_five_and_sixty_second_boundaries() {
+        let state = fixture_state(&[]);
+        let rocket = launch_entity("ice", None);
+        let sail = launch_entity("home", Some("orbit-helios"));
+        let run = |segments: &[usize]| {
+            let mut base = launch_fixture_base();
+            for &seconds in segments {
+                assert!(matches!(seconds, 1 | 5 | 60));
+                let mut runtime = None;
+                launch_deferred(
+                    &mut runtime,
+                    &state,
+                    &base,
+                    &rocket,
+                    "carrier_rocket_launch",
+                    seconds as f64 * 3.0,
+                )
+                .unwrap();
+                launch_deferred(
+                    &mut runtime,
+                    &state,
+                    &base,
+                    &sail,
+                    "solar_sail_launch",
+                    seconds as f64 * 7.0,
+                )
+                .unwrap();
+                commit_deferred_launches(&mut base, runtime);
+            }
+            serde_json::to_vec(&base).unwrap()
+        };
+
+        let one_sixty_second_boundary = run(&[60]);
+        assert_eq!(run(&[5; 12]), one_sixty_second_boundary);
+        assert_eq!(run(&[1; 60]), one_sixty_second_boundary);
     }
 
     fn legacy_calculate_reception(

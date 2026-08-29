@@ -18290,7 +18290,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         nativePlacementLabel={nativePlacementLabel}
         placementCount={placementCount}
         cargo={canvasPointerCargo}
-        blueprint={activeBlueprint}
+        blueprint={nativePlayerAuthorityOwnsRuntime ? null : activeBlueprint}
         ctrlHeld={ctrlHeld}
         clickConnectionPreview={clickConnectionPreview}
         clickConnectionTone={clickConnectionTone}

@@ -215,6 +215,13 @@ describe("factory thin-view App consumption", () => {
     expect(inspector).not.toMatch(/GameState|setEntitiesRecipe|installSprayCoaters/);
   });
 
+  it("does not render stale full-state overlays while native authority owns runtime", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+
+    expect(app).toMatch(/blueprint=\{nativePlayerAuthorityOwnsRuntime \? null : activeBlueprint\}/);
+    expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <SpeedrunStatusPanel game=\{game\} \/> : null/);
+  });
+
   it("feeds the minimap only from a proven complete viewport while keeping canvas commands on GameState", () => {
     const app = readFileSync(resolve("src/App.tsx"), "utf8");
     const store = readFileSync(resolve("src/game/nativeFactoryThinViewStore.ts"), "utf8");

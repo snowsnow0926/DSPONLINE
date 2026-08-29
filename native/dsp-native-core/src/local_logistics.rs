@@ -4425,12 +4425,18 @@ mod tests {
             let (_, entities, directory, _, _) = run_route_step(&state, &source, seconds, false);
             let remote_activity = crate::interstellar_logistics::prepare_route_activity(&entities);
             let ledger = StationRouteLedger::build(&state, &entities, &directory, &remote_activity);
+            let active_order_input_rows = directory.active_local_route_demand_indices().len()
+                + remote_activity.active_remote_route_demand_indices().len()
+                + remote_activity.opaque_route_demand_indices().len();
             assert_eq!(
                 ledger.scan(),
                 crate::station_route_ledger::StationRouteLedgerScan {
                     selected_demands: active.len(),
                     total_candidate_rows: count,
                     dense_fallback: false,
+                    active_order_input_rows,
+                    active_order_duplicate_rows: active_order_input_rows - active.len(),
+                    active_order_fallback: false,
                 },
                 "unexpected shared-ledger scan at {seconds}s"
             );
@@ -4486,12 +4492,18 @@ mod tests {
         assert_eq!(scan_indices.len(), count);
         let remote_activity = crate::interstellar_logistics::prepare_route_activity(&source);
         let shared = StationRouteLedger::build(&state, &source, &directory, &remote_activity);
+        let active_order_input_rows = directory.active_local_route_demand_indices().len()
+            + remote_activity.active_remote_route_demand_indices().len()
+            + remote_activity.opaque_route_demand_indices().len();
         assert_eq!(
             shared.scan(),
             crate::station_route_ledger::StationRouteLedgerScan {
                 selected_demands: count,
                 total_candidate_rows: count,
                 dense_fallback: true,
+                active_order_input_rows,
+                active_order_duplicate_rows: active_order_input_rows - active.len(),
+                active_order_fallback: false,
             }
         );
         assert_shared_local_ledger_matches_legacy(&state, &source, &directory);

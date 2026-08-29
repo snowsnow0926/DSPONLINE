@@ -6172,12 +6172,18 @@ mod tests {
             )
             .unwrap();
             let ledger = StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+            let active_order_input_rows = local_directory.active_local_route_demand_indices().len()
+                + activity.active_remote_route_demand_indices().len()
+                + activity.opaque_route_demand_indices().len();
             assert_eq!(
                 ledger.scan(),
                 crate::station_route_ledger::StationRouteLedgerScan {
                     selected_demands: active.len(),
                     total_candidate_rows: count,
                     dense_fallback: false,
+                    active_order_input_rows,
+                    active_order_duplicate_rows: active_order_input_rows - active.len(),
+                    active_order_fallback: false,
                 },
                 "unexpected shared-ledger scan at {seconds}s"
             );
@@ -6237,12 +6243,18 @@ mod tests {
         assert_eq!(activity.opaque_route_demand_indices(), &[1, 8]);
 
         let shared = StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+        let active_order_input_rows = local_directory.active_local_route_demand_indices().len()
+            + activity.active_remote_route_demand_indices().len()
+            + activity.opaque_route_demand_indices().len();
         assert_eq!(
             shared.scan(),
             crate::station_route_ledger::StationRouteLedgerScan {
                 selected_demands: 2,
                 total_candidate_rows: 9,
                 dense_fallback: false,
+                active_order_input_rows,
+                active_order_duplicate_rows: active_order_input_rows - 2,
+                active_order_fallback: false,
             }
         );
         assert_eq!(shared.local_in_flight(1, "iron_ore"), 5.0);
@@ -8931,12 +8943,18 @@ mod tests {
         )
         .unwrap();
         let shared = StationRouteLedger::build(&state, &source, &local_directory, &activity);
+        let active_order_input_rows = local_directory.active_local_route_demand_indices().len()
+            + activity.active_remote_route_demand_indices().len()
+            + activity.opaque_route_demand_indices().len();
         assert_eq!(
             shared.scan(),
             crate::station_route_ledger::StationRouteLedgerScan {
                 selected_demands: count,
                 total_candidate_rows: count,
                 dense_fallback: true,
+                active_order_input_rows,
+                active_order_duplicate_rows: active_order_input_rows - active.len(),
+                active_order_fallback: false,
             }
         );
         assert_shared_interstellar_ledger_matches_legacy(&state, &source, &activity);

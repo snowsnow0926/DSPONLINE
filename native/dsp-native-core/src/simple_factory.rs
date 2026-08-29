@@ -3930,8 +3930,13 @@ fn simulate_step(
     if profile_enabled {
         let scan = step_route_ledger.scan();
         eprintln!(
-            "DSP_NATIVE_CORE_PROFILE\tstation-route-ledger-ready\t{}/{}\tdense={}",
-            scan.selected_demands, scan.total_candidate_rows, scan.dense_fallback
+            "DSP_NATIVE_CORE_PROFILE\tstation-route-ledger-ready\t{}/{}\tdense={}\torder-input={}\torder-duplicates={}\torder-fallback={}",
+            scan.selected_demands,
+            scan.total_candidate_rows,
+            scan.dense_fallback,
+            scan.active_order_input_rows,
+            scan.active_order_duplicate_rows,
+            scan.active_order_fallback,
         );
     }
     let mut ready_stations = crate::local_logistics::ready_station_indices(

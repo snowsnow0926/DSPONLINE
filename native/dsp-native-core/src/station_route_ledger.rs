@@ -15,6 +15,30 @@ pub(crate) struct StationRouteLedgerScan {
     pub selected_demands: usize,
     pub total_candidate_rows: usize,
     pub dense_fallback: bool,
+    /// Total rows consumed from the local, remote and opaque activity
+    /// vectors while reconstructing the stable persisted-row order. This is
+    /// bounded by the active set on the sparse path.
+    pub active_order_input_rows: usize,
+    /// Repeated wake membership shared by two activity domains is collapsed
+    /// without changing the first persisted-row position.
+    pub active_order_duplicate_rows: usize,
+    /// Defensive compatibility path used only if an upstream activity vector
+    /// violates its monotonic-order invariant. Healthy retained revisions use
+    /// the linear merge and keep this false.
+    pub active_order_fallback: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct StableIndexOrderStats {
+    input_rows: usize,
+    duplicate_rows: usize,
+    order_fallback: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StableIndexOrder {
+    indices: Vec<usize>,
+    stats: StableIndexOrderStats,
 }
 
 /// Candidate-local, non-persisted summary of every in-flight station route.
@@ -84,27 +108,106 @@ fn item_amount(
         .unwrap_or(0.0)
 }
 
+/// Merge a fixed number of already persisted-row-ordered activity vectors.
+///
+/// Local, remote and opaque route runtimes all maintain non-decreasing entity
+/// indices as routes wake and retire. A fixed-way merge therefore preserves
+/// the exact legacy `sort_unstable + dedup` result while visiting each input
+/// row once. The defensive sort is deliberately observable and only applies
+/// if an internal caller violates that runtime invariant.
+fn stable_index_union<const SOURCE_COUNT: usize>(
+    sources: [&[usize]; SOURCE_COUNT],
+) -> StableIndexOrder {
+    let input_rows = sources.iter().map(|source| source.len()).sum::<usize>();
+    let order_fallback = sources
+        .iter()
+        .any(|source| source.windows(2).any(|pair| pair[0] > pair[1]));
+    if order_fallback {
+        let mut indices = Vec::with_capacity(input_rows);
+        for source in sources {
+            indices.extend_from_slice(source);
+        }
+        indices.sort_unstable();
+        indices.dedup();
+        return StableIndexOrder {
+            stats: StableIndexOrderStats {
+                input_rows,
+                duplicate_rows: input_rows.saturating_sub(indices.len()),
+                order_fallback: true,
+            },
+            indices,
+        };
+    }
+
+    let mut indices = Vec::with_capacity(input_rows);
+    let mut cursors = [0usize; SOURCE_COUNT];
+    loop {
+        let next = sources
+            .iter()
+            .enumerate()
+            .filter_map(|(source_index, source)| source.get(cursors[source_index]).copied())
+            .min();
+        let Some(next) = next else {
+            break;
+        };
+        indices.push(next);
+        for (source_index, source) in sources.iter().enumerate() {
+            while source.get(cursors[source_index]).copied() == Some(next) {
+                cursors[source_index] += 1;
+            }
+        }
+    }
+    StableIndexOrder {
+        stats: StableIndexOrderStats {
+            input_rows,
+            duplicate_rows: input_rows.saturating_sub(indices.len()),
+            order_fallback: false,
+        },
+        indices,
+    }
+}
+
+fn opaque_rows_outside_station_topology(
+    entities: &[Value],
+    opaque_route_demand_indices: &[usize],
+) -> usize {
+    // CoreState's immutable station topology contains every persisted object
+    // whose kind is `station`. Counting only opaque non-station rows keeps the
+    // exact union cardinality without binary-searching the complete station
+    // topology once per active MOD row.
+    opaque_route_demand_indices
+        .iter()
+        .filter(|&&index| {
+            entities
+                .get(index)
+                .and_then(Value::as_object)
+                .and_then(|entity| string_at(entity, "kind"))
+                != Some("station")
+        })
+        .count()
+}
+
 fn ordered_scan_indices(
     all_station_indices: &[usize],
+    entities: &[Value],
     local_directory: &LocalPeerDirectory,
     remote_activity: &InterstellarRouteActivity,
 ) -> (Vec<usize>, StationRouteLedgerScan) {
-    let total_candidate_rows = all_station_indices.len()
-        + remote_activity
-            .opaque_route_demand_indices()
-            .iter()
-            .filter(|index| all_station_indices.binary_search(index).is_err())
-            .count();
-    let mut active = Vec::with_capacity(
-        local_directory.active_local_route_demand_indices().len()
-            + remote_activity.active_remote_route_demand_indices().len()
-            + remote_activity.opaque_route_demand_indices().len(),
-    );
-    active.extend_from_slice(local_directory.active_local_route_demand_indices());
-    active.extend_from_slice(remote_activity.active_remote_route_demand_indices());
-    active.extend_from_slice(remote_activity.opaque_route_demand_indices());
-    active.sort_unstable();
-    active.dedup();
+    let active_order = stable_index_union([
+        local_directory.active_local_route_demand_indices(),
+        remote_activity.active_remote_route_demand_indices(),
+        remote_activity.opaque_route_demand_indices(),
+    ]);
+    let mut active = active_order.indices;
+    let mut total_candidate_rows = all_station_indices.len()
+        + opaque_rows_outside_station_topology(
+            entities,
+            remote_activity.opaque_route_demand_indices(),
+        );
+    // A stale internal topology must never report fewer candidates than the
+    // activity union that will actually be parsed. Valid sessions keep the
+    // exact CoreState count above.
+    total_candidate_rows = total_candidate_rows.max(active.len());
 
     let dense_fallback = !active.is_empty()
         && active
@@ -112,12 +215,12 @@ fn ordered_scan_indices(
             .saturating_mul(STATION_LEDGER_DENSE_DENOMINATOR)
             >= total_candidate_rows.saturating_mul(STATION_LEDGER_DENSE_NUMERATOR);
     let selected_demands = if dense_fallback {
-        active.clear();
-        active.reserve(total_candidate_rows);
-        active.extend_from_slice(all_station_indices);
-        active.extend_from_slice(remote_activity.opaque_route_demand_indices());
-        active.sort_unstable();
-        active.dedup();
+        let dense_order = stable_index_union([
+            all_station_indices,
+            remote_activity.opaque_route_demand_indices(),
+        ]);
+        active = dense_order.indices;
+        total_candidate_rows = total_candidate_rows.max(active.len());
         active.len()
     } else {
         active.len()
@@ -126,6 +229,9 @@ fn ordered_scan_indices(
         selected_demands,
         total_candidate_rows,
         dense_fallback,
+        active_order_input_rows: active_order.stats.input_rows,
+        active_order_duplicate_rows: active_order.stats.duplicate_rows,
+        active_order_fallback: active_order.stats.order_fallback,
     };
     (active, scan)
 }
@@ -139,6 +245,7 @@ impl StationRouteLedger {
     ) -> Self {
         let (scan_indices, scan) = ordered_scan_indices(
             &state.factory_topology.station_indices,
+            entities,
             local_directory,
             remote_activity,
         );
@@ -300,6 +407,9 @@ impl StationRouteLedger {
                 selected_demands: indices.len(),
                 total_candidate_rows: indices.len(),
                 dense_fallback: true,
+                active_order_input_rows: 0,
+                active_order_duplicate_rows: 0,
+                active_order_fallback: false,
             },
         )
     }
@@ -309,6 +419,9 @@ impl StationRouteLedger {
             selected_demands: 0,
             total_candidate_rows: 0,
             dense_fallback: false,
+            active_order_input_rows: 0,
+            active_order_duplicate_rows: 0,
+            active_order_fallback: false,
         })
     }
 
@@ -557,5 +670,165 @@ impl StationRouteLedger {
             .collect::<Vec<_>>();
         indices.sort_unstable();
         indices
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn legacy_sorted_union<const SOURCE_COUNT: usize>(
+        sources: [&[usize]; SOURCE_COUNT],
+    ) -> Vec<usize> {
+        let mut oracle = sources
+            .iter()
+            .flat_map(|source| source.iter().copied())
+            .collect::<Vec<_>>();
+        oracle.sort_unstable();
+        oracle.dedup();
+        oracle
+    }
+
+    fn insert_wake(indices: &mut Vec<usize>, index: usize) {
+        if let Err(position) = indices.binary_search(&index) {
+            indices.insert(position, index);
+        }
+    }
+
+    fn retire(indices: &mut Vec<usize>, index: usize) {
+        if let Ok(position) = indices.binary_search(&index) {
+            indices.remove(position);
+        }
+    }
+
+    fn next_random(seed: &mut u64) -> u64 {
+        *seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *seed
+    }
+
+    #[test]
+    fn stable_active_order_matches_legacy_sort_oracle_for_random_overlapping_sources() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        for round in 0..2_048usize {
+            let row_count = 1 + (next_random(&mut seed) as usize % 1_024);
+            let mut local = Vec::new();
+            let mut remote = Vec::new();
+            let mut opaque = Vec::new();
+            for index in 0..row_count {
+                let mask = next_random(&mut seed);
+                if mask & 1 != 0 {
+                    local.push(index);
+                }
+                if mask & 2 != 0 {
+                    remote.push(index);
+                }
+                if mask & 4 != 0 {
+                    opaque.push(index);
+                }
+                // Repeated wakes within one queue remain legal input and are
+                // collapsed by the same linear cursor advance.
+                if mask & 0x80 != 0 && index == round % row_count {
+                    opaque.push(index);
+                }
+            }
+            let sources = [local.as_slice(), remote.as_slice(), opaque.as_slice()];
+            let expected = legacy_sorted_union(sources);
+            let merged = stable_index_union(sources);
+            assert_eq!(merged.indices, expected, "random round {round}");
+            assert_eq!(
+                merged.stats.input_rows,
+                local.len() + remote.len() + opaque.len()
+            );
+            assert_eq!(
+                merged.stats.duplicate_rows,
+                merged.stats.input_rows - merged.indices.len()
+            );
+            assert!(!merged.stats.order_fallback);
+        }
+    }
+
+    #[test]
+    fn stable_active_order_survives_repeated_wakes_retires_and_topology_rebuilds_long_run() {
+        let mut seed = 0xd1b5_4a32_d192_ed03u64;
+        let mut local = Vec::new();
+        let mut remote = Vec::new();
+        let mut opaque = Vec::new();
+        let mut topology_rows = 512usize;
+
+        for step in 0..50_000usize {
+            let event = next_random(&mut seed);
+            let index = event as usize % topology_rows;
+            let target = match (event >> 16) % 3 {
+                0 => &mut local,
+                1 => &mut remote,
+                _ => &mut opaque,
+            };
+            if event & 1 == 0 {
+                insert_wake(target, index);
+                // A second identical wake must be a no-op.
+                insert_wake(target, index);
+            } else {
+                retire(target, index);
+            }
+
+            let topology_rebuilt = step > 0 && step % 997 == 0;
+            if topology_rebuilt {
+                // Model an entity-table rebuild: removed rows disappear and
+                // the remaining active sets are reconstructed in the new
+                // persisted-row order before simulation resumes.
+                topology_rows = 257 + (next_random(&mut seed) as usize % 768);
+                local.retain(|index| *index < topology_rows);
+                remote.retain(|index| *index < topology_rows);
+                opaque.retain(|index| *index < topology_rows);
+            }
+
+            // Keep the mutation stream long without making the regression
+            // suite allocate two oracle vectors after every individual wake.
+            // Every rebuild and a stable cadence across all other operations
+            // is still checked, plus the exact terminal state below.
+            if !topology_rebuilt && step % 31 != 0 {
+                continue;
+            }
+            let sources = [local.as_slice(), remote.as_slice(), opaque.as_slice()];
+            let expected = legacy_sorted_union(sources);
+            let merged = stable_index_union(sources);
+            assert_eq!(merged.indices, expected, "long-run step {step}");
+            assert!(!merged.stats.order_fallback);
+            assert_eq!(
+                merged.stats.input_rows,
+                local.len() + remote.len() + opaque.len()
+            );
+        }
+        let sources = [local.as_slice(), remote.as_slice(), opaque.as_slice()];
+        let merged = stable_index_union(sources);
+        assert_eq!(merged.indices, legacy_sorted_union(sources));
+        assert!(!merged.stats.order_fallback);
+    }
+
+    #[test]
+    fn stable_active_order_has_deterministic_compatibility_fallback_for_invalid_source_order() {
+        let local = [1, 9, 4, 9];
+        let remote = [2, 4, 8];
+        let opaque = [0, 9];
+        let sources = [local.as_slice(), remote.as_slice(), opaque.as_slice()];
+        let merged = stable_index_union(sources);
+        assert_eq!(merged.indices, legacy_sorted_union(sources));
+        assert!(merged.stats.order_fallback);
+        assert_eq!(merged.stats.input_rows, 9);
+        assert_eq!(merged.stats.duplicate_rows, 3);
+    }
+
+    #[test]
+    fn stable_dense_candidate_order_is_linear_and_matches_persisted_union_oracle() {
+        let all_stations = (0..100_000usize).step_by(2).collect::<Vec<_>>();
+        let opaque = (0..100_000usize).step_by(5).collect::<Vec<_>>();
+        let sources = [all_stations.as_slice(), opaque.as_slice()];
+        let merged = stable_index_union(sources);
+        assert_eq!(merged.indices, legacy_sorted_union(sources));
+        assert_eq!(merged.stats.input_rows, 70_000);
+        assert_eq!(merged.stats.duplicate_rows, 10_000);
+        assert!(!merged.stats.order_fallback);
     }
 }

@@ -246,7 +246,7 @@ impl PowerSourceProbe {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 struct PowerDemandProbe {
     entity_index: usize,
     planet_index: usize,
@@ -1086,6 +1086,75 @@ fn apply_power_demand_probe(
                 disconnected_power_factor_indices.push(probe.entity_index);
             }
         }
+    }
+}
+
+fn construction_power_aggregation_is_exact(
+    probe_sets: &[&[PowerDemandProbe]],
+    groups: &[crate::construction::ConstructionPowerGroupDemand],
+    grid_count: usize,
+) -> bool {
+    let mut totals = vec![0.0; grid_count];
+    for probe in probe_sets.iter().flat_map(|probes| probes.iter()) {
+        if !probe.demand_active {
+            continue;
+        }
+        let Some(slot) = probe
+            .planet_index
+            .checked_mul(GRID_IDS.len())
+            .and_then(|slot| slot.checked_add(probe.grid_index))
+            .filter(|&slot| slot < grid_count)
+        else {
+            return false;
+        };
+        let next = totals[slot] + probe.demand_kw;
+        if !crate::construction::nonnegative_safe_integer(probe.demand_kw)
+            || !crate::construction::nonnegative_safe_integer(next)
+        {
+            return false;
+        }
+        totals[slot] = next;
+    }
+    for group in groups {
+        let Some(slot) = group
+            .planet_index
+            .checked_mul(GRID_IDS.len())
+            .and_then(|slot| slot.checked_add(group.grid_index))
+            .filter(|&slot| slot < grid_count)
+        else {
+            return false;
+        };
+        if !(1..=3).contains(&group.priority) || group.center_count == 0 {
+            return false;
+        }
+        let next = totals[slot] + group.demand_kw;
+        if !crate::construction::nonnegative_safe_integer(group.demand_kw)
+            || !crate::construction::nonnegative_safe_integer(next)
+        {
+            return false;
+        }
+        totals[slot] = next;
+    }
+    true
+}
+
+fn apply_construction_power_group(
+    group: crate::construction::ConstructionPowerGroupDemand,
+    grids: &mut [GridRuntime],
+    disconnected_power_factor_indices: &mut Vec<usize>,
+) {
+    let runtime = &mut grids[group.planet_index * GRID_IDS.len() + group.grid_index];
+    let center_count = group.center_count as u64;
+    if runtime.has_power_source {
+        runtime.connected_entities += center_count;
+        runtime.consumers[group.priority].push(Consumer {
+            entity_index: group.representative_entity_index,
+            demand_kw: group.demand_kw,
+        });
+    } else {
+        runtime.disconnected_entities += center_count;
+        runtime.disconnected_demand_kw += group.demand_kw;
+        disconnected_power_factor_indices.push(group.representative_entity_index);
     }
 }
 
@@ -3834,15 +3903,13 @@ fn simulate_step(
     ));
     let mut ready_logistics_station_indices = ready_stations.iter().copied().collect::<Vec<_>>();
     ready_logistics_station_indices.sort_unstable();
-    if crate::construction::has_deficit(state, base) {
-        ready_stations.extend(
-            state
-                .factory_topology
-                .construction_center_indices
-                .iter()
-                .copied(),
-        );
-    }
+    let construction_power_plan = std::sync::Arc::make_mut(construction_runtime).power_demand_plan(
+        state,
+        base,
+        entities,
+        &state.factory_topology.construction_center_indices,
+        power_demand_multiplier,
+    );
     ready_stations.extend(crate::galactic_exports::ready_exporter_indices(
         state, entities,
     ));
@@ -3855,12 +3922,11 @@ fn simulate_step(
     let ready_station_probes =
         collect_indexed_power_probes(&ready_station_indices, |&entity_index| {
             probe_ready_station_demand(state, entities, power_demand_multiplier, entity_index)
-        });
-    for probe in ready_station_probes {
-        apply_power_demand_probe(probe?, &mut grids, &mut disconnected_power_factor_indices);
-    }
+        })
+        .into_iter()
+        .collect::<anyhow::Result<Vec<_>>>()?;
 
-    let vein_probes =
+    let vein_probe_results =
         collect_indexed_power_probes(&state.factory_topology.vein_indices, |&entity_index| {
             probe_vein_demand(
                 state,
@@ -3870,16 +3936,16 @@ fn simulate_step(
                 entity_index,
             )
         });
-    for probe in vein_probes {
+    let mut vein_probes = Vec::with_capacity(vein_probe_results.len());
+    for probe in vein_probe_results {
         if let Some(probe) = probe? {
-            apply_power_demand_probe(probe, &mut grids, &mut disconnected_power_factor_indices);
+            vein_probes.push(probe);
         }
     }
-    profile_mark!("power-demand-index");
 
     let industrial_speed = industrial_speed_multiplier(base);
     let research_speed = research_speed_multiplier(base);
-    let machine_probes = collect_indexed_power_probes(
+    let machine_probe_results = collect_indexed_power_probes(
         &state.factory_topology.ordinary_machine_indices,
         |&entity_index| {
             probe_machine_demand(
@@ -3896,10 +3962,61 @@ fn simulate_step(
             )
         },
     );
-    for probe in machine_probes {
+    let mut machine_probes = Vec::with_capacity(machine_probe_results.len());
+    for probe in machine_probe_results {
         if let Some(probe) = probe? {
-            apply_power_demand_probe(probe, &mut grids, &mut disconnected_power_factor_indices);
+            machine_probes.push(probe);
         }
+    }
+
+    let use_construction_aggregates = construction_power_plan.aggregate_candidate
+        && construction_power_aggregation_is_exact(
+            &[&ready_station_probes, &vein_probes, &machine_probes],
+            &construction_power_plan.groups,
+            grids.len(),
+        );
+    std::sync::Arc::make_mut(construction_runtime)
+        .use_aggregated_power_factors(use_construction_aggregates);
+    let mut ready_station_probes = ready_station_probes;
+    if !use_construction_aggregates && construction_power_plan.has_deficit {
+        let center_probes = collect_indexed_power_probes(
+            &state.factory_topology.construction_center_indices,
+            |&entity_index| {
+                probe_ready_station_demand(state, entities, power_demand_multiplier, entity_index)
+            },
+        );
+        for probe in center_probes {
+            ready_station_probes.push(probe?);
+        }
+        ready_station_probes.sort_unstable_by_key(|probe| probe.entity_index);
+    }
+    for probe in ready_station_probes {
+        apply_power_demand_probe(probe, &mut grids, &mut disconnected_power_factor_indices);
+    }
+    if use_construction_aggregates {
+        for group in construction_power_plan.groups.iter().copied() {
+            apply_construction_power_group(
+                group,
+                &mut grids,
+                &mut disconnected_power_factor_indices,
+            );
+        }
+    }
+    for probe in vein_probes {
+        apply_power_demand_probe(probe, &mut grids, &mut disconnected_power_factor_indices);
+    }
+    profile_mark!("power-demand-index");
+    for probe in machine_probes {
+        apply_power_demand_probe(probe, &mut grids, &mut disconnected_power_factor_indices);
+    }
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tconstruction-power-demand\tgroups={}/{}\taggregated={}\tdirectory-fallback={}",
+            construction_power_plan.groups.len(),
+            state.factory_topology.construction_center_indices.len(),
+            use_construction_aggregates,
+            construction_power_plan.directory_fallback,
+        );
     }
     profile_mark!("machine-power-demand-index");
 
@@ -5515,6 +5632,105 @@ pub(crate) mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+    #[test]
+    fn construction_power_group_matches_forced_full_at_critical_supply_and_fails_closed() {
+        let other = PowerDemandProbe {
+            entity_index: 4,
+            planet_index: 0,
+            grid_index: 0,
+            demand_kw: 3_000.0,
+            priority: 1,
+            demand_active: true,
+            zero_if_disconnected: true,
+        };
+        let centers = (0..8)
+            .map(|offset| PowerDemandProbe {
+                entity_index: 10 + offset,
+                planet_index: 0,
+                grid_index: 0,
+                demand_kw: 12_000.0,
+                priority: 2,
+                demand_active: true,
+                zero_if_disconnected: true,
+            })
+            .collect::<Vec<_>>();
+        let group = crate::construction::ConstructionPowerGroupDemand {
+            representative_entity_index: 10,
+            planet_index: 0,
+            grid_index: 0,
+            priority: 2,
+            demand_kw: 96_000.0,
+            center_count: 8,
+        };
+        assert!(construction_power_aggregation_is_exact(
+            &[std::slice::from_ref(&other)],
+            &[group],
+            GRID_IDS.len(),
+        ));
+
+        let mut full = vec![GridRuntime::default(); GRID_IDS.len()];
+        let mut indexed = vec![GridRuntime::default(); GRID_IDS.len()];
+        full[0].has_power_source = true;
+        indexed[0].has_power_source = true;
+        let mut full_disconnected = Vec::new();
+        let mut indexed_disconnected = Vec::new();
+        apply_power_demand_probe(other, &mut full, &mut full_disconnected);
+        for center in centers {
+            apply_power_demand_probe(center, &mut full, &mut full_disconnected);
+        }
+        apply_power_demand_probe(other, &mut indexed, &mut indexed_disconnected);
+        apply_construction_power_group(group, &mut indexed, &mut indexed_disconnected);
+        assert_eq!(full[0].connected_entities, indexed[0].connected_entities);
+        assert_eq!(full_disconnected, indexed_disconnected);
+        let full_total = full[0]
+            .consumers
+            .iter()
+            .flat_map(|consumers| consumers.iter())
+            .map(|consumer| consumer.demand_kw)
+            .sum::<f64>();
+        let indexed_total = indexed[0]
+            .consumers
+            .iter()
+            .flat_map(|consumers| consumers.iter())
+            .map(|consumer| consumer.demand_kw)
+            .sum::<f64>();
+        assert_eq!(full_total.to_bits(), indexed_total.to_bits());
+        let full_construction_demand = full[0].consumers[2]
+            .iter()
+            .map(|consumer| consumer.demand_kw)
+            .sum::<f64>();
+        let indexed_construction_demand = indexed[0].consumers[2]
+            .iter()
+            .map(|consumer| consumer.demand_kw)
+            .sum::<f64>();
+        for expected_factor in [EPSILON - 0.00000001, EPSILON + 0.00000001] {
+            let supplied = full_construction_demand * expected_factor;
+            let full_factor = (supplied / full_construction_demand).min(1.0);
+            let indexed_factor = (supplied / indexed_construction_demand).min(1.0);
+            assert_eq!(full_factor.to_bits(), indexed_factor.to_bits());
+            assert_eq!(full_factor <= EPSILON, expected_factor <= EPSILON);
+        }
+
+        let fractional = PowerDemandProbe {
+            demand_kw: 0.5,
+            ..other
+        };
+        assert!(!construction_power_aggregation_is_exact(
+            &[std::slice::from_ref(&fractional)],
+            &[group],
+            GRID_IDS.len(),
+        ));
+        let oversized = crate::construction::ConstructionPowerGroupDemand {
+            demand_kw: 9_007_199_254_740_992.0,
+            ..group
+        };
+        assert!(!construction_power_aggregation_is_exact(
+            &[],
+            &[oversized],
+            GRID_IDS.len(),
+        ));
+    }
 
     #[test]
     fn empty_quantum_boundary_does_not_claim_late_station_inventory_change() {

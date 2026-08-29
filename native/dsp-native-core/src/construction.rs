@@ -47,6 +47,7 @@ pub(crate) struct ConstructionQuantumWake {
 const CONSTRUCTION_ACTIVE_DENSE_NUMERATOR: usize = 3;
 const CONSTRUCTION_ACTIVE_DENSE_DENOMINATOR: usize = 4;
 const POWER_GROUPS_PER_PLANET: usize = 9;
+const CONSTRUCTION_POWER_MULTIPLIERS: [f64; 3] = [0.9, 1.0, 1.2];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct ConstructionActiveScan {
@@ -60,6 +61,28 @@ pub(crate) struct ConstructionActiveScan {
 pub(crate) struct ConstructionRunOutcome {
     pub quantum_wake: ConstructionQuantumWake,
     pub scan: ConstructionActiveScan,
+}
+
+/// One exact aggregate of construction-center demand for a single
+/// planet/grid/priority bucket. The public power ledger can register this row
+/// instead of every dormant center only after proving that all demand folds
+/// remain safe-integer exact.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ConstructionPowerGroupDemand {
+    pub representative_entity_index: usize,
+    pub planet_index: usize,
+    pub grid_index: usize,
+    pub priority: usize,
+    pub demand_kw: f64,
+    pub center_count: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct ConstructionPowerDemandPlan {
+    pub has_deficit: bool,
+    pub aggregate_candidate: bool,
+    pub directory_fallback: bool,
+    pub groups: Vec<ConstructionPowerGroupDemand>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +131,7 @@ pub(crate) struct ConstructionRuntime {
     row_by_entity: Vec<(u32, u32)>,
     row_planets: Vec<usize>,
     row_power_groups: Vec<usize>,
+    row_machine_count_bits: Vec<u64>,
     target_ids: Vec<String>,
     target_output_amounts: Vec<f64>,
     target_by_id: BTreeMap<String, usize>,
@@ -115,6 +139,10 @@ pub(crate) struct ConstructionRuntime {
     pending_by_target: Vec<f64>,
     job_count: usize,
     power_group_rows: Vec<Vec<usize>>,
+    active_power_groups: Vec<usize>,
+    power_group_center_counts: Vec<usize>,
+    power_group_demands: [Vec<f64>; 3],
+    power_variant_exact: [bool; 3],
     power_group_representatives: Vec<Option<usize>>,
     observed_power: Vec<Option<PowerFactorSignature>>,
     planet_wait_rows: Vec<BTreeSet<usize>>,
@@ -124,6 +152,8 @@ pub(crate) struct ConstructionRuntime {
     pending: BTreeSet<usize>,
     all_pending: bool,
     fallback_full_scan: bool,
+    aggregated_power_factors: bool,
+    provably_unpowered: Option<bool>,
 }
 
 impl ConstructionRuntime {
@@ -154,6 +184,7 @@ impl ConstructionRuntime {
             row_by_entity: Vec::new(),
             row_planets: Vec::new(),
             row_power_groups: Vec::new(),
+            row_machine_count_bits: Vec::new(),
             target_ids,
             target_output_amounts,
             target_by_id,
@@ -161,6 +192,10 @@ impl ConstructionRuntime {
             pending_by_target: vec![0.0; targets.len()],
             job_count: 0,
             power_group_rows: vec![Vec::new(); power_group_count],
+            active_power_groups: Vec::new(),
+            power_group_center_counts: vec![0; power_group_count],
+            power_group_demands: std::array::from_fn(|_| vec![0.0; power_group_count]),
+            power_variant_exact: [true; 3],
             power_group_representatives: vec![None; power_group_count],
             observed_power: vec![None; power_group_count],
             planet_wait_rows: vec![BTreeSet::new(); planet_count],
@@ -174,7 +209,18 @@ impl ConstructionRuntime {
                     .factory_topology
                     .construction_center_indices
                     .is_empty(),
+            aggregated_power_factors: false,
+            provably_unpowered: None,
         };
+        let construction_power_demand_kw = state
+            .catalog
+            .buildings
+            .get("construction_center")
+            .map(|building| building.power_demand_kw);
+        if construction_power_demand_kw.is_none() {
+            runtime.fallback_full_scan = true;
+            runtime.power_variant_exact = [false; 3];
+        }
         let mut entity_ids = BTreeSet::new();
         let mut entity_rows = BTreeSet::new();
         for (row, &entity_index) in runtime.center_indices.iter().enumerate() {
@@ -207,6 +253,7 @@ impl ConstructionRuntime {
             let priority = finite_number(entity.get("powerPriority"))
                 .floor()
                 .clamp(1.0, 3.0) as usize;
+            let machine_count = finite_number(entity.get("machineCount"));
             let canonical = string_at(entity, "buildingId") == Some("construction_center")
                 && state.symbols.resolve(*indexed_building) == Some("construction_center")
                 && entity_id == indexed_id
@@ -239,14 +286,62 @@ impl ConstructionRuntime {
             runtime.row_by_entity.push((entity_row, runtime_row));
             runtime.row_planets.push(planet_index);
             runtime.row_power_groups.push(group);
+            runtime.row_machine_count_bits.push(machine_count.to_bits());
             runtime.power_group_rows[group].push(row);
+            if runtime.power_group_center_counts[group] == 0 {
+                runtime.active_power_groups.push(group);
+            }
+            runtime.power_group_center_counts[group] += 1;
+            if let Some(power_demand_kw) = construction_power_demand_kw {
+                for (variant, multiplier) in CONSTRUCTION_POWER_MULTIPLIERS.iter().enumerate() {
+                    let demand = power_demand_kw * machine_count * multiplier;
+                    let next = runtime.power_group_demands[variant][group] + demand;
+                    if !nonnegative_safe_integer(demand) || !nonnegative_safe_integer(next) {
+                        runtime.power_variant_exact[variant] = false;
+                    }
+                    runtime.power_group_demands[variant][group] = next;
+                }
+            }
             runtime.power_group_representatives[group].get_or_insert(entity_index);
         }
         if runtime.row_by_entity.len() != runtime.center_indices.len()
             || runtime.row_planets.len() != runtime.center_indices.len()
             || runtime.row_power_groups.len() != runtime.center_indices.len()
+            || runtime.row_machine_count_bits.len() != runtime.center_indices.len()
         {
             runtime.fallback_full_scan = true;
+        }
+        if runtime.center_indices.is_empty() {
+            runtime.provably_unpowered = Some(false);
+        } else {
+            let mut power_topology_valid = true;
+            let has_possible_source =
+                state
+                    .factory_topology
+                    .power_source_indices
+                    .iter()
+                    .any(|&entity_index| {
+                        let Some((&planet_index, &grid_index)) = state
+                            .factory_topology
+                            .entity_planet_indices
+                            .get(entity_index)
+                            .zip(state.factory_topology.entity_grid_indices.get(entity_index))
+                        else {
+                            power_topology_valid = false;
+                            return false;
+                        };
+                        if planet_index >= planet_count || grid_index >= 3 {
+                            power_topology_valid = false;
+                            return false;
+                        }
+                        let first_group = planet_index * POWER_GROUPS_PER_PLANET + grid_index * 3;
+                        runtime.power_group_center_counts[first_group..first_group + 3]
+                            .iter()
+                            .any(|&count| count > 0)
+                    });
+            if power_topology_valid {
+                runtime.provably_unpowered = Some(!has_possible_source);
+            }
         }
         runtime
             .row_by_entity
@@ -307,6 +402,7 @@ impl ConstructionRuntime {
         runtime.row_by_entity.shrink_to_fit();
         runtime.row_planets.shrink_to_fit();
         runtime.row_power_groups.shrink_to_fit();
+        runtime.row_machine_count_bits.shrink_to_fit();
         runtime.target_ids.shrink_to_fit();
         runtime.target_output_amounts.shrink_to_fit();
         runtime.row_job_targets.shrink_to_fit();
@@ -315,6 +411,11 @@ impl ConstructionRuntime {
             rows.shrink_to_fit();
         }
         runtime.power_group_rows.shrink_to_fit();
+        runtime.active_power_groups.shrink_to_fit();
+        runtime.power_group_center_counts.shrink_to_fit();
+        for demands in &mut runtime.power_group_demands {
+            demands.shrink_to_fit();
+        }
         runtime.power_group_representatives.shrink_to_fit();
         runtime.observed_power.shrink_to_fit();
         runtime.planet_wait_rows.shrink_to_fit();
@@ -346,6 +447,18 @@ impl ConstructionRuntime {
             .ok()
             .and_then(|index| self.row_by_entity.get(index))
             .map(|&(_, row)| row as usize)
+    }
+
+    fn power_factor_entity(&self, entity_index: usize) -> Option<usize> {
+        if !self.aggregated_power_factors {
+            return Some(entity_index);
+        }
+        let row = self.row_for_entity(entity_index)?;
+        let group = *self.row_power_groups.get(row)?;
+        self.power_group_representatives
+            .get(group)
+            .copied()
+            .flatten()
     }
 
     fn dependency_signature(
@@ -391,13 +504,7 @@ impl ConstructionRuntime {
         self.row_job_targets[row] = next;
     }
 
-    fn row_matches(
-        &self,
-        state: &CoreState,
-        entities: &[Value],
-        power_factors: &HashMap<usize, f64>,
-        row: usize,
-    ) -> bool {
+    fn row_identity_matches(&self, state: &CoreState, entities: &[Value], row: usize) -> bool {
         let Some(&entity_index) = self.center_indices.get(row) else {
             return false;
         };
@@ -411,12 +518,50 @@ impl ConstructionRuntime {
         let Some(indexed_building) = state.entities.buildings.get(entity_index) else {
             return false;
         };
-        if string_at(entity, "id") != Some(indexed_id)
-            || string_at(entity, "buildingId") != Some("construction_center")
-            || state.symbols.resolve(*indexed_building) != Some("construction_center")
-        {
+        let Some(&group) = self.row_power_groups.get(row) else {
+            return false;
+        };
+        let planet_index = group / POWER_GROUPS_PER_PLANET;
+        let local_group = group % POWER_GROUPS_PER_PLANET;
+        let grid_index = local_group / 3;
+        let priority = local_group % 3 + 1;
+        let expected_grid_id = match grid_index {
+            0 => "grid-a",
+            1 => "grid-b",
+            2 => "grid-c",
+            _ => return false,
+        };
+        string_at(entity, "id") == Some(indexed_id)
+            && string_at(entity, "buildingId") == Some("construction_center")
+            && state.symbols.resolve(*indexed_building) == Some("construction_center")
+            && self.row_planets.get(row).copied() == Some(planet_index)
+            && state
+                .catalog
+                .planets
+                .get(planet_index)
+                .is_some_and(|planet| string_at(entity, "planetId") == Some(planet.id.as_str()))
+            && entity_grid_id(entity) == expected_grid_id
+            && finite_number(entity.get("powerPriority"))
+                .floor()
+                .clamp(1.0, 3.0) as usize
+                == priority
+            && self.row_machine_count_bits.get(row).copied()
+                == Some(finite_number(entity.get("machineCount")).to_bits())
+    }
+
+    fn row_matches(
+        &self,
+        state: &CoreState,
+        entities: &[Value],
+        power_factors: &HashMap<usize, f64>,
+        row: usize,
+    ) -> bool {
+        if !self.row_identity_matches(state, entities, row) {
             return false;
         }
+        let Some(&entity_index) = self.center_indices.get(row) else {
+            return false;
+        };
         let Some(&group) = self.row_power_groups.get(row) else {
             return false;
         };
@@ -428,24 +573,28 @@ impl ConstructionRuntime {
         else {
             return false;
         };
+        let factor_entity = if self.aggregated_power_factors {
+            representative
+        } else {
+            entity_index
+        };
         matches!(
             (
-                power_factor_signature(power_factors, entity_index),
+                power_factor_signature(power_factors, factor_entity),
                 power_factor_signature(power_factors, representative),
             ),
             (Some(left), Some(right)) if left == right
         )
     }
 
-    fn wake_dependency_changes(
+    fn refresh_dependency_wakes(
         &mut self,
         state: &CoreState,
         base: &Map<String, Value>,
-        power_factors: &HashMap<usize, f64>,
-    ) {
+    ) -> Option<bool> {
         let Ok(signature) = self.dependency_signature(state, base) else {
             self.fallback_full_scan = true;
-            return;
+            return None;
         };
         if let Some(previous) = self.observed_dependency.as_ref() {
             if previous.broad_dependencies_changed(&signature) {
@@ -455,9 +604,22 @@ impl ConstructionRuntime {
                 self.pending.extend(self.planner_wait_rows.iter().copied());
             }
         }
+        let has_work = signature.has_work;
         self.observed_dependency = Some(signature);
+        Some(has_work)
+    }
 
-        for group in 0..self.power_group_rows.len() {
+    fn wake_dependency_changes(
+        &mut self,
+        state: &CoreState,
+        base: &Map<String, Value>,
+        power_factors: &HashMap<usize, f64>,
+    ) {
+        if self.refresh_dependency_wakes(state, base).is_none() {
+            return;
+        }
+
+        for &group in &self.active_power_groups {
             let Some(representative) = self.power_group_representatives[group] else {
                 continue;
             };
@@ -474,6 +636,134 @@ impl ConstructionRuntime {
             self.observed_power[group] = Some(signature);
         }
         self.refresh_planet_inventory_wakes(base);
+    }
+
+    /// Refresh the O(target) global work signature before the factory power
+    /// pass and return one row per occupied power bucket. A caller may use the
+    /// aggregates only after also proving that every non-construction demand
+    /// in the same power fold is a non-negative safe integer; otherwise it
+    /// must retain the historical per-center registration path.
+    pub(crate) fn power_demand_plan(
+        &mut self,
+        state: &CoreState,
+        base: &Map<String, Value>,
+        entities: &[Value],
+        center_indices: &[usize],
+        power_demand_multiplier: f64,
+    ) -> ConstructionPowerDemandPlan {
+        self.aggregated_power_factors = false;
+        if !self.fallback_full_scan && self.topology_matches(state, entities, center_indices) {
+            let representatives_match = self.active_power_groups.iter().all(|&group| {
+                self.power_group_representatives
+                    .get(group)
+                    .copied()
+                    .flatten()
+                    .and_then(|entity_index| self.row_for_entity(entity_index))
+                    .is_some_and(|row| self.row_identity_matches(state, entities, row))
+            });
+            if !representatives_match {
+                self.fallback_full_scan = true;
+            }
+        }
+        let indexed_has_deficit =
+            if self.fallback_full_scan || !self.topology_matches(state, entities, center_indices) {
+                self.fallback_full_scan = true;
+                None
+            } else {
+                self.refresh_dependency_wakes(state, base)
+            };
+        let Some(has_deficit) = indexed_has_deficit else {
+            return ConstructionPowerDemandPlan {
+                has_deficit: has_deficit(state, base),
+                aggregate_candidate: false,
+                directory_fallback: true,
+                groups: Vec::new(),
+            };
+        };
+        if !has_deficit {
+            return ConstructionPowerDemandPlan {
+                has_deficit: false,
+                aggregate_candidate: true,
+                directory_fallback: false,
+                groups: Vec::new(),
+            };
+        }
+        let pending_rows = if self.all_pending {
+            center_indices.len()
+        } else {
+            self.pending.len()
+        };
+        let dense = pending_rows > 0
+            && pending_rows.saturating_mul(CONSTRUCTION_ACTIVE_DENSE_DENOMINATOR)
+                >= center_indices
+                    .len()
+                    .saturating_mul(CONSTRUCTION_ACTIVE_DENSE_NUMERATOR);
+        if dense {
+            return ConstructionPowerDemandPlan {
+                has_deficit: true,
+                aggregate_candidate: false,
+                directory_fallback: false,
+                groups: Vec::new(),
+            };
+        }
+        let Some(variant) = CONSTRUCTION_POWER_MULTIPLIERS
+            .iter()
+            .position(|candidate| candidate.to_bits() == power_demand_multiplier.to_bits())
+        else {
+            return ConstructionPowerDemandPlan {
+                has_deficit: true,
+                aggregate_candidate: false,
+                directory_fallback: false,
+                groups: Vec::new(),
+            };
+        };
+        if !self.power_variant_exact[variant] {
+            return ConstructionPowerDemandPlan {
+                has_deficit: true,
+                aggregate_candidate: false,
+                directory_fallback: false,
+                groups: Vec::new(),
+            };
+        }
+        let mut groups = Vec::with_capacity(self.active_power_groups.len());
+        for &group in &self.active_power_groups {
+            let Some(representative_entity_index) = self.power_group_representatives[group] else {
+                self.fallback_full_scan = true;
+                return ConstructionPowerDemandPlan {
+                    has_deficit: true,
+                    aggregate_candidate: false,
+                    directory_fallback: true,
+                    groups: Vec::new(),
+                };
+            };
+            let local_group = group % POWER_GROUPS_PER_PLANET;
+            groups.push(ConstructionPowerGroupDemand {
+                representative_entity_index,
+                planet_index: group / POWER_GROUPS_PER_PLANET,
+                grid_index: local_group / 3,
+                priority: local_group % 3 + 1,
+                demand_kw: self.power_group_demands[variant][group],
+                center_count: self.power_group_center_counts[group],
+            });
+        }
+        ConstructionPowerDemandPlan {
+            has_deficit: true,
+            aggregate_candidate: true,
+            directory_fallback: false,
+            groups,
+        }
+    }
+
+    pub(crate) fn use_aggregated_power_factors(&mut self, enabled: bool) {
+        self.aggregated_power_factors = enabled && !self.fallback_full_scan;
+    }
+
+    fn cached_all_centers_provably_unpowered(&self, state: &CoreState) -> Option<bool> {
+        (!self.fallback_full_scan
+            && Arc::ptr_eq(&self.topology, &state.factory_topology)
+            && Arc::ptr_eq(&self.catalog, &state.catalog))
+        .then_some(self.provably_unpowered)
+        .flatten()
     }
 
     fn refresh_planet_inventory_wakes(&mut self, base: &Map<String, Value>) {
@@ -630,19 +920,7 @@ impl ConstructionRuntime {
         if self.fallback_full_scan {
             return;
         }
-        let Ok(signature) = self.dependency_signature(state, base) else {
-            self.fallback_full_scan = true;
-            return;
-        };
-        if let Some(previous) = self.observed_dependency.as_ref() {
-            if previous.broad_dependencies_changed(&signature) {
-                self.all_pending = true;
-                self.pending.clear();
-            } else if previous.cursor != signature.cursor && !self.all_pending {
-                self.pending.extend(self.planner_wait_rows.iter().copied());
-            }
-        }
-        self.observed_dependency = Some(signature);
+        self.refresh_dependency_wakes(state, base);
         self.refresh_planet_inventory_wakes(base);
     }
 
@@ -740,6 +1018,7 @@ impl ConstructionRuntime {
             + self.row_by_entity.capacity() * size_of::<(u32, u32)>()
             + self.row_planets.capacity() * size_of::<usize>()
             + self.row_power_groups.capacity() * size_of::<usize>()
+            + self.row_machine_count_bits.capacity() * size_of::<u64>()
             + self.target_ids.iter().map(String::capacity).sum::<usize>()
             + self.target_ids.capacity() * size_of::<String>()
             + self.target_output_amounts.capacity() * size_of::<f64>()
@@ -748,6 +1027,14 @@ impl ConstructionRuntime {
             + self.pending_by_target.capacity() * size_of::<f64>()
             + nested_container_buffers
             + power_row_buffers
+            + self.active_power_groups.capacity() * size_of::<usize>()
+            + self.power_group_center_counts.capacity() * size_of::<usize>()
+            + self
+                .power_group_demands
+                .iter()
+                .map(|demands| demands.capacity())
+                .sum::<usize>()
+                * size_of::<f64>()
             + self.power_group_representatives.capacity() * size_of::<Option<usize>>()
             + self.observed_power.capacity() * size_of::<Option<PowerFactorSignature>>()
             + planet_wait_tree_bytes
@@ -758,7 +1045,7 @@ impl ConstructionRuntime {
     }
 
     #[cfg(test)]
-    fn force_full_scan(&mut self) {
+    pub(crate) fn force_full_scan(&mut self) {
         self.fallback_full_scan = true;
     }
 }
@@ -827,6 +1114,10 @@ fn finite_number(value: Option<&Value>) -> f64 {
         .and_then(Value::as_f64)
         .filter(|value| value.is_finite())
         .unwrap_or(0.0)
+}
+
+pub(crate) fn nonnegative_safe_integer(value: f64) -> bool {
+    value.is_finite() && (0.0..=MAX_SAFE_INTEGER).contains(&value) && value.trunc() == value
 }
 
 fn string_at<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
@@ -1034,6 +1325,12 @@ fn entity_grid_id(entity: &Map<String, Value>) -> &str {
 /// Keep this proof deliberately conservative. A potential ray receiver or any
 /// power entity makes the domain active even when it currently lacks fuel.
 fn all_centers_provably_unpowered(state: &CoreState) -> anyhow::Result<bool> {
+    if let Some(proof) = state
+        .prepared_construction_runtime()
+        .and_then(|runtime| runtime.cached_all_centers_provably_unpowered(state))
+    {
+        return Ok(proof);
+    }
     let relevant = (0..state.entity_index.len())
         .filter(|&index| {
             let building = state.symbols.resolve(state.entities.buildings[index]);
@@ -1083,40 +1380,6 @@ fn current_stock(base: &Map<String, Value>, construction_id: &str) -> f64 {
         .and_then(|inventory| inventory.get(construction_id))
         .map(|value| floor_amount(finite_number(Some(value))))
         .unwrap_or(0.0)
-}
-
-fn pending_stock(state: &CoreState, automation: &Map<String, Value>, construction_id: &str) -> f64 {
-    automation
-        .get("jobs")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flat_map(|jobs| jobs.values())
-        .filter_map(Value::as_object)
-        .filter(|job| string_at(job, "constructionId") == Some(construction_id))
-        .map(|_| {
-            if matches!(construction_id, "logistics_drone" | "logistics_vessel") {
-                state
-                    .catalog
-                    .recipes
-                    .get(construction_id)
-                    .and_then(|recipe| {
-                        recipe
-                            .outputs
-                            .iter()
-                            .find(|output| output.item_id == construction_id)
-                    })
-                    .map(|output| output.amount)
-                    .unwrap_or(0.0)
-            } else {
-                state
-                    .catalog
-                    .constructions
-                    .get(construction_id)
-                    .map(|definition| definition.output_amount)
-                    .unwrap_or(0.0)
-            }
-        })
-        .sum()
 }
 
 fn pending_stock_in_jobs(
@@ -1172,18 +1435,17 @@ fn construction_dependency_signature(
     let target_stock = automation.get("targetStock").and_then(Value::as_object);
     let mut target_limits = Vec::with_capacity(targets.len());
     let mut active_targets = Vec::with_capacity(targets.len());
-    let mut raw_target_deficit = false;
+    let mut unlocked_target_deficit = false;
     for (target_index, target) in targets.iter().enumerate() {
         let desired = target_stock
             .map(|stock| floor_amount(finite_number(stock.get(&target.id))))
             .unwrap_or(0.0);
         let pending = runtime.pending_by_target[target_index];
         let deficit = desired > current_stock(base, &target.id) + pending;
-        raw_target_deficit |= deficit;
+        let unlocked = crate::construction_planner::target_is_unlocked(base, target);
+        unlocked_target_deficit |= deficit && unlocked;
         target_limits.push(desired as u64);
-        active_targets.push(
-            enabled && deficit && crate::construction_planner::target_is_unlocked(base, target),
-        );
+        active_targets.push(enabled && deficit && unlocked);
     }
     let mut completed_tech_ids =
         base.get("research")
@@ -1224,7 +1486,7 @@ fn construction_dependency_signature(
                     .get("quantumMaterialBuffer")
                     .and_then(Value::as_object)
                     .is_some_and(|buffers| !buffers.is_empty())
-                || raw_target_deficit),
+                || unlocked_target_deficit),
         cursor,
     })
 }
@@ -2162,15 +2424,15 @@ pub(crate) fn has_deficit(state: &CoreState, base: &Map<String, Value>) -> bool 
     {
         return true;
     }
-    automation
-        .get("targetStock")
-        .and_then(Value::as_object)
-        .is_some_and(|targets| {
-            targets.iter().any(|(construction_id, target)| {
-                floor_amount(finite_number(Some(target)))
-                    > current_stock(base, construction_id)
-                        + pending_stock(state, automation, construction_id)
-            })
+    let target_stock = automation.get("targetStock").and_then(Value::as_object);
+    crate::construction_planner::targets(state)
+        .iter()
+        .any(|target| {
+            let desired = target_stock
+                .map(|stock| floor_amount(finite_number(stock.get(&target.id))))
+                .unwrap_or(0.0);
+            desired > current_stock(base, &target.id)
+                && crate::construction_planner::target_is_unlocked(base, target)
         })
 }
 
@@ -2691,7 +2953,13 @@ pub(crate) fn run_centers(
         let planet_id = string_at(&snapshot, "planetId")
             .unwrap_or_default()
             .to_owned();
-        let power_factor = power_factors.get(&entity_index).copied().unwrap_or(0.0);
+        let power_factor_entity = runtime
+            .power_factor_entity(entity_index)
+            .unwrap_or(entity_index);
+        let power_factor = power_factors
+            .get(&power_factor_entity)
+            .copied()
+            .unwrap_or(0.0);
         let demand_was_power_blocked = snapshot
             .get("powerFactor")
             .and_then(Value::as_f64)
@@ -2699,7 +2967,7 @@ pub(crate) fn run_centers(
         let center = entities[entity_index]
             .as_object_mut()
             .ok_or_else(|| anyhow!("native construction center is invalid"))?;
-        if power_factors.contains_key(&entity_index) {
+        if power_factors.contains_key(&power_factor_entity) {
             set_number(
                 center,
                 "powerFactor",
@@ -3326,7 +3594,8 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
 mod tests {
     use super::*;
     use crate::catalog::{
-        CatalogSnapshot, ConstructionDefinition, ItemDefinition, PlanetDefinition,
+        BuildingDefinition, CatalogSnapshot, ConstructionDefinition, ItemDefinition,
+        PlanetDefinition,
     };
     use crate::construction_planner::TargetKind;
     use serde_json::json;
@@ -3523,7 +3792,21 @@ mod tests {
                     kind: "solid".to_owned(),
                     fuel_energy_mj: 0.0,
                 }],
-                buildings: Vec::new(),
+                buildings: vec![BuildingDefinition {
+                    id: "construction_center".to_owned(),
+                    kind: "machine".to_owned(),
+                    speed: 1.0,
+                    input_capacity: 0.0,
+                    output_capacity: 0.0,
+                    power_demand_kw: 12_000.0,
+                    power_generation_kw: 0.0,
+                    power_charge_kw: 0.0,
+                    energy_capacity_mj: 0.0,
+                    fuel_item_ids: Vec::new(),
+                    fuel_efficiency: 1.0,
+                    family: None,
+                    accepts: None,
+                }],
                 recipes: Vec::new(),
                 constructions: vec![ConstructionDefinition {
                     id: "widget".to_owned(),
@@ -3866,6 +4149,14 @@ mod tests {
         )
         .expect("wake candidate wait rows");
         candidate_base["constructionAutomation"]["jobs"] = Value::Null;
+        let candidate_power_plan = Arc::make_mut(&mut candidate_runtime).power_demand_plan(
+            &state,
+            &candidate_base,
+            &candidate_entities,
+            &state.factory_topology.construction_center_indices,
+            1.0,
+        );
+        assert!(candidate_power_plan.has_deficit);
 
         let error = run_centers(
             &state,
@@ -3971,6 +4262,23 @@ mod tests {
         assert_eq!(live_base, oracle_base);
         assert_eq!(live_entities, restored_entities);
         assert_eq!(live_entities, oracle_entities);
+
+        let live_power_plan = live_runtime.power_demand_plan(
+            &state,
+            &live_base,
+            &live_entities,
+            &state.factory_topology.construction_center_indices,
+            1.0,
+        );
+        let restored_power_plan = restored_runtime.power_demand_plan(
+            &state,
+            &restored_base,
+            &restored_entities,
+            &state.factory_topology.construction_center_indices,
+            1.0,
+        );
+        assert_eq!(live_power_plan, restored_power_plan);
+        assert!(live_power_plan.aggregate_candidate);
 
         for base in [&mut live_base, &mut restored_base, &mut oracle_base] {
             set_inventory_amount(
@@ -4121,6 +4429,172 @@ mod tests {
         assert_eq!(dense.selected_rows, 4);
         assert!(dense.dense_fallback);
         assert!(!dense.directory_fallback);
+    }
+
+    #[test]
+    fn sparse_power_demand_plan_matches_full_center_load_and_closes_target_wakes() {
+        let (state, mut base, mut entities, power, mut runtime) =
+            active_runtime_fixture(8, 10, 1, false);
+        for _ in 0..3 {
+            run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 5.0);
+        }
+        assert!(has_deficit(&state, &base));
+        assert!(!runtime.all_pending);
+        assert!(runtime.pending.is_empty());
+
+        let indexed = runtime.power_demand_plan(
+            &state,
+            &base,
+            &entities,
+            &state.factory_topology.construction_center_indices,
+            1.0,
+        );
+        assert!(indexed.has_deficit);
+        assert!(indexed.aggregate_candidate);
+        assert!(!indexed.directory_fallback);
+        assert_eq!(indexed.groups.len(), 1);
+        assert_eq!(indexed.groups[0].center_count, 8);
+        let building = state
+            .catalog
+            .buildings
+            .get("construction_center")
+            .expect("construction power definition");
+        let forced_full_demand = state
+            .factory_topology
+            .construction_center_indices
+            .iter()
+            .map(|&entity_index| {
+                building.power_demand_kw * finite_number(entities[entity_index].get("machineCount"))
+            })
+            .sum::<f64>();
+        assert_eq!(
+            indexed.groups[0].demand_kw.to_bits(),
+            forced_full_demand.to_bits()
+        );
+
+        for factor in [EPSILON - 0.00000001, EPSILON + 0.00000001] {
+            let mut indexed_base = base.clone();
+            let mut indexed_entities = entities.clone();
+            let mut indexed_runtime = runtime.clone();
+            indexed_runtime.use_aggregated_power_factors(true);
+            let indexed_power =
+                HashMap::from([(indexed.groups[0].representative_entity_index, factor)]);
+            let indexed_outcome = run_active_fixture(
+                &state,
+                &mut indexed_base,
+                &mut indexed_entities,
+                &indexed_power,
+                &mut indexed_runtime,
+                1.0,
+            );
+
+            let mut oracle_base = base.clone();
+            let mut oracle_entities = entities.clone();
+            let mut oracle_runtime = runtime.clone();
+            oracle_runtime.force_full_scan();
+            let oracle_power = state
+                .factory_topology
+                .construction_center_indices
+                .iter()
+                .copied()
+                .map(|entity_index| (entity_index, factor))
+                .collect::<HashMap<_, _>>();
+            let oracle_outcome = run_active_fixture(
+                &state,
+                &mut oracle_base,
+                &mut oracle_entities,
+                &oracle_power,
+                &mut oracle_runtime,
+                1.0,
+            );
+            assert_eq!(indexed_outcome.scan.selected_rows, 8);
+            assert_eq!(oracle_outcome.scan.selected_rows, 8);
+            assert_eq!(indexed_base, oracle_base);
+            assert_eq!(indexed_entities, oracle_entities);
+            assert_eq!(
+                serde_json::to_vec(&(&indexed_base, &indexed_entities)).unwrap(),
+                serde_json::to_vec(&(&oracle_base, &oracle_entities)).unwrap()
+            );
+        }
+
+        base["constructionAutomation"]["targetStock"]["widget"] = Value::from(1);
+        let cleared = runtime.power_demand_plan(
+            &state,
+            &base,
+            &entities,
+            &state.factory_topology.construction_center_indices,
+            1.0,
+        );
+        assert!(!cleared.has_deficit);
+        assert!(cleared.groups.is_empty());
+        assert!(
+            runtime.all_pending,
+            "target change must wake every sleeping center"
+        );
+
+        base["constructionAutomation"]["targetStock"]["widget"] = Value::from(10);
+        let dense = runtime.power_demand_plan(
+            &state,
+            &base,
+            &entities,
+            &state.factory_topology.construction_center_indices,
+            1.0,
+        );
+        assert!(dense.has_deficit);
+        assert!(
+            !dense.aggregate_candidate,
+            "dense wake must retain the full oracle scan"
+        );
+        assert!(!dense.directory_fallback);
+    }
+
+    #[test]
+    fn power_deficit_ignores_locked_targets_and_noncanonical_directory_fails_closed() {
+        let (mut state, mut base, entities, _, _) = active_runtime_fixture(4, 1, 0, false);
+        let catalog = Arc::make_mut(&mut state.catalog);
+        catalog.snapshot.constructions[0].required_tech_id = Some("locked-tech".to_owned());
+        catalog
+            .constructions
+            .get_mut("widget")
+            .expect("widget construction")
+            .required_tech_id = Some("locked-tech".to_owned());
+        let mut runtime = ConstructionRuntime::build(&state, &base, &entities);
+        assert!(!has_deficit(&state, &base));
+        let locked = runtime.power_demand_plan(
+            &state,
+            &base,
+            &entities,
+            &state.factory_topology.construction_center_indices,
+            1.0,
+        );
+        assert!(!locked.has_deficit);
+
+        base["research"]["completedTechIds"] = json!(["locked-tech"]);
+        let unlocked = runtime.power_demand_plan(
+            &state,
+            &base,
+            &entities,
+            &state.factory_topology.construction_center_indices,
+            1.0,
+        );
+        assert!(unlocked.has_deficit);
+        assert!(
+            !unlocked.aggregate_candidate,
+            "technology wake is deliberately dense"
+        );
+
+        let (extension_state, extension_base, extension_entities, _, mut extension_runtime) =
+            active_runtime_fixture(4, 1, 0, true);
+        let fallback = extension_runtime.power_demand_plan(
+            &extension_state,
+            &extension_base,
+            &extension_entities,
+            &extension_state.factory_topology.construction_center_indices,
+            1.0,
+        );
+        assert!(fallback.has_deficit);
+        assert!(!fallback.aggregate_candidate);
+        assert!(fallback.directory_fallback);
     }
 
     #[test]

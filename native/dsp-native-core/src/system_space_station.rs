@@ -51,22 +51,38 @@ struct HubEntry {
     system_id: String,
 }
 
-/// Runs only the read-only, per-entity elevator admission probe in parallel.
-/// Ordered collection and the serial grouping pass preserve the legacy entity
-/// order exactly; inventory allocation and every fairness cursor remain on the
-/// deterministic serial commit path below.
+/// Runs only the read-only elevator admission probe in parallel. Sparse saves
+/// visit the immutable system-station candidates; dense saves pass `None` and
+/// deliberately retain the historical full scan. Ordered collection and the
+/// serial grouping pass preserve persisted entity order exactly; inventory
+/// allocation and every fairness cursor remain on the deterministic serial
+/// commit path below.
 fn collect_station_groups_with_runtime<K, F>(
     runtime: &DeterministicRuntime,
     entities: &[Value],
+    candidate_indices: Option<&[usize]>,
     classify: F,
 ) -> Vec<(K, Vec<usize>)>
 where
     K: PartialEq + Send,
     F: Fn(usize, &Value) -> Option<K> + Send + Sync,
 {
-    let admitted = runtime.indexed_map(entities, classify);
+    let admitted = if let Some(candidate_indices) = candidate_indices {
+        runtime.indexed_map(candidate_indices, |_, &entity_index| {
+            (
+                entity_index,
+                entities
+                    .get(entity_index)
+                    .and_then(|entity| classify(entity_index, entity)),
+            )
+        })
+    } else {
+        runtime.indexed_map(entities, |entity_index, entity| {
+            (entity_index, classify(entity_index, entity))
+        })
+    };
     let mut stations_by_system = Vec::<(K, Vec<usize>)>::new();
-    for (entity_index, system_id) in admitted.into_iter().enumerate() {
+    for (entity_index, system_id) in admitted {
         let Some(system_id) = system_id else {
             continue;
         };
@@ -281,19 +297,35 @@ pub(crate) fn active_power_consumers(
     base: &Map<String, Value>,
     entities: &[Value],
 ) -> Vec<usize> {
-    entities
-        .iter()
-        .enumerate()
-        .filter_map(|(index, entity)| {
-            let entity = entity.as_object()?;
-            let system_id = entity_system_id(state, entity)?;
-            let active = string_at(entity, "buildingId")
-                == Some("space_station_construction_launcher")
-                && system_status(base, system_id) == Some("building")
-                || is_elevator(entity) && system_status(base, system_id) == Some("operational");
-            active.then_some(index)
-        })
-        .collect()
+    let active_at = |index: usize, entity: &Value| {
+        let entity = entity.as_object()?;
+        let system_id = entity_system_id(state, entity)?;
+        let active = string_at(entity, "buildingId") == Some("space_station_construction_launcher")
+            && system_status(base, system_id) == Some("building")
+            || is_elevator(entity) && system_status(base, system_id) == Some("operational");
+        active.then_some(index)
+    };
+    if state
+        .factory_topology
+        .system_space_station_full_scan_required
+    {
+        entities
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entity)| active_at(index, entity))
+            .collect()
+    } else {
+        state
+            .factory_topology
+            .system_space_station_entity_indices
+            .iter()
+            .filter_map(|&index| {
+                entities
+                    .get(index)
+                    .and_then(|entity| active_at(index, entity))
+            })
+            .collect()
+    }
 }
 
 fn required_phase_amount(base_amount: u64, basis_points: f64) -> BigUint {
@@ -793,8 +825,19 @@ pub(crate) fn settle_hubs(
         Value::from(busy.saturating_sub(released)),
     );
 
-    let mut stations_by_system =
-        collect_station_groups_with_runtime(deterministic_runtime(), entities, |_, entity| {
+    let mut stations_by_system = collect_station_groups_with_runtime(
+        deterministic_runtime(),
+        entities,
+        (!state
+            .factory_topology
+            .system_space_station_full_scan_required)
+            .then_some(
+                state
+                    .factory_topology
+                    .system_space_station_entity_indices
+                    .as_slice(),
+            ),
+        |_, entity| {
             let entity = entity.as_object()?;
             let system_id = entity_system_id(state, entity)?;
             (is_elevator(entity)
@@ -804,10 +847,11 @@ pub(crate) fn settle_hubs(
                     .and_then(|hub| string_at(hub, "status"))
                     == Some("operational"))
             .then_some(system_id)
-        })
-        .into_iter()
-        .map(|(system_id, indexes)| (system_id.to_owned(), indexes))
-        .collect::<Vec<_>>();
+        },
+    )
+    .into_iter()
+    .map(|(system_id, indexes)| (system_id.to_owned(), indexes))
+    .collect::<Vec<_>>();
 
     for (system_id, station_indexes) in &mut stations_by_system {
         station_indexes.sort_by(|left, right| {
@@ -1222,21 +1266,452 @@ pub(crate) fn boundary_seconds() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::catalog::{CatalogSnapshot, RuntimeCatalog};
     use crate::deterministic_runtime::PARALLEL_MIN_ITEMS;
+    use crate::state::CoreCheckpointIdentity;
     use serde_json::json;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn fixture_catalog() -> RuntimeCatalog {
+        let snapshot = serde_json::from_value::<CatalogSnapshot>(json!({
+            "protocolVersion": 1,
+            "registryFingerprint": "system-space-test",
+            "planets": [
+                {
+                    "id": "home",
+                    "name": "Home",
+                    "systemId": "helios",
+                    "kind": "terrestrial",
+                    "orbitIndex": 1,
+                    "simulationOrder": 0,
+                    "orbitalYields": {}
+                },
+                {
+                    "id": "frontier",
+                    "name": "Frontier",
+                    "systemId": "alpha",
+                    "kind": "terrestrial",
+                    "orbitIndex": 1,
+                    "simulationOrder": 1,
+                    "orbitalYields": {}
+                }
+            ],
+            "items": [{
+                "id": "iron_ore",
+                "name": "Iron Ore",
+                "kind": "solid",
+                "fuelEnergyMj": 0
+            }],
+            "buildings": [
+                {
+                    "id": "mining_machine",
+                    "kind": "miner",
+                    "speed": 1,
+                    "inputCapacity": 0,
+                    "outputCapacity": 50,
+                    "powerDemandKw": 1
+                },
+                {
+                    "id": "interstellar_logistics_station",
+                    "kind": "station",
+                    "speed": 1,
+                    "inputCapacity": 64,
+                    "outputCapacity": 64,
+                    "powerDemandKw": 1
+                },
+                {
+                    "id": "space_station_construction_launcher",
+                    "kind": "station",
+                    "speed": 1,
+                    "inputCapacity": 64,
+                    "outputCapacity": 64,
+                    "powerDemandKw": 1
+                }
+            ],
+            "recipes": [],
+            "constructions": [],
+            "belts": [{"tier": 1, "speed": 6}],
+            "proliferators": [],
+            "technologies": []
+        }))
+        .unwrap();
+        RuntimeCatalog::validate(snapshot, "system-space-test").unwrap()
+    }
+
+    fn system_hub(system_id: &str, status: &str) -> Value {
+        json!({
+            "systemId": system_id,
+            "status": status,
+            "delivered": {},
+            "constructionBuffer": {},
+            "inventory": {"iron_ore": "128"},
+            "itemPolicies": {},
+            "modules": {"backbone": 0, "interstellar": 0},
+            "routingCursors": {},
+            "phaseIndex": 16,
+            "costMultiplierBasisPoints": 10000,
+            "decorations": []
+        })
+    }
+
+    fn system_base(helios_status: &str, alpha_status: &str) -> Map<String, Value> {
+        json!({
+            "version": 47,
+            "mode": "normal",
+            "activePlanetId": "home",
+            "elapsedSeconds": 0,
+            "paused": false,
+            "systemSpaceStations": {
+                "helios": system_hub("helios", helios_status),
+                "alpha": system_hub("alpha", alpha_status)
+            },
+            "galacticHubNetwork": {
+                "fleetInstalled": 0,
+                "fleetBusy": 0,
+                "fleetReturns": [],
+                "warpers": "0",
+                "warperTarget": "0",
+                "routingCursors": {}
+            },
+            "research": {"completedTechIds": []},
+            "settings": {"logisticsBufferLimit": 1000000}
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    fn elevator(id: &str, kind: &str, planet_id: &str, input: u64) -> Value {
+        json!({
+            "id": id,
+            "kind": kind,
+            "planetId": planet_id,
+            "buildingId": "interstellar_logistics_station",
+            "machineCount": 1,
+            "stationTier": 2,
+            "stationOperationMode": "elevator",
+            "stationModeTransition": null,
+            "stationVessels": 2,
+            "elevatorOutputItems": ["iron_ore", null, null, null, null],
+            "inputs": {"iron_ore": input},
+            "outputs": {"iron_ore": 0},
+            "powerFactor": 1,
+            "progress": 0,
+            "utilization": 0,
+            "productionRate": 0,
+            "routingCursor": 0
+        })
+    }
+
+    fn launcher(id: &str, planet_id: &str) -> Value {
+        json!({
+            "id": id,
+            "kind": "station",
+            "planetId": planet_id,
+            "buildingId": "space_station_construction_launcher",
+            "inputs": {},
+            "outputs": {},
+            "progress": 0,
+            "utilization": 0,
+            "productionRate": 0,
+            "routingCursor": 0
+        })
+    }
+
+    fn fixture_entities() -> Vec<Value> {
+        let mut entities = (0..24)
+            .map(|index| {
+                json!({
+                    "id": format!("ordinary-{index}"),
+                    "kind": "machine",
+                    "planetId": if index % 2 == 0 { "home" } else { "frontier" },
+                    "buildingId": "mining_machine",
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "utilization": 0,
+                    "productionRate": 0,
+                    "routingCursor": 0
+                })
+            })
+            .collect::<Vec<_>>();
+        entities[2] = elevator("elevator-home", "station", "home", 17);
+        entities[7] = elevator("mod-elevator-home", "mod-storage", "home", 11);
+        entities[13] = launcher("launcher-alpha", "frontier");
+        entities[19] = elevator("elevator-alpha", "station", "frontier", 23);
+        entities
+    }
+
+    fn state_from_entities(entities: &[Value]) -> CoreState {
+        CoreState::from_public_v47_parts(
+            CoreCheckpointIdentity {
+                slot: "normal-main".into(),
+                generation: 1,
+                root_hash: "a".repeat(64),
+                revision: 7,
+                state_version: 47,
+                mode: "normal".into(),
+                registry_fingerprint: "system-space-test".into(),
+                base_primary_checksum: "12345678".into(),
+            },
+            system_base("operational", "operational"),
+            entities
+                .iter()
+                .map(|entity| serde_json::to_string(entity).unwrap())
+                .collect(),
+            Vec::new(),
+            fixture_catalog(),
+        )
+        .unwrap()
+    }
+
+    fn frozen_active_power_consumers(
+        state: &CoreState,
+        base: &Map<String, Value>,
+        entities: &[Value],
+    ) -> Vec<usize> {
+        entities
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entity)| {
+                let entity = entity.as_object()?;
+                let system_id = entity_system_id(state, entity)?;
+                let active = string_at(entity, "buildingId")
+                    == Some("space_station_construction_launcher")
+                    && system_status(base, system_id) == Some("building")
+                    || is_elevator(entity) && system_status(base, system_id) == Some("operational");
+                active.then_some(index)
+            })
+            .collect()
+    }
+
+    fn frozen_station_groups<F>(entities: &[Value], classify: F) -> Vec<(u8, Vec<usize>)>
+    where
+        F: Fn(usize, &Value) -> Option<u8>,
+    {
+        let mut groups = Vec::<(u8, Vec<usize>)>::new();
+        for (entity_index, entity) in entities.iter().enumerate() {
+            let Some(group) = classify(entity_index, entity) else {
+                continue;
+            };
+            if let Some((_, indexes)) = groups.iter_mut().find(|(candidate, _)| *candidate == group)
+            {
+                indexes.push(entity_index);
+            } else {
+                groups.push((group, vec![entity_index]));
+            }
+        }
+        groups
+    }
+
+    fn force_full_scan(state: &mut CoreState) {
+        let topology = Arc::make_mut(&mut state.factory_topology);
+        topology.system_space_station_entity_indices.clear();
+        topology.system_space_station_full_scan_required = true;
+    }
 
     #[test]
-    fn elevator_admission_probe_is_identical_at_every_worker_limit() {
-        let entities = (0..(PARALLEL_MIN_ITEMS * 2 + 17))
-            .map(|index| match index % 11 {
-                0 => Value::Null,
-                1 => json!({ "id": format!("ordinary-{index}"), "system": "a", "enabled": true, "elevator": false }),
-                _ => json!({
-                    "id": format!("elevator-{index}"),
-                    "system": if index % 3 == 0 { "gamma" } else if index % 3 == 1 { "alpha" } else { "beta" },
-                    "enabled": index % 5 != 0,
-                    "elevator": true,
-                }),
+    fn stable_candidate_index_preserves_mod_rows_and_rebuilds_in_persisted_order() {
+        let entities = fixture_entities();
+        let mut state = state_from_entities(&entities);
+        assert_eq!(
+            state.factory_topology.system_space_station_entity_indices,
+            vec![2, 7, 13, 19]
+        );
+        assert!(
+            !state
+                .factory_topology
+                .system_space_station_full_scan_required
+        );
+
+        state.replace_entity_raw(
+            2,
+            Arc::<str>::from(
+                serde_json::to_string(&json!({
+                    "id": "replacement-ordinary",
+                    "kind": "machine",
+                    "planetId": "home",
+                    "buildingId": "mining_machine",
+                    "inputs": {},
+                    "outputs": {}
+                }))
+                .unwrap(),
+            ),
+        );
+        state.replace_entity_raw(
+            5,
+            Arc::<str>::from(
+                serde_json::to_string(&elevator("replacement-mod-elevator", "mod-row", "home", 3))
+                    .unwrap(),
+            ),
+        );
+        state.rebuild_indexes().unwrap();
+        assert_eq!(
+            state.factory_topology.system_space_station_entity_indices,
+            vec![5, 7, 13, 19]
+        );
+        assert!(
+            !state
+                .factory_topology
+                .system_space_station_full_scan_required
+        );
+    }
+
+    #[test]
+    fn dense_candidate_topology_uses_deterministic_full_scan_fallback() {
+        let entities = vec![
+            elevator("elevator-0", "station", "home", 1),
+            elevator("elevator-1", "mod-row", "home", 1),
+            launcher("launcher-2", "frontier"),
+            elevator("elevator-3", "station", "frontier", 1),
+            json!({
+                "id": "ordinary-4",
+                "kind": "machine",
+                "planetId": "home",
+                "buildingId": "mining_machine",
+                "inputs": {},
+                "outputs": {}
+            }),
+        ];
+        let state = state_from_entities(&entities);
+        assert!(
+            state
+                .factory_topology
+                .system_space_station_full_scan_required
+        );
+        assert!(
+            state
+                .factory_topology
+                .system_space_station_entity_indices
+                .is_empty()
+        );
+
+        let base = system_base("operational", "building");
+        assert_eq!(
+            active_power_consumers(&state, &base, &entities),
+            frozen_active_power_consumers(&state, &base, &entities)
+        );
+    }
+
+    #[test]
+    fn indexed_power_discovery_matches_frozen_full_scan_including_mod_elevator() {
+        let entities = fixture_entities();
+        let state = state_from_entities(&entities);
+        let base = system_base("operational", "building");
+        let expected = frozen_active_power_consumers(&state, &base, &entities);
+        assert_eq!(expected, vec![2, 7, 13]);
+        assert_eq!(active_power_consumers(&state, &base, &entities), expected);
+    }
+
+    #[test]
+    fn indexed_hub_settlement_is_bitwise_equal_to_full_scan_oracle() {
+        let initial_entities = fixture_entities();
+        let indexed_state = state_from_entities(&initial_entities);
+        let mut oracle_state = indexed_state.clone();
+        force_full_scan(&mut oracle_state);
+        let mut indexed_base = system_base("operational", "operational");
+        let mut oracle_base = indexed_base.clone();
+        let mut indexed_entities = initial_entities.clone();
+        let mut oracle_entities = initial_entities;
+
+        settle_hubs(
+            &indexed_state,
+            &mut indexed_base,
+            &mut indexed_entities,
+            5.0,
+        )
+        .unwrap();
+        settle_hubs(&oracle_state, &mut oracle_base, &mut oracle_entities, 5.0).unwrap();
+
+        assert_eq!(
+            serde_json::to_vec(&(indexed_base, indexed_entities)).unwrap(),
+            serde_json::to_vec(&(oracle_base, oracle_entities)).unwrap()
+        );
+    }
+
+    #[test]
+    fn indexed_and_full_scan_hub_boundary_replays_match_across_split_loops() {
+        let state = state_from_entities(&fixture_entities());
+        let mut continuous_base = system_base("operational", "operational");
+        let mut continuous_entities = fixture_entities();
+        for boundary in 1..=12 {
+            settle_hubs(
+                &state,
+                &mut continuous_base,
+                &mut continuous_entities,
+                boundary as f64 * boundary_seconds(),
+            )
+            .unwrap();
+        }
+
+        let mut segmented_state = state.clone();
+        force_full_scan(&mut segmented_state);
+        let mut segmented_base = system_base("operational", "operational");
+        let mut segmented_entities = fixture_entities();
+        for boundaries in [1..=5, 6..=12] {
+            for boundary in boundaries {
+                settle_hubs(
+                    &segmented_state,
+                    &mut segmented_base,
+                    &mut segmented_entities,
+                    boundary as f64 * boundary_seconds(),
+                )
+                .unwrap();
+            }
+        }
+
+        assert_eq!(
+            serde_json::to_vec(&(continuous_base, continuous_entities)).unwrap(),
+            serde_json::to_vec(&(segmented_base, segmented_entities)).unwrap()
+        );
+    }
+
+    #[test]
+    fn sparse_index_matches_full_scan_oracle_and_probes_only_candidates() {
+        let mut entities = (0..(PARALLEL_MIN_ITEMS * 2 + 17))
+            .map(|index| {
+                json!({
+                    "id": format!("ordinary-{index}"),
+                    "buildingId": "mining_machine",
+                    "system": "unused",
+                    "enabled": true,
+                    "elevator": false
+                })
+            })
+            .collect::<Vec<_>>();
+        for (index, kind, system, enabled) in [
+            (3, "mod-row", "beta", true),
+            (97, "station", "alpha", false),
+            (PARALLEL_MIN_ITEMS + 3, "station", "gamma", true),
+        ] {
+            entities[index] = json!({
+                "id": format!("candidate-{index}"),
+                "kind": kind,
+                "buildingId": "interstellar_logistics_station",
+                "system": system,
+                "enabled": enabled,
+                "elevator": true
+            });
+        }
+        let launcher_index = entities.len() - 1;
+        entities[launcher_index] = json!({
+            "id": "launcher",
+            "kind": "station",
+            "buildingId": "space_station_construction_launcher",
+            "system": "alpha",
+            "enabled": true,
+            "elevator": false
+        });
+        let candidate_indices = entities
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entity)| {
+                matches!(
+                    entity.get("buildingId").and_then(Value::as_str),
+                    Some("interstellar_logistics_station" | "space_station_construction_launcher")
+                )
+                .then_some(index)
             })
             .collect::<Vec<_>>();
         let classify = |_: usize, entity: &Value| {
@@ -1253,19 +1728,140 @@ mod tests {
                 _ => None,
             }
         };
-        let expected = collect_station_groups_with_runtime(
-            &DeterministicRuntime::for_test(1),
+        let expected = frozen_station_groups(&entities, classify);
+        let probes = AtomicUsize::new(0);
+        let actual = collect_station_groups_with_runtime(
+            &DeterministicRuntime::for_test(8),
             &entities,
-            classify,
+            Some(&candidate_indices),
+            |index, entity| {
+                probes.fetch_add(1, Ordering::Relaxed);
+                classify(index, entity)
+            },
         );
+        assert_eq!(actual, expected);
+        assert_eq!(probes.load(Ordering::Relaxed), candidate_indices.len());
+        assert!(candidate_indices.len() * 1_000 < entities.len());
+    }
+
+    #[test]
+    fn elevator_admission_probe_is_identical_at_every_worker_limit() {
+        let entities = (0..(PARALLEL_MIN_ITEMS * 2 + 17))
+            .map(|index| {
+                if index % 2 == 0 {
+                    json!({
+                    "id": format!("elevator-{index}"),
+                    "buildingId": "interstellar_logistics_station",
+                    "system": if index % 3 == 0 { "gamma" } else if index % 3 == 1 { "alpha" } else { "beta" },
+                    "enabled": index % 5 != 0,
+                    "elevator": true,
+                    })
+                } else {
+                    json!({
+                        "id": format!("ordinary-{index}"),
+                        "buildingId": "mining_machine",
+                        "system": "unused",
+                        "enabled": true,
+                        "elevator": false
+                    })
+                }
+            })
+            .collect::<Vec<_>>();
+        let classify = |_: usize, entity: &Value| {
+            let entity = entity.as_object()?;
+            if entity.get("enabled").and_then(Value::as_bool) != Some(true)
+                || entity.get("elevator").and_then(Value::as_bool) != Some(true)
+            {
+                return None;
+            }
+            match entity.get("system").and_then(Value::as_str) {
+                Some("gamma") => Some(0_u8),
+                Some("alpha") => Some(1_u8),
+                Some("beta") => Some(2_u8),
+                _ => None,
+            }
+        };
+        let candidate_indices = entities
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entity)| {
+                (entity.get("buildingId").and_then(Value::as_str)
+                    == Some("interstellar_logistics_station"))
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        assert!(candidate_indices.len() >= PARALLEL_MIN_ITEMS);
+        assert!(candidate_indices.len() * 4 < entities.len() * 3);
+        let expected = frozen_station_groups(&entities, classify);
         assert_eq!(expected.first().map(|entry| entry.0), Some(2));
-        for workers in [2, 4, 8] {
+        for workers in [1, 2, 4, 8] {
+            let runtime = DeterministicRuntime::for_test(workers);
+            assert_eq!(
+                runtime.worker_count_for_items(candidate_indices.len()),
+                workers
+            );
+            assert_eq!(
+                collect_station_groups_with_runtime(
+                    &runtime,
+                    &entities,
+                    Some(&candidate_indices),
+                    classify,
+                ),
+                expected,
+                "elevator probe/group order diverged at {workers} workers",
+            );
+        }
+    }
+
+    #[test]
+    fn dense_full_scan_fallback_is_identical_at_every_worker_limit() {
+        let entity_count = PARALLEL_MIN_ITEMS * 2 + 17;
+        let candidate_count = entity_count.saturating_mul(3).div_ceil(4);
+        let entities = (0..entity_count)
+            .map(|index| {
+                if index < candidate_count {
+                    json!({
+                        "id": format!("elevator-{index}"),
+                        "buildingId": "interstellar_logistics_station",
+                        "system": if index % 3 == 0 { "gamma" } else if index % 3 == 1 { "alpha" } else { "beta" },
+                        "enabled": index % 5 != 0,
+                        "elevator": true
+                    })
+                } else {
+                    json!({
+                        "id": format!("ordinary-{index}"),
+                        "buildingId": "mining_machine",
+                        "system": "unused",
+                        "enabled": true,
+                        "elevator": false
+                    })
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(candidate_count >= PARALLEL_MIN_ITEMS);
+        assert!(candidate_count * 4 >= entities.len() * 3);
+        let classify = |_: usize, entity: &Value| {
+            let entity = entity.as_object()?;
+            if entity.get("enabled").and_then(Value::as_bool) != Some(true)
+                || entity.get("elevator").and_then(Value::as_bool) != Some(true)
+            {
+                return None;
+            }
+            match entity.get("system").and_then(Value::as_str) {
+                Some("gamma") => Some(0_u8),
+                Some("alpha") => Some(1_u8),
+                Some("beta") => Some(2_u8),
+                _ => None,
+            }
+        };
+        let expected = frozen_station_groups(&entities, classify);
+        for workers in [1, 2, 4, 8] {
             let runtime = DeterministicRuntime::for_test(workers);
             assert_eq!(runtime.worker_count_for_items(entities.len()), workers);
             assert_eq!(
-                collect_station_groups_with_runtime(&runtime, &entities, classify),
+                collect_station_groups_with_runtime(&runtime, &entities, None, classify),
                 expected,
-                "elevator probe/group order diverged at {workers} workers",
+                "dense full-scan grouping diverged at {workers} workers",
             );
         }
     }

@@ -2330,6 +2330,16 @@ pub(crate) struct FactoryTopology {
     pub orbital_cargo_terminal_indices: Vec<usize>,
     pub galactic_material_exporter_indices: Vec<usize>,
     pub space_station_launcher_indices: Vec<usize>,
+    /// Stable persisted-row order for every entity whose built-in ID can
+    /// participate in system-space-station power or hub settlement. Include
+    /// non-station legacy/MOD rows because the historical elevator predicate
+    /// intentionally keys off the building ID, tier, and operation mode only.
+    pub system_space_station_entity_indices: Vec<usize>,
+    /// A save dominated by system-station candidates is cheaper to visit in
+    /// persisted entity order than to retain a near-complete duplicate index.
+    /// The full scan is selected once during topology compilation and remains
+    /// deterministic for the lifetime of the native session.
+    pub system_space_station_full_scan_required: bool,
     /// Stable persisted-row order for every ray receiver. Runtime recipe,
     /// technology, output-capacity, and power eligibility still belong to the
     /// exact Dyson probe; this immutable index only removes the O(all
@@ -2378,6 +2388,7 @@ impl FactoryTopology {
         self.orbital_cargo_terminal_indices.shrink_to_fit();
         self.galactic_material_exporter_indices.shrink_to_fit();
         self.space_station_launcher_indices.shrink_to_fit();
+        self.system_space_station_entity_indices.shrink_to_fit();
         self.ray_receiver_indices.shrink_to_fit();
         self.power_source_indices.shrink_to_fit();
         self.vein_indices.shrink_to_fit();
@@ -2407,6 +2418,7 @@ impl FactoryTopology {
             + self.orbital_cargo_terminal_indices.capacity()
             + self.galactic_material_exporter_indices.capacity()
             + self.space_station_launcher_indices.capacity()
+            + self.system_space_station_entity_indices.capacity()
             + self.ray_receiver_indices.capacity()
             + self.power_source_indices.capacity()
             + self.vein_indices.capacity()
@@ -3756,6 +3768,14 @@ impl CoreState {
             if building == "space_station_construction_launcher" {
                 factory_topology.space_station_launcher_indices.push(index);
             }
+            if matches!(
+                building,
+                "interstellar_logistics_station" | "space_station_construction_launcher"
+            ) {
+                factory_topology
+                    .system_space_station_entity_indices
+                    .push(index);
+            }
             if kind == "machine" && building == "ray_receiver" {
                 factory_topology.ray_receiver_indices.push(index);
             }
@@ -3896,6 +3916,18 @@ impl CoreState {
         {
             factory_topology.production_history_rate_indices = Vec::new();
             factory_topology.production_history_rate_full_scan_required = true;
+        }
+        if !factory_topology
+            .system_space_station_entity_indices
+            .is_empty()
+            && factory_topology
+                .system_space_station_entity_indices
+                .len()
+                .saturating_mul(4)
+                >= entity_values.len().saturating_mul(3)
+        {
+            factory_topology.system_space_station_entity_indices = Vec::new();
+            factory_topology.system_space_station_full_scan_required = true;
         }
         // These immutable indexes live for the complete native session. Trim
         // geometric growth slack once, after construction, so a large save
@@ -6452,6 +6484,11 @@ mod tests {
                     "id": format!("vein-{index}"),
                     "kind": "vein",
                     "planetId": "home",
+                    "buildingId": if index == 0 {
+                        "interstellar_logistics_station"
+                    } else {
+                        "mining_machine"
+                    },
                     "resourceId": "iron_ore",
                     "minerCount": 1,
                     "inputs": {},
@@ -6483,10 +6520,21 @@ mod tests {
             assert_eq!(capacity, entities.len());
         }
         assert_eq!(
+            state
+                .factory_topology
+                .system_space_station_entity_indices
+                .capacity(),
+            1
+        );
+        assert_eq!(
             state.factory_topology.estimated_bytes(),
             (state.factory_topology.vein_indices.len()
                 + state.factory_topology.production_history_rate_indices.len()
                 + state.factory_topology.non_station_indices.len()
+                + state
+                    .factory_topology
+                    .system_space_station_entity_indices
+                    .len()
                 + state.factory_topology.entity_planet_indices.len()
                 + state.factory_topology.entity_grid_indices.len()) as u64
                 * size_of::<usize>() as u64

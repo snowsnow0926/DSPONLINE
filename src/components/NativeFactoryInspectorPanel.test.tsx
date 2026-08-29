@@ -50,7 +50,8 @@ describe("NativeFactoryInspectorPanel", () => {
   it("renders opaque MOD rows and routes the guarded whole-building action", () => {
     const remove = vi.fn();
     const stack = vi.fn();
-    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi()} pending={false} onRemoveEntity={remove} onStackCountChange={stack} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
+    const lock = vi.fn();
+    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi()} pending={false} onEntityLockChange={lock} onRemoveEntity={remove} onStackCountChange={stack} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
     expect(host.textContent).toContain("MOD/建筑-一");
     expect(host.textContent).toContain("MOD/输入");
     const button = host.querySelector<HTMLButtonElement>('[data-native-construction-removal] button')!;
@@ -61,10 +62,12 @@ describe("NativeFactoryInspectorPanel", () => {
     act(() => stackButtons[1].click());
     expect(stack).toHaveBeenNthCalledWith(1, "MOD/设备-一", 2);
     expect(stack).toHaveBeenNthCalledWith(2, "MOD/设备-一", 4);
+    act(() => host.querySelector<HTMLButtonElement>('[data-native-entity-lock] button')!.click());
+    expect(lock).toHaveBeenCalledWith("MOD/设备-一", true);
   });
 
   it("fails closed for a mismatched revision and never exposes the removal action", () => {
-    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi({ revision: 9 })} pending={false} onRemoveEntity={vi.fn()} onStackCountChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
+    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi({ revision: 9 })} pending={false} onEntityLockChange={vi.fn()} onRemoveEntity={vi.fn()} onStackCountChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
     expect(host.textContent).toContain("正在核对原生检查摘要");
     expect(host.querySelector("[data-native-construction-removal]")).toBeNull();
   });
@@ -98,6 +101,7 @@ describe("NativeFactoryInspectorPanel", () => {
         beltRows: { rows: [selectedBelt], totalCount: 1, truncated: false },
       })}
       pending={false}
+      onEntityLockChange={vi.fn()}
       onRemoveEntity={vi.fn()}
       onStackCountChange={vi.fn()}
       onBeltLaneCountChange={lanes}

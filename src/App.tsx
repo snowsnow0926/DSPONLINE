@@ -18180,6 +18180,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           inspector={factoryInspectorSummaryReadModel}
           multiSelection={factoryMultiSelectionSummaryReadModel}
           pending={nativeRemovalContextPending || nativeStackContextPending || nativeBeltLaneContextPending || nativePlayerAuthorityCommandPending}
+          onEntityLockChange={(_entityId, locked) => void commitNativeSelectionInteractionLock(locked)}
           onRemoveEntity={(entityId) => void removeNativeOrdinaryBuilding(entityId)}
           onStackCountChange={(entityId, targetCount) => void changeNativeOrdinaryBuildingStack(entityId, targetCount)}
           onBeltLaneCountChange={(beltId, targetLanes) => void changeNativeOrdinaryBeltLanes(beltId, targetLanes)}

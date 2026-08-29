@@ -13,6 +13,7 @@ interface NativeFactoryInspectorPanelProps {
   inspector: FactoryInspectorSummaryReadModel;
   multiSelection: FactoryMultiSelectionSummaryReadModel;
   pending: boolean;
+  onEntityLockChange: (entityId: string, locked: boolean) => void;
   onRemoveEntity: (entityId: string) => void;
   onStackCountChange: (entityId: string, targetCount: number) => void;
   onBeltLaneCountChange: (beltId: string, targetLanes: number) => void;
@@ -41,9 +42,10 @@ function itemRows(label: string, rows: readonly ItemQuantityReadModel[], truncat
   </section>;
 }
 
-function NativeEntitySummary({ entity, pending, onRemoveEntity, onStackCountChange }: {
+function NativeEntitySummary({ entity, pending, onEntityLockChange, onRemoveEntity, onStackCountChange }: {
   entity: SelectedEntityReadModel;
   pending: boolean;
+  onEntityLockChange: (entityId: string, locked: boolean) => void;
   onRemoveEntity: (entityId: string) => void;
   onStackCountChange: (entityId: string, targetCount: number) => void;
 }) {
@@ -64,6 +66,16 @@ function NativeEntitySummary({ entity, pending, onRemoveEntity, onStackCountChan
       </dl>
       {itemRows("输入缓存", entity.inputItems.rows, entity.inputItems.truncated)}
       {itemRows("输出缓存", entity.outputItems.rows, entity.outputItems.truncated)}
+    </section>
+    <section className="native-inspector-safe-actions" data-native-entity-lock="ordinary-single-v1">
+      <strong>Rust 建筑锁定</strong>
+      <p>只切换当前建筑的交互锁。Rust 会在最新 revision 再确认实体仍存在，锁定不会改变库存、线路或生产数据。</p>
+      <button
+        type="button"
+        disabled={pending}
+        aria-pressed={entity.interactionLocked}
+        onClick={() => onEntityLockChange(entity.entityId, !entity.interactionLocked)}
+      ><LockKeyhole size={14} />{entity.interactionLocked ? "解除建筑锁定" : "锁定建筑"}</button>
     </section>
     <section className="native-inspector-safe-actions" data-native-construction-stack="ordinary-single-v1">
       <strong>Rust 建筑堆叠</strong>
@@ -166,6 +178,7 @@ export function NativeFactoryInspectorPanel({
   inspector,
   multiSelection,
   pending,
+  onEntityLockChange,
   onRemoveEntity,
   onStackCountChange,
   onBeltLaneCountChange,
@@ -190,7 +203,7 @@ export function NativeFactoryInspectorPanel({
       <p>{complete ? "多选内容已经由同 revision 的 Rust 投影完整确认。" : "选择超过有界投影上限；修改功能保持关闭。"}</p>
     </section>;
   } else if (inspector.entity && !inspector.belt) {
-    content = <NativeEntitySummary entity={inspector.entity} pending={pending} onRemoveEntity={onRemoveEntity} onStackCountChange={onStackCountChange} />;
+    content = <NativeEntitySummary entity={inspector.entity} pending={pending} onEntityLockChange={onEntityLockChange} onRemoveEntity={onRemoveEntity} onStackCountChange={onStackCountChange} />;
   } else if (inspector.belt && !inspector.entity) {
     content = <NativeBeltSummary belt={inspector.belt} pending={pending} onLaneCountChange={onBeltLaneCountChange} onPriorityChange={onBeltPriorityChange} onRemove={onRemoveBelt} />;
   } else {

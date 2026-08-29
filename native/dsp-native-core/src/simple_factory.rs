@@ -4565,7 +4565,7 @@ fn simulate_step(
     }
     profile_mark!("research-reset");
 
-    crate::construction::run_centers(
+    let construction_quantum_wake = crate::construction::run_centers(
         state,
         base,
         entities,
@@ -4573,6 +4573,7 @@ fn simulate_step(
         &power_factors,
         &state.factory_topology.construction_center_indices,
     )?;
+    quantum_step_runtime.wake_construction_centers(&construction_quantum_wake.center_indices);
     profile_mark!("construction");
 
     crate::dyson::run_ray_receivers(

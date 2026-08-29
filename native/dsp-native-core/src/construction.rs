@@ -35,6 +35,20 @@ pub(crate) struct QuantumDemand {
     pub amount: u64,
 }
 
+/// Runtime-only reverse-wake evidence for the quantum construction demand
+/// directory. These rows are entity indexes from the immutable factory
+/// topology; they are never persisted or included in a public save hash.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ConstructionQuantumWake {
+    pub center_indices: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RequirementReservation {
+    available: bool,
+    changed: bool,
+}
+
 fn finite_number(value: Option<&Value>) -> f64 {
     value
         .and_then(Value::as_f64)
@@ -1358,7 +1372,7 @@ fn reserve_requirements(
     planet_id: &str,
     job: &mut Map<String, Value>,
     requirements: &[ItemAmount],
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<RequirementReservation> {
     let mut inventory = job
         .get("inventory")
         .and_then(Value::as_object)
@@ -1372,6 +1386,7 @@ fn reserve_requirements(
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    let mut changed = false;
     for requirement in requirements {
         let required = floor_amount(requirement.amount);
         let already_reserved = required.min(inventory_amount(&inventory, &requirement.item_id));
@@ -1389,8 +1404,12 @@ fn reserve_requirements(
         )?;
         remaining -= from_quantum;
         if remaining > 0.0 {
-            return Ok(false);
+            return Ok(RequirementReservation {
+                available: false,
+                changed: false,
+            });
         }
+        changed |= from_tray > 0.0 || from_quantum > 0.0;
         let current = inventory_amount(&inventory, &requirement.item_id);
         set_inventory_amount(
             &mut inventory,
@@ -1409,7 +1428,10 @@ fn reserve_requirements(
     } else {
         buffers.remove(entity_id);
     }
-    Ok(true)
+    Ok(RequirementReservation {
+        available: true,
+        changed,
+    })
 }
 
 fn repair_job(
@@ -1781,7 +1803,7 @@ pub(crate) fn run_centers(
     seconds: f64,
     power_factors: &HashMap<usize, f64>,
     center_indices: &[usize],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ConstructionQuantumWake> {
     let mut automation = base
         .remove("constructionAutomation")
         .and_then(|value| value.as_object().cloned())
@@ -1795,6 +1817,7 @@ pub(crate) fn run_centers(
         .remove("quantumMaterialBuffer")
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
+    let mut wake_centers = BTreeSet::new();
     for &entity_index in center_indices {
         if entity_index >= entities.len() {
             bail!("native construction center index is outside the entity table");
@@ -1811,6 +1834,10 @@ pub(crate) fn run_centers(
             .unwrap_or_default()
             .to_owned();
         let power_factor = power_factors.get(&entity_index).copied().unwrap_or(0.0);
+        let demand_was_power_blocked = snapshot
+            .get("powerFactor")
+            .and_then(Value::as_f64)
+            .is_some_and(|factor| factor <= EPSILON);
         let center = entities[entity_index]
             .as_object_mut()
             .ok_or_else(|| anyhow!("native construction center is invalid"))?;
@@ -1822,6 +1849,13 @@ pub(crate) fn run_centers(
             )?;
         } else {
             center.remove("powerFactor");
+        }
+        let demand_is_power_blocked = center
+            .get("powerFactor")
+            .and_then(Value::as_f64)
+            .is_some_and(|factor| factor <= EPSILON);
+        if demand_was_power_blocked != demand_is_power_blocked {
+            wake_centers.insert(entity_index);
         }
         if !enabled || power_factor <= EPSILON {
             set_number(center, "utilization", 0.0)?;
@@ -1841,7 +1875,14 @@ pub(crate) fn run_centers(
             remaining_iterations -= 1;
             if job.is_none() {
                 let Some(target) = select_target(state, base, &automation, &jobs) else {
+                    let buffered = buffers
+                        .get(&entity_id)
+                        .and_then(Value::as_object)
+                        .is_some_and(|inventory| !inventory.is_empty());
                     refund_quantum_buffer(base, &mut buffers, &entity_id, &planet_id)?;
+                    if buffered {
+                        wake_centers.insert(entity_index);
+                    }
                     break;
                 };
                 let empty_quantum = Map::new();
@@ -1877,6 +1918,7 @@ pub(crate) fn run_centers(
                     remaining_work,
                     machine_count,
                 )? {
+                    wake_centers.insert(entity_index);
                     remaining_work = (remaining_work - used_work).max(0.0);
                     completed += batch_completed;
                     worked = true;
@@ -1884,6 +1926,7 @@ pub(crate) fn run_centers(
                     continue;
                 }
                 job = planned_job_value(&target, plan).as_object().cloned();
+                wake_centers.insert(entity_index);
             }
             let current_job = job
                 .as_mut()
@@ -1896,6 +1939,7 @@ pub(crate) fn run_centers(
             let step_index = floor_amount(finite_number(current_job.get("stepIndex"))) as usize;
             let Some(step_value) = steps.get(step_index) else {
                 job = None;
+                wake_centers.insert(entity_index);
                 continue;
             };
             let step = parse_step(step_value)?;
@@ -1915,20 +1959,30 @@ pub(crate) fn run_centers(
                 requirements_available(job_inventory, planet_tray, quantum, &requirements)
             };
             if !inputs_available {
+                // This is the exact transition that creates a direct quantum
+                // demand for a previously sleeping center. Retained positive
+                // demands need no repeated global scan; the center remains in
+                // the active set until a later probe proves it quiescent.
+                wake_centers.insert(entity_index);
                 if repair_job(state, base, &buffers, &entity_id, &planet_id, current_job)? {
                     continue;
                 }
                 break;
             }
-            if !reserve_requirements(
+            let reservation = reserve_requirements(
                 base,
                 &mut buffers,
                 &entity_id,
                 &planet_id,
                 current_job,
                 &requirements,
-            )? {
+            )?;
+            if !reservation.available {
+                wake_centers.insert(entity_index);
                 break;
+            }
+            if reservation.changed {
+                wake_centers.insert(entity_index);
             }
             let duration = step_duration(state, base, &step)?;
             let elapsed = finite_number(current_job.get("elapsedSeconds"));
@@ -1956,8 +2010,10 @@ pub(crate) fn run_centers(
                 current_job,
                 &step,
             )? {
+                wake_centers.insert(entity_index);
                 break;
             }
+            wake_centers.insert(entity_index);
             if let Step::Building { construction_id } = &step {
                 completed += state
                     .catalog
@@ -2006,7 +2062,9 @@ pub(crate) fn run_centers(
         "constructionAutomation".to_owned(),
         Value::Object(automation),
     );
-    Ok(())
+    Ok(ConstructionQuantumWake {
+        center_indices: wake_centers.into_iter().collect(),
+    })
 }
 
 fn plan_construction_center_probes<R, F>(
@@ -2118,6 +2176,66 @@ fn collect_quantum_demands_with_runtime(
         result.extend(demands);
     }
     Ok(result)
+}
+
+fn collect_quantum_demands_for_center_indices_with_runtime(
+    runtime: &DeterministicRuntime,
+    catalog: &RuntimeCatalog,
+    base: &Map<String, Value>,
+    automation: &Map<String, Value>,
+    jobs: &Map<String, Value>,
+    entities: &[Value],
+    center_indices: &[usize],
+) -> anyhow::Result<Vec<QuantumDemand>> {
+    let centers = center_indices
+        .iter()
+        .map(|&entity_index| {
+            entities
+                .get(entity_index)
+                .and_then(Value::as_object)
+                .filter(|entity| string_at(entity, "buildingId") == Some("construction_center"))
+                .ok_or_else(|| anyhow!("native construction center index is stale"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let planned = plan_construction_center_probes(runtime, &centers, |_, center| {
+        probe_quantum_demands(catalog, base, automation, jobs, center)
+    })?;
+    let demand_count = planned.iter().map(Vec::len).sum();
+    let mut result = Vec::with_capacity(demand_count);
+    for demands in planned {
+        result.extend(demands);
+    }
+    Ok(result)
+}
+
+pub(crate) fn quantum_demands_for_center_indices(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    center_indices: &[usize],
+) -> anyhow::Result<Vec<QuantumDemand>> {
+    let automation = automation(base)?;
+    if automation.get("enabled").and_then(Value::as_bool) != Some(true)
+        || automation
+            .get("quantumSourceEnabled")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return Ok(Vec::new());
+    }
+    let jobs = automation
+        .get("jobs")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native construction jobs are missing"))?;
+    collect_quantum_demands_for_center_indices_with_runtime(
+        deterministic_runtime(),
+        state.catalog.as_ref(),
+        base,
+        automation,
+        jobs,
+        entities,
+        center_indices,
+    )
 }
 
 pub(crate) fn quantum_demands(

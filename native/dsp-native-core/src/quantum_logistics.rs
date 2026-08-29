@@ -202,6 +202,7 @@ impl ItemPlanIndex {
 #[derive(Debug, Clone)]
 pub(crate) struct QuantumLogisticsDirectory {
     topology: Arc<FactoryTopology>,
+    catalog: Option<Arc<crate::catalog::RuntimeCatalog>>,
     entity_count: usize,
     endpoint_indices: Vec<usize>,
     item_ids: Vec<Arc<str>>,
@@ -214,13 +215,20 @@ pub(crate) struct QuantumLogisticsDirectory {
     upload_by_item: ItemPlanIndex,
     collector_by_item: ItemPlanIndex,
     download_by_station: EntityPlanRanges,
+    /// Construction centers are kept in the same exact entity-ID order used
+    /// by the historical full scan. The reverse table is sorted by entity row
+    /// so construction progress/power evidence can wake one center in O(log C).
+    construction_center_indices: Vec<usize>,
+    construction_row_by_entity: Vec<(u32, u32)>,
     pending_flush: BTreeSet<usize>,
     pending_download: BTreeSet<usize>,
+    pending_construction_download: BTreeSet<usize>,
     pending_boundary_upload: BTreeSet<usize>,
     runtime_written_station_indices: BTreeSet<usize>,
     inventory_written_station_indices: BTreeSet<usize>,
     flush_all_pending: bool,
     download_all_pending: bool,
+    construction_download_all_pending: bool,
     boundary_upload_all_pending: bool,
     tower_stack_terms: Vec<f64>,
     tower_stacks: f64,
@@ -228,12 +236,14 @@ pub(crate) struct QuantumLogisticsDirectory {
     cached_legacy_level_bits: Option<u64>,
     cached_legacy_bandwidth: RuntimeBandwidth,
     fallback_full_scan: bool,
+    construction_fallback_full_scan: bool,
 }
 
 impl Default for QuantumLogisticsDirectory {
     fn default() -> Self {
         Self {
             topology: Arc::new(FactoryTopology::default()),
+            catalog: None,
             entity_count: 0,
             endpoint_indices: Vec::new(),
             item_ids: Vec::new(),
@@ -246,13 +256,17 @@ impl Default for QuantumLogisticsDirectory {
             upload_by_item: ItemPlanIndex::default(),
             collector_by_item: ItemPlanIndex::default(),
             download_by_station: EntityPlanRanges::default(),
+            construction_center_indices: Vec::new(),
+            construction_row_by_entity: Vec::new(),
             pending_flush: BTreeSet::new(),
             pending_download: BTreeSet::new(),
+            pending_construction_download: BTreeSet::new(),
             pending_boundary_upload: BTreeSet::new(),
             runtime_written_station_indices: BTreeSet::new(),
             inventory_written_station_indices: BTreeSet::new(),
             flush_all_pending: true,
             download_all_pending: true,
+            construction_download_all_pending: true,
             boundary_upload_all_pending: true,
             tower_stack_terms: Vec::new(),
             tower_stacks: 0.0,
@@ -264,6 +278,7 @@ impl Default for QuantumLogisticsDirectory {
                 collector_stacks: 0.0,
             },
             fallback_full_scan: true,
+            construction_fallback_full_scan: true,
         }
     }
 }
@@ -785,8 +800,10 @@ impl QuantumLogisticsDirectory {
     pub(crate) fn build(state: &CoreState, entities: &[Value]) -> Self {
         let mut directory = Self {
             topology: Arc::clone(&state.factory_topology),
+            catalog: Some(Arc::clone(&state.catalog)),
             entity_count: entities.len(),
             fallback_full_scan: state.factory_topology.quantum_endpoint_full_scan_required,
+            construction_fallback_full_scan: false,
             ..Self::default()
         };
         let mut upload_positions = HashMap::new();
@@ -969,6 +986,63 @@ impl QuantumLogisticsDirectory {
             tower_stacks: directory.tower_stacks,
             collector_stacks: directory.collector_stacks,
         };
+        let mut construction_centers =
+            Vec::with_capacity(state.factory_topology.construction_center_indices.len());
+        for &entity_index in &state.factory_topology.construction_center_indices {
+            let Some(center) = entities.get(entity_index).and_then(Value::as_object) else {
+                directory.construction_fallback_full_scan = true;
+                continue;
+            };
+            let Some(entity_id) = string_at(center, "id").filter(|id| !id.is_empty()) else {
+                directory.construction_fallback_full_scan = true;
+                continue;
+            };
+            if string_at(center, "buildingId") != Some("construction_center")
+                || state
+                    .symbols
+                    .resolve(state.entities.buildings[entity_index])
+                    != Some("construction_center")
+                || entity_id != &state.entities.ids[entity_index]
+            {
+                directory.construction_fallback_full_scan = true;
+                continue;
+            }
+            // Extension IDs are valid in the permissive full scan. Until the
+            // native directory has a signed content-pack contract for them,
+            // retain exact behavior by failing closed to that oracle.
+            if !entity_id.is_ascii() || entity_id.contains(':') {
+                directory.construction_fallback_full_scan = true;
+            }
+            construction_centers.push((entity_id.to_owned(), entity_index));
+        }
+        construction_centers.sort_by(|left, right| left.0.cmp(&right.0));
+        if construction_centers
+            .windows(2)
+            .any(|pair| pair[0].0 == pair[1].0)
+        {
+            directory.construction_fallback_full_scan = true;
+        }
+        directory.construction_center_indices = construction_centers
+            .iter()
+            .map(|(_, entity_index)| *entity_index)
+            .collect();
+        directory.construction_row_by_entity = directory
+            .construction_center_indices
+            .iter()
+            .enumerate()
+            .filter_map(|(row, &entity_index)| {
+                Some((u32::try_from(entity_index).ok()?, u32::try_from(row).ok()?))
+            })
+            .collect();
+        if directory.construction_row_by_entity.len() != directory.construction_center_indices.len()
+        {
+            directory.construction_fallback_full_scan = true;
+        }
+        directory
+            .construction_row_by_entity
+            .sort_unstable_by_key(|&(entity_index, _)| entity_index);
+        directory.construction_center_indices.shrink_to_fit();
+        directory.construction_row_by_entity.shrink_to_fit();
         directory
     }
 
@@ -1082,6 +1156,10 @@ impl QuantumLogisticsDirectory {
         self.collector_plans.len() + self.upload_plans.len()
     }
 
+    fn download_rows(&self) -> usize {
+        self.download_plans.len() + self.construction_center_indices.len()
+    }
+
     fn selected_plan_indices(
         &self,
         total_rows: usize,
@@ -1190,6 +1268,93 @@ impl QuantumLogisticsDirectory {
         (selected, scan)
     }
 
+    fn construction_center_matches(
+        &self,
+        state: &CoreState,
+        entities: &[Value],
+        construction_row: usize,
+    ) -> bool {
+        let Some(catalog) = self.catalog.as_ref() else {
+            return false;
+        };
+        if !Arc::ptr_eq(catalog, &state.catalog) {
+            return false;
+        }
+        let Some(&entity_index) = self.construction_center_indices.get(construction_row) else {
+            return false;
+        };
+        let Some(center) = entities.get(entity_index).and_then(Value::as_object) else {
+            return false;
+        };
+        string_at(center, "id") == Some(&state.entities.ids[entity_index])
+            && string_at(center, "buildingId") == Some("construction_center")
+            && state
+                .symbols
+                .resolve(state.entities.buildings[entity_index])
+                == Some("construction_center")
+    }
+
+    fn selected_construction_center_rows(
+        &self,
+        state: &CoreState,
+        entities: &[Value],
+    ) -> (Option<Vec<usize>>, QuantumActiveScan) {
+        let compatible = self.topology_matches(state, entities)
+            && self.catalog.is_some()
+            && !self.construction_fallback_full_scan;
+        let (selected, mut scan) = self.selected_plan_indices(
+            self.construction_center_indices.len(),
+            self.construction_download_all_pending,
+            &self.pending_construction_download,
+            compatible,
+        );
+        if selected.is_none() {
+            scan.selected_rows = self.construction_center_indices.len();
+            scan.total_rows = self.construction_center_indices.len();
+            scan.dense_fallback = true;
+            scan.directory_fallback = true;
+            return (None, scan);
+        }
+        if selected.as_ref().is_some_and(|rows| {
+            rows.iter()
+                .any(|&row| !self.construction_center_matches(state, entities, row))
+        }) {
+            scan.selected_rows = self.construction_center_indices.len();
+            scan.total_rows = self.construction_center_indices.len();
+            scan.dense_fallback = true;
+            scan.directory_fallback = true;
+            return (None, scan);
+        }
+        (selected, scan)
+    }
+
+    fn construction_center_indices_for_rows(&self, rows: &[usize]) -> Option<Vec<usize>> {
+        rows.iter()
+            .map(|&row| self.construction_center_indices.get(row).copied())
+            .collect()
+    }
+
+    fn construction_row_for_entity(&self, entity_index: usize) -> Option<usize> {
+        let entity_index = u32::try_from(entity_index).ok()?;
+        self.construction_row_by_entity
+            .binary_search_by_key(&entity_index, |&(candidate, _)| candidate)
+            .ok()
+            .and_then(|index| self.construction_row_by_entity.get(index))
+            .map(|&(_, row)| row as usize)
+    }
+
+    fn construction_demand_is_indexable(
+        &self,
+        state: &CoreState,
+        demand: &crate::construction::QuantumDemand,
+    ) -> bool {
+        demand.entity_id.is_ascii()
+            && !demand.entity_id.contains(':')
+            && demand.item_id.is_ascii()
+            && !demand.item_id.contains(':')
+            && state.catalog.items.contains_key(&demand.item_id)
+    }
+
     fn selected_boundary_upload_rows(
         &self,
         state: &CoreState,
@@ -1271,6 +1436,23 @@ impl QuantumLogisticsDirectory {
         }
     }
 
+    pub(crate) fn wake_construction_centers(&mut self, center_indices: &[usize]) {
+        if self.construction_download_all_pending {
+            return;
+        }
+        for &entity_index in center_indices {
+            let Some(row) = self.construction_row_for_entity(entity_index) else {
+                // A construction row outside the immutable directory means a
+                // topology owner changed without replacing this cache. Never
+                // guess: the next boundary must use the permissive oracle.
+                self.construction_fallback_full_scan = true;
+                self.pending_construction_download.clear();
+                return;
+            };
+            self.pending_construction_download.insert(row);
+        }
+    }
+
     fn wake_download_credits(&mut self, state: &CoreState, credits: &crate::belts::OutputCredits) {
         if self.download_all_pending {
             return;
@@ -1349,6 +1531,18 @@ impl QuantumLogisticsDirectory {
             }
         }
         self.pending_download.extend(retain);
+    }
+
+    fn commit_construction_download(&mut self, selected: &[usize], retain: BTreeSet<usize>) {
+        if self.construction_download_all_pending {
+            self.construction_download_all_pending = false;
+            self.pending_construction_download.clear();
+        } else {
+            for row in selected {
+                self.pending_construction_download.remove(row);
+            }
+        }
+        self.pending_construction_download.extend(retain);
     }
 
     fn commit_boundary_upload(&mut self, selected: &[usize], retain: BTreeSet<usize>) {
@@ -1461,6 +1655,7 @@ impl QuantumLogisticsDirectory {
             self.item_by_id.capacity() * (size_of::<(Arc<str>, u32)>() + size_of::<u8>());
         let pending_tree_bytes = (self.pending_flush.len()
             + self.pending_download.len()
+            + self.pending_construction_download.len()
             + self.pending_boundary_upload.len()
             + self.runtime_written_station_indices.len()
             + self.inventory_written_station_indices.len())
@@ -1472,6 +1667,8 @@ impl QuantumLogisticsDirectory {
             + self.collector_plans.capacity() * size_of::<QuantumCollectorPlan>()
             + self.upload_plans.capacity() * size_of::<QuantumSlotPlan>()
             + self.download_plans.capacity() * size_of::<QuantumSlotPlan>()
+            + self.construction_center_indices.capacity() * size_of::<usize>()
+            + self.construction_row_by_entity.capacity() * size_of::<(u32, u32)>()
             + self.upload_flush_overrides.capacity() * size_of::<QuantumFlushOverride>()
             + self.upload_by_station.estimated_bytes() as usize
             + self.upload_by_item.estimated_bytes() as usize
@@ -1479,6 +1676,15 @@ impl QuantumLogisticsDirectory {
             + self.download_by_station.estimated_bytes() as usize
             + self.tower_stack_terms.capacity() * size_of::<f64>()
             + pending_tree_bytes) as u64
+    }
+}
+
+fn combined_active_scan(left: QuantumActiveScan, right: QuantumActiveScan) -> QuantumActiveScan {
+    QuantumActiveScan {
+        selected_rows: left.selected_rows.saturating_add(right.selected_rows),
+        total_rows: left.total_rows.saturating_add(right.total_rows),
+        dense_fallback: left.dense_fallback || right.dense_fallback,
+        directory_fallback: left.directory_fallback || right.directory_fallback,
     }
 }
 
@@ -2371,14 +2577,18 @@ pub(crate) fn settle_active_downloads(
         return Ok((
             None,
             QuantumActiveScan {
-                total_rows: directory.download_plans.len(),
+                total_rows: directory.download_rows(),
                 ..QuantumActiveScan::default()
             },
         ));
     }
     directory.wake_download_credits(state, credits);
-    let (selected, scan) = directory.selected_download_plans(state, entities);
-    let Some(selected) = selected else {
+    let (selected, station_scan) = directory.selected_download_plans(state, entities);
+    let (selected_construction_rows, construction_scan) =
+        directory.selected_construction_center_rows(state, entities);
+    let mut scan = combined_active_scan(station_scan, construction_scan);
+    let (Some(selected), Some(indexed_construction_rows)) = (selected, selected_construction_rows)
+    else {
         let flow = settle_downloads(state, base, entities, credits, boundary_second, seconds)?;
         directory.mark_fallback_download_runtime_rows();
         return Ok((flow, scan));
@@ -2431,7 +2641,44 @@ pub(crate) fn settle_active_downloads(
             },
         );
     }
-    let construction_demands = crate::construction::quantum_demands(state, base, entities)?
+    let center_indices = directory
+        .construction_center_indices_for_rows(&indexed_construction_rows)
+        .ok_or_else(|| anyhow!("native construction quantum row index is invalid"))?;
+    let construction_demands = crate::construction::quantum_demands_for_center_indices(
+        state,
+        base,
+        entities,
+        &center_indices,
+    )?;
+    let selected_construction_rows_by_id = indexed_construction_rows
+        .iter()
+        .filter_map(|&row| {
+            let entity_index = directory.construction_center_indices.get(row).copied()?;
+            Some((state.entities.ids[entity_index].to_string(), row))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if construction_demands.iter().any(|demand| {
+        !directory.construction_demand_is_indexable(state, demand)
+            || !selected_construction_rows_by_id.contains_key(&demand.entity_id)
+    }) {
+        // A valid extension can still be simulated by the permissive oracle,
+        // but bandwidth and request order must also come from that oracle.
+        // Fall back before mutating either the network or an endpoint.
+        scan.selected_rows = directory.download_rows();
+        scan.total_rows = directory.download_rows();
+        scan.dense_fallback = true;
+        scan.directory_fallback = true;
+        let flow = settle_downloads(state, base, entities, credits, boundary_second, seconds)?;
+        directory.mark_fallback_download_runtime_rows();
+        return Ok((flow, scan));
+    }
+    let mut construction_retain = BTreeSet::new();
+    for demand in &construction_demands {
+        if let Some(&row) = selected_construction_rows_by_id.get(&demand.entity_id) {
+            construction_retain.insert(row);
+        }
+    }
+    let construction_demands = construction_demands
         .into_iter()
         .map(|demand| (demand.key.clone(), demand))
         .collect::<BTreeMap<_, _>>();
@@ -2486,6 +2733,7 @@ pub(crate) fn settle_active_downloads(
     network.runtime_flow = Some(flow.clone());
     write_network(base, &network)?;
     directory.commit_download(&selected, retain);
+    directory.commit_construction_download(&indexed_construction_rows, construction_retain);
     Ok((Some(flow), scan))
 }
 
@@ -3243,6 +3491,177 @@ mod tests {
         })
     }
 
+    fn construction_center(id: impl Into<String>, power_factor: f64) -> Value {
+        serde_json::json!({
+            "id": id.into(),
+            "kind": "machine",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "construction_center",
+            "recipeId": null,
+            "machineCount": 1,
+            "inputs": {},
+            "outputs": {},
+            "powerFactor": power_factor,
+            "progress": 0,
+            "stationLastTransfer": 0,
+            "productionRate": 0,
+            "utilization": 0,
+            "routingCursor": 0
+        })
+    }
+
+    fn construction_quantum_fixture(
+        center_count: usize,
+    ) -> (CoreState, Map<String, Value>, Vec<Value>) {
+        let mut entities = vec![quantum_station(
+            "quantum-bandwidth",
+            "iron_ore",
+            "supply",
+            0.0,
+            0.0,
+            vec![],
+        )];
+        entities.extend(
+            (0..center_count).map(|index| construction_center(format!("center-{index:05}"), 1.0)),
+        );
+        let mut state = crate::simple_factory::tests::fixture_state(&entities);
+        let mut catalog = (*state.catalog).clone();
+        catalog.constructions.insert(
+            "widget".to_owned(),
+            crate::catalog::ConstructionDefinition {
+                id: "widget".to_owned(),
+                output_amount: 1.0,
+                automation_order: 0,
+                required_tech_id: None,
+                costs: vec![crate::catalog::ItemAmount {
+                    item_id: "iron_ore".to_owned(),
+                    amount: 10.0,
+                }],
+            },
+        );
+        state.catalog = Arc::new(catalog);
+        assert_eq!(
+            state.factory_topology.construction_center_indices.len(),
+            center_count
+        );
+        let jobs = (0..center_count)
+            .map(|index| {
+                (
+                    format!("center-{index:05}"),
+                    serde_json::json!({
+                        "constructionId": "widget",
+                        "steps": [{ "kind": "building", "constructionId": "widget" }],
+                        "stepIndex": 0,
+                        "elapsedSeconds": 0,
+                        "inventory": {},
+                        "recipeDecisions": []
+                    }),
+                )
+            })
+            .collect::<Map<_, _>>();
+        let mut base = active_quantum_base(0);
+        base.insert("tray".to_owned(), serde_json::json!({ "iron_ore": 0 }));
+        base.insert(
+            "planetTrays".to_owned(),
+            serde_json::json!({ "home": { "iron_ore": 0 } }),
+        );
+        base.insert(
+            "construction".to_owned(),
+            serde_json::json!({ "widget": 0 }),
+        );
+        base.insert("portableFleet".to_owned(), serde_json::json!({}));
+        base.insert(
+            "constructionAutomation".to_owned(),
+            serde_json::json!({
+                "enabled": true,
+                "quantumSourceEnabled": true,
+                "jobs": jobs,
+                "quantumMaterialBuffer": {},
+                "targetStock": { "widget": center_count },
+                "cursor": 0,
+                "totalCrafted": 0,
+                "destroyedByproducts": {}
+            }),
+        );
+        set_test_network_item(&mut base, "iron_ore", "1000000");
+        (state, base, entities)
+    }
+
+    fn set_construction_quantum_item(
+        base: &mut Map<String, Value>,
+        center_id: &str,
+        item_id: &str,
+        amount: f64,
+    ) {
+        let automation = base
+            .get_mut("constructionAutomation")
+            .and_then(Value::as_object_mut)
+            .expect("construction automation");
+        let buffers = automation
+            .get_mut("quantumMaterialBuffer")
+            .and_then(Value::as_object_mut)
+            .expect("construction quantum buffers");
+        if amount < 1.0 {
+            if let Some(buffer) = buffers.get_mut(center_id).and_then(Value::as_object_mut) {
+                buffer.remove(item_id);
+                if buffer.is_empty() {
+                    buffers.remove(center_id);
+                }
+            }
+            return;
+        }
+        if !buffers.contains_key(center_id) {
+            buffers.insert(center_id.to_owned(), Value::Object(Map::new()));
+        }
+        buffers
+            .get_mut(center_id)
+            .and_then(Value::as_object_mut)
+            .expect("construction center buffer")
+            .insert(item_id.to_owned(), Value::from(amount));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn settle_construction_download_pair(
+        state: &CoreState,
+        active_base: &mut Map<String, Value>,
+        active_entities: &mut [Value],
+        oracle_base: &mut Map<String, Value>,
+        oracle_entities: &mut [Value],
+        directory: &mut QuantumLogisticsDirectory,
+        boundary_second: f64,
+        seconds: f64,
+    ) -> QuantumActiveScan {
+        let credits = crate::belts::OutputCredits::default();
+        let route_ledger = crate::station_route_ledger::StationRouteLedger::default();
+        let (_, scan) = settle_active_downloads(
+            state,
+            active_base,
+            active_entities,
+            &credits,
+            boundary_second,
+            seconds,
+            directory,
+            &route_ledger,
+        )
+        .expect("active construction quantum settlement");
+        settle_downloads(
+            state,
+            oracle_base,
+            oracle_entities,
+            &credits,
+            boundary_second,
+            seconds,
+        )
+        .expect("full construction quantum settlement");
+        assert_eq!(
+            quantum_oracle_bytes(active_base, active_entities),
+            quantum_oracle_bytes(oracle_base, oracle_entities),
+            "construction quantum boundary {boundary_second} / {seconds}s"
+        );
+        scan
+    }
+
     fn set_test_item(entity: &mut Value, record: &str, item_id: &str, amount: f64) {
         set_item_amount(
             entity.as_object_mut().expect("quantum test station"),
@@ -3849,6 +4268,382 @@ mod tests {
         }
         assert!(saw_sparse_flush);
         assert!(saw_sparse_download);
+    }
+
+    #[test]
+    fn construction_active_downloads_match_full_scan_bytes_at_1_5_and_60_seconds() {
+        for seconds in [1.0, 5.0, 60.0] {
+            let (state, source_base, source_entities) = construction_quantum_fixture(8);
+            let mut active_base = source_base.clone();
+            let mut oracle_base = source_base;
+            let mut active_entities = source_entities.clone();
+            let mut oracle_entities = source_entities;
+            let mut directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+            let scan = settle_construction_download_pair(
+                &state,
+                &mut active_base,
+                &mut active_entities,
+                &mut oracle_base,
+                &mut oracle_entities,
+                &mut directory,
+                seconds,
+                seconds,
+            );
+            assert_eq!(scan.selected_rows, 8);
+            assert_eq!(scan.total_rows, 8);
+            assert!(!scan.directory_fallback);
+        }
+    }
+
+    #[test]
+    fn construction_active_queue_is_quiet_and_reverse_wakes_inventory_and_power() {
+        let (state, source_base, source_entities) = construction_quantum_fixture(16);
+        let mut active_base = source_base.clone();
+        let mut oracle_base = source_base;
+        let mut active_entities = source_entities.clone();
+        let mut oracle_entities = source_entities;
+        let mut directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+
+        let first = settle_construction_download_pair(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut directory,
+            5.0,
+            5.0,
+        );
+        assert_eq!(first.selected_rows, 16);
+        let retained = settle_construction_download_pair(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut directory,
+            10.0,
+            5.0,
+        );
+        assert_eq!(retained.selected_rows, 16);
+        let quiet = settle_construction_download_pair(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut directory,
+            15.0,
+            5.0,
+        );
+        assert_eq!(quiet.selected_rows, 0, "satisfied centers must sleep");
+
+        set_construction_quantum_item(&mut active_base, "center-00003", "iron_ore", 0.0);
+        set_construction_quantum_item(&mut oracle_base, "center-00003", "iron_ore", 0.0);
+        let center_entity_index = 4;
+        directory.wake_construction_centers(&[center_entity_index]);
+        let inventory_wake = settle_construction_download_pair(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut directory,
+            20.0,
+            5.0,
+        );
+        assert_eq!(inventory_wake.selected_rows, 1);
+        assert!(!inventory_wake.dense_fallback);
+
+        // A demand with no network inventory stays active. Refilling the
+        // inventory therefore needs no global construction rescan and still
+        // delivers on the next boundary.
+        set_construction_quantum_item(&mut active_base, "center-00003", "iron_ore", 0.0);
+        set_construction_quantum_item(&mut oracle_base, "center-00003", "iron_ore", 0.0);
+        set_test_network_item(&mut active_base, "iron_ore", "0");
+        set_test_network_item(&mut oracle_base, "iron_ore", "0");
+        directory.wake_construction_centers(&[center_entity_index]);
+        let empty_inventory = settle_construction_download_pair(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut directory,
+            25.0,
+            5.0,
+        );
+        assert_eq!(empty_inventory.selected_rows, 1);
+        set_test_network_item(&mut active_base, "iron_ore", "10");
+        set_test_network_item(&mut oracle_base, "iron_ore", "10");
+        let inventory_refill = settle_construction_download_pair(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut directory,
+            30.0,
+            5.0,
+        );
+        assert_eq!(inventory_refill.selected_rows, 1);
+
+        set_construction_quantum_item(&mut active_base, "center-00003", "iron_ore", 0.0);
+        set_construction_quantum_item(&mut oracle_base, "center-00003", "iron_ore", 0.0);
+        active_entities[center_entity_index]["powerFactor"] = Value::from(0.0);
+        oracle_entities[center_entity_index]["powerFactor"] = Value::from(0.0);
+        directory.wake_construction_centers(&[center_entity_index]);
+        let power_off = settle_construction_download_pair(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut directory,
+            35.0,
+            5.0,
+        );
+        assert_eq!(power_off.selected_rows, 1);
+        active_entities[center_entity_index]["powerFactor"] = Value::from(1.0);
+        oracle_entities[center_entity_index]["powerFactor"] = Value::from(1.0);
+        directory.wake_construction_centers(&[center_entity_index]);
+        let power_on = settle_construction_download_pair(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut directory,
+            40.0,
+            5.0,
+        );
+        assert_eq!(power_on.selected_rows, 1);
+    }
+
+    #[test]
+    fn construction_capacity_change_rebuild_wakes_and_matches_full_scan() {
+        let (state, source_base, mut source_entities) = construction_quantum_fixture(8);
+        source_entities[0]["machineCount"] = Value::from(0.0);
+        let mut active_base = source_base.clone();
+        let mut oracle_base = source_base;
+        let mut active_entities = source_entities.clone();
+        let mut oracle_entities = source_entities;
+        let mut directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+
+        let blocked = settle_construction_download_pair(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut directory,
+            5.0,
+            5.0,
+        );
+        assert_eq!(blocked.selected_rows, 8);
+
+        // A topology command owns the immutable directory replacement. The
+        // replacement both refreshes quantum bandwidth and marks every center
+        // pending, so a newly installed tower cannot leave demand asleep.
+        active_entities[0]["machineCount"] = Value::from(1.0);
+        oracle_entities[0]["machineCount"] = Value::from(1.0);
+        directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+        let capacity_wake = settle_construction_download_pair(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut directory,
+            10.0,
+            5.0,
+        );
+        assert_eq!(capacity_wake.selected_rows, 8);
+        assert!(!capacity_wake.directory_fallback);
+        assert!(
+            active_base["constructionAutomation"]["quantumMaterialBuffer"]
+                .as_object()
+                .is_some_and(|buffers| !buffers.is_empty())
+        );
+    }
+
+    #[test]
+    fn construction_active_queue_uses_exact_three_quarters_dense_fallback() {
+        let (state, source_base, source_entities) = construction_quantum_fixture(4);
+        let mut active_base = source_base.clone();
+        let mut oracle_base = source_base;
+        let mut active_entities = source_entities.clone();
+        let mut oracle_entities = source_entities;
+        let mut directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+        for boundary in [5.0, 10.0, 15.0] {
+            settle_construction_download_pair(
+                &state,
+                &mut active_base,
+                &mut active_entities,
+                &mut oracle_base,
+                &mut oracle_entities,
+                &mut directory,
+                boundary,
+                5.0,
+            );
+        }
+        for index in 0..3 {
+            let center_id = format!("center-{index:05}");
+            set_construction_quantum_item(&mut active_base, &center_id, "iron_ore", 0.0);
+            set_construction_quantum_item(&mut oracle_base, &center_id, "iron_ore", 0.0);
+        }
+        directory.wake_construction_centers(&[1, 2, 3]);
+        let dense = settle_construction_download_pair(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut directory,
+            20.0,
+            5.0,
+        );
+        assert_eq!(dense.selected_rows, 4);
+        assert_eq!(dense.total_rows, 4);
+        assert!(dense.dense_fallback);
+        assert!(!dense.directory_fallback);
+    }
+
+    #[test]
+    fn construction_directory_mod_catalog_and_topology_mismatch_fail_closed() {
+        let (state, source_base, source_entities) = construction_quantum_fixture(2);
+
+        let mut catalog_state = state.clone();
+        catalog_state.catalog = Arc::new((*state.catalog).clone());
+        let mut catalog_base = source_base.clone();
+        let mut catalog_oracle_base = source_base.clone();
+        let mut catalog_entities = source_entities.clone();
+        let mut catalog_oracle_entities = source_entities.clone();
+        let mut catalog_directory = QuantumLogisticsDirectory::build(&state, &source_entities);
+        let catalog_scan = settle_construction_download_pair(
+            &catalog_state,
+            &mut catalog_base,
+            &mut catalog_entities,
+            &mut catalog_oracle_base,
+            &mut catalog_oracle_entities,
+            &mut catalog_directory,
+            5.0,
+            5.0,
+        );
+        assert!(catalog_scan.directory_fallback);
+
+        let mut topology_base = source_base.clone();
+        let mut topology_oracle_base = source_base.clone();
+        let mut topology_entities = source_entities.clone();
+        let mut topology_oracle_entities = source_entities.clone();
+        let mut topology_directory = QuantumLogisticsDirectory::build(&state, &source_entities);
+        topology_entities[1]["buildingId"] = Value::from("mod:construction_center");
+        topology_oracle_entities[1]["buildingId"] = Value::from("mod:construction_center");
+        topology_directory.wake_construction_centers(&[1]);
+        let topology_scan = settle_construction_download_pair(
+            &state,
+            &mut topology_base,
+            &mut topology_entities,
+            &mut topology_oracle_base,
+            &mut topology_oracle_entities,
+            &mut topology_directory,
+            5.0,
+            5.0,
+        );
+        assert!(topology_scan.directory_fallback);
+
+        let mut mod_entities = source_entities;
+        mod_entities[1]["id"] = Value::from("mod:center/Ω");
+        let mut mod_state = crate::simple_factory::tests::fixture_state(&mod_entities);
+        mod_state.catalog = Arc::clone(&state.catalog);
+        let mut mod_base = source_base;
+        let jobs = mod_base["constructionAutomation"]["jobs"]
+            .as_object_mut()
+            .expect("mod jobs");
+        let job = jobs.remove("center-00000").expect("original mod job");
+        jobs.insert("mod:center/Ω".to_owned(), job);
+        let mut mod_oracle_base = mod_base.clone();
+        let mut mod_active_entities = mod_entities.clone();
+        let mut mod_oracle_entities = mod_entities;
+        let mut mod_directory = QuantumLogisticsDirectory::build(&mod_state, &mod_active_entities);
+        let mod_scan = settle_construction_download_pair(
+            &mod_state,
+            &mut mod_base,
+            &mut mod_active_entities,
+            &mut mod_oracle_base,
+            &mut mod_oracle_entities,
+            &mut mod_directory,
+            5.0,
+            5.0,
+        );
+        assert!(mod_scan.directory_fallback);
+    }
+
+    #[test]
+    fn construction_persistent_and_segment_rebuilds_are_byte_identical_for_60_seconds() {
+        let (state, source_base, source_entities) = construction_quantum_fixture(12);
+        let mut persistent_base = source_base.clone();
+        let mut rebuilt_base = source_base;
+        let mut persistent_entities = source_entities.clone();
+        let mut rebuilt_entities = source_entities;
+        let mut persistent_directory =
+            QuantumLogisticsDirectory::build(&state, &persistent_entities);
+        let credits = crate::belts::OutputCredits::default();
+        let route_ledger = crate::station_route_ledger::StationRouteLedger::default();
+        let mut saw_sparse = false;
+
+        for boundary in (5_u64..=60).step_by(5) {
+            if boundary == 20 {
+                set_construction_quantum_item(
+                    &mut persistent_base,
+                    "center-00007",
+                    "iron_ore",
+                    0.0,
+                );
+                set_construction_quantum_item(&mut rebuilt_base, "center-00007", "iron_ore", 0.0);
+                persistent_directory.wake_construction_centers(&[8]);
+            }
+            if boundary == 35 {
+                persistent_entities[8]["powerFactor"] = Value::from(0.0);
+                rebuilt_entities[8]["powerFactor"] = Value::from(0.0);
+                persistent_directory.wake_construction_centers(&[8]);
+            }
+            if boundary == 45 {
+                persistent_entities[8]["powerFactor"] = Value::from(1.0);
+                rebuilt_entities[8]["powerFactor"] = Value::from(1.0);
+                persistent_directory.wake_construction_centers(&[8]);
+            }
+            let (_, scan) = settle_active_downloads(
+                &state,
+                &mut persistent_base,
+                &mut persistent_entities,
+                &credits,
+                boundary as f64,
+                5.0,
+                &mut persistent_directory,
+                &route_ledger,
+            )
+            .unwrap();
+            let mut rebuilt_directory = QuantumLogisticsDirectory::build(&state, &rebuilt_entities);
+            settle_active_downloads(
+                &state,
+                &mut rebuilt_base,
+                &mut rebuilt_entities,
+                &credits,
+                boundary as f64,
+                5.0,
+                &mut rebuilt_directory,
+                &route_ledger,
+            )
+            .unwrap();
+            saw_sparse |= scan.selected_rows < scan.total_rows;
+            assert_eq!(
+                quantum_oracle_bytes(&persistent_base, &persistent_entities),
+                quantum_oracle_bytes(&rebuilt_base, &rebuilt_entities),
+                "segmented construction boundary {boundary}"
+            );
+        }
+        assert!(saw_sparse);
     }
 
     #[test]

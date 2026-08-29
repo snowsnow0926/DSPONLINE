@@ -468,7 +468,7 @@ import {
   selectNativeDysonWorkspaceFrame,
 } from "./game/nativeDysonWorkspaceStore";
 import {
-  createNativeProjectedInteractionLockCommand,
+  createNativeProjectedInteractionLockCommandFromReadModels,
   createNativeProjectedPlanetRoleCommand,
   createNativeProjectedStationLimitsCommand,
   createNativeProjectedStationPriorityCommand,
@@ -527,6 +527,7 @@ import {
   type FactoryRunStatusReadModel,
   type FactoryViewportBoundsReadModel,
   type FactoryViewportReadModel,
+  type NativeFactoryProjectionIdentity,
   type PlanetNavigationReadModel,
 } from "./game/factoryReadModels";
 import {
@@ -2678,6 +2679,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const nativeFactoryProjectionPlanetId = nativePlayerAuthorityOwnsRuntime
     ? (nativeFactoryDiscoveredProjectionRoute?.planetId ?? "__native_route_unbound__" as PlanetId)
     : game.activePlanetId;
+  const nativeFactoryProjectionIdentityRef = useRef<NativeFactoryProjectionIdentity | null>(null);
+  nativeFactoryProjectionIdentityRef.current = nativePlayerAuthorityActiveFrame?.runId && nativeFactoryAuthoritativeRoute &&
+      nativeFactoryAuthoritativeRoute.sessionId === nativePlayerAuthorityActiveFrame.sessionId &&
+      nativeFactoryAuthoritativeRoute.revision === nativePlayerAuthorityActiveFrame.revision
+    ? Object.freeze({
+        sessionId: nativePlayerAuthorityActiveFrame.sessionId,
+        runId: nativePlayerAuthorityActiveFrame.runId,
+        revision: nativePlayerAuthorityActiveFrame.revision,
+        planetId: nativeFactoryAuthoritativeRoute.currentPlanetId,
+      })
+    : null;
   const factoryGestureRouteKey = nativePlayerAuthorityOwnsRuntime
     ? `${nativePlayerAuthorityBoundFrame?.sessionId ?? "unbound"}:${nativeFactoryProjectionPlanetId}`
     : `web:${game.activePlanetId}`;
@@ -2702,6 +2714,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const factoryThinViewRelatedEntityIds = useMemo(
     () => selectNativeFactorySelectionRelatedEntityIds(nativeFactoryThinViewSnapshot, {
       sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      runId: nativePlayerAuthorityActiveFrame?.runId ?? null,
       revision: factoryThinViewExpectedRevision,
       planetId: nativeFactoryProjectionPlanetId,
       selectedEntityIds: factoryThinViewSelectedEntityIds,
@@ -2714,6 +2727,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       nativeFactoryProjectionPlanetId,
       nativeFactoryThinViewSnapshot,
       nativePlayerAuthorityActiveFrame?.sessionId,
+      nativePlayerAuthorityActiveFrame?.runId,
     ],
   );
   const factoryInteractionConnectionEntityIds = useMemo(
@@ -2755,6 +2769,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     () => selectNativeAuthoritativeFactoryCanvasFrame(nativeFactoryThinViewSnapshot, {
       enabled: nativeFactoryThinViewMode === "native-authoritative" && nativeFactoryProjectionRouteReady,
       sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      runId: nativePlayerAuthorityActiveFrame?.runId ?? null,
       expectedRevision: factoryThinViewExpectedRevision,
       planetId: nativeFactoryProjectionPlanetId,
       bounds: nativeFactoryViewportBounds,
@@ -2778,6 +2793,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       nativeFactoryThinViewSnapshot,
       nativeFactoryViewportBounds,
       nativePlayerAuthorityActiveFrame?.sessionId,
+      nativePlayerAuthorityActiveFrame?.runId,
     ],
   );
   const nativeAuthoritativeFactoryCanvasFrameRef = useRef(nativeAuthoritativeFactoryCanvasFrame);
@@ -2786,6 +2802,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     () => selectNativeAuthoritativeFactoryInteractionRows(nativeAuthoritativeFactoryCanvasFrame, {
       enabled: nativeFactoryThinViewMode === "native-authoritative" && nativeFactoryProjectionRouteReady,
       sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      runId: nativePlayerAuthorityActiveFrame?.runId ?? null,
       revision: factoryThinViewExpectedRevision,
       planetId: nativeFactoryProjectionPlanetId,
       selectedEntityIds: factoryThinViewAllSelectedEntityIds,
@@ -2810,6 +2827,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       nativeAuthoritativeFactoryCanvasFrame,
       nativeFactoryThinViewMode,
       nativePlayerAuthorityActiveFrame?.sessionId,
+      nativePlayerAuthorityActiveFrame?.runId,
       selectedBeltId,
     ],
   );
@@ -3131,6 +3149,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       authoritySessionId: nativeFactoryThinViewMode === "native-authoritative"
         ? nativePlayerAuthorityActiveFrame?.sessionId ?? null
         : null,
+      authorityRunId: nativeFactoryThinViewMode === "native-authoritative"
+        ? nativePlayerAuthorityActiveFrame?.runId ?? null
+        : null,
       factory: {
         selectedEntityIds: factoryThinViewSelectedEntityIds,
         selectedBeltIds: factoryThinViewSelectedBeltIds,
@@ -3162,6 +3183,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativeFactoryThinViewActive,
     nativeFactoryThinViewMode,
     nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityActiveFrame?.runId,
     nativeCoreProjectionSessionId,
     windowsNativeCoreAvailable,
     windowsNativeCoreBetaEnabled,
@@ -14985,6 +15007,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const nativePendingFactoryInteractionRows = useMemo<FactoryInteractionRows>(() => ({
     source: "native-authoritative",
     revision: factoryThinViewExpectedRevision,
+    projectionIdentity: null,
     selectedEntities: [],
     selectedEntity: null,
     selectedBelt: null,
@@ -14999,6 +15022,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       source: "native-core",
       revision: factoryThinViewExpectedRevision,
       activePlanetId: nativeFactoryProjectionPlanetId,
+      projectionIdentity: null,
       selectedCount: 0,
       selectedBeltCount: 0,
       canLock: false,
@@ -15017,6 +15041,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       source: "native-core",
       revision: factoryThinViewExpectedRevision,
       activePlanetId: nativeFactoryProjectionPlanetId,
+      projectionIdentity: null,
       requestedEntityCount: 0,
       requestedBeltCount: 0,
       entityRows: { rows: [], totalCount: 0, truncated: false },
@@ -15140,21 +15165,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return false;
     }
     const selectionProjection = factoryInteractionRows.multiSelectionSummaryReadModel;
-    if (factorySelectionToolbarReadModel.source !== "native-core" ||
-      selectionProjection.source !== "native-core" ||
-      factorySelectionToolbarReadModel.revision === null ||
-      factoryInteractionRows.revision !== factorySelectionToolbarReadModel.revision ||
-      selectionProjection.revision !== factorySelectionToolbarReadModel.revision ||
-      selectionProjection.activePlanetId !== factorySelectionToolbarReadModel.activePlanetId ||
-      selectionProjection.requestedEntityCount !== factorySelectionToolbarReadModel.selectedCount) {
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const interactionIdentity = factoryInteractionRows.projectionIdentity;
+    if (!commandSource || !routeIdentity || !interactionIdentity ||
+      interactionIdentity.sessionId !== routeIdentity.sessionId || interactionIdentity.runId !== routeIdentity.runId ||
+      interactionIdentity.revision !== routeIdentity.revision || interactionIdentity.planetId !== routeIdentity.planetId ||
+      commandSource.sessionId !== routeIdentity.sessionId ||
+      commandSource.runId !== routeIdentity.runId || commandSource.baseRevision !== routeIdentity.revision) {
       setNotice("原生选区投影尚未完成当前 revision 校验；本次操作未应用");
       return false;
     }
     return commitNativeProjectedCommand(
-      factorySelectionToolbarReadModel.revision,
-      (baseRevision) => createNativeProjectedInteractionLockCommand({
-        baseRevision,
-        entityRows: selectionProjection.entityRows,
+      routeIdentity.revision,
+      () => createNativeProjectedInteractionLockCommandFromReadModels({
+        commandIdentity: routeIdentity,
+        toolbar: factorySelectionToolbarReadModel,
+        selection: selectionProjection,
         targetInteractionLocked,
       }),
       () => setNotice(targetInteractionLocked ? "已由 Windows 原生权威锁定所选建筑" : "已由 Windows 原生权威解锁所选建筑"),

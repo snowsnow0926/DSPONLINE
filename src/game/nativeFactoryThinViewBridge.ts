@@ -152,6 +152,14 @@ export function selectFactorySelectionToolbarReadModel(
     ...web,
     source: "native-core",
     revision: expectedRevision,
+    projectionIdentity: frame.authoritySessionId && frame.authorityRunId
+      ? Object.freeze({
+          sessionId: frame.authoritySessionId,
+          runId: frame.authorityRunId,
+          revision: expectedRevision,
+          planetId: frame.planetId,
+        })
+      : null,
   });
 }
 
@@ -312,6 +320,14 @@ export function selectFactoryMultiSelectionSummaryReadModel(
     ...web,
     source: "native-core",
     revision: expectedRevision,
+    projectionIdentity: frame.authoritySessionId && frame.authorityRunId
+      ? Object.freeze({
+          sessionId: frame.authoritySessionId,
+          runId: frame.authorityRunId,
+          revision: expectedRevision,
+          planetId: frame.planetId,
+        })
+      : null,
     entityRows: selection.entityRows,
     beltRows: selection.beltRows,
   });

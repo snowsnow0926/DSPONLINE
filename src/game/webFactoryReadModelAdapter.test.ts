@@ -160,6 +160,7 @@ describe("Web/PWA factory read-model adapter", () => {
       source: "web-game-state",
       revision: null,
       activePlanetId: "home",
+      projectionIdentity: null,
       selectedCount: 4,
       selectedBeltCount: 1,
       canLock: true,

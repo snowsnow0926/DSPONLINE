@@ -71,6 +71,7 @@ const ENTITY_RECORD_KEYS = new Set([
 export interface NativeAuthoritativeFactoryCanvasFrame {
   readonly source: "native-authoritative";
   readonly sessionId: string;
+  readonly runId: string;
   readonly revision: number;
   readonly planetId: PlanetId;
   readonly bounds: DesktopNativeCoreViewportProjectionV2Result["bounds"];
@@ -92,6 +93,7 @@ export interface NativeAuthoritativeFactoryCanvasFrame {
 export interface NativeAuthoritativeFactoryCanvasBinding {
   readonly enabled: boolean;
   readonly sessionId: string | null;
+  readonly runId: string | null;
   readonly expectedRevision: number;
   readonly planetId: PlanetId;
   readonly bounds: DesktopNativeCoreViewportProjectionV2Result["bounds"];
@@ -234,6 +236,7 @@ export function selectNativeAuthoritativeFactoryCanvasFrame(
   binding: NativeAuthoritativeFactoryCanvasBinding,
 ): NativeAuthoritativeFactoryCanvasFrame | null {
   if (!binding.enabled || binding.requestTruncated || !nonEmptyString(binding.sessionId) ||
+    !nonEmptyString(binding.runId) ||
     !Number.isSafeInteger(binding.expectedRevision) || binding.expectedRevision < 0 ||
     binding.requestedPinnedEntityIds.length > 32 || binding.requestedPinnedBeltIds.length > 64 ||
     new Set(binding.requestedPinnedEntityIds).size !== binding.requestedPinnedEntityIds.length ||
@@ -243,7 +246,8 @@ export function selectNativeAuthoritativeFactoryCanvasFrame(
     : null;
   const viewport = frame?.viewport;
   const shell = frame?.factory.shell;
-  if (!frame || frame.authoritySessionId !== binding.sessionId || frame.revision !== binding.expectedRevision ||
+  if (!frame || frame.authoritySessionId !== binding.sessionId || frame.authorityRunId !== binding.runId ||
+    frame.revision !== binding.expectedRevision ||
     frame.planetId !== binding.planetId || !viewport || viewport.schemaVersion !== 2 ||
     viewport.projectionType !== "viewport-v2" || viewport.revision !== binding.expectedRevision ||
     viewport.planetId !== binding.planetId || viewport.nextEntityCursor !== null ||
@@ -324,6 +328,7 @@ export function selectNativeAuthoritativeFactoryCanvasFrame(
   return Object.freeze({
     source: "native-authoritative",
     sessionId: binding.sessionId,
+    runId: binding.runId,
     revision: binding.expectedRevision,
     planetId: binding.planetId,
     bounds: Object.freeze({ ...viewport.bounds }),

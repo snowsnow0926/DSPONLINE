@@ -104,6 +104,7 @@ function snapshot(
   revision = 7,
   projection = viewport(revision),
   sessionId = "session-a",
+  runId = "run-a",
 ): NativeFactoryThinViewSnapshot {
   return {
     status: "ready",
@@ -112,6 +113,7 @@ function snapshot(
       revision,
       planetId: "home",
       authoritySessionId: sessionId,
+      authorityRunId: runId,
       factory: factory(revision),
       viewport: projection,
     },
@@ -122,6 +124,7 @@ function binding(overrides: Partial<NativeAuthoritativeFactoryCanvasBinding> = {
   return {
     enabled: true,
     sessionId: "session-a",
+    runId: "run-a",
     expectedRevision: 7,
     planetId: "home",
     bounds: BOUNDS,
@@ -150,6 +153,7 @@ describe("native authoritative factory canvas frame", () => {
   it.each([
     ["disabled", { enabled: false }],
     ["cross-session", { sessionId: "session-b" }],
+    ["cross-run", { runId: "run-b" }],
     ["cross-revision", { expectedRevision: 8 }],
     ["moved-viewport", { bounds: { minX: 100, minY: 0, maxX: 200, maxY: 100 } }],
     ["truncated-pins", { requestTruncated: true }],
@@ -226,6 +230,7 @@ describe("native authoritative factory canvas frame", () => {
     const result = await store.refresh(source, {
       expectedRevision: 11,
       authoritySessionId: "session-a",
+      authorityRunId: "run-a",
       factory: { selectedEntityIds: [], selectedBeltIds: [] },
       viewport: {
         planetId: "home",

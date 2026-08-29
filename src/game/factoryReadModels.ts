@@ -9,6 +9,14 @@
 
 export const FACTORY_READ_MODEL_SCHEMA = "factory-read-model-v1" as const;
 
+/** Renderer-only provenance for a main-owned Rust projection. */
+export interface NativeFactoryProjectionIdentity {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly planetId: string;
+}
+
 export const FACTORY_READ_MODEL_LIMITS = Object.freeze({
   planetRows: 64,
   selectedEntityRows: 64,
@@ -76,6 +84,7 @@ export interface FactorySelectionToolbarReadModel {
   readonly source: "web-game-state" | "native-core";
   readonly revision: number | null;
   readonly activePlanetId: string;
+  readonly projectionIdentity: NativeFactoryProjectionIdentity | null;
   readonly selectedCount: number;
   readonly selectedBeltCount: number;
   readonly canLock: boolean;
@@ -105,6 +114,7 @@ export interface FactoryMultiSelectionSummaryReadModel {
   readonly source: "web-game-state" | "native-core";
   readonly revision: number | null;
   readonly activePlanetId: string;
+  readonly projectionIdentity: NativeFactoryProjectionIdentity | null;
   readonly requestedEntityCount: number;
   readonly requestedBeltCount: number;
   readonly entityRows: BoundedReadModelRows<SelectedEntityReadModel>;

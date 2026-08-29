@@ -2,6 +2,9 @@ import { MAX_BUILDING_BUFFER_LIMIT, STATION_SLOT_COUNT } from "./engine";
 import {
   FACTORY_READ_MODEL_LIMITS,
   type BoundedReadModelRows,
+  type FactoryMultiSelectionSummaryReadModel,
+  type FactorySelectionToolbarReadModel,
+  type NativeFactoryProjectionIdentity,
   type SelectedEntityReadModel,
 } from "./factoryReadModels";
 import {
@@ -57,6 +60,13 @@ export type NativeProjectedInteractionLockEntityRow = Pick<
 export interface NativeProjectedInteractionLockCommandInput {
   readonly baseRevision: number;
   readonly entityRows: BoundedReadModelRows<NativeProjectedInteractionLockEntityRow>;
+  readonly targetInteractionLocked: boolean;
+}
+
+export interface NativeProjectedInteractionLockReadModelsInput {
+  readonly commandIdentity: NativeFactoryProjectionIdentity;
+  readonly toolbar: FactorySelectionToolbarReadModel;
+  readonly selection: FactoryMultiSelectionSummaryReadModel;
   readonly targetInteractionLocked: boolean;
 }
 
@@ -166,6 +176,45 @@ export function createNativeProjectedInteractionLockCommand(
     });
   }
   return command.changedEntities.length === 0 ? null : command;
+}
+
+function sameProjectionIdentity(
+  left: NativeFactoryProjectionIdentity | null,
+  right: NativeFactoryProjectionIdentity,
+): boolean {
+  return left !== null && left.sessionId === right.sessionId && left.runId === right.runId &&
+    left.revision === right.revision && left.planetId === right.planetId;
+}
+
+/**
+ * Admits a selection mutation only when every renderer model still belongs to
+ * the exact live Rust command source and active planet route.
+ */
+export function createNativeProjectedInteractionLockCommandFromReadModels(
+  input: NativeProjectedInteractionLockReadModelsInput,
+): SimulationCommandPatch | null {
+  const { commandIdentity, toolbar, selection } = input;
+  validateLogicalId(commandIdentity.sessionId, "原生投影命令 session ID");
+  validateLogicalId(commandIdentity.runId, "原生投影命令 run ID");
+  validateLogicalId(commandIdentity.planetId, "原生投影命令行星 ID");
+  validateBaseRevision(commandIdentity.revision);
+  if (toolbar.source !== "native-core" || selection.source !== "native-core" ||
+    !sameProjectionIdentity(toolbar.projectionIdentity, commandIdentity) ||
+    !sameProjectionIdentity(selection.projectionIdentity, commandIdentity) ||
+    toolbar.revision !== commandIdentity.revision || selection.revision !== commandIdentity.revision ||
+    toolbar.activePlanetId !== commandIdentity.planetId || selection.activePlanetId !== commandIdentity.planetId ||
+    selection.requestedEntityCount !== toolbar.selectedCount ||
+    selection.requestedEntityCount !== selection.entityRows.totalCount ||
+    selection.entityRows.rows.some((row) => row.planetId !== commandIdentity.planetId) ||
+    toolbar.canLock !== selection.entityRows.rows.some((row) => !row.interactionLocked) ||
+    toolbar.canUnlock !== selection.entityRows.rows.some((row) => row.interactionLocked)) {
+    throw new TypeError("原生选区投影 identity 或完整性与当前命令源不一致");
+  }
+  return createNativeProjectedInteractionLockCommand({
+    baseRevision: commandIdentity.revision,
+    entityRows: selection.entityRows,
+    targetInteractionLocked: input.targetInteractionLocked,
+  });
 }
 
 /**

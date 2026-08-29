@@ -141,6 +141,7 @@ const selectionToolbarWeb: FactorySelectionToolbarReadModel = {
   source: "web-game-state",
   revision: null,
   activePlanetId: "home",
+  projectionIdentity: null,
   selectedCount: 2,
   selectedBeltCount: 1,
   canLock: true,
@@ -232,6 +233,7 @@ const multiSelectionWeb: FactoryMultiSelectionSummaryReadModel = {
   source: "web-game-state",
   revision: null,
   activePlanetId: "home",
+  projectionIdentity: null,
   requestedEntityCount: selectionBinding.requestedEntityIds.length,
   requestedBeltCount: selectionBinding.requestedBeltIds.length,
   entityRows: {

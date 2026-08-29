@@ -1,11 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   createNativeProjectedInteractionLockCommand,
+  createNativeProjectedInteractionLockCommandFromReadModels,
   createNativeProjectedPlanetRoleCommand,
   createNativeProjectedStationLimitsCommand,
   createNativeProjectedStationPriorityCommand,
   type NativeProjectedInteractionLockCommandInput,
 } from "./nativeProjectedPlayerCommands";
+import type {
+  FactoryMultiSelectionSummaryReadModel,
+  FactorySelectionToolbarReadModel,
+  NativeFactoryProjectionIdentity,
+  SelectedEntityReadModel,
+} from "./factoryReadModels";
 
 function expectEmptyDomains(command: NonNullable<ReturnType<typeof createNativeProjectedPlanetRoleCommand>>): void {
   expect(command.addedEntities).toEqual([]);
@@ -24,6 +31,58 @@ describe("native projected player command builders", () => {
     totalCount: options.totalCount ?? rows.length,
     truncated: options.truncated ?? false,
   });
+
+  const selectedEntity = (entityId: string, interactionLocked: boolean, planetId = "home"): SelectedEntityReadModel => ({
+    entityId,
+    planetId,
+    kind: "machine",
+    position: { x: 0, y: 0 },
+    interactionLocked,
+    buildingId: "arc_smelter",
+    resourceId: null,
+    recipeId: "iron_ingot",
+    storedItemId: null,
+    fuelItemId: null,
+    machineCount: 1,
+    minerCount: 0,
+    progress: 0,
+    utilization: 1,
+    productionRate: 60,
+    powerFactor: 1,
+    inputItems: { rows: [], totalCount: 0, truncated: false },
+    outputItems: { rows: [], totalCount: 0, truncated: false },
+  });
+
+  const lockReadModels = (identity: NativeFactoryProjectionIdentity) => {
+    const entityRows = {
+      rows: [selectedEntity("selected-a", false, identity.planetId)],
+      totalCount: 1,
+      truncated: false,
+    } as const;
+    const toolbar: FactorySelectionToolbarReadModel = {
+      schema: "factory-read-model-v1",
+      source: "native-core",
+      revision: identity.revision,
+      activePlanetId: identity.planetId,
+      projectionIdentity: identity,
+      selectedCount: 1,
+      selectedBeltCount: 0,
+      canLock: true,
+      canUnlock: false,
+    };
+    const selection: FactoryMultiSelectionSummaryReadModel = {
+      schema: "factory-read-model-v1",
+      source: "native-core",
+      revision: identity.revision,
+      activePlanetId: identity.planetId,
+      projectionIdentity: identity,
+      requestedEntityCount: 1,
+      requestedBeltCount: 0,
+      entityRows,
+      beltRows: { rows: [], totalCount: 0, truncated: false },
+    };
+    return { toolbar, selection };
+  };
 
   it("builds a planet-role leaf against the exact projected revision", () => {
     const command = createNativeProjectedPlanetRoleCommand({
@@ -154,6 +213,34 @@ describe("native projected player command builders", () => {
     ]);
     expect(command.topLevelChanges).toEqual([]);
     expectEmptyDomains(command);
+  });
+
+  it("admits lock rows only for the exact live session/run/revision/planet identity", () => {
+    const projectionIdentity = {
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 44,
+      planetId: "home",
+    } as const;
+    const models = lockReadModels(projectionIdentity);
+    expect(createNativeProjectedInteractionLockCommandFromReadModels({
+      commandIdentity: projectionIdentity,
+      ...models,
+      targetInteractionLocked: true,
+    })?.changedEntities.map((row) => row.id)).toEqual(["selected-a"]);
+
+    const sameRevisionMismatches: NativeFactoryProjectionIdentity[] = [
+      { ...projectionIdentity, sessionId: "session-b" },
+      { ...projectionIdentity, runId: "run-b" },
+      { ...projectionIdentity, planetId: "ashen" },
+    ];
+    for (const commandIdentity of sameRevisionMismatches) {
+      expect(() => createNativeProjectedInteractionLockCommandFromReadModels({
+        commandIdentity,
+        ...models,
+        targetInteractionLocked: true,
+      })).toThrow(/identity/);
+    }
   });
 
   it("emits only changed unlock rows and returns null for empty or unchanged selections", () => {

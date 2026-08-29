@@ -165,6 +165,7 @@ export function createWebFactorySelectionToolbarReadModel(
     source: "web-game-state",
     revision: null,
     activePlanetId: state.activePlanetId,
+    projectionIdentity: null,
     selectedCount: selectedEntityIds.length,
     selectedBeltCount,
     canLock,
@@ -346,6 +347,7 @@ export function createWebFactoryMultiSelectionSummaryReadModel(
     source: "web-game-state",
     revision: null,
     activePlanetId: state.activePlanetId,
+    projectionIdentity: null,
     requestedEntityCount: requestedEntityIds.length,
     requestedBeltCount: requestedBeltIds.length,
     entityRows: {

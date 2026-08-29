@@ -5,6 +5,7 @@ import {
   type BoundedReadModelRows,
   type FactoryInspectorSummaryReadModel,
   type FactoryMultiSelectionSummaryReadModel,
+  type NativeFactoryProjectionIdentity,
   type FactorySelectionToolbarReadModel,
   type ItemQuantityReadModel,
   type SelectedBeltReadModel,
@@ -36,6 +37,7 @@ export interface NativeFactoryInteractionPinRequest {
 export interface NativeFactoryInteractionBinding extends FactoryInteractionSelection {
   readonly enabled: boolean;
   readonly sessionId: string | null;
+  readonly runId: string | null;
   readonly revision: number;
   readonly planetId: PlanetId;
   readonly connectionEntityIds: readonly string[];
@@ -47,6 +49,7 @@ export interface NativeFactoryInteractionBinding extends FactoryInteractionSelec
 export interface FactoryInteractionRows {
   readonly source: "native-authoritative" | "web-game-state";
   readonly revision: number | null;
+  readonly projectionIdentity: NativeFactoryProjectionIdentity | null;
   readonly selectedEntities: readonly FactoryEntity[];
   readonly selectedEntity: FactoryEntity | null;
   readonly selectedBelt: BeltConnection | null;
@@ -184,20 +187,23 @@ export function selectNativeFactorySelectionRelatedEntityIds(
   snapshot: NativeFactoryThinViewSnapshot,
   binding: Readonly<{
     sessionId: string | null;
+    runId: string | null;
     revision: number;
     planetId: PlanetId;
     selectedEntityIds: readonly string[];
     selectedBeltIds: readonly string[];
   }>,
 ): readonly string[] {
-  if (!isOpaqueId(binding.sessionId) || !Number.isSafeInteger(binding.revision) || binding.revision < 0 ||
+  if (!isOpaqueId(binding.sessionId) || !isOpaqueId(binding.runId) ||
+    !Number.isSafeInteger(binding.revision) || binding.revision < 0 ||
     new Set(binding.selectedEntityIds).size !== binding.selectedEntityIds.length ||
     new Set(binding.selectedBeltIds).size !== binding.selectedBeltIds.length) return Object.freeze([]);
   const frame = snapshot.status === "ready" && snapshot.requestedRevision === binding.revision
     ? snapshot.frame
     : null;
   const selection = frame?.factory.selection;
-  if (!frame || !selection || frame.authoritySessionId !== binding.sessionId || frame.revision !== binding.revision ||
+  if (!frame || !selection || frame.authoritySessionId !== binding.sessionId ||
+    frame.authorityRunId !== binding.runId || frame.revision !== binding.revision ||
     frame.planetId !== binding.planetId || frame.factory.revision !== binding.revision ||
     frame.factory.shell.source !== "native-core" || frame.factory.shell.activePlanetId !== binding.planetId ||
     selection.activePlanetId !== binding.planetId || selection.entityRows.truncated || selection.beltRows.truncated ||
@@ -259,6 +265,12 @@ function createNativeModels(
   selectedBelts: readonly BeltConnection[],
   multiSelectedBelts: readonly BeltConnection[],
 ): Pick<FactoryInteractionRows, "selectionToolbarReadModel" | "inspectorSummaryReadModel" | "multiSelectionSummaryReadModel"> | null {
+  const projectionIdentity = Object.freeze({
+    sessionId: frame.sessionId,
+    runId: frame.runId,
+    revision: frame.revision,
+    planetId: frame.planetId,
+  });
   const entityRows: SelectedEntityReadModel[] = [];
   for (const entity of selectedEntities) {
     const row = selectedEntityRow(entity);
@@ -274,6 +286,7 @@ function createNativeModels(
       source: "native-core",
       revision: frame.revision,
       activePlanetId: frame.planetId,
+      projectionIdentity,
       selectedCount: binding.selectedEntityIds.length,
       selectedBeltCount: selectedBelts.length,
       canLock: selectedEntities.some((entity) => !entity.interactionLocked),
@@ -292,6 +305,7 @@ function createNativeModels(
       source: "native-core",
       revision: frame.revision,
       activePlanetId: frame.planetId,
+      projectionIdentity,
       requestedEntityCount: binding.selectedEntityIds.length,
       requestedBeltCount: multiSelectedBelts.length,
       entityRows: Object.freeze({ rows: Object.freeze(entityRows), totalCount: entityRows.length, truncated: false }),
@@ -310,7 +324,8 @@ export function selectNativeAuthoritativeFactoryInteractionRows(
   binding: NativeFactoryInteractionBinding,
 ): FactoryInteractionRows | null {
   if (!frame || !binding.enabled || binding.requestTruncated || !isOpaqueId(binding.sessionId) ||
-    frame.sessionId !== binding.sessionId || frame.revision !== binding.revision || frame.planetId !== binding.planetId ||
+    !isOpaqueId(binding.runId) || frame.sessionId !== binding.sessionId || frame.runId !== binding.runId ||
+    frame.revision !== binding.revision || frame.planetId !== binding.planetId ||
     binding.selectedEntityIds.length > MAX_PINNED_ENTITY_ROWS || binding.selectedBeltIds.length > MAX_PINNED_BELT_ROWS ||
     new Set(binding.selectedEntityIds).size !== binding.selectedEntityIds.length ||
     new Set(binding.selectedBeltIds).size !== binding.selectedBeltIds.length ||
@@ -343,6 +358,7 @@ export function selectNativeAuthoritativeFactoryInteractionRows(
   return Object.freeze({
     source: "native-authoritative",
     revision: frame.revision,
+    projectionIdentity: models.selectionToolbarReadModel.projectionIdentity,
     selectedEntities: Object.freeze(selectedEntities),
     selectedEntity,
     selectedBelt,
@@ -393,6 +409,7 @@ export function createWebFactoryInteractionRows(
   return {
     source: "web-game-state",
     revision: null,
+    projectionIdentity: null,
     selectedEntities,
     selectedEntity,
     selectedBelt,

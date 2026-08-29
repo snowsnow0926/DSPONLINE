@@ -12,6 +12,8 @@ export interface NativeFactoryThinViewFrame {
   readonly planetId: string;
   /** Main-owned authority session for fail-closed renderer binding; null for JS shadow reads. */
   readonly authoritySessionId?: string | null;
+  /** Main-owned authority run captured before this projection request started. */
+  readonly authorityRunId?: string | null;
   readonly factory: DesktopNativeCoreFactoryReadModelResult;
   readonly viewport: DesktopNativeCoreViewportProjectionV2Result;
 }
@@ -36,6 +38,7 @@ export interface NativeFactoryThinViewSource {
 export interface NativeFactoryThinViewRequest {
   readonly expectedRevision: number;
   readonly authoritySessionId?: string | null;
+  readonly authorityRunId?: string | null;
   readonly factory: Omit<DesktopNativeCoreFactoryReadModelRequest, "sessionId" | "expectedRevision">;
   readonly viewport: Omit<DesktopNativeCoreViewportProjectionV2Request, "sessionId" | "expectedRevision">;
 }
@@ -62,6 +65,8 @@ function isValidAuthoritySessionId(value: string | null | undefined): boolean {
   return value === undefined || value === null ||
     (value.length >= 1 && value.length <= 128 && /^[A-Za-z0-9_.:-]+$/.test(value));
 }
+
+const isValidAuthorityRunId = isValidAuthoritySessionId;
 
 function frameMatchesRequest(
   request: NativeFactoryThinViewRequest,
@@ -286,7 +291,10 @@ export class NativeFactoryThinViewStore {
     source: NativeFactoryThinViewSource,
     request: NativeFactoryThinViewRequest,
   ): Promise<NativeFactoryThinViewRefreshResult> {
-    if (!isValidRevision(request.expectedRevision) || !isValidAuthoritySessionId(request.authoritySessionId)) {
+    if (!isValidRevision(request.expectedRevision) || !isValidAuthoritySessionId(request.authoritySessionId) ||
+      !isValidAuthorityRunId(request.authorityRunId) ||
+      ((request.authoritySessionId === null || request.authoritySessionId === undefined) !==
+        (request.authorityRunId === null || request.authorityRunId === undefined))) {
       this.requestToken += 1;
       this.publish(Object.freeze({
         status: "unavailable",
@@ -323,6 +331,7 @@ export class NativeFactoryThinViewStore {
       revision: request.expectedRevision,
       planetId: request.viewport.planetId,
       authoritySessionId: request.authoritySessionId ?? null,
+      authorityRunId: request.authorityRunId ?? null,
       factory,
       viewport,
     });

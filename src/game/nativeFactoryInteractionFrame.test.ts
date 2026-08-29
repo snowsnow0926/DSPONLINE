@@ -60,6 +60,7 @@ function frame(input: {
   pinnedEntityIds?: string[];
   pinnedBeltIds?: string[];
   sessionId?: string;
+  runId?: string;
   revision?: number;
 } = {}): NativeAuthoritativeFactoryCanvasFrame {
   const entities = input.entities ?? [entity("source", 10), entity("target", 40)];
@@ -72,6 +73,7 @@ function frame(input: {
   return {
     source: "native-authoritative",
     sessionId: input.sessionId ?? "authority-a",
+    runId: input.runId ?? "run-a",
     revision,
     planetId: "home",
     bounds: { minX: 0, minY: 0, maxX: 100, maxY: 100 },
@@ -125,6 +127,7 @@ function binding(overrides: Partial<NativeFactoryInteractionBinding> = {}): Nati
   return {
     enabled: true,
     sessionId: "authority-a",
+    runId: "run-a",
     revision: 9,
     planetId: "home",
     selectedEntityIds: ["source"],
@@ -224,6 +227,7 @@ describe("native factory interaction atom", () => {
 
   it.each([
     ["cross-session", { sessionId: "authority-b" }],
+    ["cross-run", { runId: "run-b" }],
     ["stale revision", { revision: 10 }],
     ["truncated pin request", { requestTruncated: true }],
     ["missing candidate pin", { connectionEntityIds: ["missing"] }],
@@ -316,6 +320,7 @@ describe("native factory interaction atom", () => {
         revision,
         planetId: "home",
         authoritySessionId: "authority-a",
+        authorityRunId: "run-a",
         factory: {
           schemaVersion: 1,
           projectionType: "factory-read-model-v1",
@@ -332,6 +337,7 @@ describe("native factory interaction atom", () => {
     } satisfies NativeFactoryThinViewSnapshot;
     const exact = {
       sessionId: "authority-a",
+      runId: "run-a",
       revision,
       planetId: "home" as const,
       selectedEntityIds: [],

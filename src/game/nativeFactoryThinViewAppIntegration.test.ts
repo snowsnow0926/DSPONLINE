@@ -143,12 +143,13 @@ describe("factory thin-view App consumption", () => {
 
     expect(helperStart).toBeGreaterThanOrEqual(0);
     expect(helper).toMatch(/factoryInteractionRows\.source !== "native-authoritative"/);
-    expect(helper).toMatch(/factorySelectionToolbarReadModel\.revision === null/);
-    expect(helper).toMatch(/factoryInteractionRows\.revision !== factorySelectionToolbarReadModel\.revision/);
-    expect(helper).toMatch(/selectionProjection\.revision !== factorySelectionToolbarReadModel\.revision/);
-    expect(helper).toMatch(/selectionProjection\.requestedEntityCount !== factorySelectionToolbarReadModel\.selectedCount/);
-    expect(helper).toMatch(/commitNativeProjectedCommand\(\s*factorySelectionToolbarReadModel\.revision/);
-    expect(helper).toMatch(/createNativeProjectedInteractionLockCommand\(\{[\s\S]*?baseRevision,[\s\S]*?entityRows: selectionProjection\.entityRows,[\s\S]*?targetInteractionLocked/);
+    expect(helper).toMatch(/factoryInteractionRows\.projectionIdentity/);
+    expect(helper).toMatch(/commandSource\.sessionId !== routeIdentity\.sessionId/);
+    expect(helper).toMatch(/commandSource\.runId !== routeIdentity\.runId/);
+    expect(helper).toMatch(/commandSource\.baseRevision !== routeIdentity\.revision/);
+    expect(helper).toMatch(/interactionIdentity\.planetId !== routeIdentity\.planetId/);
+    expect(helper).toMatch(/commitNativeProjectedCommand\(\s*routeIdentity\.revision/);
+    expect(helper).toMatch(/createNativeProjectedInteractionLockCommandFromReadModels\(\{[\s\S]*?commandIdentity: routeIdentity,[\s\S]*?toolbar: factorySelectionToolbarReadModel,[\s\S]*?selection: selectionProjection,[\s\S]*?targetInteractionLocked/);
     expect(helper).not.toMatch(/selectedEntities|gameRef\.current|game\.entities|setEntitiesInteractionLocked/);
 
     expect(lock).toMatch(/if \(nativePlayerAuthorityOwnsRuntime\)[\s\S]*?commitNativeSelectionInteractionLock\(true\);[\s\S]*?return;/);

@@ -48,6 +48,7 @@ import type {
 import { RecipeFocusPanel } from "./components/RecipeFocusPanel";
 import { FactoryRunStatus } from "./components/FactoryRunStatus";
 import { ItemReferenceActionsProvider } from "./components/ItemReference";
+import { NativeResourceRail } from "./components/NativeResourceRail";
 import { OnboardingCoach } from "./components/OnboardingCoach";
 import { SpeedrunStatusPanel } from "./components/SpeedrunStatusPanel";
 import { MobileGameShell } from "./components/mobile/MobileGameShell";
@@ -437,6 +438,12 @@ import {
 } from "./game/legacyAuthorityAsyncLease";
 import { NativeFactoryThinViewStore } from "./game/nativeFactoryThinViewStore";
 import {
+  NativeFactoryInventoryStore,
+  createNativePlayerAuthorityFactoryInventorySource,
+  selectNativeFactoryInventoryFrame,
+  type NativeFactoryInventoryIdentity,
+} from "./game/nativeFactoryInventoryStore";
+import {
   NativeTechnologyWorkspaceStore,
   createNativePlayerAuthorityTechnologyProjectionSource,
 } from "./game/nativeTechnologyWorkspaceStore";
@@ -474,6 +481,11 @@ import {
   createNativeProjectedStationPriorityCommand,
 } from "./game/nativeProjectedPlayerCommands";
 import { createNativeProjectedQuantumItemCapacityCommand } from "./game/nativeProjectedQuantumCommands";
+import {
+  createNativeProjectedCargoReturnCommand,
+  createNativeProjectedTrayItemLimitCommand,
+  createNativeProjectedTrayTakeCommand,
+} from "./game/nativeProjectedFactoryInventoryCommands";
 import {
   createNativeProjectedInfiniteResearchAutomationCommand,
   createNativeProjectedQueueTechnologyCommand,
@@ -2277,6 +2289,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     source: NativePlayerAuthorityCommandSource;
   } | null>(null);
   const nativePlayerAuthorityCommandInFlightRef = useRef(false);
+  const [nativePlayerAuthorityCommandPending, setNativePlayerAuthorityCommandPending] = useState(false);
   if (!nativePlayerAuthorityActiveFrame) {
     nativePlayerAuthorityCommandBindingRef.current = null;
   } else {
@@ -2329,6 +2342,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativeFactoryThinViewStore.subscribe,
     nativeFactoryThinViewStore.getSnapshot,
     nativeFactoryThinViewStore.getSnapshot,
+  );
+  const nativeFactoryInventoryStoreRef = useRef<NativeFactoryInventoryStore | null>(null);
+  if (nativeFactoryInventoryStoreRef.current === null) {
+    nativeFactoryInventoryStoreRef.current = new NativeFactoryInventoryStore();
+  }
+  const nativeFactoryInventoryStore = nativeFactoryInventoryStoreRef.current;
+  const nativeFactoryInventorySnapshot = useSyncExternalStore(
+    nativeFactoryInventoryStore.subscribe,
+    nativeFactoryInventoryStore.getSnapshot,
+    nativeFactoryInventoryStore.getSnapshot,
   );
   // Once main proves that it owns this exact native session, its durable Rust
   // revision becomes the projection clock. A concurrently advancing legacy JS
@@ -2398,6 +2421,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativeRecipeWorkspaceStore.getSnapshot,
   );
   const recipeWorkspaceRegistryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
+  const nativeFactoryInventoryIdentity = useMemo<NativeFactoryInventoryIdentity | null>(() => {
+    const sessionId = nativePlayerAuthorityActiveFrame?.sessionId;
+    const runId = nativePlayerAuthorityActiveFrame?.runId;
+    return sessionId && runId ? Object.freeze({
+      sessionId,
+      runId,
+      revision: factoryThinViewExpectedRevision,
+      registryFingerprint: recipeWorkspaceRegistryFingerprint,
+    }) : null;
+  }, [
+    factoryThinViewExpectedRevision,
+    nativePlayerAuthorityActiveFrame,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeFactoryInventorySource = useMemo(() => nativeFactoryInventoryIdentity
+    ? createNativePlayerAuthorityFactoryInventorySource(desktopBridge, nativeFactoryInventoryIdentity)
+    : null, [desktopBridge, nativeFactoryInventoryIdentity]);
+  const nativeFactoryInventoryFrame = useMemo(() => nativeFactoryInventoryIdentity
+    ? selectNativeFactoryInventoryFrame(nativeFactoryInventorySnapshot, nativeFactoryInventoryIdentity)
+    : null, [nativeFactoryInventoryIdentity, nativeFactoryInventorySnapshot]);
   const nativeStellarWorkspaceStoreRef = useRef<NativeStellarWorkspaceStore | null>(null);
   if (nativeStellarWorkspaceStoreRef.current === null) {
     nativeStellarWorkspaceStoreRef.current = new NativeStellarWorkspaceStore();
@@ -3188,6 +3231,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     windowsNativeCoreAvailable,
     windowsNativeCoreBetaEnabled,
     windowsNativeCoreBetaStatus,
+  ]);
+  useEffect(() => {
+    if (!nativePlayerAuthorityOwnsRuntime || !nativeFactoryInventoryIdentity ||
+        !nativeFactoryInventorySource || !nativePlayerAuthorityActiveFrame) {
+      nativeFactoryInventoryStore.clear();
+      return;
+    }
+    void nativeFactoryInventoryStore.refresh(
+      nativeFactoryInventorySource,
+      nativeFactoryInventoryIdentity,
+    ).catch(() => undefined);
+  }, [
+    nativeFactoryInventoryIdentity,
+    nativeFactoryInventorySource,
+    nativeFactoryInventoryStore,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityOwnsRuntime,
   ]);
   useEffect(() => {
     if (!technologyOpen || !nativePlayerAuthorityBoundFrame) {
@@ -7862,6 +7922,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const command = createSimulationCommandPatch(current, next, binding.source.baseRevision);
       if (!command) return false;
       nativePlayerAuthorityCommandInFlightRef.current = true;
+      setNativePlayerAuthorityCommandPending(true);
       void binding.source.applyCommand(command).then(() => {
         // Main owns the durable receipt and pushes the next clock revision.
         // The renderer deliberately does not install `next` or predict the
@@ -7878,6 +7939,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           await nativePlayerAuthorityClockRef.current?.refresh();
         } finally {
           nativePlayerAuthorityCommandInFlightRef.current = false;
+          setNativePlayerAuthorityCommandPending(false);
         }
       });
       return true;
@@ -7929,6 +7991,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     if (!command) return false;
     nativePlayerAuthorityCommandInFlightRef.current = true;
+    setNativePlayerAuthorityCommandPending(true);
     void binding.source.applyCommand(command).then((receipt) => {
       // Never install or predict the projected edit locally. The next exact
       // authority revision refreshes every affected bounded read model.
@@ -7954,10 +8017,41 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         await nativePlayerAuthorityClockRef.current?.refresh();
       } finally {
         nativePlayerAuthorityCommandInFlightRef.current = false;
+        setNativePlayerAuthorityCommandPending(false);
       }
     });
     return true;
   }, [invalidateFactoryAlertProjection, rejectPlayerStateEditDuringPrimarySave]);
+
+  const takeNativeTrayItem = useCallback((itemId: string): void => {
+    const frame = nativeFactoryInventoryFrame;
+    if (!frame) {
+      setNotice("原生物资投影尚未就绪；本次操作未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, () =>
+      createNativeProjectedTrayTakeCommand(frame, itemId));
+  }, [commitNativeProjectedCommand, nativeFactoryInventoryFrame]);
+
+  const returnNativeCargo = useCallback((): void => {
+    const frame = nativeFactoryInventoryFrame;
+    if (!frame) {
+      setNotice("原生手持物投影尚未就绪；本次操作未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, () =>
+      createNativeProjectedCargoReturnCommand(frame));
+  }, [commitNativeProjectedCommand, nativeFactoryInventoryFrame]);
+
+  const setNativeTrayItemLimit = useCallback((value: number): void => {
+    const frame = nativeFactoryInventoryFrame;
+    if (!frame) {
+      setNotice("原生托盘上限投影尚未就绪；本次操作未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, () =>
+      createNativeProjectedTrayItemLimitCommand(frame, value));
+  }, [commitNativeProjectedCommand, nativeFactoryInventoryFrame]);
 
   const rejectLegacyFactoryInteractionWhileNative = useCallback((label: string): boolean => {
     if (!nativePlayerAuthorityOwnsRuntimeRef.current) return false;
@@ -16394,13 +16488,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       /> : null}
       <div className="game-workspace">
         <RuntimeRenderProfile id="resource-rail">
-        {nativePlayerAuthorityOwnsRuntime ? <aside
-          className="resource-rail native-resource-rail-unavailable"
-          data-native-authority-unavailable="tray-cargo-v1"
-          aria-label="Windows 原生物资托盘等待接入"
-        >
-          <section className="rail-block"><div className="rail-heading"><span>当前行星物资</span><strong>原生模式</strong></div><p role="status">托盘与手持物尚未接入同 revision 的 Rust 投影，已隐藏旧星球数据并禁用相关操作。</p></section>
-        </aside> : <StableResourceRail
+        {nativePlayerAuthorityOwnsRuntime ? <NativeResourceRail
+          frame={nativeFactoryInventoryFrame}
+          pending={nativePlayerAuthorityCommandPending || !nativePlayerAuthorityCommandSource}
+          onPickTray={takeNativeTrayItem}
+          onDropCargo={returnNativeCargo}
+          onSetTrayItemLimit={setNativeTrayItemLimit}
+        /> : <StableResourceRail
           game={panelGame}
           onOpenCampaign={openCampaign}
           onOpenDysonPlanner={() => {

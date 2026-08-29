@@ -85,7 +85,8 @@ describe("native planet navigation App integration", () => {
     expect(nativeRail).toMatch(/丢弃与建筑拖放仍保持关闭/);
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeConstructionDock[\s\S]*?frame=\{nativeConstructionInventoryFrame\}[\s\S]*?: <StableConstructionDock/);
     expect(nativeConstructionDock).toMatch(/!frame[\s\S]*?data-native-authority-unavailable="construction-inventory-v1"/);
-    expect(nativeConstructionDock).toMatch(/放置、删除和制造仍保持关闭/);
+    expect(nativeConstructionDock).toMatch(/普通建筑可单栋放置/);
+    expect(nativeConstructionDock).toMatch(/线路、批量扩建、删除和制造仍保持关闭/);
     expect(app).toMatch(/enabled=\{nextMobileShell && !nativePlayerAuthorityOwnsRuntime\}/);
     expect(app).toMatch(/native-mobile-shell-unavailable[\s\S]*?为避免显示旧星球数据/);
 
@@ -106,6 +107,7 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/key=\{`regions:\$\{factoryGestureSurfaceKey\}`\}/);
     expect(app).toMatch(/key=\{`minimap:\$\{factoryGestureSurfaceKey\}`\}/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <CanvasSelectionTools/);
+    expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <PendingBlueprintLayer/);
     expect(app).not.toMatch(/!nativePlayerAuthorityOwnsRuntime \? <SelectionToolbar/);
     expect(app).toMatch(/<SelectionToolbar[\s\S]*?unsafeActionsEnabled=\{!nativePlayerAuthorityOwnsRuntime\}/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <BlueprintWorkspace/);
@@ -130,6 +132,7 @@ describe("native planet navigation App integration", () => {
     }
     expect(app).toMatch(/systemSpaceStationOpen && systemSpaceStationId && !nativePlayerAuthorityOwnsRuntime/);
     expect(app).toMatch(/orbitalStationOpen && isSpaceStationFeatureEnabled\(\) && !nativePlayerAuthorityOwnsRuntime/);
+    expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime && game\.mode === "normal" && isSpaceStationFeatureEnabled\(\) \? <div className="canvas-global-navigation/);
   });
 
   it("shows an inert native loading state instead of stale Web models between revisions", () => {

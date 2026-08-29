@@ -16954,13 +16954,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               onUnavailable={handleCanvasBatchUnavailable}
             /> : null}
             <ViewportPortal>
-              <PendingBlueprintLayer
+              {!nativePlayerAuthorityOwnsRuntime ? <PendingBlueprintLayer
                 key={`blueprint:${factoryGestureSurfaceKey}`}
                 game={game}
                 planetId={factoryCanvasPlanetId}
                 viewport={pendingBlueprintViewport}
                 canvasSize={canvasViewportSize}
-              />
+              /> : null}
               <CanvasRegionLayer
                 key={`regions:${factoryGestureSurfaceKey}`}
                 regions={factoryCanvasRegions}
@@ -17011,7 +17011,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             <i aria-hidden="true"><b style={{ transform: `scaleX(${canvasDetailProgressSnapshot.ratio})` }} /></i>
             {canvasStackGrouping.groupCount > 0 ? <small>{canvasStackGrouping.groupCount} 组重叠 · {canvasStackGrouping.markerCount} 个标记 · {canvasStackGrouping.hiddenCount} 个隐藏成员</small> : null}
           </div>
-          {game.mode === "normal" && isSpaceStationFeatureEnabled() ? <div className="canvas-global-navigation nodrag nopan">
+          {!nativePlayerAuthorityOwnsRuntime && game.mode === "normal" && isSpaceStationFeatureEnabled() ? <div className="canvas-global-navigation nodrag nopan">
             <button
               className={`orbital-station-entry${orbitalStationOpen ? " active" : ""}${game.orbitalStation.contractBoard.accepted.some((contract) => contract.status === "claimable") ? " claimable" : ""}`}
               type="button"

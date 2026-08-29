@@ -60,6 +60,120 @@ pub(crate) struct ModeTransitionScan {
     pub dense_fallback: bool,
     pub index_fallback: bool,
     pub ledger_fallback: bool,
+    #[cfg(test)]
+    pub observed_worker_count: usize,
+}
+
+const MODE_TRANSITION_DENSE_NUMERATOR: usize = 3;
+const MODE_TRANSITION_DENSE_DENOMINATOR: usize = 4;
+
+/// Runtime-only persisted-order wake set for pending station-mode changes.
+///
+/// Unlike `FactoryTopology`, this set is part of the candidate simulation
+/// runtime: a successful boundary removes completed rows before the next
+/// boundary, and the updated set is installed only after the complete state
+/// revision commits. Record commands rebuild it from persisted entity order.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ModeTransitionRuntime {
+    entity_count: usize,
+    active_indices: Vec<usize>,
+    full_scan_required: bool,
+}
+
+impl ModeTransitionRuntime {
+    pub(crate) fn from_indices(entity_count: usize, active_indices: Vec<usize>) -> Self {
+        let mut runtime = Self {
+            entity_count,
+            active_indices,
+            full_scan_required: false,
+        };
+        runtime.compact_dense_index();
+        runtime
+    }
+
+    pub(crate) fn from_entities(entities: &[Value]) -> Self {
+        Self::from_indices(
+            entities.len(),
+            entities
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entity)| {
+                    entity
+                        .as_object()
+                        .and_then(|entity| entity.get("stationModeTransition"))
+                        .is_some_and(Value::is_string)
+                        .then_some(index)
+                })
+                .collect(),
+        )
+    }
+
+    fn compact_dense_index(&mut self) {
+        self.active_indices.shrink_to_fit();
+        self.full_scan_required = !self.active_indices.is_empty()
+            && self
+                .active_indices
+                .len()
+                .saturating_mul(MODE_TRANSITION_DENSE_DENOMINATOR)
+                >= self
+                    .entity_count
+                    .saturating_mul(MODE_TRANSITION_DENSE_NUMERATOR);
+        if self.full_scan_required {
+            self.active_indices = Vec::new();
+        }
+    }
+
+    fn index_is_valid(&self, state: &CoreState, entities: &[Value]) -> bool {
+        self.entity_count == entities.len()
+            && state.entities.ids.len() == entities.len()
+            && self
+                .active_indices
+                .last()
+                .is_none_or(|index| *index < entities.len())
+            && self.active_indices.windows(2).all(|pair| pair[0] < pair[1])
+            && self.active_indices.iter().all(|&index| {
+                entities
+                    .get(index)
+                    .and_then(Value::as_object)
+                    .and_then(|entity| entity.get("stationModeTransition"))
+                    .is_some_and(Value::is_string)
+            })
+    }
+
+    fn refresh_after_commit(&mut self, entities: &[Value], candidates: &[ModeTransitionCandidate]) {
+        self.entity_count = entities.len();
+        self.active_indices = candidates
+            .iter()
+            .filter_map(|candidate| {
+                entities
+                    .get(candidate.entity_index)
+                    .and_then(Value::as_object)
+                    .and_then(|entity| entity.get("stationModeTransition"))
+                    .is_some_and(Value::is_string)
+                    .then_some(candidate.entity_index)
+            })
+            .collect();
+        self.full_scan_required = false;
+        self.compact_dense_index();
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> u64 {
+        (self.active_indices.capacity() * std::mem::size_of::<usize>()) as u64
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_row_count(&self) -> usize {
+        if self.full_scan_required {
+            self.entity_count
+        } else {
+            self.active_indices.len()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn full_scan_required(&self) -> bool {
+        self.full_scan_required
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -548,47 +662,32 @@ fn mode_transition_candidate(
     }
 }
 
-fn transition_index_is_valid(state: &CoreState, entities: &[Value]) -> bool {
-    let indices = &state.factory_topology.station_mode_transition_indices;
-    state.entities.ids.len() == entities.len()
-        && indices.last().is_none_or(|index| *index < entities.len())
-        && indices.windows(2).all(|pair| pair[0] < pair[1])
-        && indices.iter().all(|&index| {
-            entities
-                .get(index)
-                .and_then(Value::as_object)
-                .and_then(|entity| entity.get("stationModeTransition"))
-                .is_some_and(|transition| transition.is_string() || transition.is_null())
-        })
-}
-
 fn collect_mode_transition_candidates(
     runtime: &DeterministicRuntime,
+    transition_runtime: &ModeTransitionRuntime,
     state: &CoreState,
     entities: &[Value],
 ) -> (Vec<ModeTransitionCandidate>, ModeTransitionScan) {
-    let index_fallback = !state
-        .factory_topology
-        .station_mode_transition_full_scan_required
-        && !transition_index_is_valid(state, entities);
-    let use_full_scan = state
-        .factory_topology
-        .station_mode_transition_full_scan_required
-        || index_fallback;
+    let index_fallback = !transition_runtime.full_scan_required
+        && !transition_runtime.index_is_valid(state, entities);
+    let use_full_scan = transition_runtime.full_scan_required || index_fallback;
     let probes = if use_full_scan {
         runtime.indexed_map(entities, |entity_index, entity| {
             mode_transition_candidate(entity_index, Some(entity))
         })
     } else {
-        runtime.indexed_map(
-            &state.factory_topology.station_mode_transition_indices,
-            |_, &entity_index| mode_transition_candidate(entity_index, entities.get(entity_index)),
-        )
+        runtime.indexed_map(&transition_runtime.active_indices, |_, &entity_index| {
+            mode_transition_candidate(entity_index, entities.get(entity_index))
+        })
     };
     let mut candidates = Vec::new();
+    #[cfg(test)]
+    let mut observed_workers = BTreeSet::new();
     for probe in probes {
         #[cfg(test)]
-        let _ = probe.worker_index;
+        if let Some(worker_index) = probe.worker_index {
+            observed_workers.insert(worker_index);
+        }
         if let Some(candidate) = probe.candidate {
             candidates.push(candidate);
         }
@@ -597,14 +696,14 @@ fn collect_mode_transition_candidates(
         selected_rows: if use_full_scan {
             entities.len()
         } else {
-            state.factory_topology.station_mode_transition_indices.len()
+            transition_runtime.active_indices.len()
         },
         total_rows: entities.len(),
         transition_rows: candidates.len(),
-        dense_fallback: state
-            .factory_topology
-            .station_mode_transition_full_scan_required,
+        dense_fallback: transition_runtime.full_scan_required,
         index_fallback,
+        #[cfg(test)]
+        observed_worker_count: observed_workers.len(),
         ..ModeTransitionScan::default()
     };
     (candidates, scan)
@@ -680,11 +779,13 @@ where
 
 fn settle_mode_transitions_with_runtime(
     runtime: &DeterministicRuntime,
+    transition_runtime: &mut ModeTransitionRuntime,
     state: &CoreState,
     entities: &mut [Value],
     route_ledger: &crate::station_route_ledger::StationRouteLedger,
 ) -> anyhow::Result<(bool, ModeTransitionScan)> {
-    let (candidates, mut scan) = collect_mode_transition_candidates(runtime, state, entities);
+    let (candidates, mut scan) =
+        collect_mode_transition_candidates(runtime, transition_runtime, state, entities);
     scan.route_reference_probes = candidates.len();
     let ledger_usable = route_ledger.has_route_reference_index()
         && candidates.iter().all(|candidate| {
@@ -703,6 +804,7 @@ fn settle_mode_transitions_with_runtime(
         })?;
         commit_mode_transition_patches(entities, patches)?
     };
+    transition_runtime.refresh_after_commit(entities, &candidates);
     Ok((changed, scan))
 }
 
@@ -712,15 +814,24 @@ fn settle_mode_transitions(
     entities: &mut [Value],
     route_ledger: &crate::station_route_ledger::StationRouteLedger,
 ) -> anyhow::Result<bool> {
-    settle_mode_transitions_with_scan(state, entities, route_ledger).map(|(changed, _)| changed)
+    let mut transition_runtime = ModeTransitionRuntime::from_entities(entities);
+    settle_mode_transitions_with_scan(state, &mut transition_runtime, entities, route_ledger)
+        .map(|(changed, _)| changed)
 }
 
 pub(crate) fn settle_mode_transitions_with_scan(
     state: &CoreState,
+    transition_runtime: &mut ModeTransitionRuntime,
     entities: &mut [Value],
     route_ledger: &crate::station_route_ledger::StationRouteLedger,
 ) -> anyhow::Result<(bool, ModeTransitionScan)> {
-    settle_mode_transitions_with_runtime(deterministic_runtime(), state, entities, route_ledger)
+    settle_mode_transitions_with_runtime(
+        deterministic_runtime(),
+        transition_runtime,
+        state,
+        entities,
+        route_ledger,
+    )
 }
 
 fn allocate_budget(
@@ -1675,6 +1786,13 @@ mod tests {
         crate::station_route_ledger::StationRouteLedger::build(state, entities, &local, &remote)
     }
 
+    fn mode_transition_runtime(state: &CoreState) -> ModeTransitionRuntime {
+        state
+            .prepared_station_mode_transition_runtime()
+            .map(|runtime| runtime.as_ref().clone())
+            .expect("state rebuild prepares the transition wake set")
+    }
+
     fn frozen_settle_mode_transitions(entities: &mut [Value]) -> anyhow::Result<bool> {
         let transitions = entities
             .iter()
@@ -2155,9 +2273,11 @@ mod tests {
         let mut entities = fixture_entities();
         let state = state_from_entities(&entities);
         let ledger = built_route_ledger(&state, &entities);
+        let mut transition_runtime = mode_transition_runtime(&state);
         let before = serde_json::to_vec(&entities).unwrap();
         let (changed, scan) = settle_mode_transitions_with_runtime(
             &DeterministicRuntime::for_test(8),
+            &mut transition_runtime,
             &state,
             &mut entities,
             &ledger,
@@ -2192,20 +2312,15 @@ mod tests {
             Some("custom-to-legacy"),
         );
         let state = state_from_entities(&entities);
-        assert_eq!(
-            state.factory_topology.station_mode_transition_indices,
-            vec![3, 4_097]
-        );
-        assert!(
-            !state
-                .factory_topology
-                .station_mode_transition_full_scan_required
-        );
+        let mut transition_runtime = mode_transition_runtime(&state);
+        assert_eq!(transition_runtime.active_indices, vec![3, 4_097]);
+        assert!(!transition_runtime.full_scan_required());
         let ledger = built_route_ledger(&state, &entities);
         let mut oracle = entities.clone();
         let oracle_changed = frozen_settle_mode_transitions(&mut oracle).unwrap();
         let (changed, scan) = settle_mode_transitions_with_runtime(
             &DeterministicRuntime::for_test(8),
+            &mut transition_runtime,
             &state,
             &mut entities,
             &ledger,
@@ -2225,87 +2340,187 @@ mod tests {
         assert!(!scan.ledger_fallback);
         assert_eq!(entities[3]["stationOperationMode"], "elevator");
         assert_eq!(entities[4_097]["stationOperationMode"], "legacy");
+        assert_eq!(transition_runtime.active_row_count(), 0);
+
+        for boundary in 2..=12 {
+            let ledger = built_route_ledger(&state, &entities);
+            let (changed, scan) = settle_mode_transitions_with_runtime(
+                &DeterministicRuntime::for_test(8),
+                &mut transition_runtime,
+                &state,
+                &mut entities,
+                &ledger,
+            )
+            .unwrap();
+            assert!(
+                !changed,
+                "cleared transition changed again at boundary {boundary}"
+            );
+            assert_eq!(
+                scan.selected_rows, 0,
+                "cleared transition was probed again at boundary {boundary}"
+            );
+            assert_eq!(scan.route_reference_probes, 0);
+        }
     }
 
     #[test]
-    fn dense_and_invalid_transition_indexes_fall_back_to_frozen_full_oracle() {
-        let dense_source = (0..64)
+    fn record_rebuild_replaces_transition_wakes_in_persisted_row_order() {
+        let mut source = (0..32)
+            .map(|index| transition_row(index, "machine", "mining_machine", None))
+            .collect::<Vec<_>>();
+        source[3] = transition_row(
+            3,
+            "station",
+            "interstellar_logistics_station",
+            Some("to-elevator"),
+        );
+        source[21] = transition_row(
+            21,
+            "mod-row",
+            "mod:transition/opaque",
+            Some("opaque-mod-transition"),
+        );
+        let mut state = state_from_entities(&source);
+        assert_eq!(mode_transition_runtime(&state).active_indices, [3, 21]);
+
+        state.replace_entity_raw(
+            3,
+            Arc::<str>::from(
+                serde_json::to_string(&transition_row(
+                    3,
+                    "station",
+                    "interstellar_logistics_station",
+                    None,
+                ))
+                .unwrap(),
+            ),
+        );
+        state.replace_entity_raw(
+            11,
+            Arc::<str>::from(
+                serde_json::to_string(&transition_row(
+                    11,
+                    "mod-row",
+                    "mod:new-transition/Ω",
+                    Some("to-elevator"),
+                ))
+                .unwrap(),
+            ),
+        );
+        state.rebuild_indexes().unwrap();
+
+        let rebuilt = mode_transition_runtime(&state);
+        assert_eq!(rebuilt.active_indices, [11, 21]);
+        assert!(!rebuilt.full_scan_required());
+    }
+
+    #[test]
+    fn dense_and_invalid_transition_fallbacks_exceed_parallel_threshold_and_match_oracle() {
+        let dense_entity_count = PARALLEL_MIN_ITEMS * 2 + 257;
+        let dense_transition_count = dense_entity_count
+            .saturating_mul(MODE_TRANSITION_DENSE_NUMERATOR)
+            .div_ceil(MODE_TRANSITION_DENSE_DENOMINATOR);
+        let dense_source = (0..dense_entity_count)
             .map(|index| {
                 transition_row(
                     index,
                     "mod-row",
                     "mod:dense-transition",
-                    (index < 48).then_some("to-elevator"),
+                    (index < dense_transition_count).then_some(if index % 2 == 0 {
+                        "to-elevator"
+                    } else {
+                        "opaque-mod-transition"
+                    }),
                 )
             })
             .collect::<Vec<_>>();
         let dense_state = state_from_entities(&dense_source);
-        assert!(
-            dense_state
-                .factory_topology
-                .station_mode_transition_full_scan_required
-        );
-        assert!(
-            dense_state
-                .factory_topology
-                .station_mode_transition_indices
-                .is_empty()
-        );
         let dense_ledger = built_route_ledger(&dense_state, &dense_source);
-        let mut dense_actual = dense_source.clone();
-        let mut dense_oracle = dense_source;
-        frozen_settle_mode_transitions(&mut dense_oracle).unwrap();
-        let (_, dense_scan) = settle_mode_transitions_with_runtime(
-            &DeterministicRuntime::for_test(8),
-            &dense_state,
-            &mut dense_actual,
-            &dense_ledger,
-        )
-        .unwrap();
-        assert_eq!(
-            mode_transition_digest(&dense_actual),
-            mode_transition_digest(&dense_oracle)
-        );
-        assert_eq!(dense_scan.selected_rows, 64);
-        assert!(dense_scan.dense_fallback);
-        assert!(!dense_scan.index_fallback);
+        let mut dense_oracle = dense_source.clone();
+        assert!(frozen_settle_mode_transitions(&mut dense_oracle).unwrap());
+        let dense_expected = mode_transition_digest(&dense_oracle);
+        for workers in [1, 2, 4, 8] {
+            let worker_runtime = DeterministicRuntime::for_test(workers);
+            assert_eq!(
+                worker_runtime.worker_count_for_items(dense_entity_count),
+                workers
+            );
+            let mut transition_runtime = mode_transition_runtime(&dense_state);
+            assert!(transition_runtime.full_scan_required());
+            assert!(transition_runtime.active_indices.is_empty());
+            assert_eq!(transition_runtime.estimated_bytes(), 0);
+            let mut actual = dense_source.clone();
+            let (changed, scan) = settle_mode_transitions_with_runtime(
+                &worker_runtime,
+                &mut transition_runtime,
+                &dense_state,
+                &mut actual,
+                &dense_ledger,
+            )
+            .unwrap();
+            assert!(changed);
+            assert_eq!(mode_transition_digest(&actual), dense_expected);
+            assert_eq!(scan.selected_rows, dense_entity_count);
+            assert_eq!(scan.transition_rows, dense_transition_count);
+            assert!(scan.dense_fallback);
+            assert!(!scan.index_fallback);
+            if workers > 1 {
+                assert!(scan.observed_worker_count > 0);
+            }
+            assert_eq!(transition_runtime.active_row_count(), 0);
+        }
 
-        let mut sparse_source = (0..64)
+        let sparse_transition_count = PARALLEL_MIN_ITEMS + 19;
+        let sparse_entity_count = sparse_transition_count * 2 + 31;
+        let sparse_source = (0..sparse_entity_count)
             .map(|index| {
                 transition_row(
                     index,
                     "mod-row",
                     "mod:sparse-transition",
-                    (index == 7).then_some("to-elevator"),
+                    (index < sparse_transition_count).then_some(if index % 2 == 0 {
+                        "to-elevator"
+                    } else {
+                        "opaque-mod-transition"
+                    }),
                 )
             })
             .collect::<Vec<_>>();
-        sparse_source[0]
-            .as_object_mut()
-            .unwrap()
-            .remove("stationModeTransition");
-        let mut invalid_state = state_from_entities(&sparse_source);
-        let invalid_topology = Arc::make_mut(&mut invalid_state.factory_topology);
-        invalid_topology.station_mode_transition_indices = vec![0];
-        invalid_topology.station_mode_transition_full_scan_required = false;
+        let invalid_state = state_from_entities(&sparse_source);
         let invalid_ledger = built_route_ledger(&invalid_state, &sparse_source);
-        let mut invalid_actual = sparse_source.clone();
-        let mut invalid_oracle = sparse_source;
-        frozen_settle_mode_transitions(&mut invalid_oracle).unwrap();
-        let (_, invalid_scan) = settle_mode_transitions_with_runtime(
-            &DeterministicRuntime::for_test(8),
-            &invalid_state,
-            &mut invalid_actual,
-            &invalid_ledger,
-        )
-        .unwrap();
-        assert_eq!(
-            mode_transition_digest(&invalid_actual),
-            mode_transition_digest(&invalid_oracle)
-        );
-        assert_eq!(invalid_scan.selected_rows, 64);
-        assert!(!invalid_scan.dense_fallback);
-        assert!(invalid_scan.index_fallback);
+        let mut invalid_oracle = sparse_source.clone();
+        assert!(frozen_settle_mode_transitions(&mut invalid_oracle).unwrap());
+        let invalid_expected = mode_transition_digest(&invalid_oracle);
+        for workers in [1, 2, 4, 8] {
+            let worker_runtime = DeterministicRuntime::for_test(workers);
+            assert_eq!(
+                worker_runtime.worker_count_for_items(sparse_entity_count),
+                workers
+            );
+            let mut transition_runtime = mode_transition_runtime(&invalid_state);
+            transition_runtime.active_indices = vec![sparse_transition_count + 7, 0];
+            transition_runtime.full_scan_required = false;
+            let mut actual = sparse_source.clone();
+            let (changed, scan) = settle_mode_transitions_with_runtime(
+                &worker_runtime,
+                &mut transition_runtime,
+                &invalid_state,
+                &mut actual,
+                &invalid_ledger,
+            )
+            .unwrap();
+            assert!(changed);
+            assert_eq!(mode_transition_digest(&actual), invalid_expected);
+            assert_eq!(scan.selected_rows, sparse_entity_count);
+            assert_eq!(scan.transition_rows, sparse_transition_count);
+            assert!(!scan.dense_fallback);
+            assert!(scan.index_fallback);
+            if workers > 1 {
+                assert!(scan.observed_worker_count > 0);
+            }
+            assert_eq!(transition_runtime.active_row_count(), 0);
+        }
     }
 
     #[test]
@@ -2332,10 +2547,12 @@ mod tests {
         }]);
         let peer_state = state_from_entities(&peer_entities);
         let peer_ledger = built_route_ledger(&peer_state, &peer_entities);
+        let mut peer_transition_runtime = mode_transition_runtime(&peer_state);
         assert!(peer_ledger.references_station(0));
         let before = mode_transition_digest(&peer_entities);
         let (changed, scan) = settle_mode_transitions_with_runtime(
             &DeterministicRuntime::for_test(8),
+            &mut peer_transition_runtime,
             &peer_state,
             &mut peer_entities,
             &peer_ledger,
@@ -2382,6 +2599,83 @@ mod tests {
                 .unwrap()
         );
         assert!(waypoint_entities[0]["stationModeTransition"].is_null());
+    }
+
+    #[test]
+    fn placeholder_and_opaque_route_ledgers_preserve_permissive_blocking_semantics() {
+        let route = |scope: &str| {
+            json!({
+                "id": "opaque-transition-route",
+                "scope": scope,
+                "peerId": "transition-00000",
+                "vehicleStationId": "transition-00001",
+                "waypointStationIds": [],
+                "itemId": "iron_ore",
+                "cargo": 1,
+                "vehicleCount": 1,
+                "progress": 0.25,
+                "mod:opaque": { "signedZero": -0.0, "text": "原样" }
+            })
+        };
+        let source = vec![
+            transition_row(
+                0,
+                "station",
+                "interstellar_logistics_station",
+                Some("to-elevator"),
+            ),
+            transition_row(1, "station", "interstellar_logistics_station", None),
+        ];
+
+        let mut placeholder_entities = source.clone();
+        placeholder_entities[1]["stationRoutes"] = Value::Array(vec![route("remote")]);
+        let placeholder_state = state_from_entities(&placeholder_entities);
+        let mut placeholder_runtime = mode_transition_runtime(&placeholder_state);
+        let before = mode_transition_digest(&placeholder_entities);
+        let (changed, scan) = settle_mode_transitions_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &mut placeholder_runtime,
+            &placeholder_state,
+            &mut placeholder_entities,
+            &crate::station_route_ledger::StationRouteLedger::default(),
+        )
+        .unwrap();
+        assert!(!changed);
+        assert!(scan.ledger_fallback);
+        assert_eq!(mode_transition_digest(&placeholder_entities), before);
+        assert_eq!(placeholder_runtime.active_row_count(), 1);
+
+        let mut opaque_entities = source;
+        opaque_entities[1]["stationRoutes"] = Value::Array(vec![route("mod:wormhole")]);
+        let opaque_state = state_from_entities(&opaque_entities);
+        let opaque_ledger = built_route_ledger(&opaque_state, &opaque_entities);
+        assert!(opaque_ledger.references_station(0));
+        let mut opaque_runtime = mode_transition_runtime(&opaque_state);
+        let (changed, scan) = settle_mode_transitions_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &mut opaque_runtime,
+            &opaque_state,
+            &mut opaque_entities,
+            &opaque_ledger,
+        )
+        .unwrap();
+        assert!(!changed);
+        assert!(!scan.ledger_fallback);
+        assert_eq!(opaque_runtime.active_row_count(), 1);
+
+        opaque_entities[1]["stationRoutes"] = Value::Array(Vec::new());
+        let cleared_ledger = built_route_ledger(&opaque_state, &opaque_entities);
+        let (changed, scan) = settle_mode_transitions_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &mut opaque_runtime,
+            &opaque_state,
+            &mut opaque_entities,
+            &cleared_ledger,
+        )
+        .unwrap();
+        assert!(changed);
+        assert_eq!(scan.selected_rows, 1);
+        assert_eq!(opaque_runtime.active_row_count(), 0);
     }
 
     fn run_mode_transition_boundaries(segmented: bool) -> Vec<Value> {
@@ -2464,15 +2758,25 @@ mod tests {
         let expected = mode_transition_digest(&oracle);
         for workers in [1, 2, 4, 8] {
             let runtime = DeterministicRuntime::for_test(workers);
+            let mut transition_runtime = mode_transition_runtime(&state);
             assert_eq!(runtime.worker_count_for_items(transition_count), workers);
             let mut candidate = source.clone();
-            let (changed, scan) =
-                settle_mode_transitions_with_runtime(&runtime, &state, &mut candidate, &ledger)
-                    .unwrap();
+            let (changed, scan) = settle_mode_transitions_with_runtime(
+                &runtime,
+                &mut transition_runtime,
+                &state,
+                &mut candidate,
+                &ledger,
+            )
+            .unwrap();
             assert!(changed);
             assert_eq!(scan.selected_rows, transition_count);
             assert_eq!(scan.transition_rows, transition_count);
             assert_eq!(scan.route_reference_probes, transition_count);
+            if workers > 1 {
+                assert!(scan.observed_worker_count > 0);
+            }
+            assert_eq!(transition_runtime.active_row_count(), 0);
             let digest = mode_transition_digest(&candidate);
             assert_eq!(
                 digest, expected,
@@ -2482,37 +2786,59 @@ mod tests {
     }
 
     #[test]
-    fn failing_route_probe_leaves_candidate_json_unchanged() {
-        let source = vec![
-            transition_row(
-                0,
-                "station",
-                "interstellar_logistics_station",
-                Some("to-elevator"),
-            ),
-            transition_row(1, "mod-row", "mod:transition", Some("custom-to-legacy")),
-        ];
+    fn parallel_route_probe_failure_is_ordered_and_commits_nothing_at_all_worker_limits() {
+        let transition_count = PARALLEL_MIN_ITEMS + 31;
+        let entity_count = transition_count * 2 + 17;
+        let source = (0..entity_count)
+            .map(|index| {
+                transition_row(
+                    index,
+                    "mod-row",
+                    "mod:parallel-error",
+                    (index < transition_count).then_some(if index % 2 == 0 {
+                        "to-elevator"
+                    } else {
+                        "opaque-mod-transition"
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
         let state = state_from_entities(&source);
-        let (candidates, scan) =
-            collect_mode_transition_candidates(&DeterministicRuntime::for_test(8), &state, &source);
-        assert_eq!(scan.transition_rows, 2);
-        let mut candidate = source.clone();
-        let before = mode_transition_digest(&candidate);
-        let error = settle_mode_transition_candidates(
+        let transition_runtime = mode_transition_runtime(&state);
+        let (candidates, scan) = collect_mode_transition_candidates(
             &DeterministicRuntime::for_test(8),
-            &mut candidate,
-            &candidates,
-            |entity_index, _| {
-                if entity_index == 1 {
-                    Err(anyhow!("injected route probe failure"))
-                } else {
-                    Ok(false)
-                }
-            },
-        )
-        .unwrap_err();
-        assert_eq!(error.to_string(), "injected route probe failure");
-        assert_eq!(mode_transition_digest(&candidate), before);
+            &transition_runtime,
+            &state,
+            &source,
+        );
+        assert_eq!(scan.transition_rows, transition_count);
+        let before = mode_transition_digest(&source);
+        let later_failure = PARALLEL_MIN_ITEMS + 13;
+        for workers in [1, 2, 4, 8] {
+            let runtime = DeterministicRuntime::for_test(workers);
+            assert_eq!(runtime.worker_count_for_items(candidates.len()), workers);
+            let visited_later = AtomicUsize::new(0);
+            let mut candidate = source.clone();
+            let error = settle_mode_transition_candidates(
+                &runtime,
+                &mut candidate,
+                &candidates,
+                |entity_index, _| {
+                    if entity_index == later_failure {
+                        visited_later.fetch_add(1, Ordering::SeqCst);
+                        Err(anyhow!("later route probe failure at {entity_index}"))
+                    } else if entity_index == 7 {
+                        Err(anyhow!("first route probe failure at {entity_index}"))
+                    } else {
+                        Ok(false)
+                    }
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.to_string(), "first route probe failure at 7");
+            assert_eq!(visited_later.load(Ordering::SeqCst), 1);
+            assert_eq!(mode_transition_digest(&candidate), before);
+        }
     }
 
     #[test]

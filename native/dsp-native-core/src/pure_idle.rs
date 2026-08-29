@@ -10483,4 +10483,134 @@ mod tests {
         assert_eq!(replayed.pure_idle_macro_exact_seconds_used(), 30.0);
         assert_eq!(replayed.pure_idle_exact_seconds_used(), 0.0);
     }
+
+    fn exact_station_mode_transition_fixture() -> CoreState {
+        let mut base = powered_fixture_base(15.0, "infinite");
+        base["timeWarp"]["enabled"] = json!(false);
+        base["timeWarp"]["requestedMultiplier"] = json!(1);
+        base["timeWarp"]["effectiveMultiplier"] = json!(1);
+        base["timeWarp"]["requiredPowerKw"] = json!(0);
+        base["timeWarp"]["allocatedPowerKw"] = json!(0);
+        let mut catalog = fixture_catalog().snapshot;
+        catalog.buildings.push(BuildingDefinition {
+            id: "interstellar_logistics_station".to_owned(),
+            kind: "station".to_owned(),
+            speed: 1.0,
+            input_capacity: 1_000_000.0,
+            output_capacity: 1_000_000.0,
+            power_demand_kw: 1.0,
+            power_generation_kw: 0.0,
+            power_charge_kw: 0.0,
+            energy_capacity_mj: 0.0,
+            fuel_item_ids: Vec::new(),
+            fuel_efficiency: 1.0,
+            family: None,
+            accepts: None,
+        });
+        let catalog = RuntimeCatalog::validate(catalog, "pure-idle-test").unwrap();
+        fixture_state_from_parts_with_belts_and_catalog(
+            base,
+            vec![
+                json!({
+                    "id": "controller",
+                    "kind": "machine",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "time_warp_device",
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0
+                }),
+                json!({
+                    "id": "committed-transition-station",
+                    "kind": "station",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "interstellar_logistics_station",
+                    "stationTier": 2,
+                    "stationOperationMode": "legacy",
+                    "stationModeTransition": "to-elevator",
+                    "quantumMode": "legacy",
+                    "machineCount": 1,
+                    "stationSlots": [
+                        { "itemId": null, "localMode": "storage", "remoteMode": "storage", "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000, "priority": 1, "routePolicy": "direct", "warperBudget": 0 },
+                        { "itemId": null, "localMode": "storage", "remoteMode": "storage", "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000, "priority": 1, "routePolicy": "direct", "warperBudget": 0 },
+                        { "itemId": null, "localMode": "storage", "remoteMode": "storage", "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000, "priority": 1, "routePolicy": "direct", "warperBudget": 0 },
+                        { "itemId": null, "localMode": "storage", "remoteMode": "storage", "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000, "priority": 1, "routePolicy": "direct", "warperBudget": 0 },
+                        { "itemId": null, "localMode": "storage", "remoteMode": "storage", "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000, "priority": 1, "routePolicy": "direct", "warperBudget": 0 }
+                    ],
+                    "stationRoutes": [],
+                    "stationDrones": 0,
+                    "stationVessels": 0,
+                    "stationWarpEnabled": false,
+                    "stationWarpers": 0,
+                    "stationDispatchCursor": 0,
+                    "stationLastSupplyPeerBySlot": {},
+                    "stationProgress": 0,
+                    "stationCongestion": 0,
+                    "stationTrips": 0,
+                    "stationLastTransfer": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0
+                }),
+            ],
+            Vec::new(),
+            catalog,
+        )
+    }
+
+    #[test]
+    fn committed_five_then_sixty_second_advances_do_not_reprobe_cleared_transition_rows() {
+        let mut segmented = exact_station_mode_transition_fixture();
+        let first = segmented
+            .advance(&exact_request(segmented.revision, 5.0, 5.0))
+            .unwrap();
+        assert!(first.supported, "first commit reason={:?}", first.reason);
+        let first_runtime = segmented
+            .prepared_station_mode_transition_runtime()
+            .expect("first commit installs transition runtime");
+        assert_eq!(first_runtime.active_row_count(), 0);
+        let first_entities = segmented.parse_entities_parallel().unwrap();
+        assert_eq!(
+            first_entities[1]["stationOperationMode"],
+            Value::from("elevator")
+        );
+        assert!(first_entities[1]["stationModeTransition"].is_null());
+
+        let second = segmented
+            .advance(&exact_request(segmented.revision, 60.0, 60.0))
+            .unwrap();
+        assert!(second.supported, "second commit reason={:?}", second.reason);
+        let second_runtime = segmented
+            .prepared_station_mode_transition_runtime()
+            .expect("second commit retains transition runtime");
+        assert_eq!(second_runtime.active_row_count(), 0);
+
+        let mut continuous = exact_station_mode_transition_fixture();
+        let result = continuous
+            .advance(&exact_request(continuous.revision, 65.0, 65.0))
+            .unwrap();
+        assert!(result.supported, "continuous reason={:?}", result.reason);
+        assert_eq!(
+            serde_json::to_vec(&segmented.parse_entities_parallel().unwrap()).unwrap(),
+            serde_json::to_vec(&continuous.parse_entities_parallel().unwrap()).unwrap(),
+            "5+60 second commit segmentation changed persisted entity order or bytes"
+        );
+        assert_eq!(
+            continuous
+                .prepared_station_mode_transition_runtime()
+                .expect("continuous commit installs transition runtime")
+                .active_row_count(),
+            0
+        );
+    }
 }

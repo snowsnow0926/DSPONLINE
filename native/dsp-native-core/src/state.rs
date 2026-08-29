@@ -2340,15 +2340,6 @@ pub(crate) struct FactoryTopology {
     /// The full scan is selected once during topology compilation and remains
     /// deterministic for the lifetime of the native session.
     pub system_space_station_full_scan_required: bool,
-    /// Stable persisted-row order for the currently pending
-    /// `stationModeTransition` records. Commands rebuild the topology before
-    /// the next admitted advance, while a completed transition is rechecked
-    /// against the mutable candidate row before commit. The common no-
-    /// transition boundary therefore performs no entity discovery scan.
-    pub station_mode_transition_indices: Vec<usize>,
-    /// Dense transition sets deliberately retain the historical persisted-row
-    /// full scan instead of keeping a near-complete duplicate index.
-    pub station_mode_transition_full_scan_required: bool,
     /// Stable persisted-row order for every ray receiver. Runtime recipe,
     /// technology, output-capacity, and power eligibility still belong to the
     /// exact Dyson probe; this immutable index only removes the O(all
@@ -2398,7 +2389,6 @@ impl FactoryTopology {
         self.galactic_material_exporter_indices.shrink_to_fit();
         self.space_station_launcher_indices.shrink_to_fit();
         self.system_space_station_entity_indices.shrink_to_fit();
-        self.station_mode_transition_indices.shrink_to_fit();
         self.ray_receiver_indices.shrink_to_fit();
         self.power_source_indices.shrink_to_fit();
         self.vein_indices.shrink_to_fit();
@@ -2429,7 +2419,6 @@ impl FactoryTopology {
             + self.galactic_material_exporter_indices.capacity()
             + self.space_station_launcher_indices.capacity()
             + self.system_space_station_entity_indices.capacity()
-            + self.station_mode_transition_indices.capacity()
             + self.ray_receiver_indices.capacity()
             + self.power_source_indices.capacity()
             + self.vein_indices.capacity()
@@ -2499,6 +2488,11 @@ pub struct CoreState {
     /// Runtime-only stable construction-center rows and dependency wake
     /// queues. Installed only after the complete simulation candidate commits.
     prepared_construction_runtime: Option<Arc<crate::construction::ConstructionRuntime>>,
+    /// Runtime-only persisted-order wake set for pending station mode
+    /// transitions. It advances with the simulation candidate and is installed
+    /// only after the corresponding entity revision commits.
+    prepared_station_mode_transition_runtime:
+        Option<Arc<crate::system_space_station::ModeTransitionRuntime>>,
     /// Immutable traditional interstellar peer/reverse-wake graph. It is
     /// shared across committed revisions and rebuilt only when record
     /// topology, station mode, research, or exploration membership changes.
@@ -3157,6 +3151,7 @@ impl CoreState {
             prepared_local_peer_directory: None,
             prepared_quantum_logistics_directory: None,
             prepared_construction_runtime: None,
+            prepared_station_mode_transition_runtime: None,
             prepared_interstellar_peer_directory: None,
             prepared_interstellar_route_activity: None,
             save_dirty,
@@ -3614,6 +3609,19 @@ impl CoreState {
         self.prepared_construction_runtime = Some(runtime);
     }
 
+    pub(crate) fn prepared_station_mode_transition_runtime(
+        &self,
+    ) -> Option<Arc<crate::system_space_station::ModeTransitionRuntime>> {
+        self.prepared_station_mode_transition_runtime.clone()
+    }
+
+    pub(crate) fn install_prepared_station_mode_transition_runtime(
+        &mut self,
+        runtime: Arc<crate::system_space_station::ModeTransitionRuntime>,
+    ) {
+        self.prepared_station_mode_transition_runtime = Some(runtime);
+    }
+
     pub(crate) fn prepared_interstellar_route_activity(
         &self,
     ) -> Option<Arc<crate::interstellar_logistics::InterstellarRouteActivity>> {
@@ -3679,6 +3687,7 @@ impl CoreState {
             device_counts_by_planet: vec![0.0; self.catalog.planets.len()],
             ..FactoryTopology::default()
         };
+        let mut station_mode_transition_indices = Vec::new();
         let mut entity_dynamics = EntityDynamicColumns::with_capacity(entity_values.len());
         for (index, value) in entity_values.iter().enumerate() {
             let object = value
@@ -3791,7 +3800,7 @@ impl CoreState {
             // string transition participates, including MOD-defined kinds and
             // building IDs. Admission validation remains unchanged.
             if object_string(object, "stationModeTransition").is_some() {
-                factory_topology.station_mode_transition_indices.push(index);
+                station_mode_transition_indices.push(index);
             }
             if kind == "machine" && building == "ray_receiver" {
                 factory_topology.ray_receiver_indices.push(index);
@@ -3946,21 +3955,17 @@ impl CoreState {
             factory_topology.system_space_station_entity_indices = Vec::new();
             factory_topology.system_space_station_full_scan_required = true;
         }
-        if !factory_topology.station_mode_transition_indices.is_empty()
-            && factory_topology
-                .station_mode_transition_indices
-                .len()
-                .saturating_mul(4)
-                >= entity_values.len().saturating_mul(3)
-        {
-            factory_topology.station_mode_transition_indices = Vec::new();
-            factory_topology.station_mode_transition_full_scan_required = true;
-        }
         // These immutable indexes live for the complete native session. Trim
         // geometric growth slack once, after construction, so a large save
         // does not retain several MiB of unreachable topology capacity.
         factory_topology.shrink_to_fit();
         self.factory_topology = Arc::new(factory_topology);
+        self.prepared_station_mode_transition_runtime = Some(Arc::new(
+            crate::system_space_station::ModeTransitionRuntime::from_indices(
+                entity_values.len(),
+                station_mode_transition_indices,
+            ),
+        ));
         // Record commands may alter station slots or elevator mode. The next
         // admitted advance recompiles this immutable directory from the new
         // records; keeping the previous one would route against stale topology.
@@ -5648,6 +5653,11 @@ impl CoreState {
             .as_ref()
             .map(|runtime| runtime.estimated_bytes())
             .unwrap_or(0);
+        let prepared_station_mode_transition_bytes = self
+            .prepared_station_mode_transition_runtime
+            .as_ref()
+            .map(|runtime| runtime.estimated_bytes())
+            .unwrap_or(0);
         let prepared_interstellar_peer_bytes = self
             .prepared_interstellar_peer_directory
             .as_ref()
@@ -5663,12 +5673,13 @@ impl CoreState {
             + prepared_local_peer_bytes
             + prepared_quantum_logistics_bytes
             + prepared_construction_runtime_bytes
+            + prepared_station_mode_transition_bytes
             + prepared_interstellar_peer_bytes
             + prepared_interstellar_activity_bytes
             + factory_topology_bytes;
         if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
             eprintln!(
-                "DSP_NATIVE_CORE_PROFILE\tmemory-topology-breakdown\tbelts={prepared_belt_route_bytes},local={prepared_local_peer_bytes},quantum={prepared_quantum_logistics_bytes},construction={prepared_construction_runtime_bytes},interstellar={prepared_interstellar_peer_bytes},activity={prepared_interstellar_activity_bytes},factory={factory_topology_bytes}"
+                "DSP_NATIVE_CORE_PROFILE\tmemory-topology-breakdown\tbelts={prepared_belt_route_bytes},local={prepared_local_peer_bytes},quantum={prepared_quantum_logistics_bytes},construction={prepared_construction_runtime_bytes},stationMode={prepared_station_mode_transition_bytes},interstellar={prepared_interstellar_peer_bytes},activity={prepared_interstellar_activity_bytes},factory={factory_topology_bytes}"
             );
         }
         let belt_activity_runtime_bytes = self

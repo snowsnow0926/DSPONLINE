@@ -3606,6 +3606,61 @@ fn maximum_stable_time_warp_multiplier(
     Some(requested_multiplier.min(supported))
 }
 
+fn settle_post_route_station_mode_transition(
+    state: &CoreState,
+    transition_runtime: &mut std::sync::Arc<crate::system_space_station::ModeTransitionRuntime>,
+    entities: &mut [Value],
+    route_ledger: &crate::station_route_ledger::StationRouteLedger,
+) -> anyhow::Result<(bool, crate::system_space_station::ModeTransitionScan)> {
+    crate::system_space_station::settle_mode_transitions_with_scan(
+        state,
+        std::sync::Arc::make_mut(transition_runtime),
+        entities,
+        route_ledger,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_station_mode_dependent_directories(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    topology_changed: bool,
+    local_step_directory: &mut std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
+    quantum_step_runtime: &mut crate::quantum_logistics::QuantumLogisticsDirectory,
+    interstellar_peer_directory: &mut std::sync::Arc<
+        crate::interstellar_logistics::InterstellarPeerDirectory,
+    >,
+    interstellar_route_activity: &mut std::sync::Arc<
+        crate::interstellar_logistics::InterstellarRouteActivity,
+    >,
+) -> anyhow::Result<()> {
+    crate::local_logistics::refresh_step_directory_after_topology_change(
+        entities,
+        &state.factory_topology.station_indices,
+        topology_changed,
+        local_step_directory,
+    )?;
+    crate::interstellar_logistics::refresh_route_activity_after_topology_change(
+        entities,
+        topology_changed,
+        interstellar_route_activity,
+    );
+    crate::interstellar_logistics::refresh_peer_directory(
+        state,
+        base,
+        entities,
+        topology_changed,
+        interstellar_peer_directory,
+        interstellar_route_activity,
+    );
+    if topology_changed {
+        *quantum_step_runtime =
+            crate::quantum_logistics::QuantumLogisticsDirectory::build(state, entities);
+    }
+    Ok(())
+}
+
 // Keep each mutable runtime dependency explicit at the candidate boundary;
 // bundling them would obscure which wake cache is committed only on success.
 #[allow(clippy::too_many_arguments)]
@@ -3620,6 +3675,9 @@ fn simulate_step(
         crate::quantum_logistics::QuantumLogisticsDirectory,
     >,
     construction_runtime: &mut std::sync::Arc<crate::construction::ConstructionRuntime>,
+    station_mode_transition_runtime: &mut std::sync::Arc<
+        crate::system_space_station::ModeTransitionRuntime,
+    >,
     interstellar_peer_directory: &mut std::sync::Arc<
         crate::interstellar_logistics::InterstellarPeerDirectory,
     >,
@@ -5206,12 +5264,12 @@ fn simulate_step(
     let mut station_mode_topology_changed = false;
     if crossed_quantum_boundary {
         for boundary in first_quantum_boundary..=last_quantum_boundary {
-            let (mode_changed, mode_scan) =
-                crate::system_space_station::settle_mode_transitions_with_scan(
-                    state,
-                    entities,
-                    &congestion_route_ledger,
-                )?;
+            let (mode_changed, mode_scan) = settle_post_route_station_mode_transition(
+                state,
+                station_mode_transition_runtime,
+                entities,
+                &congestion_route_ledger,
+            )?;
             station_mode_topology_changed |= mode_changed;
             if profile_enabled {
                 eprintln!(
@@ -5272,29 +5330,16 @@ fn simulate_step(
         // Elevator and quantum attachment transitions can change traditional
         // peer membership. Stable five-second settlements retain the
         // cross-revision wake caches; an actual transition rebuilds once.
-        crate::local_logistics::refresh_step_directory_after_topology_change(
-            entities,
-            &state.factory_topology.station_indices,
-            station_mode_topology_changed,
-            local_step_directory,
-        )?;
-        crate::interstellar_logistics::refresh_route_activity_after_topology_change(
-            entities,
-            station_mode_topology_changed,
-            interstellar_route_activity,
-        );
-        crate::interstellar_logistics::refresh_peer_directory(
+        refresh_station_mode_dependent_directories(
             state,
             base,
             entities,
             station_mode_topology_changed,
+            local_step_directory,
+            quantum_step_runtime,
             interstellar_peer_directory,
             interstellar_route_activity,
-        );
-        if station_mode_topology_changed {
-            *quantum_step_runtime =
-                crate::quantum_logistics::QuantumLogisticsDirectory::build(state, entities);
-        }
+        )?;
     }
     profile_mark!("local-directory-boundary-refresh");
     if let Some(endgame) = base.get_mut("endgame").and_then(Value::as_object_mut) {
@@ -5331,6 +5376,8 @@ pub(crate) struct PreparedFactoryAdvance {
     pub quantum_logistics_directory:
         std::sync::Arc<crate::quantum_logistics::QuantumLogisticsDirectory>,
     pub construction_runtime: std::sync::Arc<crate::construction::ConstructionRuntime>,
+    pub station_mode_transition_runtime:
+        std::sync::Arc<crate::system_space_station::ModeTransitionRuntime>,
     pub interstellar_peer_directory:
         std::sync::Arc<crate::interstellar_logistics::InterstellarPeerDirectory>,
     pub interstellar_route_activity:
@@ -5415,6 +5462,13 @@ pub(crate) fn prepare_advance(
             state, &base, &entities,
         ))
     };
+    let mut station_mode_transition_runtime = state
+        .prepared_station_mode_transition_runtime()
+        .unwrap_or_else(|| {
+            std::sync::Arc::new(
+                crate::system_space_station::ModeTransitionRuntime::from_entities(&entities),
+            )
+        });
     let mut interstellar_route_activity =
         if let Some(activity) = state.prepared_interstellar_route_activity() {
             activity
@@ -5543,6 +5597,7 @@ pub(crate) fn prepare_advance(
             &mut local_peer_directory,
             &mut quantum_logistics_directory,
             &mut construction_runtime,
+            &mut station_mode_transition_runtime,
             &mut interstellar_peer_directory,
             &mut interstellar_route_activity,
             step,
@@ -5633,6 +5688,7 @@ pub(crate) fn prepare_advance(
         local_peer_directory,
         quantum_logistics_directory,
         construction_runtime,
+        station_mode_transition_runtime,
         interstellar_peer_directory,
         interstellar_route_activity,
     })
@@ -7187,5 +7243,187 @@ pub(crate) mod tests {
         let grouped = 10_000_000_000_000_000.0 + (1.0 + 1.0);
         assert_eq!(produced["iron_ingot"], serial);
         assert_ne!(produced["iron_ingot"], grouped);
+    }
+
+    #[test]
+    fn route_advance_post_route_ledger_boundary_and_cache_refresh_share_production_chain() {
+        let slot = |remote_mode: &str| {
+            json!({
+                "itemId": if remote_mode == "storage" { Value::Null } else { Value::from("iron_ore") },
+                "localMode": "storage",
+                "remoteMode": remote_mode,
+                "minimumLoad": 0.1,
+                "minStock": 0,
+                "maxStock": 1000000,
+                "priority": 1,
+                "routePolicy": "direct",
+                "warperBudget": 0
+            })
+        };
+        let station = |id: &str, tier: u64, transition: Option<&str>, remote_mode: &str| {
+            json!({
+                "id": id,
+                "kind": "station",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "interstellar_logistics_station",
+                "stationTier": tier,
+                "stationOperationMode": "legacy",
+                "stationModeTransition": transition,
+                "machineCount": 1,
+                "stationSlots": [
+                    slot(remote_mode), slot("storage"), slot("storage"), slot("storage"), slot("storage")
+                ],
+                "stationRoutes": [],
+                "stationVessels": 2,
+                "stationWarpEnabled": false,
+                "stationWarpers": 0,
+                "stationDispatchCursor": 0,
+                "stationLastSupplyPeerBySlot": {},
+                "stationProgress": 0,
+                "stationCongestion": 0,
+                "stationTrips": 0,
+                "stationLastTransfer": 0,
+                "inputs": { "iron_ore": 0 },
+                "outputs": { "iron_ore": 1 },
+                "utilization": 0,
+                "productionRate": 0,
+                "routingCursor": 0
+            })
+        };
+        let mut entities = vec![
+            station("transition-target", 2, Some("to-elevator"), "supply"),
+            station("route-demand", 1, None, "demand"),
+        ];
+        entities[1]["stationRoutes"] = json!([{
+            "id": "draining-remote-route",
+            "slotIndex": 0,
+            "peerId": "transition-target",
+            "itemId": "iron_ore",
+            "scope": "remote",
+            "cargo": 1,
+            "vehicleCount": 1,
+            "progress": 0,
+            "duration": 10,
+            "requiresWarp": false,
+            "waypointStationIds": [],
+            "distanceLy": 0,
+            "warpersPerVessel": 0,
+            "vehicleStationId": "route-demand",
+            "mod:route/opaque": { "signedZero": -0.0, "text": "原样" }
+        }]);
+        let state = fixture_state(&entities);
+        let base = fixture_base().as_object().unwrap().clone();
+        let powers = HashMap::from([(0, 1.0), (1, 1.0)]);
+        let mut transition_runtime = state
+            .prepared_station_mode_transition_runtime()
+            .expect("transition runtime");
+        let mut local_directory = std::sync::Arc::new(
+            crate::local_logistics::prepare_step_directory(
+                &entities,
+                &state.factory_topology.station_indices,
+            )
+            .unwrap(),
+        );
+        let mut route_activity = std::sync::Arc::new(
+            crate::interstellar_logistics::prepare_route_activity(&entities),
+        );
+        let mut peer_directory = std::sync::Arc::new(
+            crate::interstellar_logistics::InterstellarPeerDirectory::build(
+                &state, &base, &entities,
+            ),
+        );
+        let mut quantum_directory =
+            crate::quantum_logistics::QuantumLogisticsDirectory::build(&state, &entities);
+        assert!(local_directory.contains_local_station(0));
+        assert!(
+            !quantum_directory
+                .endpoint_indices(&state, &entities)
+                .unwrap()
+                .contains(&0)
+        );
+
+        crate::interstellar_logistics::advance_routes(
+            &state,
+            &mut entities,
+            5.0,
+            &powers,
+            std::sync::Arc::make_mut(&mut route_activity),
+        )
+        .unwrap();
+        let first_post_route_ledger = crate::station_route_ledger::StationRouteLedger::build(
+            &state,
+            &entities,
+            &local_directory,
+            &route_activity,
+        );
+        assert!(first_post_route_ledger.references_station(0));
+        let (changed, first_scan) = settle_post_route_station_mode_transition(
+            &state,
+            &mut transition_runtime,
+            &mut entities,
+            &first_post_route_ledger,
+        )
+        .unwrap();
+        assert!(!changed);
+        assert_eq!(first_scan.selected_rows, 1);
+        assert_eq!(
+            transition_runtime.as_ref().active_row_count(),
+            1,
+            "blocked row must remain awake"
+        );
+
+        crate::interstellar_logistics::advance_routes(
+            &state,
+            &mut entities,
+            5.0,
+            &powers,
+            std::sync::Arc::make_mut(&mut route_activity),
+        )
+        .unwrap();
+        let second_post_route_ledger = crate::station_route_ledger::StationRouteLedger::build(
+            &state,
+            &entities,
+            &local_directory,
+            &route_activity,
+        );
+        assert!(!second_post_route_ledger.references_station(0));
+        let (changed, second_scan) = settle_post_route_station_mode_transition(
+            &state,
+            &mut transition_runtime,
+            &mut entities,
+            &second_post_route_ledger,
+        )
+        .unwrap();
+        assert!(changed);
+        assert_eq!(second_scan.selected_rows, 1);
+        assert_eq!(transition_runtime.as_ref().active_row_count(), 0);
+        assert_eq!(entities[0]["stationOperationMode"], "elevator");
+        assert!(entities[0]["stationModeTransition"].is_null());
+
+        let old_local = local_directory.clone();
+        let old_peer = peer_directory.clone();
+        let old_activity = route_activity.clone();
+        refresh_station_mode_dependent_directories(
+            &state,
+            &base,
+            &entities,
+            true,
+            &mut local_directory,
+            &mut quantum_directory,
+            &mut peer_directory,
+            &mut route_activity,
+        )
+        .unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&old_local, &local_directory));
+        assert!(!std::sync::Arc::ptr_eq(&old_peer, &peer_directory));
+        assert!(!std::sync::Arc::ptr_eq(&old_activity, &route_activity));
+        assert!(!local_directory.contains_local_station(0));
+        assert!(
+            quantum_directory
+                .endpoint_indices(&state, &entities)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

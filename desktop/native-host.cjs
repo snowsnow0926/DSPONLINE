@@ -737,9 +737,10 @@ function normalizePlayerAuthorityStartupRecovery(value) {
   );
   const validCleanup = !hasCleanup || (
     presentCleanupKeys.length === cleanupKeys.length && !hasMacro &&
+    entryCheckpoint !== null &&
     validLogicalId(value.pendingMacroCleanupSessionId, 128) &&
     Number.isSafeInteger(value.pendingMacroCleanupRevision) &&
-    value.pendingMacroCleanupRevision >= 0 &&
+    value.pendingMacroCleanupRevision >= entryCheckpoint.revision &&
     Number.isSafeInteger(value.revision) &&
     value.pendingMacroCleanupRevision <= value.revision
   );

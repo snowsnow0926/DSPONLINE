@@ -93,13 +93,24 @@ function requireNoRequest(value, label) {
 }
 
 function requireAuthorityIdentity(snapshot, phases, label) {
-  if (!isRecord(snapshot) || !phases.includes(snapshot.phase) || snapshot.inFlight !== false ||
-      snapshot.currentOperation !== null || snapshot.queuedCommands !== 0 ||
+  if (!isRecord(snapshot) || !phases.includes(snapshot.phase) ||
       !validLogicalId(snapshot.sessionId) || !validLogicalId(snapshot.runId) ||
       !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0) {
     throw brokerError(
       `native player-authority macro ${label} is not settled`,
       "NATIVE_PLAYER_AUTHORITY_MACRO_UNAVAILABLE",
+    );
+  }
+  // A tick or durable player command may enter the main-owned gate after the
+  // renderer observed its last settled frame but before this request reaches
+  // main. That is a definite, retryable no-op: no macro identity has been
+  // issued and no Host call has occurred. Publish the existing BUSY code so
+  // the renderer preserves and rebases the exact start intent.
+  if (snapshot.inFlight !== false || snapshot.currentOperation !== null ||
+      snapshot.queuedCommands !== 0) {
+    throw brokerError(
+      `native player-authority macro ${label} is temporarily busy`,
+      "NATIVE_PLAYER_AUTHORITY_MACRO_BUSY",
     );
   }
   return Object.freeze({

@@ -1155,6 +1155,10 @@ test("startup recovery receipt is strictly adopted once as a main-owned Rust ses
       pendingMacroCleanupSessionId: "macro-session-finished",
       pendingMacroCleanupRevision: 12,
     },
+    {
+      pendingMacroCleanupSessionId: "macro-session-finished",
+      pendingMacroCleanupRevision: 6,
+    },
   ]) {
     assert.throws(() => new NativeCoreSessionRegistry({
       hello: {

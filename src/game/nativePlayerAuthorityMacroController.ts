@@ -30,11 +30,18 @@ interface PendingMacroRecovery {
   readonly budget: MacroBudget | null;
 }
 
+interface PendingEnableAttempt {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly baseRevision: number;
+}
+
 type PendingMacroTransientRetry = Readonly<
   | {
       kind: "start";
       phase: "starting";
-      code: typeof PERSISTENCE_BUSY_ERROR_CODE | typeof START_REBASE_REQUIRED_ERROR_CODE;
+      code: typeof PERSISTENCE_BUSY_ERROR_CODE | typeof START_REBASE_REQUIRED_ERROR_CODE |
+        typeof MACRO_BUSY_ERROR_CODE;
     }
   | {
       kind: "advance";
@@ -192,6 +199,23 @@ function settledThroughFromDeadline(nextDeadlineMs: number): number | null {
   return Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
+function bindingAuthorityLineageKey(
+  binding: NativePlayerAuthorityMacroControllerBinding,
+): string | null {
+  const frameSessionId = binding.activeFrame?.sessionId;
+  const frameRunId = binding.activeFrame?.runId;
+  if (typeof frameSessionId === "string" && frameSessionId.length > 0 &&
+      typeof frameRunId === "string" && frameRunId.length > 0) {
+    return `${frameSessionId}\0${frameRunId}`;
+  }
+  const sourceSessionId = binding.commandSource?.sessionId;
+  const sourceRunId = binding.commandSource?.runId;
+  return typeof sourceSessionId === "string" && sourceSessionId.length > 0 &&
+    typeof sourceRunId === "string" && sourceRunId.length > 0
+    ? `${sourceSessionId}\0${sourceRunId}`
+    : null;
+}
+
 export class NativePlayerAuthorityMacroController {
   private readonly bridge: Required<MacroBridge>;
   private readonly now: () => number;
@@ -203,6 +227,7 @@ export class NativePlayerAuthorityMacroController {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private operationInFlight = false;
   private stopRequested = false;
+  private pendingEnableAttempt: PendingEnableAttempt | null = null;
   private enableRevision: number | null = null;
   private finishRevision: number | null = null;
   private disableRevision: number | null = null;
@@ -212,6 +237,7 @@ export class NativePlayerAuthorityMacroController {
   private transientRetryAttempt = 0;
   private recoveryKey: string | null = null;
   private finishRecoveryHintKey: string | null = null;
+  private authorityLineageKey: string | null = null;
   private generation = 0;
   private disposed = false;
 
@@ -238,6 +264,19 @@ export class NativePlayerAuthorityMacroController {
   bind(binding: NativePlayerAuthorityMacroControllerBinding): void {
     this.disposed = false;
     this.binding = binding;
+    const nextLineageKey = bindingAuthorityLineageKey(binding);
+    if (nextLineageKey !== null && this.authorityLineageKey !== null &&
+        nextLineageKey !== this.authorityLineageKey) {
+      // A controller instance can outlive a renderer store while a save/core
+      // session is replaced. Invalidate every Promise continuation and BUSY
+      // retry from the old authority epoch before interpreting the new read
+      // model. Same-lineage StrictMode rebinds deliberately keep their exact
+      // durable intent.
+      this.authorityLineageKey = nextLineageKey;
+      this.resetIdle();
+    } else if (nextLineageKey !== null) {
+      this.authorityLineageKey = nextLineageKey;
+    }
     const macro = binding.macroStatus;
     if (macro) {
       if (this.snapshotValue.phase === "idle") {
@@ -281,12 +320,15 @@ export class NativePlayerAuthorityMacroController {
     if (!activeFrame || activeFrame.schemaVersion !== 1 || activeFrame.phase !== "active" ||
         activeFrame.inFlight || activeFrame.currentOperation !== null || paused !== false ||
         !Number.isSafeInteger(simulationSpeed) || simulationSpeed! < 1 || !timeWarp ||
-        !timeWarp.controllerEntityId || !commandSource ||
+        !timeWarp.controllerEntityId || !commandSource || !activeFrame.sessionId ||
+        !activeFrame.runId || commandSource.sessionId !== activeFrame.sessionId ||
+        commandSource.runId !== activeFrame.runId ||
         commandSource.baseRevision !== activeFrame.revision) return false;
     if (this.snapshotValue.phase === "idle") this.stopRequested = false;
     this.generation += 1;
     this.macroRevision = activeFrame.revision;
     if (timeWarp.enabled) {
+      this.pendingEnableAttempt = null;
       this.enableRevision = activeFrame.revision - 1;
       const multiplier = poweredMultiplier(simulationSpeed, timeWarp);
       this.publish("waiting-powered-frame", true, multiplier, null, null);
@@ -300,11 +342,18 @@ export class NativePlayerAuthorityMacroController {
       true,
     );
     if (!command) return false;
+    const enableAttempt = Object.freeze({
+      sessionId: activeFrame.sessionId,
+      runId: activeFrame.runId,
+      baseRevision: activeFrame.revision,
+    });
+    this.pendingEnableAttempt = enableAttempt;
     const generation = this.generation;
     this.operationInFlight = true;
     this.publish("enabling", true, null, null, null);
     void commandSource.applyCommand(command).then((receipt) => {
       if (generation !== this.generation) return;
+      this.pendingEnableAttempt = null;
       this.enableRevision = receipt.revision;
       this.macroRevision = receipt.revision;
       this.publish(this.stopRequested ? "stopping" : "waiting-powered-frame",
@@ -494,7 +543,20 @@ export class NativePlayerAuthorityMacroController {
         commandSource.sessionId !== activeFrame.sessionId || commandSource.runId !== activeFrame.runId ||
         commandSource.baseRevision !== activeFrame.revision) return false;
     const key = `${activeFrame.sessionId}\0${activeFrame.runId}\0${hint.revision}`;
-    if (this.finishRecoveryHintKey === key) return false;
+    if (this.finishRecoveryHintKey === key) {
+      // A finished receipt can be recovered successfully and still leave the
+      // following durable disable reply uncertain. If the command did not in
+      // fact commit, the same main-owned cleanup marker remains visible on an
+      // enabled frame. Re-enter the idempotent finished recovery only after
+      // proving that exact cleanup revision had already reached the disable
+      // stage; this avoids both a permanent renderer stall and unbounded
+      // retries for an unrelated/fatal macro-recovery failure.
+      const retryUncommittedDisable = ["uncertain", "faulted"].includes(this.snapshotValue.phase) &&
+        this.stopRequested && this.finishRevision === hint.revision &&
+        this.pendingRecovery === null && this.pendingTransientRetry === null &&
+        !this.operationInFlight;
+      if (!retryUncommittedDisable) return false;
+    }
     const settled = settledThroughFromDeadline(activeFrame.nextDeadlineMs);
     if (settled === null) return false;
     this.generation += 1;
@@ -543,6 +605,7 @@ export class NativePlayerAuthorityMacroController {
     this.transientRetryAttempt = 0;
     this.recoveryKey = null;
     this.macroRevision = activeFrame.revision;
+    this.pendingEnableAttempt = null;
     this.enableRevision = activeFrame.revision - 1;
     const multiplier = binding.paused === false
       ? poweredMultiplier(binding.simulationSpeed, timeWarp)
@@ -570,13 +633,18 @@ export class NativePlayerAuthorityMacroController {
 
   private reconcilePreMacroNoop(binding: NativePlayerAuthorityMacroControllerBinding): boolean {
     const { activeFrame, timeWarp, commandSource } = binding;
+    const enableAttempt = this.pendingEnableAttempt;
     if (!["uncertain", "faulted"].includes(this.snapshotValue.phase) ||
         this.snapshotValue.effectiveMultiplier !== null ||
         this.snapshotValue.settledThroughMs !== null || this.finishRevision !== null ||
+        !enableAttempt ||
         timeWarp?.enabled !== false || !activeFrame || activeFrame.schemaVersion !== 1 ||
         activeFrame.phase !== "active" || activeFrame.inFlight ||
         activeFrame.currentOperation !== null || activeFrame.revision === null ||
+        activeFrame.revision <= enableAttempt.baseRevision ||
         !activeFrame.sessionId || !activeFrame.runId || !commandSource ||
+        activeFrame.sessionId !== enableAttempt.sessionId ||
+        activeFrame.runId !== enableAttempt.runId ||
         commandSource.sessionId !== activeFrame.sessionId ||
         commandSource.runId !== activeFrame.runId ||
         commandSource.baseRevision !== activeFrame.revision) return false;
@@ -717,7 +785,7 @@ export class NativePlayerAuthorityMacroController {
   }
 
   private retryStartFromLatestFrame(retry: Extract<PendingMacroTransientRetry, { kind: "start" }>): void {
-    const { activeFrame, simulationSpeed, timeWarp, commandSource } = this.binding;
+    const { activeFrame, paused, simulationSpeed, timeWarp, commandSource } = this.binding;
     if (!activeFrame || activeFrame.schemaVersion !== 1 || activeFrame.phase !== "active" ||
         activeFrame.inFlight || activeFrame.currentOperation !== null || activeFrame.revision === null ||
         activeFrame.nextDeadlineMs === null || !commandSource ||
@@ -736,7 +804,8 @@ export class NativePlayerAuthorityMacroController {
     }
     const multiplier = poweredMultiplier(simulationSpeed, timeWarp);
     const settled = settledThroughFromDeadline(activeFrame.nextDeadlineMs);
-    if (multiplier === null || settled === null) {
+    if (paused !== false || !timeWarp?.controllerEntityId ||
+        multiplier === null || settled === null) {
       this.queueTransientRetry(retry);
       this.armTransientRetry();
       return;
@@ -830,7 +899,7 @@ export class NativePlayerAuthorityMacroController {
     }).catch((error: unknown) => {
       if (generation !== this.generation) return;
       const code = errorCode(error);
-      if (start && (code === PERSISTENCE_BUSY_ERROR_CODE ||
+      if (start && (code === PERSISTENCE_BUSY_ERROR_CODE || code === MACRO_BUSY_ERROR_CODE ||
           code === START_REBASE_REQUIRED_ERROR_CODE)) {
         this.queueTransientRetry(Object.freeze({ kind: "start", phase: "starting", code }));
         return;
@@ -999,6 +1068,7 @@ export class NativePlayerAuthorityMacroController {
     this.clearTimer();
     this.operationInFlight = false;
     this.stopRequested = false;
+    this.pendingEnableAttempt = null;
     this.enableRevision = null;
     this.finishRevision = null;
     this.disableRevision = null;
@@ -1007,6 +1077,7 @@ export class NativePlayerAuthorityMacroController {
     this.pendingTransientRetry = null;
     this.transientRetryAttempt = 0;
     this.recoveryKey = null;
+    this.finishRecoveryHintKey = null;
     this.publish("idle", false, null, null, null);
   }
 }

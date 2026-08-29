@@ -880,6 +880,70 @@ describe("native player authority macro controller", () => {
     expect(controller.getSnapshot().phase).toBe("disabling");
   });
 
+  it("never carries an in-flight result or BUSY retry into a different authority lineage", async () => {
+    const nextFrame = activeFrame(20, {
+      sessionId: "macro-controller-session-b",
+      runId: "macro-controller-run-b",
+      nextDeadlineMs: 2_000,
+    });
+    const nextSource: NativePlayerAuthorityCommandSource = {
+      ...commandSource(20),
+      sessionId: "macro-controller-session-b",
+      runId: "macro-controller-run-b",
+    };
+
+    const inFlightClock = clockHarness(1_000);
+    const oldStart = deferred<DesktopNativePlayerAuthorityMacroReceipt>();
+    const start = vi.fn(() => oldStart.promise);
+    const controller = controllerWithClock(
+      macroBridge({ startNativePlayerAuthorityMacro: start }),
+      inFlightClock,
+    );
+    controller.bind(binding({
+      activeFrame: activeFrame(10, { nextDeadlineMs: 1_000 }),
+      timeWarp: timeWarp(),
+      commandSource: commandSource(10),
+    }));
+    expect(start).toHaveBeenCalledTimes(1);
+    controller.bind(binding({
+      activeFrame: nextFrame,
+      timeWarp: timeWarp({ enabled: false }),
+      commandSource: nextSource,
+    }));
+    expect(controller.getSnapshot().phase).toBe("idle");
+    oldStart.resolve(activeMacroReceipt(11, {
+      simulationMilliseconds: 15_000,
+      wallMilliseconds: 1_000,
+    }));
+    await flushPromises();
+    expect(controller.getSnapshot()).toMatchObject({ phase: "idle", requested: false });
+
+    const retryClock = clockHarness(1_100);
+    const busy = Object.assign(new Error("old authority tick is busy"), {
+      code: "NATIVE_PLAYER_AUTHORITY_MACRO_BUSY",
+    });
+    const retryStart = vi.fn(async () => { throw busy; });
+    const retryController = controllerWithClock(
+      macroBridge({ startNativePlayerAuthorityMacro: retryStart }),
+      retryClock,
+    );
+    retryController.bind(binding({
+      activeFrame: activeFrame(10, { nextDeadlineMs: 1_000 }),
+      timeWarp: timeWarp(),
+      commandSource: commandSource(10),
+    }));
+    await flushPromises();
+    expect(retryClock.pending().map((timer) => timer.delayMs)).toStrictEqual([50]);
+    retryController.bind(binding({
+      activeFrame: nextFrame,
+      timeWarp: timeWarp({ enabled: false }),
+      commandSource: nextSource,
+    }));
+    expect(retryClock.pending()).toStrictEqual([]);
+    expect(retryController.getSnapshot().phase).toBe("idle");
+    expect(retryStart).toHaveBeenCalledTimes(1);
+  });
+
   it("takes over a durable enable after its renderer reply is lost and still permits Stop", async () => {
     const clock = clockHarness(1_000);
     const transport = Object.assign(new Error("enable reply lost"), {
@@ -950,6 +1014,12 @@ describe("native player authority macro controller", () => {
       timeWarp: timeWarp({ enabled: false }),
       commandSource: commandSource(10),
     }));
+    expect(noopController.getSnapshot().phase).toBe("uncertain");
+    noopController.bind(binding({
+      activeFrame: activeFrame(11, { nextDeadlineMs: 2_000 }),
+      timeWarp: timeWarp({ enabled: false }),
+      commandSource: commandSource(11),
+    }));
     expect(noopController.getSnapshot()).toMatchObject({
       phase: "idle",
       requested: false,
@@ -1009,6 +1079,65 @@ describe("native player authority macro controller", () => {
       commandSource: commandSource(13),
     }));
     expect(controller.getSnapshot().phase).toBe("idle");
+  });
+
+  it("replays the same finished cleanup hint when an uncertain disable did not commit", async () => {
+    const clock = clockHarness(13_000);
+    const recover = vi.fn(async () => finishedMacroReceipt(10, true));
+    const disableTransport = Object.assign(new Error("disable did not reach the host"), {
+      code: "NATIVE_PLAYER_AUTHORITY_COMMAND_TRANSPORT_UNCERTAIN",
+    });
+    let disableAttempts = 0;
+    const applyDisable = vi.fn(async () => {
+      disableAttempts += 1;
+      if (disableAttempts === 1) throw disableTransport;
+      return commandReceipt(12);
+    });
+    const controller = controllerWithClock(
+      macroBridge({ recoverNativePlayerAuthorityMacro: recover }),
+      clock,
+    );
+    const hinted = binding({
+      activeFrame: activeFrame(12, {
+        nextDeadlineMs: 13_000,
+        macroRecoveryHint: { kind: "finished-pending-disable", revision: 10 },
+      }),
+      macroStatus: null,
+      timeWarp: timeWarp(),
+      commandSource: commandSource(12, applyDisable),
+    });
+
+    controller.bind(hinted);
+    await flushPromises();
+    expect(recover).toHaveBeenCalledTimes(1);
+    expect(applyDisable).toHaveBeenCalledTimes(1);
+    expect(controller.getSnapshot().phase).toBe("uncertain");
+
+    // The authority revision and cleanup marker are unchanged, proving the
+    // first disable was not durable. Recovering the immutable finish receipt
+    // again is idempotent and gives the controller one fresh disable attempt.
+    controller.bind(hinted);
+    await flushPromises();
+    expect(recover).toHaveBeenCalledTimes(2);
+    expect(applyDisable).toHaveBeenCalledTimes(2);
+    expect(controller.getSnapshot().phase).toBe("disabling");
+
+    controller.bind(binding({
+      activeFrame: activeFrame(13, { nextDeadlineMs: 14_000 }),
+      macroStatus: null,
+      timeWarp: timeWarp({
+        enabled: false,
+        effectiveMultiplier: 1,
+        requiredPowerKw: 0,
+        allocatedPowerKw: 0,
+      }),
+      commandSource: commandSource(13),
+    }));
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: "idle",
+      requested: false,
+      lastErrorCode: null,
+    });
   });
 
   it("rebases a contended start while exact ticks move, but retries active budgets exactly", async () => {
@@ -1160,6 +1289,64 @@ describe("native player authority macro controller", () => {
       lastErrorCode: null,
     });
     expect(bridge.recoverNativePlayerAuthorityMacro).not.toHaveBeenCalled();
+  });
+
+  it("keeps a BUSY start pending while paused and starts once a powered frame resumes", async () => {
+    const clock = clockHarness(1_100);
+    const busy = Object.assign(new Error("exact tick entered before macro start"), {
+      code: "NATIVE_PLAYER_AUTHORITY_MACRO_BUSY",
+    });
+    let attempts = 0;
+    const start = vi.fn(async (budget: DesktopNativePlayerAuthorityMacroStartRequest) => {
+      attempts += 1;
+      if (attempts === 1) throw busy;
+      return activeMacroReceipt(12, budget);
+    });
+    const controller = controllerWithClock(
+      macroBridge({ startNativePlayerAuthorityMacro: start }),
+      clock,
+    );
+    controller.bind(binding({
+      activeFrame: activeFrame(10, { nextDeadlineMs: 1_000 }),
+      paused: false,
+      timeWarp: timeWarp(),
+      commandSource: commandSource(10),
+    }));
+    await flushPromises();
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(clock.pending().map((timer) => timer.delayMs)).toStrictEqual([50]);
+
+    controller.bind(binding({
+      activeFrame: activeFrame(11, { nextDeadlineMs: 2_000 }),
+      paused: true,
+      timeWarp: timeWarp(),
+      commandSource: commandSource(11),
+    }));
+    clock.runNext(1_150);
+    await flushPromises();
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(controller.getSnapshot().phase).toBe("starting");
+    expect(clock.pending().map((timer) => timer.delayMs)).toStrictEqual([100]);
+
+    controller.bind(binding({
+      activeFrame: activeFrame(11, { nextDeadlineMs: 2_000 }),
+      paused: false,
+      timeWarp: timeWarp(),
+      commandSource: commandSource(11),
+    }));
+    clock.runNext(1_250);
+    await flushPromises();
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(start).toHaveBeenLastCalledWith({
+      expectedRevision: 11,
+      simulationMilliseconds: 3_750,
+      wallMilliseconds: 250,
+    });
+    expect(controller.getSnapshot()).toMatchObject({
+      phase: "active",
+      settledThroughMs: 1_250,
+      lastErrorCode: null,
+    });
   });
 
   it("re-arms a BUSY recovery backoff after StrictMode dispose without probing immediately", async () => {

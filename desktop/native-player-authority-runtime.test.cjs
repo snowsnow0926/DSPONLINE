@@ -458,6 +458,82 @@ test("macro broker treats persistence BUSY as a definite no-op and remains retry
   assert.equal(value.calls.filter(([operation]) => operation === "macro-finish").length, 1);
 });
 
+test("macro start observes an exact tick gate as BUSY and starts once the newer frame settles", async () => {
+  const tickGate = deferred();
+  let value;
+  value = fixture({
+    registry: {
+      async commitPlayerAuthorityTick(ownerId, request) {
+        value.calls.push(["tick", ownerId, request]);
+        return tickGate.promise;
+      },
+      async commitPlayerAuthorityMacroAdvance(ownerId, request) {
+        value.calls.push(["macro-advance", ownerId, request]);
+        const checkpoint = { generation: 5, rootHash: HASH_A, revision: 10 };
+        return {
+          acknowledgedSequence: 3,
+          macroSessionId: request.macroSessionId,
+          operationId: request.operationId,
+          baseRevision: request.baseRevision,
+          revision: 10,
+          simulationMilliseconds: request.simulationMilliseconds,
+          wallMilliseconds: request.wallMilliseconds,
+          algorithmVersion: "native-pure-idle-macro-v10",
+          settledDeadlineMs: 12_000,
+          checkpoint,
+          summary: summary(10),
+          duplicate: false,
+        };
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  let issued = 0;
+  const ids = ["session-after-tick", "operation-after-tick"];
+  const broker = new NativePlayerAuthorityMacroBroker({
+    runtime: value.runtime,
+    createId: () => {
+      issued += 1;
+      return ids.shift();
+    },
+  });
+
+  value.setNow(11_000);
+  const ticking = value.runtime.settleDue();
+  await Promise.resolve();
+  assert.equal(value.runtime.snapshot().inFlight, true);
+  assert.equal(value.runtime.snapshot().currentOperation, "tick");
+  await assert.rejects(
+    broker.start({ expectedRevision: 7, simulationMilliseconds: 15_000, wallMilliseconds: 1_000 }),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_BUSY",
+  );
+  assert.equal(issued, 0);
+  assert.equal(value.calls.filter(([operation]) => operation === "macro-advance").length, 0);
+
+  const checkpoint = { generation: 4, rootHash: HASH_A, revision: 8 };
+  tickGate.resolve({
+    sequence: 1,
+    revision: 8,
+    duplicate: false,
+    checkpoint,
+    summary: summary(8),
+  });
+  await ticking;
+  assert.equal(value.runtime.snapshot().revision, 8);
+  const started = await broker.start({
+    expectedRevision: 8,
+    simulationMilliseconds: 15_000,
+    wallMilliseconds: 1_000,
+  });
+  assert.equal(started.state, "macro-active");
+  assert.equal(started.previousRevision, 8);
+  assert.equal(issued, 2);
+  assert.equal(value.calls.filter(([operation]) => operation === "macro-advance").length, 1);
+});
+
 test("only one tick is in flight and successful receipts advance exactly once", async () => {
   let resolveTick;
   const value = fixture({

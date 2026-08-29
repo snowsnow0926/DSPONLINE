@@ -174,6 +174,8 @@ export interface DesktopBridge {
   getNativeCoreStellarIndustryProjection?: (request: DesktopNativeCoreStellarIndustryProjectionRequest) => Promise<DesktopNativeCoreStellarIndustryProjectionResult>;
   /** Adds an independently paged, filtered native route table to the v1 industry model. */
   getNativeCoreStellarIndustryV2Projection?: (request: DesktopNativeCoreStellarIndustryV2ProjectionRequest) => Promise<DesktopNativeCoreStellarIndustryV2ProjectionResult>;
+  /** Bounded shared quantum inventory and orbital-collector attachment pages. */
+  getNativeCoreStellarQuantumProjection?: (request: DesktopNativeCoreStellarQuantumProjectionRequest) => Promise<DesktopNativeCoreStellarQuantumProjectionResult>;
   /** Current Windows thin-UI host only; native authority never falls back to a renderer entity scan. */
   getNativeCoreCommandPaletteEntitySearch?: (request: DesktopNativeCoreCommandPaletteEntitySearchRequest) => Promise<DesktopNativeCoreCommandPaletteEntitySearchResult>;
   requestNativeCoreProjectionTransfer?: (request: DesktopNativeCoreProjectionTransferRequest) => Promise<DesktopNativeCoreProjectionTransferResult>;
@@ -1234,6 +1236,73 @@ export interface DesktopNativeCoreStellarIndustryV2ProjectionResult
   routes: DesktopNativeCoreStellarPage<DesktopNativeCoreStellarIndustryRouteRow>;
 }
 
+export interface DesktopNativeCoreStellarQuantumProjectionRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  itemCursor: number;
+  itemLimit: number;
+  collectorCursor: number;
+  collectorLimit: number;
+}
+
+export interface DesktopNativeCoreStellarQuantumItemRow {
+  itemId: string;
+  inventory: string;
+  capacity: string;
+  uploaded: string;
+  downloaded: string;
+}
+
+export interface DesktopNativeCoreStellarQuantumCollectorRow {
+  collectorId: string;
+  planetId: string;
+  systemId: string;
+  machineCount: number;
+  quantumMode: "legacy" | "transitioning" | "quantum";
+  quantumTransitionActive: boolean;
+  attachmentState: "available" | "pending" | "connected" | "unavailable";
+}
+
+export interface DesktopNativeCoreStellarQuantumProjectionResult {
+  schemaVersion: 1;
+  projectionType: "stellar-quantum-v1";
+  revision: number;
+  registryFingerprint: string;
+  stateVersion: 47;
+  limits: {
+    requestBytes: 32768;
+    projectionBytes: 1048576;
+    pageRows: 64;
+    decimalDigits: 256;
+  };
+  request: Omit<DesktopNativeCoreStellarQuantumProjectionRequest, "sessionId">;
+  enabled: boolean;
+  bandwidth: {
+    multiplier: number;
+    globalUploadPerMinute: number;
+    globalDownloadPerMinute: number;
+    activeTowerCount: number;
+    activeTowerStacks: number;
+  };
+  runtime: null | {
+    boundarySecond: number;
+    globalUploadPerMinute: number;
+    globalDownloadPerMinute: number;
+    quantumTowerStacks: number;
+    quantumCollectorStacks: number;
+  };
+  collectorSummary: {
+    totalCount: number;
+    connectedCount: number;
+    pendingCount: number;
+    availableCount: number;
+    connectedStacks: number;
+  };
+  truncated: boolean;
+  items: DesktopNativeCoreStellarPage<DesktopNativeCoreStellarQuantumItemRow>;
+  collectors: DesktopNativeCoreStellarPage<DesktopNativeCoreStellarQuantumCollectorRow>;
+}
+
 export interface DesktopNativeCoreCommandPaletteEntitySearchRequest extends DesktopNativeCoreSessionRequest {
   expectedRevision: number;
   expectedRegistryFingerprint: string;
@@ -1325,6 +1394,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
       sessionId: string;
       projectionType: "stellar-industry-v2";
       payload: Omit<DesktopNativeCoreStellarIndustryV2ProjectionRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      projectionType: "stellar-quantum-v1";
+      payload: Omit<DesktopNativeCoreStellarQuantumProjectionRequest, "sessionId">;
     };
 
 export interface DesktopNativeCoreProjectionTransferHeader {
@@ -1332,7 +1406,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "stellar-industry-v1" | "stellar-industry-v2";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1";
   payloadLength: number;
   sha256: string;
 }

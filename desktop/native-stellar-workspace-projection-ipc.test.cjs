@@ -336,6 +336,113 @@ function industryV2Projection() {
   };
 }
 
+function quantumContext() {
+  return {
+    sessionId: "authority-1",
+    expectedRevision: 7,
+    expectedRegistryFingerprint: "builtin:test",
+    itemCursor: 0,
+    itemLimit: 64,
+    collectorCursor: 0,
+    collectorLimit: 64,
+  };
+}
+
+function quantumProjection() {
+  return {
+    schemaVersion: 1,
+    projectionType: "stellar-quantum-v1",
+    revision: 7,
+    registryFingerprint: "builtin:test",
+    stateVersion: 47,
+    limits: {
+      requestBytes: 32_768,
+      projectionBytes: 1_048_576,
+      pageRows: 64,
+      decimalDigits: 256,
+    },
+    request: {
+      expectedRevision: 7,
+      expectedRegistryFingerprint: "builtin:test",
+      itemCursor: 0,
+      itemLimit: 64,
+      collectorCursor: 0,
+      collectorLimit: 64,
+    },
+    enabled: true,
+    bandwidth: {
+      multiplier: 1.21,
+      globalUploadPerMinute: 18_150,
+      globalDownloadPerMinute: 18_150,
+      activeTowerCount: 1,
+      activeTowerStacks: 3,
+    },
+    runtime: {
+      boundarySecond: 25,
+      globalUploadPerMinute: 18_150,
+      globalDownloadPerMinute: 18_150,
+      quantumTowerStacks: 3,
+      quantumCollectorStacks: 5,
+    },
+    collectorSummary: {
+      totalCount: 2,
+      connectedCount: 1,
+      pendingCount: 1,
+      availableCount: 0,
+      connectedStacks: 5,
+    },
+    truncated: false,
+    items: {
+      cursor: 0,
+      limit: 64,
+      totalCount: 2,
+      nextCursor: null,
+      rows: [
+        {
+          itemId: "iron_ore",
+          inventory: "123456789012345678901234567890",
+          capacity: "100000",
+          uploaded: "7",
+          downloaded: "2",
+        },
+        {
+          itemId: "copper_ore",
+          inventory: "0",
+          capacity: "10000000000",
+          uploaded: "0",
+          downloaded: "1",
+        },
+      ],
+    },
+    collectors: {
+      cursor: 0,
+      limit: 64,
+      totalCount: 2,
+      nextCursor: null,
+      rows: [
+        {
+          collectorId: "collector-connected",
+          planetId: "home",
+          systemId: "helios",
+          machineCount: 5,
+          quantumMode: "quantum",
+          quantumTransitionActive: false,
+          attachmentState: "connected",
+        },
+        {
+          collectorId: "collector-pending",
+          planetId: "gas-giant",
+          systemId: "helios",
+          machineCount: 7,
+          quantumMode: "transitioning",
+          quantumTransitionActive: true,
+          attachmentState: "pending",
+        },
+      ],
+    },
+  };
+}
+
 test("stellar workspace boundaries bind identity, exact request echo, scope, and page chains", () => {
   const map = normalizeRendererNativeResult(
     "coreStarMapOverviewProjection",
@@ -442,6 +549,57 @@ test("stellar industry v2 binds a complete independently paged route model", () 
   }
 });
 
+test("stellar quantum projection preserves big integer strings and rejects malformed authority data", () => {
+  const result = normalizeRendererNativeResult(
+    "coreStellarQuantumProjection",
+    quantumProjection(),
+    quantumContext(),
+  );
+  assert.equal(result.items.rows[0].inventory, "123456789012345678901234567890");
+  assert.equal(result.collectors.rows[1].attachmentState, "pending");
+  assert.equal(result.collectorSummary.connectedStacks, 5);
+
+  for (const invalid of [
+    { ...quantumProjection(), revision: 8 },
+    { ...quantumProjection(), request: { ...quantumProjection().request, itemCursor: 1 } },
+    { ...quantumProjection(), unexpected: true },
+    {
+      ...quantumProjection(),
+      items: {
+        ...quantumProjection().items,
+        rows: [{ ...quantumProjection().items.rows[0], inventory: "007" }, quantumProjection().items.rows[1]],
+      },
+    },
+    {
+      ...quantumProjection(),
+      items: {
+        ...quantumProjection().items,
+        rows: [{ ...quantumProjection().items.rows[0], capacity: "9999" }, quantumProjection().items.rows[1]],
+      },
+    },
+    {
+      ...quantumProjection(),
+      collectors: {
+        ...quantumProjection().collectors,
+        rows: [
+          quantumProjection().collectors.rows[0],
+          { ...quantumProjection().collectors.rows[1], attachmentState: "connected" },
+        ],
+      },
+    },
+    {
+      ...quantumProjection(),
+      collectorSummary: { ...quantumProjection().collectorSummary, connectedCount: 2 },
+    },
+    { ...quantumProjection(), truncated: true },
+  ]) {
+    assert.throws(
+      () => normalizeRendererNativeResult("coreStellarQuantumProjection", invalid, quantumContext()),
+      { code: "NATIVE_PROTOCOL_INVALID" },
+    );
+  }
+});
+
 test("stellar workspace projections use trusted direct IPC and checksummed bounded transfer only", () => {
   const main = readFileSync(path.join(root, "desktop", "main.cjs"), "utf8");
   const preload = readFileSync(path.join(root, "desktop", "preload.cjs"), "utf8");
@@ -452,20 +610,27 @@ test("stellar workspace projections use trusted direct IPC and checksummed bound
   assert.match(main, /desktop:native-core-star-map-overview-projection"[\s\S]*?coreStarMapOverviewProjection[\s\S]*?starMapOverviewProjection\(ownerId, request\)/);
   assert.match(main, /desktop:native-core-stellar-industry-projection"[\s\S]*?coreStellarIndustryProjection[\s\S]*?stellarIndustryProjection\(ownerId, request\)/);
   assert.match(main, /desktop:native-core-stellar-industry-v2-projection"[\s\S]*?coreStellarIndustryProjectionV2[\s\S]*?stellarIndustryProjectionV2\(ownerId, request\)/);
+  assert.match(main, /desktop:native-core-stellar-quantum-projection"[\s\S]*?coreStellarQuantumProjection[\s\S]*?stellarQuantumProjection\(ownerId, request\)/);
   assert.match(main, /"star-map-overview-v1"[\s\S]*?nativeStarMapOverviewProjectionResultContext/);
   assert.match(main, /"stellar-industry-v1"[\s\S]*?nativeStellarIndustryProjectionResultContext/);
+  assert.match(main, /"stellar-quantum-v1"[\s\S]*?nativeStellarQuantumProjectionResultContext/);
   assert.match(preload, /MAX_STELLAR_PROJECTION_REQUEST_BYTES = 32_768/);
   assert.match(preload, /getNativeCoreStarMapOverviewProjection:[\s\S]*?desktop:native-core-star-map-overview-projection/);
   assert.match(preload, /getNativeCoreStellarIndustryProjection:[\s\S]*?desktop:native-core-stellar-industry-projection/);
   assert.match(preload, /getNativeCoreStellarIndustryV2Projection:[\s\S]*?desktop:native-core-stellar-industry-v2-projection/);
+  assert.match(preload, /getNativeCoreStellarQuantumProjection:[\s\S]*?desktop:native-core-stellar-quantum-projection/);
   assert.match(host, /MAX_STELLAR_PROJECTION_PAGE_ROWS = 64[\s\S]*?starMapOverviewProjection\(ownerId, request\)/);
   assert.match(host, /stellarIndustryProjection\(ownerId, request\)[\s\S]*?bounded IPC limit/);
   assert.match(host, /stellarIndustryProjectionV2\(ownerId, request\)[\s\S]*?coreStellarIndustryProjectionV2/);
+  assert.match(host, /stellarQuantumProjection\(ownerId, request\)[\s\S]*?coreStellarQuantumProjection/);
   assert.match(desktop, /projectionType:\s*"star-map-overview-v1"/);
   assert.match(desktop, /projectionType:\s*"stellar-industry-v1"/);
   assert.match(desktop, /projectionType:\s*"stellar-industry-v2"/);
+  assert.match(desktop, /projectionType:\s*"stellar-quantum-v1"/);
   assert.match(nativeCore, /starMapOverviewProjection\([\s\S]*?decodeNativeCoreProjectionTransfer/);
   assert.match(nativeCore, /stellarIndustryProjection\([\s\S]*?decodeNativeCoreProjectionTransfer/);
+  assert.match(nativeCore, /stellarQuantumProjection\([\s\S]*?decodeNativeCoreProjectionTransfer/);
   assert.doesNotMatch(nativeCore, /starMapOverviewProjection\([\s\S]{0,2500}?getNativeCoreProjection\(/);
   assert.doesNotMatch(nativeCore, /stellarIndustryProjection\([\s\S]{0,2500}?getNativeCoreProjection\(/);
+  assert.doesNotMatch(nativeCore, /stellarQuantumProjection\([\s\S]{0,2500}?getNativeCoreProjection\(/);
 });

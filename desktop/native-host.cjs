@@ -65,7 +65,7 @@ function normalizeNativeHostSpawnEnvironment(value = {}) {
 
 function encodeNativeProjectionTransfer({ sessionId, sequence, projectionType, result }) {
   if (!validLogicalId(sessionId, 128) || !Number.isSafeInteger(sequence) || sequence < 1 ||
-    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "stellar-industry-v1", "stellar-industry-v2"].includes(projectionType) || !result || typeof result !== "object" ||
+    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1"].includes(projectionType) || !result || typeof result !== "object" ||
     result.schemaVersion !== (["viewport-v2", "stellar-industry-v2"].includes(projectionType) ? 2 : 1) || result.projectionType !== projectionType ||
     !Number.isSafeInteger(result.revision) || result.revision < 0) {
     throw new TypeError("native core projection transfer is invalid");
@@ -1177,6 +1177,42 @@ class NativeCoreSessionRegistry {
     };
     if (Buffer.byteLength(JSON.stringify(hostRequest), "utf8") > MAX_STELLAR_PROJECTION_REQUEST_BYTES) {
       throw new RangeError("native stellar industry v2 projection request exceeds the bounded IPC limit");
+    }
+    return this.requestOwned(ownerId, request.sessionId, hostRequest);
+  }
+
+  stellarQuantumProjection(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    const allowedKeys = new Set([
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "itemCursor", "itemLimit",
+      "collectorCursor", "collectorLimit",
+    ]);
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+      Reflect.ownKeys(request).some((key) => typeof key !== "string" || !allowedKeys.has(key)) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256) ||
+      !Number.isSafeInteger(request.itemCursor) || request.itemCursor < 0 ||
+      request.itemCursor > 0xffff_ffff ||
+      !Number.isSafeInteger(request.itemLimit) || request.itemLimit < 1 ||
+      request.itemLimit > MAX_STELLAR_PROJECTION_PAGE_ROWS ||
+      !Number.isSafeInteger(request.collectorCursor) || request.collectorCursor < 0 ||
+      request.collectorCursor > 0xffff_ffff ||
+      !Number.isSafeInteger(request.collectorLimit) || request.collectorLimit < 1 ||
+      request.collectorLimit > MAX_STELLAR_PROJECTION_PAGE_ROWS) {
+      throw new TypeError("native stellar quantum projection request is invalid");
+    }
+    const hostRequest = {
+      operation: "coreStellarQuantumProjection",
+      sessionId: request.sessionId,
+      expectedRevision: request.expectedRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      itemCursor: request.itemCursor,
+      itemLimit: request.itemLimit,
+      collectorCursor: request.collectorCursor,
+      collectorLimit: request.collectorLimit,
+    };
+    if (Buffer.byteLength(JSON.stringify(hostRequest), "utf8") > MAX_STELLAR_PROJECTION_REQUEST_BYTES) {
+      throw new RangeError("native stellar quantum projection request exceeds the bounded IPC limit");
     }
     return this.requestOwned(ownerId, request.sessionId, hostRequest);
   }

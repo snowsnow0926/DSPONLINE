@@ -10,6 +10,10 @@ import type {
   DesktopNativeCoreStellarIndustryStationRow,
   DesktopNativeCoreStellarIndustryV2ProjectionRequest,
   DesktopNativeCoreStellarIndustryV2ProjectionResult,
+  DesktopNativeCoreStellarQuantumCollectorRow,
+  DesktopNativeCoreStellarQuantumItemRow,
+  DesktopNativeCoreStellarQuantumProjectionRequest,
+  DesktopNativeCoreStellarQuantumProjectionResult,
   DesktopNativeCoreStellarRouteFilter,
 } from "../desktop";
 
@@ -20,8 +24,11 @@ export const NATIVE_STELLAR_MAX_SYSTEM_ROWS = 4_096 as const;
 export const NATIVE_STELLAR_MAX_PLANET_ROWS = 4_096 as const;
 export const NATIVE_STELLAR_MAX_STATION_ROWS = 8_192 as const;
 export const NATIVE_STELLAR_MAX_ROUTE_ROWS = 8_192 as const;
+export const NATIVE_STELLAR_MAX_QUANTUM_ITEM_ROWS = 4_096 as const;
+export const NATIVE_STELLAR_MAX_QUANTUM_COLLECTOR_ROWS = 8_192 as const;
 export const NATIVE_STELLAR_OVERVIEW_PAGE_CACHE_ENTRIES = 64 as const;
 export const NATIVE_STELLAR_INDUSTRY_PAGE_CACHE_ENTRIES = 192 as const;
+export const NATIVE_STELLAR_QUANTUM_PAGE_CACHE_ENTRIES = 192 as const;
 
 export interface NativeStellarProjectionIdentity {
   readonly sessionId: string;
@@ -54,6 +61,18 @@ export type NativeStellarIndustrySelector = Pick<
   | "query"
 >;
 
+export type NativeStellarQuantumSelector = Pick<
+  DesktopNativeCoreStellarQuantumProjectionRequest,
+  "itemCursor" | "itemLimit" | "collectorCursor" | "collectorLimit"
+>;
+
+export const DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR: NativeStellarQuantumSelector = Object.freeze({
+  itemCursor: 0,
+  itemLimit: NATIVE_STELLAR_PAGE_ROWS,
+  collectorCursor: 0,
+  collectorLimit: NATIVE_STELLAR_PAGE_ROWS,
+});
+
 export const DEFAULT_NATIVE_STELLAR_ROUTE_SELECTOR = Object.freeze({
   routeCursor: 0,
   routeLimit: NATIVE_STELLAR_PAGE_ROWS,
@@ -74,6 +93,10 @@ export interface NativeStellarWorkspaceSource {
     request: NativeStellarIndustrySelector,
     expectedRevision: number,
   ) => Promise<DesktopNativeCoreStellarIndustryV2ProjectionResult | null>;
+  readVerifiedStellarQuantumProjection?: (
+    request: NativeStellarQuantumSelector,
+    expectedRevision: number,
+  ) => Promise<DesktopNativeCoreStellarQuantumProjectionResult | null>;
   /** Only an explicitly shadow-mode source may expose or use this legacy reader. */
   readVerifiedStellarIndustryProjection?: (
     request: NativeStellarIndustryBaseSelector,
@@ -94,6 +117,10 @@ export interface NativeShadowStellarProjectionReader {
     request: NativeStellarIndustryBaseSelector,
     expectedRevision: number,
   ) => Promise<DesktopNativeCoreStellarIndustryProjectionResult | null>;
+  readVerifiedStellarQuantumProjection?: (
+    request: NativeStellarQuantumSelector,
+    expectedRevision: number,
+  ) => Promise<DesktopNativeCoreStellarQuantumProjectionResult | null>;
 }
 
 export interface NativeStarMapOverviewFrame extends NativeStellarProjectionIdentity {
@@ -125,6 +152,17 @@ export interface NativeStellarIndustryFrame extends NativeStellarProjectionIdent
   readonly routeRowsByTargetStationId: ReadonlyMap<string, readonly DesktopNativeCoreStellarIndustryRouteRow[]> | null;
 }
 
+export interface NativeStellarQuantumFrame extends NativeStellarProjectionIdentity {
+  readonly sourceMode: NativeStellarSourceMode;
+  readonly projection: DesktopNativeCoreStellarQuantumProjectionResult;
+  readonly selector: NativeStellarQuantumSelector;
+  readonly items: readonly DesktopNativeCoreStellarQuantumItemRow[];
+  readonly collectors: readonly DesktopNativeCoreStellarQuantumCollectorRow[];
+  readonly itemRowsById: ReadonlyMap<string, DesktopNativeCoreStellarQuantumItemRow>;
+  readonly collectorRowsById: ReadonlyMap<string, DesktopNativeCoreStellarQuantumCollectorRow>;
+  readonly collectorRowsBySystemId: ReadonlyMap<string, readonly DesktopNativeCoreStellarQuantumCollectorRow[]>;
+}
+
 interface NativeStellarWorkspaceSection<TFrame> {
   readonly status: "empty" | "loading" | "ready" | "unavailable";
   readonly requestedRevision: number | null;
@@ -134,6 +172,21 @@ interface NativeStellarWorkspaceSection<TFrame> {
 export interface NativeStellarWorkspaceSnapshot {
   readonly overview: NativeStellarWorkspaceSection<NativeStarMapOverviewFrame>;
   readonly industry: NativeStellarWorkspaceSection<NativeStellarIndustryFrame>;
+  readonly quantum: NativeStellarWorkspaceSection<NativeStellarQuantumFrame>;
+}
+
+export interface NativeStellarQuantumReadModel extends NativeStellarProjectionIdentity {
+  readonly source: "native-core";
+  readonly sourceMode: "player-authority";
+  readonly enabled: boolean;
+  readonly bandwidth: DesktopNativeCoreStellarQuantumProjectionResult["bandwidth"];
+  readonly runtime: DesktopNativeCoreStellarQuantumProjectionResult["runtime"];
+  readonly collectorSummary: DesktopNativeCoreStellarQuantumProjectionResult["collectorSummary"];
+  readonly items: readonly DesktopNativeCoreStellarQuantumItemRow[];
+  readonly collectors: readonly DesktopNativeCoreStellarQuantumCollectorRow[];
+  readonly itemRowsById: ReadonlyMap<string, DesktopNativeCoreStellarQuantumItemRow>;
+  readonly collectorRowsById: ReadonlyMap<string, DesktopNativeCoreStellarQuantumCollectorRow>;
+  readonly collectorRowsBySystemId: ReadonlyMap<string, readonly DesktopNativeCoreStellarQuantumCollectorRow[]>;
 }
 
 export interface NativeStarMapWorkspaceReadModel extends NativeStellarProjectionIdentity {
@@ -170,6 +223,8 @@ type OverviewReadResult = { readonly status: "ready"; readonly frame: NativeStar
   { readonly status: "superseded" } | { readonly status: "unavailable" };
 type IndustryReadResult = { readonly status: "ready"; readonly frame: NativeStellarIndustryFrame } |
   { readonly status: "superseded" } | { readonly status: "unavailable" };
+type QuantumReadResult = { readonly status: "ready"; readonly frame: NativeStellarQuantumFrame } |
+  { readonly status: "superseded" } | { readonly status: "unavailable" };
 
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const ROUTE_FILTERS = new Set<DesktopNativeCoreStellarRouteFilter>(["all", "remote", "issues"]);
@@ -179,9 +234,18 @@ const STELLAR_LIMITS = Object.freeze({
   pageRows: NATIVE_STELLAR_PAGE_ROWS,
   labelBytes: 512,
 });
+const STELLAR_QUANTUM_LIMITS = Object.freeze({
+  requestBytes: 32_768,
+  projectionBytes: 1_048_576,
+  pageRows: NATIVE_STELLAR_PAGE_ROWS,
+  decimalDigits: 256,
+});
+const QUANTUM_CAPACITY_MIN = 10_000;
+const QUANTUM_CAPACITY_MAX = 10_000_000_000;
 const EMPTY_SNAPSHOT: NativeStellarWorkspaceSnapshot = Object.freeze({
   overview: Object.freeze({ status: "empty", requestedRevision: null, frame: null }),
   industry: Object.freeze({ status: "empty", requestedRevision: null, frame: null }),
+  quantum: Object.freeze({ status: "empty", requestedRevision: null, frame: null }),
 });
 
 class BoundedLruCache<T> {
@@ -222,8 +286,9 @@ function validRevision(value: number): boolean {
 }
 
 function exactKeys(value: object, expected: readonly string[]): boolean {
-  const keys = Object.keys(value);
-  return keys.length === expected.length && expected.every((key) =>
+  const keys = Reflect.ownKeys(value);
+  return keys.length === expected.length && keys.every((key) => typeof key === "string") &&
+    expected.every((key) =>
     Object.prototype.hasOwnProperty.call(value, key));
 }
 
@@ -268,6 +333,15 @@ function exactV2Limits(
     limits.pathVisits === 200_000;
 }
 
+function exactQuantumLimits(
+  limits: DesktopNativeCoreStellarQuantumProjectionResult["limits"],
+): boolean {
+  return limits.requestBytes === STELLAR_QUANTUM_LIMITS.requestBytes &&
+    limits.projectionBytes === STELLAR_QUANTUM_LIMITS.projectionBytes &&
+    limits.pageRows === STELLAR_QUANTUM_LIMITS.pageRows &&
+    limits.decimalDigits === STELLAR_QUANTUM_LIMITS.decimalDigits;
+}
+
 function exactPage<Row>(
   page: { cursor: number; limit: number; totalCount: number; nextCursor: number | null; rows: Row[] },
   cursor: number,
@@ -281,6 +355,128 @@ function exactPage<Row>(
   if (page.rows.length !== expectedRows) return false;
   const consumed = cursor + page.rows.length;
   return page.nextCursor === (consumed < page.totalCount ? consumed : null);
+}
+
+function canonicalQuantumDecimal(value: string): boolean {
+  return typeof value === "string" && value.length >= 1 &&
+    value.length <= STELLAR_QUANTUM_LIMITS.decimalDigits && /^(?:0|[1-9][0-9]*)$/.test(value);
+}
+
+function quantumCapacity(value: string): boolean {
+  if (!canonicalQuantumDecimal(value) || value.length > 11) return false;
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= QUANTUM_CAPACITY_MIN && number <= QUANTUM_CAPACITY_MAX;
+}
+
+function nonNegativeFinite(value: number, minimum = 0): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value >= minimum;
+}
+
+function nonNegativeSafeInteger(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function exactQuantumRequest(
+  result: DesktopNativeCoreStellarQuantumProjectionResult,
+  revision: number,
+  registryFingerprint: string,
+  selector: NativeStellarQuantumSelector,
+): boolean {
+  if (result === null || typeof result !== "object" ||
+      !exactKeys(result, [
+        "schemaVersion", "projectionType", "revision", "registryFingerprint", "stateVersion",
+        "limits", "request", "enabled", "bandwidth", "runtime", "collectorSummary",
+        "truncated", "items", "collectors",
+      ]) || result.schemaVersion !== 1 || result.projectionType !== "stellar-quantum-v1" ||
+      result.stateVersion !== 47 || result.revision !== revision ||
+      result.registryFingerprint !== registryFingerprint || !exactQuantumLimits(result.limits) ||
+      !exactKeys(result.limits, ["requestBytes", "projectionBytes", "pageRows", "decimalDigits"]) ||
+      !exactKeys(result.request, [
+        "expectedRevision", "expectedRegistryFingerprint", "itemCursor", "itemLimit",
+        "collectorCursor", "collectorLimit",
+      ]) || result.request.expectedRevision !== revision ||
+      result.request.expectedRegistryFingerprint !== registryFingerprint ||
+      result.request.itemCursor !== selector.itemCursor || result.request.itemLimit !== selector.itemLimit ||
+      result.request.collectorCursor !== selector.collectorCursor ||
+      result.request.collectorLimit !== selector.collectorLimit || typeof result.enabled !== "boolean" ||
+      !exactKeys(result.items, ["cursor", "limit", "totalCount", "nextCursor", "rows"]) ||
+      !exactKeys(result.collectors, ["cursor", "limit", "totalCount", "nextCursor", "rows"]) ||
+      !exactPage(result.items, selector.itemCursor, selector.itemLimit, NATIVE_STELLAR_MAX_QUANTUM_ITEM_ROWS) ||
+      !exactPage(
+        result.collectors,
+        selector.collectorCursor,
+        selector.collectorLimit,
+        NATIVE_STELLAR_MAX_QUANTUM_COLLECTOR_ROWS,
+      )) return false;
+
+  const itemIds = new Set<string>();
+  for (const row of result.items.rows) {
+    if (row === null || typeof row !== "object" ||
+        !exactKeys(row, ["itemId", "inventory", "capacity", "uploaded", "downloaded"]) ||
+        !validLogicalId(row.itemId) || itemIds.has(row.itemId) ||
+        !canonicalQuantumDecimal(row.inventory) || !quantumCapacity(row.capacity) ||
+        !canonicalQuantumDecimal(row.uploaded) || !canonicalQuantumDecimal(row.downloaded)) return false;
+    itemIds.add(row.itemId);
+  }
+
+  const collectorIds = new Set<string>();
+  for (const row of result.collectors.rows) {
+    if (row === null || typeof row !== "object" || !exactKeys(row, [
+      "collectorId", "planetId", "systemId", "machineCount", "quantumMode",
+      "quantumTransitionActive", "attachmentState",
+    ]) || !validLogicalId(row.collectorId) || collectorIds.has(row.collectorId) ||
+        !validLogicalId(row.planetId) || !validLogicalId(row.systemId) ||
+        !nonNegativeSafeInteger(row.machineCount) ||
+        !["legacy", "transitioning", "quantum"].includes(row.quantumMode) ||
+        typeof row.quantumTransitionActive !== "boolean" ||
+        !["available", "pending", "connected", "unavailable"].includes(row.attachmentState)) return false;
+    const expectedAttachment = row.quantumMode === "quantum"
+      ? "connected"
+      : row.quantumMode === "transitioning"
+        ? "pending"
+        : row.quantumTransitionActive
+          ? "unavailable"
+          : "available";
+    if (row.attachmentState !== expectedAttachment ||
+        row.quantumMode === "transitioning" && !row.quantumTransitionActive) return false;
+    collectorIds.add(row.collectorId);
+  }
+
+  const bandwidth = result.bandwidth;
+  if (!exactKeys(bandwidth, [
+    "multiplier", "globalUploadPerMinute", "globalDownloadPerMinute", "activeTowerCount",
+    "activeTowerStacks",
+  ]) || !nonNegativeFinite(bandwidth.multiplier, 1) ||
+      !nonNegativeFinite(bandwidth.globalUploadPerMinute) ||
+      !nonNegativeFinite(bandwidth.globalDownloadPerMinute) ||
+      bandwidth.globalUploadPerMinute !== bandwidth.globalDownloadPerMinute ||
+      !nonNegativeSafeInteger(bandwidth.activeTowerCount) ||
+      !nonNegativeSafeInteger(bandwidth.activeTowerStacks) ||
+      bandwidth.activeTowerCount > bandwidth.activeTowerStacks) return false;
+
+  if (result.runtime !== null) {
+    const runtime = result.runtime;
+    if (!exactKeys(runtime, [
+      "boundarySecond", "globalUploadPerMinute", "globalDownloadPerMinute",
+      "quantumTowerStacks", "quantumCollectorStacks",
+    ]) || !nonNegativeSafeInteger(runtime.boundarySecond) ||
+        !nonNegativeFinite(runtime.globalUploadPerMinute) ||
+        !nonNegativeFinite(runtime.globalDownloadPerMinute) ||
+        !nonNegativeSafeInteger(runtime.quantumTowerStacks) ||
+        !nonNegativeSafeInteger(runtime.quantumCollectorStacks)) return false;
+  }
+
+  const summary = result.collectorSummary;
+  if (!exactKeys(summary, [
+    "totalCount", "connectedCount", "pendingCount", "availableCount", "connectedStacks",
+  ]) || !nonNegativeSafeInteger(summary.totalCount) ||
+      !nonNegativeSafeInteger(summary.connectedCount) || !nonNegativeSafeInteger(summary.pendingCount) ||
+      !nonNegativeSafeInteger(summary.availableCount) || !nonNegativeSafeInteger(summary.connectedStacks) ||
+      summary.totalCount !== result.collectors.totalCount ||
+      summary.connectedCount + summary.pendingCount + summary.availableCount > summary.totalCount ||
+      summary.connectedCount > summary.connectedStacks || typeof result.truncated !== "boolean" ||
+      result.truncated !== (result.items.nextCursor !== null || result.collectors.nextCursor !== null)) return false;
+  return true;
 }
 
 function exactStatusCounts(
@@ -425,6 +621,19 @@ function sameIndustryV2Identity(
     exactRouteSummary(page.routeSummary, first.routeSummary);
 }
 
+function sameQuantumIdentity(
+  first: DesktopNativeCoreStellarQuantumProjectionResult,
+  page: DesktopNativeCoreStellarQuantumProjectionResult,
+): boolean {
+  const leftRuntime = first.runtime;
+  const rightRuntime = page.runtime;
+  return page.enabled === first.enabled && page.items.totalCount === first.items.totalCount &&
+    page.collectors.totalCount === first.collectors.totalCount &&
+    JSON.stringify(page.bandwidth) === JSON.stringify(first.bandwidth) &&
+    JSON.stringify(rightRuntime) === JSON.stringify(leftRuntime) &&
+    JSON.stringify(page.collectorSummary) === JSON.stringify(first.collectorSummary);
+}
+
 function selectorKey(selector: object): string {
   return JSON.stringify(selector);
 }
@@ -511,6 +720,14 @@ function exactIndustrySelectors(
     left.routeFilter === right.routeFilter && left.query === right.query;
 }
 
+function exactQuantumSelectors(
+  left: NativeStellarQuantumSelector,
+  right: NativeStellarQuantumSelector,
+): boolean {
+  return left.itemCursor === right.itemCursor && left.itemLimit === right.itemLimit &&
+    left.collectorCursor === right.collectorCursor && left.collectorLimit === right.collectorLimit;
+}
+
 function immutableRowsByTargetStation(
   routes: readonly DesktopNativeCoreStellarIndustryRouteRow[],
 ): ReadonlyMap<string, readonly DesktopNativeCoreStellarIndustryRouteRow[]> {
@@ -519,6 +736,18 @@ function immutableRowsByTargetStation(
     const rows = mutable.get(route.targetStationId);
     if (rows) rows.push(route);
     else mutable.set(route.targetStationId, [route]);
+  }
+  return new Map([...mutable].map(([id, rows]) => [id, Object.freeze(rows)]));
+}
+
+function immutableCollectorsBySystem(
+  collectors: readonly DesktopNativeCoreStellarQuantumCollectorRow[],
+): ReadonlyMap<string, readonly DesktopNativeCoreStellarQuantumCollectorRow[]> {
+  const mutable = new Map<string, DesktopNativeCoreStellarQuantumCollectorRow[]>();
+  for (const collector of collectors) {
+    const rows = mutable.get(collector.systemId);
+    if (rows) rows.push(collector);
+    else mutable.set(collector.systemId, [collector]);
   }
   return new Map([...mutable].map(([id, rows]) => [id, Object.freeze(rows)]));
 }
@@ -539,6 +768,11 @@ export function validNativeStellarIndustrySelector(selector: NativeStellarIndust
     validRouteQuery(selector.query);
 }
 
+export function validNativeStellarQuantumSelector(selector: NativeStellarQuantumSelector): boolean {
+  return validPage(selector.itemCursor, selector.itemLimit) &&
+    validPage(selector.collectorCursor, selector.collectorLimit);
+}
+
 function validCompleteOverviewSelector(selector: NativeStarMapOverviewSelector): boolean {
   return validNativeStarMapOverviewSelector(selector) && selector.cursor === 0;
 }
@@ -548,15 +782,22 @@ function validCompleteIndustrySelector(selector: NativeStellarIndustrySelector):
     selector.stationCursor === 0 && selector.routeCursor === 0;
 }
 
+function validCompleteQuantumSelector(selector: NativeStellarQuantumSelector): boolean {
+  return validNativeStellarQuantumSelector(selector) && selector.itemCursor === 0 &&
+    selector.collectorCursor === 0;
+}
+
 export function createNativePlayerAuthorityStellarProjectionSource(
   bridge: Pick<
     DesktopBridge,
-    "getNativeCoreStarMapOverviewProjection" | "getNativeCoreStellarIndustryV2Projection"
+    "getNativeCoreStarMapOverviewProjection" | "getNativeCoreStellarIndustryV2Projection" |
+    "getNativeCoreStellarQuantumProjection"
   > | null,
   identity: NativeStellarProjectionIdentity,
 ): NativeStellarWorkspaceSource | null {
   const readOverview = bridge?.getNativeCoreStarMapOverviewProjection;
   const readIndustryV2 = bridge?.getNativeCoreStellarIndustryV2Projection;
+  const readQuantum = bridge?.getNativeCoreStellarQuantumProjection;
   if (!validLogicalId(identity.sessionId, 128) || !validRevision(identity.revision) ||
       !validLogicalId(identity.registryFingerprint) || typeof readOverview !== "function" ||
       typeof readIndustryV2 !== "function") return null;
@@ -602,6 +843,27 @@ export function createNativePlayerAuthorityStellarProjectionSource(
         return null;
       }
     },
+    ...(typeof readQuantum === "function" ? {
+      async readVerifiedStellarQuantumProjection(
+        selector: NativeStellarQuantumSelector,
+        expectedRevision: number,
+      ) {
+        if (expectedRevision !== boundIdentity.revision || !validNativeStellarQuantumSelector(selector)) return null;
+        try {
+          const result = await readQuantum({
+            sessionId: boundIdentity.sessionId,
+            expectedRevision,
+            expectedRegistryFingerprint: boundIdentity.registryFingerprint,
+            ...selector,
+          });
+          return exactQuantumRequest(result, expectedRevision, boundIdentity.registryFingerprint, selector)
+            ? result
+            : null;
+        } catch {
+          return null;
+        }
+      },
+    } : {}),
   });
 }
 
@@ -623,6 +885,10 @@ export function createNativeShadowStellarProjectionSource(
     readVerifiedStellarIndustryProjection: typeof reader.readVerifiedStellarIndustryProjection === "function"
       ? (request: NativeStellarIndustryBaseSelector, revision: number) =>
           reader.readVerifiedStellarIndustryProjection!(request, revision)
+      : undefined,
+    readVerifiedStellarQuantumProjection: typeof reader.readVerifiedStellarQuantumProjection === "function"
+      ? (request: NativeStellarQuantumSelector, revision: number) =>
+          reader.readVerifiedStellarQuantumProjection!(request, revision)
       : undefined,
   });
 }
@@ -675,6 +941,32 @@ export function selectNativeStarMapWorkspaceReadModel(
   });
 }
 
+/** Player-authority Quantum console selector. It never reads or accepts a renderer GameState fallback. */
+export function selectNativePlayerAuthorityStellarQuantumReadModel(
+  snapshot: NativeStellarWorkspaceSnapshot,
+  identity: NativeStellarProjectionIdentity,
+  expectedSelector: NativeStellarQuantumSelector = DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR,
+): NativeStellarQuantumReadModel | null {
+  const frame = snapshot.quantum.frame;
+  if (snapshot.quantum.status !== "ready" || !frame || frame.sourceMode !== "player-authority" ||
+      !exactIdentityFrame(frame, identity) || !validCompleteQuantumSelector(expectedSelector) ||
+      !exactQuantumSelectors(frame.selector, expectedSelector)) return null;
+  return Object.freeze({
+    source: "native-core" as const,
+    sourceMode: "player-authority" as const,
+    ...identity,
+    enabled: frame.projection.enabled,
+    bandwidth: frame.projection.bandwidth,
+    runtime: frame.projection.runtime,
+    collectorSummary: frame.projection.collectorSummary,
+    items: frame.items,
+    collectors: frame.collectors,
+    itemRowsById: frame.itemRowsById,
+    collectorRowsById: frame.collectorRowsById,
+    collectorRowsBySystemId: frame.collectorRowsBySystemId,
+  });
+}
+
 /** Shadow-only compatibility selector. A legacy v1 frame explicitly has no route model. */
 export function selectNativeShadowStarMapWorkspaceReadModel(
   snapshot: NativeStellarWorkspaceSnapshot,
@@ -707,9 +999,11 @@ export class NativeStellarWorkspaceStore {
   private snapshot: NativeStellarWorkspaceSnapshot = EMPTY_SNAPSHOT;
   private overviewToken = 0;
   private industryToken = 0;
+  private quantumToken = 0;
   private cacheIdentity: string | null = null;
   private overviewFlight: { key: string; promise: Promise<RefreshResult> } | null = null;
   private industryFlight: { key: string; promise: Promise<RefreshResult> } | null = null;
+  private quantumFlight: { key: string; promise: Promise<RefreshResult> } | null = null;
   private readonly overviewPageCache = new BoundedLruCache<DesktopNativeCoreStarMapOverviewProjectionResult>(
     NATIVE_STELLAR_OVERVIEW_PAGE_CACHE_ENTRIES,
   );
@@ -718,6 +1012,9 @@ export class NativeStellarWorkspaceStore {
   );
   private readonly industryV1PageCache = new BoundedLruCache<DesktopNativeCoreStellarIndustryProjectionResult>(
     NATIVE_STELLAR_INDUSTRY_PAGE_CACHE_ENTRIES,
+  );
+  private readonly quantumPageCache = new BoundedLruCache<DesktopNativeCoreStellarQuantumProjectionResult>(
+    NATIVE_STELLAR_QUANTUM_PAGE_CACHE_ENTRIES,
   );
   private readonly listeners = new Set<() => void>();
 
@@ -731,8 +1028,10 @@ export class NativeStellarWorkspaceStore {
   clear(): void {
     this.overviewToken += 1;
     this.industryToken += 1;
+    this.quantumToken += 1;
     this.overviewFlight = null;
     this.industryFlight = null;
+    this.quantumFlight = null;
     this.cacheIdentity = null;
     this.clearPageCaches();
     this.publish(EMPTY_SNAPSHOT);
@@ -807,6 +1106,39 @@ export class NativeStellarWorkspaceStore {
     return promise;
   }
 
+  refreshQuantum(
+    source: NativeStellarWorkspaceSource,
+    identity: NativeStellarProjectionIdentity,
+    selector: NativeStellarQuantumSelector = DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR,
+  ): Promise<RefreshResult> {
+    if (!this.validSourceIdentity(source, identity) || !validCompleteQuantumSelector(selector) ||
+        typeof source.readVerifiedStellarQuantumProjection !== "function") {
+      this.invalidateQuantum();
+      return Promise.resolve("unavailable");
+    }
+    this.prepareIdentity(identity);
+    const key = `${source.mode}\u0000${identityKey(identity)}\u0000${selectorKey(selector)}`;
+    if (this.quantumFlight?.key === key) return this.quantumFlight.promise;
+    const current = this.snapshot.quantum.frame;
+    if (this.snapshot.quantum.status === "ready" && current && current.sourceMode === source.mode &&
+        exactIdentityFrame(current, identity) && exactQuantumSelectors(current.selector, selector)) {
+      return Promise.resolve("committed");
+    }
+
+    const token = ++this.quantumToken;
+    const previous = current;
+    this.publish(Object.freeze({
+      ...this.snapshot,
+      quantum: Object.freeze({ status: "loading", requestedRevision: identity.revision, frame: previous }),
+    }));
+    const promise = this.performQuantumRefresh(source, identity, selector, token, previous);
+    this.quantumFlight = { key, promise };
+    void promise.finally(() => {
+      if (this.quantumFlight?.promise === promise) this.quantumFlight = null;
+    });
+    return promise;
+  }
+
   private async performOverviewRefresh(
     source: NativeStellarWorkspaceSource,
     identity: NativeStellarProjectionIdentity,
@@ -861,6 +1193,34 @@ export class NativeStellarWorkspaceStore {
     this.publish(Object.freeze({
       ...this.snapshot,
       industry: Object.freeze({ status: "ready", requestedRevision: identity.revision, frame: result.frame }),
+    }));
+    return "committed";
+  }
+
+  private async performQuantumRefresh(
+    source: NativeStellarWorkspaceSource,
+    identity: NativeStellarProjectionIdentity,
+    selector: NativeStellarQuantumSelector,
+    token: number,
+    previous: NativeStellarQuantumFrame | null,
+  ): Promise<RefreshResult> {
+    let result: QuantumReadResult;
+    try {
+      result = await this.readCompleteQuantum(source, identity, selector, token);
+    } catch {
+      result = { status: "unavailable" };
+    }
+    if (result.status === "superseded" || token !== this.quantumToken) return "superseded";
+    if (result.status === "unavailable") {
+      this.publish(Object.freeze({
+        ...this.snapshot,
+        quantum: Object.freeze({ status: "unavailable", requestedRevision: identity.revision, frame: previous }),
+      }));
+      return "unavailable";
+    }
+    this.publish(Object.freeze({
+      ...this.snapshot,
+      quantum: Object.freeze({ status: "ready", requestedRevision: identity.revision, frame: result.frame }),
     }));
     return "committed";
   }
@@ -1100,6 +1460,102 @@ export class NativeStellarWorkspaceStore {
     return { status: "unavailable" };
   }
 
+  private async readCompleteQuantum(
+    source: NativeStellarWorkspaceSource,
+    identity: NativeStellarProjectionIdentity,
+    initial: NativeStellarQuantumSelector,
+    token: number,
+  ): Promise<QuantumReadResult> {
+    const read = source.readVerifiedStellarQuantumProjection;
+    if (!read) return { status: "unavailable" };
+    let itemCursor = initial.itemCursor;
+    let collectorCursor = initial.collectorCursor;
+    let first: DesktopNativeCoreStellarQuantumProjectionResult | null = null;
+    const items: DesktopNativeCoreStellarQuantumItemRow[] = [];
+    const collectors: DesktopNativeCoreStellarQuantumCollectorRow[] = [];
+    const itemIds = new Set<string>();
+    const collectorIds = new Set<string>();
+    for (let pageIndex = 0; pageIndex < NATIVE_STELLAR_MAX_COMPLETE_PAGES; pageIndex += 1) {
+      if (token !== this.quantumToken) return { status: "superseded" };
+      const pageSelector = { ...initial, itemCursor, collectorCursor };
+      const key = `${source.mode}\u0000${identityKey(identity)}\u0000${selectorKey(pageSelector)}`;
+      let page = this.quantumPageCache.get(key);
+      if (!page) {
+        page = await read(pageSelector, identity.revision) ?? undefined;
+        if (token !== this.quantumToken) return { status: "superseded" };
+        if (!page || !exactQuantumRequest(page, identity.revision, identity.registryFingerprint, pageSelector)) {
+          return { status: "unavailable" };
+        }
+        this.quantumPageCache.set(key, page);
+      }
+      if (!first) {
+        first = page;
+        const pageCount = Math.max(
+          Math.ceil(page.items.totalCount / initial.itemLimit),
+          Math.ceil(page.collectors.totalCount / initial.collectorLimit),
+        );
+        if (pageCount > NATIVE_STELLAR_MAX_COMPLETE_PAGES) return { status: "unavailable" };
+      } else if (!sameQuantumIdentity(first, page)) {
+        return { status: "unavailable" };
+      }
+      for (const row of page.items.rows) {
+        if (itemIds.has(row.itemId)) return { status: "unavailable" };
+        itemIds.add(row.itemId);
+        items.push(row);
+      }
+      for (const row of page.collectors.rows) {
+        if (collectorIds.has(row.collectorId)) return { status: "unavailable" };
+        collectorIds.add(row.collectorId);
+        collectors.push(row);
+      }
+      const itemsDone = page.items.nextCursor === null;
+      const collectorsDone = page.collectors.nextCursor === null;
+      if (itemsDone && collectorsDone) {
+        if (!first || items.length !== page.items.totalCount || collectors.length !== page.collectors.totalCount) {
+          return { status: "unavailable" };
+        }
+        let connectedCount = 0;
+        let pendingCount = 0;
+        let availableCount = 0;
+        let connectedStacks = 0;
+        for (const collector of collectors) {
+          if (collector.attachmentState === "connected") {
+            connectedCount += 1;
+            connectedStacks += collector.machineCount;
+          } else if (collector.attachmentState === "pending") {
+            pendingCount += 1;
+          } else if (collector.attachmentState === "available") {
+            availableCount += 1;
+          }
+          if (!Number.isSafeInteger(connectedStacks)) return { status: "unavailable" };
+        }
+        const summary = first.collectorSummary;
+        if (summary.totalCount !== collectors.length || summary.connectedCount !== connectedCount ||
+            summary.pendingCount !== pendingCount || summary.availableCount !== availableCount ||
+            summary.connectedStacks !== connectedStacks) return { status: "unavailable" };
+        const frozenItems = Object.freeze(items);
+        const frozenCollectors = Object.freeze(collectors);
+        return {
+          status: "ready",
+          frame: Object.freeze({
+            ...identity,
+            sourceMode: source.mode,
+            projection: first,
+            selector: Object.freeze({ ...initial }),
+            items: frozenItems,
+            collectors: frozenCollectors,
+            itemRowsById: new Map(frozenItems.map((row) => [row.itemId, row])),
+            collectorRowsById: new Map(frozenCollectors.map((row) => [row.collectorId, row])),
+            collectorRowsBySystemId: immutableCollectorsBySystem(frozenCollectors),
+          }),
+        };
+      }
+      itemCursor = page.items.nextCursor ?? page.items.totalCount;
+      collectorCursor = page.collectors.nextCursor ?? page.collectors.totalCount;
+    }
+    return { status: "unavailable" };
+  }
+
   private validSourceIdentity(
     source: NativeStellarWorkspaceSource,
     identity: NativeStellarProjectionIdentity,
@@ -1116,8 +1572,10 @@ export class NativeStellarWorkspaceStore {
     this.cacheIdentity = key;
     this.overviewToken += 1;
     this.industryToken += 1;
+    this.quantumToken += 1;
     this.overviewFlight = null;
     this.industryFlight = null;
+    this.quantumFlight = null;
     this.clearPageCaches();
     this.publish(EMPTY_SNAPSHOT);
   }
@@ -1126,6 +1584,7 @@ export class NativeStellarWorkspaceStore {
     this.overviewPageCache.clear();
     this.industryV2PageCache.clear();
     this.industryV1PageCache.clear();
+    this.quantumPageCache.clear();
   }
 
   private invalidateOverview(): void {
@@ -1143,6 +1602,15 @@ export class NativeStellarWorkspaceStore {
     this.publish(Object.freeze({
       ...this.snapshot,
       industry: Object.freeze({ status: "unavailable", requestedRevision: null, frame: null }),
+    }));
+  }
+
+  private invalidateQuantum(): void {
+    this.quantumToken += 1;
+    this.quantumFlight = null;
+    this.publish(Object.freeze({
+      ...this.snapshot,
+      quantum: Object.freeze({ status: "unavailable", requestedRevision: null, frame: null }),
     }));
   }
 

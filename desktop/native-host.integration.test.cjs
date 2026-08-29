@@ -387,6 +387,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.ok(hello.capabilities.includes("native-core-star-map-overview-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-stellar-industry-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-stellar-industry-projection-v2"));
+  assert.ok(hello.capabilities.includes("native-core-stellar-quantum-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-v47-stream-export-v1"));
   assert.ok(hello.capabilities.includes("native-core-player-authority-tick-v1"));
   assert.ok(hello.capabilities.includes("native-core-player-authority-command-v1"));
@@ -679,6 +680,35 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   ));
   assert.equal(stellarIndustryV2.projectionType, "stellar-industry-v2");
   assert.equal(stellarIndustryV2.routes.totalCount, 0);
+
+  const stellarQuantumRequest = {
+    operation: "coreStellarQuantumProjection",
+    sessionId: opened.sessionId,
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    itemCursor: 0,
+    itemLimit: 64,
+    collectorCursor: 0,
+    collectorLimit: 64,
+  };
+  const stellarQuantum = await client.request(stellarQuantumRequest);
+  assert.doesNotThrow(() => normalizeRendererNativeResult(
+    "coreStellarQuantumProjection",
+    stellarQuantum,
+    {
+      sessionId: opened.sessionId,
+      expectedRevision: 2,
+      expectedRegistryFingerprint: "builtin:test",
+      itemCursor: 0,
+      itemLimit: 64,
+      collectorCursor: 0,
+      collectorLimit: 64,
+    },
+  ));
+  assert.equal(stellarQuantum.projectionType, "stellar-quantum-v1");
+  assert.deepEqual(stellarQuantum.items.rows.map((row) => row.itemId), ["iron_ore"]);
+  assert.equal(stellarQuantum.items.rows[0].inventory, "0");
+  assert.equal(stellarQuantum.collectors.totalCount, 0);
 
   await assert.rejects(
     client.request({ ...starMapRequest, expectedRevision: 1 }),

@@ -20,6 +20,7 @@ const PROJECTION_METHODS = Object.freeze({
   "star-map-overview-v1": "starMapOverviewProjection",
   "stellar-industry-v1": "stellarIndustryProjection",
   "stellar-industry-v2": "stellarIndustryProjectionV2",
+  "stellar-quantum-v1": "stellarQuantumProjection",
 });
 
 class NativePlayerAuthorityProjectionBrokerError extends Error {

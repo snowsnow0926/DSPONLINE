@@ -17,12 +17,21 @@ use crate::state::CoreState;
 const STAR_MAP_SCHEMA: &str = "star-map-overview-v1";
 const STELLAR_INDUSTRY_SCHEMA: &str = "stellar-industry-v1";
 const STELLAR_INDUSTRY_V2_SCHEMA: &str = "stellar-industry-v2";
+const STELLAR_QUANTUM_SCHEMA: &str = "stellar-quantum-v1";
 const MAX_PAGE_ROWS: usize = 64;
 const MAX_REQUEST_BYTES: usize = 32_768;
 const MAX_PROJECTION_BYTES: usize = 1_048_576;
 const MAX_LABEL_BYTES: usize = 512;
 const MAX_QUERY_BYTES: usize = 512;
 const MAX_PATH_VISITS: usize = 200_000;
+const MAX_QUANTUM_ITEM_ROWS: usize = 4_096;
+const MAX_QUANTUM_COLLECTOR_ROWS: usize = 8_192;
+const MAX_DECIMAL_DIGITS: usize = 256;
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+const MAX_SAFE_INTEGER_U64: u64 = 9_007_199_254_740_991;
+const QUANTUM_ITEM_CAPACITY_MIN: &str = "10000";
+const QUANTUM_ITEM_CAPACITY_MAX: &str = "10000000000";
+const QUANTUM_UNIT_CAP_PER_MINUTE: f64 = 5_000.0;
 const STATION_SLOT_COUNT: usize = 5;
 const DRONES_PER_BUILDING: f64 = 50.0;
 const VESSELS_PER_BUILDING: f64 = 10.0;
@@ -171,6 +180,18 @@ struct RouteSnapshotProjection {
     row: Value,
     source_planet_index: Option<usize>,
     target_planet_index: usize,
+}
+
+#[derive(Debug, Default)]
+struct QuantumCollectorScan {
+    rows: Vec<Value>,
+    total_count: usize,
+    connected_count: usize,
+    pending_count: usize,
+    available_count: usize,
+    connected_stacks: u64,
+    active_tower_count: usize,
+    active_tower_stacks: u64,
 }
 
 fn checked_add(target: &mut usize, amount: usize, label: &'static str) -> anyhow::Result<()> {
@@ -2190,6 +2211,203 @@ fn page_value(
     }))
 }
 
+fn strict_decimal_string<'a>(value: Option<&'a Value>, label: &str) -> anyhow::Result<&'a str> {
+    let value = value
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native stellar quantum {label} is not a decimal string"))?;
+    if value.is_empty()
+        || value.len() > MAX_DECIMAL_DIGITS
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || value.len() > 1 && value.starts_with('0')
+    {
+        bail!("native stellar quantum {label} is not canonical");
+    }
+    Ok(value)
+}
+
+fn decimal_at_least(left: &str, right: &str) -> bool {
+    left.len() > right.len() || left.len() == right.len() && left >= right
+}
+
+fn decimal_at_most(left: &str, right: &str) -> bool {
+    left.len() < right.len() || left.len() == right.len() && left <= right
+}
+
+fn strict_quantity_record<'a>(
+    value: Option<&'a Value>,
+    state: &CoreState,
+    label: &str,
+    capacity: bool,
+) -> anyhow::Result<Option<&'a Map<String, Value>>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let record = value
+        .as_object()
+        .ok_or_else(|| anyhow!("native stellar quantum {label} is not an object"))?;
+    if record.len() > MAX_QUANTUM_ITEM_ROWS {
+        bail!("native stellar quantum {label} exceeds the item limit");
+    }
+    for (item_id, amount) in record {
+        if !state.catalog.items.contains_key(item_id) {
+            bail!("native stellar quantum {label} contains an unknown item");
+        }
+        let amount = strict_decimal_string(Some(amount), label)?;
+        if capacity
+            && (!decimal_at_least(amount, QUANTUM_ITEM_CAPACITY_MIN)
+                || !decimal_at_most(amount, QUANTUM_ITEM_CAPACITY_MAX))
+        {
+            bail!("native stellar quantum item capacity is outside the allowed range");
+        }
+    }
+    Ok(Some(record))
+}
+
+fn strict_safe_integer(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
+    let value = value
+        .and_then(Value::as_f64)
+        .filter(|value| {
+            value.is_finite() && *value >= 0.0 && *value <= MAX_SAFE_INTEGER && value.fract() == 0.0
+        })
+        .ok_or_else(|| anyhow!("native stellar quantum {label} is not a safe integer"))?;
+    Ok(value as u64)
+}
+
+fn strict_non_negative_number(value: Option<&Value>, label: &str) -> anyhow::Result<f64> {
+    value
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .ok_or_else(|| anyhow!("native stellar quantum {label} is invalid"))
+}
+
+fn quantum_mode(object: &Map<String, Value>) -> anyhow::Result<&str> {
+    match object.get("quantumMode") {
+        None | Some(Value::Null) => Ok("legacy"),
+        Some(Value::String(value))
+            if matches!(value.as_str(), "legacy" | "transitioning" | "quantum") =>
+        {
+            Ok(value)
+        }
+        _ => bail!("native stellar quantum attachment mode is invalid"),
+    }
+}
+
+fn quantum_logistics_level_strict(base: &Map<String, Value>) -> anyhow::Result<u64> {
+    let level = base
+        .get("endgame")
+        .and_then(Value::as_object)
+        .and_then(|endgame| endgame.get("infiniteResearch"))
+        .and_then(Value::as_object)
+        .and_then(|research| research.get("galactic_logistics"))
+        .and_then(Value::as_object)
+        .and_then(|progress| progress.get("level"));
+    match level {
+        None => Ok(0),
+        Some(value) => strict_safe_integer(Some(value), "galactic logistics level"),
+    }
+}
+
+fn scan_quantum_collectors(state: &CoreState) -> anyhow::Result<QuantumCollectorScan> {
+    let mut scan = QuantumCollectorScan::default();
+    for &entity_index in &state.factory_topology.station_indices {
+        let building_id = state
+            .symbols
+            .resolve(state.entities.buildings[entity_index]);
+        if !matches!(
+            building_id,
+            Some("interstellar_logistics_station" | "orbital_collector")
+        ) {
+            continue;
+        }
+        let entity = state.parse_entity(entity_index)?;
+        let object = entity
+            .as_object()
+            .ok_or_else(|| anyhow!("native stellar quantum endpoint is not an object"))?;
+        let mode = quantum_mode(object)?;
+        let machine_count = strict_safe_integer(object.get("machineCount"), "machine count")?;
+        if building_id == Some("interstellar_logistics_station") {
+            if mode == "quantum" {
+                if machine_count > 0 {
+                    checked_add(
+                        &mut scan.active_tower_count,
+                        1,
+                        "quantum active tower count",
+                    )?;
+                }
+                scan.active_tower_stacks = scan
+                    .active_tower_stacks
+                    .checked_add(machine_count)
+                    .ok_or_else(|| anyhow!("native stellar quantum tower stack overflow"))?;
+                if scan.active_tower_stacks > MAX_SAFE_INTEGER_U64 {
+                    bail!("native stellar quantum tower stacks exceed the safe integer range");
+                }
+            }
+            continue;
+        }
+
+        let planet_index = state
+            .factory_topology
+            .entity_planet_indices
+            .get(entity_index)
+            .copied()
+            .ok_or_else(|| anyhow!("native stellar quantum collector planet is missing"))?;
+        let planet = state
+            .catalog
+            .planets
+            .get(planet_index)
+            .ok_or_else(|| anyhow!("native stellar quantum collector planet is invalid"))?;
+        let transition_active = mode == "transitioning"
+            || object
+                .get("quantumTransition")
+                .is_some_and(|value| !value.is_null());
+        let attachment_state = if mode == "quantum" {
+            checked_add(
+                &mut scan.connected_count,
+                1,
+                "quantum connected collector count",
+            )?;
+            scan.connected_stacks = scan
+                .connected_stacks
+                .checked_add(machine_count)
+                .ok_or_else(|| anyhow!("native stellar quantum collector stack overflow"))?;
+            if scan.connected_stacks > MAX_SAFE_INTEGER_U64 {
+                bail!("native stellar quantum collector stacks exceed the safe integer range");
+            }
+            "connected"
+        } else if mode == "transitioning" {
+            checked_add(
+                &mut scan.pending_count,
+                1,
+                "quantum pending collector count",
+            )?;
+            "pending"
+        } else if !transition_active {
+            checked_add(
+                &mut scan.available_count,
+                1,
+                "quantum available collector count",
+            )?;
+            "available"
+        } else {
+            "unavailable"
+        };
+        checked_add(&mut scan.total_count, 1, "quantum collector count")?;
+        if scan.total_count > MAX_QUANTUM_COLLECTOR_ROWS {
+            bail!("native stellar quantum collector count exceeds the bounded limit");
+        }
+        scan.rows.push(json!({
+            "collectorId": &state.entities.ids[entity_index],
+            "planetId": planet.id,
+            "systemId": planet.system_id,
+            "machineCount": machine_count,
+            "quantumMode": mode,
+            "quantumTransitionActive": transition_active,
+            "attachmentState": attachment_state,
+        }));
+    }
+    Ok(scan)
+}
+
 impl CoreState {
     /// Returns a stable page of star systems with direct display labels,
     /// generated galaxy coordinates, exploration state, and aggregated
@@ -2355,7 +2573,7 @@ impl CoreState {
                     .filter(|value| value.is_finite())
                     .unwrap_or(if unlocked { 1.0 } else { 0.0 })
                     .clamp(0.0, 1.0);
-                Ok(json!({
+                Ok::<Value, anyhow::Error>(json!({
                     "systemId": system.system_id,
                     "displayName": display_name,
                     "displayNameTruncated": display_name_truncated,
@@ -2836,6 +3054,199 @@ impl CoreState {
         );
         finish_projection(projection)
     }
+
+    /// Returns a revision-bound, independently paged view of the shared
+    /// quantum inventory and orbital-collector attachment state. Decimal
+    /// quantities remain canonical strings so the renderer never rounds a
+    /// large inventory through JavaScript `number`.
+    pub fn stellar_quantum_projection(
+        &self,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        item_cursor: usize,
+        item_limit: usize,
+        collector_cursor: usize,
+        collector_limit: usize,
+    ) -> anyhow::Result<Value> {
+        validate_identity(self, expected_revision, expected_registry_fingerprint)?;
+        validate_page(item_cursor, item_limit)?;
+        validate_page(collector_cursor, collector_limit)?;
+        if self.catalog.snapshot.items.len() > MAX_QUANTUM_ITEM_ROWS {
+            bail!("native stellar quantum catalog exceeds the bounded item limit");
+        }
+
+        let request = json!({
+            "expectedRevision": expected_revision,
+            "expectedRegistryFingerprint": expected_registry_fingerprint,
+            "itemCursor": item_cursor,
+            "itemLimit": item_limit,
+            "collectorCursor": collector_cursor,
+            "collectorLimit": collector_limit,
+        });
+        validate_request(&request)?;
+
+        let base = self.base_value();
+        let network = match base.get("quantumLogisticsNetwork") {
+            None => None,
+            Some(Value::Object(network)) => Some(network),
+            Some(_) => bail!("native stellar quantum network is not an object"),
+        };
+        let enabled = match network.and_then(|value| value.get("enabled")) {
+            None => false,
+            Some(Value::Bool(enabled)) => *enabled,
+            Some(_) => bail!("native stellar quantum enabled flag is invalid"),
+        };
+        let inventory = strict_quantity_record(
+            network.and_then(|value| value.get("inventory")),
+            self,
+            "inventory",
+            false,
+        )?;
+        let capacities = strict_quantity_record(
+            network.and_then(|value| value.get("itemCapacities")),
+            self,
+            "item capacities",
+            true,
+        )?;
+        let runtime = match network.and_then(|value| value.get("runtimeFlow")) {
+            None => None,
+            Some(Value::Object(runtime)) => Some(runtime),
+            Some(_) => bail!("native stellar quantum runtime flow is invalid"),
+        };
+        let uploaded = strict_quantity_record(
+            runtime.and_then(|value| value.get("uploaded")),
+            self,
+            "runtime uploaded totals",
+            false,
+        )?;
+        let downloaded = strict_quantity_record(
+            runtime.and_then(|value| value.get("downloaded")),
+            self,
+            "runtime downloaded totals",
+            false,
+        )?;
+        let runtime_summary = runtime
+            .map(|runtime| {
+                Ok::<Value, anyhow::Error>(json!({
+                    "boundarySecond": strict_safe_integer(runtime.get("boundarySecond"), "runtime boundary")?,
+                    "globalUploadPerMinute": strict_non_negative_number(runtime.get("globalUploadPerMinute"), "runtime upload bandwidth")?,
+                    "globalDownloadPerMinute": strict_non_negative_number(runtime.get("globalDownloadPerMinute"), "runtime download bandwidth")?,
+                    "quantumTowerStacks": strict_safe_integer(runtime.get("quantumTowerStacks"), "runtime tower stacks")?,
+                    "quantumCollectorStacks": strict_safe_integer(runtime.get("quantumCollectorStacks"), "runtime collector stacks")?,
+                }))
+            })
+            .transpose()?;
+
+        let item_rows = self
+            .catalog
+            .snapshot
+            .items
+            .iter()
+            .skip(item_cursor)
+            .take(item_limit)
+            .map(|item| {
+                let inventory = inventory
+                    .and_then(|record| record.get(&item.id))
+                    .map_or(Ok("0"), |value| {
+                        strict_decimal_string(Some(value), "inventory")
+                    })?;
+                let capacity = capacities
+                    .and_then(|record| record.get(&item.id))
+                    .map_or(Ok(QUANTUM_ITEM_CAPACITY_MAX), |value| {
+                        strict_decimal_string(Some(value), "item capacity")
+                    })?;
+                let uploaded = uploaded
+                    .and_then(|record| record.get(&item.id))
+                    .map_or(Ok("0"), |value| {
+                        strict_decimal_string(Some(value), "runtime uploaded total")
+                    })?;
+                let downloaded = downloaded
+                    .and_then(|record| record.get(&item.id))
+                    .map_or(Ok("0"), |value| {
+                        strict_decimal_string(Some(value), "runtime downloaded total")
+                    })?;
+                Ok(json!({
+                    "itemId": item.id,
+                    "inventory": inventory,
+                    "capacity": capacity,
+                    "uploaded": uploaded,
+                    "downloaded": downloaded,
+                }))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        if item_cursor > self.catalog.snapshot.items.len() {
+            bail!("native stellar quantum item cursor is invalid");
+        }
+
+        let collector_scan = scan_quantum_collectors(self)?;
+        if collector_cursor > collector_scan.total_count {
+            bail!("native stellar quantum collector cursor is invalid");
+        }
+        let collector_rows = collector_scan
+            .rows
+            .iter()
+            .skip(collector_cursor)
+            .take(collector_limit)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let level = quantum_logistics_level_strict(base)? as f64;
+        let multiplier_base = 1.0 + 0.05 * level;
+        let multiplier = multiplier_base * multiplier_base;
+        let global_bandwidth =
+            QUANTUM_UNIT_CAP_PER_MINUTE * multiplier * collector_scan.active_tower_stacks as f64;
+        if !multiplier.is_finite() || !global_bandwidth.is_finite() {
+            bail!("native stellar quantum bandwidth exceeds the finite range");
+        }
+
+        let item_page = page_value(
+            item_cursor,
+            item_limit,
+            self.catalog.snapshot.items.len(),
+            item_rows,
+        )?;
+        let collector_page = page_value(
+            collector_cursor,
+            collector_limit,
+            collector_scan.total_count,
+            collector_rows,
+        )?;
+        let truncated =
+            item_page["nextCursor"].is_number() || collector_page["nextCursor"].is_number();
+        finish_projection(json!({
+            "schemaVersion": 1,
+            "projectionType": STELLAR_QUANTUM_SCHEMA,
+            "revision": self.revision,
+            "registryFingerprint": self.catalog.snapshot.registry_fingerprint,
+            "stateVersion": 47,
+            "limits": {
+                "requestBytes": MAX_REQUEST_BYTES,
+                "projectionBytes": MAX_PROJECTION_BYTES,
+                "pageRows": MAX_PAGE_ROWS,
+                "decimalDigits": MAX_DECIMAL_DIGITS,
+            },
+            "request": request,
+            "enabled": enabled,
+            "bandwidth": {
+                "multiplier": multiplier,
+                "globalUploadPerMinute": global_bandwidth,
+                "globalDownloadPerMinute": global_bandwidth,
+                "activeTowerCount": collector_scan.active_tower_count,
+                "activeTowerStacks": collector_scan.active_tower_stacks,
+            },
+            "runtime": runtime_summary,
+            "collectorSummary": {
+                "totalCount": collector_scan.total_count,
+                "connectedCount": collector_scan.connected_count,
+                "pendingCount": collector_scan.pending_count,
+                "availableCount": collector_scan.available_count,
+                "connectedStacks": collector_scan.connected_stacks,
+            },
+            "truncated": truncated,
+            "items": item_page,
+            "collectors": collector_page,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -2868,19 +3279,45 @@ mod tests {
         }
     }
 
+    fn orbital_collector_building() -> BuildingDefinition {
+        BuildingDefinition {
+            id: "orbital_collector".to_owned(),
+            kind: "station".to_owned(),
+            speed: 1.0,
+            input_capacity: 10_000.0,
+            output_capacity: 10_000.0,
+            power_demand_kw: 1_000.0,
+            power_generation_kw: 0.0,
+            power_charge_kw: 0.0,
+            energy_capacity_mj: 0.0,
+            fuel_item_ids: Vec::new(),
+            fuel_efficiency: 1.0,
+            family: None,
+            accepts: None,
+        }
+    }
+
     fn catalog(planets: Vec<PlanetDefinition>, fingerprint: &str) -> RuntimeCatalog {
         RuntimeCatalog::validate(
             CatalogSnapshot {
                 protocol_version: 1,
                 registry_fingerprint: fingerprint.to_owned(),
                 planets,
-                items: vec![ItemDefinition {
-                    id: "iron_ore".to_owned(),
-                    name: "铁矿".to_owned(),
-                    kind: "solid".to_owned(),
-                    fuel_energy_mj: 0.0,
-                }],
-                buildings: vec![building()],
+                items: vec![
+                    ItemDefinition {
+                        id: "iron_ore".to_owned(),
+                        name: "铁矿".to_owned(),
+                        kind: "solid".to_owned(),
+                        fuel_energy_mj: 0.0,
+                    },
+                    ItemDefinition {
+                        id: "copper_ore".to_owned(),
+                        name: "铜矿".to_owned(),
+                        kind: "solid".to_owned(),
+                        fuel_energy_mj: 0.0,
+                    },
+                ],
+                buildings: vec![building(), orbital_collector_building()],
                 recipes: Vec::new(),
                 constructions: Vec::new(),
                 belts: Vec::new(),
@@ -3243,6 +3680,125 @@ mod tests {
             entities,
             Vec::new(),
             catalog(planets, "stellar-route-test"),
+        )
+        .unwrap()
+    }
+
+    fn quantum_state() -> CoreState {
+        let planets = vec![planet("home", "母星", "helios", 0, 1)];
+        let endpoint =
+            |id: &str, building_id: &str, machine_count: u64, mode: &str, transition: Value| {
+                json!({
+                    "id": id,
+                    "kind": "station",
+                    "planetId": "home",
+                    "position": { "x": 0, "y": 0 },
+                    "buildingId": building_id,
+                    "machineCount": machine_count,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "stationTier": 2,
+                    "quantumMode": mode,
+                    "quantumTransition": transition,
+                    "stationSlots": [],
+                    "stationRoutes": []
+                })
+                .to_string()
+            };
+        let base = json!({
+            "version": 47,
+            "mode": "normal",
+            "activePlanetId": "home",
+            "paused": false,
+            "settings": {},
+            "tray": {},
+            "planetTrays": {},
+            "research": { "completedTechIds": [] },
+            "endgame": {
+                "infiniteResearch": {
+                    "galactic_logistics": { "level": 2, "progress": "0" }
+                }
+            },
+            "exploration": {
+                "unlockedSystemIds": ["helios"],
+                "colonizedPlanetIds": ["home"],
+                "missions": [],
+                "surveyProgressBySystem": { "helios": 1 }
+            },
+            "galaxy": {
+                "seed": 42,
+                "systemProfiles": { "helios": {} },
+                "profiles": { "home": {} },
+                "planetRoles": {},
+                "planetMetadata": {},
+                "systemMetadata": {}
+            },
+            "planetMetrics": {},
+            "quantumLogisticsNetwork": {
+                "enabled": true,
+                "inventory": { "iron_ore": "123456789012345678901234567890" },
+                "itemCapacities": { "iron_ore": "100000" },
+                "routingCursors": {},
+                "uploadRoutingCursors": {},
+                "runtimeFlow": {
+                    "boundarySecond": 25,
+                    "uploaded": { "iron_ore": "7" },
+                    "downloaded": { "iron_ore": "2" },
+                    "globalUploadPerMinute": 18150,
+                    "globalDownloadPerMinute": 18150,
+                    "quantumTowerStacks": 3,
+                    "quantumCollectorStacks": 5
+                }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        CoreState::from_public_v47_parts(
+            CoreCheckpointIdentity {
+                slot: "normal-main".to_owned(),
+                generation: 4,
+                root_hash: "d".repeat(64),
+                revision: 61,
+                state_version: 47,
+                mode: "normal".to_owned(),
+                registry_fingerprint: "stellar-quantum-test".to_owned(),
+                base_primary_checksum: "12345678".to_owned(),
+            },
+            base,
+            vec![
+                endpoint(
+                    "tower-connected",
+                    "interstellar_logistics_station",
+                    3,
+                    "quantum",
+                    Value::Null,
+                ),
+                endpoint(
+                    "collector-connected",
+                    "orbital_collector",
+                    5,
+                    "quantum",
+                    Value::Null,
+                ),
+                endpoint(
+                    "collector-pending",
+                    "orbital_collector",
+                    7,
+                    "transitioning",
+                    json!({ "targetMode": "quantum" }),
+                ),
+                endpoint(
+                    "collector-available",
+                    "orbital_collector",
+                    11,
+                    "legacy",
+                    Value::Null,
+                ),
+            ],
+            Vec::new(),
+            catalog(planets, "stellar-quantum-test"),
         )
         .unwrap()
     }
@@ -3737,6 +4293,114 @@ mod tests {
                 .is_err()
         );
         assert_eq!(malformed.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn stellar_quantum_pages_preserve_decimal_inventory_and_attachment_state() {
+        let state = quantum_state();
+        let before = state.canonical_sha256().unwrap();
+        let first = state
+            .stellar_quantum_projection(61, "stellar-quantum-test", 0, 1, 0, 2)
+            .unwrap();
+        assert_eq!(first["schemaVersion"], 1);
+        assert_eq!(first["projectionType"], STELLAR_QUANTUM_SCHEMA);
+        assert_eq!(first["revision"], 61);
+        assert_eq!(first["registryFingerprint"], "stellar-quantum-test");
+        assert_eq!(first["limits"]["decimalDigits"], MAX_DECIMAL_DIGITS);
+        assert_eq!(first["items"]["totalCount"], 2);
+        assert_eq!(first["items"]["nextCursor"], 1);
+        assert_eq!(first["items"]["rows"][0]["itemId"], "iron_ore");
+        assert_eq!(
+            first["items"]["rows"][0]["inventory"],
+            "123456789012345678901234567890"
+        );
+        assert_eq!(first["items"]["rows"][0]["capacity"], "100000");
+        assert_eq!(first["items"]["rows"][0]["uploaded"], "7");
+        assert_eq!(first["items"]["rows"][0]["downloaded"], "2");
+        assert_eq!(first["collectors"]["totalCount"], 3);
+        assert_eq!(first["collectors"]["nextCursor"], 2);
+        assert_eq!(
+            first["collectors"]["rows"][0]["attachmentState"],
+            "connected"
+        );
+        assert_eq!(first["collectors"]["rows"][1]["attachmentState"], "pending");
+        assert_eq!(first["collectorSummary"]["connectedCount"], 1);
+        assert_eq!(first["collectorSummary"]["pendingCount"], 1);
+        assert_eq!(first["collectorSummary"]["availableCount"], 1);
+        assert_eq!(first["collectorSummary"]["connectedStacks"], 5);
+        assert_eq!(first["bandwidth"]["activeTowerCount"], 1);
+        assert_eq!(first["bandwidth"]["activeTowerStacks"], 3);
+        let js_contract_base = 1.0_f64 + 0.05_f64 * 2.0_f64;
+        let js_contract_bandwidth = 5_000.0_f64 * js_contract_base * js_contract_base * 3.0_f64;
+        assert_eq!(
+            first["bandwidth"]["globalDownloadPerMinute"],
+            json!(js_contract_bandwidth)
+        );
+        assert_eq!(first["runtime"]["boundarySecond"], 25);
+        assert_eq!(first["runtime"]["quantumCollectorStacks"], 5);
+        assert_eq!(first["truncated"], true);
+
+        let second = state
+            .stellar_quantum_projection(61, "stellar-quantum-test", 1, 1, 2, 1)
+            .unwrap();
+        assert_eq!(second["items"]["rows"][0]["itemId"], "copper_ore");
+        assert_eq!(second["items"]["rows"][0]["inventory"], "0");
+        assert_eq!(
+            second["items"]["rows"][0]["capacity"],
+            QUANTUM_ITEM_CAPACITY_MAX
+        );
+        assert_eq!(second["items"]["nextCursor"], Value::Null);
+        assert_eq!(
+            second["collectors"]["rows"][0]["attachmentState"],
+            "available"
+        );
+        assert_eq!(second["collectors"]["nextCursor"], Value::Null);
+        assert_eq!(second["truncated"], false);
+        assert_eq!(state.canonical_sha256().unwrap(), before);
+        assert!(serde_json::to_vec(&first).unwrap().len() <= MAX_PROJECTION_BYTES);
+    }
+
+    #[test]
+    fn stellar_quantum_rejects_stale_unbounded_and_malformed_quantity_requests() {
+        let state = quantum_state();
+        assert!(
+            state
+                .stellar_quantum_projection(60, "stellar-quantum-test", 0, 1, 0, 1)
+                .is_err()
+        );
+        assert!(
+            state
+                .stellar_quantum_projection(61, "stellar-quantum-test", 0, MAX_PAGE_ROWS + 1, 0, 1,)
+                .is_err()
+        );
+        assert!(
+            state
+                .stellar_quantum_projection(61, "stellar-quantum-test", 3, 1, 0, 1)
+                .is_err()
+        );
+        assert!(
+            state
+                .stellar_quantum_projection(61, "stellar-quantum-test", 0, 1, 4, 1)
+                .is_err()
+        );
+
+        let mut malformed = quantum_state();
+        malformed.base_value_mut()["quantumLogisticsNetwork"]["inventory"]["iron_ore"] =
+            json!("007");
+        assert!(
+            malformed
+                .stellar_quantum_projection(61, "stellar-quantum-test", 0, 1, 0, 1)
+                .is_err()
+        );
+
+        let mut unknown = quantum_state();
+        unknown.base_value_mut()["quantumLogisticsNetwork"]["runtimeFlow"]["uploaded"]["missing_mod_item"] =
+            json!("1");
+        assert!(
+            unknown
+                .stellar_quantum_projection(61, "stellar-quantum-test", 0, 1, 0, 1)
+                .is_err()
+        );
     }
 
     #[test]

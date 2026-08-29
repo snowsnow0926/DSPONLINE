@@ -655,6 +655,18 @@ function nativeStellarIndustryV2ProjectionResultContext(request) {
   };
 }
 
+function nativeStellarQuantumProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    itemCursor: request?.itemCursor,
+    itemLimit: request?.itemLimit,
+    collectorCursor: request?.collectorCursor,
+    collectorLimit: request?.collectorLimit,
+  };
+}
+
 function nativeCommandPaletteEntitySearchResultContext(request) {
   return {
     sessionId: request?.sessionId,
@@ -1286,6 +1298,20 @@ ipcMain.handle("desktop:native-core-stellar-industry-v2-projection", async (even
   });
 });
 
+ipcMain.handle("desktop:native-core-stellar-quantum-projection", async (event, request) => {
+  return runRendererNativeOperation("coreStellarQuantumProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生量子库存投影请求失败，请重试",
+    resultContext: nativeStellarQuantumProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "stellar-quantum-v1", request);
+    }
+    return await nativeCoreSessions.stellarQuantumProjection(ownerId, request);
+  });
+});
+
 ipcMain.handle("desktop:native-core-command-palette-entity-search", async (event, request) => {
   return runRendererNativeOperation("coreCommandPaletteEntitySearchProjection", {
     fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
@@ -1312,7 +1338,7 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
     if (!request || typeof request !== "object" ||
       !validNativeLogicalId(request.sessionId, 128) ||
       !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
-      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "stellar-industry-v1", "stellar-industry-v2"].includes(request.projectionType) ||
+      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object" ||
       Object.prototype.hasOwnProperty.call(request.payload, "sessionId")) {
       throw new Error("原生投影二进制请求无效");
@@ -1341,6 +1367,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       rawResult = await nativeCoreSessions.stellarIndustryProjection(ownerId, normalizedRequest);
     } else if (request.projectionType === "stellar-industry-v2") {
       rawResult = await nativeCoreSessions.stellarIndustryProjectionV2(ownerId, normalizedRequest);
+    } else if (request.projectionType === "stellar-quantum-v1") {
+      rawResult = await nativeCoreSessions.stellarQuantumProjection(ownerId, normalizedRequest);
     } else {
       rawResult = await nativeCoreSessions.technologyProjection(ownerId, normalizedRequest);
     }
@@ -1359,9 +1387,11 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                   ? "coreStarMapOverviewProjection"
                   : request.projectionType === "stellar-industry-v1"
                     ? "coreStellarIndustryProjection"
-                    : request.projectionType === "stellar-industry-v2"
-                      ? "coreStellarIndustryProjectionV2"
-                    : "coreTechnologyProjection",
+                  : request.projectionType === "stellar-industry-v2"
+                    ? "coreStellarIndustryProjectionV2"
+                    : request.projectionType === "stellar-quantum-v1"
+                      ? "coreStellarQuantumProjection"
+                      : "coreTechnologyProjection",
       rawResult,
       request.projectionType === "viewport-v1"
         ? nativeViewportProjectionResultContext(request.payload)
@@ -1377,9 +1407,11 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                   ? nativeStarMapOverviewProjectionResultContext(normalizedRequest)
                   : request.projectionType === "stellar-industry-v1"
                     ? nativeStellarIndustryProjectionResultContext(normalizedRequest)
-                    : request.projectionType === "stellar-industry-v2"
-                      ? nativeStellarIndustryV2ProjectionResultContext(normalizedRequest)
-                    : nativeTechnologyProjectionResultContext(normalizedRequest),
+                  : request.projectionType === "stellar-industry-v2"
+                    ? nativeStellarIndustryV2ProjectionResultContext(normalizedRequest)
+                    : request.projectionType === "stellar-quantum-v1"
+                      ? nativeStellarQuantumProjectionResultContext(normalizedRequest)
+                      : nativeTechnologyProjectionResultContext(normalizedRequest),
     );
     const transfer = encodeNativeProjectionTransfer({
       sessionId: request.sessionId,

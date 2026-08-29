@@ -95,7 +95,9 @@ test("native projection transfer carries bounded identity and SHA-256 metadata",
   });
   assert.equal(factoryReadModelTransfer.header.projectionType, "factory-read-model-v1");
   assert.equal(JSON.parse(factoryReadModelTransfer.payload).schemaVersion, 1);
-  for (const projectionType of ["star-map-overview-v1", "stellar-industry-v1", "stellar-industry-v2"]) {
+  for (const projectionType of [
+    "star-map-overview-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1",
+  ]) {
     const stellarTransfer = encodeNativeProjectionTransfer({
       sessionId: "core-1",
       sequence: 10,
@@ -447,6 +449,34 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     routeFilter: "unknown",
     query: "",
   }), /stellar industry v2 projection request is invalid/);
+  await registry.stellarQuantumProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    itemCursor: 0,
+    itemLimit: 64,
+    collectorCursor: 128,
+    collectorLimit: 32,
+  });
+  assert.throws(() => registry.stellarQuantumProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    itemCursor: 0,
+    itemLimit: 65,
+    collectorCursor: 0,
+    collectorLimit: 64,
+  }), /stellar quantum projection request is invalid/);
+  assert.throws(() => registry.stellarQuantumProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    itemCursor: 0,
+    itemLimit: 64,
+    collectorCursor: 0,
+    collectorLimit: 64,
+    unexpected: true,
+  }), /stellar quantum projection request is invalid/);
   assert.throws(() => registry.stellarIndustryProjectionV2(7, {
     sessionId: "core-1",
     expectedRevision: 2,
@@ -511,7 +541,7 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     "coreOpen", "coreStatus", "coreCommitOperation", "coreViewportProjectionV2",
     "coreFactoryReadModelProjection", "coreRecipeWorkspaceProjection",
     "coreStarMapOverviewProjection", "coreStellarIndustryProjection",
-    "coreStellarIndustryProjectionV2",
+    "coreStellarIndustryProjectionV2", "coreStellarQuantumProjection",
     "coreCommandPaletteEntitySearchProjection", "coreCheckpoint", "coreClose",
   ]);
   assert.deepEqual(calls[3], {
@@ -583,6 +613,16 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     query: "warper",
   });
   assert.deepEqual(calls[9], {
+    operation: "coreStellarQuantumProjection",
+    sessionId: "core-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    itemCursor: 0,
+    itemLimit: 64,
+    collectorCursor: 128,
+    collectorLimit: 32,
+  });
+  assert.deepEqual(calls[10], {
     operation: "coreCommandPaletteEntitySearchProjection",
     sessionId: "core-1",
     expectedRevision: 2,

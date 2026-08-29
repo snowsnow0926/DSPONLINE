@@ -550,6 +550,27 @@ function normalizeStellarIndustryV2ProjectionContext(value, label) {
   };
 }
 
+function normalizeStellarQuantumProjectionContext(value, label) {
+  const source = exactObject(value, [
+    "sessionId", "expectedRevision", "expectedRegistryFingerprint", "itemCursor", "itemLimit",
+    "collectorCursor", "collectorLimit",
+  ], label);
+  requireStellarRequestByteBudget(source, label);
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} registry fingerprint`,
+      256,
+    ),
+    itemCursor: stellarCursor(source.itemCursor, `${label} item cursor`),
+    itemLimit: stellarPageLimit(source.itemLimit, `${label} item limit`),
+    collectorCursor: stellarCursor(source.collectorCursor, `${label} collector cursor`),
+    collectorLimit: stellarPageLimit(source.collectorLimit, `${label} collector limit`),
+  };
+}
+
 function normalizeProjectionBase(value, allowedFields, label, budget) {
   const source = jsonObject(value, label);
   const keys = Reflect.ownKeys(source);
@@ -2066,6 +2087,19 @@ function stellarUnitNumber(value, label) {
   return result;
 }
 
+function stellarDecimal(value, label) {
+  if (typeof value !== "string" || value.length < 1 || value.length > 256 ||
+      !/^(0|[1-9][0-9]*)$/.test(value)) throw protocolError(label);
+  return value;
+}
+
+function stellarCapacity(value, label) {
+  const result = stellarDecimal(value, label);
+  const amount = BigInt(result);
+  if (amount < 10_000n || amount > 10_000_000_000n) throw protocolError(label);
+  return result;
+}
+
 function normalizeStellarPage(value, expectedCursor, expectedLimit, label, normalizeRow) {
   const source = exactObject(value, [
     "cursor", "limit", "totalCount", "nextCursor", "rows",
@@ -2906,6 +2940,234 @@ function normalizeCoreStellarIndustryV2Projection(value, context) {
   };
 }
 
+function normalizeCoreStellarQuantumProjection(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "revision", "registryFingerprint", "stateVersion",
+    "limits", "request", "enabled", "bandwidth", "runtime", "collectorSummary",
+    "truncated", "items", "collectors",
+  ], "native stellar quantum projection");
+  if (source.schemaVersion !== 1 || source.projectionType !== "stellar-quantum-v1") {
+    throw protocolError("native stellar quantum projection identity");
+  }
+  requireProjectionByteBudget(source, "native stellar quantum projection");
+  const projectionContext = normalizeStellarQuantumProjectionContext(
+    context,
+    "native stellar quantum projection context",
+  );
+  const revision = safeInteger(source.revision, "native stellar quantum revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native stellar quantum registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint || source.stateVersion !== 47) {
+    throw protocolError("native stellar quantum identity binding");
+  }
+  const limitsSource = exactObject(source.limits, [
+    "requestBytes", "projectionBytes", "pageRows", "decimalDigits",
+  ], "native stellar quantum limits");
+  const limits = {
+    requestBytes: safeInteger(limitsSource.requestBytes, "native stellar quantum request byte limit", 1),
+    projectionBytes: safeInteger(limitsSource.projectionBytes, "native stellar quantum projection byte limit", 1),
+    pageRows: safeInteger(limitsSource.pageRows, "native stellar quantum page row limit", 1),
+    decimalDigits: safeInteger(limitsSource.decimalDigits, "native stellar quantum decimal digit limit", 1),
+  };
+  if (limits.requestBytes !== 32_768 || limits.projectionBytes !== 1_048_576 ||
+      limits.pageRows !== 64 || limits.decimalDigits !== 256) {
+    throw protocolError("native stellar quantum limit binding");
+  }
+  const requestSource = exactObject(source.request, [
+    "expectedRevision", "expectedRegistryFingerprint", "itemCursor", "itemLimit",
+    "collectorCursor", "collectorLimit",
+  ], "native stellar quantum echoed request");
+  const echoed = normalizeStellarQuantumProjectionContext({
+    sessionId: projectionContext.sessionId,
+    ...requestSource,
+  }, "native stellar quantum echoed request");
+  for (const key of [
+    "expectedRevision", "expectedRegistryFingerprint", "itemCursor", "itemLimit",
+    "collectorCursor", "collectorLimit",
+  ]) {
+    if (echoed[key] !== projectionContext[key]) {
+      throw protocolError("native stellar quantum request binding");
+    }
+  }
+
+  const itemIds = new Set();
+  const items = normalizeStellarPage(
+    source.items,
+    echoed.itemCursor,
+    echoed.itemLimit,
+    "native stellar quantum items",
+    (row, label) => {
+      const entry = exactObject(row, [
+        "itemId", "inventory", "capacity", "uploaded", "downloaded",
+      ], label);
+      const itemId = opaqueId(entry.itemId, `${label}.itemId`);
+      if (itemIds.has(itemId)) throw protocolError(`${label}.itemId`);
+      itemIds.add(itemId);
+      return {
+        itemId,
+        inventory: stellarDecimal(entry.inventory, `${label}.inventory`),
+        capacity: stellarCapacity(entry.capacity, `${label}.capacity`),
+        uploaded: stellarDecimal(entry.uploaded, `${label}.uploaded`),
+        downloaded: stellarDecimal(entry.downloaded, `${label}.downloaded`),
+      };
+    },
+  );
+  if (items.totalCount > 4_096) throw protocolError("native stellar quantum item count");
+
+  const collectorIds = new Set();
+  const collectors = normalizeStellarPage(
+    source.collectors,
+    echoed.collectorCursor,
+    echoed.collectorLimit,
+    "native stellar quantum collectors",
+    (row, label) => {
+      const entry = exactObject(row, [
+        "collectorId", "planetId", "systemId", "machineCount", "quantumMode",
+        "quantumTransitionActive", "attachmentState",
+      ], label);
+      const collectorId = opaqueId(entry.collectorId, `${label}.collectorId`);
+      if (collectorIds.has(collectorId)) throw protocolError(`${label}.collectorId`);
+      collectorIds.add(collectorId);
+      const quantumMode = oneOf(
+        entry.quantumMode,
+        ["legacy", "transitioning", "quantum"],
+        `${label}.quantumMode`,
+      );
+      const quantumTransitionActive = boolean(
+        entry.quantumTransitionActive,
+        `${label}.quantumTransitionActive`,
+      );
+      const attachmentState = oneOf(
+        entry.attachmentState,
+        ["available", "pending", "connected", "unavailable"],
+        `${label}.attachmentState`,
+      );
+      const expectedAttachmentState = quantumMode === "quantum"
+        ? "connected"
+        : quantumMode === "transitioning"
+          ? "pending"
+          : quantumTransitionActive
+            ? "unavailable"
+            : "available";
+      if (attachmentState !== expectedAttachmentState ||
+          quantumMode === "transitioning" && !quantumTransitionActive) {
+        throw protocolError(`${label} attachment binding`);
+      }
+      return {
+        collectorId,
+        planetId: opaqueId(entry.planetId, `${label}.planetId`),
+        systemId: opaqueId(entry.systemId, `${label}.systemId`),
+        machineCount: safeInteger(entry.machineCount, `${label}.machineCount`),
+        quantumMode,
+        quantumTransitionActive,
+        attachmentState,
+      };
+    },
+  );
+  if (collectors.totalCount > 8_192) throw protocolError("native stellar quantum collector count");
+
+  const bandwidthSource = exactObject(source.bandwidth, [
+    "multiplier", "globalUploadPerMinute", "globalDownloadPerMinute", "activeTowerCount",
+    "activeTowerStacks",
+  ], "native stellar quantum bandwidth");
+  const bandwidth = {
+    multiplier: finiteNumber(bandwidthSource.multiplier, "native stellar quantum multiplier", 1),
+    globalUploadPerMinute: finiteNumber(
+      bandwidthSource.globalUploadPerMinute,
+      "native stellar quantum upload bandwidth",
+    ),
+    globalDownloadPerMinute: finiteNumber(
+      bandwidthSource.globalDownloadPerMinute,
+      "native stellar quantum download bandwidth",
+    ),
+    activeTowerCount: safeInteger(
+      bandwidthSource.activeTowerCount,
+      "native stellar quantum active tower count",
+    ),
+    activeTowerStacks: safeInteger(
+      bandwidthSource.activeTowerStacks,
+      "native stellar quantum active tower stacks",
+    ),
+  };
+  if (bandwidth.globalUploadPerMinute !== bandwidth.globalDownloadPerMinute ||
+      bandwidth.activeTowerCount > bandwidth.activeTowerStacks) {
+    throw protocolError("native stellar quantum bandwidth binding");
+  }
+
+  const runtime = source.runtime === null ? null : (() => {
+    const runtimeSource = exactObject(source.runtime, [
+      "boundarySecond", "globalUploadPerMinute", "globalDownloadPerMinute",
+      "quantumTowerStacks", "quantumCollectorStacks",
+    ], "native stellar quantum runtime");
+    return {
+      boundarySecond: safeInteger(runtimeSource.boundarySecond, "native stellar quantum runtime boundary"),
+      globalUploadPerMinute: finiteNumber(
+        runtimeSource.globalUploadPerMinute,
+        "native stellar quantum runtime upload bandwidth",
+      ),
+      globalDownloadPerMinute: finiteNumber(
+        runtimeSource.globalDownloadPerMinute,
+        "native stellar quantum runtime download bandwidth",
+      ),
+      quantumTowerStacks: safeInteger(
+        runtimeSource.quantumTowerStacks,
+        "native stellar quantum runtime tower stacks",
+      ),
+      quantumCollectorStacks: safeInteger(
+        runtimeSource.quantumCollectorStacks,
+        "native stellar quantum runtime collector stacks",
+      ),
+    };
+  })();
+
+  const summarySource = exactObject(source.collectorSummary, [
+    "totalCount", "connectedCount", "pendingCount", "availableCount", "connectedStacks",
+  ], "native stellar quantum collector summary");
+  const collectorSummary = {
+    totalCount: safeInteger(summarySource.totalCount, "native stellar quantum collector total"),
+    connectedCount: safeInteger(summarySource.connectedCount, "native stellar quantum connected collectors"),
+    pendingCount: safeInteger(summarySource.pendingCount, "native stellar quantum pending collectors"),
+    availableCount: safeInteger(summarySource.availableCount, "native stellar quantum available collectors"),
+    connectedStacks: safeInteger(summarySource.connectedStacks, "native stellar quantum connected stacks"),
+  };
+  if (collectorSummary.totalCount !== collectors.totalCount ||
+      collectorSummary.connectedCount + collectorSummary.pendingCount + collectorSummary.availableCount >
+        collectorSummary.totalCount || collectorSummary.connectedCount > collectorSummary.connectedStacks) {
+    throw protocolError("native stellar quantum collector summary binding");
+  }
+  const truncated = boolean(source.truncated, "native stellar quantum truncated");
+  if (truncated !== (items.nextCursor !== null || collectors.nextCursor !== null)) {
+    throw protocolError("native stellar quantum truncation binding");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "stellar-quantum-v1",
+    revision,
+    registryFingerprint,
+    stateVersion: 47,
+    limits,
+    request: {
+      expectedRevision: echoed.expectedRevision,
+      expectedRegistryFingerprint: echoed.expectedRegistryFingerprint,
+      itemCursor: echoed.itemCursor,
+      itemLimit: echoed.itemLimit,
+      collectorCursor: echoed.collectorCursor,
+      collectorLimit: echoed.collectorLimit,
+    },
+    enabled: boolean(source.enabled, "native stellar quantum enabled"),
+    bandwidth,
+    runtime,
+    collectorSummary,
+    truncated,
+    items,
+    collectors,
+  };
+}
+
 function normalizeCoreCommandPaletteEntitySearchProjection(value, context) {
   const source = exactObject(value, [
     "schemaVersion", "projectionType", "revision", "registryFingerprint", "limits",
@@ -3408,6 +3670,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreStarMapOverviewProjection: normalizeCoreStarMapOverviewProjection,
   coreStellarIndustryProjection: normalizeCoreStellarIndustryProjection,
   coreStellarIndustryProjectionV2: normalizeCoreStellarIndustryV2Projection,
+  coreStellarQuantumProjection: normalizeCoreStellarQuantumProjection,
   coreCommandPaletteEntitySearchProjection: normalizeCoreCommandPaletteEntitySearchProjection,
   coreCommand: normalizeCoreCommand,
   coreAdvance: normalizeCoreAdvance,

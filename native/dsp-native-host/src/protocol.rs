@@ -284,6 +284,17 @@ pub enum ControlRequest {
         #[serde(default)]
         query: String,
     },
+    CoreStellarQuantumProjection {
+        session_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        #[serde(default)]
+        item_cursor: usize,
+        item_limit: usize,
+        #[serde(default)]
+        collector_cursor: usize,
+        collector_limit: usize,
+    },
     CoreApplyCommand {
         session_id: String,
         command: SimulationCommandPatch,
@@ -918,6 +929,38 @@ mod tests {
                 assert_eq!(query, "warp");
             }
             _ => panic!("stellar-industry v2 projection decoded as the wrong variant"),
+        }
+
+        let quantum = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreStellarQuantumProjection",
+            "sessionId": "core-5",
+            "expectedRevision": 46,
+            "expectedRegistryFingerprint": "builtin:test",
+            "itemCursor": 6,
+            "itemLimit": 32,
+            "collectorCursor": 7,
+            "collectorLimit": 16
+        }))
+        .unwrap();
+        match quantum {
+            ControlRequest::CoreStellarQuantumProjection {
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                item_cursor,
+                item_limit,
+                collector_cursor,
+                collector_limit,
+            } => {
+                assert_eq!(session_id, "core-5");
+                assert_eq!(expected_revision, 46);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(item_cursor, 6);
+                assert_eq!(item_limit, 32);
+                assert_eq!(collector_cursor, 7);
+                assert_eq!(collector_limit, 16);
+            }
+            _ => panic!("stellar-quantum projection decoded as the wrong variant"),
         }
     }
 }

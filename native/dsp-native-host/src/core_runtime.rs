@@ -2846,6 +2846,27 @@ impl CoreRegistry {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn stellar_quantum_projection(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        item_cursor: usize,
+        item_limit: usize,
+        collector_cursor: usize,
+        collector_limit: usize,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?.stellar_quantum_projection(
+            expected_revision,
+            expected_registry_fingerprint,
+            item_cursor,
+            item_limit,
+            collector_cursor,
+            collector_limit,
+        )
+    }
+
     pub fn apply_command(
         &mut self,
         session_id: &str,

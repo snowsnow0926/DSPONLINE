@@ -515,6 +515,8 @@ import {
   createNativeProjectedStationLimitsCommand,
   createNativeProjectedStationMinimumLoadCommand,
   createNativeProjectedStationPriorityCommand,
+  createNativeProjectedStationRoutePolicyCommand,
+  createNativeProjectedStationWarperBudgetCommand,
 } from "./game/nativeProjectedPlayerCommands";
 import { createNativeProjectedBeltPriorityCommand } from "./game/nativeProjectedBeltCommands";
 import {
@@ -19151,6 +19153,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               createNativeProjectedStationPriorityCommand({ baseRevision, stationId, slotIndex, currentPriority, targetPriority }))}
             onNativeStationMinimumLoadChange={(projectedRevision, stationId, slotIndex, currentMinimumLoad, targetMinimumLoad, primarySlot) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
               createNativeProjectedStationMinimumLoadCommand({ baseRevision, stationId, slotIndex, currentMinimumLoad, targetMinimumLoad, primarySlot }))}
+            onNativeStationRoutePolicyChange={(projectedRevision, stationId, slotIndex, currentRoutePolicy, targetRoutePolicy) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+              createNativeProjectedStationRoutePolicyCommand({ baseRevision, stationId, slotIndex, currentRoutePolicy, targetRoutePolicy }))}
+            onNativeStationWarperBudgetChange={(projectedRevision, stationId, slotIndex, currentWarperBudget, requestedWarperBudget) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+              createNativeProjectedStationWarperBudgetCommand({ baseRevision, stationId, slotIndex, currentWarperBudget, requestedWarperBudget }))}
             onNativeStationLimitsChange={(projectedRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
               createNativeProjectedStationLimitsCommand({ baseRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock }))}
             onFocusStation={focusStellarStation}

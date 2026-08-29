@@ -6,6 +6,8 @@ import {
   createNativeProjectedStationLimitsCommand,
   createNativeProjectedStationMinimumLoadCommand,
   createNativeProjectedStationPriorityCommand,
+  createNativeProjectedStationRoutePolicyCommand,
+  createNativeProjectedStationWarperBudgetCommand,
   type NativeProjectedInteractionLockCommandInput,
 } from "./nativeProjectedPlayerCommands";
 import type {
@@ -163,6 +165,36 @@ describe("native projected player command builders", () => {
     expectEmptyDomains(secondary);
   });
 
+  it("builds interstellar route policy and normalized warper-budget leaves", () => {
+    const policy = createNativeProjectedStationRoutePolicyCommand({
+      baseRevision: 94,
+      stationId: "station-ils",
+      slotIndex: 2,
+      currentRoutePolicy: "relay-preferred",
+      targetRoutePolicy: "relay-required",
+    })!;
+    expect(policy.changedEntities[0].changes).toEqual([{
+      path: ["stationSlots", 2, "routePolicy"],
+      operation: "set",
+      value: "relay-required",
+    }]);
+
+    const budget = createNativeProjectedStationWarperBudgetCommand({
+      baseRevision: 95,
+      stationId: "station-ils",
+      slotIndex: 2,
+      currentWarperBudget: 2,
+      requestedWarperBudget: 9.75,
+    })!;
+    expect(budget.changedEntities[0].changes).toEqual([{
+      path: ["stationSlots", 2, "warperBudget"],
+      operation: "set",
+      value: 4,
+    }]);
+    expectEmptyDomains(policy);
+    expectEmptyDomains(budget);
+  });
+
   it("replays legacy limit clamping and emits the paired minimum when maximum drops", () => {
     const lowerMaximum = createNativeProjectedStationLimitsCommand({
       baseRevision: 12,
@@ -221,6 +253,20 @@ describe("native projected player command builders", () => {
       currentMinimumLoad: 0.5,
       targetMinimumLoad: 0.5,
       primarySlot: true,
+    })).toBeNull();
+    expect(createNativeProjectedStationRoutePolicyCommand({
+      baseRevision: 7,
+      stationId: "station-a",
+      slotIndex: 0,
+      currentRoutePolicy: "direct",
+      targetRoutePolicy: "direct",
+    })).toBeNull();
+    expect(createNativeProjectedStationWarperBudgetCommand({
+      baseRevision: 7,
+      stationId: "station-a",
+      slotIndex: 0,
+      currentWarperBudget: 4,
+      requestedWarperBudget: 10,
     })).toBeNull();
     expect(createNativeProjectedPlanetRoleCommand({
       baseRevision: 7,

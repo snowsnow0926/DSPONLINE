@@ -12,7 +12,12 @@ import {
   type SimulationCommandPatch,
   type SimulationValuePatch,
 } from "./simulationRuntimeProtocol";
-import type { LogisticsPriority, PlanetIndustryRole, StationMinimumLoad } from "./types";
+import type {
+  InterstellarRoutePolicy,
+  LogisticsPriority,
+  PlanetIndustryRole,
+  StationMinimumLoad,
+} from "./types";
 
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const MAX_LOGICAL_ID_BYTES = 256;
@@ -49,6 +54,22 @@ export interface NativeProjectedStationMinimumLoadCommandInput {
   readonly currentMinimumLoad: StationMinimumLoad;
   readonly targetMinimumLoad: StationMinimumLoad;
   readonly primarySlot: boolean;
+}
+
+export interface NativeProjectedStationRoutePolicyCommandInput {
+  readonly baseRevision: number;
+  readonly stationId: string;
+  readonly slotIndex: number;
+  readonly currentRoutePolicy: InterstellarRoutePolicy;
+  readonly targetRoutePolicy: InterstellarRoutePolicy;
+}
+
+export interface NativeProjectedStationWarperBudgetCommandInput {
+  readonly baseRevision: number;
+  readonly stationId: string;
+  readonly slotIndex: number;
+  readonly currentWarperBudget: number;
+  readonly requestedWarperBudget: number;
 }
 
 export interface NativeProjectedStationLimitsCommandInput {
@@ -122,6 +143,18 @@ function validatePriority(value: LogisticsPriority): void {
 function validateMinimumLoad(value: StationMinimumLoad): void {
   if (value !== 0.1 && value !== 0.25 && value !== 0.5 && value !== 1) {
     throw new TypeError("原生投影命令最低装载率无效");
+  }
+}
+
+function validateRoutePolicy(value: InterstellarRoutePolicy): void {
+  if (value !== "direct" && value !== "relay-preferred" && value !== "relay-required") {
+    throw new TypeError("原生投影命令星际航线策略无效");
+  }
+}
+
+function validateCurrentWarperBudget(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 4) {
+    throw new TypeError("原生投影命令当前翘曲器预算无效");
   }
 }
 
@@ -309,6 +342,53 @@ export function createNativeProjectedStationMinimumLoadCommand(
   }
   const command = emptyCommand(input.baseRevision);
   command.changedEntities.push({ id: input.stationId, changes });
+  return command;
+}
+
+/** Builds one built-in interstellar station routing-policy leaf. */
+export function createNativeProjectedStationRoutePolicyCommand(
+  input: NativeProjectedStationRoutePolicyCommandInput,
+): SimulationCommandPatch | null {
+  validateBaseRevision(input.baseRevision);
+  validateLogicalId(input.stationId, "原生投影命令物流站 ID");
+  validateSlotIndex(input.slotIndex);
+  validateRoutePolicy(input.currentRoutePolicy);
+  validateRoutePolicy(input.targetRoutePolicy);
+  if (input.currentRoutePolicy === input.targetRoutePolicy) return null;
+  const command = emptyCommand(input.baseRevision);
+  command.changedEntities.push({
+    id: input.stationId,
+    changes: [{
+      path: ["stationSlots", input.slotIndex, "routePolicy"],
+      operation: "set",
+      value: input.targetRoutePolicy,
+    }],
+  });
+  return command;
+}
+
+/** Mirrors the web command's finite check, integer floor and 1..4 clamp. */
+export function createNativeProjectedStationWarperBudgetCommand(
+  input: NativeProjectedStationWarperBudgetCommandInput,
+): SimulationCommandPatch | null {
+  validateBaseRevision(input.baseRevision);
+  validateLogicalId(input.stationId, "原生投影命令物流站 ID");
+  validateSlotIndex(input.slotIndex);
+  validateCurrentWarperBudget(input.currentWarperBudget);
+  if (!Number.isFinite(input.requestedWarperBudget)) {
+    throw new TypeError("原生投影命令目标翘曲器预算无效");
+  }
+  const targetWarperBudget = Math.max(1, Math.min(4, Math.floor(input.requestedWarperBudget)));
+  if (input.currentWarperBudget === targetWarperBudget) return null;
+  const command = emptyCommand(input.baseRevision);
+  command.changedEntities.push({
+    id: input.stationId,
+    changes: [{
+      path: ["stationSlots", input.slotIndex, "warperBudget"],
+      operation: "set",
+      value: targetWarperBudget,
+    }],
+  });
   return command;
 }
 

@@ -82,6 +82,7 @@ const ROUTE = {
   sourcePlanetId: "home",
   targetStationId: TARGET_STATION.stationId,
   targetStationLabel: "原生需求站",
+  targetBuildingId: "interstellar_logistics_station",
   targetBuildingLabel: "星际物流站",
   targetSlotIndex: 1,
   targetSlotIsPrimary: true,
@@ -446,6 +447,8 @@ describe("NativeIndustryConsole", () => {
     const onNativeRoleChange = vi.fn(() => true);
     const onNativeStationPriorityChange = vi.fn(() => true);
     const onNativeStationMinimumLoadChange = vi.fn(() => true);
+    const onNativeStationRoutePolicyChange = vi.fn(() => true);
+    const onNativeStationWarperBudgetChange = vi.fn(() => true);
     const onNativeStationLimitsChange = vi.fn(() => true);
     const props = renderWorkspace({
       game,
@@ -454,6 +457,8 @@ describe("NativeIndustryConsole", () => {
       onNativeRoleChange,
       onNativeStationPriorityChange,
       onNativeStationMinimumLoadChange,
+      onNativeStationRoutePolicyChange,
+      onNativeStationWarperBudgetChange,
       onNativeStationLimitsChange,
       onRoleChange,
       onStationPriorityChange,
@@ -466,11 +471,13 @@ describe("NativeIndustryConsole", () => {
     const travel = host.querySelector<HTMLButtonElement>(".stellar-planet-row > button")!;
     const priority = host.querySelector<HTMLSelectElement>("[aria-label='原生铁矿航线航线优先级']")!;
     const minimumLoad = host.querySelector<HTMLSelectElement>("[aria-label='原生铁矿航线最低装载率']")!;
+    const routePolicy = host.querySelector<HTMLSelectElement>("[aria-label='原生铁矿航线星际路线策略']")!;
+    const warperBudget = host.querySelector<HTMLSelectElement>("[aria-label='原生铁矿航线翘曲器预算']")!;
     const sourceLimit = host.querySelector<HTMLInputElement>("[aria-label='原生铁矿航线出口保底库存']")!;
     const targetLimit = host.querySelector<HTMLInputElement>("[aria-label='原生铁矿航线进口库存上限']")!;
     expect(host.textContent).toContain("权威命令");
     expect(host.textContent).toContain("投影绑定");
-    for (const control of [role, priority, minimumLoad, sourceLimit, targetLimit]) {
+    for (const control of [role, priority, minimumLoad, routePolicy, warperBudget, sourceLimit, targetLimit]) {
       expect(control.disabled).toBe(false);
       expect(control.getAttribute("aria-describedby")).toBe("native-stellar-command-boundary");
     }
@@ -484,12 +491,18 @@ describe("NativeIndustryConsole", () => {
       role.dispatchEvent(new Event("change", { bubbles: true }));
       minimumLoad.value = "0.1";
       minimumLoad.dispatchEvent(new Event("change", { bubbles: true }));
+      routePolicy.value = "relay-required";
+      routePolicy.dispatchEvent(new Event("change", { bubbles: true }));
+      warperBudget.value = "4";
+      warperBudget.dispatchEvent(new Event("change", { bubbles: true }));
       inputValue(sourceLimit, "0");
       inputValue(targetLimit, "0");
     });
 
     expect(onNativeStationPriorityChange).toHaveBeenCalledWith(9, TARGET_STATION.stationId, 1, 2, 0);
     expect(onNativeStationMinimumLoadChange).toHaveBeenCalledWith(9, TARGET_STATION.stationId, 1, 0.5, 0.1, true);
+    expect(onNativeStationRoutePolicyChange).toHaveBeenCalledWith(9, TARGET_STATION.stationId, 1, "direct", "relay-required");
+    expect(onNativeStationWarperBudgetChange).toHaveBeenCalledWith(9, TARGET_STATION.stationId, 1, 2, 4);
     expect(onNativeRoleChange).toHaveBeenCalledWith(9, "home", "manufacturing", "mining");
     expect(onNativeStationLimitsChange).toHaveBeenCalledWith(9, SOURCE_STATION.stationId, 0, 50, 500, 0, 500);
     expect(onNativeStationLimitsChange).toHaveBeenCalledWith(9, TARGET_STATION.stationId, 1, 10, 200, 10, 0);

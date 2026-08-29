@@ -4,7 +4,7 @@ import { ITEMS, PLANETS, STAR_SYSTEM_LIST, getItem, getPlanet, getStarSystem, ge
 import { canColonizePlanet, canExploreStarSystem, getColonizationRequirements, getStationSlots, isPlanetColonized, isStarSystemUnlocked, isTechnologyCompleted } from "../game/engine";
 import { getPlanetDisplayName, getPlanetIndustrialProfile, getPlanetSearchText, getPlanetSolarPowerMultiplier, getRecommendedPlanetRole, getStarSystemDisplayName, getStarSystemProfile, PLANET_CUSTOM_NAME_MAX_LENGTH, PLANET_INDUSTRY_ROLE_LABELS, PLANET_NOTE_MAX_LENGTH, PLANET_TAG_MAX_COUNT, PLANET_TAG_MAX_LENGTH, STAR_SYSTEM_CUSTOM_NAME_MAX_LENGTH } from "../game/galaxy";
 import { getInterplanetaryLogisticsDiagnostics, getPlanetIndustrySummaries, getRouteDistanceLabel, getRouteEndpointLabel, getRoutePathLabel, getStarSystemIndustrySummaries, getStellarRouteSnapshots } from "../game/stellarIndustry";
-import type { GameState, ItemId, LogisticsPriority, PlanetId, PlanetIndustryRole, StarSystemId, StationMinimumLoad } from "../game/types";
+import type { GameState, InterstellarRoutePolicy, ItemId, LogisticsPriority, PlanetId, PlanetIndustryRole, StarSystemId, StationMinimumLoad } from "../game/types";
 import { ItemGlyph, ItemHoverCard } from "./ItemReference";
 import { PowerValue } from "./PowerValue";
 import { formatQuantityCompact, formatQuantityExact, formatQuantityScientific } from "../game/quantityFormat";
@@ -78,6 +78,20 @@ type NativeStationMinimumLoadAction = (
   currentMinimumLoad: StationMinimumLoad,
   targetMinimumLoad: StationMinimumLoad,
   primarySlot: boolean,
+) => boolean;
+type NativeStationRoutePolicyAction = (
+  projectedRevision: number,
+  stationId: string,
+  slotIndex: number,
+  currentRoutePolicy: InterstellarRoutePolicy,
+  targetRoutePolicy: InterstellarRoutePolicy,
+) => boolean;
+type NativeStationWarperBudgetAction = (
+  projectedRevision: number,
+  stationId: string,
+  slotIndex: number,
+  currentWarperBudget: number,
+  requestedWarperBudget: number,
 ) => boolean;
 type NativeStationLimitsAction = (
   projectedRevision: number,
@@ -311,6 +325,8 @@ export function NativeIndustryConsole({
   onNativeRoleChange,
   onNativeStationPriorityChange,
   onNativeStationMinimumLoadChange,
+  onNativeStationRoutePolicyChange,
+  onNativeStationWarperBudgetChange,
   onNativeStationLimitsChange,
   onFocusStation,
 }: {
@@ -322,6 +338,8 @@ export function NativeIndustryConsole({
   onNativeRoleChange?: NativePlanetRoleAction;
   onNativeStationPriorityChange?: NativeStationPriorityAction;
   onNativeStationMinimumLoadChange?: NativeStationMinimumLoadAction;
+  onNativeStationRoutePolicyChange?: NativeStationRoutePolicyAction;
+  onNativeStationWarperBudgetChange?: NativeStationWarperBudgetAction;
   onNativeStationLimitsChange?: NativeStationLimitsAction;
   onFocusStation: (entityId: string, planetId: PlanetId) => void;
 }) {
@@ -349,7 +367,7 @@ export function NativeIndustryConsole({
         <div><Factory size={15} /><span>工业设备<strong>{readModel ? readModel.planets.reduce((sum, planet) => sum + planet.deviceCount, 0) : "--"}</strong></span></div>
         <div><Route size={15} /><span>航线运行<strong>{readModel ? `${readModel.routeSummary.activeCount}/${readModel.routeSummary.scopeTotalCount}` : "--"}</strong></span></div>
         <div className={(readModel?.routeSummary.blockedCount ?? 0) > 0 ? "warning" : ""}><AlertTriangle size={15} /><span>航线问题<strong>{readModel ? readModel.routeSummary.blockedCount : "--"}</strong></span></div>
-        <div id="native-stellar-command-boundary" role="status" aria-label="原生权威工业配置边界" title="工业定位、优先级、最低装载率和库存上下限均使用当前投影 revision 的直接命令。"><LockKeyhole size={15} /><span>权威命令<strong>投影绑定</strong></span></div>
+        <div id="native-stellar-command-boundary" role="status" aria-label="原生权威工业配置边界" title="工业定位、优先级、装载率、库存上下限及星际路线策略均使用当前投影 revision 的直接命令。"><LockKeyhole size={15} /><span>权威命令<strong>投影绑定</strong></span></div>
       </div>
 
       <section className="stellar-system-overview" aria-label="原生权威星系统计与行星工业标签">
@@ -411,6 +429,8 @@ export function NativeIndustryConsole({
               <div className="stellar-route-policy">
                 <label><span>优先</span><select aria-label={`${route.itemLabel}航线优先级`} aria-describedby="native-stellar-command-boundary" title={onNativeStationPriorityChange ? "由当前原生投影 revision 提交" : "原生权威命令暂不可用"} value={route.priority} disabled={!onNativeStationPriorityChange} onChange={(event) => onNativeStationPriorityChange?.(readModel.revision, route.targetStationId, route.targetSlotIndex, route.priority as LogisticsPriority, Number(event.target.value) as LogisticsPriority)}><option value={2}>高</option><option value={1}>中</option><option value={0}>低</option></select></label>
                 <label><span>装载</span><select aria-label={`${route.itemLabel}最低装载率`} aria-describedby="native-stellar-command-boundary" title={onNativeStationMinimumLoadChange ? "由当前原生投影 revision 提交" : "原生权威命令暂不可用"} value={route.minimumLoad} disabled={!onNativeStationMinimumLoadChange} onChange={(event) => onNativeStationMinimumLoadChange?.(readModel.revision, route.targetStationId, route.targetSlotIndex, route.minimumLoad as StationMinimumLoad, Number(event.target.value) as StationMinimumLoad, route.targetSlotIsPrimary)}><option value={0.1}>10%</option><option value={0.25}>25%</option><option value={0.5}>50%</option><option value={1}>100%</option></select></label>
+                <label><span>路线</span><select aria-label={`${route.itemLabel}星际路线策略`} aria-describedby="native-stellar-command-boundary" title={onNativeStationRoutePolicyChange ? "由当前原生投影 revision 提交" : "原生权威命令暂不可用"} value={route.routePolicy} disabled={route.targetBuildingId !== "interstellar_logistics_station" || !onNativeStationRoutePolicyChange} onChange={(event) => onNativeStationRoutePolicyChange?.(readModel.revision, route.targetStationId, route.targetSlotIndex, route.routePolicy as InterstellarRoutePolicy, event.target.value as InterstellarRoutePolicy)}><option value="direct">直达</option><option value="relay-preferred">优先中转</option><option value="relay-required">强制中转</option></select></label>
+                <label><span>翘曲预算</span><select aria-label={`${route.itemLabel}翘曲器预算`} aria-describedby="native-stellar-command-boundary" title={onNativeStationWarperBudgetChange ? "由当前原生投影 revision 提交" : "原生权威命令暂不可用"} value={route.warperBudget} disabled={route.targetBuildingId !== "interstellar_logistics_station" || !onNativeStationWarperBudgetChange} onChange={(event) => onNativeStationWarperBudgetChange?.(readModel.revision, route.targetStationId, route.targetSlotIndex, route.warperBudget, Number(event.target.value))}><option value={1}>1 跳</option><option value={2}>2 跳</option><option value={3}>3 跳</option><option value={4}>4 跳</option></select></label>
                 <label><span>出口保底</span><input type="number" min={0} step={10} value={route.sourceSlotMinStock} aria-label={`${route.itemLabel}出口保底库存`} aria-describedby="native-stellar-command-boundary" title={onNativeStationLimitsChange ? "由当前原生投影 revision 提交" : "原生权威命令暂不可用"} disabled={!route.sourceStationId || route.sourceSlotIndex == null || !onNativeStationLimitsChange} onChange={(event) => route.sourceStationId && route.sourceSlotIndex != null && onNativeStationLimitsChange?.(readModel.revision, route.sourceStationId, route.sourceSlotIndex, route.sourceSlotMinStock, route.sourceSlotMaxStock, Number(event.target.value), route.sourceSlotMaxStock)} /></label>
                 <label><span>进口上限</span><input type="number" min={0} step={10} value={route.targetSlotMaxStock} aria-label={`${route.itemLabel}进口库存上限`} aria-describedby="native-stellar-command-boundary" title={onNativeStationLimitsChange ? "由当前原生投影 revision 提交" : "原生权威命令暂不可用"} disabled={!onNativeStationLimitsChange} onChange={(event) => onNativeStationLimitsChange?.(readModel.revision, route.targetStationId, route.targetSlotIndex, route.targetSlotMinStock, route.targetSlotMaxStock, route.targetSlotMinStock, Number(event.target.value))} /></label>
               </div>
@@ -695,6 +715,8 @@ export function NativeStarMapWorkspace({
   onNativeRoleChange,
   onNativeStationPriorityChange,
   onNativeStationMinimumLoadChange,
+  onNativeStationRoutePolicyChange,
+  onNativeStationWarperBudgetChange,
   onNativeStationLimitsChange,
   onFocusStation,
   onNativeQuantumItemCapacityChange,
@@ -712,6 +734,8 @@ export function NativeStarMapWorkspace({
   onNativeRoleChange?: NativePlanetRoleAction;
   onNativeStationPriorityChange?: NativeStationPriorityAction;
   onNativeStationMinimumLoadChange?: NativeStationMinimumLoadAction;
+  onNativeStationRoutePolicyChange?: NativeStationRoutePolicyAction;
+  onNativeStationWarperBudgetChange?: NativeStationWarperBudgetAction;
   onNativeStationLimitsChange?: NativeStationLimitsAction;
   onFocusStation: (entityId: string, planetId: PlanetId) => void;
   onNativeQuantumItemCapacityChange?: NativeQuantumItemCapacityAction;
@@ -757,7 +781,7 @@ export function NativeStarMapWorkspace({
     </nav>
 
     {view === "map" ? <NativeStarMapCatalogConsole frame={mapCatalogFrame} status={mapCatalogStatus} query={mapQuery} onQueryChange={setMapQuery} />
-      : view === "industry" ? <NativeIndustryConsole readModel={readModel} status={readStatus} selector={industryReadRequest} onSelectorChange={onIndustryReadRequest} onNativeRoleChange={onNativeRoleChange} onNativeStationPriorityChange={onNativeStationPriorityChange} onNativeStationMinimumLoadChange={onNativeStationMinimumLoadChange} onNativeStationLimitsChange={onNativeStationLimitsChange} onFocusStation={onFocusStation} />
+      : view === "industry" ? <NativeIndustryConsole readModel={readModel} status={readStatus} selector={industryReadRequest} onSelectorChange={onIndustryReadRequest} onNativeRoleChange={onNativeRoleChange} onNativeStationPriorityChange={onNativeStationPriorityChange} onNativeStationMinimumLoadChange={onNativeStationMinimumLoadChange} onNativeStationRoutePolicyChange={onNativeStationRoutePolicyChange} onNativeStationWarperBudgetChange={onNativeStationWarperBudgetChange} onNativeStationLimitsChange={onNativeStationLimitsChange} onFocusStation={onFocusStation} />
         : <NativeQuantumInventoryConsole readModel={quantumReadModel} status={quantumReadStatus} onNativeItemCapacityChange={onNativeQuantumItemCapacityChange} />}
   </WorkspaceFrame>;
 }
@@ -787,6 +811,8 @@ export function StarMapWorkspace({
   onStationLimitsChange,
   onNativeStationPriorityChange,
   onNativeStationMinimumLoadChange,
+  onNativeStationRoutePolicyChange,
+  onNativeStationWarperBudgetChange,
   onNativeStationLimitsChange,
   onFocusStation,
   onUpgradeAllStations,
@@ -822,6 +848,8 @@ export function StarMapWorkspace({
   onStationLimitsChange: (entityId: string, slotIndex: number, minStock: number, maxStock: number) => void;
   onNativeStationPriorityChange?: NativeStationPriorityAction;
   onNativeStationMinimumLoadChange?: NativeStationMinimumLoadAction;
+  onNativeStationRoutePolicyChange?: NativeStationRoutePolicyAction;
+  onNativeStationWarperBudgetChange?: NativeStationWarperBudgetAction;
   onNativeStationLimitsChange?: NativeStationLimitsAction;
   onFocusStation: (entityId: string, planetId: PlanetId) => void;
   onUpgradeAllStations: StarMapBatchAction;
@@ -918,7 +946,7 @@ export function StarMapWorkspace({
   const nativeMapCatalogConsole = <NativeStarMapCatalogConsole frame={nativeMapCatalogFrame ?? null} status={nativeMapCatalogStatus} query={mapQuery} onQueryChange={setMapQuery} />;
   const nativeQuantumConsole = <NativeQuantumInventoryConsole readModel={nativeQuantumReadModel ?? null} status={nativeQuantumReadStatus} onNativeItemCapacityChange={onNativeQuantumItemCapacityChange} />;
   const industryConsole = nativeAuthorityRequired
-    ? <NativeIndustryConsole readModel={nativeReadModel ?? null} status={nativeReadStatus} selector={industryReadRequest} onSelectorChange={onIndustryReadRequest} onNativeRoleChange={onNativeRoleChange} onNativeStationPriorityChange={onNativeStationPriorityChange} onNativeStationMinimumLoadChange={onNativeStationMinimumLoadChange} onNativeStationLimitsChange={onNativeStationLimitsChange} onFocusStation={onFocusStation} />
+    ? <NativeIndustryConsole readModel={nativeReadModel ?? null} status={nativeReadStatus} selector={industryReadRequest} onSelectorChange={onIndustryReadRequest} onNativeRoleChange={onNativeRoleChange} onNativeStationPriorityChange={onNativeStationPriorityChange} onNativeStationMinimumLoadChange={onNativeStationMinimumLoadChange} onNativeStationRoutePolicyChange={onNativeStationRoutePolicyChange} onNativeStationWarperBudgetChange={onNativeStationWarperBudgetChange} onNativeStationLimitsChange={onNativeStationLimitsChange} onFocusStation={onFocusStation} />
     : <IndustryConsole game={game} onTravel={onTravel} onRoleChange={onRoleChange} onStationPriorityChange={onStationPriorityChange} onStationMinimumLoadChange={onStationMinimumLoadChange} onStationLimitsChange={onStationLimitsChange} onFocusStation={onFocusStation} />;
 
   if (mobile && nativeAuthorityRequired) {

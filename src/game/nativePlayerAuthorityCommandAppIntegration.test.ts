@@ -128,8 +128,8 @@ describe("native player-authority command App boundary", () => {
     );
     const nativeBranch = viewport.indexOf("if (nativePlayerAuthorityOwnsRuntimeRef.current)");
     expect(nativeBranch).toBeGreaterThanOrEqual(0);
-    expect(viewport.slice(nativeBranch)).toMatch(/commitGame\(\(authoritativeMirror\)[\s\S]*?planetViewports/);
+    expect(viewport.slice(nativeBranch)).toMatch(/nativePlanetViewportReadModelRef\.current[\s\S]*?commitNativeProjectedCommand[\s\S]*?createNativeProjectedPlanetViewportCommand/);
     expect(viewport.slice(nativeBranch, viewport.indexOf("pendingPlanetViewportRef.current.delete", nativeBranch)))
-      .not.toMatch(/publishRuntimeGame|gameRef\.current\s*=|setGame\(/);
+      .not.toMatch(/commitGame|publishRuntimeGame|gameRef\.current|setGame\(/);
   });
 });

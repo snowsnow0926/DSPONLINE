@@ -30,6 +30,7 @@ describe("native planet navigation App integration", () => {
       app.indexOf("useEffect(() => {", app.indexOf("void nativeFactoryThinViewStore.refresh") + 1),
     );
     expect(refreshBlock).toMatch(/planetId: nativeFactoryProjectionPlanetId/);
+    expect(refreshBlock).toMatch(/baseFields: \[\.\.\.RECIPE_FOCUS_NATIVE_BASE_FIELDS, \.\.\.PLANET_VIEWPORT_NATIVE_BASE_FIELDS\]/);
   });
 
   it("submits only the same-revision Rust travel intent and never predicts gameplay state", () => {
@@ -43,12 +44,15 @@ describe("native planet navigation App integration", () => {
     expect(nativeBranch).toMatch(/const frame = nativeAuthoritativeFactoryWorkspaceFrame/);
     expect(nativeBranch).toMatch(/if \(pendingNativePlanetChange\)[\s\S]*?重复切换未应用/);
     expect(nativeBranch).toMatch(/frame\.planetNavigation\.activePlanetId/);
+    expect(nativeBranch).toMatch(/nativePlanetViewportReadModelRef\.current[\s\S]*?cameraModel\.identity\.runId !== routeIdentity\.runId/);
+    expect(nativeBranch).toMatch(/cameraModel\.viewports\.get\(planetId\)/);
     expect(nativeBranch).toMatch(/commitNativeProjectedCommand\([\s\S]*?frame\.revision/);
     expect(nativeBranch).toMatch(/createNativeProjectedActivePlanetCommand\(frame, planetId\)/);
     expect(nativeBranch).toMatch(/setPendingNativePlanetChange\(\{[\s\S]*?acceptedRevision: receipt\.revision/);
     expect(nativeBranch).not.toMatch(/setNativeFactoryPlanetRoute/);
     expect(nativeBranch).not.toMatch(/setActivePlanet|commitGame\(|publishRuntimeGame|gameRef\.current\s*=/);
     expect(nativeBranch).not.toMatch(/gameRef\.current\.(?:cargo|tray|planetTrays|metrics|entities|belts)/);
+    expect(nativeBranch).not.toMatch(/gameRef\.current\.planetViewports/);
   });
 
   it("changes the visible planet only after a newer native projection confirms it", () => {

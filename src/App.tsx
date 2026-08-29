@@ -534,6 +534,11 @@ import {
   createNativeProjectedRecipeFocusPositionCommand,
 } from "./game/nativeProjectedRecipeFocusCommands";
 import {
+  PLANET_VIEWPORT_NATIVE_BASE_FIELDS,
+  createNativeProjectedPlanetViewportCommand,
+  selectNativePlanetViewportReadModel,
+} from "./game/nativePlanetViewportReadModel";
+import {
   RECIPE_WORKSPACE_PROJECTION_LIMITS,
   createWebRecipeWorkspaceReadModel,
   recipeWorkspaceSelectorsEqual,
@@ -3167,6 +3172,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       nativePlayerAuthorityActiveFrame?.sessionId,
     ],
   );
+  const nativePlanetViewportReadModel = useMemo(
+    () => selectNativePlanetViewportReadModel(nativeFactoryThinViewSnapshot, {
+      enabled: nativeFactoryThinViewMode === "native-authoritative" && nativeFactoryProjectionRouteReady,
+      sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      runId: nativePlayerAuthorityActiveFrame?.runId ?? null,
+      expectedRevision: factoryThinViewExpectedRevision,
+      activePlanetId: nativeFactoryProjectionPlanetId,
+    }),
+    [
+      factoryThinViewExpectedRevision,
+      nativeFactoryProjectionPlanetId,
+      nativeFactoryProjectionRouteReady,
+      nativeFactoryThinViewMode,
+      nativeFactoryThinViewSnapshot,
+      nativePlayerAuthorityActiveFrame?.runId,
+      nativePlayerAuthorityActiveFrame?.sessionId,
+    ],
+  );
+  const nativePlanetViewportReadModelRef = useRef(nativePlanetViewportReadModel);
+  nativePlanetViewportReadModelRef.current = nativePlanetViewportReadModel;
   const nativeFactoryRouteUnsafe = nativePlayerAuthorityOwnsRuntime &&
     (nativeFactoryUnpinnedBootstrap || pendingNativePlanetChange !== null);
   const nativeFactoryProjectionPending = nativePlayerAuthorityOwnsRuntime &&
@@ -3425,7 +3450,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         selectedBeltIds: factoryThinViewSelectedBeltIds,
       },
       viewport: {
-        baseFields: [...RECIPE_FOCUS_NATIVE_BASE_FIELDS],
+        baseFields: [...RECIPE_FOCUS_NATIVE_BASE_FIELDS, ...PLANET_VIEWPORT_NATIVE_BASE_FIELDS],
         planetId: nativeFactoryProjectionPlanetId,
         bounds: nativeFactoryViewportBounds,
         entityCursor: 0,
@@ -8715,31 +8740,36 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           schedule();
           return;
         }
-        const current = gameRef.current;
-        const previous = current.planetViewports[planetId];
-        if (previous && previous.x === latest.viewport.x && previous.y === latest.viewport.y && previous.zoom === latest.viewport.zoom) {
-          pendingPlanetViewportRef.current.delete(planetId);
-          return;
-        }
         if (nativePlayerAuthorityOwnsRuntimeRef.current) {
-          // Viewports are persisted GameState too. Submit the bounded leaf
-          // patch to the exact Rust revision and wait for its projection;
-          // never install the renderer's stale full-state wrapper locally.
-          if (!nativePlayerAuthorityCommandBindingRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+          const model = nativePlanetViewportReadModelRef.current;
+          const current = model?.viewports.get(planetId);
+          if (!model || !current || !nativePlayerAuthorityCommandBindingRef.current ||
+              nativePlayerAuthorityCommandInFlightRef.current) {
             schedule();
             return;
           }
-          const accepted = commitGame((authoritativeMirror) => ({
-            ...authoritativeMirror,
-            planetViewports: {
-              ...authoritativeMirror.planetViewports,
-              [planetId]: latest.viewport,
-            },
-          }));
+          if (current.x === latest.viewport.x && current.y === latest.viewport.y &&
+              current.zoom === latest.viewport.zoom) {
+            pendingPlanetViewportRef.current.delete(planetId);
+            return;
+          }
+          // Persist only the changed camera leaves from the exact Rust
+          // directory. The renderer never diffs or installs its stale full
+          // GameState mirror while native authority owns the session.
+          const accepted = commitNativeProjectedCommand(model.identity.revision, (baseRevision) =>
+            baseRevision === model.identity.revision
+              ? createNativeProjectedPlanetViewportCommand(model, planetId, latest.viewport)
+              : null);
           if (!accepted) {
             schedule();
             return;
           }
+          pendingPlanetViewportRef.current.delete(planetId);
+          return;
+        }
+        const current = gameRef.current;
+        const previous = current.planetViewports[planetId];
+        if (previous && previous.x === latest.viewport.x && previous.y === latest.viewport.y && previous.zoom === latest.viewport.zoom) {
           pendingPlanetViewportRef.current.delete(planetId);
           return;
         }
@@ -8760,7 +8790,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       pendingPlanetViewportRef.current.set(planetId, { viewport: normalized, timer });
     };
     schedule();
-  }, [commitGame, publishRuntimeGame]);
+  }, [commitNativeProjectedCommand, publishRuntimeGame]);
   useEffect(() => () => {
     for (const pending of pendingPlanetViewportRef.current.values()) window.clearTimeout(pending.timer);
     pendingPlanetViewportRef.current.clear();
@@ -11453,11 +11483,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         setNotice("目标行星尚未解锁或殖民；本次切换未应用");
         return false;
       }
+      const cameraModel = nativePlanetViewportReadModelRef.current;
+      const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+      if (!cameraModel || !routeIdentity || routeIdentity.sessionId !== frame.sessionId ||
+          routeIdentity.revision !== frame.revision || cameraModel.identity.sessionId !== routeIdentity.sessionId ||
+          cameraModel.identity.runId !== routeIdentity.runId || cameraModel.identity.revision !== frame.revision ||
+          cameraModel.identity.planetId !== previousPlanetId) {
+        setNotice("原生行星视角目录尚未完成当前 revision 校验；本次切换未应用");
+        return false;
+      }
+      const projectedDestinationViewport = cameraModel.viewports.get(planetId);
+      if (!projectedDestinationViewport) {
+        setNotice("原生行星视角目录缺少目标行星；本次切换未应用");
+        return false;
+      }
       const leavingViewport = { ...viewportRef.current };
-      // Camera positions and reduced-motion are renderer preferences, not
-      // gameplay authority. Inventory, tray and metrics never come from this
-      // stale JS mirror; Rust expands the single travel intent atomically.
-      const destinationViewport = gameRef.current.planetViewports[planetId] ?? { x: 510, y: 250, zoom: 0.84 };
+      // Camera positions are persisted in Rust-owned v47 state. Reduced motion
+      // remains a local presentation preference; no inventory, metrics or
+      // persisted camera value comes from the stale JavaScript mirror.
+      const destinationViewport = { ...projectedDestinationViewport };
       const reducedMotion = gameRef.current.settings.reducedMotion;
       commitNativeProjectedCommand(
         frame.revision,

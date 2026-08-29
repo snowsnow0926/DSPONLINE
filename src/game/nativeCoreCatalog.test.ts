@@ -29,5 +29,7 @@ describe("Windows native core catalog", () => {
       energyCapacityMj: 90,
       fuelItemIds: [],
     });
+    expect(catalog.buildings.every((building) => building.stackLimitComplete === true)).toBe(true);
+    expect(catalog.buildings.find((building) => building.id === "arc_smelter")?.stackLimit).toBeNull();
   });
 });

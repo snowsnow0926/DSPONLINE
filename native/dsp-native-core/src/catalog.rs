@@ -166,6 +166,16 @@ pub struct RuntimeCatalog {
     pub belt_speeds: HashMap<u8, f64>,
     pub proliferators: HashMap<u8, ProliferatorDefinition>,
     pub technologies: HashMap<String, TechnologyDefinition>,
+    /// Transient policy proof carried by current catalog payloads. Older
+    /// protocol-v1 payloads remain readable but cannot authorize increases in
+    /// a content-pack registry because they omitted the optional stack bound.
+    pub building_stack_policies: HashMap<String, BuildingStackPolicy>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuildingStackPolicy {
+    pub limit: Option<u64>,
+    pub complete: bool,
 }
 
 fn valid_id(value: &str) -> bool {
@@ -441,6 +451,19 @@ impl RuntimeCatalog {
         if recipe_ids.len() != snapshot.recipes.len() {
             bail!("native catalog recipe index is ambiguous");
         }
+        let building_stack_policies = snapshot
+            .buildings
+            .iter()
+            .map(|building| {
+                (
+                    building.id.clone(),
+                    BuildingStackPolicy {
+                        limit: None,
+                        complete: false,
+                    },
+                )
+            })
+            .collect();
         Ok(Self {
             snapshot,
             fingerprint,
@@ -452,12 +475,56 @@ impl RuntimeCatalog {
             belt_speeds,
             proliferators,
             technologies,
+            building_stack_policies,
         })
     }
 
     pub fn from_value(value: Value, expected_registry_fingerprint: &str) -> anyhow::Result<Self> {
+        let mut building_stack_policies = HashMap::new();
+        if let Some(buildings) = value.get("buildings").and_then(Value::as_array) {
+            for building in buildings {
+                let Some(object) = building.as_object() else {
+                    continue;
+                };
+                let Some(id) = object.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let complete = object
+                    .get("stackLimitComplete")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let limit = if complete {
+                    match object.get("stackLimit") {
+                        Some(Value::Null) => None,
+                        Some(value) => Some(
+                            value
+                                .as_u64()
+                                .filter(|limit| *limit > 0 && *limit <= 100_000_000)
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "native catalog building stack limit is invalid: {id}"
+                                    )
+                                })?,
+                        ),
+                        None => {
+                            bail!("native catalog building stack policy is incomplete: {id}")
+                        }
+                    }
+                } else {
+                    None
+                };
+                building_stack_policies
+                    .insert(id.to_owned(), BuildingStackPolicy { limit, complete });
+            }
+        }
         let snapshot =
             serde_json::from_value::<CatalogSnapshot>(value).context("decode native catalog")?;
-        Self::validate(snapshot, expected_registry_fingerprint)
+        let mut catalog = Self::validate(snapshot, expected_registry_fingerprint)?;
+        for (id, policy) in building_stack_policies {
+            if catalog.buildings.contains_key(&id) {
+                catalog.building_stack_policies.insert(id, policy);
+            }
+        }
+        Ok(catalog)
     }
 }

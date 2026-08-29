@@ -58,6 +58,8 @@ export function createNativeCoreCatalog(
       fuelEfficiency: getFuelEfficiency(building.id),
       ...(building.family ? { family: building.family } : {}),
       ...(building.accepts ? { accepts: building.accepts } : {}),
+      stackLimit: building.stackLimit ?? null,
+      stackLimitComplete: true,
     }))),
     recipes: byId(Object.values(RECIPES).map((recipe) => ({
       id: recipe.id,

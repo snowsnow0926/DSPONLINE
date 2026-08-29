@@ -329,6 +329,8 @@ export interface DesktopBridge {
   getNativeCoreConstructionPlacementContext?: (request: DesktopNativeCoreConstructionPlacementContextRequest) => Promise<DesktopNativeCoreConstructionPlacementContextResult>;
   /** Same-revision Rust-derived complete ordinary-building recycling eligibility and exact refund. */
   getNativeCoreConstructionRemovalContext?: (request: DesktopNativeCoreConstructionRemovalContextRequest) => Promise<DesktopNativeCoreConstructionRemovalContextResult>;
+  /** Same-revision Rust-derived ordinary-building stack target and exact material adjustment. */
+  getNativeCoreConstructionStackContext?: (request: DesktopNativeCoreConstructionStackContextRequest) => Promise<DesktopNativeCoreConstructionStackContextResult>;
   getNativeCoreStatisticsProjection: (request: DesktopNativeCoreStatisticsProjectionRequest) => Promise<DesktopNativeCoreStatisticsProjectionResult>;
   getNativeCoreTechnologyProjection: (request: DesktopNativeCoreTechnologyProjectionRequest) => Promise<DesktopNativeCoreTechnologyProjectionResult>;
   /** Current Windows thin-UI host only; older shells fail closed instead of reading the Web GameState. */
@@ -625,6 +627,9 @@ export interface DesktopNativeCoreBuildingDefinition {
   fuelEfficiency: number;
   family?: string;
   accepts?: "solid" | "fluid" | "any";
+  /** Present on current clients so Rust can distinguish unbounded from omitted. */
+  stackLimit?: number | null;
+  stackLimitComplete?: boolean;
 }
 
 export interface DesktopNativeCoreRecipeDefinition {
@@ -1122,6 +1127,65 @@ export interface DesktopNativeCoreConstructionRemovalContextResult {
   support: {
     supported: boolean;
     reason: DesktopNativeCoreConstructionRemovalUnsupportedReason | null;
+  };
+  limits: {
+    projectionBytes: 1048576;
+  };
+}
+
+export interface DesktopNativeCoreConstructionStackContextRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  entityId: string;
+  targetCount: number;
+}
+
+export type DesktopNativeCoreConstructionStackUnsupportedReason =
+  | "invalid-target-count"
+  | "entity-not-found"
+  | "invalid-entity"
+  | "not-active-planet"
+  | "interaction-locked"
+  | "missing-building-id"
+  | "unknown-building"
+  | "missing-construction-definition"
+  | "unsupported-building-kind"
+  | "unsupported-building-domain"
+  | "entity-kind-mismatch"
+  | "invalid-current-count"
+  | "empty-machine-stack"
+  | "unchanged-target"
+  | "stack-limit"
+  | "catalog-incomplete"
+  | "invalid-construction-inventory"
+  | "inventory-insufficient"
+  | "refund-overflow";
+
+export interface DesktopNativeCoreConstructionStackContextResult {
+  schemaVersion: 1;
+  projectionType: "construction-stack-context-v1";
+  source: "native-core";
+  sessionId: string;
+  revision: number;
+  stateVersion: 47;
+  registryFingerprint: string;
+  request: {
+    sessionId: string;
+    expectedRevision: number;
+    expectedRegistryFingerprint: string;
+    entityId: string;
+    targetCount: number;
+  };
+  activePlanetId: string;
+  entityId: string;
+  buildingId: string | null;
+  currentCount: number | null;
+  targetCount: number;
+  currentConstruction: number | null;
+  constructionAfter: number | null;
+  support: {
+    supported: boolean;
+    reason: DesktopNativeCoreConstructionStackUnsupportedReason | null;
   };
   limits: {
     projectionBytes: 1048576;
@@ -2043,6 +2107,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
     }
   | {
       sessionId: string;
+      projectionType: "construction-stack-context-v1";
+      payload: Omit<DesktopNativeCoreConstructionStackContextRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
       projectionType: "statistics-v1";
       payload: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">;
     }
@@ -2092,7 +2161,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "construction-placement-context-v1" | "construction-removal-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "construction-placement-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
   payloadLength: number;
   sha256: string;
 }

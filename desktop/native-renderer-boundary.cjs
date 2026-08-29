@@ -434,6 +434,25 @@ function normalizeConstructionRemovalContext(value, label) {
   };
 }
 
+function normalizeConstructionStackContext(value, label) {
+  const source = exactObject(
+    value,
+    ["sessionId", "expectedRevision", "expectedRegistryFingerprint", "entityId", "targetCount"],
+    label,
+  );
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} expected registry fingerprint`,
+      256,
+    ),
+    entityId: factoryInventoryId(source.entityId, `${label} entity ID`),
+    targetCount: safeInteger(source.targetCount, `${label} target count`, 1),
+  };
+}
+
 function factoryInventoryId(value, label) {
   const result = opaqueId(value, label);
   for (const character of result) {
@@ -2389,6 +2408,172 @@ function normalizeCoreConstructionRemovalContext(value, context) {
     machineCount,
     currentConstruction,
     refundAfterRemoval,
+    support: { supported, reason },
+    limits: { projectionBytes: MAX_NATIVE_PROJECTION_BYTES },
+  };
+}
+
+function normalizeCoreConstructionStackContext(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "sessionId", "revision", "stateVersion",
+    "registryFingerprint", "request", "activePlanetId", "entityId", "buildingId",
+    "currentCount", "targetCount", "currentConstruction", "constructionAfter", "support",
+    "limits",
+  ], "native construction stack context");
+  if (source.schemaVersion !== 1 ||
+      source.projectionType !== "construction-stack-context-v1" ||
+      source.source !== "native-core" || source.stateVersion !== 47) {
+    throw protocolError("native construction stack identity");
+  }
+  requireProjectionByteBudget(source, "native construction stack context");
+  const projectionContext = normalizeConstructionStackContext(
+    context,
+    "native construction stack request context",
+  );
+  const sessionId = logicalId(source.sessionId, "native construction stack session", 128);
+  const revision = safeInteger(source.revision, "native construction stack revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native construction stack registry fingerprint",
+    256,
+  );
+  if (sessionId !== projectionContext.sessionId ||
+      revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint) {
+    throw protocolError("native construction stack identity binding");
+  }
+  const requestSource = exactObject(
+    source.request,
+    ["sessionId", "expectedRevision", "expectedRegistryFingerprint", "entityId", "targetCount"],
+    "native construction stack request echo",
+  );
+  const requestSessionId = logicalId(
+    requestSource.sessionId,
+    "native construction stack request session",
+    128,
+  );
+  const requestEntityId = factoryInventoryId(
+    requestSource.entityId,
+    "native construction stack request entity ID",
+  );
+  const requestTargetCount = safeInteger(
+    requestSource.targetCount,
+    "native construction stack request target count",
+    1,
+  );
+  if (requestSessionId !== projectionContext.sessionId ||
+      requestSource.expectedRevision !== projectionContext.expectedRevision ||
+      requestSource.expectedRegistryFingerprint !== projectionContext.expectedRegistryFingerprint ||
+      requestEntityId !== projectionContext.entityId ||
+      requestTargetCount !== projectionContext.targetCount) {
+    throw protocolError("native construction stack request binding");
+  }
+  const activePlanetId = factoryInventoryId(
+    source.activePlanetId,
+    "native construction stack active planet",
+  );
+  const entityId = factoryInventoryId(source.entityId, "native construction stack entity ID");
+  const targetCount = safeInteger(source.targetCount, "native construction stack target count", 1);
+  if (entityId !== projectionContext.entityId || targetCount !== projectionContext.targetCount) {
+    throw protocolError("native construction stack target binding");
+  }
+  const nullableId = (entry, label) => entry === null ? null : factoryInventoryId(entry, label);
+  const nullableInteger = (entry, label) => entry === null ? null : safeInteger(entry, label);
+  const buildingId = nullableId(source.buildingId, "native construction stack building ID");
+  const currentCount = nullableInteger(source.currentCount, "native construction stack current count");
+  const currentConstruction = nullableInteger(
+    source.currentConstruction,
+    "native construction stack current construction",
+  );
+  const constructionAfter = nullableInteger(
+    source.constructionAfter,
+    "native construction stack construction after",
+  );
+  const supportSource = exactObject(
+    source.support,
+    ["supported", "reason"],
+    "native construction stack support",
+  );
+  const supported = boolean(supportSource.supported, "native construction stack support flag");
+  const unsupportedReasons = [
+    "invalid-target-count", "entity-not-found", "invalid-entity", "not-active-planet",
+    "interaction-locked", "missing-building-id", "unknown-building",
+    "missing-construction-definition", "unsupported-building-kind",
+    "unsupported-building-domain", "entity-kind-mismatch", "invalid-current-count",
+    "empty-machine-stack", "unchanged-target", "stack-limit", "catalog-incomplete",
+    "invalid-construction-inventory", "inventory-insufficient", "refund-overflow",
+  ];
+  const reason = supportSource.reason === null
+    ? null
+    : oneOf(
+        supportSource.reason,
+        unsupportedReasons,
+        "native construction stack unsupported reason",
+      );
+  if (supported !== (reason === null) || (!supported && constructionAfter !== null)) {
+    throw protocolError("native construction stack support binding");
+  }
+  if (supported) {
+    if (buildingId === null || currentCount === null || currentCount < 1 ||
+        currentConstruction === null || constructionAfter === null || targetCount === currentCount) {
+      throw protocolError("native construction stack material binding");
+    }
+    if (targetCount > currentCount) {
+      const addition = targetCount - currentCount;
+      if (addition > currentConstruction || constructionAfter !== currentConstruction - addition) {
+        throw protocolError("native construction stack debit binding");
+      }
+    } else {
+      const refund = currentCount - targetCount;
+      if (currentConstruction > Number.MAX_SAFE_INTEGER - refund ||
+          constructionAfter !== currentConstruction + refund) {
+        throw protocolError("native construction stack refund binding");
+      }
+    }
+  } else if ((reason === "entity-not-found" &&
+      (buildingId !== null || currentCount !== null || currentConstruction !== null)) ||
+      (reason === "invalid-current-count" && currentCount !== null) ||
+      (reason === "empty-machine-stack" && currentCount !== 0) ||
+      (reason === "unchanged-target" && currentCount !== targetCount) ||
+      (reason === "invalid-construction-inventory" && currentConstruction !== null) ||
+      (reason === "inventory-insufficient" &&
+        (currentCount === null || currentConstruction === null || targetCount <= currentCount ||
+          currentConstruction >= targetCount - currentCount)) ||
+      (reason === "refund-overflow" &&
+        (currentCount === null || currentConstruction === null || targetCount >= currentCount ||
+          currentConstruction <= Number.MAX_SAFE_INTEGER - (currentCount - targetCount)))) {
+    throw protocolError("native construction stack unsupported binding");
+  }
+  const limitsSource = exactObject(
+    source.limits,
+    ["projectionBytes"],
+    "native construction stack limits",
+  );
+  if (limitsSource.projectionBytes !== MAX_NATIVE_PROJECTION_BYTES) {
+    throw protocolError("native construction stack limits");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "construction-stack-context-v1",
+    source: "native-core",
+    sessionId,
+    revision,
+    stateVersion: 47,
+    registryFingerprint,
+    request: {
+      sessionId: projectionContext.sessionId,
+      expectedRevision: projectionContext.expectedRevision,
+      expectedRegistryFingerprint: projectionContext.expectedRegistryFingerprint,
+      entityId: projectionContext.entityId,
+      targetCount: projectionContext.targetCount,
+    },
+    activePlanetId,
+    entityId,
+    buildingId,
+    currentCount,
+    targetCount,
+    currentConstruction,
+    constructionAfter,
     support: { supported, reason },
     limits: { projectionBytes: MAX_NATIVE_PROJECTION_BYTES },
   };
@@ -5411,6 +5596,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreConstructionInventoryProjection: normalizeCoreConstructionInventoryProjection,
   coreConstructionPlacementContext: normalizeCoreConstructionPlacementContext,
   coreConstructionRemovalContext: normalizeCoreConstructionRemovalContext,
+  coreConstructionStackContext: normalizeCoreConstructionStackContext,
   coreStatisticsProjection: normalizeCoreStatisticsProjection,
   coreTechnologyProjection: normalizeCoreTechnologyProjection,
   coreRecipeWorkspaceProjection: normalizeCoreRecipeWorkspaceProjection,

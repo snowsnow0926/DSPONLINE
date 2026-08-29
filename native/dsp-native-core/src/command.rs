@@ -1033,56 +1033,6 @@ fn validate_ordinary_building_placement(
     Ok(())
 }
 
-fn ordinary_removal_entity(
-    state: &CoreState,
-    entity_id: &str,
-) -> anyhow::Result<(Value, String, u64)> {
-    let index = *state
-        .entity_index
-        .get(entity_id)
-        .ok_or_else(|| anyhow!("native player-authority removal entity is missing"))?;
-    let entity = state.parse_entity(index)?;
-    let object = entity
-        .as_object()
-        .ok_or_else(|| anyhow!("native player-authority removal entity is invalid"))?;
-    if object.get("interactionLocked").and_then(Value::as_bool) == Some(true) {
-        bail!("native player-authority removal entity is locked")
-    }
-    let building_id = object
-        .get("buildingId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("native player-authority removal building ID is missing"))?
-        .to_owned();
-    let building =
-        state.catalog.buildings.get(&building_id).ok_or_else(|| {
-            anyhow!("native player-authority removal building is not in the catalog")
-        })?;
-    if !state.catalog.constructions.contains_key(&building_id)
-        || matches!(building.kind.as_str(), "miner" | "station")
-        || !matches!(
-            building.kind.as_str(),
-            "machine" | "power" | "storage" | "splitter"
-        )
-        || UNSUPPORTED_ORDINARY_REMOVAL_BUILDINGS.contains(&building_id.as_str())
-    {
-        bail!("native player-authority removal building domain is not covered")
-    }
-    let expected_kind = match building.kind.as_str() {
-        "power" => "power",
-        "storage" => "storage",
-        "splitter" => "splitter",
-        _ => "machine",
-    };
-    if object.get("kind").and_then(Value::as_str) != Some(expected_kind) {
-        bail!("native player-authority removal entity kind conflicts with the catalog")
-    }
-    let machine_count = safe_json_integer(object.get("machineCount"), "building stack")?;
-    if machine_count == 0 {
-        bail!("native player-authority removal building stack is empty")
-    }
-    Ok((entity, building_id, machine_count))
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OrdinaryBuildingRemovalEligibility {
     pub active_planet_id: String,
@@ -1295,6 +1245,187 @@ pub(crate) fn ordinary_building_removal_eligibility(
     Ok(eligibility)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OrdinaryBuildingStackEligibility {
+    pub active_planet_id: String,
+    pub entity_id: String,
+    pub building_id: Option<String>,
+    pub current_count: Option<u64>,
+    pub target_count: u64,
+    pub current_construction: Option<u64>,
+    pub construction_after: Option<u64>,
+    pub unsupported_reason: Option<&'static str>,
+}
+
+impl OrdinaryBuildingStackEligibility {
+    fn new(active_planet_id: &str, entity_id: &str, target_count: u64) -> Self {
+        Self {
+            active_planet_id: active_planet_id.to_owned(),
+            entity_id: entity_id.to_owned(),
+            building_id: None,
+            current_count: None,
+            target_count,
+            current_construction: None,
+            construction_after: None,
+            unsupported_reason: None,
+        }
+    }
+
+    fn unsupported(mut self, reason: &'static str) -> Self {
+        self.unsupported_reason = Some(reason);
+        self.construction_after = None;
+        self
+    }
+}
+
+fn exact_construction_inventory(value: Option<&Value>) -> anyhow::Result<u64> {
+    match value {
+        None | Some(Value::Null) => Ok(0),
+        Some(value) => safe_json_integer(Some(value), "construction inventory"),
+    }
+}
+
+/// Re-derives the complete material and domain proof for one ordinary stack
+/// target. The read-only same-revision context and the durable command
+/// validator both call this helper so a stale renderer result is never trusted.
+pub(crate) fn ordinary_building_stack_eligibility(
+    state: &CoreState,
+    entity_id: &str,
+    target_count: u64,
+) -> anyhow::Result<OrdinaryBuildingStackEligibility> {
+    let active_planet_id = state
+        .base_value()
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority active planet is invalid"))?;
+    if !state
+        .catalog
+        .planets
+        .iter()
+        .any(|planet| planet.id == active_planet_id)
+    {
+        bail!("native player-authority active planet is not in the catalog")
+    }
+    let mut eligibility =
+        OrdinaryBuildingStackEligibility::new(active_planet_id, entity_id, target_count);
+    if target_count == 0 || target_count > MAX_JAVASCRIPT_SAFE_INTEGER {
+        return Ok(eligibility.unsupported("invalid-target-count"));
+    }
+    let Some(index) = state.entity_index.get(entity_id).copied() else {
+        return Ok(eligibility.unsupported("entity-not-found"));
+    };
+    let entity = state.parse_entity(index)?;
+    let Some(object) = entity.as_object() else {
+        return Ok(eligibility.unsupported("invalid-entity"));
+    };
+    eligibility.building_id = object
+        .get("buildingId")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    eligibility.current_count =
+        safe_json_integer(object.get("machineCount"), "building stack").ok();
+
+    if object.get("planetId").and_then(Value::as_str) != Some(active_planet_id) {
+        return Ok(eligibility.unsupported("not-active-planet"));
+    }
+    if object
+        .get("interactionLocked")
+        .is_some_and(|value| value.as_bool() != Some(false))
+    {
+        return Ok(eligibility.unsupported("interaction-locked"));
+    }
+    let Some(building_id) = eligibility.building_id.as_deref() else {
+        return Ok(eligibility.unsupported("missing-building-id"));
+    };
+    let Some(building) = state.catalog.buildings.get(building_id) else {
+        return Ok(eligibility.unsupported("unknown-building"));
+    };
+    if !state.catalog.constructions.contains_key(building_id) {
+        return Ok(eligibility.unsupported("missing-construction-definition"));
+    }
+    if matches!(building.kind.as_str(), "miner" | "station")
+        || !matches!(
+            building.kind.as_str(),
+            "machine" | "power" | "storage" | "splitter"
+        )
+    {
+        return Ok(eligibility.unsupported("unsupported-building-kind"));
+    }
+    if UNSUPPORTED_ORDINARY_REMOVAL_BUILDINGS.contains(&building_id) {
+        return Ok(eligibility.unsupported("unsupported-building-domain"));
+    }
+    let expected_kind = match building.kind.as_str() {
+        "power" => "power",
+        "storage" => "storage",
+        "splitter" => "splitter",
+        _ => "machine",
+    };
+    if object.get("kind").and_then(Value::as_str) != Some(expected_kind) {
+        return Ok(eligibility.unsupported("entity-kind-mismatch"));
+    }
+    let Some(current_count) = eligibility.current_count else {
+        return Ok(eligibility.unsupported("invalid-current-count"));
+    };
+    if current_count == 0 {
+        return Ok(eligibility.unsupported("empty-machine-stack"));
+    }
+    if target_count == current_count {
+        return Ok(eligibility.unsupported("unchanged-target"));
+    }
+
+    let Some(construction) = state
+        .base_value()
+        .get("construction")
+        .and_then(Value::as_object)
+    else {
+        return Ok(eligibility.unsupported("invalid-construction-inventory"));
+    };
+    let Ok(current_construction) = exact_construction_inventory(construction.get(building_id))
+    else {
+        return Ok(eligibility.unsupported("invalid-construction-inventory"));
+    };
+    eligibility.current_construction = Some(current_construction);
+
+    if target_count > current_count {
+        // Historical over-limit groups may be preserved or reduced, but can
+        // never be maintained through this mutating command or increased.
+        if current_count > MAX_PLAYER_BUILDING_STACK || target_count > MAX_PLAYER_BUILDING_STACK {
+            return Ok(eligibility.unsupported("stack-limit"));
+        }
+        // Current clients mark the optional stack bound complete. Older
+        // non-empty content-pack catalogs remain fail-closed; the built-in
+        // empty registry keeps its established compatibility path.
+        let built_in_legacy_complete = state.catalog.snapshot.registry_fingerprint
+            == EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+            && BUILTIN_ORDINARY_STACK_BUILDINGS.contains(&building_id);
+        let stack_policy = state.catalog.building_stack_policies.get(building_id);
+        if !stack_policy.is_some_and(|policy| policy.complete) && !built_in_legacy_complete {
+            return Ok(eligibility.unsupported("catalog-incomplete"));
+        }
+        if stack_policy
+            .and_then(|policy| policy.limit)
+            .is_some_and(|stack_limit| target_count > stack_limit)
+        {
+            return Ok(eligibility.unsupported("stack-limit"));
+        }
+        let addition = target_count - current_count;
+        let Some(construction_after) = current_construction.checked_sub(addition) else {
+            return Ok(eligibility.unsupported("inventory-insufficient"));
+        };
+        eligibility.construction_after = Some(construction_after);
+    } else {
+        let refund = current_count - target_count;
+        let Some(construction_after) = current_construction
+            .checked_add(refund)
+            .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        else {
+            return Ok(eligibility.unsupported("refund-overflow"));
+        };
+        eligibility.construction_after = Some(construction_after);
+    }
+    Ok(eligibility)
+}
+
 fn validate_ordinary_building_stack_change(
     state: &CoreState,
     command: &SimulationCommandPatch,
@@ -1311,48 +1442,22 @@ fn validate_ordinary_building_stack_change(
         bail!("native player-authority building stack change shape is invalid")
     }
     let record = &command.changed_entities[0];
-    let (_, building_id, current) = ordinary_removal_entity(state, &record.id)?;
     let target = require_exact_set_patch(&record.changes, &["machineCount"])?
         .as_u64()
-        .filter(|value| *value <= MAX_PLAYER_BUILDING_STACK)
+        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
         .ok_or_else(|| anyhow!("native player-authority building stack target is invalid"))?;
-    if target == 0 || target == current {
-        bail!("native player-authority building stack command is unchanged")
+    let eligibility = ordinary_building_stack_eligibility(state, &record.id, target)?;
+    if let Some(reason) = eligibility.unsupported_reason {
+        bail!("native player-authority building stack change is unsupported: {reason}")
     }
-    let construction = state
-        .base_value()
-        .get("construction")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("native player-authority construction inventory is missing"))?;
-    let previous = if target > current {
-        // Content packs may override a core building's optional stackLimit,
-        // while the existing CORE protocol deliberately omits that field.
-        // Prove the built-in, unbounded definition instead of guessing that a
-        // catalog-shaped MOD entry has the same player semantics.
-        if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
-            || !BUILTIN_ORDINARY_STACK_BUILDINGS.contains(&building_id.as_str())
-        {
-            bail!("native player-authority building stack limit is not provable")
-        }
-        safe_json_integer(construction.get(&building_id), "construction inventory")?
-    } else {
-        normalized_construction_inventory(construction.get(&building_id))?
-    };
-    let expected = if target > current {
-        previous.checked_sub(target - current).ok_or_else(|| {
-            anyhow!("native player-authority building construction stock is insufficient")
-        })?
-    } else {
-        previous
-            .checked_add(current - target)
-            .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
-            .ok_or_else(|| anyhow!("native player-authority building refund overflows"))?
-    };
-    if require_exact_set_patch(
-        &command.top_level_changes,
-        &["construction", building_id.as_str()],
-    )?
-    .as_u64()
+    let building_id = eligibility
+        .building_id
+        .as_deref()
+        .ok_or_else(|| anyhow!("native player-authority building stack ID is missing"))?;
+    let expected = eligibility
+        .construction_after
+        .ok_or_else(|| anyhow!("native player-authority building stack inventory is missing"))?;
+    if require_exact_set_patch(&command.top_level_changes, &["construction", building_id])?.as_u64()
         != Some(expected)
     {
         bail!("native player-authority building stack inventory adjustment is invalid")
@@ -8124,9 +8229,36 @@ mod tests {
         let before = modded.canonical_sha256().unwrap();
         let command = ordinary_stack_change_command(modded.revision, 5, 2);
         let error = modded.apply_player_authority_command(&command).unwrap_err();
-        assert!(format!("{error:#}").contains("stack limit is not provable"));
+        assert!(format!("{error:#}").contains("catalog-incomplete"));
         assert_eq!(modded.revision, 9);
         assert_eq!(modded.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_safely_reduces_a_historical_over_limit_building_stack() {
+        let mut state = player_command_state();
+        let mut entity = state.parse_entity(0).unwrap();
+        entity["machineCount"] = Value::from(150_000_000_u64);
+        state.replace_entity_raw(0, Arc::<str>::from(serde_json::to_string(&entity).unwrap()));
+        state.base_value_mut()["construction"]["arc_smelter"] = Value::from(0);
+
+        let command = ordinary_stack_change_command(state.revision, 120_000_000, 30_000_000);
+        let applied = state.apply_player_authority_command(&command).unwrap();
+        assert_eq!(applied.revision, 10);
+        assert_eq!(state.parse_entity(0).unwrap()["machineCount"], 120_000_000);
+        assert_eq!(
+            state.base_value()["construction"]["arc_smelter"],
+            30_000_000
+        );
+
+        let committed_hash = state.canonical_sha256().unwrap();
+        let mut forbidden = ordinary_stack_change_command(state.revision, 120_000_001, 29_999_999);
+        forbidden.base_revision = state.revision;
+        let error = state
+            .apply_player_authority_command(&forbidden)
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("stack-limit"));
+        assert_eq!(state.canonical_sha256().unwrap(), committed_hash);
     }
 
     #[test]

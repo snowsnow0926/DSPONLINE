@@ -84,6 +84,7 @@ fn handle_request(
                     "native-core-construction-inventory-v1",
                     "native-core-construction-placement-context-v1",
                     "native-core-construction-removal-context-v1",
+                    "native-core-construction-stack-context-v1",
                     "native-core-statistics-projection-v1",
                     "native-core-technology-projection-v1",
                     "native-core-recipe-workspace-projection-v1",
@@ -327,6 +328,19 @@ fn handle_request(
             expected_revision,
             &expected_registry_fingerprint,
             &entity_id,
+        )?,
+        ControlRequest::CoreConstructionStackContext {
+            session_id,
+            expected_revision,
+            expected_registry_fingerprint,
+            entity_id,
+            target_count,
+        } => cores.construction_stack_context(
+            &session_id,
+            expected_revision,
+            &expected_registry_fingerprint,
+            &entity_id,
+            target_count,
         )?,
         ControlRequest::CoreStatisticsProjection {
             session_id,

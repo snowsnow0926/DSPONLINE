@@ -387,6 +387,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.ok(hello.capabilities.includes("native-core-construction-inventory-v1"));
   assert.ok(hello.capabilities.includes("native-core-construction-placement-context-v1"));
   assert.ok(hello.capabilities.includes("native-core-construction-removal-context-v1"));
+  assert.ok(hello.capabilities.includes("native-core-construction-stack-context-v1"));
   assert.ok(hello.capabilities.includes("native-core-statistics-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-star-map-overview-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-stellar-industry-projection-v1"));
@@ -737,6 +738,53 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     expectedRegistryFingerprint: "other",
     entityId: "未知/MOD-实体",
   }), /construction removal context request is invalid/);
+  const constructionStackContext = await client.request({
+    operation: "coreConstructionStackContext",
+    sessionId: opened.sessionId,
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    entityId: "未知/MOD-实体",
+    targetCount: 11,
+  });
+  assert.doesNotThrow(() => normalizeRendererNativeResult(
+    "coreConstructionStackContext",
+    constructionStackContext,
+    {
+      sessionId: opened.sessionId,
+      expectedRevision: 2,
+      expectedRegistryFingerprint: "builtin:test",
+      entityId: "未知/MOD-实体",
+      targetCount: 11,
+    },
+  ));
+  assert.equal(constructionStackContext.sessionId, opened.sessionId);
+  assert.equal(constructionStackContext.activePlanetId, "home");
+  assert.equal(constructionStackContext.entityId, "未知/MOD-实体");
+  assert.equal(constructionStackContext.targetCount, 11);
+  assert.equal(constructionStackContext.buildingId, null);
+  assert.equal(constructionStackContext.currentCount, null);
+  assert.equal(constructionStackContext.currentConstruction, null);
+  assert.equal(constructionStackContext.constructionAfter, null);
+  assert.deepEqual(constructionStackContext.support, {
+    supported: false,
+    reason: "entity-not-found",
+  });
+  await assert.rejects(client.request({
+    operation: "coreConstructionStackContext",
+    sessionId: opened.sessionId,
+    expectedRevision: 1,
+    expectedRegistryFingerprint: "builtin:test",
+    entityId: "未知/MOD-实体",
+    targetCount: 11,
+  }), /construction stack context request is invalid/);
+  await assert.rejects(client.request({
+    operation: "coreConstructionStackContext",
+    sessionId: opened.sessionId,
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "other",
+    entityId: "未知/MOD-实体",
+    targetCount: 11,
+  }), /construction stack context request is invalid/);
   const statisticsProjection = await client.request({
     operation: "coreStatisticsProjection",
     sessionId: opened.sessionId,

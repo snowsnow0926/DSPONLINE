@@ -2766,6 +2766,24 @@ impl CoreRegistry {
             )
     }
 
+    pub fn construction_stack_context(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        entity_id: &str,
+        target_count: u64,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?
+            .construction_stack_context_projection(
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                entity_id,
+                target_count,
+            )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn statistics_projection(
         &self,

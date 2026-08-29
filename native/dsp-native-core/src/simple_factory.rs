@@ -257,6 +257,101 @@ struct PowerDemandProbe {
     zero_if_disconnected: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RenewablePowerFacilityPatch {
+    entity_index: usize,
+    power_output_kw: f64,
+    power_input_kw: f64,
+    utilization: f64,
+    #[cfg(test)]
+    worker_index: Option<usize>,
+}
+
+fn is_independent_renewable_power_facility(building_id: &str) -> bool {
+    matches!(
+        building_id,
+        "wind_turbine" | "solar_panel" | "geothermal_power_station"
+    )
+}
+
+fn collect_renewable_power_facility_patches_with_runtime(
+    runtime: &DeterministicRuntime,
+    state: &CoreState,
+    entities: &[Value],
+    grids: &[GridRuntime],
+) -> anyhow::Result<Vec<RenewablePowerFacilityPatch>> {
+    let indices = state
+        .factory_topology
+        .power_source_indices
+        .iter()
+        .copied()
+        .filter(|&entity_index| {
+            state
+                .symbols
+                .resolve(state.entities.buildings[entity_index])
+                .is_some_and(is_independent_renewable_power_facility)
+        })
+        .collect::<Vec<_>>();
+    runtime.indexed_try_map(&indices, |_, &entity_index| {
+        let object = entities[entity_index]
+            .as_object()
+            .ok_or_else(|| anyhow!("native renewable power facility is not an object"))?;
+        let building_id = state
+            .symbols
+            .resolve(state.entities.buildings[entity_index])
+            .unwrap_or_default();
+        let building = state
+            .catalog
+            .buildings
+            .get(building_id)
+            .ok_or_else(|| anyhow!("native renewable power facility catalog is missing"))?;
+        let planet = state.factory_topology.entity_planet_indices[entity_index];
+        let grid = state.factory_topology.entity_grid_indices[entity_index];
+        if planet == usize::MAX || grid == usize::MAX {
+            bail!("native renewable power facility topology is unknown");
+        }
+        let grid_slot = planet
+            .checked_mul(GRID_IDS.len())
+            .and_then(|offset| offset.checked_add(grid))
+            .filter(|&slot| slot < grids.len())
+            .ok_or_else(|| anyhow!("native renewable power facility grid is missing"))?;
+        let output = grids[grid_slot]
+            .power_output_by_entity
+            .get(&entity_index)
+            .copied()
+            .unwrap_or(0.0);
+        let input = grids[grid_slot]
+            .power_input_by_entity
+            .get(&entity_index)
+            .copied()
+            .unwrap_or(0.0);
+        let rated = building.power_generation_kw * finite_number(object.get("machineCount"));
+        Ok(RenewablePowerFacilityPatch {
+            entity_index,
+            power_output_kw: rounded(output, 2),
+            power_input_kw: rounded(input, 2),
+            utilization: if rated > EPSILON {
+                rounded(output.max(input) / rated, 4)
+            } else {
+                0.0
+            },
+            #[cfg(test)]
+            worker_index: rayon::current_thread_index(),
+        })
+    })
+}
+
+fn apply_renewable_power_facility_patch(
+    entity: &mut Value,
+    patch: RenewablePowerFacilityPatch,
+) -> anyhow::Result<()> {
+    let object = entity_object(entity)?;
+    set_number(object, "powerOutputKw", patch.power_output_kw)?;
+    set_number(object, "powerInputKw", patch.power_input_kw)?;
+    set_number(object, "utilization", patch.utilization)?;
+    set_number(object, "productionRate", 0.0)
+}
+
 // Built-in recipes currently have at most two outputs. Keep a wider inline
 // budget for content packs, but conservatively leave unusually wide MOD
 // recipes on the byte-identical serial path instead of allocating one result
@@ -4310,6 +4405,21 @@ fn simulate_step(
         .is_some()
         .then(Vec::<MachineProductionEvent>::new);
     profile_mark!("machine-local-settlement-plan");
+    let renewable_power_facility_patches = collect_renewable_power_facility_patches_with_runtime(
+        deterministic_runtime(),
+        state,
+        entities,
+        &grids,
+    )?;
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tfactory-renewable-power-patches\tworkers={}\tcandidates={}",
+            deterministic_runtime().worker_limit(),
+            renewable_power_facility_patches.len(),
+        );
+    }
+    let mut renewable_power_facility_patches =
+        renewable_power_facility_patches.into_iter().peekable();
     let mut produced_by_item = HashMap::<String, f64>::new();
     let has_galactic_material_exporter = state.factory_topology.has_galactic_material_exporter;
     let research_entity_indexes = &state.factory_topology.research_entity_indices;
@@ -4319,6 +4429,22 @@ fn simulate_step(
         if reset_research_progress_before_next_entity {
             reset_indexed_research_machine_progress(entities, research_entity_indexes)?;
             reset_research_progress_before_next_entity = false;
+        }
+        if renewable_power_facility_patches
+            .peek()
+            .is_some_and(|patch| patch.entity_index < entity_index)
+        {
+            bail!("native renewable power facility patch order diverged");
+        }
+        if renewable_power_facility_patches
+            .peek()
+            .is_some_and(|patch| patch.entity_index == entity_index)
+        {
+            let patch = renewable_power_facility_patches
+                .next()
+                .expect("peeked renewable power facility patch disappeared");
+            apply_renewable_power_facility_patch(&mut entities[entity_index], patch)?;
+            continue;
         }
         if vein_settlement_outcomes
             .peek()
@@ -4696,6 +4822,9 @@ fn simulate_step(
     }
     if vein_settlement_outcomes.next().is_some() {
         bail!("native vein settlement plan was not fully replayed");
+    }
+    if renewable_power_facility_patches.next().is_some() {
+        bail!("native renewable power facility patches were not fully applied");
     }
     if local_machine_settlement_indices
         .as_mut()
@@ -5828,14 +5957,20 @@ pub(crate) mod tests {
     }
 
     fn fixture_building(id: &str) -> BuildingDefinition {
+        let renewable = is_independent_renewable_power_facility(id);
         BuildingDefinition {
             id: id.to_owned(),
-            kind: "machine".to_owned(),
+            kind: if renewable { "power" } else { "machine" }.to_owned(),
             speed: 1.0,
             input_capacity: 100.0,
             output_capacity: 100.0,
-            power_demand_kw: 1.0,
-            power_generation_kw: 0.0,
+            power_demand_kw: if renewable { 0.0 } else { 1.0 },
+            power_generation_kw: match id {
+                "wind_turbine" => 300.0,
+                "solar_panel" => 360.0,
+                "geothermal_power_station" => 4_800.0,
+                _ => 0.0,
+            },
             power_charge_kw: 0.0,
             energy_capacity_mj: 0.0,
             fuel_item_ids: Vec::new(),
@@ -5911,6 +6046,9 @@ pub(crate) mod tests {
                     "mining_machine",
                     "interstellar_logistics_station",
                     "orbital_collector",
+                    "wind_turbine",
+                    "solar_panel",
+                    "geothermal_power_station",
                 ]
                 .into_iter()
                 .map(fixture_building)
@@ -6194,6 +6332,122 @@ pub(crate) mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn renewable_power_entity(index: usize) -> Value {
+        let building_id = match index % 3 {
+            0 => "wind_turbine",
+            1 => "solar_panel",
+            _ => "geothermal_power_station",
+        };
+        json!({
+            "id": format!("renewable-{index:05}"),
+            "kind": "power",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": building_id,
+            "machineCount": 1 + index % 11,
+            "minerCount": 0,
+            "inputs": {},
+            "outputs": {},
+            "progress": 0,
+            "utilization": -1,
+            "productionRate": -1,
+            "powerOutputKw": -1,
+            "powerInputKw": -1,
+            "routingCursor": 0,
+            "mod:renewable/private": { "index": index, "signedZero": -0.0 }
+        })
+    }
+
+    fn renewable_power_matrix(count: usize) -> Vec<Value> {
+        (0..count).map(renewable_power_entity).collect()
+    }
+
+    fn renewable_power_grids(count: usize) -> Vec<GridRuntime> {
+        let mut grids = vec![GridRuntime::default(); GRID_IDS.len()];
+        for index in 0..count {
+            grids[0]
+                .power_output_by_entity
+                .insert(index, (index % 997) as f64 + 0.345_678);
+            if index % 17 == 0 {
+                grids[0]
+                    .power_input_by_entity
+                    .insert(index, (index % 31) as f64 + 0.125);
+            }
+        }
+        grids
+    }
+
+    fn serial_renewable_power_oracle(
+        state: &CoreState,
+        source: &[Value],
+        grids: &[GridRuntime],
+    ) -> Vec<Value> {
+        let mut entities = source.to_vec();
+        for &entity_index in &state.factory_topology.power_source_indices {
+            let object = entity_object(&mut entities[entity_index]).unwrap();
+            let building_id = state
+                .symbols
+                .resolve(state.entities.buildings[entity_index])
+                .unwrap();
+            if !is_independent_renewable_power_facility(building_id) {
+                continue;
+            }
+            let building = state.catalog.buildings.get(building_id).unwrap();
+            let output = grids[0]
+                .power_output_by_entity
+                .get(&entity_index)
+                .copied()
+                .unwrap_or(0.0);
+            let input = grids[0]
+                .power_input_by_entity
+                .get(&entity_index)
+                .copied()
+                .unwrap_or(0.0);
+            let rated = building.power_generation_kw * finite_number(object.get("machineCount"));
+            set_number(object, "powerOutputKw", rounded(output, 2)).unwrap();
+            set_number(object, "powerInputKw", rounded(input, 2)).unwrap();
+            set_number(
+                object,
+                "utilization",
+                if rated > EPSILON {
+                    rounded(output.max(input) / rated, 4)
+                } else {
+                    0.0
+                },
+            )
+            .unwrap();
+            set_number(object, "productionRate", 0.0).unwrap();
+        }
+        entities
+    }
+
+    fn run_renewable_power_patches(
+        state: &CoreState,
+        source: &[Value],
+        grids: &[GridRuntime],
+        worker_count: usize,
+    ) -> (Vec<Value>, Vec<Option<usize>>) {
+        let mut entities = source.to_vec();
+        let source_bytes = serde_json::to_vec(&entities).unwrap();
+        let patches = collect_renewable_power_facility_patches_with_runtime(
+            &DeterministicRuntime::for_test(worker_count),
+            state,
+            &entities,
+            grids,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&entities).unwrap(),
+            source_bytes,
+            "renewable worker probes must not mutate source entities",
+        );
+        let workers = patches.iter().map(|patch| patch.worker_index).collect();
+        for patch in patches {
+            apply_renewable_power_facility_patch(&mut entities[patch.entity_index], patch).unwrap();
+        }
+        (entities, workers)
     }
 
     fn finite_vein_context() -> VeinSettlementContext {
@@ -6548,6 +6802,78 @@ pub(crate) mod tests {
                 .iter()
                 .enumerate()
                 .all(|(index, &(value, workers))| value == index && workers == 4)
+        );
+    }
+
+    #[test]
+    fn renewable_power_patches_match_the_serial_oracle_and_canonical_bytes_at_all_workers() {
+        let source = renewable_power_matrix(PARALLEL_MIN_ITEMS + 137);
+        let state = fixture_state(&source);
+        let grids = renewable_power_grids(source.len());
+        let oracle = serial_renewable_power_oracle(&state, &source, &grids);
+        let oracle_bytes = serde_json::to_vec(&oracle).unwrap();
+        let oracle_hash = fixture_state(&oracle).canonical_sha256().unwrap();
+
+        for worker_count in [1, 2, 4, 8] {
+            let (observed, workers) =
+                run_renewable_power_patches(&state, &source, &grids, worker_count);
+            assert_eq!(
+                serde_json::to_vec(&observed).unwrap(),
+                oracle_bytes,
+                "renewable entity bytes diverged for {worker_count} workers",
+            );
+            assert_eq!(
+                fixture_state(&observed).canonical_sha256().unwrap(),
+                oracle_hash,
+                "renewable canonical hash diverged for {worker_count} workers",
+            );
+            if worker_count == 1 {
+                assert!(workers.iter().all(Option::is_none));
+            } else {
+                assert!(workers.iter().any(Option::is_some));
+            }
+        }
+    }
+
+    #[test]
+    fn renewable_power_patches_are_segment_invariant_for_one_five_and_sixty_seconds() {
+        let source = renewable_power_matrix(PARALLEL_MIN_ITEMS + 19);
+        let state = fixture_state(&source);
+        let grids = renewable_power_grids(source.len());
+        let run = |segments: &[usize]| {
+            let mut entities = source.clone();
+            for &segment_seconds in segments {
+                assert!(matches!(segment_seconds, 1 | 5 | 60));
+                entities = run_renewable_power_patches(&state, &entities, &grids, 8).0;
+            }
+            let bytes = serde_json::to_vec(&entities).unwrap();
+            (fixture_checksum(&bytes), bytes)
+        };
+
+        let one_sixty_second_step = run(&[60]);
+        let twelve_five_second_steps = run(&[5; 12]);
+        let sixty_one_second_steps = run(&[1; 60]);
+        assert_eq!(twelve_five_second_steps, one_sixty_second_step);
+        assert_eq!(sixty_one_second_steps, one_sixty_second_step);
+    }
+
+    #[test]
+    fn renewable_power_patch_selection_leaves_fuel_storage_and_machine_rows_serial() {
+        let mut source = renewable_power_matrix(PARALLEL_MIN_ITEMS + 1);
+        let machine_index = source.len();
+        source.push(machine_entity(
+            "serial-machine",
+            "arc_smelter",
+            "iron_ingot",
+        ));
+        let state = fixture_state(&source);
+        let grids = renewable_power_grids(source.len());
+        let machine_before = serde_json::to_vec(&source[machine_index]).unwrap();
+        let (observed, _) = run_renewable_power_patches(&state, &source, &grids, 8);
+        assert_eq!(
+            serde_json::to_vec(&observed[machine_index]).unwrap(),
+            machine_before,
+            "non-renewable rows must remain on their established serial path",
         );
     }
 

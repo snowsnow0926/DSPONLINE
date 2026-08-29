@@ -35,9 +35,19 @@ import {
   type LocalSaveWriterStatus,
 } from "./localSaveCoordination";
 import {
+  acquireLocalSaveNativeAuthorityHandoff as prepareLocalSaveNativeAuthorityHandoff,
   acquireLocalSaveNativeAuthorityLease as prepareLocalSaveNativeAuthorityLease,
   isLocalSaveNativeAuthorityLease,
+  localSaveNativeAuthorityHandoffJournalKey,
+  localSaveNativeAuthorityLeaseId,
+  parseLocalSaveNativeAuthorityHandoffJournal,
+  releaseLocalSaveNativeAuthorityHandoff as prepareLocalSaveNativeAuthorityHandoffRelease,
   releaseLocalSaveNativeAuthorityLease as prepareLocalSaveNativeAuthorityRelease,
+  type LocalSaveNativeAuthorityBrowserFencedJournal,
+  type LocalSaveNativeAuthorityCheckpoint,
+  type LocalSaveNativeAuthorityHandedBackTombstone,
+  type LocalSaveNativeAuthorityHandoffJournal,
+  type LocalSaveNativeAuthorityHandoffReconcileDecision,
   type LocalSaveNativeAuthorityLeaseReceipt,
   type LocalSaveWriterFence,
 } from "./localSaveAuthorityLease";
@@ -107,7 +117,31 @@ interface StoredSaveRecord {
 }
 
 export type LocalSaveBackend = "indexeddb" | "local-storage" | "memory";
-export type { LocalSaveNativeAuthorityLeaseReceipt } from "./localSaveAuthorityLease";
+export type {
+  LocalSaveNativeAuthorityBrowserFencedJournal,
+  LocalSaveNativeAuthorityCheckpoint,
+  LocalSaveNativeAuthorityHandedBackTombstone,
+  LocalSaveNativeAuthorityHandoffJournal,
+  LocalSaveNativeAuthorityHandoffReconcileDecision,
+  LocalSaveNativeAuthorityLeaseReceipt,
+} from "./localSaveAuthorityLease";
+
+export interface LocalSaveNativeAuthorityHandoffInspection {
+  storage: "indexeddb" | "unavailable";
+  journalState: "missing" | "invalid" | "browser-fenced" | "handed-back";
+  writerLease: LocalSaveWriterLease | null;
+  journal: LocalSaveNativeAuthorityHandoffJournal | null;
+}
+
+export interface LocalSaveNativeAuthorityHandoffAcquireReceipt {
+  receipt: LocalSaveNativeAuthorityLeaseReceipt;
+  journal: LocalSaveNativeAuthorityBrowserFencedJournal;
+}
+
+export interface LocalSaveNativeAuthorityHandoffReleaseReceipt {
+  writerStatus: LocalSaveWriterStatus;
+  journal: LocalSaveNativeAuthorityHandedBackTombstone;
+}
 
 export interface LocalSaveStorageEntry {
   key: string;
@@ -879,6 +913,12 @@ function nativeAuthorityLeaseFailureMessage(reason: string): string {
   return "本地主存档 writer fence 已变化，已阻止过期的原生权威切换";
 }
 
+function nativeAuthorityHandoffFailureMessage(reason: string): string {
+  if (reason === "journal-conflict") return "Windows 原生权威交接日志缺失、损坏或与当前租约不一致";
+  if (reason === "release-not-authorized") return "尚未获得 Rust 租约明确不存在的安全交还授权";
+  return nativeAuthorityLeaseFailureMessage(reason);
+}
+
 /**
  * Atomically fence every existing JavaScript save transaction before Rust
  * takes gameplay ownership. Both this CAS and all coordinated save commits use
@@ -947,6 +987,87 @@ export async function acquireLocalSaveNativeAuthorityLease(input: {
   return prepared.receipt;
 }
 
+/**
+ * Atomically publishes the durable browser fence and its exact handoff
+ * journal. No native session owner may transfer before this transaction has
+ * committed and its receipt has been acknowledged.
+ */
+export async function acquireLocalSaveNativeAuthorityHandoff(input: {
+  runId: string;
+  sessionId: string;
+  checkpoint: LocalSaveNativeAuthorityCheckpoint;
+  writerFence: LocalSaveWriterFence;
+}): Promise<LocalSaveNativeAuthorityHandoffAcquireReceipt> {
+  await initializeLocalSaveStore();
+  const journalKey = localSaveNativeAuthorityHandoffJournalKey(input.runId);
+  if (backend !== "indexeddb" || !database || !journalKey) {
+    throw new LocalSaveReadOnlyError("Windows 原生权威交接需要可事务化的 IndexedDB 本地存储和有效 run ID");
+  }
+  if (input.writerFence.ownerId !== writerId) {
+    throw new LocalSaveReadOnlyError("Windows 原生权威交接没有绑定当前页面 writer");
+  }
+  const transaction = database.transaction(RECORD_STORE, "readwrite");
+  const done = transactionDone(transaction);
+  const store = transaction.objectStore(RECORD_STORE);
+  const [leaseRecord, journalRecord] = await Promise.all([
+    requestResult(store.get(LOCAL_SAVE_WRITER_LEASE_KEY) as IDBRequest<StoredSaveRecord | undefined>),
+    requestResult(store.get(journalKey) as IDBRequest<StoredSaveRecord | undefined>),
+  ]);
+  const currentLease = parseLocalSaveWriterLease(leaseRecord?.value);
+  const currentJournal = parseLocalSaveNativeAuthorityHandoffJournal(journalRecord?.value);
+  if (journalRecord !== undefined && (!currentJournal || currentJournal.runId !== input.runId)) {
+    try { transaction.abort(); } catch { /* transaction may already be inactive */ }
+    await done.catch(() => undefined);
+    throw new LocalSaveReadOnlyError(nativeAuthorityHandoffFailureMessage("journal-conflict"));
+  }
+  const prepared = prepareLocalSaveNativeAuthorityHandoff({
+    currentLease,
+    currentJournal,
+    expectedWriterFence: input.writerFence,
+    runId: input.runId,
+    sessionId: input.sessionId,
+    checkpoint: input.checkpoint,
+    now: Date.now(),
+  });
+  if (!prepared.ok) {
+    try { transaction.abort(); } catch { /* transaction may already be inactive */ }
+    await done.catch(() => undefined);
+    throw new LocalSaveReadOnlyError(nativeAuthorityHandoffFailureMessage(prepared.reason));
+  }
+  if (prepared.changed) {
+    putStoredValue(
+      store,
+      LOCAL_SAVE_WRITER_LEASE_KEY,
+      JSON.stringify(prepared.lease),
+      prepared.lease.heartbeatAt,
+    );
+    putStoredValue(
+      store,
+      journalKey,
+      JSON.stringify(prepared.journal),
+      prepared.journal.createdAt,
+    );
+  }
+  await done;
+  legacyCatalogIndexQueue = [];
+  publishWriterStatus({
+    role: "secondary",
+    writerId,
+    fencingToken: prepared.lease.fencingToken,
+    leaseExpiresAt: prepared.lease.expiresAt,
+    reason: "Windows 原生权威交接已原子冻结 JavaScript 保存，等待 Rust 所有权确认",
+  });
+  postCoordinationMessage({
+    schemaVersion: 1,
+    type: "lease",
+    writerId: prepared.lease.ownerId,
+    sentAt: Date.now(),
+    fencingToken: prepared.lease.fencingToken,
+    leaseExpiresAt: prepared.lease.expiresAt,
+  });
+  return { receipt: prepared.receipt, journal: prepared.journal };
+}
+
 /** Explicit hand-back for a handoff that was proven not to transfer Rust ownership. */
 export async function releaseLocalSaveNativeAuthorityLease(
   receipt: LocalSaveNativeAuthorityLeaseReceipt,
@@ -958,9 +1079,19 @@ export async function releaseLocalSaveNativeAuthorityLease(
   const transaction = database.transaction(RECORD_STORE, "readwrite");
   const done = transactionDone(transaction);
   const store = transaction.objectStore(RECORD_STORE);
-  const current = parseLocalSaveWriterLease(
-    (await requestResult(store.get(LOCAL_SAVE_WRITER_LEASE_KEY) as IDBRequest<StoredSaveRecord | undefined>))?.value,
-  );
+  const journalKey = localSaveNativeAuthorityHandoffJournalKey(receipt.leaseId);
+  const [leaseRecord, journalRecord] = await Promise.all([
+    requestResult(store.get(LOCAL_SAVE_WRITER_LEASE_KEY) as IDBRequest<StoredSaveRecord | undefined>),
+    ...(journalKey
+      ? [requestResult(store.get(journalKey) as IDBRequest<StoredSaveRecord | undefined>)]
+      : [Promise.resolve(undefined)]),
+  ]);
+  if (journalRecord !== undefined) {
+    try { transaction.abort(); } catch { /* transaction may already be inactive */ }
+    await done.catch(() => undefined);
+    throw new LocalSaveReadOnlyError("带交接日志的 Windows 原生权威租约只能通过原子 handoff release 交还");
+  }
+  const current = parseLocalSaveWriterLease(leaseRecord?.value);
   const prepared = prepareLocalSaveNativeAuthorityRelease({
     current,
     receipt,
@@ -997,6 +1128,130 @@ export async function releaseLocalSaveNativeAuthorityLease(
     leaseExpiresAt: prepared.lease.expiresAt,
   });
   return getLocalSaveWriterStatus();
+}
+
+/**
+ * Atomically hands a browser-fenced lease back after reconcile proved that no
+ * Rust authority lease exists. The handed-back tombstone preserves the old
+ * native fence and the N+2 returned fence, preventing run-ID replay and ABA.
+ */
+export async function releaseLocalSaveNativeAuthorityHandoff(input: {
+  receipt: LocalSaveNativeAuthorityLeaseReceipt;
+  decision: LocalSaveNativeAuthorityHandoffReconcileDecision;
+}): Promise<LocalSaveNativeAuthorityHandoffReleaseReceipt> {
+  await initializeLocalSaveStore();
+  const journalKey = localSaveNativeAuthorityHandoffJournalKey(input.receipt.leaseId);
+  if (backend !== "indexeddb" || !database || !journalKey) {
+    throw new LocalSaveReadOnlyError("Windows 原生权威交接无法从非事务存储交还");
+  }
+  const transaction = database.transaction(RECORD_STORE, "readwrite");
+  const done = transactionDone(transaction);
+  const store = transaction.objectStore(RECORD_STORE);
+  const [leaseRecord, journalRecord] = await Promise.all([
+    requestResult(store.get(LOCAL_SAVE_WRITER_LEASE_KEY) as IDBRequest<StoredSaveRecord | undefined>),
+    requestResult(store.get(journalKey) as IDBRequest<StoredSaveRecord | undefined>),
+  ]);
+  const currentLease = parseLocalSaveWriterLease(leaseRecord?.value);
+  const currentJournal = parseLocalSaveNativeAuthorityHandoffJournal(journalRecord?.value);
+  if (!currentJournal || currentJournal.runId !== input.receipt.leaseId) {
+    try { transaction.abort(); } catch { /* transaction may already be inactive */ }
+    await done.catch(() => undefined);
+    throw new LocalSaveReadOnlyError(nativeAuthorityHandoffFailureMessage("journal-conflict"));
+  }
+  const prepared = prepareLocalSaveNativeAuthorityHandoffRelease({
+    currentLease,
+    currentJournal,
+    receipt: input.receipt,
+    targetWriterId: writerId,
+    decision: input.decision,
+    now: Date.now(),
+  });
+  if (!prepared.ok) {
+    try { transaction.abort(); } catch { /* transaction may already be inactive */ }
+    await done.catch(() => undefined);
+    throw new LocalSaveReadOnlyError(nativeAuthorityHandoffFailureMessage(prepared.reason));
+  }
+  if (prepared.changed) {
+    putStoredValue(
+      store,
+      LOCAL_SAVE_WRITER_LEASE_KEY,
+      JSON.stringify(prepared.lease),
+      prepared.lease.heartbeatAt,
+    );
+    putStoredValue(
+      store,
+      journalKey,
+      JSON.stringify(prepared.journal),
+      prepared.journal.handedBackAt,
+    );
+  }
+  await done;
+  publishWriterStatus({
+    role: "primary",
+    writerId,
+    fencingToken: prepared.lease.fencingToken,
+    leaseExpiresAt: prepared.lease.expiresAt,
+    reason: "Rust 权威租约已确认不存在，交接日志已原子标记 handed-back",
+  });
+  postCoordinationMessage({
+    schemaVersion: 1,
+    type: "lease",
+    writerId,
+    sentAt: Date.now(),
+    fencingToken: prepared.lease.fencingToken,
+    leaseExpiresAt: prepared.lease.expiresAt,
+  });
+  return { writerStatus: getLocalSaveWriterStatus(), journal: prepared.journal };
+}
+
+/** Read-only, same-snapshot inspection for startup cross-store reconciliation. */
+export async function inspectLocalSaveNativeAuthorityHandoff(
+  runId?: string,
+): Promise<LocalSaveNativeAuthorityHandoffInspection> {
+  await initializeLocalSaveStore();
+  if (backend !== "indexeddb" || !database) {
+    return {
+      storage: "unavailable",
+      journalState: runId === undefined || localSaveNativeAuthorityHandoffJournalKey(runId) ? "missing" : "invalid",
+      writerLease: null,
+      journal: null,
+    };
+  }
+  let inspectedRunId = runId;
+  if (inspectedRunId === undefined) {
+    const leaseTransaction = database.transaction(RECORD_STORE, "readonly");
+    const leaseDone = transactionDone(leaseTransaction);
+    const leaseRecord = await requestResult(
+      leaseTransaction.objectStore(RECORD_STORE).get(LOCAL_SAVE_WRITER_LEASE_KEY) as IDBRequest<StoredSaveRecord | undefined>,
+    );
+    await leaseDone;
+    const writerLease = parseLocalSaveWriterLease(leaseRecord?.value);
+    inspectedRunId = localSaveNativeAuthorityLeaseId(writerLease) ?? undefined;
+    if (!inspectedRunId) {
+      return { storage: "indexeddb", journalState: "missing", writerLease, journal: null };
+    }
+  }
+  const journalKey = localSaveNativeAuthorityHandoffJournalKey(inspectedRunId);
+  if (!journalKey) {
+    return { storage: "indexeddb", journalState: "invalid", writerLease: null, journal: null };
+  }
+  const transaction = database.transaction(RECORD_STORE, "readonly");
+  const done = transactionDone(transaction);
+  const store = transaction.objectStore(RECORD_STORE);
+  const [leaseRecord, journalRecord] = await Promise.all([
+    requestResult(store.get(LOCAL_SAVE_WRITER_LEASE_KEY) as IDBRequest<StoredSaveRecord | undefined>),
+    requestResult(store.get(journalKey) as IDBRequest<StoredSaveRecord | undefined>),
+  ]);
+  await done;
+  const writerLease = parseLocalSaveWriterLease(leaseRecord?.value);
+  if (journalRecord === undefined) {
+    return { storage: "indexeddb", journalState: "missing", writerLease, journal: null };
+  }
+  const journal = parseLocalSaveNativeAuthorityHandoffJournal(journalRecord.value);
+  if (!journal || journal.runId !== inspectedRunId) {
+    return { storage: "indexeddb", journalState: "invalid", writerLease, journal: null };
+  }
+  return { storage: "indexeddb", journalState: journal.phase, writerLease, journal };
 }
 
 async function claimWriterLease(): Promise<boolean> {

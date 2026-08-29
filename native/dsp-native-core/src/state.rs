@@ -2340,6 +2340,15 @@ pub(crate) struct FactoryTopology {
     /// The full scan is selected once during topology compilation and remains
     /// deterministic for the lifetime of the native session.
     pub system_space_station_full_scan_required: bool,
+    /// Stable persisted-row order for the currently pending
+    /// `stationModeTransition` records. Commands rebuild the topology before
+    /// the next admitted advance, while a completed transition is rechecked
+    /// against the mutable candidate row before commit. The common no-
+    /// transition boundary therefore performs no entity discovery scan.
+    pub station_mode_transition_indices: Vec<usize>,
+    /// Dense transition sets deliberately retain the historical persisted-row
+    /// full scan instead of keeping a near-complete duplicate index.
+    pub station_mode_transition_full_scan_required: bool,
     /// Stable persisted-row order for every ray receiver. Runtime recipe,
     /// technology, output-capacity, and power eligibility still belong to the
     /// exact Dyson probe; this immutable index only removes the O(all
@@ -2389,6 +2398,7 @@ impl FactoryTopology {
         self.galactic_material_exporter_indices.shrink_to_fit();
         self.space_station_launcher_indices.shrink_to_fit();
         self.system_space_station_entity_indices.shrink_to_fit();
+        self.station_mode_transition_indices.shrink_to_fit();
         self.ray_receiver_indices.shrink_to_fit();
         self.power_source_indices.shrink_to_fit();
         self.vein_indices.shrink_to_fit();
@@ -2419,6 +2429,7 @@ impl FactoryTopology {
             + self.galactic_material_exporter_indices.capacity()
             + self.space_station_launcher_indices.capacity()
             + self.system_space_station_entity_indices.capacity()
+            + self.station_mode_transition_indices.capacity()
             + self.ray_receiver_indices.capacity()
             + self.power_source_indices.capacity()
             + self.vein_indices.capacity()
@@ -3776,6 +3787,12 @@ impl CoreState {
                     .system_space_station_entity_indices
                     .push(index);
             }
+            // Preserve the permissive legacy predicate: any object row with a
+            // string transition participates, including MOD-defined kinds and
+            // building IDs. Admission validation remains unchanged.
+            if object_string(object, "stationModeTransition").is_some() {
+                factory_topology.station_mode_transition_indices.push(index);
+            }
             if kind == "machine" && building == "ray_receiver" {
                 factory_topology.ray_receiver_indices.push(index);
             }
@@ -3928,6 +3945,16 @@ impl CoreState {
         {
             factory_topology.system_space_station_entity_indices = Vec::new();
             factory_topology.system_space_station_full_scan_required = true;
+        }
+        if !factory_topology.station_mode_transition_indices.is_empty()
+            && factory_topology
+                .station_mode_transition_indices
+                .len()
+                .saturating_mul(4)
+                >= entity_values.len().saturating_mul(3)
+        {
+            factory_topology.station_mode_transition_indices = Vec::new();
+            factory_topology.station_mode_transition_full_scan_required = true;
         }
         // These immutable indexes live for the complete native session. Trim
         // geometric growth slack once, after construction, so a large save

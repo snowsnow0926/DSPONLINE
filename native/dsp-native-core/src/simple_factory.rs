@@ -5206,8 +5206,25 @@ fn simulate_step(
     let mut station_mode_topology_changed = false;
     if crossed_quantum_boundary {
         for boundary in first_quantum_boundary..=last_quantum_boundary {
-            station_mode_topology_changed |=
-                crate::system_space_station::settle_mode_transitions(entities)?;
+            let (mode_changed, mode_scan) =
+                crate::system_space_station::settle_mode_transitions_with_scan(
+                    state,
+                    entities,
+                    &congestion_route_ledger,
+                )?;
+            station_mode_topology_changed |= mode_changed;
+            if profile_enabled {
+                eprintln!(
+                    "DSP_NATIVE_CORE_PROFILE\tstation-mode-transition-active\t{}/{}\ttransitions={}\troute-probes={}\tdense={}\tindex-fallback={}\tledger-fallback={}",
+                    mode_scan.selected_rows,
+                    mode_scan.total_rows,
+                    mode_scan.transition_rows,
+                    mode_scan.route_reference_probes,
+                    mode_scan.dense_fallback,
+                    mode_scan.index_fallback,
+                    mode_scan.ledger_fallback,
+                );
+            }
             station_mode_topology_changed |=
                 crate::quantum_logistics::settle_transitions(base, entities)?;
             crate::system_space_station::settle_construction(state, base, entities)?;

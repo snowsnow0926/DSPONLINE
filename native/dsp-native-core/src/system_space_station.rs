@@ -51,6 +51,37 @@ struct HubEntry {
     system_id: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ModeTransitionScan {
+    pub selected_rows: usize,
+    pub total_rows: usize,
+    pub transition_rows: usize,
+    pub route_reference_probes: usize,
+    pub dense_fallback: bool,
+    pub index_fallback: bool,
+    pub ledger_fallback: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ModeTransitionCandidate {
+    entity_index: usize,
+    station_id: String,
+    transition: String,
+}
+
+#[derive(Debug)]
+struct ModeTransitionCandidateProbe {
+    candidate: Option<ModeTransitionCandidate>,
+    #[cfg(test)]
+    worker_index: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+struct ModeTransitionPatch {
+    entity_index: usize,
+    target_mode: &'static str,
+}
+
 /// Runs only the read-only elevator admission probe in parallel. Sparse saves
 /// visit the immutable system-station candidates; dense saves pass `None` and
 /// deliberately retain the historical full scan. Ordered collection and the
@@ -497,37 +528,199 @@ fn route_references_station(entities: &[Value], station_id: &str) -> bool {
         })
 }
 
-pub(crate) fn settle_mode_transitions(entities: &mut [Value]) -> anyhow::Result<bool> {
-    let transitions = entities
-        .iter()
-        .enumerate()
-        .filter_map(|(index, entity)| {
-            let entity = entity.as_object()?;
-            let transition = string_at(entity, "stationModeTransition")?;
-            let id = string_at(entity, "id")?.to_owned();
-            Some((index, id, transition.to_owned()))
+fn mode_transition_candidate(
+    entity_index: usize,
+    entity: Option<&Value>,
+) -> ModeTransitionCandidateProbe {
+    let candidate = entity.and_then(Value::as_object).and_then(|entity| {
+        let transition = string_at(entity, "stationModeTransition")?;
+        let station_id = string_at(entity, "id")?;
+        Some(ModeTransitionCandidate {
+            entity_index,
+            station_id: station_id.to_owned(),
+            transition: transition.to_owned(),
         })
-        .collect::<Vec<_>>();
-    let mut changed = false;
-    for (index, station_id, transition) in transitions {
-        if route_references_station(entities, &station_id) {
-            continue;
+    });
+    ModeTransitionCandidateProbe {
+        candidate,
+        #[cfg(test)]
+        worker_index: rayon::current_thread_index(),
+    }
+}
+
+fn transition_index_is_valid(state: &CoreState, entities: &[Value]) -> bool {
+    let indices = &state.factory_topology.station_mode_transition_indices;
+    state.entities.ids.len() == entities.len()
+        && indices.last().is_none_or(|index| *index < entities.len())
+        && indices.windows(2).all(|pair| pair[0] < pair[1])
+        && indices.iter().all(|&index| {
+            entities
+                .get(index)
+                .and_then(Value::as_object)
+                .and_then(|entity| entity.get("stationModeTransition"))
+                .is_some_and(|transition| transition.is_string() || transition.is_null())
+        })
+}
+
+fn collect_mode_transition_candidates(
+    runtime: &DeterministicRuntime,
+    state: &CoreState,
+    entities: &[Value],
+) -> (Vec<ModeTransitionCandidate>, ModeTransitionScan) {
+    let index_fallback = !state
+        .factory_topology
+        .station_mode_transition_full_scan_required
+        && !transition_index_is_valid(state, entities);
+    let use_full_scan = state
+        .factory_topology
+        .station_mode_transition_full_scan_required
+        || index_fallback;
+    let probes = if use_full_scan {
+        runtime.indexed_map(entities, |entity_index, entity| {
+            mode_transition_candidate(entity_index, Some(entity))
+        })
+    } else {
+        runtime.indexed_map(
+            &state.factory_topology.station_mode_transition_indices,
+            |_, &entity_index| mode_transition_candidate(entity_index, entities.get(entity_index)),
+        )
+    };
+    let mut candidates = Vec::new();
+    for probe in probes {
+        #[cfg(test)]
+        let _ = probe.worker_index;
+        if let Some(candidate) = probe.candidate {
+            candidates.push(candidate);
         }
-        let station = entities[index]
+    }
+    let scan = ModeTransitionScan {
+        selected_rows: if use_full_scan {
+            entities.len()
+        } else {
+            state.factory_topology.station_mode_transition_indices.len()
+        },
+        total_rows: entities.len(),
+        transition_rows: candidates.len(),
+        dense_fallback: state
+            .factory_topology
+            .station_mode_transition_full_scan_required,
+        index_fallback,
+        ..ModeTransitionScan::default()
+    };
+    (candidates, scan)
+}
+
+fn plan_mode_transition_patches<F>(
+    runtime: &DeterministicRuntime,
+    candidates: &[ModeTransitionCandidate],
+    route_references: F,
+) -> anyhow::Result<Vec<Option<ModeTransitionPatch>>>
+where
+    F: Fn(usize, &str) -> anyhow::Result<bool> + Send + Sync,
+{
+    runtime.indexed_try_map(candidates, |_, candidate| {
+        Ok(
+            (!route_references(candidate.entity_index, &candidate.station_id)?).then_some(
+                ModeTransitionPatch {
+                    entity_index: candidate.entity_index,
+                    target_mode: if candidate.transition == "to-elevator" {
+                        "elevator"
+                    } else {
+                        "legacy"
+                    },
+                },
+            ),
+        )
+    })
+}
+
+fn commit_mode_transition_patches(
+    entities: &mut [Value],
+    patches: Vec<Option<ModeTransitionPatch>>,
+) -> anyhow::Result<bool> {
+    // Preflight every target before the first write. A future fallible route
+    // probe or malformed candidate can therefore never leave a partial mode
+    // transition in the candidate state.
+    for patch in patches.iter().flatten() {
+        if entities
+            .get(patch.entity_index)
+            .and_then(Value::as_object)
+            .is_none()
+        {
+            return Err(anyhow!("native transitioning station is invalid"));
+        }
+    }
+    let mut changed = false;
+    for patch in patches.into_iter().flatten() {
+        let station = entities[patch.entity_index]
             .as_object_mut()
-            .ok_or_else(|| anyhow!("native transitioning station is invalid"))?;
+            .expect("preflighted transitioning station");
         station.insert(
             "stationOperationMode".to_owned(),
-            Value::from(if transition == "to-elevator" {
-                "elevator"
-            } else {
-                "legacy"
-            }),
+            Value::from(patch.target_mode),
         );
         station.insert("stationModeTransition".to_owned(), Value::Null);
         changed = true;
     }
     Ok(changed)
+}
+
+fn settle_mode_transition_candidates<F>(
+    runtime: &DeterministicRuntime,
+    entities: &mut [Value],
+    candidates: &[ModeTransitionCandidate],
+    route_references: F,
+) -> anyhow::Result<bool>
+where
+    F: Fn(usize, &str) -> anyhow::Result<bool> + Send + Sync,
+{
+    let patches = plan_mode_transition_patches(runtime, candidates, route_references)?;
+    commit_mode_transition_patches(entities, patches)
+}
+
+fn settle_mode_transitions_with_runtime(
+    runtime: &DeterministicRuntime,
+    state: &CoreState,
+    entities: &mut [Value],
+    route_ledger: &crate::station_route_ledger::StationRouteLedger,
+) -> anyhow::Result<(bool, ModeTransitionScan)> {
+    let (candidates, mut scan) = collect_mode_transition_candidates(runtime, state, entities);
+    scan.route_reference_probes = candidates.len();
+    let ledger_usable = route_ledger.has_route_reference_index()
+        && candidates.iter().all(|candidate| {
+            candidate.entity_index < state.entities.ids.len()
+                && &state.entities.ids[candidate.entity_index] == candidate.station_id.as_str()
+        });
+    scan.ledger_fallback = !candidates.is_empty() && !ledger_usable;
+    let changed = if ledger_usable {
+        settle_mode_transition_candidates(runtime, entities, &candidates, |entity_index, _| {
+            Ok(route_ledger.references_station(entity_index))
+        })?
+    } else {
+        let frozen_entities: &[Value] = entities;
+        let patches = plan_mode_transition_patches(runtime, &candidates, |_, station_id| {
+            Ok(route_references_station(frozen_entities, station_id))
+        })?;
+        commit_mode_transition_patches(entities, patches)?
+    };
+    Ok((changed, scan))
+}
+
+#[cfg(test)]
+fn settle_mode_transitions(
+    state: &CoreState,
+    entities: &mut [Value],
+    route_ledger: &crate::station_route_ledger::StationRouteLedger,
+) -> anyhow::Result<bool> {
+    settle_mode_transitions_with_scan(state, entities, route_ledger).map(|(changed, _)| changed)
+}
+
+pub(crate) fn settle_mode_transitions_with_scan(
+    state: &CoreState,
+    entities: &mut [Value],
+    route_ledger: &crate::station_route_ledger::StationRouteLedger,
+) -> anyhow::Result<(bool, ModeTransitionScan)> {
+    settle_mode_transitions_with_runtime(deterministic_runtime(), state, entities, route_ledger)
 }
 
 fn allocate_budget(
@@ -1270,6 +1463,7 @@ mod tests {
     use crate::deterministic_runtime::PARALLEL_MIN_ITEMS;
     use crate::state::CoreCheckpointIdentity;
     use serde_json::json;
+    use sha2::{Digest, Sha256};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1393,6 +1587,8 @@ mod tests {
             "stationOperationMode": "elevator",
             "stationModeTransition": null,
             "stationVessels": 2,
+            "stationSlots": [],
+            "stationRoutes": [],
             "elevatorOutputItems": ["iron_ore", null, null, null, null],
             "inputs": {"iron_ore": input},
             "outputs": {"iron_ore": 0},
@@ -1464,6 +1660,94 @@ mod tests {
             fixture_catalog(),
         )
         .unwrap()
+    }
+
+    fn built_route_ledger(
+        state: &CoreState,
+        entities: &[Value],
+    ) -> crate::station_route_ledger::StationRouteLedger {
+        let local = crate::local_logistics::prepare_step_directory(
+            entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let remote = crate::interstellar_logistics::prepare_route_activity(entities);
+        crate::station_route_ledger::StationRouteLedger::build(state, entities, &local, &remote)
+    }
+
+    fn frozen_settle_mode_transitions(entities: &mut [Value]) -> anyhow::Result<bool> {
+        let transitions = entities
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entity)| {
+                let entity = entity.as_object()?;
+                let transition = string_at(entity, "stationModeTransition")?;
+                let id = string_at(entity, "id")?.to_owned();
+                Some((index, id, transition.to_owned()))
+            })
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for (index, station_id, transition) in transitions {
+            if route_references_station(entities, &station_id) {
+                continue;
+            }
+            let station = entities[index]
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("native transitioning station is invalid"))?;
+            station.insert(
+                "stationOperationMode".to_owned(),
+                Value::from(if transition == "to-elevator" {
+                    "elevator"
+                } else {
+                    "legacy"
+                }),
+            );
+            station.insert("stationModeTransition".to_owned(), Value::Null);
+            changed = true;
+        }
+        Ok(changed)
+    }
+
+    fn transition_row(
+        index: usize,
+        kind: &str,
+        building_id: &str,
+        transition: Option<&str>,
+    ) -> Value {
+        let mut row = json!({
+            "id": format!("transition-{index:05}"),
+            "kind": kind,
+            "planetId": "home",
+            "buildingId": building_id,
+            "machineCount": 1,
+            "stationTier": 1,
+            "stationOperationMode": "legacy",
+            "stationModeTransition": transition,
+            "stationSlots": [],
+            "stationRoutes": [],
+            "inputs": {},
+            "outputs": {},
+            "progress": 0,
+            "utilization": 0,
+            "productionRate": 0,
+            "routingCursor": 0
+        });
+        if kind == "station" && building_id == "interstellar_logistics_station" {
+            row["stationSlots"] = json!([
+                {"itemId": null, "localMode": "storage", "remoteMode": "storage", "minimumLoad": 1, "minStock": 0, "maxStock": 0, "priority": 1},
+                {"itemId": null, "localMode": "storage", "remoteMode": "storage", "minimumLoad": 1, "minStock": 0, "maxStock": 0, "priority": 1},
+                {"itemId": null, "localMode": "storage", "remoteMode": "storage", "minimumLoad": 1, "minStock": 0, "maxStock": 0, "priority": 1},
+                {"itemId": null, "localMode": "storage", "remoteMode": "storage", "minimumLoad": 1, "minStock": 0, "maxStock": 0, "priority": 1},
+                {"itemId": null, "localMode": "storage", "remoteMode": "storage", "minimumLoad": 1, "minStock": 0, "maxStock": 0, "priority": 1}
+            ]);
+        }
+        row
+    }
+
+    fn mode_transition_digest(entities: &[Value]) -> (Vec<u8>, String) {
+        let bytes = serde_json::to_vec(entities).unwrap();
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        (bytes, hash)
     }
 
     fn frozen_active_power_consumers(
@@ -1867,47 +2151,392 @@ mod tests {
     }
 
     #[test]
-    fn mode_transition_reports_only_an_actual_topology_change() {
-        let mut entities = vec![json!({
-            "id": "station-a",
-            "kind": "station",
-            "stationOperationMode": "legacy",
-            "stationModeTransition": null
-        })];
+    fn no_mode_transition_probes_zero_rows_and_preserves_bytes() {
+        let mut entities = fixture_entities();
+        let state = state_from_entities(&entities);
+        let ledger = built_route_ledger(&state, &entities);
         let before = serde_json::to_vec(&entities).unwrap();
-        assert!(!settle_mode_transitions(&mut entities).unwrap());
+        let (changed, scan) = settle_mode_transitions_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &state,
+            &mut entities,
+            &ledger,
+        )
+        .unwrap();
+        assert!(!changed);
+        assert_eq!(scan.selected_rows, 0);
+        assert_eq!(scan.total_rows, entities.len());
+        assert_eq!(scan.transition_rows, 0);
+        assert_eq!(scan.route_reference_probes, 0);
+        assert!(!scan.dense_fallback);
+        assert!(!scan.index_fallback);
+        assert!(!scan.ledger_fallback);
         assert_eq!(serde_json::to_vec(&entities).unwrap(), before);
-
-        entities[0]["stationModeTransition"] = Value::from("to-elevator");
-        assert!(settle_mode_transitions(&mut entities).unwrap());
-        assert_eq!(entities[0]["stationOperationMode"], Value::from("elevator"));
-        assert!(entities[0]["stationModeTransition"].is_null());
-        assert!(!settle_mode_transitions(&mut entities).unwrap());
     }
 
     #[test]
-    fn referenced_mode_transition_stays_pending_and_reports_no_change() {
-        let mut entities = vec![
-            json!({
-                "id": "station-a",
-                "kind": "station",
-                "stationOperationMode": "legacy",
-                "stationModeTransition": "to-elevator"
-            }),
-            json!({
-                "id": "station-b",
-                "kind": "station",
-                "stationRoutes": [{ "peerId": "station-a" }]
-            }),
-        ];
-        assert!(!settle_mode_transitions(&mut entities).unwrap());
-        assert_eq!(
-            entities[0]["stationModeTransition"],
-            Value::from("to-elevator")
+    fn sparse_transition_index_probes_only_active_rows_and_preserves_mod_semantics() {
+        let mut entities = (0..4_113)
+            .map(|index| transition_row(index, "machine", "mining_machine", None))
+            .collect::<Vec<_>>();
+        entities[3] = transition_row(
+            3,
+            "station",
+            "interstellar_logistics_station",
+            Some("to-elevator"),
         );
+        entities[4_097] = transition_row(
+            4_097,
+            "mod-row",
+            "mod:orbital-lift/Ω",
+            Some("custom-to-legacy"),
+        );
+        let state = state_from_entities(&entities);
+        assert_eq!(
+            state.factory_topology.station_mode_transition_indices,
+            vec![3, 4_097]
+        );
+        assert!(
+            !state
+                .factory_topology
+                .station_mode_transition_full_scan_required
+        );
+        let ledger = built_route_ledger(&state, &entities);
+        let mut oracle = entities.clone();
+        let oracle_changed = frozen_settle_mode_transitions(&mut oracle).unwrap();
+        let (changed, scan) = settle_mode_transitions_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &state,
+            &mut entities,
+            &ledger,
+        )
+        .unwrap();
+        assert_eq!(changed, oracle_changed);
+        assert_eq!(
+            mode_transition_digest(&entities),
+            mode_transition_digest(&oracle)
+        );
+        assert_eq!(scan.selected_rows, 2);
+        assert_eq!(scan.total_rows, 4_113);
+        assert_eq!(scan.transition_rows, 2);
+        assert_eq!(scan.route_reference_probes, 2);
+        assert!(!scan.dense_fallback);
+        assert!(!scan.index_fallback);
+        assert!(!scan.ledger_fallback);
+        assert_eq!(entities[3]["stationOperationMode"], "elevator");
+        assert_eq!(entities[4_097]["stationOperationMode"], "legacy");
+    }
 
-        entities[1]["stationRoutes"] = Value::Array(Vec::new());
-        assert!(settle_mode_transitions(&mut entities).unwrap());
+    #[test]
+    fn dense_and_invalid_transition_indexes_fall_back_to_frozen_full_oracle() {
+        let dense_source = (0..64)
+            .map(|index| {
+                transition_row(
+                    index,
+                    "mod-row",
+                    "mod:dense-transition",
+                    (index < 48).then_some("to-elevator"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let dense_state = state_from_entities(&dense_source);
+        assert!(
+            dense_state
+                .factory_topology
+                .station_mode_transition_full_scan_required
+        );
+        assert!(
+            dense_state
+                .factory_topology
+                .station_mode_transition_indices
+                .is_empty()
+        );
+        let dense_ledger = built_route_ledger(&dense_state, &dense_source);
+        let mut dense_actual = dense_source.clone();
+        let mut dense_oracle = dense_source;
+        frozen_settle_mode_transitions(&mut dense_oracle).unwrap();
+        let (_, dense_scan) = settle_mode_transitions_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &dense_state,
+            &mut dense_actual,
+            &dense_ledger,
+        )
+        .unwrap();
+        assert_eq!(
+            mode_transition_digest(&dense_actual),
+            mode_transition_digest(&dense_oracle)
+        );
+        assert_eq!(dense_scan.selected_rows, 64);
+        assert!(dense_scan.dense_fallback);
+        assert!(!dense_scan.index_fallback);
+
+        let mut sparse_source = (0..64)
+            .map(|index| {
+                transition_row(
+                    index,
+                    "mod-row",
+                    "mod:sparse-transition",
+                    (index == 7).then_some("to-elevator"),
+                )
+            })
+            .collect::<Vec<_>>();
+        sparse_source[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("stationModeTransition");
+        let mut invalid_state = state_from_entities(&sparse_source);
+        let invalid_topology = Arc::make_mut(&mut invalid_state.factory_topology);
+        invalid_topology.station_mode_transition_indices = vec![0];
+        invalid_topology.station_mode_transition_full_scan_required = false;
+        let invalid_ledger = built_route_ledger(&invalid_state, &sparse_source);
+        let mut invalid_actual = sparse_source.clone();
+        let mut invalid_oracle = sparse_source;
+        frozen_settle_mode_transitions(&mut invalid_oracle).unwrap();
+        let (_, invalid_scan) = settle_mode_transitions_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &invalid_state,
+            &mut invalid_actual,
+            &invalid_ledger,
+        )
+        .unwrap();
+        assert_eq!(
+            mode_transition_digest(&invalid_actual),
+            mode_transition_digest(&invalid_oracle)
+        );
+        assert_eq!(invalid_scan.selected_rows, 64);
+        assert!(!invalid_scan.dense_fallback);
+        assert!(invalid_scan.index_fallback);
+    }
+
+    #[test]
+    fn route_peer_and_waypoint_membership_block_transition_until_post_route_ledger_clears() {
+        let mut peer_entities = vec![
+            transition_row(
+                0,
+                "station",
+                "interstellar_logistics_station",
+                Some("to-elevator"),
+            ),
+            transition_row(1, "station", "interstellar_logistics_station", None),
+        ];
+        peer_entities[1]["stationRoutes"] = json!([{
+            "id": "peer-route",
+            "scope": "remote",
+            "peerId": "transition-00000",
+            "vehicleStationId": "transition-00001",
+            "waypointStationIds": [],
+            "itemId": "iron_ore",
+            "cargo": 1,
+            "vehicleCount": 1,
+            "progress": 0
+        }]);
+        let peer_state = state_from_entities(&peer_entities);
+        let peer_ledger = built_route_ledger(&peer_state, &peer_entities);
+        assert!(peer_ledger.references_station(0));
+        let before = mode_transition_digest(&peer_entities);
+        let (changed, scan) = settle_mode_transitions_with_runtime(
+            &DeterministicRuntime::for_test(8),
+            &peer_state,
+            &mut peer_entities,
+            &peer_ledger,
+        )
+        .unwrap();
+        assert!(!changed);
+        assert_eq!(scan.route_reference_probes, 1);
+        assert_eq!(mode_transition_digest(&peer_entities), before);
+
+        let mut waypoint_entities = vec![
+            transition_row(
+                0,
+                "station",
+                "interstellar_logistics_station",
+                Some("to-elevator"),
+            ),
+            transition_row(1, "station", "interstellar_logistics_station", None),
+            transition_row(2, "station", "interstellar_logistics_station", None),
+        ];
+        waypoint_entities[1]["stationRoutes"] = json!([{
+            "id": "waypoint-route",
+            "scope": "remote",
+            "peerId": "transition-00002",
+            "vehicleStationId": "transition-00001",
+            "waypointStationIds": ["transition-00000"],
+            "itemId": "iron_ore",
+            "cargo": 1,
+            "vehicleCount": 1,
+            "progress": 0
+        }]);
+        let waypoint_state = state_from_entities(&waypoint_entities);
+        let waypoint_ledger = built_route_ledger(&waypoint_state, &waypoint_entities);
+        assert!(waypoint_ledger.references_station(0));
+        assert!(
+            !settle_mode_transitions(&waypoint_state, &mut waypoint_entities, &waypoint_ledger,)
+                .unwrap()
+        );
+        waypoint_entities[1]["stationRoutes"] = Value::Array(Vec::new());
+        let cleared_state = state_from_entities(&waypoint_entities);
+        let cleared_ledger = built_route_ledger(&cleared_state, &waypoint_entities);
+        assert!(!cleared_ledger.references_station(0));
+        assert!(
+            settle_mode_transitions(&cleared_state, &mut waypoint_entities, &cleared_ledger,)
+                .unwrap()
+        );
+        assert!(waypoint_entities[0]["stationModeTransition"].is_null());
+    }
+
+    fn run_mode_transition_boundaries(segmented: bool) -> Vec<Value> {
+        let mut entities = vec![
+            transition_row(
+                0,
+                "station",
+                "interstellar_logistics_station",
+                Some("to-elevator"),
+            ),
+            transition_row(1, "station", "interstellar_logistics_station", None),
+        ];
+        entities[1]["stationRoutes"] = json!([{
+            "id": "draining-route",
+            "scope": "remote",
+            "peerId": "transition-00000",
+            "vehicleStationId": "transition-00001",
+            "waypointStationIds": [],
+            "itemId": "iron_ore",
+            "cargo": 1,
+            "vehicleCount": 1,
+            "progress": 0
+        }]);
+        let ranges = if segmented {
+            vec![1_u64..=5, 6_u64..=12]
+        } else {
+            vec![1_u64..=12]
+        };
+        let mut state = state_from_entities(&entities);
+        for (segment_index, range) in ranges.into_iter().enumerate() {
+            if segment_index != 0 {
+                state = state_from_entities(&entities);
+            }
+            for boundary in range {
+                if boundary == 6 {
+                    entities[1]["stationRoutes"] = Value::Array(Vec::new());
+                }
+                let ledger = built_route_ledger(&state, &entities);
+                settle_mode_transitions(&state, &mut entities, &ledger).unwrap();
+            }
+        }
+        entities
+    }
+
+    #[test]
+    fn continuous_and_segmented_five_second_boundaries_are_byte_identical() {
+        let continuous = run_mode_transition_boundaries(false);
+        let segmented = run_mode_transition_boundaries(true);
+        assert_eq!(
+            mode_transition_digest(&continuous),
+            mode_transition_digest(&segmented)
+        );
+        assert_eq!(continuous[0]["stationOperationMode"], "elevator");
+        assert!(continuous[0]["stationModeTransition"].is_null());
+    }
+
+    #[test]
+    fn sparse_transition_parallel_matrix_is_frozen_json_and_hash_identical() {
+        let transition_count = PARALLEL_MIN_ITEMS + 3;
+        let entity_count = transition_count * 2 + 17;
+        let source = (0..entity_count)
+            .map(|index| {
+                json!({
+                    "id": format!("parallel-transition-{index:05}"),
+                    "kind": "mod-row",
+                    "buildingId": "mod:parallel-transition",
+                    "stationOperationMode": "legacy",
+                    "stationModeTransition": (index < transition_count).then_some(if index % 2 == 0 {
+                        "to-elevator"
+                    } else {
+                        "custom-to-legacy"
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        let state = state_from_entities(&source);
+        let ledger = built_route_ledger(&state, &source);
+        let mut oracle = source.clone();
+        assert!(frozen_settle_mode_transitions(&mut oracle).unwrap());
+        let expected = mode_transition_digest(&oracle);
+        for workers in [1, 2, 4, 8] {
+            let runtime = DeterministicRuntime::for_test(workers);
+            assert_eq!(runtime.worker_count_for_items(transition_count), workers);
+            let mut candidate = source.clone();
+            let (changed, scan) =
+                settle_mode_transitions_with_runtime(&runtime, &state, &mut candidate, &ledger)
+                    .unwrap();
+            assert!(changed);
+            assert_eq!(scan.selected_rows, transition_count);
+            assert_eq!(scan.transition_rows, transition_count);
+            assert_eq!(scan.route_reference_probes, transition_count);
+            let digest = mode_transition_digest(&candidate);
+            assert_eq!(
+                digest, expected,
+                "mode transition diverged from frozen oracle at {workers} workers"
+            );
+        }
+    }
+
+    #[test]
+    fn failing_route_probe_leaves_candidate_json_unchanged() {
+        let source = vec![
+            transition_row(
+                0,
+                "station",
+                "interstellar_logistics_station",
+                Some("to-elevator"),
+            ),
+            transition_row(1, "mod-row", "mod:transition", Some("custom-to-legacy")),
+        ];
+        let state = state_from_entities(&source);
+        let (candidates, scan) =
+            collect_mode_transition_candidates(&DeterministicRuntime::for_test(8), &state, &source);
+        assert_eq!(scan.transition_rows, 2);
+        let mut candidate = source.clone();
+        let before = mode_transition_digest(&candidate);
+        let error = settle_mode_transition_candidates(
+            &DeterministicRuntime::for_test(8),
+            &mut candidate,
+            &candidates,
+            |entity_index, _| {
+                if entity_index == 1 {
+                    Err(anyhow!("injected route probe failure"))
+                } else {
+                    Ok(false)
+                }
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "injected route probe failure");
+        assert_eq!(mode_transition_digest(&candidate), before);
+    }
+
+    #[test]
+    fn mode_transition_reports_only_an_actual_topology_change() {
+        let mut entities = vec![transition_row(
+            0,
+            "station",
+            "interstellar_logistics_station",
+            None,
+        )];
+        let before = serde_json::to_vec(&entities).unwrap();
+        let state = state_from_entities(&entities);
+        let ledger = built_route_ledger(&state, &entities);
+        assert!(!settle_mode_transitions(&state, &mut entities, &ledger).unwrap());
+        assert_eq!(serde_json::to_vec(&entities).unwrap(), before);
+
+        entities[0]["stationModeTransition"] = Value::from("to-elevator");
+        let state = state_from_entities(&entities);
+        let ledger = built_route_ledger(&state, &entities);
+        assert!(settle_mode_transitions(&state, &mut entities, &ledger).unwrap());
+        assert_eq!(entities[0]["stationOperationMode"], Value::from("elevator"));
         assert!(entities[0]["stationModeTransition"].is_null());
+        let state = state_from_entities(&entities);
+        let ledger = built_route_ledger(&state, &entities);
+        assert!(!settle_mode_transitions(&state, &mut entities, &ledger).unwrap());
     }
 }

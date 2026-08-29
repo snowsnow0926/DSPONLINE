@@ -513,6 +513,21 @@ impl StationRouteLedger {
             .unwrap_or(0.0)
     }
 
+    /// Exact post-route membership used by station-mode settlement. Every
+    /// parsed route inserts its demand, owner, peer and resolvable waypoint
+    /// before scope-specific filtering, so membership remains true even for a
+    /// zero-progress route or an opaque/MOD scope.
+    pub(crate) fn references_station(&self, station_index: usize) -> bool {
+        self.active_progress.contains_key(&station_index)
+    }
+
+    /// A default/placeholder ledger cannot prove absence. Callers that use a
+    /// negative membership result must fall back unless the ledger came from a
+    /// complete sparse/dense build.
+    pub(crate) fn has_route_reference_index(&self) -> bool {
+        self.scan.is_some()
+    }
+
     pub(crate) fn active_local_progress(&self, station_index: usize) -> f64 {
         self.active_local_progress
             .get(&station_index)

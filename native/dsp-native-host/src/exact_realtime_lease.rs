@@ -2096,6 +2096,7 @@ fn validate_exact_realtime_lease(lease: &ExactRealtimeLease) -> anyhow::Result<(
         (Some(finished), Some(revision)) => {
             if purpose != ExactRealtimeLeasePurpose::PlayerAuthority
                 || lease.macro_session.is_some()
+                || revision < lease.checkpoint.revision
                 || revision > lease.acknowledged.revision
             {
                 bail!("native player-authority finished macro cleanup identity conflicts")
@@ -2985,6 +2986,42 @@ mod tests {
             serde_json::from_value::<ExactRealtimeLease>(value).unwrap(),
             lease
         );
+    }
+
+    #[test]
+    fn finished_macro_cleanup_revision_stays_inside_the_authority_chain() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let checkpoint = publish_checkpoint(&mut store, 7);
+        store
+            .prepare_player_authority_lease(
+                "core-1".to_owned(),
+                RUN_ID.to_owned(),
+                FINGERPRINT.to_owned(),
+                checkpoint,
+                proof(7),
+                10_000,
+            )
+            .unwrap();
+        store
+            .activate_player_authority_lease("core-1", RUN_ID, FINGERPRINT)
+            .unwrap();
+        let mut lease = store.require_exact_realtime_lease().unwrap();
+        lease.last_finished_macro_session_id = Some("macro-session-finished".to_owned());
+
+        // The entry checkpoint and current ACK are both revision 7. Neither a
+        // pre-entry nor a future cleanup marker may be accepted from disk.
+        lease.last_finished_macro_revision = Some(6);
+        assert!(validate_exact_realtime_lease(&lease).is_err());
+        lease.last_finished_macro_revision = Some(8);
+        assert!(validate_exact_realtime_lease(&lease).is_err());
+        lease.last_finished_macro_revision = Some(7);
+        validate_exact_realtime_lease(&lease).unwrap();
+
+        // ID-only historical bytes remain readable but deliberately carry no
+        // revision-bound startup cleanup intent.
+        lease.last_finished_macro_revision = None;
+        validate_exact_realtime_lease(&lease).unwrap();
     }
 
     #[test]

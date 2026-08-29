@@ -16369,7 +16369,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     >
       <RuntimeRenderProfile id="header">
       <HeaderControls
-        game={game}
+        game={nativePlayerAuthorityOwnsRuntime ? null : game}
+        runStatus={factoryRunStatusReadModel}
         constructionCenterUnavailable={nativePlayerAuthorityOwnsRuntime}
         activeWorkspace={headerActiveWorkspace}
         onReturnToMenu={returnToMenuSafely}

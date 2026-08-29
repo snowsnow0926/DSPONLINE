@@ -1,0 +1,22 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+import { describe, expect, it } from "vitest";
+
+describe("native header controls App integration", () => {
+  const app = readFileSync(resolve("src/App.tsx"), "utf8");
+  const panels = readFileSync(resolve("src/components/GamePanels.tsx"), "utf8");
+
+  it("removes the full renderer state from the header while Rust owns the factory", () => {
+    expect(app).toMatch(/<HeaderControls[\s\S]*?game=\{nativePlayerAuthorityOwnsRuntime \? null : game\}[\s\S]*?runStatus=\{factoryRunStatusReadModel\}/);
+    expect(panels).toMatch(/game: GameState \| null;[\s\S]*?runStatus: FactoryRunStatusReadModel/);
+    expect(panels).toMatch(/game \? <>[\s\S]*?data-native-header-status="factory-run-status-v1"/);
+  });
+
+  it("hides uncovered legacy destinations and disables pause in native mode", () => {
+    expect(panels).toMatch(/!nativeAuthority \? <button[^>]*header-settings-command/);
+    expect(panels).toMatch(/!nativeAuthority \? <button[^>]*activeWorkspace === "galaxy"/);
+    expect(panels).toMatch(/!nativeAuthority \? <button[^>]*activeWorkspace === "campaign"/);
+    expect(panels).toMatch(/disabled=\{nativeAuthority\}[\s\S]*?Windows 原生暂停命令尚未接入/);
+  });
+});

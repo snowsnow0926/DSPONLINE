@@ -74,6 +74,7 @@ import { getPlanetDisplayName, getPlanetIndustrialProfile, getPlanetOrbitalYield
 import type {
   FactoryInspectorSummaryReadModel,
   FactoryMultiSelectionSummaryReadModel,
+  FactoryRunStatusReadModel,
   PlanetNavigationReadModel,
   SelectedBeltReadModel,
   SelectedEntityReadModel,
@@ -2814,6 +2815,7 @@ export function BuildingPlacementCursor({ buildingId, count, x, y }: {
 
 export function HeaderControls({
   game,
+  runStatus,
   onReturnToMenu,
   onPauseToggle,
   onOpenResources,
@@ -2833,7 +2835,8 @@ export function HeaderControls({
   showMobileUiSwitch = false,
   onMobileUiSwitch,
 }: {
-  game: GameState;
+  game: GameState | null;
+  runStatus: FactoryRunStatusReadModel;
   onReturnToMenu: () => void;
   onPauseToggle: () => void;
   onOpenResources: () => void;
@@ -2854,7 +2857,10 @@ export function HeaderControls({
   onMobileUiSwitch?: () => void;
 }) {
   const [overflowOpen, setOverflowOpen] = useState(false);
-  const powerTone = game.metrics.powerFactor >= 0.999 ? "positive" : game.metrics.powerFactor > 0 ? "warning" : "negative";
+  const nativeAuthority = game === null;
+  const powerTone = game
+    ? game.metrics.powerFactor >= 0.999 ? "positive" : game.metrics.powerFactor > 0 ? "warning" : "negative"
+    : "warning";
   const runOverflowAction = (action: () => void) => {
     setOverflowOpen(false);
     action();
@@ -2866,19 +2872,26 @@ export function HeaderControls({
         <div><strong>DSP极简网络</strong></div>
       </div>
       <div className="header-metrics">
-        <div><Zap size={16} /><span>电网负载</span><strong><PowerValue valueKw={game.metrics.demandKw} /><small>/ <PowerValue valueKw={game.metrics.generationKw} /></small></strong></div>
-        <div className={`metric-tone metric-tone--${powerTone}`}><Power size={16} /><span>供电效率</span><strong>{Math.round(game.metrics.powerFactor * 100)}<small>%</small></strong></div>
-        <div><Factory size={16} /><span>生产通量</span><strong>{game.metrics.totalItemsPerMinute.toFixed(1)}<small>/min</small></strong></div>
-        <div><FlaskConical size={16} /><span>蓝 / 红 / 黄 / 紫 / 绿 / 白矩阵</span><strong><QuantityValue value={game.totalProduced.electromagnetic_matrix ?? 0} /><small> / <QuantityValue value={game.totalProduced.energy_matrix ?? 0} /> / <QuantityValue value={game.totalProduced.structure_matrix ?? 0} /> / <QuantityValue value={game.totalProduced.information_matrix ?? 0} /> / <QuantityValue value={game.totalProduced.gravity_matrix ?? 0} /> / <QuantityValue value={game.totalProduced.universe_matrix ?? 0} /></small></strong></div>
+        {game ? <>
+          <div><Zap size={16} /><span>电网负载</span><strong><PowerValue valueKw={game.metrics.demandKw} /><small>/ <PowerValue valueKw={game.metrics.generationKw} /></small></strong></div>
+          <div className={`metric-tone metric-tone--${powerTone}`}><Power size={16} /><span>供电效率</span><strong>{Math.round(game.metrics.powerFactor * 100)}<small>%</small></strong></div>
+          <div><Factory size={16} /><span>生产通量</span><strong>{game.metrics.totalItemsPerMinute.toFixed(1)}<small>/min</small></strong></div>
+          <div><FlaskConical size={16} /><span>蓝 / 红 / 黄 / 紫 / 绿 / 白矩阵</span><strong><QuantityValue value={game.totalProduced.electromagnetic_matrix ?? 0} /><small> / <QuantityValue value={game.totalProduced.energy_matrix ?? 0} /> / <QuantityValue value={game.totalProduced.structure_matrix ?? 0} /> / <QuantityValue value={game.totalProduced.information_matrix ?? 0} /> / <QuantityValue value={game.totalProduced.gravity_matrix ?? 0} /> / <QuantityValue value={game.totalProduced.universe_matrix ?? 0} /></small></strong></div>
+        </> : <>
+          <div data-native-header-status="factory-run-status-v1"><Power size={16} /><span>Rust 权威</span><strong>{runStatus.paused ? "已暂停" : "运行中"}</strong></div>
+          <div><Factory size={16} /><span>当前行星</span><strong>{runStatus.activePlanetId}</strong></div>
+          <div><BarChart3 size={16} /><span>状态版本</span><strong>revision {runStatus.revision ?? "-"}</strong></div>
+          <div className="metric-tone metric-tone--warning"><Zap size={16} /><span>功率与矩阵</span><strong>等待原生投影</strong></div>
+        </>}
       </div>
       <div className="header-actions">
         <button className="header-action--overflowable" type="button" onClick={onReturnToMenu} title="保存并返回主菜单" aria-label="保存并返回主菜单"><House size={17} /></button>
-        <button className={`header-action--overflowable header-settings-command${activeWorkspace === "settings" ? " active" : ""}`} type="button" onClick={onOpenSettings} title={activeWorkspace === "settings" ? "设置已打开，再次点击返回工厂" : "打开设置"} aria-label={activeWorkspace === "settings" ? "设置已打开，再次点击返回工厂" : "打开设置"} aria-pressed={activeWorkspace === "settings"}>
+        {!nativeAuthority ? <button className={`header-action--overflowable header-settings-command${activeWorkspace === "settings" ? " active" : ""}`} type="button" onClick={onOpenSettings} title={activeWorkspace === "settings" ? "设置已打开，再次点击返回工厂" : "打开设置"} aria-label={activeWorkspace === "settings" ? "设置已打开，再次点击返回工厂" : "打开设置"} aria-pressed={activeWorkspace === "settings"}>
           <Settings size={17} />
-        </button>
-        <button className={`header-action--overflowable${activeWorkspace === "galaxy" ? " active" : ""}`} type="button" onClick={onOpenGalaxy} title={activeWorkspace === "galaxy" ? "银河网络已打开，再次点击返回工厂" : "打开银河网络"} aria-label={activeWorkspace === "galaxy" ? "银河网络已打开，再次点击返回工厂" : "打开银河网络"} aria-pressed={activeWorkspace === "galaxy"}><Globe2 size={17} /></button>
-        <button className={`header-action--overflowable${activeWorkspace === "campaign" ? " active" : ""}`} type="button" onClick={onOpenCampaign} title={activeWorkspace === "campaign" ? "主线任务已打开，再次点击返回工厂" : "打开主线任务中心"} aria-label={activeWorkspace === "campaign" ? "主线任务已打开，再次点击返回工厂" : "打开主线任务中心"} aria-pressed={activeWorkspace === "campaign"}><Flag size={17} /></button>
-        {game.entities.some((entity) => entity.buildingId === "construction_center") ? <button className={`header-action--overflowable${activeWorkspace === "construction-center" ? " active" : ""}`} type="button" onClick={onOpenConstructionCenter} disabled={constructionCenterUnavailable} title={constructionCenterUnavailable ? "Windows 原生模式尚未接入建筑制造中心" : activeWorkspace === "construction-center" ? "建筑制造中心已打开，再次点击返回工厂" : "打开建筑制造中心"} aria-label={constructionCenterUnavailable ? "建筑制造中心在 Windows 原生模式中暂不可用" : activeWorkspace === "construction-center" ? "建筑制造中心已打开，再次点击返回工厂" : "打开建筑制造中心"} aria-pressed={activeWorkspace === "construction-center"}><Factory size={17} /></button> : null}
+        </button> : null}
+        {!nativeAuthority ? <button className={`header-action--overflowable${activeWorkspace === "galaxy" ? " active" : ""}`} type="button" onClick={onOpenGalaxy} title={activeWorkspace === "galaxy" ? "银河网络已打开，再次点击返回工厂" : "打开银河网络"} aria-label={activeWorkspace === "galaxy" ? "银河网络已打开，再次点击返回工厂" : "打开银河网络"} aria-pressed={activeWorkspace === "galaxy"}><Globe2 size={17} /></button> : null}
+        {!nativeAuthority ? <button className={`header-action--overflowable${activeWorkspace === "campaign" ? " active" : ""}`} type="button" onClick={onOpenCampaign} title={activeWorkspace === "campaign" ? "主线任务已打开，再次点击返回工厂" : "打开主线任务中心"} aria-label={activeWorkspace === "campaign" ? "主线任务已打开，再次点击返回工厂" : "打开主线任务中心"} aria-pressed={activeWorkspace === "campaign"}><Flag size={17} /></button> : null}
+        {game?.entities.some((entity) => entity.buildingId === "construction_center") ? <button className={`header-action--overflowable${activeWorkspace === "construction-center" ? " active" : ""}`} type="button" onClick={onOpenConstructionCenter} disabled={constructionCenterUnavailable} title={constructionCenterUnavailable ? "Windows 原生模式尚未接入建筑制造中心" : activeWorkspace === "construction-center" ? "建筑制造中心已打开，再次点击返回工厂" : "打开建筑制造中心"} aria-label={constructionCenterUnavailable ? "建筑制造中心在 Windows 原生模式中暂不可用" : activeWorkspace === "construction-center" ? "建筑制造中心已打开，再次点击返回工厂" : "打开建筑制造中心"} aria-pressed={activeWorkspace === "construction-center"}><Factory size={17} /></button> : null}
         <button className={`header-action--overflowable${activeWorkspace === "star-map" ? " active" : ""}`} type="button" onClick={onOpenStarMap} title={activeWorkspace === "star-map" ? "星图已打开，再次点击返回工厂" : "打开星图"} aria-label={activeWorkspace === "star-map" ? "星图已打开，再次点击返回工厂" : "打开星图"} aria-pressed={activeWorkspace === "star-map"}><Telescope size={17} /></button>
         <button className={`header-action--overflowable${activeWorkspace === "statistics" ? " active" : ""}`} type="button" onClick={onOpenStatistics} title={activeWorkspace === "statistics" ? "生产统计已打开，再次点击返回工厂" : "打开生产统计"} aria-label={activeWorkspace === "statistics" ? "生产统计已打开，再次点击返回工厂" : "打开生产统计"} aria-pressed={activeWorkspace === "statistics"}><BarChart3 size={17} /></button>
         <button className={`header-action--overflowable${activeWorkspace === "recipes" ? " active" : ""}`} type="button" onClick={onOpenRecipes} title={activeWorkspace === "recipes" ? "生产资料库已打开，再次点击返回工厂" : "打开生产资料库"} aria-label={activeWorkspace === "recipes" ? "生产资料库已打开，再次点击返回工厂" : "打开生产资料库"} aria-pressed={activeWorkspace === "recipes"}><BookOpen size={17} /></button>
@@ -2888,10 +2901,10 @@ export function HeaderControls({
         <button className="header-overflow-command" type="button" onClick={() => setOverflowOpen((open) => !open)} aria-expanded={overflowOpen} title="更多工作区" aria-label="更多工作区"><MoreHorizontal size={18} /></button>
         {overflowOpen ? <div className="header-overflow-menu" role="menu">
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onReturnToMenu)}><House size={15} />主菜单</button>
-          <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenSettings)}><Settings size={15} />设置</button>
-          <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenGalaxy)}><Globe2 size={15} />银河网络</button>
-          <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenCampaign)}><Flag size={15} />主线任务</button>
-          {game.entities.some((entity) => entity.buildingId === "construction_center") ? <button type="button" role="menuitem" disabled={constructionCenterUnavailable} onClick={() => runOverflowAction(onOpenConstructionCenter)}><Factory size={15} />建筑制造中心{constructionCenterUnavailable ? "（原生模式暂不可用）" : ""}</button> : null}
+          {!nativeAuthority ? <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenSettings)}><Settings size={15} />设置</button> : null}
+          {!nativeAuthority ? <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenGalaxy)}><Globe2 size={15} />银河网络</button> : null}
+          {!nativeAuthority ? <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenCampaign)}><Flag size={15} />主线任务</button> : null}
+          {game?.entities.some((entity) => entity.buildingId === "construction_center") ? <button type="button" role="menuitem" disabled={constructionCenterUnavailable} onClick={() => runOverflowAction(onOpenConstructionCenter)}><Factory size={15} />建筑制造中心{constructionCenterUnavailable ? "（原生模式暂不可用）" : ""}</button> : null}
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenStarMap)}><Telescope size={15} />星图</button>
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenStatistics)}><BarChart3 size={15} />生产统计</button>
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenRecipes)}><BookOpen size={15} />生产资料库</button>
@@ -2899,10 +2912,10 @@ export function HeaderControls({
           <button type="button" role="menuitem" aria-pressed={activeWorkspace === "dyson"} onClick={() => runOverflowAction(onOpenDysonPlanner)}><Orbit size={15} />戴森球规划</button>
           {showMobileUiSwitch && onMobileUiSwitch ? <button type="button" role="menuitem" onClick={() => runOverflowAction(onMobileUiSwitch)}><Sparkles size={15} />新版手机界面</button> : null}
         </div> : null}
-        <button className={`mobile-toggle${game.cargo ? " mobile-toggle--cargo" : ""}`} type="button" onClick={onOpenResources} title={game.cargo ? "物资已拿起，打开物资托盘放下" : "物资托盘"} aria-label={game.cargo ? "物资已拿起，打开物资托盘" : "打开物资托盘"}><PackageOpen size={17} /></button>
+        {game ? <button className={`mobile-toggle${game.cargo ? " mobile-toggle--cargo" : ""}`} type="button" onClick={onOpenResources} title={game.cargo ? "物资已拿起，打开物资托盘放下" : "物资托盘"} aria-label={game.cargo ? "物资已拿起，打开物资托盘" : "打开物资托盘"}><PackageOpen size={17} /></button> : null}
         <button className="mobile-toggle" type="button" onClick={onOpenInspector} title="检查器" aria-label="打开检查器"><PanelRight size={17} /></button>
-        <button type="button" onClick={onPauseToggle} title={`${game.paused ? "继续模拟" : "暂停模拟"}（Space）`} aria-label={game.paused ? "继续模拟" : "暂停模拟"} aria-keyshortcuts="Space">
-          {game.paused ? <Play size={17} /> : <Pause size={17} />}
+        <button type="button" onClick={onPauseToggle} disabled={nativeAuthority} title={nativeAuthority ? "Windows 原生暂停命令尚未接入" : `${runStatus.paused ? "继续模拟" : "暂停模拟"}（Space）`} aria-label={nativeAuthority ? "Windows 原生暂停命令暂不可用" : runStatus.paused ? "继续模拟" : "暂停模拟"} aria-keyshortcuts="Space">
+          {runStatus.paused ? <Play size={17} /> : <Pause size={17} />}
         </button>
       </div>
     </header>

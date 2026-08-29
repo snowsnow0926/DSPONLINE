@@ -51,6 +51,7 @@ import { ItemReferenceActionsProvider } from "./components/ItemReference";
 import { NativeResourceRail } from "./components/NativeResourceRail";
 import { NativeConstructionDock } from "./components/NativeConstructionDock";
 import { NativeFactoryInspectorPanel } from "./components/NativeFactoryInspectorPanel";
+import { createNativeRendererShellState } from "./game/nativeRendererShell";
 import { OnboardingCoach } from "./components/OnboardingCoach";
 import { SpeedrunStatusPanel } from "./components/SpeedrunStatusPanel";
 import { MobileGameShell } from "./components/mobile/MobileGameShell";
@@ -1569,7 +1570,7 @@ function minerPlacementHint(buildingId: BuildingId): string {
   return "采矿机需要部署在固体资源矿脉上";
 }
 
-export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }: { initialLoad: LoadedGame; onReturnToMenu: () => void; onOpenReleaseNotes: () => void }) {
+export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, onReleaseNativeRendererState }: { initialLoad: LoadedGame; onReturnToMenu: () => void; onOpenReleaseNotes: () => void; onReleaseNativeRendererState: (releasedLoad: LoadedGame) => void }) {
   usePlayerPresence();
   const { isEnglish } = useAppLocale();
   const gameDialog = useGameDialog();
@@ -1579,7 +1580,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [productionRefreshPreference, setProductionRefreshPreference] = useProductionRefreshPreference();
   const [endgameExtremeMode, setEndgameExtremeMode] = useState(readEndgameExtremeMode);
   const [canvasPerformanceFeatures, setCanvasPerformanceFeatures] = useState(readCanvasPerformanceFeatures);
-  const [loaded] = useState(initialLoad);
+  const [loaded, setLoaded] = useState(initialLoad);
   const [game, setGame] = useState(loaded.state);
   const [largeSaveAutosaveProtection, setLargeSaveAutosaveProtection] = useState(readLargeSaveAutosaveThrottlePreference);
   const [allowEditsDuringSave, setAllowEditsDuringSave] = useState(readAllowEditsDuringSavePreference);
@@ -7347,6 +7348,81 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice("纯挂机已停止，Worker 权威进度已校验保存");
     pureIdleStoppingRef.current = false;
   }, [initializePureIdleMacroClient, issueLegacyJavaScriptAuthorityLease, legacyJavaScriptAuthorityLeaseIsCurrent, persistPureIdleTerminalEnvelope, persistPureIdleTransition, persistPureIdleWorkerFailure, publishPureIdleTerminalGameBehindOverlay, requestAuthoritativeSimulationCheckpoint, setPureIdleRecoveryContinueState, settlePureIdleBackgroundRecovery]);
+
+  const nativeRendererReleasedIdentityRef = useRef<string | null>(null);
+  const releaseNativeRendererState = useCallback((sessionId: string, runId: string) => {
+    const identity = `${sessionId}\0${runId}`;
+    if (nativeRendererReleasedIdentityRef.current === identity) return;
+
+    // The active frame exists only after main/Rust owns the durable writer and
+    // the handoff has proven that renderer/Worker work is drained. From this
+    // point the old GameState is neither a fallback nor a valid save source.
+    const shell = createNativeRendererShellState(gameRef.current);
+    const releasedLoad: LoadedGame = {
+      state: shell,
+      offlineSeconds: 0,
+      offlineReport: null,
+    };
+    const shellCanvas = createCanvasRenderSnapshot(shell);
+    nativeRendererReleasedIdentityRef.current = identity;
+
+    if (pendingRuntimeGamePublicationTimerRef.current !== null) {
+      window.clearTimeout(pendingRuntimeGamePublicationTimerRef.current);
+      pendingRuntimeGamePublicationTimerRef.current = null;
+    }
+    pendingRuntimeGamePublicationRef.current = null;
+    runtimeGamePublicationInFlightRef.current = null;
+    deferredProjectionGameRef.current = null;
+    controlledReturnCommitRef.current = null;
+    pendingCanvasSnapshotPublicationRef.current = null;
+    canvasSnapshotPublicationInFlightRef.current = null;
+    pendingCanvasProjectionRef.current = null;
+    batchConnectionDraftRef.current = null;
+    batchConnectionDraftBaseRef.current = null;
+    viewportOnlyGameStateRef.current = null;
+    durableRecoveryPendingViewRef.current = null;
+    latestAuthoritativeCheckpointTransferRef.current = null;
+    simulationReplayJournalRef.current = [];
+    simulationRecoveryRef.current = null;
+    lastSimulationResultRef.current = null;
+    gameHistoryRef.current.clear();
+    lineFindTraceCacheRef.current = null;
+    canvasTopologyRef.current = null;
+    edgeRouteCacheRef.current = null;
+    edgeRenderCacheRef.current.clear();
+    edgeRenderArrayRef.current = [];
+    canvasPositionNodesRef.current = [];
+    connectionHandleSpatialIndexRef.current = null;
+    alignmentSpatialIndexRef.current = null;
+    dragAlignmentSpatialIndexRef.current = null;
+
+    durableRecoveryBaseStateRef.current = shell;
+    latestAuthoritativeCheckpointRef.current = shell;
+    simulationProjectionIndexRef.current = createSimulationProjectionStateIndex(shell);
+    gameRef.current = shell;
+    committedRuntimeGameRef.current = shell;
+    latestCanvasGameRef.current = shell;
+    lastCanvasPublishedGameRef.current = shell;
+    canvasRenderSnapshotRef.current = shellCanvas;
+
+    setAutoLayoutUndo(null);
+    setBlueprintPlacementId(null);
+    setStatisticsHistory(null);
+    setOfflineReport(null);
+    setImportPreview(null);
+    setPendingImportState(null);
+    setPendingImportRaw(null);
+    setCanvasRenderSnapshot(shellCanvas);
+    setLoaded(releasedLoad);
+    setGame(shell);
+    onReleaseNativeRendererState(releasedLoad);
+  }, [onReleaseNativeRendererState]);
+
+  useEffect(() => {
+    const active = nativePlayerAuthorityActiveFrame;
+    if (!active?.sessionId || !active.runId) return;
+    releaseNativeRendererState(active.sessionId, active.runId);
+  }, [nativePlayerAuthorityActiveFrame, releaseNativeRendererState]);
 
   useEffect(() => {
     if (!desktopBridge?.onNativePlayerAuthorityHandoffRequest) return;

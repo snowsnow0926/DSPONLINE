@@ -3551,11 +3551,14 @@ fn string_array_contains(value: Option<&Value>, needle: &str) -> anyhow::Result<
     Ok(false)
 }
 
-fn validate_active_planet_command(
-    state: &CoreState,
-    command: &SimulationCommandPatch,
-) -> anyhow::Result<()> {
-    if command.top_level_changes.is_empty()
+/// The renderer cannot safely materialize either planet tray while Rust owns
+/// the player state. Encode travel as one deliberately non-generic patch:
+/// `activePlanetId/<observed-current> = <target>`. The current ID binds the
+/// intent to the same projected revision, while the target remains the only
+/// requested mutation. `apply_command()` expands this marker from authoritative
+/// state as well, so the exact durable WAL payload replays after a cold start.
+fn require_active_planet_intent(command: &SimulationCommandPatch) -> anyhow::Result<(&str, &str)> {
+    if command.top_level_changes.len() != 1
         || !command.changed_entities.is_empty()
         || !command.added_entities.is_empty()
         || !command.removed_entity_ids.is_empty()
@@ -3563,17 +3566,51 @@ fn validate_active_planet_command(
         || !command.added_belts.is_empty()
         || !command.removed_belt_ids.is_empty()
     {
-        bail!("native player-authority active planet command shape is invalid")
+        bail!("native player-authority active planet intent shape is invalid")
     }
-    let target_id = require_exact_set_patch(&command.top_level_changes, &["activePlanetId"])?
-        .as_str()
-        .filter(|planet_id| !planet_id.is_empty() && planet_id.len() <= MAX_PLAYER_ORBIT_ID_BYTES)
+    let change = &command.top_level_changes[0];
+    let [
+        PathSegment::Key(root),
+        PathSegment::Key(observed_current_id),
+    ] = change.path.as_slice()
+    else {
+        bail!("native player-authority active planet intent path is invalid")
+    };
+    if root != "activePlanetId" || change.operation != "set" {
+        bail!("native player-authority active planet intent path is invalid")
+    }
+    let target_id = change
+        .value
+        .as_ref()
+        .and_then(Value::as_str)
+        .filter(|planet_id| {
+            !planet_id.is_empty()
+                && planet_id.len() <= MAX_PLAYER_ORBIT_ID_BYTES
+                && !planet_id.contains('\0')
+        })
         .ok_or_else(|| anyhow!("native player-authority active planet target is invalid"))?;
+    if observed_current_id.is_empty()
+        || observed_current_id.len() > MAX_PLAYER_ORBIT_ID_BYTES
+        || observed_current_id.contains('\0')
+    {
+        bail!("native player-authority observed active planet is invalid")
+    }
+    Ok((observed_current_id, target_id))
+}
+
+fn validate_active_planet_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    let (observed_current_id, target_id) = require_active_planet_intent(command)?;
     let base = state.base_value();
     let current_id = base
         .get("activePlanetId")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("native player-authority current active planet is invalid"))?;
+    if observed_current_id != current_id {
+        bail!("native player-authority observed active planet is stale")
+    }
     if target_id == current_id {
         bail!("native player-authority active planet target is unchanged")
     }
@@ -3623,16 +3660,58 @@ fn validate_active_planet_command(
         bail!("native player-authority active planet is not colonized")
     }
 
-    let tray = base
-        .get("tray")
+    base.get("tray")
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow!("native player-authority active planet tray is invalid"))?;
     let planet_trays = base
         .get("planetTrays")
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow!("native player-authority planet tray directory is invalid"))?;
-    let target_tray = planet_trays
+    if planet_trays
         .get(target_id)
+        .is_some_and(|value| !value.is_object())
+    {
+        bail!("native player-authority target planet tray is invalid")
+    }
+    if !base.get("metrics").is_some_and(Value::is_object) {
+        bail!("native player-authority current planet metrics are missing")
+    }
+    if !base
+        .get("planetMetrics")
+        .and_then(Value::as_object)
+        .and_then(|metrics| metrics.get(target_id))
+        .is_some_and(Value::is_object)
+    {
+        bail!("native player-authority target planet metrics are missing")
+    }
+    Ok(())
+}
+
+fn command_contains_active_planet_intent(command: &SimulationCommandPatch) -> bool {
+    command.top_level_changes.iter().any(|change| {
+        matches!(
+            change.path.as_slice(),
+            [PathSegment::Key(root), PathSegment::Key(_)] if root == "activePlanetId"
+        )
+    })
+}
+
+fn expand_active_planet_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<SimulationCommandPatch> {
+    validate_active_planet_command(state, command)?;
+    let (current_id, target_id) = require_active_planet_intent(command)?;
+    let base = state.base_value();
+    let current_tray = base
+        .get("tray")
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| anyhow!("native player-authority active planet tray is invalid"))?;
+    let target_tray = base
+        .get("planetTrays")
+        .and_then(Value::as_object)
+        .and_then(|trays| trays.get(target_id))
         .map(|value| {
             value
                 .as_object()
@@ -3648,43 +3727,41 @@ fn validate_active_planet_command(
         .and_then(Value::as_object)
         .cloned()
         .ok_or_else(|| anyhow!("native player-authority target planet metrics are missing"))?;
-
-    let mut current_subset = Map::new();
-    for key in ["activePlanetId", "tray", "planetTrays", "metrics"] {
-        current_subset.insert(
-            key.to_owned(),
-            base.get(key)
-                .cloned()
-                .ok_or_else(|| anyhow!("native player-authority planet switch field is missing"))?,
-        );
-    }
-    let mut expected_subset = current_subset.clone();
-    expected_subset.insert("activePlanetId".to_owned(), Value::from(target_id));
-    expected_subset.insert("tray".to_owned(), Value::Object(target_tray));
-    expected_subset.insert("metrics".to_owned(), Value::Object(target_metrics));
-    expected_subset
-        .get_mut("planetTrays")
-        .and_then(Value::as_object_mut)
-        .expect("planetTrays object was proved above")
-        .insert(current_id.to_owned(), Value::Object(tray.clone()));
-
-    let mut candidate = Value::Object(current_subset);
-    for change in &command.top_level_changes {
-        let Some(PathSegment::Key(root)) = change.path.first() else {
-            bail!("native player-authority planet switch path is invalid")
-        };
-        if !matches!(
-            root.as_str(),
-            "activePlanetId" | "tray" | "planetTrays" | "metrics"
-        ) {
-            bail!("native player-authority planet switch changes an unrelated field")
-        }
-        apply_value_patch(&mut candidate, change)?;
-    }
-    if candidate != Value::Object(expected_subset) {
-        bail!("native player-authority planet switch snapshot is not canonical")
-    }
-    Ok(())
+    Ok(SimulationCommandPatch {
+        protocol_version: command.protocol_version,
+        base_revision: command.base_revision,
+        top_level_changes: vec![
+            ValuePatch {
+                path: vec![PathSegment::Key("activePlanetId".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(target_id)),
+            },
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("planetTrays".to_owned()),
+                    PathSegment::Key(current_id.to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::Object(current_tray)),
+            },
+            ValuePatch {
+                path: vec![PathSegment::Key("tray".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::Object(target_tray)),
+            },
+            ValuePatch {
+                path: vec![PathSegment::Key("metrics".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::Object(target_metrics)),
+            },
+        ],
+        changed_entities: Vec::new(),
+        added_entities: Vec::new(),
+        removed_entity_ids: Vec::new(),
+        changed_belts: Vec::new(),
+        added_belts: Vec::new(),
+        removed_belt_ids: Vec::new(),
+    })
 }
 
 struct ValidatedTimeWarpState<'a> {
@@ -5761,15 +5838,28 @@ impl CoreState {
             bail!("native command change count is invalid")
         }
 
+        // Player-authority travel is durably stored as a minimal semantic
+        // intent. Expand it inside the generic command engine as well as the
+        // live player path, otherwise cold WAL replay would update only the ID
+        // and leave the two planet inventories and visible metrics mismatched.
+        let expanded_active_planet_intent;
+        let applied_command = if command_contains_active_planet_intent(command) {
+            expanded_active_planet_intent = expand_active_planet_intent(self, command)?;
+            &expanded_active_planet_intent
+        } else {
+            command
+        };
+
         // Apply to a cloned transactional state. A malformed late patch can
         // never leave the authoritative candidate partially edited.
-        let rebuild_production_history = command_requires_production_history_rebuild(command);
+        let rebuild_production_history =
+            command_requires_production_history_rebuild(applied_command);
         let mut next = self.clone();
         // `next` is already disposable on failure. Move its base map into the
         // patch value instead of retaining two complete copies during every
         // pause/edit command.
         let mut base = Value::Object(next.take_base_for_command());
-        for change in &command.top_level_changes {
+        for change in &applied_command.top_level_changes {
             apply_value_patch(&mut base, change)?;
         }
         let base = match base {
@@ -5778,7 +5868,7 @@ impl CoreState {
         };
         next.install_base_from_command(base, rebuild_production_history);
 
-        for record in &command.changed_entities {
+        for record in &applied_command.changed_entities {
             let index = *next
                 .entity_index
                 .get(&record.id)
@@ -5787,12 +5877,12 @@ impl CoreState {
             apply_record_changes(&mut value, &record.changes)?;
             next.replace_entity_raw(index, Arc::<str>::from(serde_json::to_string(&value)?));
         }
-        if !command.removed_entity_ids.is_empty() {
-            let removed = command
+        if !applied_command.removed_entity_ids.is_empty() {
+            let removed = applied_command
                 .removed_entity_ids
                 .iter()
                 .collect::<std::collections::HashSet<_>>();
-            if removed.len() != command.removed_entity_ids.len() {
+            if removed.len() != applied_command.removed_entity_ids.len() {
                 bail!("native command repeats an entity removal")
             }
             if removed.iter().any(|id| !next.entity_index.contains_key(id)) {
@@ -5810,8 +5900,8 @@ impl CoreState {
                     .unwrap_or(false)
             });
         }
-        if !command.added_entities.is_empty() {
-            let mut additions = command.added_entities.clone();
+        if !applied_command.added_entities.is_empty() {
+            let mut additions = applied_command.added_entities.clone();
             additions.sort_by_key(|entry| entry.index);
             for addition in additions {
                 if addition.index > next.entity_raw_mut_topology().len()
@@ -5834,7 +5924,7 @@ impl CoreState {
             }
         }
 
-        for record in &command.changed_belts {
+        for record in &applied_command.changed_belts {
             let index = *next
                 .belt_index
                 .get(&record.id)
@@ -5843,12 +5933,12 @@ impl CoreState {
             apply_record_changes(&mut value, &record.changes)?;
             next.replace_belt_raw(index, Arc::<str>::from(serde_json::to_string(&value)?));
         }
-        if !command.removed_belt_ids.is_empty() {
-            let removed = command
+        if !applied_command.removed_belt_ids.is_empty() {
+            let removed = applied_command
                 .removed_belt_ids
                 .iter()
                 .collect::<std::collections::HashSet<_>>();
-            if removed.len() != command.removed_belt_ids.len() {
+            if removed.len() != applied_command.removed_belt_ids.len() {
                 bail!("native command repeats a belt removal")
             }
             if removed.iter().any(|id| !next.belt_index.contains_key(id)) {
@@ -5866,8 +5956,8 @@ impl CoreState {
                     .unwrap_or(false)
             });
         }
-        if !command.added_belts.is_empty() {
-            let mut additions = command.added_belts.clone();
+        if !applied_command.added_belts.is_empty() {
+            let mut additions = applied_command.added_belts.clone();
             additions.sort_by_key(|entry| entry.index);
             for addition in additions {
                 if addition.index > next.belt_raw_mut_topology().len()
@@ -5890,13 +5980,13 @@ impl CoreState {
             }
         }
         next.revision += 1;
-        let only_pause_changed = command.changed_entities.is_empty()
-            && command.added_entities.is_empty()
-            && command.removed_entity_ids.is_empty()
-            && command.changed_belts.is_empty()
-            && command.added_belts.is_empty()
-            && command.removed_belt_ids.is_empty()
-            && command.top_level_changes.iter().all(|change| {
+        let only_pause_changed = applied_command.changed_entities.is_empty()
+            && applied_command.added_entities.is_empty()
+            && applied_command.removed_entity_ids.is_empty()
+            && applied_command.changed_belts.is_empty()
+            && applied_command.added_belts.is_empty()
+            && applied_command.removed_belt_ids.is_empty()
+            && applied_command.top_level_changes.iter().all(|change| {
                 matches!(
                     change.path.first(),
                     Some(PathSegment::Key(key)) if key == "paused"
@@ -5905,12 +5995,12 @@ impl CoreState {
         // Top-level commands never change record IDs or topology. Rebuilding
         // all 80k entity and 155k belt indexes for a pause/resume toggle made
         // a tiny Windows command pay the full save-open parsing cost.
-        let records_changed = !command.changed_entities.is_empty()
-            || !command.added_entities.is_empty()
-            || !command.removed_entity_ids.is_empty()
-            || !command.changed_belts.is_empty()
-            || !command.added_belts.is_empty()
-            || !command.removed_belt_ids.is_empty();
+        let records_changed = !applied_command.changed_entities.is_empty()
+            || !applied_command.added_entities.is_empty()
+            || !applied_command.removed_entity_ids.is_empty()
+            || !applied_command.changed_belts.is_empty()
+            || !applied_command.added_belts.is_empty()
+            || !applied_command.removed_belt_ids.is_empty();
         if records_changed {
             next.rebuild_indexes()?;
         }
@@ -7552,76 +7642,25 @@ mod tests {
         )
     }
 
-    fn active_planet_to_ashen_command(revision: u64) -> SimulationCommandPatch {
+    fn active_planet_intent(
+        revision: u64,
+        observed_current_id: &str,
+        target_id: &str,
+    ) -> SimulationCommandPatch {
         let mut command = empty_player_command(revision);
-        command.top_level_changes = vec![
-            ValuePatch {
-                path: vec![PathSegment::Key("activePlanetId".to_owned())],
-                operation: "set".to_owned(),
-                value: Some(Value::from("ashen")),
-            },
-            ValuePatch {
-                path: vec![
-                    PathSegment::Key("planetTrays".to_owned()),
-                    PathSegment::Key("home".to_owned()),
-                ],
-                operation: "set".to_owned(),
-                value: Some(serde_json::json!({
-                    "logistics_drone": 0,
-                    "logistics_vessel": 0,
-                    "space_warper": 10
-                })),
-            },
-            ValuePatch {
-                path: vec![
-                    PathSegment::Key("tray".to_owned()),
-                    PathSegment::Key("logistics_drone".to_owned()),
-                ],
-                operation: "delete".to_owned(),
-                value: None,
-            },
-            ValuePatch {
-                path: vec![
-                    PathSegment::Key("tray".to_owned()),
-                    PathSegment::Key("logistics_vessel".to_owned()),
-                ],
-                operation: "delete".to_owned(),
-                value: None,
-            },
-            ValuePatch {
-                path: vec![
-                    PathSegment::Key("tray".to_owned()),
-                    PathSegment::Key("space_warper".to_owned()),
-                ],
-                operation: "set".to_owned(),
-                value: Some(Value::from(7)),
-            },
-            ValuePatch {
-                path: vec![
-                    PathSegment::Key("metrics".to_owned()),
-                    PathSegment::Key("generationKw".to_owned()),
-                ],
-                operation: "set".to_owned(),
-                value: Some(Value::from(3)),
-            },
-            ValuePatch {
-                path: vec![
-                    PathSegment::Key("metrics".to_owned()),
-                    PathSegment::Key("demandKw".to_owned()),
-                ],
-                operation: "set".to_owned(),
-                value: Some(Value::from(4)),
-            },
-            ValuePatch {
-                path: vec![
-                    PathSegment::Key("metrics".to_owned()),
-                    PathSegment::Key("powerFactor".to_owned()),
-                ],
-                operation: "set".to_owned(),
-                value: Some(Value::from(0.75)),
-            },
-        ];
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("activePlanetId".to_owned()),
+                PathSegment::Key(observed_current_id.to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(Value::from(target_id)),
+        }];
         command
+    }
+
+    fn active_planet_to_ashen_command(revision: u64) -> SimulationCommandPatch {
+        active_planet_intent(revision, "home", "ashen")
     }
 
     fn time_warp_changes_command(
@@ -9775,9 +9814,17 @@ mod tests {
     }
 
     #[test]
-    fn player_authority_switches_planet_with_exact_tray_and_metrics_snapshot() {
+    fn player_authority_switches_planet_from_minimal_intent_without_renderer_inventory() {
         let mut state = player_command_state();
         let command = active_planet_to_ashen_command(state.revision);
+        assert_eq!(command.top_level_changes.len(), 1);
+        assert!(path_matches(
+            &command.top_level_changes[0].path,
+            &["activePlanetId", "home"]
+        ));
+        let durable = serde_json::to_string(&command).unwrap();
+        assert!(!durable.contains("space_warper"));
+        assert!(!durable.contains("generationKw"));
         let applied = state.apply_player_authority_command(&command).unwrap();
         assert_eq!(applied.previous_revision, 9);
         assert_eq!(applied.revision, 10);
@@ -9806,14 +9853,37 @@ mod tests {
     }
 
     #[test]
-    fn player_authority_planet_switch_fails_closed_on_forged_or_locked_state() {
-        let mut forged_tray = active_planet_to_ashen_command(9);
-        let tray_patch = forged_tray
-            .top_level_changes
-            .iter_mut()
-            .find(|change| path_matches(&change.path, &["tray", "space_warper"]))
+    fn player_authority_planet_switch_replays_the_same_semantic_wal_deterministically() {
+        let command = active_planet_to_ashen_command(9);
+        let durable = serde_json::to_string(&command).unwrap();
+        let replayed_command: SimulationCommandPatch = serde_json::from_str(&durable).unwrap();
+
+        let mut live = player_command_state();
+        let live_receipt = live.apply_player_authority_command(&command).unwrap();
+        let live_hash = live.canonical_sha256().unwrap();
+
+        let mut replayed = player_command_state();
+        replayed
+            .replay_operation(
+                9,
+                10,
+                Some(&replayed_command),
+                0.0,
+                0.0,
+                crate::CoreAdvanceMode::Exact,
+            )
             .unwrap();
-        tray_patch.value = Some(Value::from(8));
+        assert_eq!(replayed.canonical_sha256().unwrap(), live_hash);
+        assert_eq!(replayed.base_value(), live.base_value());
+        assert_eq!(live_receipt.changed_entity_ids, Vec::<String>::new());
+        assert_eq!(live_receipt.changed_belt_ids, Vec::<String>::new());
+        assert!(live_receipt.topology_dirty);
+    }
+
+    #[test]
+    fn player_authority_planet_switch_fails_closed_on_stale_forged_or_locked_intent() {
+        let mut stale_current = active_planet_to_ashen_command(9);
+        stale_current.top_level_changes[0].path[1] = PathSegment::Key("other-current".to_owned());
         let mut extra = active_planet_to_ashen_command(9);
         extra.top_level_changes.push(ValuePatch {
             path: vec![PathSegment::Key("paused".to_owned())],
@@ -9823,18 +9893,49 @@ mod tests {
         let mut delete_target = active_planet_to_ashen_command(9);
         delete_target.top_level_changes[0].operation = "delete".to_owned();
         delete_target.top_level_changes[0].value = None;
+        let mut changed_entity = active_planet_to_ashen_command(9);
+        changed_entity.changed_entities.push(RecordPatch {
+            id: "smelter-a".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("progress".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(1)),
+            }],
+        });
+        let mut stale_revision = active_planet_to_ashen_command(8);
+        stale_revision.top_level_changes[0].value = Some(Value::from("ashen"));
+        let nul_target = active_planet_intent(9, "home", "ashen\0forged");
+        let nul_current = active_planet_intent(9, "home\0forged", "ashen");
         let commands = [
-            top_level_leaf_command(9, &["activePlanetId"], Value::from("home")),
-            top_level_leaf_command(9, &["activePlanetId"], Value::from("missing")),
-            top_level_leaf_command(9, &["activePlanetId"], Value::from("giant")),
-            forged_tray,
-            extra,
-            delete_target,
+            (
+                active_planet_intent(9, "home", "home"),
+                "target is unchanged",
+            ),
+            (
+                active_planet_intent(9, "home", "missing"),
+                "not in the catalog",
+            ),
+            (active_planet_intent(9, "home", "giant"), "is not colonized"),
+            (
+                top_level_leaf_command(9, &["activePlanetId"], Value::from("ashen")),
+                "intent path is invalid",
+            ),
+            (stale_current, "observed active planet is stale"),
+            (extra, "intent shape is invalid"),
+            (delete_target, "intent path is invalid"),
+            (changed_entity, "intent shape is invalid"),
+            (stale_revision, "base revision is not current"),
+            (nul_target, "target is invalid"),
+            (nul_current, "observed active planet is invalid"),
         ];
-        for command in commands {
+        for (command, expected_error) in commands {
             let mut state = player_command_state();
             let before = state.canonical_sha256().unwrap();
-            assert!(state.apply_player_authority_command(&command).is_err());
+            let error = state.apply_player_authority_command(&command).unwrap_err();
+            assert!(
+                format!("{error:#}").contains(expected_error),
+                "unexpected rejection for {expected_error}: {error:#}"
+            );
             assert_eq!(state.revision, 9);
             assert_eq!(state.canonical_sha256().unwrap(), before);
         }

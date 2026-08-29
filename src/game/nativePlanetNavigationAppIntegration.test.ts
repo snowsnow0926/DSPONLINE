@@ -100,7 +100,8 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/key=\{`regions:\$\{factoryGestureSurfaceKey\}`\}/);
     expect(app).toMatch(/key=\{`minimap:\$\{factoryGestureSurfaceKey\}`\}/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <CanvasSelectionTools/);
-    expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <SelectionToolbar/);
+    expect(app).not.toMatch(/!nativePlayerAuthorityOwnsRuntime \? <SelectionToolbar/);
+    expect(app).toMatch(/<SelectionToolbar[\s\S]*?unsafeActionsEnabled=\{!nativePlayerAuthorityOwnsRuntime\}/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <BlueprintWorkspace/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <RuntimeRenderProfile id="onboarding">/);
     expect(app).toMatch(/<StableInspectorPanel[\s\S]*?readOnly=\{nativePlayerAuthorityOwnsRuntime\}/);

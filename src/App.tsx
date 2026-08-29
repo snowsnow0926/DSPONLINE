@@ -468,6 +468,7 @@ import {
   selectNativeDysonWorkspaceFrame,
 } from "./game/nativeDysonWorkspaceStore";
 import {
+  createNativeProjectedInteractionLockCommand,
   createNativeProjectedPlanetRoleCommand,
   createNativeProjectedStationLimitsCommand,
   createNativeProjectedStationPriorityCommand,
@@ -15133,6 +15134,32 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       selectedEntityIds,
     ],
   );
+  const commitNativeSelectionInteractionLock = useCallback((targetInteractionLocked: boolean): boolean => {
+    if (factoryInteractionRows.source !== "native-authoritative") {
+      setNotice("原生选区投影尚未完成当前 revision 校验；本次操作未应用");
+      return false;
+    }
+    const selectionProjection = factoryInteractionRows.multiSelectionSummaryReadModel;
+    if (factorySelectionToolbarReadModel.source !== "native-core" ||
+      selectionProjection.source !== "native-core" ||
+      factorySelectionToolbarReadModel.revision === null ||
+      factoryInteractionRows.revision !== factorySelectionToolbarReadModel.revision ||
+      selectionProjection.revision !== factorySelectionToolbarReadModel.revision ||
+      selectionProjection.activePlanetId !== factorySelectionToolbarReadModel.activePlanetId ||
+      selectionProjection.requestedEntityCount !== factorySelectionToolbarReadModel.selectedCount) {
+      setNotice("原生选区投影尚未完成当前 revision 校验；本次操作未应用");
+      return false;
+    }
+    return commitNativeProjectedCommand(
+      factorySelectionToolbarReadModel.revision,
+      (baseRevision) => createNativeProjectedInteractionLockCommand({
+        baseRevision,
+        entityRows: selectionProjection.entityRows,
+        targetInteractionLocked,
+      }),
+      () => setNotice(targetInteractionLocked ? "已由 Windows 原生权威锁定所选建筑" : "已由 Windows 原生权威解锁所选建筑"),
+    );
+  }, [commitNativeProjectedCommand, factoryInteractionRows, factorySelectionToolbarReadModel]);
   const selectedBelts = factoryInteractionRows.selectedBelts;
   const factorySelectionReadGame = useMemo(() => factoryInteractionRows.source === "native-authoritative"
     ? {
@@ -16757,8 +16784,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             }}
             onClose={() => setSelectedRegionId(null)}
           /> : null}
-          {!nativePlayerAuthorityOwnsRuntime ? <SelectionToolbar
+          <SelectionToolbar
             model={factorySelectionToolbarReadModel}
+            unsafeActionsEnabled={!nativePlayerAuthorityOwnsRuntime}
             eligibleCount={blueprintEligibleIds.length}
             canUpgrade={canUpgradeEntities(game, selectedEntityIds)}
             canUpgradeBelts={selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}
@@ -16777,11 +16805,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             }}
             onBatchIncrease={(amount) => void batchIncreaseSelected(amount)}
             onLock={() => {
+              if (nativePlayerAuthorityOwnsRuntime) {
+                commitNativeSelectionInteractionLock(true);
+                return;
+              }
               const ids = selectedEntities.filter((entity) => !entity.interactionLocked).map((entity) => entity.id);
               commitGame((current) => setEntitiesInteractionLocked(current, ids, true));
               setNotice(`已锁定 ${ids.length} 个建筑`);
             }}
             onUnlock={() => {
+              if (nativePlayerAuthorityOwnsRuntime) {
+                commitNativeSelectionInteractionLock(false);
+                return;
+              }
               const ids = selectedEntities.filter((entity) => entity.interactionLocked).map((entity) => entity.id);
               commitGame((current) => setEntitiesInteractionLocked(current, ids, false));
               setNotice(`已解锁 ${ids.length} 个建筑`);
@@ -16795,7 +16831,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               setSelectedBeltIds([]);
               setSelectedBeltId(null);
             }}
-          /> : null}
+          />
           {highlightedTaskId ? (
             <div className="task-path-indicator nodrag nopan">
               <span>任务生产路径</span>

@@ -119,15 +119,42 @@ describe("factory thin-view App consumption", () => {
     expect(app).toMatch(/requestedEntityIds:\s*factoryThinViewSelectedEntityIds/);
     expect(app).toMatch(/requestedBeltIds:\s*factoryThinViewSelectedBeltIds/);
     expect(app).toMatch(/<SelectionToolbar\s+model=\{factorySelectionToolbarReadModel\}/);
+    expect(app).toMatch(/<SelectionToolbar[\s\S]*?unsafeActionsEnabled=\{!nativePlayerAuthorityOwnsRuntime\}/);
     expect(app).not.toMatch(/<SelectionToolbar\s+selectedCount=/);
     expect(toolbar).toMatch(/FactorySelectionToolbarReadModel/);
     expect(toolbar).toMatch(/data-factory-read-model-source=\{model\.source\}/);
     expect(toolbar).not.toMatch(/GameState|FactoryEntity|game\.entities/);
 
-    // Read-only native coverage does not grant command authority.
+    // Legacy-only controls retain their exact Web inputs but are inert while
+    // native authority owns runtime state.
     expect(app).toMatch(/canUpgrade=\{canUpgradeEntities\(game, selectedEntityIds\)\}/);
     expect(app).toMatch(/eligibleCount=\{blueprintEligibleIds\.length\}/);
-    expect(app).toMatch(/onLock=\{\(\) => \{[\s\S]*?commitGame\(\(current\) => setEntitiesInteractionLocked/);
+  });
+
+  it("submits native selection locks only from the exact bounded selection projection", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+    const helperStart = app.indexOf("const commitNativeSelectionInteractionLock");
+    const helper = app.slice(helperStart, app.indexOf("const selectedBelts =", helperStart));
+    const toolbarStart = app.indexOf("<SelectionToolbar");
+    const toolbar = app.slice(toolbarStart, app.indexOf("/>", toolbarStart) + 2);
+    const lockStart = toolbar.indexOf("onLock={() => {");
+    const lock = toolbar.slice(lockStart, toolbar.indexOf("onUnlock=", lockStart));
+    const unlock = toolbar.slice(toolbar.indexOf("onUnlock={() => {"), toolbar.indexOf("onRemove="));
+
+    expect(helperStart).toBeGreaterThanOrEqual(0);
+    expect(helper).toMatch(/factoryInteractionRows\.source !== "native-authoritative"/);
+    expect(helper).toMatch(/factorySelectionToolbarReadModel\.revision === null/);
+    expect(helper).toMatch(/factoryInteractionRows\.revision !== factorySelectionToolbarReadModel\.revision/);
+    expect(helper).toMatch(/selectionProjection\.revision !== factorySelectionToolbarReadModel\.revision/);
+    expect(helper).toMatch(/selectionProjection\.requestedEntityCount !== factorySelectionToolbarReadModel\.selectedCount/);
+    expect(helper).toMatch(/commitNativeProjectedCommand\(\s*factorySelectionToolbarReadModel\.revision/);
+    expect(helper).toMatch(/createNativeProjectedInteractionLockCommand\(\{[\s\S]*?baseRevision,[\s\S]*?entityRows: selectionProjection\.entityRows,[\s\S]*?targetInteractionLocked/);
+    expect(helper).not.toMatch(/selectedEntities|gameRef\.current|game\.entities|setEntitiesInteractionLocked/);
+
+    expect(lock).toMatch(/if \(nativePlayerAuthorityOwnsRuntime\)[\s\S]*?commitNativeSelectionInteractionLock\(true\);[\s\S]*?return;/);
+    expect(lock).toMatch(/const ids = selectedEntities\.filter\(\(entity\) => !entity\.interactionLocked\)[\s\S]*?commitGame\(\(current\) => setEntitiesInteractionLocked\(current, ids, true\)\)/);
+    expect(unlock).toMatch(/if \(nativePlayerAuthorityOwnsRuntime\)[\s\S]*?commitNativeSelectionInteractionLock\(false\);[\s\S]*?return;/);
+    expect(unlock).toMatch(/const ids = selectedEntities\.filter\(\(entity\) => entity\.interactionLocked\)[\s\S]*?commitGame\(\(current\) => setEntitiesInteractionLocked\(current, ids, false\)\)/);
   });
 
   it("feeds compact mobile inspector live fields without moving command authority", () => {

@@ -17,12 +17,27 @@ describe("native Dyson workspace App integration", () => {
     expect(app).toMatch(/nativeDysonWorkspaceStore\.refresh\([\s\S]*?nativeDysonWorkspaceSource,[\s\S]*?nativeDysonWorkspaceIdentity/);
   });
 
-  it("renders the read-only native component before the legacy mutable workspace", () => {
+  it("renders the native component before the legacy workspace and wires only projected launch commands", () => {
     expect(app).toMatch(/dysonPlannerOpen \? nativePlayerAuthorityBoundFrame \? \([\s\S]*?<NativeDysonPlannerWorkspace[\s\S]*?frame=\{nativeDysonWorkspaceFrame\}[\s\S]*?status=\{nativeDysonWorkspaceReadStatus\}/);
     const nativeTag = app.match(/<NativeDysonPlannerWorkspace[\s\S]*?\/>/)?.[0] ?? "";
     expect(nativeTag).toContain("onSelectSystem={setNativeDysonSelectedSystemId}");
-    expect(nativeTag).not.toMatch(/\bgame=|onAddLayer=|onLaunchModeChange=|commitGame/);
+    expect(nativeTag).toContain("onLaunchModeChange={onNativeDysonLaunchModeChange}");
+    expect(nativeTag).toContain("onLaunchThrottleChange={onNativeDysonLaunchThrottleChange}");
+    expect(nativeTag).toContain("onLaunchEnabledChange={onNativeDysonLaunchEnabledChange}");
+    expect(nativeTag).not.toMatch(/\bgame=|onAddLayer=|commitGame/);
     expect(app).toMatch(/nativePlayerAuthorityBoundFrame \? \([\s\S]*?<NativeDysonPlannerWorkspace[\s\S]*?: authorityWorkspaceSync === "dyson"[\s\S]*?<DysonPlannerWorkspace/);
+  });
+
+  it("commits launch changes against the exact projected revision without mutating the renderer save", () => {
+    const handlers = app.slice(
+      app.indexOf("const onNativeDysonLaunchModeChange"),
+      app.indexOf("const onFuelChange"),
+    );
+    expect(handlers).toMatch(/commitNativeProjectedCommand\(frame\.revision/);
+    expect(handlers).toMatch(/createNativeProjectedDysonLaunchModeCommand\(frame, mode\)/);
+    expect(handlers).toMatch(/createNativeProjectedDysonLaunchThrottleCommand\(frame, throttle\)/);
+    expect(handlers).toMatch(/createNativeProjectedDysonLaunchEnabledCommand\(frame, enabled\)/);
+    expect(handlers).not.toMatch(/commitGame|gameRef|publishRuntimeGame/);
   });
 
   it("never derives the native selected system from a stale renderer save", () => {

@@ -539,6 +539,11 @@ import {
   selectNativePlanetViewportReadModel,
 } from "./game/nativePlanetViewportReadModel";
 import {
+  createNativeProjectedDysonLaunchEnabledCommand,
+  createNativeProjectedDysonLaunchModeCommand,
+  createNativeProjectedDysonLaunchThrottleCommand,
+} from "./game/nativeProjectedDysonCommands";
+import {
   RECIPE_WORKSPACE_PROJECTION_LIMITS,
   createWebRecipeWorkspaceReadModel,
   recipeWorkspaceSelectorsEqual,
@@ -11299,6 +11304,48 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     else mobileNavigation.openWorkspace("recipes");
   }, [closeAllWorkspaces, mobileNavigation.openWorkspace, mobileNavigation.replaceModalWithWorkspace, nextMobileShell, recipeFocusReadModel?.itemId]);
 
+  const onNativeDysonLaunchModeChange = useCallback((mode: DysonLaunchMode) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次发射模式未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonLaunchModeCommand(frame, mode)
+        : null,
+      () => setNotice(`已由 Rust 将戴森发射模式设为${mode === "balanced" ? "均衡" : mode === "swarm" ? "太阳帆" : "火箭"}`),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonLaunchThrottleChange = useCallback((throttle: DysonLaunchThrottle) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次发射节流未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonLaunchThrottleCommand(frame, throttle)
+        : null,
+      () => setNotice(`已由 Rust 将戴森发射节流设为 ${Math.round(throttle * 100)}%`),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonLaunchEnabledChange = useCallback((enabled: boolean) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次发射开关未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonLaunchEnabledCommand(frame, enabled)
+        : null,
+      () => setNotice(enabled ? "已由 Rust 恢复戴森发射" : "已由 Rust 暂停戴森发射"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
   const onFuelChange = useCallback((entityId: string, itemId: ItemId) => {
     commitGame((current) => setFuelItem(current, entityId, itemId));
   }, [commitGame]);
@@ -18916,7 +18963,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             frame={nativeDysonWorkspaceFrame}
             status={nativeDysonWorkspaceReadStatus}
             selectedSystemId={nativeDysonEffectiveSystemId}
+            pending={nativePlayerAuthorityCommandPending}
             onSelectSystem={setNativeDysonSelectedSystemId}
+            onLaunchModeChange={onNativeDysonLaunchModeChange}
+            onLaunchThrottleChange={onNativeDysonLaunchThrottleChange}
+            onLaunchEnabledChange={onNativeDysonLaunchEnabledChange}
             onClose={() => {
               setNativeDysonSelectedSystemId(null);
               if (nextMobileShell) mobileNavigation.requestBack();

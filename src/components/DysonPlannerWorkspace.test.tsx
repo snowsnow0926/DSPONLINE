@@ -250,7 +250,11 @@ function renderNative(overrides: Partial<Parameters<typeof NativeDysonPlannerWor
     frame: FRAME,
     status: "ready",
     selectedSystemId: "helios",
+    pending: false,
     onSelectSystem: vi.fn(),
+    onLaunchModeChange: vi.fn(),
+    onLaunchThrottleChange: vi.fn(),
+    onLaunchEnabledChange: vi.fn(),
     onClose: vi.fn(),
     ...overrides,
   };
@@ -277,10 +281,19 @@ describe("NativeDysonPlannerWorkspace", () => {
     expect(host.querySelector("[data-native-dyson-shell-id='shell:alpha-beta']")).not.toBeNull();
   });
 
-  it("allows only system selection and close while every gameplay operation stays disabled", () => {
+  it("routes launch controls through native callbacks while structural edits stay disabled", () => {
     const onSelectSystem = vi.fn();
+    const onLaunchModeChange = vi.fn();
+    const onLaunchThrottleChange = vi.fn();
+    const onLaunchEnabledChange = vi.fn();
     const onClose = vi.fn();
-    renderNative({ onSelectSystem, onClose });
+    renderNative({
+      onSelectSystem,
+      onLaunchModeChange,
+      onLaunchThrottleChange,
+      onLaunchEnabledChange,
+      onClose,
+    });
 
     const modButton = Array.from(host.querySelectorAll<HTMLButtonElement>("[data-native-dyson-system-id]"))
       .find((button) => button.dataset.nativeDysonSystemId === "mod:system/Ω🚀")!;
@@ -290,12 +303,35 @@ describe("NativeDysonPlannerWorkspace", () => {
     act(() => modButton.click());
     expect(onSelectSystem).toHaveBeenCalledWith("mod:system/Ω🚀");
 
-    const gameplayControls = host.querySelectorAll<HTMLButtonElement | HTMLInputElement>("[data-native-dyson-action]");
-    expect(gameplayControls.length).toBeGreaterThan(10);
-    for (const control of gameplayControls) expect(control.disabled).toBe(true);
+    const launchEnabled = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='launch-enabled']")!;
+    const launchSphere = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='launch-mode-sphere']")!;
+    const launchQuarter = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='launch-throttle-0.25']")!;
+    expect(launchEnabled.disabled).toBe(false);
+    expect(launchSphere.disabled).toBe(false);
+    expect(launchQuarter.disabled).toBe(false);
+    act(() => launchEnabled.click());
+    act(() => launchSphere.click());
+    act(() => launchQuarter.click());
+    expect(onLaunchEnabledChange).toHaveBeenCalledWith(false);
+    expect(onLaunchModeChange).toHaveBeenCalledWith("sphere");
+    expect(onLaunchThrottleChange).toHaveBeenCalledWith(0.25);
+
+    const structuralControls = host.querySelectorAll<HTMLButtonElement | HTMLInputElement>(
+      "[data-native-dyson-action]:not([data-native-dyson-action^='launch-'])",
+    );
+    expect(structuralControls.length).toBeGreaterThan(5);
+    for (const control of structuralControls) expect(control.disabled).toBe(true);
 
     act(() => host.querySelector<HTMLButtonElement>("[aria-label='关闭戴森球规划']")!.click());
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("locks native launch controls while a command is pending", () => {
+    renderNative({ pending: true });
+
+    const launchControls = host.querySelectorAll<HTMLButtonElement>("[data-native-dyson-action^='launch-']");
+    expect(launchControls.length).toBeGreaterThan(3);
+    for (const control of launchControls) expect(control.disabled).toBe(true);
   });
 
   it("does not render the retained old frame while a new revision is loading", () => {
@@ -328,6 +364,6 @@ describe("NativeDysonPlannerWorkspace", () => {
     const nativeBoundary = source.slice(source.indexOf("export type NativeDysonWorkspaceReadStatus"));
 
     expect(nativeBoundary).not.toMatch(/\bGameState\b|\bgame\.|getDysonEngineeringSnapshot|isTechnologyCompleted|createDysonLayerTemplate|getDysonPlanTotals|getStarSystemProfile|getStarSystem\(/);
-    expect(nativeBoundary).not.toMatch(/onAddLayer|onSave|onLaunchModeChange|onOrbitChange|onAddSwarmOrbit/);
+    expect(nativeBoundary).not.toMatch(/onAddLayer|onSave|onOrbitChange|onAddSwarmOrbit|commitGame|publishRuntimeGame/);
   });
 });

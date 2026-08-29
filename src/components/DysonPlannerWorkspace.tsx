@@ -407,20 +407,28 @@ function NativeDysonUnavailable({
 
 /**
  * Player-authority Dyson surface. This component intentionally consumes only
- * the complete, same-revision native projection and exposes no legacy mutation
- * callbacks. System changes only request another read projection.
+ * the complete, same-revision native projection. Its launch callbacks are
+ * revision-bound Rust commands; structural editing stays unavailable here.
  */
 export function NativeDysonPlannerWorkspace({
   frame,
   status,
   selectedSystemId,
+  pending,
   onSelectSystem,
+  onLaunchModeChange,
+  onLaunchThrottleChange,
+  onLaunchEnabledChange,
   onClose,
 }: {
   frame: NativeDysonWorkspaceFrame | null;
   status: NativeDysonWorkspaceReadStatus;
   selectedSystemId: string | null;
+  pending: boolean;
   onSelectSystem: (systemId: string) => void;
+  onLaunchModeChange: (mode: DysonLaunchMode) => void;
+  onLaunchThrottleChange: (throttle: DysonLaunchThrottle) => void;
+  onLaunchEnabledChange: (enabled: boolean) => void;
   onClose: () => void;
 }) {
   if (!nativeDysonFrameIsComplete(frame, status, selectedSystemId)) {
@@ -663,12 +671,12 @@ export function NativeDysonPlannerWorkspace({
             </section>
           ) : null}
           <section className="dyson-launch-console" aria-label="原生戴森发射调度">
-            <header><span><RadioTower size={14} />发射调度 · 只读</span><button type="button" className={selectedSystem.engineering.launchEnabled ? "active" : ""} disabled data-native-dyson-action="launch-enabled" aria-label="原生戴森发射开关（只读）">{selectedSystem.engineering.launchEnabled ? <Pause size={13} /> : <Play size={13} />}</button></header>
-            <div className="dyson-launch-mode" role="group" aria-label="原生发射优先级（只读）">
-              {(["balanced", "swarm", "sphere"] as const).map((mode) => <button type="button" className={selectedSystem.engineering.launchMode === mode ? "active" : ""} disabled data-native-dyson-action={`launch-mode-${mode}`} key={mode}>{launchModeLabel[mode]}</button>)}
+            <header><span><RadioTower size={14} />发射调度 · Rust 权威</span><button type="button" className={selectedSystem.engineering.launchEnabled ? "active" : ""} disabled={pending} onClick={() => onLaunchEnabledChange(!selectedSystem.engineering.launchEnabled)} data-native-dyson-action="launch-enabled" aria-label="切换原生戴森发射开关">{selectedSystem.engineering.launchEnabled ? <Pause size={13} /> : <Play size={13} />}</button></header>
+            <div className="dyson-launch-mode" role="group" aria-label="原生发射优先级">
+              {(["balanced", "swarm", "sphere"] as const).map((mode) => <button type="button" className={selectedSystem.engineering.launchMode === mode ? "active" : ""} disabled={pending || selectedSystem.engineering.launchMode === mode} onClick={() => onLaunchModeChange(mode)} data-native-dyson-action={`launch-mode-${mode}`} key={mode}>{launchModeLabel[mode]}</button>)}
             </div>
-            <div className="dyson-launch-throttle" role="group" aria-label="原生发射节流（只读）">
-              {([0.25, 0.5, 0.75, 1] as const).map((throttle) => <button type="button" className={selectedSystem.engineering.launchThrottle === throttle ? "active" : ""} disabled data-native-dyson-action={`launch-throttle-${throttle}`} key={throttle}>{Math.round(throttle * 100)}%</button>)}
+            <div className="dyson-launch-throttle" role="group" aria-label="原生发射节流">
+              {([0.25, 0.5, 0.75, 1] as const).map((throttle) => <button type="button" className={selectedSystem.engineering.launchThrottle === throttle ? "active" : ""} disabled={pending || selectedSystem.engineering.launchThrottle === throttle} onClick={() => onLaunchThrottleChange(throttle)} data-native-dyson-action={`launch-throttle-${throttle}`} key={throttle}>{Math.round(throttle * 100)}%</button>)}
             </div>
             <dl className="metric-ledger dyson-engineering-ledger">
               <div><dt>太阳帆队列</dt><dd><QuantityValue value={selectedSystem.engineering.queuedSails} /> · {selectedSystem.engineering.sailLaunchesPerMinute.toLocaleString("zh-CN")}/min</dd></div>
@@ -695,7 +703,7 @@ export function NativeDysonPlannerWorkspace({
             <span><Sun size={12} />在轨帆 <QuantityValue value={projection.global.swarm.sailsInOrbit} /></span>
             <span><Zap size={12} />累计能耗 {projection.global.launch.energySpentMj.toLocaleString("zh-CN")} MJ</span>
           </div>
-          <div className="dyson-launch-cost"><span><LockKeyhole size={12} />原生权威只读边界</span><strong>{starTypeName} · {selectedSystem.starProfile.luminosity.toFixed(2)} L☉ · {selectedSystem.systemId}</strong></div>
+          <div className="dyson-launch-cost"><span><LockKeyhole size={12} />原生权威边界</span><strong>{starTypeName} · {selectedSystem.starProfile.luminosity.toFixed(2)} L☉ · {selectedSystem.systemId}</strong></div>
         </aside>
       </div>
     </WorkspaceFrame>

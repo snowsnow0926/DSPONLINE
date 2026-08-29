@@ -246,6 +246,33 @@ describe("native core transferable projections", () => {
     })).resolves.toEqual(value);
   });
 
+  it("verifies and decodes a read-only construction inventory page over the bounded transfer", async () => {
+    const value = {
+      schemaVersion: 1,
+      projectionType: "construction-inventory-v1",
+      source: "native-core",
+      revision: 14,
+      stateVersion: 47,
+      registryFingerprint: "builtin:test",
+      readOnly: true,
+      request: {
+        expectedRevision: 14,
+        expectedRegistryFingerprint: "builtin:test",
+        cursor: 0,
+        limit: 32,
+      },
+      totalCount: 1,
+      rows: [{ buildingId: "MOD/building-beta", amount: 3 }],
+      nextCursor: null,
+      truncated: false,
+      limits: { rows: 256, projectionBytes: 1_048_576 },
+    };
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor(value), {
+      sessionId: "core-1",
+      projectionType: "construction-inventory-v1",
+    })).resolves.toEqual(value);
+  });
+
   it.each(["star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "dyson-workspace-v1"] as const)(
     "verifies and decodes the bounded %s block",
     async (projectionType) => {

@@ -384,6 +384,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.ok(hello.capabilities.includes("native-core-viewport-projection-v2"));
   assert.ok(hello.capabilities.includes("native-core-factory-read-model-v1"));
   assert.ok(hello.capabilities.includes("native-core-factory-inventory-v1"));
+  assert.ok(hello.capabilities.includes("native-core-construction-inventory-v1"));
   assert.ok(hello.capabilities.includes("native-core-statistics-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-star-map-overview-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-stellar-industry-projection-v1"));
@@ -401,6 +402,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     tray: { iron_ore: 3 },
     planetTrayItemLimits: { home: 1_000 },
     portableFleet: { logistics_drone: 2, logistics_vessel: 1 },
+    construction: { arc_smelter: 2, "MOD/building-beta": 4, "未知/MOD-建筑": 5 },
     productionHistory: [
       { elapsedSeconds: 1, sampleDurationSeconds: 1, productionPerMinute: { iron_ore: 60 }, consumptionPerMinute: {}, inventory: { iron_ore: 3 }, planetProductionPerMinute: { home: { iron_ore: 60 } }, planetConsumptionPerMinute: { home: {} }, generationKw: 0, demandKw: 0 },
       { elapsedSeconds: 2, sampleDurationSeconds: 1, productionPerMinute: { iron_ore: 120 }, consumptionPerMinute: {}, inventory: { iron_ore: 5 }, planetProductionPerMinute: { home: { iron_ore: 120 } }, planetConsumptionPerMinute: { home: {} }, generationKw: 0, demandKw: 0 },
@@ -474,6 +476,10 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
       items: [{ id: "iron_ore", kind: "solid" }],
       buildings: [{ id: "mining_machine", kind: "miner", speed: 1, inputCapacity: 0, outputCapacity: 50, powerDemandKw: 1, powerGenerationKw: 0 }],
       recipes: [],
+      constructions: [
+        { id: "arc_smelter", outputAmount: 1, costs: [{ itemId: "iron_ore", amount: 2 }] },
+        { id: "MOD/building-beta", outputAmount: 1, costs: [{ itemId: "iron_ore", amount: 3 }] },
+      ],
       belts: [{ tier: 1, speed: 6 }],
     },
   };
@@ -607,6 +613,48 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     cursor: 0,
     limit: 32,
   }), /inventory projection request is invalid/);
+  const constructionInventory = await client.request({
+    operation: "coreConstructionInventoryProjection",
+    sessionId: opened.sessionId,
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    cursor: 0,
+    limit: 32,
+  });
+  assert.doesNotThrow(() => normalizeRendererNativeResult(
+    "coreConstructionInventoryProjection",
+    constructionInventory,
+    {
+      sessionId: opened.sessionId,
+      expectedRevision: 2,
+      expectedRegistryFingerprint: "builtin:test",
+      cursor: 0,
+      limit: 32,
+    },
+  ));
+  assert.equal(constructionInventory.projectionType, "construction-inventory-v1");
+  assert.equal(constructionInventory.readOnly, true);
+  assert.deepEqual(constructionInventory.rows, [
+    { buildingId: "MOD/building-beta", amount: 4 },
+    { buildingId: "arc_smelter", amount: 2 },
+    { buildingId: "未知/MOD-建筑", amount: 5 },
+  ]);
+  await assert.rejects(client.request({
+    operation: "coreConstructionInventoryProjection",
+    sessionId: opened.sessionId,
+    expectedRevision: 1,
+    expectedRegistryFingerprint: "builtin:test",
+    cursor: 0,
+    limit: 32,
+  }), /construction inventory projection request is invalid/);
+  await assert.rejects(client.request({
+    operation: "coreConstructionInventoryProjection",
+    sessionId: opened.sessionId,
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "other",
+    cursor: 0,
+    limit: 32,
+  }), /construction inventory projection request is invalid/);
   const statisticsProjection = await client.request({
     operation: "coreStatisticsProjection",
     sessionId: opened.sessionId,

@@ -519,6 +519,44 @@ function factoryInventoryProjection(overrides = {}) {
   };
 }
 
+function constructionInventoryContext(overrides = {}) {
+  return {
+    sessionId: "session-construction-inventory",
+    expectedRevision: 7,
+    expectedRegistryFingerprint: "builtin:test",
+    cursor: 0,
+    limit: 2,
+    ...overrides,
+  };
+}
+
+function constructionInventoryProjection(overrides = {}) {
+  return {
+    schemaVersion: 1,
+    projectionType: "construction-inventory-v1",
+    source: "native-core",
+    revision: 7,
+    stateVersion: 47,
+    registryFingerprint: "builtin:test",
+    readOnly: true,
+    request: {
+      expectedRevision: 7,
+      expectedRegistryFingerprint: "builtin:test",
+      cursor: 0,
+      limit: 2,
+    },
+    totalCount: 3,
+    rows: [
+      { buildingId: "MOD/building-beta", amount: 4 },
+      { buildingId: "arc_smelter", amount: 8 },
+    ],
+    nextCursor: 2,
+    truncated: true,
+    limits: { rows: 256, projectionBytes: 1_048_576 },
+    ...overrides,
+  };
+}
+
 function statisticsContext(overrides = {}) {
   return {
     minElapsedSeconds: 0,
@@ -1276,6 +1314,75 @@ test("factory inventory pages are exact, revision-bound, sorted, and conservatio
   ).cargo, null);
 });
 
+test("construction inventory pages fail closed on identity, shape, order, and unsafe counts", () => {
+  const projection = constructionInventoryProjection();
+  const context = constructionInventoryContext();
+  const normalized = normalizeRendererNativeResult(
+    "coreConstructionInventoryProjection",
+    projection,
+    context,
+  );
+  assert.deepEqual(normalized, projection);
+  assert.notEqual(normalized, projection);
+  assert.notEqual(normalized.rows[0], projection.rows[0]);
+  const opaqueModProjection = constructionInventoryProjection({
+    totalCount: 1,
+    rows: [{ buildingId: "未知/MOD-建筑", amount: 5 }],
+    nextCursor: null,
+    truncated: false,
+  });
+  assert.equal(normalizeRendererNativeResult(
+    "coreConstructionInventoryProjection",
+    opaqueModProjection,
+    context,
+  ).rows[0].buildingId, "未知/MOD-建筑");
+
+  const rejects = (value, requestContext = context) => assert.throws(
+    () => normalizeRendererNativeResult(
+      "coreConstructionInventoryProjection",
+      value,
+      requestContext,
+    ),
+    (error) => error?.code === "NATIVE_PROTOCOL_INVALID",
+  );
+  rejects(projection, constructionInventoryContext({ sessionId: "bad session" }));
+  rejects(projection, constructionInventoryContext({ expectedRevision: 8 }));
+  rejects(projection, constructionInventoryContext({ expectedRegistryFingerprint: "other" }));
+  rejects(projection, constructionInventoryContext({ cursor: -1 }));
+  rejects(projection, constructionInventoryContext({ limit: 257 }));
+  rejects({ ...projection, source: "web-game-state" });
+  rejects({ ...projection, stateVersion: 46 });
+  rejects({ ...projection, revision: 8 });
+  rejects({ ...projection, registryFingerprint: "other" });
+  rejects({ ...projection, readOnly: false });
+  rejects({
+    ...projection,
+    request: { ...projection.request, expectedRegistryFingerprint: "other" },
+  });
+  rejects({ ...projection, rows: [projection.rows[1], projection.rows[0]] });
+  rejects({
+    ...projection,
+    rows: [{ ...projection.rows[0], buildingId: "bad\nbuilding" }, projection.rows[1]],
+  });
+  rejects({
+    ...projection,
+    rows: [{ ...projection.rows[0], amount: 0 }, projection.rows[1]],
+  });
+  rejects({
+    ...projection,
+    rows: [{ ...projection.rows[0], amount: Number.MAX_SAFE_INTEGER + 1 }, projection.rows[1]],
+  });
+  rejects({ ...projection, totalCount: 2 });
+  rejects({ ...projection, nextCursor: null });
+  rejects({ ...projection, truncated: false });
+  rejects({ ...projection, limits: { ...projection.limits, rows: 512 } });
+  rejects({ ...projection, path: SECRET_PATH });
+  rejects({
+    ...projection,
+    rows: [{ buildingId: "x".repeat(1_048_576), amount: 1 }, projection.rows[1]],
+  });
+});
+
 test("Electron main uses the dedicated native renderer boundary", () => {
   const source = fs.readFileSync(path.join(__dirname, "main.cjs"), "utf8");
   const preload = fs.readFileSync(path.join(__dirname, "preload.cjs"), "utf8");
@@ -1289,6 +1396,7 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.match(source, /function nativeViewportProjectionV2ResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?planetId:\s*request\?\.planetId[\s\S]*?entityCursor:[\s\S]*?entityLimit:[\s\S]*?beltCursor:[\s\S]*?beltLimit:[\s\S]*?pinnedEntityIds:[\s\S]*?pinnedBeltIds:/);
   assert.match(source, /function nativeFactoryReadModelResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?selectedEntityIds:[\s\S]*?selectedBeltIds:/);
   assert.match(source, /function nativeFactoryInventoryResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?cursor:[\s\S]*?limit:/);
+  assert.match(source, /function nativeConstructionInventoryResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?cursor:[\s\S]*?limit:/);
   assert.match(source, /function nativeStatisticsProjectionResultContext[\s\S]*?minElapsedSeconds:[\s\S]*?maxElapsedSeconds:[\s\S]*?cursor:[\s\S]*?limit:[\s\S]*?planetId:[\s\S]*?itemId:/);
   assert.match(source, /function nativeTechnologyProjectionResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision/);
   assert.match(source, /desktop:native-core-projection"[\s\S]*?resultContext:\s*nativeCoreProjectionResultContext\(request\)/);
@@ -1296,6 +1404,7 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.match(source, /desktop:native-core-viewport-projection-v2"[\s\S]*?runRendererNativeOperation\("coreViewportProjectionV2"[\s\S]*?resultContext:\s*nativeViewportProjectionV2ResultContext\(request\)/);
   assert.match(source, /desktop:native-core-factory-read-model"[\s\S]*?runRendererNativeOperation\("coreFactoryReadModelProjection"[\s\S]*?resultContext:\s*nativeFactoryReadModelResultContext\(request\)/);
   assert.match(source, /desktop:native-core-factory-inventory"[\s\S]*?runRendererNativeOperation\("coreFactoryInventoryProjection"[\s\S]*?resultContext:\s*nativeFactoryInventoryResultContext\(request\)/);
+  assert.match(source, /desktop:native-core-construction-inventory"[\s\S]*?runRendererNativeOperation\("coreConstructionInventoryProjection"[\s\S]*?resultContext:\s*nativeConstructionInventoryResultContext\(request\)/);
   assert.match(source, /desktop:native-core-statistics-projection"[\s\S]*?resultContext:\s*nativeStatisticsProjectionResultContext\(request\)/);
   assert.match(source, /desktop:native-core-technology-projection"[\s\S]*?resultContext:\s*nativeTechnologyProjectionResultContext\(request\)/);
   assert.match(source, /desktop:native-core-projection-transfer[\s\S]*?nativeViewportProjectionResultContext\(request\.payload\)[\s\S]*?nativeViewportProjectionV2ResultContext\(normalizedRequest\)[\s\S]*?nativeFactoryReadModelResultContext\(normalizedRequest\)[\s\S]*?nativeStatisticsProjectionResultContext\(request\.payload\)[\s\S]*?nativeTechnologyProjectionResultContext\(normalizedRequest\)/);
@@ -1310,7 +1419,7 @@ test("Electron main uses the dedicated native renderer boundary", () => {
     .map((match) => match[1]);
   const preloadChannels = [...preload.matchAll(/invokeNative\("(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  assert.equal(mainChannels.length, 43);
+  assert.equal(mainChannels.length, 44);
   assert.ok(mainChannels.includes("desktop:native-player-authority-checkpoint"));
   assert.ok(preloadChannels.includes("desktop:native-player-authority-checkpoint"));
   assert.ok(mainChannels.includes("desktop:native-player-authority-export-v47"));
@@ -1319,6 +1428,8 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.ok(preloadChannels.includes("desktop:native-core-star-map-catalog-projection"));
   assert.ok(mainChannels.includes("desktop:native-core-factory-inventory"));
   assert.ok(preloadChannels.includes("desktop:native-core-factory-inventory"));
+  assert.ok(mainChannels.includes("desktop:native-core-construction-inventory"));
+  assert.ok(preloadChannels.includes("desktop:native-core-construction-inventory"));
   assert.ok(mainChannels.includes("desktop:native-core-stellar-quantum-projection"));
   assert.ok(preloadChannels.includes("desktop:native-core-stellar-quantum-projection"));
   assert.ok(mainChannels.includes("desktop:native-core-dyson-workspace-projection"));

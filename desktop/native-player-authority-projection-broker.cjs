@@ -14,6 +14,7 @@ const PROJECTION_METHODS = Object.freeze({
   "viewport-v2": "viewportProjectionV2",
   "factory-read-model-v1": "factoryReadModelProjection",
   "factory-inventory-v1": "factoryInventoryProjection",
+  "construction-inventory-v1": "constructionInventoryProjection",
   "statistics-v1": "statisticsProjection",
   "technology-v1": "technologyProjection",
   "recipe-workspace-v1": "recipeWorkspaceProjection",

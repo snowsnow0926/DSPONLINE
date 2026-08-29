@@ -7,6 +7,7 @@ const {
   CONTROL_RESPONSE_KIND,
   MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
   NATIVE_FACTORY_INVENTORY_CAPABILITY,
+  NATIVE_CONSTRUCTION_INVENTORY_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
@@ -28,6 +29,7 @@ const {
 
 test("native factory inventory capability matches the Rust host contract", () => {
   assert.equal(NATIVE_FACTORY_INVENTORY_CAPABILITY, "native-core-factory-inventory-v1");
+  assert.equal(NATIVE_CONSTRUCTION_INVENTORY_CAPABILITY, "native-core-construction-inventory-v1");
 });
 
 test("native frame codec survives arbitrary stream boundaries", () => {

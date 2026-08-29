@@ -81,6 +81,7 @@ fn handle_request(
                     "native-core-viewport-projection-v2",
                     "native-core-factory-read-model-v1",
                     "native-core-factory-inventory-v1",
+                    "native-core-construction-inventory-v1",
                     "native-core-statistics-projection-v1",
                     "native-core-technology-projection-v1",
                     "native-core-recipe-workspace-projection-v1",
@@ -290,6 +291,19 @@ fn handle_request(
             cursor,
             limit,
         } => cores.factory_inventory_projection(&session_id, expected_revision, cursor, limit)?,
+        ControlRequest::CoreConstructionInventoryProjection {
+            session_id,
+            expected_revision,
+            expected_registry_fingerprint,
+            cursor,
+            limit,
+        } => cores.construction_inventory_projection(
+            &session_id,
+            expected_revision,
+            &expected_registry_fingerprint,
+            cursor,
+            limit,
+        )?,
         ControlRequest::CoreStatisticsProjection {
             session_id,
             min_elapsed_seconds,

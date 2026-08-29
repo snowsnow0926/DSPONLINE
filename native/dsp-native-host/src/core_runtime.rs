@@ -2720,6 +2720,22 @@ impl CoreRegistry {
             .factory_inventory_projection(expected_revision, cursor, limit)
     }
 
+    pub fn construction_inventory_projection(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        cursor: usize,
+        limit: usize,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?.construction_inventory_projection(
+            expected_revision,
+            expected_registry_fingerprint,
+            cursor,
+            limit,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn statistics_projection(
         &self,

@@ -11,6 +11,7 @@ pub mod catalog;
 pub mod command;
 mod command_palette;
 mod construction;
+mod construction_inventory;
 mod construction_planner;
 mod deterministic_runtime;
 mod dyson;

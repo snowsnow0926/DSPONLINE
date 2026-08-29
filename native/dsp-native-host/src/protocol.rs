@@ -204,6 +204,14 @@ pub enum ControlRequest {
         cursor: usize,
         limit: usize,
     },
+    CoreConstructionInventoryProjection {
+        session_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        #[serde(default)]
+        cursor: usize,
+        limit: usize,
+    },
     CoreStatisticsProjection {
         session_id: String,
         min_elapsed_seconds: f64,
@@ -770,6 +778,50 @@ mod tests {
                 assert_eq!(cursor, 0);
             }
             _ => panic!("factory inventory defaults decoded as the wrong variant"),
+        }
+    }
+
+    #[test]
+    fn construction_inventory_protocol_preserves_revision_catalog_and_page_identity() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreConstructionInventoryProjection",
+            "sessionId": "core-construction",
+            "expectedRevision": 47,
+            "expectedRegistryFingerprint": "builtin:test",
+            "cursor": 256,
+            "limit": 128
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreConstructionInventoryProjection {
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                cursor,
+                limit,
+            } => {
+                assert_eq!(session_id, "core-construction");
+                assert_eq!(expected_revision, 47);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(cursor, 256);
+                assert_eq!(limit, 128);
+            }
+            _ => panic!("construction inventory operation decoded as the wrong variant"),
+        }
+
+        let defaults = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreConstructionInventoryProjection",
+            "sessionId": "core-construction-defaults",
+            "expectedRevision": 0,
+            "expectedRegistryFingerprint": "builtin:test",
+            "limit": 1
+        }))
+        .unwrap();
+        match defaults {
+            ControlRequest::CoreConstructionInventoryProjection { cursor, .. } => {
+                assert_eq!(cursor, 0);
+            }
+            _ => panic!("construction inventory defaults decoded as the wrong variant"),
         }
     }
 

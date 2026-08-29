@@ -323,6 +323,8 @@ export interface DesktopBridge {
   getNativeCoreFactoryReadModel: (request: DesktopNativeCoreFactoryReadModelRequest) => Promise<DesktopNativeCoreFactoryReadModelResult>;
   /** Independently paged active-planet tray and held stack for the native thin UI. */
   getNativeCoreFactoryInventory?: (request: DesktopNativeCoreFactoryInventoryRequest) => Promise<DesktopNativeCoreFactoryInventoryResult>;
+  /** Read-only, catalog-identity-bound top-level construction stock for the native thin UI. */
+  getNativeCoreConstructionInventory?: (request: DesktopNativeCoreConstructionInventoryRequest) => Promise<DesktopNativeCoreConstructionInventoryResult>;
   getNativeCoreStatisticsProjection: (request: DesktopNativeCoreStatisticsProjectionRequest) => Promise<DesktopNativeCoreStatisticsProjectionResult>;
   getNativeCoreTechnologyProjection: (request: DesktopNativeCoreTechnologyProjectionRequest) => Promise<DesktopNativeCoreTechnologyProjectionResult>;
   /** Current Windows thin-UI host only; older shells fail closed instead of reading the Web GameState. */
@@ -978,6 +980,42 @@ export interface DesktopNativeCoreFactoryInventoryResult {
   };
   totalCount: number;
   rows: DesktopNativeCoreFactoryInventoryRow[];
+  nextCursor: number | null;
+  truncated: boolean;
+  limits: {
+    rows: 256;
+    projectionBytes: 1048576;
+  };
+}
+
+export interface DesktopNativeCoreConstructionInventoryRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  cursor: number;
+  limit: number;
+}
+
+export interface DesktopNativeCoreConstructionInventoryRow {
+  buildingId: string;
+  amount: number;
+}
+
+export interface DesktopNativeCoreConstructionInventoryResult {
+  schemaVersion: 1;
+  projectionType: "construction-inventory-v1";
+  source: "native-core";
+  revision: number;
+  stateVersion: 47;
+  registryFingerprint: string;
+  readOnly: true;
+  request: {
+    expectedRevision: number;
+    expectedRegistryFingerprint: string;
+    cursor: number;
+    limit: number;
+  };
+  totalCount: number;
+  rows: DesktopNativeCoreConstructionInventoryRow[];
   nextCursor: number | null;
   truncated: boolean;
   limits: {
@@ -1886,6 +1924,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
     }
   | {
       sessionId: string;
+      projectionType: "construction-inventory-v1";
+      payload: Omit<DesktopNativeCoreConstructionInventoryRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
       projectionType: "statistics-v1";
       payload: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">;
     }
@@ -1935,7 +1978,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
   payloadLength: number;
   sha256: string;
 }

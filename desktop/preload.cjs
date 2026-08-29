@@ -11,7 +11,7 @@ const {
 const MAX_NATIVE_PROJECTION_TRANSFER_BYTES = 1024 * 1024;
 const MAX_STELLAR_PROJECTION_REQUEST_BYTES = 32_768;
 const NATIVE_CORE_TRANSFER_PROJECTION_TYPES = Object.freeze([
-  "viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "statistics-v1", "technology-v1",
+  "viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "statistics-v1", "technology-v1",
   "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2",
   "stellar-quantum-v1",
   "dyson-workspace-v1",
@@ -175,6 +175,7 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   getNativeCoreViewportProjectionV2: (request) => invokeNative("desktop:native-core-viewport-projection-v2", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生视口 v2 投影请求失败，请重试" }, request),
   getNativeCoreFactoryReadModel: (request) => invokeNative("desktop:native-core-factory-read-model", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生工厂只读模型请求失败，请重试" }, request),
   getNativeCoreFactoryInventory: (request) => invokeNative("desktop:native-core-factory-inventory", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生工厂库存请求失败，请重试" }, request),
+  getNativeCoreConstructionInventory: (request) => invokeNative("desktop:native-core-construction-inventory", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生建筑库存请求失败，请重试" }, request),
   getNativeCoreStatisticsProjection: (request) => invokeNative("desktop:native-core-statistics-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生统计投影请求失败，请重试" }, request),
   getNativeCoreTechnologyProjection: (request) => invokeNative("desktop:native-core-technology-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生科研投影请求失败，请重试" }, request),
   getNativeCoreRecipeWorkspaceProjection: (request) => invokeNative("desktop:native-core-recipe-workspace-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生生产资料库投影请求失败，请重试" }, request),

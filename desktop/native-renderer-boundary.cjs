@@ -377,6 +377,27 @@ function normalizeFactoryInventoryContext(value, label) {
   };
 }
 
+function normalizeConstructionInventoryContext(value, label) {
+  const source = exactObject(
+    value,
+    ["sessionId", "expectedRevision", "expectedRegistryFingerprint", "cursor", "limit"],
+    label,
+  );
+  const limit = safeInteger(source.limit, `${label} limit`, 1);
+  if (limit > 256) throw protocolError(`${label} limit`);
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} expected registry fingerprint`,
+      256,
+    ),
+    cursor: safeInteger(source.cursor, `${label} cursor`),
+    limit,
+  };
+}
+
 function factoryInventoryId(value, label) {
   const result = opaqueId(value, label);
   for (const character of result) {
@@ -1818,6 +1839,119 @@ function normalizeCoreFactoryInventoryProjection(value, context) {
     trayItemLimitBounds: { minimum: 1_000, default: 1_000_000, maximum: 100_000_000 },
     request: {
       expectedRevision: projectionContext.expectedRevision,
+      cursor: projectionContext.cursor,
+      limit: projectionContext.limit,
+    },
+    totalCount,
+    rows,
+    nextCursor,
+    truncated: expectedNextCursor !== null,
+    limits: { rows: 256, projectionBytes: MAX_NATIVE_PROJECTION_BYTES },
+  };
+}
+
+function normalizeCoreConstructionInventoryProjection(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "revision", "stateVersion",
+    "registryFingerprint", "readOnly", "request", "totalCount", "rows",
+    "nextCursor", "truncated", "limits",
+  ], "native construction inventory projection");
+  if (source.schemaVersion !== 1 || source.projectionType !== "construction-inventory-v1" ||
+      source.source !== "native-core" || source.stateVersion !== 47 || source.readOnly !== true) {
+    throw protocolError("native construction inventory identity");
+  }
+  requireProjectionByteBudget(source, "native construction inventory projection");
+  const projectionContext = normalizeConstructionInventoryContext(
+    context,
+    "native construction inventory context",
+  );
+  const revision = safeInteger(source.revision, "native construction inventory revision");
+  if (revision !== projectionContext.expectedRevision || !projectionContext.sessionId) {
+    throw protocolError("native construction inventory revision binding");
+  }
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native construction inventory registry fingerprint",
+    256,
+  );
+  if (registryFingerprint !== projectionContext.expectedRegistryFingerprint) {
+    throw protocolError("native construction inventory registry binding");
+  }
+  const requestSource = exactObject(
+    source.request,
+    ["expectedRevision", "expectedRegistryFingerprint", "cursor", "limit"],
+    "native construction inventory request echo",
+  );
+  if (requestSource.expectedRevision !== projectionContext.expectedRevision ||
+      requestSource.expectedRegistryFingerprint !== projectionContext.expectedRegistryFingerprint ||
+      requestSource.cursor !== projectionContext.cursor ||
+      requestSource.limit !== projectionContext.limit) {
+    throw protocolError("native construction inventory request binding");
+  }
+  const totalCount = safeInteger(source.totalCount, "native construction inventory total count");
+  if (projectionContext.cursor > totalCount || !Array.isArray(source.rows) ||
+      source.rows.length > projectionContext.limit) {
+    throw protocolError("native construction inventory page cardinality");
+  }
+  const rows = source.rows.map((row, index) => {
+    const rowSource = exactObject(
+      row,
+      ["buildingId", "amount"],
+      `native construction inventory row[${index}]`,
+    );
+    return {
+      buildingId: factoryInventoryId(
+        rowSource.buildingId,
+        `native construction inventory row[${index}] building ID`,
+      ),
+      amount: safeInteger(
+        rowSource.amount,
+        `native construction inventory row[${index}] amount`,
+        1,
+      ),
+    };
+  });
+  const expectedRows = Math.min(projectionContext.limit, totalCount - projectionContext.cursor);
+  if (rows.length !== expectedRows) {
+    throw protocolError("native construction inventory page cardinality");
+  }
+  for (let index = 1; index < rows.length; index += 1) {
+    if (Buffer.compare(
+      Buffer.from(rows[index - 1].buildingId, "utf8"),
+      Buffer.from(rows[index].buildingId, "utf8"),
+    ) >= 0) {
+      throw protocolError("native construction inventory row order");
+    }
+  }
+  const consumed = projectionContext.cursor + rows.length;
+  const expectedNextCursor = consumed < totalCount ? consumed : null;
+  const nextCursor = source.nextCursor === null
+    ? null
+    : safeInteger(source.nextCursor, "native construction inventory next cursor");
+  if (nextCursor !== expectedNextCursor ||
+      boolean(source.truncated, "native construction inventory truncated") !==
+        (expectedNextCursor !== null)) {
+    throw protocolError("native construction inventory page continuation");
+  }
+  const limitsSource = exactObject(
+    source.limits,
+    ["rows", "projectionBytes"],
+    "native construction inventory limits",
+  );
+  if (limitsSource.rows !== 256 || limitsSource.projectionBytes !== MAX_NATIVE_PROJECTION_BYTES) {
+    throw protocolError("native construction inventory limits");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "construction-inventory-v1",
+    source: "native-core",
+    revision,
+    stateVersion: 47,
+    registryFingerprint,
+    readOnly: true,
+    request: {
+      expectedRevision: projectionContext.expectedRevision,
+      expectedRegistryFingerprint: projectionContext.expectedRegistryFingerprint,
       cursor: projectionContext.cursor,
       limit: projectionContext.limit,
     },
@@ -4843,6 +4977,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreViewportProjectionV2: normalizeCoreViewportProjectionV2,
   coreFactoryReadModelProjection: normalizeCoreFactoryReadModelProjection,
   coreFactoryInventoryProjection: normalizeCoreFactoryInventoryProjection,
+  coreConstructionInventoryProjection: normalizeCoreConstructionInventoryProjection,
   coreStatisticsProjection: normalizeCoreStatisticsProjection,
   coreTechnologyProjection: normalizeCoreTechnologyProjection,
   coreRecipeWorkspaceProjection: normalizeCoreRecipeWorkspaceProjection,

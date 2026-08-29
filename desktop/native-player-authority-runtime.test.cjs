@@ -492,12 +492,11 @@ test("macro start observes an exact tick gate as BUSY and starts once the newer 
     expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
   });
   let issued = 0;
-  const ids = ["session-after-tick", "operation-after-tick"];
   const broker = new NativePlayerAuthorityMacroBroker({
     runtime: value.runtime,
     createId: () => {
       issued += 1;
-      return ids.shift();
+      return "epoch-after-tick";
     },
   });
 
@@ -530,7 +529,7 @@ test("macro start observes an exact tick gate as BUSY and starts once the newer 
   });
   assert.equal(started.state, "macro-active");
   assert.equal(started.previousRevision, 8);
-  assert.equal(issued, 2);
+  assert.equal(issued, 1);
   assert.equal(value.calls.filter(([operation]) => operation === "macro-advance").length, 1);
 });
 

@@ -9,9 +9,10 @@ import type {
   DesktopNativePlayerAuthorityMacroState,
 } from "../desktop";
 import type { FactoryTimeWarpReadModel } from "./factoryReadModels";
-import type {
-  NativePlayerAuthorityCommandReceipt,
-  NativePlayerAuthorityCommandSource,
+import {
+  createNativePlayerAuthorityCommandSource,
+  type NativePlayerAuthorityCommandReceipt,
+  type NativePlayerAuthorityCommandSource,
 } from "./nativePlayerAuthorityCommandSource";
 import {
   NativePlayerAuthorityMacroController,
@@ -1081,49 +1082,96 @@ describe("native player authority macro controller", () => {
     expect(controller.getSnapshot().phase).toBe("idle");
   });
 
-  it("replays the same finished cleanup hint when an uncertain disable did not commit", async () => {
+  it("waits for a fresh command source after an uncertain finished-hint disable", async () => {
     const clock = clockHarness(13_000);
     const recover = vi.fn(async () => finishedMacroReceipt(10, true));
-    const disableTransport = Object.assign(new Error("disable did not reach the host"), {
-      code: "NATIVE_PLAYER_AUTHORITY_COMMAND_TRANSPORT_UNCERTAIN",
+    let authoritativeFrame = activeFrame(12, {
+      nextDeadlineMs: 13_000,
+      macroRecoveryHint: { kind: "finished-pending-disable", revision: 10 },
     });
-    let disableAttempts = 0;
-    const applyDisable = vi.fn(async () => {
-      disableAttempts += 1;
-      if (disableAttempts === 1) throw disableTransport;
-      return commandReceipt(12);
-    });
+    let hostAttempts = 0;
+    const commandBridge: Pick<
+      DesktopBridge,
+      "getNativePlayerAuthorityState" | "applyNativeCoreCommand"
+    > = {
+      getNativePlayerAuthorityState: vi.fn(async () => authoritativeFrame),
+      applyNativeCoreCommand: vi.fn(async (request) => {
+        hostAttempts += 1;
+        if (hostAttempts === 1) throw new Error("disable did not reach the host");
+        const baseRevision = request.command.baseRevision as number;
+        authoritativeFrame = activeFrame(baseRevision + 1, {
+          nextDeadlineMs: authoritativeFrame.nextDeadlineMs!,
+        });
+        return {
+          previousRevision: baseRevision,
+          revision: baseRevision + 1,
+          changedEntityIds: [],
+          changedBeltIds: [],
+          topologyDirty: false,
+        };
+      }),
+    };
+    const firstSource = createNativePlayerAuthorityCommandSource(
+      commandBridge,
+      authoritativeFrame,
+    );
+    if (!firstSource) throw new Error("expected first native command source");
     const controller = controllerWithClock(
       macroBridge({ recoverNativePlayerAuthorityMacro: recover }),
       clock,
     );
     const hinted = binding({
-      activeFrame: activeFrame(12, {
-        nextDeadlineMs: 13_000,
-        macroRecoveryHint: { kind: "finished-pending-disable", revision: 10 },
-      }),
+      activeFrame: authoritativeFrame,
       macroStatus: null,
       timeWarp: timeWarp(),
-      commandSource: commandSource(12, applyDisable),
+      commandSource: firstSource,
     });
 
     controller.bind(hinted);
     await flushPromises();
     expect(recover).toHaveBeenCalledTimes(1);
-    expect(applyDisable).toHaveBeenCalledTimes(1);
+    expect(commandBridge.applyNativeCoreCommand).toHaveBeenCalledTimes(1);
     expect(controller.getSnapshot().phase).toBe("uncertain");
 
-    // The authority revision and cleanup marker are unchanged, proving the
-    // first disable was not durable. Recovering the immutable finish receipt
-    // again is idempotent and gives the controller one fresh disable attempt.
+    // A real command source is permanently consumed after a transport-uncertain
+    // attempt. The same immutable finish hint may be recovered again, but it
+    // must not turn the same frame into a second Host mutation.
     controller.bind(hinted);
     await flushPromises();
     expect(recover).toHaveBeenCalledTimes(2);
-    expect(applyDisable).toHaveBeenCalledTimes(2);
+    expect(commandBridge.applyNativeCoreCommand).toHaveBeenCalledTimes(1);
+    expect(controller.getSnapshot().phase).toBe("faulted");
+
+    // A later exact tick publishes a new revision and therefore a fresh,
+    // independently fenced source. Only that source may retry the durable
+    // disable while the same main-owned cleanup marker remains outstanding.
+    authoritativeFrame = activeFrame(13, {
+      nextDeadlineMs: 14_000,
+      macroRecoveryHint: { kind: "finished-pending-disable", revision: 10 },
+    });
+    const freshSource = createNativePlayerAuthorityCommandSource(
+      commandBridge,
+      authoritativeFrame,
+    );
+    if (!freshSource) throw new Error("expected fresh native command source");
+    controller.bind(binding({
+      activeFrame: authoritativeFrame,
+      macroStatus: null,
+      timeWarp: timeWarp(),
+      commandSource: freshSource,
+    }));
+    await flushPromises();
+    expect(recover).toHaveBeenCalledTimes(3);
+    expect(commandBridge.applyNativeCoreCommand).toHaveBeenCalledTimes(2);
     expect(controller.getSnapshot().phase).toBe("disabling");
 
+    const disabledSource = createNativePlayerAuthorityCommandSource(
+      commandBridge,
+      authoritativeFrame,
+    );
+    if (!disabledSource) throw new Error("expected disabled-frame command source");
     controller.bind(binding({
-      activeFrame: activeFrame(13, { nextDeadlineMs: 14_000 }),
+      activeFrame: authoritativeFrame,
       macroStatus: null,
       timeWarp: timeWarp({
         enabled: false,
@@ -1131,7 +1179,7 @@ describe("native player authority macro controller", () => {
         requiredPowerKw: 0,
         allocatedPowerKw: 0,
       }),
-      commandSource: commandSource(13),
+      commandSource: disabledSource,
     }));
     expect(controller.getSnapshot()).toMatchObject({
       phase: "idle",

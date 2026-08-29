@@ -787,10 +787,10 @@ async function initializeNativeHost() {
         mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
       ),
     });
-    // Main-process-only. The renderer has no IPC/preload entry for macro
-    // lifecycle or authority identities. A later gameplay coordinator may
-    // supply only bounded integer millisecond budgets to this broker; IDs,
-    // current revision, durable retry and finish identity stay in main/Rust.
+    // Main-process-owned. The renderer IPC/preload surface supplies only
+    // bounded integer millisecond budgets plus the start revision it observed;
+    // session/operation IDs, the current authoritative revision, durable retry
+    // and finish identity stay in main/Rust.
     nativePlayerAuthorityMacroBroker = new NativePlayerAuthorityMacroBroker({
       runtime: nativePlayerAuthorityRuntime,
       ...(playerAuthorityStartupRecovery?.recoveredMacroOperationId

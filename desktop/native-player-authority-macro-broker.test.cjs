@@ -344,20 +344,20 @@ test("main-owned broker starts, advances and finishes without exposing authority
   assert.deepEqual(finished, { schemaVersion: 1, state: "finished", revision: 11 });
   assert.deepEqual(calls.map(([kind, request]) => [kind, request]), [
     ["advance", {
-      macroSessionId: "native-macro-session-session-a",
-      operationId: "native-macro-operation-operation-a",
+      macroSessionId: "native-macro-session-session-a-1",
+      operationId: "native-macro-operation-session-a-2",
       baseRevision: 7,
       simulationMilliseconds: 60_000,
       wallMilliseconds: 4_000,
     }],
     ["advance", {
-      macroSessionId: "native-macro-session-session-a",
-      operationId: "native-macro-operation-operation-b",
+      macroSessionId: "native-macro-session-session-a-1",
+      operationId: "native-macro-operation-session-a-3",
       baseRevision: 9,
       simulationMilliseconds: 30_000,
       wallMilliseconds: 2_000,
     }],
-    ["finish", { macroSessionId: "native-macro-session-session-a" }],
+    ["finish", { macroSessionId: "native-macro-session-session-a-1" }],
   ]);
   for (const receipt of [first, second, finished]) {
     assert.equal(Object.hasOwn(receipt, "sessionId"), false);
@@ -411,7 +411,7 @@ test("inclusive one-millisecond and thirty-day bounds remain valid and one opera
   assert.equal(value.calls.filter(([kind]) => kind === "advance").length, 1);
 });
 
-test("broker rejects forged identity fields, duplicate IDs and stale receipts before publishing", async (t) => {
+test("broker rejects forged identity fields, invalid epochs and stale receipts before publishing", async (t) => {
   await t.test("forged start identity", async () => {
     const { broker, calls } = runtimeFixture();
     await assert.rejects(broker.start({
@@ -431,14 +431,29 @@ test("broker rejects forged identity fields, duplicate IDs and stale receipts be
     );
     assert.equal(calls.filter(([kind]) => kind === "finish").length, 0);
   });
-  await t.test("duplicate operation ID", async () => {
-    const { broker, calls } = runtimeFixture({ createId: () => "same" });
+  await t.test("one constant epoch still yields distinct operation IDs", async () => {
+    let epochCalls = 0;
+    const { broker, calls } = runtimeFixture({
+      createId: () => {
+        epochCalls += 1;
+        return "same";
+      },
+    });
     await broker.start(macroStartRequest({ simulationMilliseconds: 1_000, wallMilliseconds: 1_000 }));
-    await assert.rejects(
-      broker.advance({ simulationMilliseconds: 1_000, wallMilliseconds: 1_000 }),
-      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_ID_REUSED",
+    await broker.advance({ simulationMilliseconds: 1_000, wallMilliseconds: 1_000 });
+    assert.equal(epochCalls, 1);
+    assert.deepEqual(
+      calls.filter(([kind]) => kind === "advance").map(([, request]) => request.operationId),
+      ["native-macro-operation-same-2", "native-macro-operation-same-3"],
     );
-    assert.equal(calls.filter(([kind]) => kind === "advance").length, 1);
+  });
+  await t.test("overlong identity epoch", async () => {
+    const { broker, calls } = runtimeFixture({ createId: () => "x".repeat(128) });
+    await assert.rejects(
+      broker.start(macroStartRequest({ simulationMilliseconds: 1_000, wallMilliseconds: 1_000 })),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_ID_INVALID",
+    );
+    assert.equal(calls.length, 0);
   });
   await t.test("stale result session", async () => {
     const { broker } = runtimeFixture({
@@ -618,16 +633,67 @@ test("cached recovery receipts never cross authority lineage or macro identity",
       (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN",
     );
     await value.broker.recover();
+    const macroSessionId = value.runtime.snapshot().macroSessionId;
     value.setSnapshot(authoritySnapshot({
       phase: "macro-active",
       revision: 9,
-      macroSessionId: "native-macro-session-session-a",
+      macroSessionId,
       macroAlgorithmVersion: "native-pure-idle-macro-v11-other",
     }));
     const startup = await value.broker.recover();
     assert.equal(Object.hasOwn(startup, "previousRevision"), false);
     assert.equal(startup.algorithmVersion, "native-pure-idle-macro-v11-other");
   });
+});
+
+test("macro identity allocation stays bounded across three days of one-hertz advances", async () => {
+  const advanceCount = 3 * 24 * 60 * 60;
+  let current = authoritySnapshot();
+  let committedAdvances = 0;
+  let epochCalls = 0;
+  const runtime = {
+    snapshot: () => current,
+    async commitMacroAdvance(request) {
+      committedAdvances += 1;
+      assert.equal(
+        request.operationId,
+        `native-macro-operation-long-run-epoch-${(committedAdvances + 1).toString(36)}`,
+      );
+      current = authoritySnapshot({
+        phase: "macro-active",
+        revision: request.baseRevision + 1,
+        macroSessionId: request.macroSessionId,
+        macroAlgorithmVersion: "native-pure-idle-macro-v10",
+      });
+      return current;
+    },
+    async finishMacroSession() {
+      current = authoritySnapshot({ revision: current.revision });
+      return current;
+    },
+    async retryUncertain() {
+      throw new Error("long-run test has no uncertain operation");
+    },
+  };
+  const broker = new NativePlayerAuthorityMacroBroker({
+    runtime,
+    createId: () => {
+      epochCalls += 1;
+      return "long-run-epoch";
+    },
+  });
+
+  await broker.start(macroStartRequest({ simulationMilliseconds: 1, wallMilliseconds: 1 }));
+  for (let index = 0; index < advanceCount; index += 1) {
+    await broker.advance({ simulationMilliseconds: 1, wallMilliseconds: 1 });
+  }
+
+  assert.equal(committedAdvances, advanceCount + 1);
+  assert.equal(epochCalls, 1);
+  assert.equal(Object.hasOwn(broker, "issuedIds"), false);
+  assert.equal(broker.startupReservedIds.size, 0);
+  assert.equal(broker.nextIdentitySequence, advanceCount + 2);
+  await broker.finish();
 });
 
 test("startup-recovered macro is adopted without renderer identity or a second Host mutation", async () => {

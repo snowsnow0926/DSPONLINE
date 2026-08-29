@@ -16,7 +16,7 @@ const { randomUUID } = require("node:crypto");
 
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const MAX_MACRO_BUDGET_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
-const MAX_ISSUED_IDENTITIES = 65_536;
+const MAX_IDENTITY_SEQUENCE = Number.MAX_SAFE_INTEGER;
 
 class NativePlayerAuthorityMacroBrokerError extends Error {
   constructor(message, code, cause) {
@@ -185,7 +185,14 @@ class NativePlayerAuthorityMacroBroker {
     }
     this.runtime = options.runtime;
     this.createId = options.createId ?? (() => randomUUID());
-    this.issuedIds = new Set();
+    // One random process-local epoch plus a monotonic safe-integer sequence
+    // makes every generated identity unique without retaining one string per
+    // one-second macro advance. Only identities recovered from the durable
+    // lease need a bounded collision set because their epoch was created by a
+    // previous main-process lifetime.
+    this.identityEpoch = null;
+    this.nextIdentitySequence = 0;
+    this.startupReservedIds = new Set();
     this.pending = null;
     this.inFlight = false;
     this.lastRecovered = null;
@@ -200,21 +207,22 @@ class NativePlayerAuthorityMacroBroker {
     } else if (options.recoveredOperationId !== undefined) {
       throw new TypeError("native player-authority recovered macro operation has no active session");
     }
-    if (this.activeMacroSessionId) this.issuedIds.add(this.activeMacroSessionId);
+    if (this.activeMacroSessionId) this.startupReservedIds.add(this.activeMacroSessionId);
     if (options.recoveredOperationId !== undefined) {
-      if (this.issuedIds.has(options.recoveredOperationId)) {
+      if (this.startupReservedIds.has(options.recoveredOperationId)) {
         throw new TypeError("native player-authority recovered macro identity was reused");
       }
-      this.issuedIds.add(options.recoveredOperationId);
+      this.startupReservedIds.add(options.recoveredOperationId);
     }
     if (hasCleanupSession) {
       const identity = requireAuthorityIdentity(snapshot, ["active"], "startup cleanup");
       if (snapshot.macroSessionId !== null || snapshot.macroAlgorithmVersion !== null ||
           options.pendingMacroCleanupRevision > identity.revision ||
-          this.activeMacroSessionId !== null || this.issuedIds.has(options.pendingMacroCleanupSessionId)) {
+          this.activeMacroSessionId !== null ||
+          this.startupReservedIds.has(options.pendingMacroCleanupSessionId)) {
         throw new TypeError("native player-authority pending macro cleanup lineage is invalid");
       }
-      this.issuedIds.add(options.pendingMacroCleanupSessionId);
+      this.startupReservedIds.add(options.pendingMacroCleanupSessionId);
       this.lastRecovered = Object.freeze({
         receipt: Object.freeze({
           schemaVersion: 1,
@@ -231,37 +239,38 @@ class NativePlayerAuthorityMacroBroker {
   }
 
   issueId(kind) {
-    if (this.issuedIds.size >= MAX_ISSUED_IDENTITIES) {
-      throw brokerError(
-        "native player-authority macro identity budget is exhausted",
-        "NATIVE_PLAYER_AUTHORITY_MACRO_ID_EXHAUSTED",
-      );
+    if (this.identityEpoch === null) {
+      let raw;
+      try {
+        raw = this.createId("macro-epoch");
+      } catch (cause) {
+        throw brokerError(
+          "native player-authority macro identity generation failed",
+          "NATIVE_PLAYER_AUTHORITY_MACRO_ID_INVALID",
+          cause,
+        );
+      }
+      // Validate against the longest generated form once, before publishing
+      // any session/operation identity from this epoch.
+      const longest = `native-macro-operation-${raw}-${MAX_IDENTITY_SEQUENCE.toString(36)}`;
+      if (!validLogicalId(raw) || !validLogicalId(longest)) {
+        throw brokerError(
+          "native player-authority macro identity is invalid",
+          "NATIVE_PLAYER_AUTHORITY_MACRO_ID_INVALID",
+        );
+      }
+      this.identityEpoch = raw;
     }
-    let raw;
-    try {
-      raw = this.createId(kind);
-    } catch (cause) {
-      throw brokerError(
-        "native player-authority macro identity generation failed",
-        "NATIVE_PLAYER_AUTHORITY_MACRO_ID_INVALID",
-        cause,
-      );
+    while (this.nextIdentitySequence < MAX_IDENTITY_SEQUENCE) {
+      this.nextIdentitySequence += 1;
+      const id = `native-${kind}-${this.identityEpoch}-${this.nextIdentitySequence.toString(36)}`;
+      if (this.startupReservedIds.has(id)) continue;
+      return id;
     }
-    const id = `native-${kind}-${raw}`;
-    if (!validLogicalId(raw) || !validLogicalId(id)) {
-      throw brokerError(
-        "native player-authority macro identity is invalid",
-        "NATIVE_PLAYER_AUTHORITY_MACRO_ID_INVALID",
-      );
-    }
-    if (this.issuedIds.has(id)) {
-      throw brokerError(
-        "native player-authority macro identity was reused",
-        "NATIVE_PLAYER_AUTHORITY_MACRO_ID_REUSED",
-      );
-    }
-    this.issuedIds.add(id);
-    return id;
+    throw brokerError(
+      "native player-authority macro identity budget is exhausted",
+      "NATIVE_PLAYER_AUTHORITY_MACRO_ID_EXHAUSTED",
+    );
   }
 
   assertAvailable() {

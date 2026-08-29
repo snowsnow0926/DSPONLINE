@@ -466,9 +466,22 @@ test("handoff wiring is main-initiated, coverage-gated, and exposes no renderer 
   assert.match(main, /new NativePlayerAuthorityBoundedRetryCoordinator\(/);
   assert.match(main, /state\?\.phase === "terminal" && state\.rendererOwnerId === rendererOwnerId/);
   assert.match(main, /nativePlayerAuthorityPersistenceBroker\.withHandoffCompletion\(/);
+  assert.match(main, /recordActiveNativePlayerAuthorityObservation\(/);
+  assert.match(main, /bindRendererAuthority\(ownerId, durable\.authority\)/);
+  assert.match(main, /clearRendererBinding\(event\.sender\.id\)/);
+  assert.match(
+    main,
+    /cancelNativePlayerAuthorityRetriesForOwner\(event\.sender\.id\);[\s\S]*?nativePlayerAuthorityHandoffIpcBridge\?\.cancelOwner\(event\.sender\.id\);[\s\S]*?clearRendererBinding\(event\.sender\.id\);[\s\S]*?beginNativePlayerAuthorityStartupReconciliation\(event\.sender\.id\)/,
+  );
+  assert.match(main, /nativePlayerAuthorityDeferredHandoff\?\.rendererOwnerId === ownerId[\s\S]*?nativePlayerAuthorityDeferredHandoff = null/);
   assert.match(main, /cancelNativePlayerAuthorityRetriesForOwner\(ownerId\)/);
   assert.match(main, /desktop:native-player-authority-export-v47/);
   assert.match(main, /nativePlayerAuthorityPersistenceBroker\.exportV47\(rendererOwnerId/);
+  assert.match(main, /assertBoundRendererArtifact\([\s\S]*?prepared\.authority,[\s\S]*?prepared\.result\.revision/);
+  assert.match(
+    main,
+    /const prepared = normalizeRendererNativeResult\([\s\S]*?await nativePlayerAuthorityPersistenceBroker\.exportV47\([\s\S]*?assertBoundRendererArtifact\([\s\S]*?deliverNativeV47Export\(/,
+  );
   assert.match(preload, /onNativePlayerAuthorityHandoffRequest:/);
   assert.match(preload, /subscribeRendererToNativePlayerAuthorityHandoff/);
   assert.match(preload, /checkpointNativePlayerAuthority:\s*\(\) =>/);

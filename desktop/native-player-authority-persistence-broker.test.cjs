@@ -41,6 +41,10 @@ function fixture(overrides = {}) {
       calls.push(["boundary"]);
       return operation(boundary);
     },
+    async withStartupReconciliationBoundary(operation) {
+      calls.push(["startup-boundary"]);
+      return operation(boundary);
+    },
     ...overrides.runtime,
   };
   const registry = {
@@ -118,6 +122,11 @@ test("checkpoint reuses the Rust-ACKed lease checkpoint and never enters generic
 
 test("export selects the active main-owned session and renderer cannot supply authority identity", async () => {
   const value = fixture();
+  value.broker.bindRendererAuthority(7, {
+    sessionId: "core-main-1",
+    runId: "player-run-1",
+    revision: 41,
+  });
   const exported = await value.broker.exportV47(7, {
     exportId: "export-1",
     savedAtMs: 20_000,
@@ -153,7 +162,7 @@ test("startup reconciliation holds the settled runtime boundary through the rend
   let boundaryReleased = false;
   const value = fixture({
     runtime: {
-      async withSettledPersistenceBoundary(operation) {
+      async withStartupReconciliationBoundary(operation) {
         try {
           return await operation({
             sessionId: "core-main-1",
@@ -268,8 +277,62 @@ test("export rejects a result that drifted from the frozen scheduler boundary", 
       }),
     },
   });
+  value.broker.bindRendererAuthority(7, {
+    sessionId: "core-main-1",
+    runId: "player-run-1",
+    revision: 41,
+  });
   await assert.rejects(
     value.broker.exportV47(7, { exportId: "export-stale", savedAtMs: 20_000 }),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_EXPORT_STALE",
+  );
+});
+
+test("export fails before Rust export when the renderer document is unbound or has another lineage", async () => {
+  const value = fixture();
+  await assert.rejects(
+    value.broker.exportV47(7, { exportId: "export-unbound", savedAtMs: 20_000 }),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BINDING_STALE",
+  );
+  assert.equal(value.calls.some(([operation]) => operation === "export"), false);
+
+  value.broker.bindRendererAuthority(7, {
+    sessionId: "replacement-session",
+    runId: "replacement-run",
+    revision: 41,
+  });
+  await assert.rejects(
+    value.broker.exportV47(7, { exportId: "export-replaced", savedAtMs: 20_001 }),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BINDING_STALE",
+  );
+  assert.equal(value.calls.some(([operation]) => operation === "export"), false);
+
+  assert.equal(value.broker.clearRendererBinding(7), true);
+  assert.equal(value.broker.clearRendererBinding(7), false);
+  assert.throws(
+    () => value.broker.bindRendererAuthority(8, {
+      sessionId: "core-main-1",
+      runId: "player-run-1",
+      revision: 41,
+    }),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_RENDERER_UNTRUSTED",
+  );
+});
+
+test("the post-export guard rejects a renderer replacement before artifact delivery", async () => {
+  const value = fixture();
+  value.broker.bindRendererAuthority(7, {
+    sessionId: "core-main-1",
+    runId: "player-run-1",
+    revision: 41,
+  });
+  const prepared = await value.broker.exportV47(7, {
+    exportId: "export-before-reload",
+    savedAtMs: 20_000,
+  });
+  assert.equal(value.broker.clearRendererBinding(7), true);
+  assert.throws(
+    () => value.broker.assertBoundRendererArtifact(7, prepared.authority, prepared.result.revision),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BINDING_STALE",
   );
 });

@@ -7,6 +7,9 @@ const test = require("node:test");
 const {
   NativePlayerAuthorityRuntime,
 } = require("./native-player-authority-runtime.cjs");
+const {
+  NativePlayerAuthorityMacroBroker,
+} = require("./native-player-authority-macro-broker.cjs");
 
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
@@ -312,6 +315,129 @@ test("persistence refuses in-flight gameplay and overlapping persistence reads",
   );
   persistenceGate.resolve("done");
   assert.equal(await first, "done");
+});
+
+test("startup reconciliation freezes the current macro checkpoint without finishing or replaying it", async () => {
+  const value = fixture();
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  await value.runtime.commitMacroAdvance({
+    macroSessionId: "macro-reload",
+    operationId: "macro-reload-first",
+    baseRevision: 7,
+    simulationMilliseconds: 30_000,
+    wallMilliseconds: 5_000,
+  });
+  assert.deepEqual(value.runtime.snapshot(), {
+    phase: "macro-active",
+    sessionId: "core-main-1",
+    runId: "player-run-1",
+    revision: 9,
+    acknowledgedSequence: 2,
+    nextSequence: 3,
+    nextDeadlineMs: 16_000,
+    inFlight: false,
+    currentOperation: null,
+    queuedCommands: 0,
+    macroSessionId: "macro-reload",
+    macroAlgorithmVersion: "native-pure-idle-macro-v10",
+    lastErrorCode: null,
+  });
+
+  const gate = deferred();
+  let observedBoundary = null;
+  const reconciliation = value.runtime.withStartupReconciliationBoundary(async (boundary) => {
+    observedBoundary = boundary;
+    await gate.promise;
+    return "renderer-rebound";
+  });
+  await assert.rejects(
+    value.runtime.withSettledPersistenceBoundary(async () => undefined),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+  );
+  await assert.rejects(value.runtime.commitMacroAdvance({
+    macroSessionId: "macro-reload",
+    operationId: "macro-reload-second",
+    baseRevision: 9,
+    simulationMilliseconds: 30_000,
+    wallMilliseconds: 5_000,
+  }));
+  await assert.rejects(
+    value.runtime.finishMacroSession({ macroSessionId: "macro-reload" }),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+  );
+  assert.deepEqual(observedBoundary, {
+    sessionId: "core-main-1",
+    runId: "player-run-1",
+    revision: 9,
+    checkpoint: { generation: 4, rootHash: HASH_A, revision: 9 },
+    acknowledgedSequence: 2,
+    settledDeadlineMs: 15_000,
+  });
+  assert.equal(value.calls.filter(([operation]) => operation === "macro-advance").length, 1);
+  assert.equal(value.calls.filter(([operation]) => operation === "macro-finish").length, 0);
+
+  gate.resolve();
+  assert.equal(await reconciliation, "renderer-rebound");
+  assert.equal(value.runtime.snapshot().phase, "macro-active");
+  assert.equal(value.runtime.snapshot().revision, 9);
+});
+
+test("macro broker treats persistence BUSY as a definite no-op and remains retryable", async () => {
+  const value = fixture();
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  const issued = [
+    "session-a", "operation-a", "session-b", "operation-b", "operation-c", "operation-d",
+  ];
+  const broker = new NativePlayerAuthorityMacroBroker({
+    runtime: value.runtime,
+    createId: () => issued.shift(),
+  });
+
+  const activeGate = deferred();
+  const activeBoundary = value.runtime.withSettledPersistenceBoundary(() => activeGate.promise);
+  await assert.rejects(
+    broker.start({ simulationMilliseconds: 30_000, wallMilliseconds: 5_000 }),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+  );
+  assert.equal(value.calls.filter(([operation]) => operation === "macro-advance").length, 0);
+  await assert.rejects(
+    broker.recover(),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_RECOVERY_UNAVAILABLE",
+  );
+  activeGate.resolve("active-released");
+  assert.equal(await activeBoundary, "active-released");
+
+  const started = await broker.start({ simulationMilliseconds: 30_000, wallMilliseconds: 5_000 });
+  assert.equal(started.state, "macro-active");
+  assert.equal(started.revision, 9);
+
+  const macroGate = deferred();
+  const macroBoundary = value.runtime.withStartupReconciliationBoundary(() => macroGate.promise);
+  await assert.rejects(
+    broker.advance({ simulationMilliseconds: 30_000, wallMilliseconds: 5_000 }),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+  );
+  await assert.rejects(
+    broker.finish(),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+  );
+  assert.equal(value.calls.filter(([operation]) => operation === "macro-advance").length, 1);
+  assert.equal(value.calls.filter(([operation]) => operation === "macro-finish").length, 0);
+  assert.equal((await broker.recover()).state, "macro-active");
+  macroGate.resolve("macro-released");
+  assert.equal(await macroBoundary, "macro-released");
+
+  const advanced = await broker.advance({ simulationMilliseconds: 30_000, wallMilliseconds: 5_000 });
+  assert.equal(advanced.revision, 11);
+  assert.deepEqual(await broker.finish(), { schemaVersion: 1, state: "finished", revision: 11 });
+  assert.equal(value.calls.filter(([operation]) => operation === "macro-advance").length, 2);
+  assert.equal(value.calls.filter(([operation]) => operation === "macro-finish").length, 1);
 });
 
 test("only one tick is in flight and successful receipts advance exactly once", async () => {

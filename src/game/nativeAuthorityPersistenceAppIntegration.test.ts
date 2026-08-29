@@ -80,10 +80,11 @@ describe("native authority persistence App boundary", () => {
     );
     expect(nativeBranch).toMatch(/persistNativeAuthorityCheckpoint\("manual"\)/);
     expect(nativeBranch).toMatch(/exportAuthoritativeV47\(/);
-    expect(nativeBranch).toMatch(/verifyNativeAuthorityArtifactLineage\([\s\S]*?exported\.artifact\.identity,[\s\S]*?latestRuntime/);
-    expect(nativeBranch).toMatch(/exported\.artifact\.identity\.revision === exported\.artifact\.export\.result\.revision/);
+    expect(nativeBranch).toMatch(/exportedIdentity\.sessionId !== exportToken\.sessionId[\s\S]*?exportedIdentity\.runId !== exportToken\.runId/);
+    expect(nativeBranch).toMatch(/exportedIdentity\.revision < exportToken\.minimumRevision[\s\S]*?exportedIdentity\.revision !== exported\.artifact\.export\.result\.revision/);
+    expect(nativeBranch).toMatch(/原生导出会话证明与当前权威不一致/);
+    expect(nativeBranch).toMatch(/verifyNativeAuthorityArtifactLineage\([\s\S]*?exportedIdentity,[\s\S]*?latestRuntime/);
     expect(nativeBranch).toMatch(/native-json-recovery-warning/);
-    expect(nativeBranch).not.toMatch(/throw new Error\("Windows 原生导出回执不属于当前/);
     expect(nativeBranch).not.toMatch(/readLocalSavePayload|compressSaveTextToGzipBlob|exportTextFile/);
   });
 

@@ -11784,6 +11784,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           `dsp-idle-native-save-${date}.json`,
         );
         if (exported.artifact.export.cancelled) return "cancelled" as const;
+        const exportedIdentity = exported.artifact.identity;
+        const exportToken = exportBoundary.checkpointToken;
+        if (exportedIdentity.sessionId !== exportToken.sessionId ||
+          exportedIdentity.runId !== exportToken.runId ||
+          exportedIdentity.revision < exportToken.minimumRevision ||
+          exportedIdentity.revision !== exported.artifact.export.result.revision) {
+          // Main validates this before publishing the file and the controller
+          // validates it again before returning. Reaching this branch means the
+          // trusted bridge contract itself was violated; never downgrade that
+          // to the ordinary post-export clock recovery warning.
+          throw new Error("Windows 原生导出会话证明与当前权威不一致");
+        }
         let latestRuntime: NativeAuthorityRuntimeObservation | null = null;
         let liveLineageHealthy = false;
         try {
@@ -11791,9 +11803,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           latestRuntime = readNativeAuthorityRuntimeObservation();
           liveLineageHealthy = verifyNativeAuthorityArtifactLineage(
             exportBoundary.checkpointToken,
-            exported.artifact.identity,
+            exportedIdentity,
             latestRuntime,
-          ) && exported.artifact.identity.revision === exported.artifact.export.result.revision;
+          );
         } catch {
           // Main already verified and atomically published the selected file.
           // Surface only a recovery warning if the follow-up clock pull fails.

@@ -467,16 +467,18 @@ export class WindowsNativeCoreBetaController {
       input.summary.revision !== input.checkpoint.revision) {
       throw new Error("主进程原生权威完成回执无效");
     }
-    if (input.source === "startup-recovery" && this.session) {
+    if (input.source === "startup-recovery" && this.session &&
+      (!this.mainOwnedPlayerAuthority || this.session.sessionId !== input.sessionId)) {
       throw new Error("启动恢复不能替换已有原生影子会话");
     }
     if (input.source === "handoff" && (!this.session || this.session.sessionId !== input.sessionId)) {
       throw new Error("原生权威完成回执不属于当前影子会话");
     }
     const proof = proofFromSummary(input.summary, input.checkpoint.rootHash);
-    if (input.source === "handoff" && this.mainOwnedPlayerAuthority) {
+    if (this.mainOwnedPlayerAuthority) {
       if (this.mainOwnedPlayerAuthority.sessionId !== input.sessionId ||
         this.mainOwnedPlayerAuthority.runId !== input.runId ||
+        !this.session || this.session.sessionId !== input.sessionId ||
         this.authorityState.phase !== "native-authoritative" ||
         this.authorityState.authority !== "native" ||
         !this.authorityState.latestVerifiedProof ||
@@ -642,7 +644,7 @@ export class WindowsNativeCoreBetaController {
       // reason to misreport the durable file as failed.
       const resultAuthority = playerAuthorityArtifactIdentity(result);
       if (mainOwnedIdentity && (result.mode !== "normal" || !resultAuthority ||
-        resultAuthority.revision !== result.result.revision)) {
+        !sameMainOwnedArtifactIdentity(mainOwnedIdentity, resultAuthority, result.result.revision))) {
         throw new Error("主进程原生权威导出回执结构无效");
       }
       if (!this.lastSummary || (!mainOwnedIdentity &&

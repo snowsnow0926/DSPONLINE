@@ -44,6 +44,10 @@ function validLogicalId(value) {
     LOGICAL_ID_PATTERN.test(value);
 }
 
+function isPersistenceBoundaryBusy(error) {
+  return error?.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY";
+}
+
 function normalizeBudgetRequest(value) {
   if (!exactKeys(value, ["simulationMilliseconds", "wallMilliseconds"]) ||
       !Number.isSafeInteger(value.simulationMilliseconds) || value.simulationMilliseconds < 1 ||
@@ -250,6 +254,17 @@ class NativePlayerAuthorityMacroBroker {
       this.pending = null;
       return receipt;
     } catch (cause) {
+      // The runtime reports this code only before it stages or calls the Host.
+      // This is a definite no-op, not an uncertain durable outcome, so release
+      // the broker-side operation and let the caller retry after persistence.
+      if (isPersistenceBoundaryBusy(cause)) {
+        this.pending = null;
+        throw brokerError(
+          "native player-authority macro advance is blocked by persistence",
+          "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+          cause,
+        );
+      }
       if (cause instanceof NativePlayerAuthorityMacroBrokerError) throw cause;
       throw brokerError(
         "native player-authority macro outcome is uncertain",
@@ -295,6 +310,14 @@ class NativePlayerAuthorityMacroBroker {
       this.pending = null;
       return Object.freeze({ schemaVersion: 1, state: "finished", revision: settled.revision });
     } catch (cause) {
+      if (isPersistenceBoundaryBusy(cause)) {
+        this.pending = null;
+        throw brokerError(
+          "native player-authority macro finish is blocked by persistence",
+          "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+          cause,
+        );
+      }
       if (cause instanceof NativePlayerAuthorityMacroBrokerError) throw cause;
       throw brokerError(
         "native player-authority macro finish outcome is uncertain",

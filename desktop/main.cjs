@@ -353,6 +353,19 @@ function nativePlayerAuthoritySummaryEligible(summary) {
     summary?.paused === false && summary?.coverage?.authorityEligible === true;
 }
 
+function recordActiveNativePlayerAuthorityObservation(identity, entryCheckpoint, checkpoint, summary) {
+  nativePlayerAuthorityStartupReconcileObservation = Object.freeze({
+    state: "active",
+    runId: identity.runId,
+    sessionId: identity.sessionId,
+    stateVersion: 47,
+    mode: "normal",
+    entryCheckpoint: Object.freeze({ ...entryCheckpoint }),
+    checkpoint: Object.freeze({ ...checkpoint }),
+    summary,
+  });
+}
+
 const NATIVE_PLAYER_AUTHORITY_RETRYABLE_CODES = new Set([
   "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
   "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_STALE",
@@ -530,6 +543,17 @@ async function performNativePlayerAuthorityHandoff(rendererOwnerId, opened) {
           code: "NATIVE_PLAYER_AUTHORITY_HANDOFF_COMPLETION_UNAVAILABLE",
         });
       }
+      // Rust owns the session from this point onward even if the renderer ACK
+      // is lost or the document reloads. Keep the main-owned startup
+      // observation current so the next renderer can rebind instead of seeing
+      // the pre-handoff "absent" observation.
+      recordActiveNativePlayerAuthorityObservation(
+        identity,
+        expectedCheckpoint,
+        expectedCheckpoint,
+        checkpointResult.summary,
+      );
+      nativePlayerAuthorityPersistenceBroker.clearRendererBinding(rendererOwnerId);
       // Ownership has already moved to main. From this point forward there is
       // no legal browser hand-back. Retry only the idempotent completion bind,
       // and hold one settled persistence boundary across checkpoint capture,
@@ -545,7 +569,7 @@ async function performNativePlayerAuthorityHandoff(rendererOwnerId, opened) {
                 code: "NATIVE_PLAYER_AUTHORITY_HANDOFF_COMPLETION_STALE",
               });
             }
-            return nativePlayerAuthorityHandoffIpcBridge.request(ownerId, {
+            const completed = await nativePlayerAuthorityHandoffIpcBridge.request(ownerId, {
               kind: NATIVE_PLAYER_AUTHORITY_HANDOFF_COMPLETE_REQUEST_KIND,
               ...identity,
               revision: durable.checkpoint.revision,
@@ -553,6 +577,14 @@ async function performNativePlayerAuthorityHandoff(rendererOwnerId, opened) {
               nativeWriterFence: browserFence.leaseReceipt.nativeWriterFence,
               summary: durable.summary,
             }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
+            recordActiveNativePlayerAuthorityObservation(
+              durable.authority,
+              expectedCheckpoint,
+              durable.checkpoint,
+              durable.summary,
+            );
+            nativePlayerAuthorityPersistenceBroker.bindRendererAuthority(ownerId, durable.authority);
+            return completed;
           },
         ),
         isTerminalResult: (result) => result?.kind === "native-player-authority-handoff-completed-v1",
@@ -603,14 +635,15 @@ async function reconcileNativePlayerAuthorityStartupWithRenderer(rendererOwnerId
     releaseAuthorized: rustLease.state === "absent",
     timeoutMs: NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS,
   }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
-  if (observation.state === "active" && recoveredRuntimePhase === "active" &&
+  if (observation.state === "active" && ["active", "macro-active"].includes(recoveredRuntimePhase) &&
       nativePlayerAuthorityPersistenceBroker) {
     // Keep the exact clock frozen from checkpoint capture through renderer
     // drain and ACK. The outer retry coordinator starts a fresh atomic attempt
     // after BUSY, timeout, or a non-terminal fail-closed response.
+    const entryCheckpoint = observation.entryCheckpoint;
     return nativePlayerAuthorityPersistenceBroker.withStartupReconciliation(
       rendererOwnerId,
-      (durable) => {
+      async (durable) => {
         if (durable.authority.sessionId !== observation.sessionId ||
             durable.authority.runId !== observation.runId ||
             durable.authority.revision !== durable.checkpoint.revision) {
@@ -618,15 +651,34 @@ async function reconcileNativePlayerAuthorityStartupWithRenderer(rendererOwnerId
             code: "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_STALE",
           });
         }
-        return challenge(Object.freeze({
+        const result = await challenge(Object.freeze({
           ...observation,
           checkpoint: durable.checkpoint,
           summary: durable.summary,
         }));
+        if (result?.action === "resumed-native") {
+          recordActiveNativePlayerAuthorityObservation(
+            durable.authority,
+            entryCheckpoint,
+            durable.checkpoint,
+            durable.summary,
+          );
+          nativePlayerAuthorityPersistenceBroker.bindRendererAuthority(rendererOwnerId, durable.authority);
+        }
+        return result;
       },
     );
   }
-  return challenge(observation);
+  const result = await challenge(observation);
+  if (result?.action === "resumed-native" && observation.state === "active" &&
+      nativePlayerAuthorityPersistenceBroker) {
+    nativePlayerAuthorityPersistenceBroker.bindRendererAuthority(rendererOwnerId, {
+      sessionId: observation.sessionId,
+      runId: observation.runId,
+      revision: observation.checkpoint.revision,
+    });
+  }
+  return result;
 }
 
 function beginNativePlayerAuthorityStartupReconciliation(rendererOwnerId) {
@@ -1279,6 +1331,10 @@ function createWindow() {
     closeNativeCoreOwner: (ownerId) => {
       cancelNativePlayerAuthorityRetriesForOwner(ownerId);
       nativePlayerAuthorityHandoffIpcBridge?.cancelOwner(ownerId);
+      nativePlayerAuthorityPersistenceBroker?.clearRendererBinding(ownerId);
+      if (nativePlayerAuthorityDeferredHandoff?.rendererOwnerId === ownerId) {
+        nativePlayerAuthorityDeferredHandoff = null;
+      }
       if (nativeCoreSessions) void nativeCoreSessions.closeOwner(ownerId);
     },
     cancelApiRequests: cancelAllApiRequests,
@@ -1343,6 +1399,14 @@ ipcMain.on(NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_READY_CHANNEL, (event, messa
   if (message?.kind !== NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_READY_KIND ||
       Reflect.ownKeys(message).length !== 1 ||
       !trustedRendererForNativePlayerAuthority(event?.sender?.id)) return;
+  // A ready event belongs to the newly installed renderer subscription. Drop
+  // any binding left by the previous document even when Electron reuses the
+  // same WebContents ID. Invalidate the old one-shot request/retry generation
+  // before issuing a fresh challenge, so a late ACK from the previous document
+  // cannot bind the new document by owner-ID reuse alone.
+  cancelNativePlayerAuthorityRetriesForOwner(event.sender.id);
+  nativePlayerAuthorityHandoffIpcBridge?.cancelOwner(event.sender.id);
+  nativePlayerAuthorityPersistenceBroker?.clearRendererBinding(event.sender.id);
   void beginNativePlayerAuthorityStartupReconciliation(event.sender.id).catch(() => undefined);
 });
 
@@ -2103,6 +2167,14 @@ ipcMain.handle("desktop:native-player-authority-export-v47", async (event, reque
         exportId: request.exportId,
         savedAtMs: request.savedAtMs,
       }),
+    );
+    // Validate the exact renderer-bound session/run before the temporary file
+    // can be published. A post-export UI warning must never turn a cross-lineage
+    // artifact into a successful download.
+    nativePlayerAuthorityPersistenceBroker.assertBoundRendererArtifact(
+      rendererOwnerId,
+      prepared.authority,
+      prepared.result.revision,
     );
     const delivered = await deliverNativeV47Export({
       exportId: prepared.exportId,

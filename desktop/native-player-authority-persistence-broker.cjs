@@ -68,6 +68,7 @@ class NativePlayerAuthorityPersistenceBroker {
   constructor(options) {
     if (!isRecord(options) || !options.runtime ||
         typeof options.runtime.withSettledPersistenceBoundary !== "function" ||
+        typeof options.runtime.withStartupReconciliationBoundary !== "function" ||
         !options.registry || typeof options.registry.status !== "function" ||
         typeof options.registry.exportV47 !== "function" ||
         typeof options.registry.inspectSession !== "function" ||
@@ -79,6 +80,7 @@ class NativePlayerAuthorityPersistenceBroker {
     this.registry = options.registry;
     this.ownerId = options.ownerId ?? "main-player-authority";
     this.isTrustedRendererOwner = options.isTrustedRendererOwner;
+    this.rendererBinding = null;
   }
 
   requireTrustedRenderer(rendererOwnerId) {
@@ -90,9 +92,56 @@ class NativePlayerAuthorityPersistenceBroker {
     }
   }
 
-  async withBoundary(rendererOwnerId, operation) {
+  bindRendererAuthority(rendererOwnerId, identity) {
     this.requireTrustedRenderer(rendererOwnerId);
-    return this.runtime.withSettledPersistenceBoundary(async (boundary) => {
+    if (!isRecord(identity) || !validLogicalId(identity.sessionId) ||
+        !validLogicalId(identity.runId) || !Number.isSafeInteger(identity.revision) ||
+        identity.revision < 0) {
+      throw brokerError(
+        "native player-authority renderer binding is invalid",
+        "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BINDING_INVALID",
+      );
+    }
+    this.rendererBinding = Object.freeze({
+      rendererOwnerId,
+      sessionId: identity.sessionId,
+      runId: identity.runId,
+    });
+    return this.rendererBinding;
+  }
+
+  clearRendererBinding(rendererOwnerId) {
+    if (this.rendererBinding?.rendererOwnerId !== rendererOwnerId) return false;
+    this.rendererBinding = null;
+    return true;
+  }
+
+  assertBoundRendererArtifact(rendererOwnerId, identity, revision) {
+    this.requireTrustedRenderer(rendererOwnerId);
+    const binding = this.rendererBinding;
+    if (!binding || binding.rendererOwnerId !== rendererOwnerId || !isRecord(identity) ||
+        identity.sessionId !== binding.sessionId || identity.runId !== binding.runId ||
+        !Number.isSafeInteger(identity.revision) || identity.revision < 0 ||
+        identity.revision !== revision) {
+      throw brokerError(
+        "native player-authority artifact does not belong to the bound renderer lineage",
+        "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BINDING_STALE",
+      );
+    }
+    return true;
+  }
+
+  async withBoundary(rendererOwnerId, operation) {
+    return this.withRuntimeBoundary(rendererOwnerId, operation, "withSettledPersistenceBoundary");
+  }
+
+  async withStartupBoundary(rendererOwnerId, operation) {
+    return this.withRuntimeBoundary(rendererOwnerId, operation, "withStartupReconciliationBoundary");
+  }
+
+  async withRuntimeBoundary(rendererOwnerId, operation, runtimeMethod) {
+    this.requireTrustedRenderer(rendererOwnerId);
+    return this.runtime[runtimeMethod](async (boundary) => {
       const owned = this.registry.inspectSession(this.ownerId, boundary.sessionId);
       if (owned?.ownerId !== this.ownerId || owned.slot !== "normal-main" ||
           owned.state !== "owned" || owned.inFlight !== 0) {
@@ -122,7 +171,7 @@ class NativePlayerAuthorityPersistenceBroker {
     if (typeof operation !== "function") {
       throw new TypeError("native player-authority startup reconciliation is invalid");
     }
-    return this.withBoundary(rendererOwnerId, async (boundary, summary) => operation(Object.freeze({
+    return this.withStartupBoundary(rendererOwnerId, async (boundary, summary) => operation(Object.freeze({
       authority: authorityIdentity(boundary),
       checkpoint: Object.freeze({ ...boundary.checkpoint }),
       summary,
@@ -146,6 +195,7 @@ class NativePlayerAuthorityPersistenceBroker {
       throw brokerError("native player-authority export request is invalid");
     }
     return this.withBoundary(rendererOwnerId, async (boundary) => {
+      this.assertBoundRendererArtifact(rendererOwnerId, authorityIdentity(boundary), boundary.revision);
       const result = await this.registry.exportV47(this.ownerId, {
         sessionId: boundary.sessionId,
         exportId: request.exportId,

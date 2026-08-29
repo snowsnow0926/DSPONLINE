@@ -349,6 +349,30 @@ test("startup reconciliation actions are constrained by main's active/absent/unk
   }
 });
 
+test("cancelling a reused WebContents rejects its old envelope and accepts only the fresh handoff ID", async () => {
+  const { bridge, sent } = bridgeFixture();
+  const oldRequest = startupRequest("active", { handoffId: "startup-old" });
+  const oldPending = bridge.request(7, oldRequest, 5_000);
+  assert.equal(bridge.cancelOwner(7), true);
+  await assert.rejects(
+    oldPending,
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_UNAVAILABLE",
+  );
+
+  const freshRequest = startupRequest("active", { handoffId: "startup-fresh" });
+  const freshPending = bridge.request(7, freshRequest, 5_000);
+  const resumed = {
+    kind: "native-player-authority-startup-reconciled-v1",
+    action: "resumed-native",
+    rendererInFlightCoreOperations: 0,
+    workerInFlightCoreOperations: 0,
+  };
+  assert.equal(bridge.accept({ sender: { id: 7 } }, response(oldRequest, resumed)), false);
+  assert.equal(bridge.accept({ sender: { id: 7 } }, response(freshRequest, resumed)), true);
+  assert.equal((await freshPending).action, "resumed-native");
+  assert.deepEqual(sent.map(({ value }) => value.handoffId), ["startup-old", "startup-fresh"]);
+});
+
 test("startup retry is single-instance, bounded, and reaches terminal without another renderer-ready signal", async () => {
   const scheduled = [];
   const cancelled = [];
@@ -412,6 +436,88 @@ test("startup retry is single-instance, bounded, and reaches terminal without an
     lastErrorCode: null,
   });
   assert.ok(cancelled.every((timer) => timer.cancelled));
+});
+
+test("a fresh renderer-ready after terminal starts a new challenge even when WebContents ID is reused", async () => {
+  let calls = 0;
+  const retry = new NativePlayerAuthorityBoundedRetryCoordinator({
+    operation: async () => {
+      calls += 1;
+      return {
+        kind: "native-player-authority-startup-reconciled-v1",
+        action: "resumed-native",
+      };
+    },
+    isTerminalResult: startupReconciliationIsTerminalResolved,
+    isOwnerAvailable: (ownerId) => ownerId === 7,
+    retryDelaysMs: [0],
+  });
+
+  const first = retry.start(7);
+  await first;
+  const second = retry.start(7);
+  assert.notEqual(second, first);
+  await second;
+  assert.equal(calls, 2);
+  assert.deepEqual(retry.snapshot(), {
+    phase: "terminal",
+    rendererOwnerId: 7,
+    attempt: 1,
+    retryDelayMs: null,
+    lastErrorCode: null,
+  });
+});
+
+test("a fresh renderer-ready cancels an in-flight challenge before reusing the WebContents ID", async () => {
+  const firstGate = {};
+  firstGate.promise = new Promise((resolve) => { firstGate.resolve = resolve; });
+  const scheduled = [];
+  let calls = 0;
+  const retry = new NativePlayerAuthorityBoundedRetryCoordinator({
+    operation: async () => {
+      calls += 1;
+      if (calls === 1) return firstGate.promise;
+      return {
+        kind: "native-player-authority-startup-reconciled-v1",
+        action: "resumed-native",
+      };
+    },
+    isTerminalResult: startupReconciliationIsTerminalResolved,
+    isOwnerAvailable: (ownerId) => ownerId === 7,
+    retryDelaysMs: [0],
+    schedule: (callback, delayMs) => {
+      const token = { callback, delayMs, cancelled: false };
+      scheduled.push(token);
+      return token;
+    },
+    cancel: (token) => { token.cancelled = true; },
+  });
+
+  const previousDocument = retry.start(7);
+  scheduled.shift().callback();
+  await Promise.resolve();
+  assert.equal(calls, 1);
+  assert.equal(retry.cancelOwner(7), true);
+  await assert.rejects(
+    previousDocument,
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_UNAVAILABLE",
+  );
+
+  const currentDocument = retry.start(7);
+  scheduled.shift().callback();
+  firstGate.resolve({
+    kind: "native-player-authority-startup-reconciled-v1",
+    action: "resumed-native",
+  });
+  assert.equal((await currentDocument).action, "resumed-native");
+  assert.equal(calls, 2);
+  assert.deepEqual(retry.snapshot(), {
+    phase: "terminal",
+    rendererOwnerId: 7,
+    attempt: 1,
+    retryDelayMs: null,
+    lastErrorCode: null,
+  });
 });
 
 test("retry-pending becomes recovery-blocked and cancels its timer when the renderer is destroyed", async () => {

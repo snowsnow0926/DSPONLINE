@@ -333,7 +333,7 @@ class NativePlayerAuthorityBoundedRetryCoordinator {
       return Promise.reject(protocolError("native player-authority retry owner is invalid"));
     }
     if (this.state.rendererOwnerId === rendererOwnerId &&
-        ["terminal", "retry-pending"].includes(this.state.phase) && this.completion) {
+        this.state.phase === "retry-pending" && this.completion) {
       return this.completion;
     }
     if (this.state.phase === "retry-pending" && this.state.rendererOwnerId !== rendererOwnerId) {

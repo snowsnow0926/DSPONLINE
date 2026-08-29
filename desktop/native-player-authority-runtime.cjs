@@ -854,13 +854,29 @@ class NativePlayerAuthorityRuntime {
    * and reuse that checkpoint rather than enter the generic checkpoint path
    * (which is correctly fenced while this lease exists).
    */
-  async withSettledPersistenceBoundary(operation) {
+  withSettledPersistenceBoundary(operation) {
+    return this.withFrozenPersistenceBoundary(operation, false);
+  }
+
+  /**
+   * Startup/reload reconciliation also has to bind a renderer while a durable
+   * macro session is active. It freezes that already-ACKed macro checkpoint
+   * without finishing, replaying, or advancing the macro operation.
+   */
+  withStartupReconciliationBoundary(operation) {
+    return this.withFrozenPersistenceBoundary(operation, true);
+  }
+
+  async withFrozenPersistenceBoundary(operation, allowMacro) {
     if (typeof operation !== "function") {
       throw new TypeError("native player-authority persistence operation is invalid");
     }
-    if (this.phase !== "active" || !this.context || this.inFlight ||
+    const phaseAllowed = this.phase === "active" || allowMacro && this.phase === "macro-active";
+    if (!phaseAllowed || !this.context || this.inFlight ||
         this.currentOperation !== null || this.persistenceBoundaryInFlight ||
-        this.context.macroSession !== null) {
+        this.pendingMacroAction !== null ||
+        (!allowMacro && this.context.macroSession !== null) ||
+        (this.phase === "macro-active") !== (this.context.macroSession !== null)) {
       throw runtimeError(
         "native player-authority persistence requires a settled active boundary",
         "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
@@ -870,6 +886,8 @@ class NativePlayerAuthorityRuntime {
     this.timer = null;
     this.persistenceBoundaryInFlight = true;
     const context = this.context;
+    const frozenPhase = this.phase;
+    const frozenMacroSession = context.macroSession;
     const boundary = Object.freeze({
       sessionId: context.sessionId,
       runId: context.runId,
@@ -880,13 +898,14 @@ class NativePlayerAuthorityRuntime {
     });
     try {
       const result = await operation(boundary);
-      if (this.shutdownRequested || this.phase !== "active" || this.context !== context ||
+      if (this.shutdownRequested || this.phase !== frozenPhase || this.context !== context ||
           context.sessionId !== boundary.sessionId || context.runId !== boundary.runId ||
           context.revision !== boundary.revision ||
           !sameCheckpoint(context.checkpoint, boundary.checkpoint) ||
           context.nextSequence - 1 !== boundary.acknowledgedSequence ||
           context.nextDeadlineMs - TICK_MILLISECONDS !== boundary.settledDeadlineMs ||
-          context.macroSession !== null || this.inFlight || this.currentOperation !== null) {
+          context.macroSession !== frozenMacroSession || this.pendingMacroAction !== null ||
+          this.inFlight || this.currentOperation !== null) {
         throw runtimeError(
           "native player-authority persistence boundary changed before completion",
           "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_STALE",
@@ -900,8 +919,14 @@ class NativePlayerAuthorityRuntime {
   }
 
   commitMacroAdvance(rawRequest) {
+    if (this.persistenceBoundaryInFlight) {
+      return Promise.reject(runtimeError(
+        "native player-authority macro advance is blocked by persistence",
+        "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+      ));
+    }
     if (!this.context || !["active", "macro-active", "macro-uncertain"].includes(this.phase) ||
-        this.inFlight || this.persistenceBoundaryInFlight || this.activeCommand || this.commandQueue.length > 0 ||
+        this.inFlight || this.activeCommand || this.commandQueue.length > 0 ||
         typeof this.registry.commitPlayerAuthorityMacroAdvance !== "function") {
       return Promise.reject(runtimeError("native player-authority runtime cannot start a macro advance"));
     }
@@ -1011,6 +1036,12 @@ class NativePlayerAuthorityRuntime {
   }
 
   finishMacroSession(rawRequest) {
+    if (this.persistenceBoundaryInFlight) {
+      return Promise.reject(runtimeError(
+        "native player-authority macro finish is blocked by persistence",
+        "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+      ));
+    }
     if (!this.context || !["macro-active", "macro-uncertain"].includes(this.phase) ||
         this.inFlight || typeof this.registry.finishPlayerAuthorityMacroSession !== "function") {
       return Promise.reject(runtimeError("native player-authority macro session cannot finish"));

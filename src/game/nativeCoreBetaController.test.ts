@@ -1199,12 +1199,7 @@ describe("Windows native core invitation-Beta controller", () => {
       "export-after-lineage-change",
       "factory-after-lineage-change.json",
       23_000,
-    )).resolves.toMatchObject({
-      artifact: {
-        identity: { sessionId: "replacement-session", runId: "replacement-run", revision: 4 },
-        export: { cancelled: false, result: { revision: 4 } },
-      },
-    });
+    )).rejects.toThrow(/导出回执结构无效/);
     expect(session.exportCalls).toBe(0);
   });
 
@@ -1353,6 +1348,34 @@ describe("Windows native core invitation-Beta controller", () => {
       shadowRevision: 41,
     });
     expect(opener).not.toHaveBeenCalled();
+
+    const rebound = controller.bindMainOwnedPlayerAuthority({
+      sessionId: "core-recovered-1",
+      runId: "player-run-recovered-1",
+      checkpoint: { generation: 9, rootHash: "d".repeat(64), revision: 42 },
+      summary: summary(42, true),
+      source: "startup-recovery",
+    });
+    expect(rebound.authority).toMatchObject({
+      phase: "native-authoritative",
+      authority: "native",
+      sessionId: "core-recovered-1",
+      shadowRevision: 42,
+    });
+    expect(() => controller.bindMainOwnedPlayerAuthority({
+      sessionId: "core-recovered-1",
+      runId: "replacement-run",
+      checkpoint: { generation: 9, rootHash: "d".repeat(64), revision: 42 },
+      summary: summary(42, true),
+      source: "startup-recovery",
+    })).toThrow(/lineage 回退或替换/);
+    expect(() => controller.bindMainOwnedPlayerAuthority({
+      sessionId: "core-recovered-1",
+      runId: "player-run-recovered-1",
+      checkpoint: startupCheckpoint,
+      summary: startupSummary,
+      source: "startup-recovery",
+    })).toThrow(/lineage 回退或替换/);
 
     const rejected = new WindowsNativeCoreBetaController(opener, () => 1_000);
     expect(() => rejected.bindMainOwnedPlayerAuthority({

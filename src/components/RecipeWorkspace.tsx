@@ -36,6 +36,7 @@ import { ItemGlyph, ItemHoverCard } from "./ItemReference";
 import { QuantityValue } from "./QuantityValue";
 import { StableTextInput, clearStableTextDraft } from "./CompositionSafeInput";
 import { WorkspaceFrame } from "./WorkspaceFrame";
+import { useAppLocale } from "../i18n/locale";
 
 type ItemFilter = "all" | "raw" | "solid" | "fluid" | "matrix";
 
@@ -126,6 +127,7 @@ export function RecipeWorkspace({ open, readOnly = false, readModel, onReadReque
   onMobileOpenDetail?: (subview: string) => void;
   onMobileReplaceDetail?: (subview: string) => void;
 }) {
+  const { isEnglish } = useAppLocale();
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ItemFilter>("all");
   const [section, setSection] = useState<CodexSection>("items");
@@ -241,6 +243,16 @@ export function RecipeWorkspace({ open, readOnly = false, readModel, onReadReque
   const stock = readModel.selectedItem.stock;
   const productionLocations = readModel.selectedItem.productionLocations;
   const currentProductionLocation = productionLocations.find((location) => location.planetId === readModel.activePlanetId);
+  const locateProductionLabel = currentProductionLocation
+    ? isEnglish
+      ? `${readModel.source === "native-core" ? "Locate Production Facilities" : "Locate Production Line"} · ${currentProductionLocation.producerCount}`
+      : `定位${readModel.source === "native-core" ? "生产设备" : "产线"} · ${currentProductionLocation.producerCount}`
+    : null;
+  const locateProductionTitle = currentProductionLocation
+    ? isEnglish
+      ? `Locate ${currentProductionLocation.producerCount} ${readModel.source === "native-core" ? "production facilities" : "production nodes and upstream belts"} on the current planet`
+      : `定位当前行星 ${currentProductionLocation.producerCount} 个${readModel.source === "native-core" ? "生产设备" : "生产节点及上游产线"}`
+    : undefined;
   const catalogAudit = validateContentCatalog();
 
   const mobileDetail = Boolean(mobile && mobileSubview);
@@ -294,7 +306,9 @@ export function RecipeWorkspace({ open, readOnly = false, readModel, onReadReque
           <button type="button" disabled={itemPage === 0} onClick={() => setItemPage((page) => Math.max(0, page - 1))}>上一页</button>
           <button type="button" disabled={itemPage + 1 >= itemPageCount} onClick={() => setItemPage((page) => Math.min(itemPageCount - 1, page + 1))}>下一页</button>
         </div> : null}
-        <span className="recipe-result-count">{visibleItems.length} 项 · {itemPage + 1}/{itemPageCount} 页</span>
+        <span className="recipe-result-count">{isEnglish
+          ? `${visibleItems.length} item${visibleItems.length === 1 ? "" : "s"} · Page ${itemPage + 1}/${itemPageCount}`
+          : `${visibleItems.length} 项 · ${itemPage + 1}/${itemPageCount} 页`}</span>
       </div> : null}
 
       {section === "items" ? <div className="recipe-layout">
@@ -318,7 +332,7 @@ export function RecipeWorkspace({ open, readOnly = false, readModel, onReadReque
             <div><span>{item.kind === "matrix" ? "科研矩阵" : item.kind === "fluid" ? "流体物品" : sources.length > 0 ? "天然资源" : "工业物品"}</span><strong>{item.name}</strong><p>{item.description}</p></div>
             <div className="recipe-item-actions">
               <button type="button" disabled={readOnly} className={readModel.recipeFocus.itemId === selectedItemId ? "active" : ""} onClick={() => onFocus(readModel.recipeFocus.itemId === selectedItemId ? null : selectedItemId)} title={readOnly ? "Windows 原生模式下暂不可修改聚焦状态" : readModel.recipeFocus.itemId === selectedItemId ? "取消主界面聚焦" : "固定生产链到主界面"}><Pin size={14} /><span>{readModel.recipeFocus.itemId === selectedItemId ? "已固定" : "固定到主界面"}</span></button>
-              {currentProductionLocation ? <button type="button" onClick={() => onLocateProductionLine(selectedItemId, readModel.activePlanetId)} title={`定位当前行星 ${currentProductionLocation.producerCount} 个${readModel.source === "native-core" ? "生产设备" : "生产节点及上游产线"}`}><LocateFixed size={14} /><span>定位{readModel.source === "native-core" ? "生产设备" : "产线"} · {currentProductionLocation.producerCount}</span></button> : null}
+              {currentProductionLocation ? <button type="button" onClick={() => onLocateProductionLine(selectedItemId, readModel.activePlanetId)} title={locateProductionTitle}><LocateFixed size={14} /><span>{locateProductionLabel}</span></button> : null}
             </div>
             <dl>
               <div><dt>网络库存</dt><dd><QuantityValue value={stock} /></dd></div>

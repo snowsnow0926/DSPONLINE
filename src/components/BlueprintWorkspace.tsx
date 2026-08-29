@@ -164,8 +164,8 @@ export function CanvasRegionEditor({ region, onChange, onRemove, onClose }: {
     <section className="canvas-region-editor nodrag nopan" aria-label="生产区域设置">
       <Palette size={15} />
       <label><span>区域名称</span><StableTextInput commitOnBlur draftId={`canvas-region-name:${region.id}`} value={region.name} onValueChange={(name) => onChange({ name })} maxLength={28} onBlur={() => clearStableTextDraft(`canvas-region-name:${region.id}`)} onKeyDown={(event) => { if (event.key === "Enter") event.currentTarget.blur(); }} /></label>
-      <label className="canvas-region-editor__color"><span>背景</span><input type="color" value={region.fillColor} onChange={(event) => onChange({ fillColor: event.target.value })} /></label>
-      <label className="canvas-region-editor__color"><span>边框</span><input type="color" value={region.borderColor} onChange={(event) => onChange({ borderColor: event.target.value })} /></label>
+      <label className="canvas-region-editor__color"><span>背景</span><input type="color" value={region.fillColor} onInput={(event) => onChange({ fillColor: event.currentTarget.value })} /></label>
+      <label className="canvas-region-editor__color"><span>边框</span><input type="color" value={region.borderColor} onInput={(event) => onChange({ borderColor: event.currentTarget.value })} /></label>
       <button className="danger" type="button" onClick={onRemove} title="删除生产区域" aria-label="删除生产区域"><Trash2 size={14} /></button>
       <button type="button" onClick={onClose} title="关闭区域设置" aria-label="关闭区域设置"><X size={14} /></button>
     </section>

@@ -301,4 +301,25 @@ describe("InspectorPanel native-authority read-only boundary", () => {
     expect(host.querySelector(".fabricator-workspace")).not.toBeNull();
     expect(host.textContent).toContain("基础制造");
   });
+
+  it("keeps projected live summaries exclusive to native read-only ownership", () => {
+    const game = createInitialState();
+    const belt = beltFixture(game);
+    const projectionGame: GameState = { ...game, belts: [belt] };
+
+    render(panelProps({
+      game: projectionGame,
+      readOnly: false,
+      tab: "inspect",
+      selectedEntities: [],
+      selectedEntity: null,
+      multiSelectedBelts: [belt],
+      selectedBelt: belt,
+      inspectorReadModel: nativeInspectorModel(projectionGame, null, belt, 62),
+    }));
+
+    expect(host.querySelector(".belt-lane-control")).not.toBeNull();
+    expect(host.querySelector(".desktop-inspector-live-summary")).toBeNull();
+    expect(host.querySelector("[data-native-authority-read-only='true']")).toBeNull();
+  });
 });

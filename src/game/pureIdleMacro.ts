@@ -19,6 +19,7 @@ import {
   creditPureIdleConstructionQuantumReplay,
   createPureIdleAffineCalibration,
   createPureIdleLightweightCalibration,
+  issuePureIdleConstructionRuntimePowerCertificate,
   validatePureIdleCombinedSettlementConservation,
   type PureIdleAffineContract,
   type PureIdleCombinedConservationCheckpoint,
@@ -707,8 +708,8 @@ export function createConservativePureIdleMacroSession(
       ? `${reason}；${powerTailRejectionReason ?? "燃料或储能供电没有形成闭合证书"}；普通生产、科研、火箭和建筑制造尾段全部冻结`
     : productiveTail
       ? steadyStateItemCount > 0
-        ? `${reason}；已用 3 个 10 秒精确窗口为 ${steadyStateItemCount} 类物料建立闭合稳态供需证书；可持续产线不再受物流缓存波动误停，未获证明的缓存产线仍按真实边界停止；建筑制造只使用同电网 30 秒逐秒证明的持续可再生余电，未获联合物料/电力授权的中心尾段冻结；${terminalTailDescription}`
-        : `${reason}；已用 3 个 10 秒精确窗口建立轻量外推；普通生产与科研按物料边界推进；建筑制造只使用同电网 30 秒逐秒证明的持续可再生余电，未获联合物料/电力授权的中心尾段冻结；${terminalTailDescription}`
+        ? `${reason}；已用 3 个 10 秒精确窗口为 ${steadyStateItemCount} 类物料建立闭合稳态供需证书；可持续产线不再受物流缓存波动误停，未获证明的缓存产线仍按真实边界停止；建筑制造按同电网逐秒采样的最低供电比例运行，有限燃料与储能时长由主供电证书共同限制；未获联合物料/电力授权的中心尾段冻结；${terminalTailDescription}`
+        : `${reason}；已用 3 个 10 秒精确窗口建立轻量外推；普通生产与科研按物料边界推进；建筑制造按同电网逐秒采样的最低供电比例运行，有限燃料与储能时长由主供电证书共同限制；未获联合物料/电力授权的中心尾段冻结；${terminalTailDescription}`
       : `${reason}；已精确结算 ${prefixSeconds} 秒，但样本没有形成可持续普通生产合同，尾段仅推进时间`;
   return {
     mode,
@@ -798,15 +799,20 @@ export function createReplicationPureIdleMacroSession(state: GameState): PureIdl
     activityDelivered: {},
   };
   const baseline = capturePureIdleTerminalSnapshot(state);
+  const macroContract: PureIdleAffineContract = {
+    deltas: [],
+    calibrationSeconds: contract.windowSeconds,
+    calibrationWallSeconds: 0,
+  };
+  const constructionPowerCertificate = issuePureIdleConstructionRuntimePowerCertificate(
+    state,
+    macroContract,
+  );
   return {
     mode: "replication",
     phase: "running",
     candidate: state,
-    contract: {
-      deltas: [],
-      calibrationSeconds: contract.windowSeconds,
-      calibrationWallSeconds: 0,
-    },
+    contract: macroContract,
     researchLedger: {
       unitsPerWindow: 0n,
       windowSeconds: contract.windowSeconds,
@@ -845,6 +851,7 @@ export function createReplicationPureIdleMacroSession(state: GameState): PureIdl
       maximumSimulationSeconds: null,
       storageDispatchDetected: false,
     },
+    ...(constructionPowerCertificate ? { constructionPowerCertificate } : {}),
     powerRemainingSimulationSeconds: null,
     powerBoundaryRecalibrations: 0,
     conservativeRemainingSimulationSecondsByItem: {},
@@ -1027,6 +1034,29 @@ function advanceReplicationSession(
   const multiplier = session.actualMultiplier;
   const wallSeconds = targetWallSeconds - session.settledWallSeconds;
   const simulationSeconds = wallSeconds * multiplier;
+  let constructionCompleted = 0;
+  if (session.constructionPowerCertificate && session.candidate.constructionAutomation.enabled) {
+    // Replication intentionally fabricates terminal output, so its broad
+    // terminal ledger cannot share a conservation baseline with construction.
+    // Settle and validate the construction-only domain first; it still burns
+    // real recursive inputs and uses only the power factor captured at start.
+    const constructionCheckpoint = capturePureIdleCombinedConservationCheckpoint(session.candidate);
+    const construction = advanceConstructionAutomationMacroWithReceiptInPlace(
+      session.candidate,
+      simulationSeconds,
+      constructionCheckpoint,
+      {
+        powerCertificate: session.constructionPowerCertificate,
+        contract: session.contract,
+      },
+    );
+    const constructionFailure = validatePureIdleCombinedSettlementConservation(
+      constructionCheckpoint,
+      session.candidate,
+    );
+    if (constructionFailure) throw new Error(`产率复制建筑制造结算失败：${constructionFailure}`);
+    constructionCompleted = construction.completed;
+  }
   const application = advancePureIdleReplicationInPlace(
     session.candidate,
     contract,
@@ -1043,7 +1073,7 @@ function advanceReplicationSession(
   session.settledSimulationSeconds += simulationSeconds;
   session.actualMultiplier = multiplier;
   session.phase = "running";
-  session.lastValidationReason = `统计产率复制：终局材料 ${Object.keys(application.creditedMaterials).length} 类，科研 ${application.creditedResearch.toString()}，火箭 ${application.launchedRockets.toLocaleString("zh-CN")}，壳面帆 ${application.absorbedSails.toLocaleString("zh-CN")}`;
+  session.lastValidationReason = `统计产率复制：终局材料 ${Object.keys(application.creditedMaterials).length} 类，科研 ${application.creditedResearch.toString()}，火箭 ${application.launchedRockets.toLocaleString("zh-CN")}，壳面帆 ${application.absorbedSails.toLocaleString("zh-CN")}${constructionCompleted > 0 ? `；建筑制造递归完成 ${constructionCompleted.toLocaleString("zh-CN")} 件` : ""}`;
   session.computationDurationMs = Math.max(0, macroNow() - startedAt);
   return summarizePureIdleMacroSession(session);
 }
@@ -1340,12 +1370,10 @@ export function advancePureIdleMacroSession(
         completedFiniteTechIds: [], completedInfiniteLevels: [] };
     session.researchRemainder = research.remainder;
     session.researchInflowRemainders = research.inflowRemainders;
-    if (research.completedFiniteTechIds.length > 0 || research.completedInfiniteLevels.length > 0) {
-      // Research can change production/power multipliers inside this same
-      // bucket. The 30-second joint power proof predates that boundary, so
-      // construction must wait for the next exact recalibration.
-      delete session.constructionPowerCertificate;
-    }
+    // Research boundaries may change construction speed or capacity, but do
+    // not change a center's certified electrical demand. The receipt ledger
+    // still consumes real inputs, while the allocation revalidates center
+    // count, grid, stack, priority, difficulty and controller every bucket.
     throwIfMacroInterrupted(options);
     const constructionSeconds = isolatedConstructionPrefixSeconds +
       (applied.ok

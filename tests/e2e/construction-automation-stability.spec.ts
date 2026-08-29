@@ -95,6 +95,41 @@ test("guarded construction automation keeps realtime Worker responses bounded wi
   expect(result.centerStack).toBe(44_311);
 });
 
+test("simulation Worker classifies engine failures as recoverable runtime errors", async ({ page }) => {
+  await page.goto("/");
+  const response = await page.evaluate(async () => {
+    const engine = await import("/src/game/engine.ts");
+    const packs = await import("/src/game/contentPacks.ts");
+    const snapshot = packs.createContentPackRuntimeSnapshot(packs.createContentPackRegistry());
+    const malformed = engine.createInitialState(20_260_830, false) as unknown as Record<string, unknown>;
+    malformed.entities = null;
+    const worker = new Worker(new URL("/src/game/simulation.worker.ts", location.origin), { type: "module" });
+    const result = await new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timeout = window.setTimeout(() => reject(new Error("runtime classification timed out")), 10_000);
+      worker.addEventListener("message", (event: MessageEvent<Record<string, unknown>>) => {
+        if (event.data.id !== 991) return;
+        window.clearTimeout(timeout);
+        resolve(event.data);
+      }, { once: true });
+      worker.postMessage({
+        id: 991,
+        state: malformed,
+        simulationSeconds: 1,
+        wallSeconds: 1,
+        registryFingerprint: snapshot.fingerprint,
+        registry: snapshot,
+      });
+    });
+    worker.terminate();
+    return result;
+  });
+
+  expect(response.needsState).toBe(true);
+  expect(response.registryError).toBeUndefined();
+  expect(response.runtimeError).toMatchObject({ recoverable: true });
+  expect((response.runtimeError as { message?: unknown }).message).toEqual(expect.any(String));
+});
+
 const realFixturePath = process.env.DSP_CONSTRUCTION_STABILITY_SAVE;
 
 test("real construction-center save keeps committing sixty one-second Worker slices", async ({ page }) => {
@@ -173,7 +208,7 @@ test("real construction-center save keeps committing sixty one-second Worker sli
   expect(result.targetCount).toBeGreaterThan(0);
 });
 
-test("stopping pure idle terminates an unresponsive slice and restores interaction", async ({ page }) => {
+test("pure idle survives an unresponsive slice and manual stop still restores interaction", async ({ page }) => {
   test.skip(!realFixturePath, "Set DSP_CONSTRUCTION_STABILITY_SAVE to run the player-save acceptance test.");
   test.setTimeout(120_000);
   const envelope = JSON.parse(await readFile(realFixturePath!, "utf8")) as {
@@ -327,16 +362,18 @@ test("stopping pure idle terminates an unresponsive slice and restores interacti
   await expect.poll(() => page.evaluate(() =>
     (window as typeof window & { __timeWarpStopTracker?: { delayedRequests: number } }).__timeWarpStopTracker?.delayedRequests ?? 0,
   ), { timeout: 3_000 }).toBeGreaterThan(delayedBeforeAutomaticTimeout);
-  await expect(page.getByRole("dialog", { name: "纯挂机" })).toHaveCount(0, { timeout: 7_000 });
-  await expect(page.locator(".game-notice")).toContainText("单个切片超过安全时限", { timeout: 3_000 });
+  await expect(page.locator(".game-notice")).toContainText("继续纯挂机", { timeout: 7_000 });
+  await expect(page.getByRole("dialog", { name: "纯挂机" })).toBeVisible();
   await page.evaluate(() => {
     (window as typeof window & { __timeWarpStopTracker?: { delayTimeWarp: boolean } }).__timeWarpStopTracker!.delayTimeWarp = false;
   });
   await expect.poll(() => page.evaluate(() =>
     (window as typeof window & { __timeWarpStopTracker?: { terminatedWorkers: number } }).__timeWarpStopTracker?.terminatedWorkers ?? 0,
   )).toBeGreaterThan(1);
-  await expect(page.locator(".game-shell")).toHaveAttribute("data-simulation-worker", "active", { timeout: 3_000 });
+  await expect(page.locator(".game-shell")).toHaveAttribute("data-simulation-worker", "active", { timeout: 20_000 });
+  await expect(page.getByRole("dialog", { name: "纯挂机" })).toBeVisible();
+  await page.getByRole("dialog", { name: "纯挂机" }).getByRole("button", { name: "停止并结算纯挂机" }).click();
+  await expect(page.getByRole("dialog", { name: "纯挂机" })).toHaveCount(0, { timeout: 3_000 });
   await page.getByTitle("生产统计").click();
   await expect(page.getByRole("dialog", { name: "生产统计" })).toBeVisible();
 });
-

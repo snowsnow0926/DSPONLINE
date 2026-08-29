@@ -197,6 +197,46 @@ describe("pure-idle production replication", () => {
     expect(summary.current.rocketsLaunched - summary.baseline.rocketsLaunched).toBe(60);
   });
 
+  it("keeps the construction megastructure recursively manufacturing from real stock", () => {
+    const state = replicationState();
+    state.research.completedTechIds.push("construction_automation");
+    state.construction.arc_smelter = 0;
+    state.constructionAutomation.enabled = true;
+    state.constructionAutomation.targetStock.arc_smelter = 2;
+    state.tray.iron_ingot = 8;
+    state.tray.stone_brick = 4;
+    state.tray.circuit_board = 8;
+    state.tray.magnetic_coil = 4;
+    state.entities.push({
+      id: "replication-construction-center",
+      kind: "machine",
+      planetId: "home",
+      position: { x: 160, y: 0 },
+      interactionLocked: false,
+      buildingId: "construction_center",
+      powerGridId: "grid-a",
+      machineCount: 100,
+      minerCount: 0,
+      inputs: {},
+      outputs: {},
+      progress: 0,
+      routingCursor: 0,
+      utilization: 1,
+      productionRate: 0,
+      powerInputKw: 1_200_000,
+      powerFactor: 1,
+    });
+
+    const session = createPureIdleMacroSession(state, "replication");
+    expect(session.constructionPowerCertificate).toBeDefined();
+    advancePureIdleMacroSession(session, 1);
+
+    expect(state.construction.arc_smelter).toBe(2);
+    expect(state.constructionAutomation.totalCrafted).toBe(2);
+    expect(state.tray.iron_ingot).toBe(0);
+    expect(session.lastValidationReason).toContain("建筑制造递归完成 2 件");
+  });
+
   it("is deterministic across one-shot and segmented wall-clock advances", () => {
     const wholeState = replicationState();
     const segmentedState = structuredClone(wholeState);
@@ -213,6 +253,9 @@ describe("pure-idle production replication", () => {
 
   it("initializes and advances without traversing the entity or belt graph", () => {
     const state = replicationState();
+    state.constructionAutomation.enabled = true;
+    state.constructionAutomation.targetStock.arc_smelter = 2;
+    state.construction.arc_smelter = 2;
     Object.defineProperty(state, "entities", {
       configurable: true,
       get: () => { throw new Error("replication traversed entities"); },

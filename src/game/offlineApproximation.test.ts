@@ -1107,7 +1107,7 @@ describe("offline macro contract experiment", () => {
     expect(hashGameState(source)).toBe(sourceHash);
   });
 
-  it("freezes construction centers on an exhaustible grid while preserving its funded ordinary prefix", () => {
+  it("runs construction only through the funded exhaustible-grid prefix and cannot reuse it", () => {
     const state = timeWarpPowerFixture("fuel", 80);
     state.research.completedTechIds.push("construction_automation");
     state.constructionAutomation.enabled = true;
@@ -1126,9 +1126,21 @@ describe("offline macro contract experiment", () => {
     expect(result.status).toBe("approximate");
     if (result.status !== "approximate") return;
     expect(result.state.totalProduced.iron_ingot ?? 0).toBeGreaterThan(0);
-    expect(result.state.constructionAutomation.totalCrafted).toBe(0);
-    expect(result.state.entities.find((entity) => entity.id === "power-fuel-construction"))
-      .toMatchObject({ buildingId: "construction_center", powerInputKw: 0, powerFactor: 0, utilization: 0, productionRate: 0 });
+    expect(result.state.constructionAutomation.totalCrafted).toBeGreaterThan(0);
+    expect(result.state.constructionAutomation.totalCrafted).toBeLessThanOrEqual(10_000);
+    expect(result.state.entities.find((entity) => entity.id === "power-fuel-star")?.fuelRemainingMj ?? 0)
+      .toBeLessThan(1);
+
+    const craftedAtExhaustion = result.state.constructionAutomation.totalCrafted;
+    const second = runFastOfflineSettlement(result.state, 100, 100 / 16);
+    expect(["approximate", "conservative"]).toContain(second.status);
+    if (second.status === "approximate" || second.status === "conservative") {
+      expect(second.state.constructionAutomation.totalCrafted).toBe(craftedAtExhaustion);
+      const exhaustedCenter = second.state.entities.find((entity) => entity.id === "power-fuel-construction");
+      expect(exhaustedCenter).toMatchObject({ buildingId: "construction_center", utilization: 0, productionRate: 0 });
+      expect(exhaustedCenter?.powerInputKw ?? 0).toBe(0);
+      expect(exhaustedCenter?.powerFactor ?? 0).toBe(0);
+    }
   });
 
   it("does not replay a one-second accumulator reserve through the first or rolling 15x tail", () => {

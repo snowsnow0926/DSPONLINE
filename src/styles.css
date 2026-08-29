@@ -11604,10 +11604,20 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   min-width: 0;
   min-height: 0;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-auto-flow: row;
+  grid-auto-rows: max-content;
+  align-items: start;
   align-content: start;
   gap: 14px;
   overflow: auto;
   padding: 20px;
+}
+
+.blueprint-library--detailed {
+  /* Detailed cards contain arbitrary recipe rows and large endgame counters.
+     Wider tracks prevent controls from collapsing, while max-content rows make
+     every following card start below the complete preceding row. */
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
 }
 
 .blueprint-library-shell {
@@ -11660,7 +11670,11 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   display: flex;
   min-width: 0;
   min-height: 270px;
+  height: max-content;
+  align-self: start;
   flex-direction: column;
+  overflow: hidden;
+  contain: layout paint;
   border: 1px solid var(--line-strong);
   border-radius: 7px;
   background: #131916;
@@ -11744,11 +11758,14 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
 }
 
 .blueprint-composition span {
+  min-width: 0;
+  max-width: 100%;
   padding: 4px 6px;
   border: 1px solid var(--line);
   border-radius: 3px;
   color: var(--text-soft);
   font-size: 8px;
+  overflow-wrap: anywhere;
 }
 
 .blueprint-resource-note { display: grid; gap: 4px; padding: 9px 12px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--green) 7%, transparent); }
@@ -11818,6 +11835,8 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   background: var(--surface-raised);
   color: var(--text-soft);
   font-size: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .blueprint-external-ports > div {
@@ -11854,6 +11873,8 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
 
 .blueprint-requirements span {
   display: flex;
+  min-width: 0;
+  max-width: 100%;
   align-items: center;
   gap: 4px;
   padding: 4px 6px;
@@ -11861,6 +11882,8 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   border-radius: 3px;
   color: var(--coral);
   font-size: 8px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .blueprint-requirements span.ready {
@@ -11911,6 +11934,7 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
 .blueprint-card--compact {
   min-height: 204px;
   height: 214px;
+  contain: layout paint;
 }
 
 .blueprint-card--compact > .blueprint-resource-note,

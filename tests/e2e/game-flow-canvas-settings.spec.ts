@@ -1106,6 +1106,76 @@ async function openBlueprintStageGame(page: Page) {
   await expect(page.locator(".machine-node")).toHaveCount(2);
 }
 
+async function openDenseBlueprintLibraryGame(page: Page) {
+  await page.addInitScript(() => {
+    const templates = [
+      ["arc_smelter", "iron_ingot"],
+      ["arc_smelter", "copper_ingot"],
+      ["arc_smelter", "magnet"],
+      ["arc_smelter", "stone_brick"],
+      ["arc_smelter", "glass"],
+      ["assembling_machine_mk1", "gear"],
+      ["assembling_machine_mk1", "circuit_board"],
+      ["assembling_machine_mk1", "magnetic_coil"],
+      ["matrix_lab", "electromagnetic_matrix"],
+      ["chemical_plant", "graphene"],
+    ] as const;
+    const blueprints = Array.from({ length: 16 }, (_, blueprintIndex) => ({
+      id: `dense-blueprint-${blueprintIndex}`,
+      name: `终局超大型生产模块 ${String(blueprintIndex + 1).padStart(2, "0")} · 配方与外部接口完整测试`,
+      revision: blueprintIndex + 1,
+      entities: templates.map(([buildingId, recipeId], entityIndex) => ({
+        key: `entity-${entityIndex}`,
+        buildingId,
+        recipeId,
+        offset: { x: entityIndex * 80, y: entityIndex % 2 * 120 },
+        machineCount: 242_259 + blueprintIndex * 10_000 + entityIndex * 1_337,
+      })),
+      belts: [],
+      externalPorts: Array.from({ length: 12 }, (_, portIndex) => ({
+        key: `port-${portIndex}`,
+        entityKey: `entity-${portIndex % templates.length}`,
+        direction: portIndex % 2 === 0 ? "input" : "output",
+        itemId: ["iron_ore", "copper_ore", "stone", "iron_ingot", "circuit_board", "graphene"][portIndex % 6],
+        offset: { x: portIndex * 20, y: portIndex * 10 },
+      })),
+      rotation: 0,
+      mirror: "none",
+    }));
+    const state = {
+      version: 23,
+      nextId: 2,
+      activePlanetId: "home",
+      entities: [],
+      belts: [],
+      blueprints,
+      construction: {
+        arc_smelter: 9_223_372_036_854,
+        assembling_machine_mk1: 8_223_372_036_854,
+        matrix_lab: 7_223_372_036_854,
+        chemical_plant: 6_223_372_036_854,
+      },
+      tray: {},
+      planetTrays: { home: {} },
+      totalProduced: {},
+      research: {
+        selectedTechId: null,
+        queuedTechIds: [],
+        progressByTech: {},
+        completedTechIds: [
+          "automatic_metallurgy", "basic_assembling", "electromagnetic_matrix", "basic_chemical_engineering",
+          "energy_matrix", "nanomaterials", "high_strength_crystal",
+        ],
+      },
+      paused: true,
+    };
+    window.localStorage.setItem("dsp-idle-network.blueprint-view-mode.v1", "detailed");
+    window.localStorage.setItem("dsp-idle-network.save.v1", JSON.stringify({ savedAt: Date.now(), state }));
+  });
+  await page.goto("/");
+  await expect(page.getByText("DSP极简网络", { exact: true })).toBeVisible();
+}
+
 async function openStressStageGame(page: Page) {
   await page.addInitScript(() => {
     const entities = Array.from({ length: 500 }, (_, index) => ({
@@ -1562,6 +1632,55 @@ test("box selection copies, pastes, moves and upgrades a production blueprint", 
   await expect.poll(async () => library.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await expect(library.locator(".blueprint-card input")).toHaveValue("处理器模块");
   await page.screenshot({ path: "artifacts/qa/blueprint-library-390.png", fullPage: true });
+});
+
+test("detailed blueprint cards with huge counts never overlap at desktop font scales", async ({ page }) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  await openDenseBlueprintLibraryGame(page);
+  await page.getByLabel("打开蓝图库").click();
+  const library = page.getByRole("dialog", { name: "蓝图与待建施工" });
+  const cards = library.locator(".blueprint-card");
+  await expect(cards).toHaveCount(16);
+  await expect(library.locator(".blueprint-library")).toHaveClass(/blueprint-library--detailed/);
+
+  const inspectLayout = async () => cards.evaluateAll((elements) => {
+    const rects = elements.map((element) => element.getBoundingClientRect());
+    let cardOverlaps = 0;
+    let escapedDescendants = 0;
+    for (let left = 0; left < rects.length; left += 1) {
+      for (let right = left + 1; right < rects.length; right += 1) {
+        const a = rects[left];
+        const b = rects[right];
+        if (Math.min(a.right, b.right) - Math.max(a.left, b.left) > 0.5 &&
+          Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0.5) cardOverlaps += 1;
+      }
+      for (const descendant of elements[left].querySelectorAll<HTMLElement>("input,select,button,span,em,strong")) {
+        const rect = descendant.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) continue;
+        if (rect.left < rects[left].left - 1 || rect.right > rects[left].right + 1 ||
+          rect.top < rects[left].top - 1 || rect.bottom > rects[left].bottom + 1) escapedDescendants += 1;
+      }
+    }
+    return {
+      cardOverlaps,
+      escapedDescendants,
+      minimumWidth: Math.min(...rects.map((rect) => rect.width)),
+      minimumHeight: Math.min(...rects.map((rect) => rect.height)),
+    };
+  });
+
+  const normal = await inspectLayout();
+  expect(normal.cardOverlaps).toBe(0);
+  expect(normal.escapedDescendants).toBe(0);
+  expect(normal.minimumWidth).toBeGreaterThanOrEqual(410);
+  expect(normal.minimumHeight).toBeGreaterThan(600);
+
+  await page.evaluate(() => document.documentElement.style.setProperty("--ui-font-scale", "1.5"));
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  const enlarged = await inspectLayout();
+  expect(enlarged.cardOverlaps).toBe(0);
+  expect(enlarged.escapedDescendants).toBe(0);
+  await page.screenshot({ path: "artifacts/qa/blueprint-library-dense-1920.png" });
 });
 
 test("production regions persist visual boundaries without blocking normal canvas tools", async ({ page }) => {

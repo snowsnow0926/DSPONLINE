@@ -535,7 +535,7 @@ export function BlueprintWorkspace({ open, game, onClose, onDeploy, onRemove, on
         <StableTextArea draftId="blueprint-import-json" value={importText} onValueChange={setImportText} placeholder="粘贴蓝图交换 JSON" aria-label="粘贴蓝图交换 JSON" />
         <footer><span className={importMessage?.startsWith("已导入") ? "ready" : ""}>{importMessage ?? "导出的蓝图可以直接在此粘贴。"}</span><button type="button" disabled={!importText.trim()} onClick={() => importRaw(importText)}><Check size={13} />导入到蓝图库</button></footer>
       </section> : null}
-      <div className="blueprint-library">
+      <div className={`blueprint-library blueprint-library--${viewMode}`}>
         {game.blueprints.length === 0 ? (
           <div className="blueprint-empty"><BoxSelect size={26} /><strong>蓝图库为空</strong><span>在画布中框选设备，再使用选区复制命令建立模板。</span></div>
         ) : visibleBlueprints.map((blueprint) => {

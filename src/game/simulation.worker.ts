@@ -113,6 +113,10 @@ export interface SimulationWorkerResponse {
   registryFingerprint?: string;
   needsRegistry?: boolean;
   registryError?: string;
+  /** Engine/runtime failure, distinct from a content-pack registry mismatch.
+   * Recoverable failures invalidate this isolated Worker and ask the UI to
+   * rebuild from its durable authority without ending pure idle. */
+  runtimeError?: { message: string; recoverable: boolean };
   /** Optional P4 projection; `state` remains the compatibility oracle. */
   projection?: SimulationProjection;
   /** The authoritative revision advanced, but this response intentionally
@@ -360,7 +364,10 @@ self.onmessage = (event: MessageEvent<SimulationWorkerRequest>) => {
         durationMs: Math.max(0, performance.now() - receivedAt),
         needsState: true,
         registryFingerprint: activeRegistryFingerprint ?? undefined,
-        registryError: error instanceof Error ? error.message : "模拟 Worker 处理失败，已请求安全重建",
+        runtimeError: {
+          message: error instanceof Error ? error.message : "模拟 Worker 处理失败，已请求安全重建",
+          recoverable: true,
+        },
       } satisfies SimulationWorkerResponse);
     });
 };
@@ -589,7 +596,10 @@ async function processSimulationRequest(event: MessageEvent<SimulationWorkerRequ
       durationMs: Math.max(0, performance.now() - receivedAt),
       needsState: true,
       registryFingerprint: activeRegistryFingerprint ?? undefined,
-      registryError: "模拟 Worker 上一次恢复未完成，必须从精确 checkpoint 重建",
+      runtimeError: {
+        message: "模拟 Worker 上一次恢复未完成，必须从精确 checkpoint 重建",
+        recoverable: true,
+      },
     } satisfies SimulationWorkerResponse);
     return;
   }

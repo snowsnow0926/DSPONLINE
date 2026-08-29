@@ -1819,6 +1819,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setGame(stopped);
     setNotice(`检测到内存压力，已暂停并保留当前进度：${reason}。保存完成并确认内存稳定后可继续。`);
   }, []);
+  const pauseVisibleStateWithoutRollback = useCallback((message: string): GameState => {
+    // An automatic safety path may stop new simulation work, but it must not
+    // install an older checkpoint over progress or edits that the player can
+    // already see. Historical state remains available only to explicit restore
+    // actions. Recovery may rebuild a verified authority underneath this view,
+    // but the whole visible snapshot must never be replayed as a command.
+    const visible = stateWithSimulationDebtRef.current(gameRef.current);
+    const stopped = visible.paused ? visible : { ...visible, paused: true };
+    gameRef.current = stopped;
+    setGame(stopped);
+    setNotice(message);
+    return stopped;
+  }, []);
   const allowEditsDuringSaveRef = useRef(allowEditsDuringSave);
   allowEditsDuringSaveRef.current = allowEditsDuringSave;
   const setAllowEditsDuringSavePreference = useCallback((enabled: boolean) => {
@@ -2926,18 +2939,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const onFailure = (error: unknown) => {
       simulationPendingSecondsRef.current = 0;
       simulationPendingWallSecondsRef.current = 0;
-      const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
-      latestAuthoritativeCheckpointRef.current = stopped;
-      lastSimulationResultRef.current = stopped;
-      gameRef.current = stopped;
-      setGame(stopped);
+      pauseVisibleStateWithoutRollback(`玩家编辑尚未写入 durable WAL，当前画面与进度已保留并暂停：${error instanceof Error ? error.message : "请重试或导出"}`);
       const checkpointRequest = simulationCheckpointRequestRef.current;
       if (checkpointRequest?.id === null) {
         simulationCheckpointRequestRef.current = null;
         simulationCheckpointBarrierRef.current = simulationSaveBarrierDepthRef.current > 0;
         checkpointRequest.reject(error instanceof Error ? error : new Error("玩家编辑未完成 durable stage"));
       }
-      setNotice(`玩家编辑尚未写入 durable WAL，已回退到精确检查点：${error instanceof Error ? error.message : "请刷新重试"}`);
     };
     const retryAgainstReplacementHead = () => {
       window.setTimeout(() => {
@@ -2945,7 +2953,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       }, 0);
     };
     stageAndPostDurableSimulationRequest(request, submission, onFailure, retryAgainstReplacementHead);
-  }, [stageAndPostDurableSimulationRequest]);
+  }, [pauseVisibleStateWithoutRollback, stageAndPostDurableSimulationRequest]);
   dispatchDurableUiCommandRef.current = dispatchDurableUiCommand;
 
   const dispatchSimulationCheckpoint = useCallback(() => {
@@ -3281,14 +3289,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       simulationWorkerRef.current = null;
       setSimulationWorkerActive(false);
       worker.terminate();
-      const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
-      latestAuthoritativeCheckpointRef.current = stopped;
-      lastSimulationResultRef.current = stopped;
-      gameRef.current = stopped;
-      setGame(stopped);
-      setNotice("模拟 Worker 恢复失败，已回到最近精确检查点并暂停模拟");
+      pauseVisibleStateWithoutRollback("模拟 Worker 恢复失败；当前画面与进度已保留并暂停，可重试恢复或导出");
     }
-  }, []);
+  }, [pauseVisibleStateWithoutRollback]);
   dispatchSimulationRecoveryRef.current = dispatchSimulationRecovery;
 
   const currentPrimarySaveSource = useCallback(() => {
@@ -3553,12 +3556,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         repairDurableWorkerAfterSave = primaryWriteVerified;
         return failure;
       }
-      const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
-      latestAuthoritativeCheckpointRef.current = stopped;
-      lastSimulationResultRef.current = stopped;
-      gameRef.current = stopped;
-      setGame(stopped);
-      setNotice(`${failure.message}；已暂停，旧 recovery 保留供重试`);
+      pauseVisibleStateWithoutRollback(`${failure.message}；当前画面与进度已保留并暂停，旧 recovery 保留供重试`);
       repairDurableWorkerAfterSave = primaryWriteVerified;
       return failure;
     } finally {
@@ -3576,7 +3574,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       }
       window.setTimeout(() => setRuntimePersistenceProgress((current) => current?.id === progressId ? null : current), 8_000);
     }
-  }, [memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, requestAuthoritativeSimulationCheckpoint, saveVerifiedPrimaryCheckpoint]);
+  }, [memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, pauseVisibleStateWithoutRollback, requestAuthoritativeSimulationCheckpoint, saveVerifiedPrimaryCheckpoint]);
   persistDurablePrimaryCheckpointRef.current = persistDurablePrimaryCheckpoint;
 
   const loadVerifiedDurablePrimaryState = useCallback(async (
@@ -3642,6 +3640,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         return false;
       }
       const primaryAdvancedBeyondHead = !sameDurableRecoveryBaseIdentity(head.baseIdentity, primaryIdentity);
+      const visibleWithDebt = stateWithSimulationDebtRef.current(gameRef.current);
+      const visibleView = visibleWithDebt.paused ? visibleWithDebt : { ...visibleWithDebt, paused: true };
       // A stage callback can still be returning a pending intent after the
       // simulation Worker has failed. Give it a short, bounded opportunity to
       // finish so the replay sees the same durable boundary as a refresh.
@@ -3653,7 +3653,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         throw new Error("durable recovery intent 仍在写入，请稍后重试");
       }
       const fence = { ownerId: status.writerId, fencingToken: status.fencingToken };
-      setNotice("模拟 Worker 不可用，正在从 durable recovery 精确重建…");
+      setNotice(pendingResumeAfterDurableRecoveryRef.current
+        ? "模拟 Worker 不可用，正在从 durable recovery 精确重建并继续纯挂机…"
+        : "模拟 Worker 不可用，正在从 durable recovery 精确重建…");
       const registry = contentPackRuntimeSnapshotRef.current;
       let recoveredState = durableRecoveryBaseRequiresPrimaryReloadRef.current
         ? await loadVerifiedDurablePrimaryState(head)
@@ -3666,7 +3668,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         durableRecoveryBaseRequiresPrimaryReloadRef.current = false;
       }
       let recoveredRevision = Math.max(1, head.stateRevision);
-      let pendingView: GameState | null = null;
+      let pendingCommandView: GameState | null = null;
       if (primaryAdvancedBeyondHead) {
         // T1 is already the selected primary authority. Its old T0 journal is
         // intentionally no longer readable under the new identity, so replay
@@ -3675,7 +3677,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         // experimental mode may have a later accepted view to re-stage after
         // the fresh Worker adopts T1.
         recoveredRevision = Math.max(recoveredRevision, simulationStateRevisionRef.current);
-        if (allowEditsDuringSaveRef.current) pendingView = setPaused(gameRef.current, true);
+        if (allowEditsDuringSaveRef.current) pendingCommandView = setPaused(gameRef.current, true);
       } else {
         const read = await readSimulationRuntimeRecoveryInPersistenceWorker(head.baseIdentity, fence);
         if (!read.ok) throw new Error(read.message);
@@ -3740,7 +3742,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       simulationPendingWallSecondsRef.current = stopped.timeWarp.pendingWallSeconds;
       simulationRetrySecondsRef.current = 0;
       simulationRetryWallSecondsRef.current = 0;
-      durableRecoveryPendingViewRef.current = pendingView;
+      // The screen can keep showing the latest visible state while the fresh
+      // Worker installs. Do not rebase that whole screen snapshot as a command:
+      // it contains engine-owned counters and pending time. Only the previously
+      // supported edit-during-save view may be replayed; otherwise initialize
+      // directly from the verified recovered authority.
+      durableRecoveryPendingViewRef.current = pendingCommandView ?? stopped;
       // The replacement T1 and recovery head have both passed verification.
       // Clear the transient save failure so the pure-idle recovery panel does
       // not keep reporting an already-repaired checkpoint as actionable.
@@ -3750,8 +3757,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       simulationWorkerRef.current = null;
       simulationWorkerDisabledRef.current = false;
       setSimulationWorkerActive(false);
-      gameRef.current = stopped;
-      setGame(stopped);
+      // Keep the player-visible view installed while the verified authority is
+      // rebuilt underneath it. The initialize response adopts the verified
+      // authority (plus only the explicit edit-during-save view above); it must
+      // never replay this whole visible snapshot as a gameplay command.
+      gameRef.current = visibleView;
+      setGame(visibleView);
       invalidateFactoryAlertProjection();
       setInitialSimulationWorkerReady(false);
       setSimulationWorkerGeneration((generation) => generation + 1);
@@ -5885,6 +5896,37 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       }
       const submission = simulationSubmissionRef.current;
       if (!submission || event.data.id !== submission.id) return;
+      if (event.data.runtimeError) {
+        simulationSubmissionRef.current = null;
+        simulationPendingSecondsRef.current += submission.simulationSeconds;
+        simulationPendingWallSecondsRef.current += submission.wallSeconds;
+        const shouldResume = submission.state.timeWarp.enabled || gameRef.current.timeWarp.enabled;
+        simulationWorkerRef.current = null;
+        simulationWorkerDisabledRef.current = false;
+        lastSimulationResultRef.current = null;
+        setSimulationWorkerActive(false);
+        worker.terminate();
+        pauseVisibleStateWithoutRollback(
+          `模拟 Worker 运行异常：${event.data.runtimeError.message}；当前进度已保留，正在自动重建${shouldResume ? "并继续纯挂机" : ""}`,
+        );
+        if (durableRecoveryLifecycleRef.current === "active") {
+          void recoverSimulationWorkerFromDurableRecovery(shouldResume);
+        } else {
+          const confirmedView = submission.baseState ?? latestAuthoritativeCheckpointRef.current;
+          const desiredState = gameRef.current;
+          simulationRecoveryRef.current = {
+            operations: [...simulationReplayJournalRef.current],
+            nextOperationIndex: 0,
+            confirmedView,
+            desiredState,
+            finalCommand: createSimulationCommandPatch(confirmedView, desiredState, 0),
+            attempts: 0,
+          };
+          if (shouldResume) pendingResumeAfterDurableRecoveryRef.current = true;
+          setSimulationWorkerGeneration((generation) => generation + 1);
+        }
+        return;
+      }
       const durableFinalizeReady = durableRecoveryFinalizeReadyRef.current === event.data.id;
       if (submission.durableIntent && !durableFinalizeReady) {
         if (durableRecoveryFinalizeInFlightRef.current === event.data.id) return;
@@ -5899,13 +5941,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           simulationWorkerRef.current = null;
           setSimulationWorkerActive(false);
           worker.terminate();
-          const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
-          latestAuthoritativeCheckpointRef.current = stopped;
-          lastSimulationResultRef.current = stopped;
-          gameRef.current = stopped;
-          setGame(stopped);
-          setNotice("durable 模拟回执缺少可确认 revision，已暂停；刷新后将从 pending intent 精确恢复");
-          void recoverSimulationWorkerFromDurableRecovery(false);
+          const resume = submission.state.timeWarp.enabled || gameRef.current.timeWarp.enabled;
+          pauseVisibleStateWithoutRollback("durable 模拟回执缺少可确认 revision；当前进度已保留，正在从 pending intent 精确恢复");
+          void recoverSimulationWorkerFromDurableRecovery(resume);
           return;
         }
         const status = getLocalSaveWriterStatus();
@@ -5916,12 +5954,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           worker.terminate();
           simulationWorkerRef.current = null;
           setSimulationWorkerActive(false);
-          const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
-          latestAuthoritativeCheckpointRef.current = stopped;
-          lastSimulationResultRef.current = stopped;
-          gameRef.current = stopped;
-          setGame(stopped);
-          setNotice("本地存档写入权已失效，durable 模拟未确认；请刷新后恢复");
+          pauseVisibleStateWithoutRollback("本地存档写入权已失效，durable 模拟未确认；当前进度已保留并暂停，请重新取得写入权后恢复");
           return;
         }
         durableRecoveryFinalizeInFlightRef.current = event.data.id;
@@ -6046,13 +6079,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               simulationWorkerRef.current = null;
               setSimulationWorkerActive(false);
               worker.terminate();
-              const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
-              latestAuthoritativeCheckpointRef.current = stopped;
-              lastSimulationResultRef.current = stopped;
-              gameRef.current = stopped;
-              setGame(stopped);
-              setNotice(`durable 回执检查点吸收失败（${error instanceof Error ? error.message : "未知错误"}），已暂停；刷新后精确恢复`);
-              void recoverSimulationWorkerFromDurableRecovery(false);
+              const resume = submission.state.timeWarp.enabled || gameRef.current.timeWarp.enabled;
+              pauseVisibleStateWithoutRollback(`durable 回执检查点吸收失败（${error instanceof Error ? error.message : "未知错误"}）；当前进度已保留，正在精确恢复`);
+              void recoverSimulationWorkerFromDurableRecovery(resume);
             }
           })();
           return;
@@ -6107,13 +6136,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           simulationWorkerRef.current = null;
           setSimulationWorkerActive(false);
           worker.terminate();
-          const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
-          latestAuthoritativeCheckpointRef.current = stopped;
-          lastSimulationResultRef.current = stopped;
-          gameRef.current = stopped;
-          setGame(stopped);
-          setNotice(`durable 模拟回执未能写入确认（${error instanceof Error ? error.message : "未知错误"}），已暂停；刷新后精确恢复`);
-          void recoverSimulationWorkerFromDurableRecovery(false);
+          const resume = submission.state.timeWarp.enabled || gameRef.current.timeWarp.enabled;
+          pauseVisibleStateWithoutRollback(`durable 模拟回执未能写入确认（${error instanceof Error ? error.message : "未知错误"}）；当前进度已保留，正在精确恢复`);
+          void recoverSimulationWorkerFromDurableRecovery(resume);
         });
         return;
       }
@@ -6189,14 +6214,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           simulationWorkerRef.current = null;
           setSimulationWorkerActive(false);
           worker.terminate();
-          const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
-          latestAuthoritativeCheckpointRef.current = stopped;
-          lastSimulationResultRef.current = stopped;
-          simulationProjectionIndexRef.current = createSimulationProjectionStateIndex(stopped);
-          gameRef.current = stopped;
-          setGame(stopped);
           setInitialSimulationWorkerReady(true);
-          setNotice("模拟 Worker 无法完成精确恢复，已回到最近检查点并暂停模拟");
+          pauseVisibleStateWithoutRollback("模拟 Worker 无法完成精确恢复；当前画面与进度已保留并暂停，可重试恢复或导出");
           return;
         }
         simulationStateRevisionRef.current = event.data.stateRevision;
@@ -6250,12 +6269,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           }
         } catch {
           simulationRecoveryRef.current = null;
-          const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
-          lastSimulationResultRef.current = stopped;
-          gameRef.current = stopped;
-          setGame(stopped);
           setInitialSimulationWorkerReady(true);
-          setNotice("模拟 Worker 恢复数据校验失败，已回到最近检查点并暂停模拟");
+          pauseVisibleStateWithoutRollback("模拟 Worker 恢复数据校验失败；当前画面与进度已保留并暂停，可重试恢复或导出");
         }
         return;
       }
@@ -6492,7 +6507,37 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setInitialSimulationWorkerReady(true);
       const submission = simulationSubmissionRef.current;
       if (submission?.state.timeWarp.enabled || gameRef.current.timeWarp.enabled) {
-        abortPureIdleForWorkerFailure("模拟 Worker 异常，纯挂机已安全停止；未完成预算没有计入收益");
+        if (pureIdleMacroActiveRef.current) {
+          abortPureIdleForWorkerFailure("模拟 Worker 异常");
+          return;
+        }
+        if (submission) {
+          simulationPendingSecondsRef.current += submission.simulationSeconds;
+          simulationPendingWallSecondsRef.current += submission.wallSeconds;
+        }
+        simulationSubmissionRef.current = null;
+        simulationWorkerRef.current = null;
+        simulationWorkerDisabledRef.current = false;
+        lastSimulationResultRef.current = null;
+        setSimulationWorkerActive(false);
+        worker.terminate();
+        pauseVisibleStateWithoutRollback("模拟 Worker 异常；当前进度与未完成时间已保留，正在自动重建并继续纯挂机");
+        if (durableRecoveryLifecycleRef.current === "active") {
+          void recoverSimulationWorkerFromDurableRecovery(true);
+        } else {
+          const confirmedView = submission?.baseState ?? latestAuthoritativeCheckpointRef.current;
+          const desiredState = gameRef.current;
+          simulationRecoveryRef.current = {
+            operations: [...simulationReplayJournalRef.current],
+            nextOperationIndex: 0,
+            confirmedView,
+            desiredState,
+            finalCommand: createSimulationCommandPatch(confirmedView, desiredState, 0),
+            attempts: 0,
+          };
+          pendingResumeAfterDurableRecoveryRef.current = true;
+          setSimulationWorkerGeneration((generation) => generation + 1);
+        }
         return;
       }
       const existingRecovery = simulationRecoveryRef.current;
@@ -6510,12 +6555,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }
         simulationRecoveryRef.current = null;
         simulationWorkerDisabledRef.current = true;
-        const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
-        lastSimulationResultRef.current = stopped;
-        simulationProjectionIndexRef.current = createSimulationProjectionStateIndex(stopped);
-        gameRef.current = stopped;
-        setGame(stopped);
-        setNotice("模拟 Worker 连续恢复失败，已回到最近精确检查点并暂停模拟");
+        pauseVisibleStateWithoutRollback("模拟 Worker 连续恢复失败；当前画面与进度已保留并暂停，可重试恢复或导出");
         return;
       }
       if (submission) {
@@ -6606,7 +6646,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         simulationSubmissionRef.current = null;
       }
     };
-  }, [abortPureIdleForWorkerFailure, acceptFactoryAlertProjection, publishRuntimeGame, publishTimeWarpComputeState, recoverSimulationWorkerFromDurableRecovery, simulationWorkerGeneration]);
+  }, [abortPureIdleForWorkerFailure, acceptFactoryAlertProjection, pauseVisibleStateWithoutRollback, publishRuntimeGame, publishTimeWarpComputeState, recoverSimulationWorkerFromDurableRecovery, simulationWorkerGeneration]);
 
   useEffect(() => {
     if (!loaded.state.timeWarp.enabled || loaded.state.speedrun?.enabled) {
@@ -6854,7 +6894,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const inFlight = simulationSubmissionRef.current;
       if (currentState.timeWarp.enabled && inFlight && shouldAbortTimeWarpWorker(inFlight.submittedAt, now)) {
         previous = now;
-        abortPureIdleForWorkerFailure("模拟 Worker 单个切片超过安全时限，纯挂机已自动停止并暂停模拟");
+        simulationPendingSecondsRef.current += inFlight.simulationSeconds;
+        simulationPendingWallSecondsRef.current += inFlight.wallSeconds;
+        simulationSubmissionRef.current = null;
+        simulationWorkerRef.current?.terminate();
+        simulationWorkerRef.current = null;
+        simulationWorkerDisabledRef.current = false;
+        lastSimulationResultRef.current = null;
+        setSimulationWorkerActive(false);
+        pauseVisibleStateWithoutRollback("模拟 Worker 单个切片超过安全时限；当前进度和时间已保留，正在自动重建并继续纯挂机");
+        void recoverSimulationWorkerFromDurableRecovery(true);
         return;
       }
       // A manual pause intentionally drops unsubmitted wall-clock debt. A
@@ -7013,15 +7062,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           simulationPendingWallSecondsRef.current += pendingWallSeconds;
           const message = error instanceof Error ? error.message : "durable stage 失败";
           if (currentState.timeWarp.enabled) {
-            abortPureIdleForWorkerFailure(`模拟请求未完成 durable stage：${message}；纯挂机已安全停止`);
+            simulationWorkerRef.current?.terminate();
+            simulationWorkerRef.current = null;
+            simulationWorkerDisabledRef.current = false;
+            lastSimulationResultRef.current = null;
+            setSimulationWorkerActive(false);
+            pauseVisibleStateWithoutRollback(`模拟请求未完成 durable stage：${message}；当前进度已保留，正在自动重建并继续纯挂机`);
+            void recoverSimulationWorkerFromDurableRecovery(true);
             return;
           }
-          const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
-          latestAuthoritativeCheckpointRef.current = stopped;
-          lastSimulationResultRef.current = stopped;
-          gameRef.current = stopped;
-          setGame(stopped);
-          setNotice(`模拟请求未完成 durable stage，已暂停并保留未提交时间：${message}`);
+          pauseVisibleStateWithoutRollback(`模拟请求未完成 durable stage，已暂停并保留当前进度与未提交时间：${message}`);
         };
         const retrySupersededSlice = () => {
           simulationPendingSecondsRef.current += simulationSeconds;
@@ -7035,16 +7085,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         return;
       }
       if (durableRecoveryLifecycleRef.current === "active") {
-        const stopped = setPaused(latestAuthoritativeCheckpointRef.current, true);
-        latestAuthoritativeCheckpointRef.current = stopped;
-        lastSimulationResultRef.current = stopped;
-        gameRef.current = stopped;
-        setGame(stopped);
-        void recoverSimulationWorkerFromDurableRecovery(false);
+        const resume = currentState.timeWarp.enabled;
+        pauseVisibleStateWithoutRollback(resume
+          ? "模拟 Worker 暂不可用；当前进度已保留，正在自动重建并继续纯挂机"
+          : "模拟 Worker 暂不可用；当前进度已保留，正在自动重建");
+        void recoverSimulationWorkerFromDurableRecovery(resume);
         return;
       }
       if (currentState.timeWarp.enabled) {
-        abortPureIdleForWorkerFailure("模拟 Worker 不可用，纯挂机已安全停止并暂停模拟");
+        simulationWorkerDisabledRef.current = false;
+        pendingResumeAfterDurableRecoveryRef.current = true;
+        pauseVisibleStateWithoutRollback("模拟 Worker 不可用；当前进度与时间已保留，正在重建并继续纯挂机");
+        setSimulationWorkerGeneration((generation) => generation + 1);
         return;
       }
       const budget = takeSimulationBudgetSlice(
@@ -7064,7 +7116,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       publishRuntimeGame(next);
     }, 1_000);
     return () => window.clearInterval(timer);
-  }, [abortPureIdleForWorkerFailure, memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, publishRuntimeGame, publishTimeWarpComputeState, recoverSimulationWorkerFromDurableRecovery, stageAndPostDurableSimulationRequest]);
+  }, [memoryGuardPolicy, memoryWorkloadForState, pauseForMemoryPressure, pauseVisibleStateWithoutRollback, publishRuntimeGame, publishTimeWarpComputeState, recoverSimulationWorkerFromDurableRecovery, stageAndPostDurableSimulationRequest]);
 
   // Keep the autosave timer responsive to the player's interval/throttle
   // preference, but do not couple it to lifecycle listener cleanup. A

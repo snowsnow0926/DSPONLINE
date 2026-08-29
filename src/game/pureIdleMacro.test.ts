@@ -1374,7 +1374,7 @@ describe("pure idle macro session", () => {
     expect(hashGameState(source)).toBe(sourceHash);
   });
 
-  it("freezes quantum construction when finite generation cannot issue a renewable headroom certificate", () => {
+  it("runs quantum construction only through the certified finite-power horizon", () => {
     const source = pureIdleState();
     addFiniteArtificialStarSmelter(source, 40);
     source.research.completedTechIds.push("construction_automation");
@@ -1409,17 +1409,17 @@ describe("pure idle macro session", () => {
     const session = createPureIdleMacroSession(structuredClone(source), "extreme");
     const calibratedCrafted = session.calibrationCheckpoint!.candidate.constructionAutomation.totalCrafted;
 
-    // The ordinary factory may consume its finite 40-second power horizon,
-    // but isolated construction receives no renewable-headroom certificate
-    // and therefore cannot borrow that same finite fuel a second time.
+    // Construction demand was present in the exact dispatch sample. It may
+    // therefore share the same metered finite-power horizon, but must stop
+    // once that fuel certificate reaches zero.
     advancePureIdleMacroSession(session, 4);
     const craftedAtFuelExhaustion = session.candidate.constructionAutomation.totalCrafted;
     advancePureIdleMacroSession(session, 5);
 
     expect(session.conservativeOnly).toBe(false);
-    expect(craftedAtFuelExhaustion).toBe(calibratedCrafted);
+    expect(craftedAtFuelExhaustion).toBeGreaterThan(calibratedCrafted);
     expect(session.candidate.constructionAutomation.totalCrafted)
-      .toBe(calibratedCrafted);
+      .toBe(craftedAtFuelExhaustion);
     expect(session.actualMultiplier).toBeLessThan(16);
     expect(session.powerRemainingSimulationSeconds).toBe(0);
     expect(session.candidate.entities.find((entity) => entity.id === "pure-idle-finite-star")?.fuelRemainingMj)
@@ -1721,7 +1721,7 @@ describe("pure idle macro session", () => {
     expect(session.candidate.tray).toEqual(beforeTray);
   });
 
-  it("freezes a grid whose ordinary demand consumes its complete renewable floor", () => {
+  it("replays the sampled center allocation when ordinary demand consumes the renewable floor", () => {
     const source = pureIdleState();
     addJointConstructionPowerFixture(source, {
       target: 12,
@@ -1737,7 +1737,7 @@ describe("pure idle macro session", () => {
 
     const star = session.candidate.entities.find((entity) => entity.id === "joint-idle-star")!;
     const accumulator = session.candidate.entities.find((entity) => entity.id === "joint-full-acc")!;
-    expect(session.candidate.construction.arc_smelter).toBe(0);
+    expect(session.candidate.construction.arc_smelter).toBe(12);
     expect(star.fuelRemainingMj).toBe(starBefore?.fuelRemainingMj);
     expect(star.inputs.antimatter_fuel_rod).toBe(starBefore?.inputs.antimatter_fuel_rod);
     expect(accumulator.storedEnergyMj).toBe(accumulatorBefore?.storedEnergyMj);
@@ -1872,7 +1872,7 @@ describe("pure idle macro session", () => {
     expect(macroCenter.powerFactor).toBe(0);
   });
 
-  it("freezes construction for the bucket when macro research completes after power certification", () => {
+  it("keeps construction running across a research boundary when center power configuration is unchanged", () => {
     const source = pureIdleState();
     addJointConstructionPowerFixture(source, { target: 12, wind: 80, smelters: 0 });
     source.research.completedTechIds.push("gravity_matrix");
@@ -1907,8 +1907,8 @@ describe("pure idle macro session", () => {
     advancePureIdleMacroSession(session, 60);
 
     expect(session.candidate.research.completedTechIds).toContain("construction_capacity_1");
-    expect(session.constructionPowerCertificate).toBeUndefined();
-    expect(session.candidate.construction.arc_smelter).toBe(0);
+    expect(session.constructionPowerCertificate).toBeDefined();
+    expect(session.candidate.construction.arc_smelter).toBeGreaterThan(0);
   });
 
   it("refreshes the joint power certificate across the ten-minute shadow validation", () => {
@@ -2190,6 +2190,20 @@ describe("pure idle macro session", () => {
     expect(validatePureIdleTerminalMaterialConservation(before, after)).toBeNull();
     after.dysonPlans[targetSystem].structurePoints += 1;
     expect(validatePureIdleTerminalMaterialConservation(before, after)).toContain("各恒星系结构增量");
+  });
+
+  it("accepts only convergence of a legacy global/per-system Dyson aggregate gap", () => {
+    const before = pureIdleState();
+    before.dysonSphere.structurePoints += 580_144;
+    const reconciled = structuredClone(before);
+    reconciled.dysonPlans.helios.structurePoints += 580_144;
+
+    expect(validatePureIdleTerminalMaterialConservation(before, reconciled)).toBeNull();
+
+    const fabricated = structuredClone(reconciled);
+    fabricated.dysonPlans.helios.structurePoints += 1;
+    expect(validatePureIdleTerminalMaterialConservation(before, fabricated))
+      .toContain("各恒星系结构增量");
   });
 
   it("rejects a candidate that copies rocket and structure counters without consuming their material", () => {

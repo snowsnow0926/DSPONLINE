@@ -1813,7 +1813,7 @@ export interface PureIdleAffineCalibration {
   powerTailRejectionReason?: string;
   /** Non-persisted certificate used to debit finite generator fuel during macro buckets. */
   powerTail: PureIdlePowerTailCertificate;
-  /** Opaque per-grid renewable headroom proof for isolated construction work. */
+  /** Opaque per-grid sampled supply proof for isolated construction work. */
   constructionPowerCertificate: PureIdleConstructionPowerCertificate;
   /** Optional first closed terminal event domain; absent means freeze. */
   rocketLedger?: PureIdleRocketMacroLedger;
@@ -1859,7 +1859,8 @@ export interface PureIdleConstructionPowerCertificate {
 interface PureIdleConstructionPowerGridGrant {
   planetId: PlanetId;
   gridId: PowerGridId;
-  minimumRenewableHeadroomKw: number;
+  /** Minimum center supply observed throughout the exact calibration window. */
+  minimumCertifiedSupplyKw: number;
   centerDemandKwById: Map<string, number>;
   centerPriorityById: Map<string, 1 | 2 | 3>;
   minimumPowerFactorByCenterId: Map<string, number>;
@@ -1870,7 +1871,6 @@ interface PureIdleConstructionPowerCertificateAuthority {
   difficulty: GameState["settings"]["difficulty"];
   controllerEntityId?: string;
   requestedMultiplier: number;
-  researchFingerprint: string;
   entityArrays: Set<GameState["entities"]>;
   beltArrays: Set<GameState["belts"]>;
   grids: Map<string, PureIdleConstructionPowerGridGrant>;
@@ -1888,15 +1888,6 @@ const PURE_IDLE_CONSTRUCTION_POWER_CERTIFICATES = new WeakMap<
   PureIdleConstructionPowerCertificate,
   PureIdleConstructionPowerCertificateAuthority
 >();
-
-function constructionPowerResearchFingerprint(state: GameState): string {
-  const completed = [...state.research.completedTechIds].sort().join(",");
-  const infinite = Object.entries(state.endgame.infiniteResearch)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([id, progress]) => `${id}:${Math.max(0, Math.floor(progress.level))}`)
-    .join(",");
-  return `${completed}|${infinite}`;
-}
 
 interface ConstructionPowerGridAudit {
   observedSimulationSeconds: number;
@@ -2091,25 +2082,33 @@ function issuePureIdleConstructionPowerCertificate(
     if (!sample || sample.invalid ||
       sample.observedSimulationSeconds + EPSILON < expectedSimulationSeconds ||
       sample.maximumStepSeconds > 1 + EPSILON ||
-      sample.maximumFiniteGenerationKw > EPSILON ||
-      sample.maximumStorageDischargeKw > EPSILON ||
-      !Number.isFinite(sample.minimumRenewableHeadroomKw) ||
-      sample.minimumRenewableHeadroomKw <= EPSILON) continue;
+      !Number.isFinite(sample.minimumRenewableHeadroomKw)) continue;
     const [planetId, gridId] = key.split("|") as [PlanetId, PowerGridId];
+    const centerDemandKwById = new Map(centers.map((center) => [
+      center.id,
+      Math.max(0, getBuilding("construction_center").powerDemandKw ?? 0) *
+        Math.max(0, center.machineCount) * difficultyPowerMultiplier,
+    ]));
+    const minimumPowerFactorByCenterId = new Map(centers.map((center) => [
+      center.id,
+      sample.minimumPowerFactorByCenterId.get(center.id) ?? 0,
+    ]));
+    // The ordinary power-tail certificate already debits finite fuel and
+    // limits storage-backed seconds. Construction was isolated only from
+    // material mutation during calibration; its real demand remained in the
+    // exact power dispatch. Reusing the minimum sampled center supply is
+    // therefore safe and avoids freezing every fuel-backed endgame grid.
+    const minimumCertifiedSupplyKw = centers.reduce((sum, center) =>
+      sum + (centerDemandKwById.get(center.id) ?? 0) *
+        Math.max(0, Math.min(1, minimumPowerFactorByCenterId.get(center.id) ?? 0)), 0);
+    if (!Number.isFinite(minimumCertifiedSupplyKw) || minimumCertifiedSupplyKw <= EPSILON) continue;
     grids.set(key, {
       planetId,
       gridId,
-      minimumRenewableHeadroomKw: sample.minimumRenewableHeadroomKw,
-      centerDemandKwById: new Map(centers.map((center) => [
-        center.id,
-        Math.max(0, getBuilding("construction_center").powerDemandKw ?? 0) *
-          Math.max(0, center.machineCount) * difficultyPowerMultiplier,
-      ])),
+      minimumCertifiedSupplyKw,
+      centerDemandKwById,
       centerPriorityById: new Map(centers.map((center) => [center.id, center.powerPriority ?? 2])),
-      minimumPowerFactorByCenterId: new Map(centers.map((center) => [
-        center.id,
-        sample.minimumPowerFactorByCenterId.get(center.id) ?? 0,
-      ])),
+      minimumPowerFactorByCenterId,
     });
   }
   const quantumGrant = createPureIdleConstructionQuantumGrant(state, acceptedStates);
@@ -2118,9 +2117,84 @@ function issuePureIdleConstructionPowerCertificate(
     difficulty: state.settings.difficulty,
     ...(state.timeWarp.controllerEntityId ? { controllerEntityId: state.timeWarp.controllerEntityId } : {}),
     requestedMultiplier: state.timeWarp.requestedMultiplier,
-    researchFingerprint: constructionPowerResearchFingerprint(state),
     entityArrays: new Set(acceptedStates.map((candidate) => candidate.entities)),
     beltArrays: new Set(acceptedStates.map((candidate) => candidate.belts)),
+    grids,
+    ...(quantumGrant ? { quantumGrant } : {}),
+  });
+  return certificate;
+}
+
+/**
+ * Capture the already-settled center power factors for the opt-in production
+ * replication mode. This intentionally runs only when construction automation
+ * is enabled; the normal replication fast path still does not traverse a large
+ * entity graph. The authority is bound to the current arrays, controller,
+ * multiplier, difficulty, center demand and priority just like a calibrated
+ * certificate, while construction continues to consume real inventories.
+ */
+export function issuePureIdleConstructionRuntimePowerCertificate(
+  state: GameState,
+  contract: PureIdleAffineContract,
+): PureIdleConstructionPowerCertificate | undefined {
+  if (!state.constructionAutomation.enabled) return undefined;
+  const hasRequestedWork = Object.keys(state.constructionAutomation.jobs).length > 0 ||
+    Object.entries(state.constructionAutomation.targetStock).some(([targetId, amount]) => {
+      const target = Number.isFinite(amount) ? Math.max(0, Math.floor(amount ?? 0)) : 0;
+      const current = Object.prototype.hasOwnProperty.call(state.portableFleet, targetId)
+        ? Math.max(0, Math.floor(state.portableFleet[targetId as keyof typeof state.portableFleet] ?? 0))
+        : Math.max(0, Math.floor(state.construction[targetId as keyof typeof state.construction] ?? 0));
+      return target > current;
+    });
+  if (!hasRequestedWork) return undefined;
+  const centers = state.entities.filter((entity) => entity.buildingId === "construction_center");
+  if (centers.length === 0) return undefined;
+  const difficultyPowerMultiplier = getDifficultyDefinition(state.settings.difficulty).powerDemandMultiplier;
+  const grids = new Map<string, PureIdleConstructionPowerGridGrant>();
+  const centersByGrid = new Map<string, FactoryEntity[]>();
+  for (const center of centers) {
+    const key = constructionPowerGridKey(center.planetId, center.powerGridId ?? "grid-a");
+    const entries = centersByGrid.get(key) ?? [];
+    entries.push(center);
+    centersByGrid.set(key, entries);
+  }
+  for (const [key, gridCenters] of centersByGrid) {
+    const centerDemandKwById = new Map(gridCenters.map((center) => [
+      center.id,
+      Math.max(0, getBuilding("construction_center").powerDemandKw ?? 0) *
+        Math.max(0, center.machineCount) * difficultyPowerMultiplier,
+    ]));
+    const minimumPowerFactorByCenterId = new Map(gridCenters.map((center) => {
+      const demandKw = centerDemandKwById.get(center.id) ?? 0;
+      const measuredFromInput = demandKw > EPSILON ? Math.max(0, center.powerInputKw ?? 0) / demandKw : 0;
+      return [center.id, Math.max(0, Math.min(1, Math.max(center.powerFactor ?? 0, measuredFromInput)))] as const;
+    }));
+    const minimumCertifiedSupplyKw = gridCenters.reduce((sum, center) =>
+      sum + (centerDemandKwById.get(center.id) ?? 0) *
+        (minimumPowerFactorByCenterId.get(center.id) ?? 0), 0);
+    if (!Number.isFinite(minimumCertifiedSupplyKw) || minimumCertifiedSupplyKw <= EPSILON) continue;
+    const [planetId, gridId] = key.split("|") as [PlanetId, PowerGridId];
+    grids.set(key, {
+      planetId,
+      gridId,
+      minimumCertifiedSupplyKw,
+      centerDemandKwById,
+      centerPriorityById: new Map(gridCenters.map((center) => [center.id, center.powerPriority ?? 2])),
+      minimumPowerFactorByCenterId,
+    });
+  }
+  if (grids.size === 0) return undefined;
+  const certificate = Object.freeze({
+    [PURE_IDLE_CONSTRUCTION_POWER_CERTIFICATE_BRAND]: true as const,
+  });
+  const quantumGrant = createPureIdleConstructionQuantumGrant(state, [state]);
+  PURE_IDLE_CONSTRUCTION_POWER_CERTIFICATES.set(certificate, {
+    contract,
+    difficulty: state.settings.difficulty,
+    ...(state.timeWarp.controllerEntityId ? { controllerEntityId: state.timeWarp.controllerEntityId } : {}),
+    requestedMultiplier: state.timeWarp.requestedMultiplier,
+    entityArrays: new Set([state.entities]),
+    beltArrays: new Set([state.belts]),
     grids,
     ...(quantumGrant ? { quantumGrant } : {}),
   });
@@ -3537,6 +3611,21 @@ export function capturePureIdleTerminalMaterialBaseline(
   }
 }
 
+function aggregateDivergenceConvergesWithoutNewCredit(
+  beforeDetail: bigint,
+  beforeGlobal: bigint,
+  afterDetail: bigint,
+  afterGlobal: bigint,
+): boolean {
+  const beforeGap = beforeDetail - beforeGlobal;
+  const afterGap = afterDetail - afterGlobal;
+  if (beforeGap === 0n) return afterGap === 0n;
+  if (afterGap === 0n) return true;
+  const sameDirection = (beforeGap > 0n) === (afterGap > 0n);
+  const absolute = (value: bigint) => value < 0n ? -value : value;
+  return sameDirection && absolute(afterGap) <= absolute(beforeGap);
+}
+
 /**
  * Closed material ledger for leaderboard-facing pure-idle terminal results.
  * A failure means the whole affine candidate must be discarded; callers may
@@ -3578,10 +3667,24 @@ export function validatePureIdleTerminalMaterialConservationFromBaseline(
 
     const planStructureDelta = afterSnapshot.planStructurePoints - before.planStructurePoints;
     const planShellDelta = afterSnapshot.planShellSails - before.planShellSails;
-    if (planStructureDelta !== structureDelta) {
+    // Legacy saves can contain a pre-existing global/per-system aggregate
+    // difference. The engine normalizes that historical gap on the first
+    // Dyson update. Accept only monotonic convergence of an already-present
+    // gap; a new, larger or sign-crossing divergence is still rejected.
+    if (!aggregateDivergenceConvergesWithoutNewCredit(
+      before.planStructurePoints,
+      before.structurePoints,
+      afterSnapshot.planStructurePoints,
+      afterSnapshot.structurePoints,
+    )) {
       return `终端物资守恒失败：各恒星系结构增量 ${planStructureDelta} 与全局增量 ${structureDelta} 不一致`;
     }
-    if (planShellDelta !== shellDelta) {
+    if (!aggregateDivergenceConvergesWithoutNewCredit(
+      before.planShellSails,
+      before.shellSails,
+      afterSnapshot.planShellSails,
+      afterSnapshot.shellSails,
+    )) {
       return `终端物资守恒失败：各恒星系壳面增量 ${planShellDelta} 与全局增量 ${shellDelta} 不一致`;
     }
     for (const [field, beforeSystem, afterSystem, beforeGlobal, afterGlobal] of [
@@ -3591,7 +3694,12 @@ export function validatePureIdleTerminalMaterialConservationFromBaseline(
     ] as const) {
       const systemDelta = afterSystem - beforeSystem;
       const globalDelta = afterGlobal - beforeGlobal;
-      if (systemDelta !== globalDelta) {
+      if (!aggregateDivergenceConvergesWithoutNewCredit(
+        beforeSystem,
+        beforeGlobal,
+        afterSystem,
+        afterGlobal,
+      )) {
         return `终端物资守恒失败：各恒星系太阳帆 ${field} 增量 ${systemDelta} 与全局增量 ${globalDelta} 不一致`;
       }
     }
@@ -3933,7 +4041,6 @@ function createConstructionPowerAllocation(
     certificateAuthority.difficulty !== state.settings.difficulty ||
     (certificateAuthority.controllerEntityId ?? null) !== (state.timeWarp.controllerEntityId ?? null) ||
     certificateAuthority.requestedMultiplier !== state.timeWarp.requestedMultiplier ||
-    certificateAuthority.researchFingerprint !== constructionPowerResearchFingerprint(state) ||
     !certificateAuthority.entityArrays.has(state.entities) ||
     !certificateAuthority.beltArrays.has(state.belts) ||
     !Number.isFinite(simulationSeconds) || simulationSeconds <= EPSILON) {
@@ -3964,7 +4071,7 @@ function createConstructionPowerAllocation(
     }
     if (!configurationMatches) continue;
 
-    let remainingKw = Math.max(0, grant.minimumRenewableHeadroomKw);
+    let remainingKw = Math.max(0, grant.minimumCertifiedSupplyKw);
     let usedKw = 0;
     for (const priority of [3, 2, 1] as const) {
       const group = gridCenters.filter((center) => (center.powerPriority ?? 2) === priority);
@@ -3983,7 +4090,7 @@ function createConstructionPowerAllocation(
       remainingKw = Math.max(0, remainingKw - suppliedKw);
     }
     const usedEnergyKws = usedKw * simulationSeconds;
-    const authorizedEnergyKws = grant.minimumRenewableHeadroomKw * simulationSeconds;
+    const authorizedEnergyKws = grant.minimumCertifiedSupplyKw * simulationSeconds;
     if (!Number.isFinite(usedEnergyKws) || !Number.isFinite(authorizedEnergyKws)) continue;
     allocatedEnergyKwsByGrid.set(key, usedEnergyKws);
     authorizedEnergyKwsByGrid.set(key, authorizedEnergyKws);

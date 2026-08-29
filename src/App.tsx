@@ -421,6 +421,11 @@ import {
   selectNativeStarMapCatalogFrame,
 } from "./game/nativeStarMapCatalogStore";
 import {
+  NativeDysonWorkspaceStore,
+  createNativePlayerAuthorityDysonWorkspaceSource,
+  selectNativeDysonWorkspaceFrame,
+} from "./game/nativeDysonWorkspaceStore";
+import {
   createNativeProjectedPlanetRoleCommand,
   createNativeProjectedStationLimitsCommand,
   createNativeProjectedStationPriorityCommand,
@@ -1066,6 +1071,7 @@ const RecipeWorkspace = lazy(() => importWithRecovery(() => import("./components
 const StatisticsWorkspace = lazy(() => importWithRecovery(() => import("./components/StatisticsWorkspace"), "生产统计模块").then((module) => ({ default: module.StatisticsWorkspace })));
 const StarMapWorkspace = lazy(() => importWithRecovery(() => import("./components/StarMapWorkspace"), "星图模块").then((module) => ({ default: module.StarMapWorkspace })));
 const DysonPlannerWorkspace = lazy(() => importWithRecovery(() => import("./components/DysonPlannerWorkspace"), "戴森规划模块").then((module) => ({ default: module.DysonPlannerWorkspace })));
+const NativeDysonPlannerWorkspace = lazy(() => importWithRecovery(() => import("./components/DysonPlannerWorkspace"), "原生戴森规划模块").then((module) => ({ default: module.NativeDysonPlannerWorkspace })));
 const OfflineReportWorkspace = lazy(() => importWithRecovery(() => import("./components/OfflineReportWorkspace"), "离线报告模块").then((module) => ({ default: module.OfflineReportWorkspace })));
 const OperationsWorkspace = lazy(() => importWithRecovery(() => import("./components/OperationsWorkspace"), "运营中心模块").then((module) => ({ default: module.OperationsWorkspace })));
 const TechnologyWorkspace = lazy(() => importWithRecovery(() => import("./components/TechnologyWorkspace"), "科技树模块").then((module) => ({ default: module.TechnologyWorkspace })));
@@ -1553,6 +1559,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [orbitalStationInitialTab, setOrbitalStationInitialTab] = useState<StationTab | undefined>();
   const [blueprintsOpen, setBlueprintsOpen] = useState(false);
   const [dysonPlannerOpen, setDysonPlannerOpen] = useState(false);
+  const [nativeDysonSelectedSystemId, setNativeDysonSelectedSystemId] = useState<string | null>(null);
   const [operationsOpen, setOperationsOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandPaletteEntitySearchRequest, setCommandPaletteEntitySearchRequest] = useState({
@@ -2217,6 +2224,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativeStarMapCatalogStore.getSnapshot,
     nativeStarMapCatalogStore.getSnapshot,
   );
+  const nativeDysonWorkspaceStoreRef = useRef<NativeDysonWorkspaceStore | null>(null);
+  if (nativeDysonWorkspaceStoreRef.current === null) {
+    nativeDysonWorkspaceStoreRef.current = new NativeDysonWorkspaceStore();
+  }
+  const nativeDysonWorkspaceStore = nativeDysonWorkspaceStoreRef.current;
+  const nativeDysonWorkspaceSnapshot = useSyncExternalStore(
+    nativeDysonWorkspaceStore.subscribe,
+    nativeDysonWorkspaceStore.getSnapshot,
+    nativeDysonWorkspaceStore.getSnapshot,
+  );
   const nativeStellarIndustrySelector = useMemo<NativeStellarIndustrySelector>(() => ({
     ...starMapIndustryReadRequest,
     planetCursor: 0,
@@ -2649,6 +2666,32 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     ),
     [factoryPlanetNavigationReadModel, webFactoryPlanetNavigationReadModel],
   );
+  // A bound native session must never infer its Dyson target from the stale
+  // renderer GameState. Until an active native factory frame identifies the
+  // current system, the native workspace stays fail-closed.
+  const nativeDysonEffectiveSystemId = nativeDysonSelectedSystemId ??
+    (nativeAuthoritativeFactoryWorkspaceFrame ? factoryActivePlanetNavigationRow?.systemId ?? null : null);
+  const nativeDysonWorkspaceIdentity = useMemo(() => nativeStellarProjectionIdentity &&
+      nativeDysonEffectiveSystemId
+    ? Object.freeze({
+        ...nativeStellarProjectionIdentity,
+        selectedSystemId: nativeDysonEffectiveSystemId,
+      })
+    : null, [nativeDysonEffectiveSystemId, nativeStellarProjectionIdentity]);
+  const nativeDysonWorkspaceSource = useMemo(() => nativeDysonWorkspaceIdentity
+    ? createNativePlayerAuthorityDysonWorkspaceSource(desktopBridge, nativeDysonWorkspaceIdentity)
+    : null, [desktopBridge, nativeDysonWorkspaceIdentity]);
+  const nativeDysonWorkspaceFrame = useMemo(() => nativeDysonWorkspaceIdentity
+    ? selectNativeDysonWorkspaceFrame(nativeDysonWorkspaceSnapshot, nativeDysonWorkspaceIdentity)
+    : null, [nativeDysonWorkspaceIdentity, nativeDysonWorkspaceSnapshot]);
+  const nativeDysonWorkspaceReadStatus = nativeDysonWorkspaceFrame
+    ? "ready" as const
+    : !nativeDysonWorkspaceIdentity || !nativeDysonWorkspaceSource ||
+        nativeDysonWorkspaceSnapshot.status === "unavailable"
+      ? "unavailable" as const
+      : nativeDysonWorkspaceSnapshot.status === "empty"
+        ? "empty" as const
+        : "loading" as const;
   const webFactoryViewportReadModel = useMemo(
     () => nativeAuthoritativeFactoryCanvasFrame ? null : createWebFactoryViewportReadModel(game, {
       planetId: game.activePlanetId,
@@ -2905,6 +2948,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativeStellarProjectionSource,
     nativeStellarWorkspaceStore,
     starMapOpen,
+  ]);
+  useEffect(() => {
+    if (!dysonPlannerOpen || !nativePlayerAuthorityBoundFrame || !nativeDysonWorkspaceIdentity ||
+        !nativeDysonWorkspaceSource) {
+      nativeDysonWorkspaceStore.clear();
+      return;
+    }
+    void nativeDysonWorkspaceStore.refresh(
+      nativeDysonWorkspaceSource,
+      nativeDysonWorkspaceIdentity,
+    ).catch(() => undefined);
+  }, [
+    dysonPlannerOpen,
+    nativeDysonWorkspaceIdentity,
+    nativeDysonWorkspaceSource,
+    nativeDysonWorkspaceStore,
+    nativePlayerAuthorityBoundFrame,
   ]);
   useEffect(() => {
     if (!commandPaletteOpen || !nativePlayerAuthorityBoundFrame ||
@@ -15389,7 +15449,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onGameChange={commitGame}
           onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setOrbitalStationOpen(false)}
         /> : null}
-        {dysonPlannerOpen ? (authorityWorkspaceSync === "dyson" ? <WorkspaceLoading label="正在同步权威戴森规划…" /> : (
+        {dysonPlannerOpen ? nativePlayerAuthorityBoundFrame ? (
+          <NativeDysonPlannerWorkspace
+            frame={nativeDysonWorkspaceFrame}
+            status={nativeDysonWorkspaceReadStatus}
+            selectedSystemId={nativeDysonEffectiveSystemId}
+            onSelectSystem={setNativeDysonSelectedSystemId}
+            onClose={() => {
+              setNativeDysonSelectedSystemId(null);
+              if (nextMobileShell) mobileNavigation.requestBack();
+              else setDysonPlannerOpen(false);
+            }}
+          />
+        ) : authorityWorkspaceSync === "dyson" ? <WorkspaceLoading label="正在同步权威戴森规划…" /> : (
           <DysonPlannerWorkspace
             open
             game={game}
@@ -15425,7 +15497,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onSwarmOrbitChange={(systemId, orbitId, changes) => commitGame((current) => setDysonSwarmOrbit(current, systemId, orbitId, changes))}
             onRemoveSwarmOrbit={(systemId, orbitId) => commitGame((current) => removeDysonSwarmOrbit(current, systemId, orbitId))}
           />
-        )) : null}
+        ) : null}
         {operationsOpen ? (
           <OperationsWorkspace
             open

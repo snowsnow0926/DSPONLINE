@@ -1,0 +1,32 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+
+describe("native Dyson workspace App integration", () => {
+  const app = readFileSync(fileURLToPath(new URL("../App.tsx", import.meta.url)), "utf8");
+
+  it("binds the workspace to the exact native session, revision, registry, and selected system", () => {
+    expect(app).toMatch(/new NativeDysonWorkspaceStore\(\)/);
+    expect(app).toMatch(/nativeDysonWorkspaceIdentity = useMemo\(\(\) => nativeStellarProjectionIdentity[\s\S]*?selectedSystemId: nativeDysonEffectiveSystemId/);
+    expect(app).toMatch(/createNativePlayerAuthorityDysonWorkspaceSource\(desktopBridge, nativeDysonWorkspaceIdentity\)/);
+    expect(app).toMatch(/selectNativeDysonWorkspaceFrame\(nativeDysonWorkspaceSnapshot, nativeDysonWorkspaceIdentity\)/);
+  });
+
+  it("refreshes only while the native authority workspace is open and otherwise clears old pages", () => {
+    expect(app).toMatch(/!dysonPlannerOpen \|\| !nativePlayerAuthorityBoundFrame \|\| !nativeDysonWorkspaceIdentity \|\|[\s\S]*?!nativeDysonWorkspaceSource[\s\S]*?nativeDysonWorkspaceStore\.clear\(\)/);
+    expect(app).toMatch(/nativeDysonWorkspaceStore\.refresh\([\s\S]*?nativeDysonWorkspaceSource,[\s\S]*?nativeDysonWorkspaceIdentity/);
+  });
+
+  it("renders the read-only native component before the legacy mutable workspace", () => {
+    expect(app).toMatch(/dysonPlannerOpen \? nativePlayerAuthorityBoundFrame \? \([\s\S]*?<NativeDysonPlannerWorkspace[\s\S]*?frame=\{nativeDysonWorkspaceFrame\}[\s\S]*?status=\{nativeDysonWorkspaceReadStatus\}/);
+    const nativeTag = app.match(/<NativeDysonPlannerWorkspace[\s\S]*?\/>/)?.[0] ?? "";
+    expect(nativeTag).toContain("onSelectSystem={setNativeDysonSelectedSystemId}");
+    expect(nativeTag).not.toMatch(/\bgame=|onAddLayer=|onLaunchModeChange=|commitGame/);
+    expect(app).toMatch(/nativePlayerAuthorityBoundFrame \? \([\s\S]*?<NativeDysonPlannerWorkspace[\s\S]*?: authorityWorkspaceSync === "dyson"[\s\S]*?<DysonPlannerWorkspace/);
+  });
+
+  it("never derives the native selected system from a stale renderer save", () => {
+    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame \? factoryActivePlanetNavigationRow\?\.systemId \?\? null : null/);
+    expect(app).not.toMatch(/nativeDysonEffectiveSystemId[\s\S]{0,240}game\.activePlanetId/);
+  });
+});

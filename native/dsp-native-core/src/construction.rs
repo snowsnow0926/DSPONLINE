@@ -670,28 +670,57 @@ impl ConstructionRuntime {
     pub(crate) fn estimated_bytes(&self) -> u64 {
         use std::mem::size_of;
 
-        let power_rows = self
+        // Runtime is Arc-owned. Count its inline allocation and the two Arc
+        // reference counters in addition to every separately allocated
+        // buffer below. Nested Vec/BTreeSet headers live in their outer Vec
+        // allocation, not in `Self`, so they must be counted explicitly.
+        let runtime_allocation = size_of::<Self>() + size_of::<usize>() * 2;
+        let power_row_buffers = self
             .power_group_rows
             .iter()
             .map(|rows| rows.capacity())
-            .sum::<usize>();
-        let planet_wait_rows = self
-            .planet_wait_rows
+            .sum::<usize>()
+            * size_of::<usize>();
+        let nested_container_buffers = self.power_group_rows.capacity() * size_of::<Vec<usize>>()
+            + self.planet_wait_rows.capacity() * size_of::<BTreeSet<usize>>()
+            + self.observed_planet_inventory.capacity() * size_of::<Option<Vec<(String, u64)>>>();
+        // Rust's B-tree node layout is deliberately private. Charge a full
+        // root/allocation allowance to every non-empty Set, then four machine
+        // words per live key for keys, links, occupancy, and additional-node
+        // slack. This intentionally overestimates sparse one-key wait sets
+        // instead of pretending a Set is a packed Vec.
+        let tree_entry_bytes = size_of::<usize>() * 4;
+        let tree_root_bytes = size_of::<usize>() * 16;
+        let tree_bytes = |rows: &BTreeSet<usize>| {
+            if rows.is_empty() {
+                0
+            } else {
+                tree_root_bytes + rows.len() * tree_entry_bytes
+            }
+        };
+        let planet_wait_tree_bytes = self.planet_wait_rows.iter().map(tree_bytes).sum::<usize>();
+        let pending_tree_bytes = tree_bytes(&self.planner_wait_rows) + tree_bytes(&self.pending);
+        let inventory_entry_buffers = self
+            .observed_planet_inventory
             .iter()
-            .map(BTreeSet::len)
+            .flatten()
+            .map(|entries| entries.capacity() * size_of::<(String, u64)>())
             .sum::<usize>();
-        let inventory_bytes = self
+        let inventory_text_bytes = self
             .observed_planet_inventory
             .iter()
             .flatten()
             .flat_map(|entries| entries.iter())
-            .map(|(item_id, _)| item_id.capacity() + size_of::<u64>())
+            .map(|(item_id, _)| item_id.capacity())
             .sum::<usize>();
         let target_lookup_bytes = self
             .target_by_id
             .keys()
-            .map(|target_id| target_id.capacity() + size_of::<String>() + size_of::<usize>() * 4)
-            .sum::<usize>();
+            .map(|target_id| {
+                target_id.capacity() + size_of::<(String, usize)>() + size_of::<usize>() * 4
+            })
+            .sum::<usize>()
+            + usize::from(!self.target_by_id.is_empty()) * size_of::<usize>() * 64;
         let dependency_bytes = self
             .observed_dependency
             .as_ref()
@@ -706,7 +735,8 @@ impl ConstructionRuntime {
                     + signature.active_targets.capacity() * size_of::<bool>()
             })
             .unwrap_or(0);
-        (self.center_indices.capacity() * size_of::<usize>()
+        (runtime_allocation
+            + self.center_indices.capacity() * size_of::<usize>()
             + self.row_by_entity.capacity() * size_of::<(u32, u32)>()
             + self.row_planets.capacity() * size_of::<usize>()
             + self.row_power_groups.capacity() * size_of::<usize>()
@@ -716,13 +746,14 @@ impl ConstructionRuntime {
             + target_lookup_bytes
             + self.row_job_targets.capacity() * size_of::<Option<usize>>()
             + self.pending_by_target.capacity() * size_of::<f64>()
-            + power_rows * size_of::<usize>()
+            + nested_container_buffers
+            + power_row_buffers
             + self.power_group_representatives.capacity() * size_of::<Option<usize>>()
             + self.observed_power.capacity() * size_of::<Option<PowerFactorSignature>>()
-            + planet_wait_rows * size_of::<usize>()
-            + self.planner_wait_rows.len() * size_of::<usize>()
-            + self.pending.len() * size_of::<usize>()
-            + inventory_bytes
+            + planet_wait_tree_bytes
+            + pending_tree_bytes
+            + inventory_entry_buffers
+            + inventory_text_bytes
             + dependency_bytes) as u64
     }
 
@@ -742,12 +773,11 @@ fn power_factor_signature(
     if !factor.is_finite() {
         return None;
     }
-    let rounded = (factor * 10_000.0).round() / 10_000.0;
-    Some(PowerFactorSignature::Value(if rounded == 0.0 {
-        0.0_f64.to_bits()
-    } else {
-        rounded.to_bits()
-    }))
+    // `run_centers` gates work on the unrounded factor and also multiplies
+    // work by that exact value. Keep its complete IEEE-754 representation so
+    // two factors in the same four-decimal display bucket (including values
+    // on opposite sides of EPSILON) cannot leave a sleeping center stale.
+    Some(PowerFactorSignature::Value(factor.to_bits()))
 }
 
 fn planet_inventory_fingerprint(
@@ -3470,6 +3500,10 @@ mod tests {
     }
 
     fn active_runtime_catalog() -> RuntimeCatalog {
+        active_runtime_catalog_with_iron_cost(1.0)
+    }
+
+    fn active_runtime_catalog_with_iron_cost(iron_cost: f64) -> RuntimeCatalog {
         RuntimeCatalog::validate(
             CatalogSnapshot {
                 protocol_version: crate::CORE_PROTOCOL_VERSION,
@@ -3498,7 +3532,7 @@ mod tests {
                     required_tech_id: None,
                     costs: vec![ItemAmount {
                         item_id: "iron".to_owned(),
-                        amount: 1.0,
+                        amount: iron_cost,
                     }],
                 }],
                 belts: Vec::new(),
@@ -3699,6 +3733,318 @@ mod tests {
         assert_eq!(
             inventory_amount(base["construction"].as_object().unwrap(), "widget"),
             1.0
+        );
+    }
+
+    #[test]
+    fn raw_power_signature_wakes_across_epsilon_inside_one_display_bucket_and_matches_oracle() {
+        const BELOW_EPSILON: f64 = 0.00009;
+        const ABOVE_EPSILON: f64 = 0.00011;
+        assert_eq!(
+            (BELOW_EPSILON * 10_000.0).round() / 10_000.0,
+            (ABOVE_EPSILON * 10_000.0).round() / 10_000.0,
+            "the regression factors must share the persisted display bucket"
+        );
+
+        let (state, mut active_base, mut active_entities, mut active_power, mut active_runtime) =
+            active_runtime_fixture(4, 1, 1, false);
+        let mut oracle_base = active_base.clone();
+        let mut oracle_entities = active_entities.clone();
+        let mut oracle_power = active_power.clone();
+        let mut oracle_runtime = ConstructionRuntime::build(&state, &oracle_base, &oracle_entities);
+        oracle_runtime.force_full_scan();
+        active_power
+            .values_mut()
+            .for_each(|factor| *factor = BELOW_EPSILON);
+        oracle_power
+            .values_mut()
+            .for_each(|factor| *factor = BELOW_EPSILON);
+
+        let initial = run_active_fixture(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &active_power,
+            &mut active_runtime,
+            5.0,
+        );
+        let oracle_initial = run_active_fixture(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &oracle_power,
+            &mut oracle_runtime,
+            5.0,
+        );
+        assert_eq!(initial.scan.selected_rows, 4);
+        assert_eq!(oracle_initial.scan.selected_rows, 4);
+        assert_eq!(active_base, oracle_base);
+        assert_eq!(active_entities, oracle_entities);
+
+        let quiet = run_active_fixture(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &active_power,
+            &mut active_runtime,
+            5.0,
+        );
+        let oracle_quiet = run_active_fixture(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &oracle_power,
+            &mut oracle_runtime,
+            5.0,
+        );
+        assert_eq!(quiet.scan.selected_rows, 0);
+        assert_eq!(oracle_quiet.scan.selected_rows, 4);
+        assert_eq!(active_base, oracle_base);
+        assert_eq!(active_entities, oracle_entities);
+
+        active_power
+            .values_mut()
+            .for_each(|factor| *factor = ABOVE_EPSILON);
+        oracle_power
+            .values_mut()
+            .for_each(|factor| *factor = ABOVE_EPSILON);
+        let wake = run_active_fixture(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &active_power,
+            &mut active_runtime,
+            5.0,
+        );
+        let oracle_wake = run_active_fixture(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &oracle_power,
+            &mut oracle_runtime,
+            5.0,
+        );
+        assert_eq!(wake.scan.selected_rows, 4);
+        assert!(wake.scan.dense_fallback);
+        assert_eq!(oracle_wake.scan.selected_rows, 4);
+        assert_eq!(active_base, oracle_base);
+        assert_eq!(active_entities, oracle_entities);
+        assert_eq!(
+            serde_json::to_vec(&(&active_base, &active_entities)).expect("active bytes"),
+            serde_json::to_vec(&(&oracle_base, &oracle_entities)).expect("oracle bytes")
+        );
+        assert!(
+            active_base["constructionAutomation"]["jobs"]
+                .as_object()
+                .is_some_and(|jobs| !jobs.is_empty()),
+            "the awakened center must start work above EPSILON"
+        );
+    }
+
+    #[test]
+    fn failed_candidate_does_not_drain_source_runtime_wait_state() {
+        let (state, mut base, mut entities, power, mut runtime) =
+            active_runtime_fixture(4, 1, 0, false);
+        let blocked =
+            run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 5.0);
+        assert_eq!(blocked.scan.selected_rows, 4);
+        assert_eq!(runtime.planet_wait_rows[0].len(), 4);
+        assert_eq!(runtime.planner_wait_rows.len(), 4);
+
+        let source_runtime = Arc::new(runtime);
+        let source_planet_wait_rows = source_runtime.planet_wait_rows.clone();
+        let source_planner_wait_rows = source_runtime.planner_wait_rows.clone();
+        let source_inventory = source_runtime.observed_planet_inventory.clone();
+        let source_base_bytes = serde_json::to_vec(&base).expect("source base bytes");
+        let mut candidate_runtime = Arc::clone(&source_runtime);
+        let mut candidate_base = base.clone();
+        let mut candidate_entities = entities.clone();
+        set_inventory_amount(
+            tray_mut(&mut candidate_base, "home").expect("candidate home tray"),
+            "iron",
+            1.0,
+        )
+        .expect("wake candidate wait rows");
+        candidate_base["constructionAutomation"]["jobs"] = Value::Null;
+
+        let error = run_centers(
+            &state,
+            &mut candidate_base,
+            &mut candidate_entities,
+            5.0,
+            &power,
+            &state.factory_topology.construction_center_indices,
+            Arc::make_mut(&mut candidate_runtime),
+        )
+        .expect_err("malformed candidate jobs must fail after selecting wake rows");
+        assert_eq!(error.to_string(), "native construction jobs are missing");
+        assert!(!Arc::ptr_eq(&source_runtime, &candidate_runtime));
+        assert_eq!(source_runtime.planet_wait_rows, source_planet_wait_rows);
+        assert_eq!(source_runtime.planner_wait_rows, source_planner_wait_rows);
+        assert_eq!(source_runtime.observed_planet_inventory, source_inventory);
+        assert_eq!(
+            serde_json::to_vec(&base).expect("source base bytes after failure"),
+            source_base_bytes
+        );
+        assert!(candidate_runtime.planet_wait_rows[0].is_empty());
+        assert!(candidate_runtime.planner_wait_rows.is_empty());
+    }
+
+    #[test]
+    fn serialized_job_wait_and_quantum_buffer_rebuild_matches_live_and_full_scan_oracle() {
+        let (mut state, mut live_base, mut live_entities, power, _) =
+            active_runtime_fixture(4, 1, 0, false);
+        state.catalog = Arc::new(active_runtime_catalog_with_iron_cost(2.0));
+        let center_id = state.entities.ids[2].to_string();
+        live_base["constructionAutomation"]["jobs"][&center_id] = json!({
+            "constructionId": "widget",
+            "steps": [{ "kind": "building", "constructionId": "widget" }],
+            "stepIndex": 0,
+            "elapsedSeconds": 0,
+            "inventory": {}
+        });
+        live_base["constructionAutomation"]["quantumMaterialBuffer"] = Value::Object(
+            [(center_id.clone(), json!({ "iron": 1 }))]
+                .into_iter()
+                .collect(),
+        );
+        let mut live_runtime = ConstructionRuntime::build(&state, &live_base, &live_entities);
+        let blocked = run_active_fixture(
+            &state,
+            &mut live_base,
+            &mut live_entities,
+            &power,
+            &mut live_runtime,
+            5.0,
+        );
+        assert_eq!(blocked.quantum_wake.center_indices, vec![2]);
+        assert!(live_runtime.planet_wait_rows[0].contains(&2));
+        assert_eq!(
+            live_base["constructionAutomation"]["quantumMaterialBuffer"][&center_id]["iron"],
+            Value::from(1)
+        );
+
+        let persisted =
+            serde_json::to_vec(&(&live_base, &live_entities)).expect("serialize persisted domains");
+        let (mut restored_base, mut restored_entities): (Map<String, Value>, Vec<Value>) =
+            serde_json::from_slice(&persisted).expect("restore persisted domains");
+        assert_eq!(
+            serde_json::to_vec(&(&restored_base, &restored_entities))
+                .expect("reserialize persisted domains"),
+            persisted
+        );
+        let mut restored_runtime =
+            ConstructionRuntime::build(&state, &restored_base, &restored_entities);
+        let mut oracle_base = restored_base.clone();
+        let mut oracle_entities = restored_entities.clone();
+        let mut oracle_runtime = ConstructionRuntime::build(&state, &oracle_base, &oracle_entities);
+        oracle_runtime.force_full_scan();
+
+        let live_quiet = run_active_fixture(
+            &state,
+            &mut live_base,
+            &mut live_entities,
+            &power,
+            &mut live_runtime,
+            5.0,
+        );
+        let restored_full = run_active_fixture(
+            &state,
+            &mut restored_base,
+            &mut restored_entities,
+            &power,
+            &mut restored_runtime,
+            5.0,
+        );
+        let oracle_full = run_active_fixture(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &power,
+            &mut oracle_runtime,
+            5.0,
+        );
+        assert_eq!(live_quiet.scan.selected_rows, 0);
+        assert_eq!(restored_full.scan.selected_rows, 4);
+        assert_eq!(oracle_full.scan.selected_rows, 4);
+        assert_eq!(live_base, restored_base);
+        assert_eq!(live_base, oracle_base);
+        assert_eq!(live_entities, restored_entities);
+        assert_eq!(live_entities, oracle_entities);
+
+        for base in [&mut live_base, &mut restored_base, &mut oracle_base] {
+            set_inventory_amount(
+                tray_mut(base, "home").expect("home tray after recovery"),
+                "iron",
+                1.0,
+            )
+            .expect("complete recovered job material");
+        }
+        let live_wake = run_active_fixture(
+            &state,
+            &mut live_base,
+            &mut live_entities,
+            &power,
+            &mut live_runtime,
+            5.0,
+        );
+        let restored_wake = run_active_fixture(
+            &state,
+            &mut restored_base,
+            &mut restored_entities,
+            &power,
+            &mut restored_runtime,
+            5.0,
+        );
+        let oracle_wake = run_active_fixture(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &power,
+            &mut oracle_runtime,
+            5.0,
+        );
+        assert_eq!(live_wake.scan.selected_rows, 1);
+        assert_eq!(restored_wake.scan.selected_rows, 1);
+        assert_eq!(oracle_wake.scan.selected_rows, 4);
+        assert_eq!(live_base, restored_base);
+        assert_eq!(live_base, oracle_base);
+        assert_eq!(live_entities, restored_entities);
+        assert_eq!(live_entities, oracle_entities);
+        assert_eq!(
+            serde_json::to_vec(&(&live_base, &live_entities)).expect("live final bytes"),
+            serde_json::to_vec(&(&oracle_base, &oracle_entities)).expect("oracle final bytes")
+        );
+    }
+
+    #[test]
+    fn construction_runtime_memory_estimate_counts_wait_trees_and_inventory_entries() {
+        let (state, mut base, mut entities, power, mut runtime) =
+            active_runtime_fixture(4, 1, 0, false);
+        let before = runtime.estimated_bytes();
+        run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 5.0);
+        assert_eq!(runtime.planet_wait_rows[0].len(), 4);
+        assert_eq!(runtime.planner_wait_rows.len(), 4);
+        let tree_keys = runtime
+            .planet_wait_rows
+            .iter()
+            .map(BTreeSet::len)
+            .sum::<usize>()
+            + runtime.planner_wait_rows.len()
+            + runtime.pending.len();
+        let nonempty_trees = runtime
+            .planet_wait_rows
+            .iter()
+            .filter(|rows| !rows.is_empty())
+            .count()
+            + usize::from(!runtime.planner_wait_rows.is_empty())
+            + usize::from(!runtime.pending.is_empty());
+        let tree_growth = (tree_keys * 4 + nonempty_trees * 16) * std::mem::size_of::<usize>();
+        let inventory_growth = std::mem::size_of::<(String, u64)>() + "iron".len();
+        assert!(
+            runtime.estimated_bytes()
+                >= before + u64::try_from(tree_growth + inventory_growth).unwrap(),
+            "the public memory gate must conservatively include wait-tree nodes and inventory entry storage"
         );
     }
 

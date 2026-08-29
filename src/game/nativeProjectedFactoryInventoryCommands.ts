@@ -243,6 +243,24 @@ export function createNativeProjectedTrayItemLimitCommand(
   return command;
 }
 
+/** Changes the global ordinary-machine buffer cap without touching existing stock. */
+export function createNativeProjectedProductionBufferLimitCommand(
+  frame: NativeFactoryInventoryFrame,
+  requestedValue: number,
+): SimulationCommandPatch | null {
+  validateFrame(frame);
+  if (!Number.isFinite(requestedValue)) return null;
+  const target = Math.max(1_000, Math.min(100_000_000, Math.floor(requestedValue)));
+  if (target === frame.productionBufferLimit) return null;
+  const command = emptyCommand(frame.revision);
+  command.topLevelChanges.push({
+    path: ["settings", "productionBufferLimit"],
+    operation: "set",
+    value: target,
+  });
+  return command;
+}
+
 function validateProjectedEntity(
   frame: NativeFactoryInventoryFrame,
   entity: FactoryEntity,

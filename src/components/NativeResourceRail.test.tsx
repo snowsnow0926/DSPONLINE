@@ -55,6 +55,7 @@ describe("NativeResourceRail", () => {
       onDropCargo={vi.fn()}
       onStowEntityInventory={vi.fn()}
       onSetTrayItemLimit={vi.fn()}
+      onSetProductionBufferLimit={vi.fn()}
     />));
     expect(host.querySelector("[data-native-authority-unavailable='tray-cargo-v1']")).not.toBeNull();
     expect(host.textContent).toContain("旧网页库存不会显示");
@@ -70,6 +71,7 @@ describe("NativeResourceRail", () => {
       onDropCargo={onDropCargo}
       onStowEntityInventory={vi.fn()}
       onSetTrayItemLimit={vi.fn()}
+      onSetProductionBufferLimit={vi.fn()}
     />));
     expect(host.textContent).toContain("125");
     expect(host.textContent).toContain("会原样保留并可整栈放回");
@@ -87,10 +89,44 @@ describe("NativeResourceRail", () => {
       onDropCargo={vi.fn()}
       onStowEntityInventory={vi.fn()}
       onSetTrayItemLimit={vi.fn()}
+      onSetProductionBufferLimit={vi.fn()}
     />));
     expect([...host.querySelectorAll<HTMLButtonElement>("button")].every((button) => button.disabled)).toBe(true);
-    expect(host.querySelector<HTMLInputElement>(".tray-limit-control input")?.disabled).toBe(true);
+    expect([...host.querySelectorAll<HTMLInputElement>(".tray-limit-control input")]
+      .every((input) => input.disabled)).toBe(true);
     expect(host.textContent).toContain("命令确认中");
+  });
+
+  it("validates and submits the global production-building buffer limit", () => {
+    const onSetProductionBufferLimit = vi.fn();
+    act(() => root.render(<NativeResourceRail
+      frame={{ ...frame(), cargo: null }}
+      pending={false}
+      entityDepositEnabled={false}
+      onPickTray={vi.fn()}
+      onDropCargo={vi.fn()}
+      onStowEntityInventory={vi.fn()}
+      onSetTrayItemLimit={vi.fn()}
+      onSetProductionBufferLimit={onSetProductionBufferLimit}
+    />));
+    const input = host.querySelector<HTMLInputElement>("[aria-label='生产建筑缓存上限']")!;
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    act(() => {
+      input.focus();
+      setValue.call(input, "250000");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.blur();
+    });
+    expect(onSetProductionBufferLimit).toHaveBeenCalledWith(250_000);
+
+    act(() => {
+      input.focus();
+      setValue.call(input, "1e3");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.blur();
+    });
+    expect(onSetProductionBufferLimit).toHaveBeenCalledTimes(1);
+    expect(host.textContent).toContain("不支持小数、负数或指数格式");
   });
 
   it("keeps mixed cargo picks disabled and warns about over-limit rows", () => {
@@ -102,6 +138,7 @@ describe("NativeResourceRail", () => {
       onDropCargo={vi.fn()}
       onStowEntityInventory={vi.fn()}
       onSetTrayItemLimit={vi.fn()}
+      onSetProductionBufferLimit={vi.fn()}
     />));
     const rows = [...host.querySelectorAll<HTMLButtonElement>(".tray-row")];
     expect(rows).toHaveLength(2);
@@ -119,6 +156,7 @@ describe("NativeResourceRail", () => {
       onDropCargo={vi.fn()}
       onStowEntityInventory={onStowEntityInventory}
       onSetTrayItemLimit={vi.fn()}
+      onSetProductionBufferLimit={vi.fn()}
     />));
     const tray = host.querySelector<HTMLElement>("[data-native-entity-stow='same-revision-v1']")!;
     const drop = new Event("drop", { bubbles: true, cancelable: true });
@@ -156,6 +194,7 @@ describe("NativeResourceRail", () => {
       onDropCargo={vi.fn()}
       onStowEntityInventory={vi.fn()}
       onSetTrayItemLimit={vi.fn()}
+      onSetProductionBufferLimit={vi.fn()}
     />));
     const row = host.querySelector<HTMLButtonElement>(".tray-row")!;
     expect(row.disabled).toBe(false);

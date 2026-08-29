@@ -531,6 +531,7 @@ import {
   createNativeProjectedCargoToEntityInputCommand,
   createNativeProjectedEntityInventoryStowCommand,
   createNativeProjectedEntityInventoryTakeCommand,
+  createNativeProjectedProductionBufferLimitCommand,
   createNativeProjectedTrayItemLimitCommand,
   createNativeProjectedTrayTakeCommand,
   createNativeProjectedTrayToEntityInputCommand,
@@ -8533,6 +8534,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     }
     commitNativeProjectedCommand(frame.revision, () =>
       createNativeProjectedTrayItemLimitCommand(frame, value));
+  }, [commitNativeProjectedCommand, nativeFactoryInventoryFrame]);
+
+  const setNativeProductionBufferLimit = useCallback((value: number): void => {
+    const frame = nativeFactoryInventoryFrame;
+    if (!frame) {
+      setNotice("原生生产缓存上限投影尚未就绪；本次操作未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, () =>
+      createNativeProjectedProductionBufferLimitCommand(frame, value));
   }, [commitNativeProjectedCommand, nativeFactoryInventoryFrame]);
 
   const cancelNativeBuildingPlacement = useCallback((): void => {
@@ -18117,6 +18128,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           onStowEntityInventory={handleDraggedItemToTray}
           entityDepositEnabled={nativeEntityInventoryDepositEnabled}
           onSetTrayItemLimit={setNativeTrayItemLimit}
+          onSetProductionBufferLimit={setNativeProductionBufferLimit}
         /> : <StableResourceRail
           game={panelGame}
           onOpenCampaign={openCampaign}

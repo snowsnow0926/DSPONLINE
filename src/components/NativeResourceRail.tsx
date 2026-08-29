@@ -18,6 +18,7 @@ interface NativeResourceRailProps {
   ) => void;
   entityDepositEnabled: boolean;
   onSetTrayItemLimit: (value: number) => void;
+  onSetProductionBufferLimit: (value: number) => void;
 }
 
 const ITEM_DIRECTORY = ITEMS as unknown as Record<string, ItemDefinition | undefined>;
@@ -54,16 +55,23 @@ export function NativeResourceRail({
   onStowEntityInventory,
   entityDepositEnabled,
   onSetTrayItemLimit,
+  onSetProductionBufferLimit,
 }: NativeResourceRailProps) {
   const [trayLimitDraft, setTrayLimitDraft] = useState(frame ? String(frame.trayItemLimit) : "1000000");
   const [trayLimitError, setTrayLimitError] = useState<string | null>(null);
+  const [productionBufferLimitDraft, setProductionBufferLimitDraft] = useState(
+    frame ? String(frame.productionBufferLimit) : "1000000",
+  );
+  const [productionBufferLimitError, setProductionBufferLimitError] = useState<string | null>(null);
   const frameRef = useRef(frame);
   frameRef.current = frame;
   useEffect(() => {
     if (!frame) return;
     setTrayLimitDraft(String(frame.trayItemLimit));
     setTrayLimitError(null);
-  }, [frame?.activePlanetId, frame?.revision, frame?.trayItemLimit]);
+    setProductionBufferLimitDraft(String(frame.productionBufferLimit));
+    setProductionBufferLimitError(null);
+  }, [frame?.activePlanetId, frame?.productionBufferLimit, frame?.revision, frame?.trayItemLimit]);
   const planet = frame ? PLANET_DIRECTORY[frame.activePlanetId] : null;
   const cargoIsPortable = frame?.cargo && ["logistics_drone", "logistics_vessel"].includes(frame.cargo.itemId);
   const disabled = pending || !frame;
@@ -83,6 +91,22 @@ export function NativeResourceRail({
     }
     setTrayLimitError(null);
     onSetTrayItemLimit(next);
+  };
+  const commitProductionBufferLimit = () => {
+    const current = frameRef.current;
+    if (!current || pending) return;
+    const normalized = productionBufferLimitDraft.trim().replaceAll(",", "");
+    if (!/^[0-9]+$/.test(normalized)) {
+      setProductionBufferLimitError("请输入十进制正整数，不支持小数、负数或指数格式");
+      return;
+    }
+    const next = Number(normalized);
+    if (!Number.isSafeInteger(next) || next < 1_000 || next > 100_000_000) {
+      setProductionBufferLimitError("允许范围为 1,000 至 100,000,000");
+      return;
+    }
+    setProductionBufferLimitError(null);
+    onSetProductionBufferLimit(next);
   };
   const rows = useMemo(() => frame?.rows ?? [], [frame?.rows]);
 
@@ -174,6 +198,45 @@ export function NativeResourceRail({
           >{value === 10_000 ? "1万" : value === 100_000 ? "10万" : value === 1_000_000 ? "100万" : "1亿"}</button>)}
         </div>
         {trayLimitError ? <p className="tray-limit-error" role="alert">{trayLimitError}</p> : null}
+        <label className="tray-limit-control production-buffer-limit-control">
+          <span>生产建筑缓存上限</span>
+          <input
+            type="number"
+            min={1000}
+            max={100_000_000}
+            step={1000}
+            inputMode="numeric"
+            value={productionBufferLimitDraft}
+            disabled={disabled}
+            aria-label="生产建筑缓存上限"
+            onChange={(event) => setProductionBufferLimitDraft(event.target.value)}
+            onBlur={commitProductionBufferLimit}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.currentTarget.blur();
+              if (event.key === "Escape") {
+                setProductionBufferLimitDraft(String(frame.productionBufferLimit));
+                event.currentTarget.blur();
+              }
+            }}
+          />
+          <small>1千–1亿</small>
+        </label>
+        <div className="tray-limit-presets" role="group" aria-label="生产建筑缓存上限预设">
+          {[10_000, 100_000, 1_000_000, 100_000_000].map((value) => <button
+            type="button"
+            disabled={disabled}
+            className={frame.productionBufferLimit === value ? "active" : ""}
+            key={value}
+            onClick={() => {
+              setProductionBufferLimitDraft(String(value));
+              setProductionBufferLimitError(null);
+              onSetProductionBufferLimit(value);
+            }}
+          >{value === 10_000 ? "1万" : value === 100_000 ? "10万" : value === 1_000_000 ? "100万" : "1亿"}</button>)}
+        </div>
+        {productionBufferLimitError
+          ? <p className="tray-limit-error" role="alert">{productionBufferLimitError}</p>
+          : null}
         <div className="tray-list">
           {rows.length === 0 ? <div className="tray-empty"><Box size={18} /><span>暂无库存</span></div> : rows.map((row) => {
             const mixedCargo = Boolean(frame.cargo && frame.cargo.itemId !== row.itemId);

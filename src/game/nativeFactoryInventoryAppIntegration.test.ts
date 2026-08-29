@@ -19,10 +19,11 @@ describe("native factory inventory App integration", () => {
   });
 
   it("uses only projected rows and typed Rust-validated commands", () => {
-    expect(app).toMatch(/<NativeResourceRail[\s\S]*?frame=\{nativeFactoryInventoryFrame\}[\s\S]*?onPickTray=\{takeNativeTrayItem\}[\s\S]*?onDropCargo=\{returnNativeCargo\}[\s\S]*?onSetTrayItemLimit=\{setNativeTrayItemLimit\}/);
+    expect(app).toMatch(/<NativeResourceRail[\s\S]*?frame=\{nativeFactoryInventoryFrame\}[\s\S]*?onPickTray=\{takeNativeTrayItem\}[\s\S]*?onDropCargo=\{returnNativeCargo\}[\s\S]*?onSetTrayItemLimit=\{setNativeTrayItemLimit\}[\s\S]*?onSetProductionBufferLimit=\{setNativeProductionBufferLimit\}/);
     expect(app).toMatch(/commitNativeProjectedCommand\(frame\.revision,[\s\S]*?createNativeProjectedTrayTakeCommand\(frame, itemId\)/);
     expect(app).toMatch(/commitNativeProjectedCommand\(frame\.revision,[\s\S]*?createNativeProjectedCargoReturnCommand\(frame\)/);
     expect(app).toMatch(/commitNativeProjectedCommand\(frame\.revision,[\s\S]*?createNativeProjectedTrayItemLimitCommand\(frame, value\)/);
+    expect(app).toMatch(/commitNativeProjectedCommand\(frame\.revision,[\s\S]*?createNativeProjectedProductionBufferLimitCommand\(frame, value\)/);
     expect(rail).not.toMatch(/GameState|panelGame|commitGame|gameRef/);
     expect(rail).toMatch(/frame\?\.rows/);
   });

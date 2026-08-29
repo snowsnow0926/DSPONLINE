@@ -4,6 +4,7 @@ import {
   createNativeProjectedCargoToEntityInputCommand,
   createNativeProjectedEntityInventoryStowCommand,
   createNativeProjectedEntityInventoryTakeCommand,
+  createNativeProjectedProductionBufferLimitCommand,
   createNativeProjectedTrayItemLimitCommand,
   createNativeProjectedTrayTakeCommand,
   createNativeProjectedTrayToEntityInputCommand,
@@ -134,6 +135,26 @@ describe("native projected factory inventory commands", () => {
     expect(createNativeProjectedTrayItemLimitCommand(frame(), 1_000_000)).toBeNull();
     expect(createNativeProjectedTrayItemLimitCommand(frame(), Number.NaN)).toBeNull();
     expect(createNativeProjectedTrayItemLimitCommand(frame(), 1e12)?.topLevelChanges[0].value)
+      .toBe(100_000_000);
+  });
+
+  it("changes only the bounded global production-buffer setting", () => {
+    expect(createNativeProjectedProductionBufferLimitCommand(frame(), 9_999.9)).toMatchObject({
+      baseRevision: 41,
+      topLevelChanges: [{
+        path: ["settings", "productionBufferLimit"],
+        operation: "set",
+        value: 9_999,
+      }],
+      changedEntities: [],
+      changedBelts: [],
+    });
+    expect(createNativeProjectedProductionBufferLimitCommand(frame(), 999)?.topLevelChanges[0].value)
+      .toBe(1_000);
+    expect(createNativeProjectedProductionBufferLimitCommand(frame(), 1_000_000)).toBeNull();
+    expect(createNativeProjectedProductionBufferLimitCommand(frame(), Number.NaN)).toBeNull();
+    expect(createNativeProjectedProductionBufferLimitCommand(frame(), Number.POSITIVE_INFINITY)).toBeNull();
+    expect(createNativeProjectedProductionBufferLimitCommand(frame(), 1e12)?.topLevelChanges[0].value)
       .toBe(100_000_000);
   });
 

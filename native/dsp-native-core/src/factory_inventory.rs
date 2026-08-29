@@ -237,11 +237,19 @@ fn inventory_root(path: &[PathSegment]) -> bool {
     )
 }
 
+fn production_buffer_limit_path(path: &[PathSegment]) -> bool {
+    path_equals(path, &["settings", "productionBufferLimit"])
+}
+
+fn factory_inventory_command_path(path: &[PathSegment]) -> bool {
+    inventory_root(path) || production_buffer_limit_path(path)
+}
+
 pub(crate) fn command_touches_factory_inventory(command: &SimulationCommandPatch) -> bool {
     command
         .top_level_changes
         .iter()
-        .any(|change| inventory_root(&change.path))
+        .any(|change| factory_inventory_command_path(&change.path))
 }
 
 fn exact_patch_sets_match(actual: &[ValuePatch], expected: &[ValuePatch]) -> anyhow::Result<()> {
@@ -440,6 +448,37 @@ fn validate_active_tray_item_limit(
             path: vec![
                 PathSegment::Key("planetTrayItemLimits".to_owned()),
                 PathSegment::Key(planet_id.to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(Value::from(target)),
+        }],
+    )
+}
+
+fn validate_production_buffer_limit(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.top_level_changes.len() != 1 || !patches_have_only_top_level_changes(command) {
+        bail!("native factory inventory production-buffer patch set is incomplete or mixed")
+    }
+    let change = &command.top_level_changes[0];
+    if !production_buffer_limit_path(&change.path) || change.operation != "set" {
+        bail!("native factory inventory production-buffer path is not canonical")
+    }
+    let target = safe_nonnegative_integer(change.value.as_ref(), "production-buffer target")?;
+    if !(MIN_PRODUCTION_BUFFER_LIMIT..=MAX_PRODUCTION_BUFFER_LIMIT).contains(&target) {
+        bail!("native factory inventory production-buffer target is outside game bounds")
+    }
+    if effective_production_buffer_limit(state.base_value()) == target {
+        bail!("native factory inventory production-buffer target is unchanged")
+    }
+    exact_patch_sets_match(
+        &command.top_level_changes,
+        &[ValuePatch {
+            path: vec![
+                PathSegment::Key("settings".to_owned()),
+                PathSegment::Key("productionBufferLimit".to_owned()),
             ],
             operation: "set".to_owned(),
             value: Some(Value::from(target)),
@@ -911,9 +950,16 @@ pub(crate) fn validate_factory_inventory_command(
         || command
             .top_level_changes
             .iter()
-            .any(|change| !inventory_root(&change.path))
+            .any(|change| !factory_inventory_command_path(&change.path))
     {
         bail!("native factory inventory command shape is invalid")
+    }
+    if command
+        .top_level_changes
+        .iter()
+        .any(|change| production_buffer_limit_path(&change.path))
+    {
+        return validate_production_buffer_limit(state, command);
     }
     if !command.changed_entities.is_empty() {
         if let Some(target) = entity_inventory_target(state, command)? {
@@ -1555,6 +1601,90 @@ mod tests {
                     .is_err()
             );
             assert_eq!(state.summary().unwrap().canonical_sha256, before);
+        }
+    }
+
+    #[test]
+    fn player_authority_sets_only_the_bounded_production_buffer_limit() {
+        let mut state = state();
+        let tray_before = state.base_value()["tray"].clone();
+        let valid = command(
+            7,
+            vec![set(
+                &["settings", "productionBufferLimit"],
+                json!(10_000),
+            )],
+        );
+        state.apply_player_authority_command(&valid).unwrap();
+        assert_eq!(
+            state.base_value()["settings"]["productionBufferLimit"],
+            10_000
+        );
+        assert_eq!(state.base_value()["tray"], tray_before);
+        assert_eq!(
+            state.factory_inventory_projection(8, 0, 8).unwrap()["productionBufferLimit"],
+            10_000
+        );
+
+        let invalid = [
+            command(
+                7,
+                vec![set(
+                    &["settings", "productionBufferLimit"],
+                    json!(20_000),
+                )],
+            ),
+            command(
+                8,
+                vec![set(
+                    &["settings", "productionBufferLimit"],
+                    json!(999),
+                )],
+            ),
+            command(
+                8,
+                vec![set(
+                    &["settings", "productionBufferLimit"],
+                    json!(100_000_001),
+                )],
+            ),
+            command(
+                8,
+                vec![set(
+                    &["settings", "productionBufferLimit"],
+                    json!(10_000),
+                )],
+            ),
+            command(
+                8,
+                vec![set(
+                    &["settings", "productionBufferLimit"],
+                    json!(10_000.5),
+                )],
+            ),
+            command(
+                8,
+                vec![
+                    set(
+                        &["settings", "productionBufferLimit"],
+                        json!(20_000),
+                    ),
+                    set(&["planetTrayItemLimits", "home"], json!(20_000)),
+                ],
+            ),
+            command(
+                8,
+                vec![set(&["settings", "simulationSpeed"], json!(2))],
+            ),
+        ];
+        for forged in invalid {
+            let before = state.summary().unwrap().canonical_sha256;
+            assert!(state.apply_player_authority_command(&forged).is_err());
+            assert_eq!(state.summary().unwrap().canonical_sha256, before);
+            assert_eq!(
+                state.base_value()["settings"]["productionBufferLimit"],
+                10_000
+            );
         }
     }
 

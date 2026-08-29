@@ -14,6 +14,7 @@ import {
   ACCUMULATOR_ENERGY_MJ,
   advanceConstructionAutomationMacroInPlace,
   advanceDysonRocketMacroInPlace,
+  advanceSimulationBudget,
   advanceSimulationSession,
   completeSimulationAdvanceSession,
   createSimulationAdvanceSession,
@@ -31,6 +32,7 @@ import {
   PORTABLE_FLEET_ITEM_IDS,
   type SimulationPowerAuditSample,
   type SimulationAdvanceSession,
+  type SimulationProfiler,
 } from "./engine";
 import { getDifficultyDefinition } from "./difficulty";
 import type { FactoryEntity, GameState, ItemId, PlanetId, PowerGridId } from "./types";
@@ -2938,6 +2940,44 @@ export function validateAggregateConservation(
     constructionCraftedDelta,
     constructionReceipt,
   );
+}
+
+export interface ExactSimulationConservationDiagnostic {
+  state: GameState;
+  conservationFailure: string | null;
+  /** Exact engine call only; excludes the two baseline/receipt scans. */
+  exactAdvanceDurationMs: number;
+}
+
+/**
+ * Run the ordinary exact simulation and validate its aggregate material flow
+ * with an internally issued construction receipt. This is a diagnostic
+ * comparator, not a settlement commit API: callers can provide only the
+ * source and duration, never an arbitrary candidate or a forged receipt.
+ *
+ * Keeping the receipt inside this module is important. `totalCrafted` remains
+ * a cross-check and cannot certify itself merely because unrelated inventory
+ * happened to fall during the same simulation window.
+ */
+export function advanceExactSimulationForConservationDiagnostic(
+  source: GameState,
+  simulationSeconds: number,
+  wallSeconds: number,
+  profiler?: SimulationProfiler,
+): ExactSimulationConservationDiagnostic {
+  const aggregateBefore = captureAggregateConservationBaseline(source);
+  const constructionBefore = captureConstructionRecipeStageSnapshot(source, "aggregate");
+  const exactAdvanceStartedAt = globalThis.performance.now();
+  const state = advanceSimulationBudget(source, simulationSeconds, wallSeconds, profiler);
+  const exactAdvanceDurationMs = globalThis.performance.now() - exactAdvanceStartedAt;
+  const receipt = createConstructionRecipeReceipt(constructionBefore, state);
+  return {
+    state,
+    exactAdvanceDurationMs,
+    conservationFailure: typeof receipt === "string"
+      ? `精确施工阶段最终物资守恒失败：${receipt}`
+      : validateAggregateConservation(aggregateBefore, state, receipt),
+  };
 }
 
 interface PureIdleFlowSnapshot {

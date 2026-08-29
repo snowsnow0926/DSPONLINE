@@ -101,6 +101,14 @@ test("validation fails closed on an unobserved pool or divergent conservation di
 
   const unbalanced = [...cells, structuredClone(cells[0])];
   assert.match(validateDeterminismEvidence(unbalanced).errors.join("\n"), /not balanced/);
+
+  const consistentlyInvalidConservation = structuredClone(cells);
+  for (const cell of consistentlyInvalidConservation) {
+    cell.evidence.conservationValidationFailure = "missing private construction receipt";
+  }
+  const invalidConservation = validateDeterminismEvidence(consistentlyInvalidConservation);
+  assert.equal(invalidConservation.valid, false);
+  assert.match(invalidConservation.errors.join("\n"), /conservation validation failed/);
 });
 
 test("runDeterminismMatrix launches every thread cell independently with profiling enabled", () => {

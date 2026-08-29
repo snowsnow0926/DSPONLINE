@@ -10,7 +10,10 @@ import { buildChunkedSaveJournal } from "./chunkedSaveJournal";
 import { createContentPackRegistry, createContentPackRuntimeSnapshot } from "./contentPacks";
 import { createNativeCoreCatalog } from "./nativeCoreCatalog";
 import { advanceSimulationBudget, createSimulationLookupContext, createSimulationProfiler, getEntityOperatingStatus } from "./engine";
-import { captureAggregateConservationBaseline, validateAggregateConservation } from "./offlineApproximation";
+import {
+  advanceExactSimulationForConservationDiagnostic,
+  captureAggregateConservationBaseline,
+} from "./offlineApproximation";
 import { migrateGame } from "./storage";
 import type { GameState } from "./types";
 
@@ -553,13 +556,15 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     if (admission.supported) {
       const expectedInitial = structuredClone(migratedState);
       expectedInitial.paused = false;
-      const conservationBefore = captureAggregateConservationBaseline(expectedInitial);
       const jsProfiler = createSimulationProfiler();
-      const jsAdvanceStartedAt = performance.now();
-      const expected = advanceSimulationBudget(expectedInitial, 1, 1, jsProfiler);
-      const jsAdvanceDurationMs = performance.now() - jsAdvanceStartedAt;
+      const jsDiagnosticStartedAt = performance.now();
+      const {
+        state: expected,
+        conservationFailure: conservationValidationFailure,
+        exactAdvanceDurationMs: jsAdvanceDurationMs,
+      } = advanceExactSimulationForConservationDiagnostic(expectedInitial, 1, 1, jsProfiler);
+      const jsAdvanceAndConservationDurationMs = performance.now() - jsDiagnosticStartedAt;
       const conservationSummary = aggregateConservationSummary(expected);
-      const conservationValidationFailure = validateAggregateConservation(conservationBefore, expected);
       const expectedFields = Object.fromEntries(Object.entries(JSON.parse(JSON.stringify(expected)) as Record<string, unknown>)
         .map(([key, value]) => [key, stableCanonicalSha256(value)]));
       const fieldMismatches = Object.keys(expectedFields).filter((key) =>
@@ -616,6 +621,7 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
           blockedMachineGroups,
           nativeAdvanceDurationMs: Number(coreAdvanceDurationMs.toFixed(2)),
           jsAdvanceDurationMs: Number(jsAdvanceDurationMs.toFixed(2)),
+          jsAdvanceAndConservationDurationMs: Number(jsAdvanceAndConservationDurationMs.toFixed(2)),
           nativeToJsRatio: Number((coreAdvanceDurationMs / jsAdvanceDurationMs).toFixed(3)),
           processPrivateBytesPeakDuringAdvance: exactPeakSample.peakBytes,
           processPrivateBytesPeakDeltaDuringAdvance: exactPeakSample.peakBytes !== null && exactPeakSample.baselineBytes !== null
@@ -635,6 +641,7 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
       expect(advancedSummary.canonicalFields).toEqual(expectedFields);
       expect(advancedSummary.revision).toBe(resumed.revision + 1);
       expect(conservationSummary.captureFailure).toBeNull();
+      expect(conservationValidationFailure).toBeNull();
       expect(advancedSummary.canonicalSha256).toBe(stableCanonicalSha256(expected));
       if (benchmarkExactOnly) {
         await client.request({ operation: "coreClose", sessionId: opened.sessionId });

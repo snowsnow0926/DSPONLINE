@@ -28,7 +28,8 @@ export function usageText() {
     "Runs one independent native Host process for every 1/2/4/8 thread cell.",
     "Every cell must report the requested and observed worker count, then match",
     "revision, complete canonical SHA-256, domain SHA-256, and the aggregate",
-    "material-conservation summary SHA-256. This is a determinism gate only;",
+    "material-conservation summary SHA-256; exact conservation must also pass.",
+    "This is still a determinism gate;",
     "it does not claim that every authoritative simulation domain is parallel.",
   ].join("\n");
 }
@@ -145,7 +146,11 @@ export function validateDeterminismEvidence(cells, requiredThreads = REQUIRED_TH
     if (evidence.conservationCaptureReported !== true || evidence.conservationCaptureFailure !== null) {
       errors.push(`${prefix}: conservation capture failed`);
     }
-    if (evidence.conservationValidationReported !== true) errors.push(`${prefix}: conservation validation result is missing`);
+    if (evidence.conservationValidationReported !== true) {
+      errors.push(`${prefix}: conservation validation result is missing`);
+    } else if (evidence.conservationValidationFailure !== null) {
+      errors.push(`${prefix}: conservation validation failed: ${evidence.conservationValidationFailure}`);
+    }
     if (!evidence.conservationItemCounts || typeof evidence.conservationItemCounts !== "object") {
       errors.push(`${prefix}: conservation item counts are missing`);
     }

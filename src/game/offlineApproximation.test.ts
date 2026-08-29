@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { advanceSimulation, createInitialState, createPlayerInitialState } from "./engine";
+import { advanceSimulation, advanceSimulationBudget, createInitialState, createPlayerInitialState } from "./engine";
 import { hashGameState } from "./benchmark";
 import {
   FAST_OFFLINE_ALGORITHM_VERSION,
   FAST_OFFLINE_CALIBRATION_SECONDS,
   FAST_OFFLINE_CONSERVATIVE_PREFIX_SECONDS,
   advanceConstructionAutomationMacroWithReceiptInPlace,
+  advanceExactSimulationForConservationDiagnostic,
   advanceExactSimulationWindowWithConstructionReceipt,
   applyPureIdleAffineContract,
   captureAggregateConservationBaseline,
@@ -506,6 +507,44 @@ describe("offline macro contract experiment", () => {
     candidate.constructionAutomation.totalCrafted = 1;
 
     expect(validateAggregateConservation(checkpoint, candidate)).toContain("缺少隔离施工阶段收据");
+  });
+
+  it("keeps exact diagnostic construction receipts private while matching the ordinary engine", () => {
+    const source = stableEmptyState();
+    source.constructionAutomation.enabled = true;
+    source.constructionAutomation.targetStock.arc_smelter = (source.construction.arc_smelter ?? 0) + 1;
+    source.constructionAutomation.jobs["diagnostic-building-center"] = {
+      constructionId: "arc_smelter",
+      steps: [{ kind: "building", constructionId: "arc_smelter" }],
+      stepIndex: 0,
+      elapsedSeconds: 0,
+      inventory: { iron_ingot: 4, stone_brick: 2, circuit_board: 4, magnetic_coil: 2 },
+    };
+    source.entities.push({
+      id: "diagnostic-building-power", kind: "power", planetId: "home", position: { x: -40, y: 0 },
+      interactionLocked: false, buildingId: "wind_turbine", machineCount: 1_000, minerCount: 0,
+      inputs: {}, outputs: {}, progress: 0, routingCursor: 0, utilization: 0, productionRate: 0,
+    }, {
+      id: "diagnostic-building-center", kind: "machine", planetId: "home", position: { x: 0, y: 0 },
+      interactionLocked: false, buildingId: "construction_center", machineCount: 10, minerCount: 0,
+      inputs: {}, outputs: {}, progress: 0, routingCursor: 0, utilization: 0, productionRate: 0,
+    });
+    const sourceHash = hashGameState(source);
+    const plainBaseline = captureAggregateConservationBaseline(source);
+    const ordinary = advanceSimulationBudget(source, 10, 10);
+
+    expect(ordinary.construction.arc_smelter).toBe((source.construction.arc_smelter ?? 0) + 1);
+    expect(ordinary.constructionAutomation.totalCrafted).toBe(1);
+    expect(validateAggregateConservation(plainBaseline, ordinary)).toContain("缺少隔离施工阶段收据");
+
+    const diagnostic = advanceExactSimulationForConservationDiagnostic(source, 10, 10);
+
+    expect(diagnostic.state).toEqual(ordinary);
+    expect(hashGameState(diagnostic.state)).toBe(hashGameState(ordinary));
+    expect(diagnostic.conservationFailure).toBeNull();
+    expect(Number.isFinite(diagnostic.exactAdvanceDurationMs)).toBe(true);
+    expect(diagnostic.exactAdvanceDurationMs).toBeGreaterThanOrEqual(0);
+    expect(hashGameState(source)).toBe(sourceHash);
   });
 
   it("keeps construction receipts behind an opaque non-cloneable checkpoint token", () => {

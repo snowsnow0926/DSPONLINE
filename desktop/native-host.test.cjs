@@ -8,6 +8,7 @@ const {
   MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
   NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,
+  NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY,
   NativeHostClient,
@@ -1122,6 +1123,64 @@ test("startup recovery receipt is strictly adopted once as a main-owned Rust ses
       playerAuthorityStartupRecovery: {
         ...commandReceipt,
         changedEntityIds: ["entity-z", "entity-a"],
+      },
+    },
+  }), (error) => error.code === "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID");
+
+  const cleanupReceipt = {
+    ...receipt,
+    sessionId: "core-restarted-finished-macro",
+    pendingMacroCleanupSessionId: "macro-session-finished",
+    pendingMacroCleanupRevision: 9,
+  };
+  const cleanupRegistry = new NativeCoreSessionRegistry({
+    hello: {
+      capabilities: [NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY],
+      playerAuthorityStartupRecovery: cleanupReceipt,
+    },
+    request() { throw new Error("finished macro cleanup adoption must not call the Host"); },
+  });
+  const adoptedCleanup = cleanupRegistry.takePlayerAuthorityStartupRecovery(
+    "main-player-authority",
+  );
+  assert.equal(adoptedCleanup.sessionId, "core-restarted-finished-macro");
+  assert.equal(adoptedCleanup.runId, "player-run-1");
+  assert.equal(adoptedCleanup.revision, 11);
+  assert.equal(adoptedCleanup.pendingMacroCleanupSessionId, "macro-session-finished");
+  assert.equal(adoptedCleanup.pendingMacroCleanupRevision, 9);
+  for (const invalidCleanup of [
+    { pendingMacroCleanupSessionId: "macro-session-finished" },
+    { pendingMacroCleanupRevision: 9 },
+    {
+      pendingMacroCleanupSessionId: "macro-session-finished",
+      pendingMacroCleanupRevision: 12,
+    },
+  ]) {
+    assert.throws(() => new NativeCoreSessionRegistry({
+      hello: {
+        capabilities: [NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY],
+        playerAuthorityStartupRecovery: {
+          ...receipt,
+          sessionId: "core-restarted-invalid-cleanup",
+          ...invalidCleanup,
+        },
+      },
+    }), (error) => error.code === "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID");
+  }
+  assert.throws(() => new NativeCoreSessionRegistry({
+    hello: {
+      capabilities: [
+        NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
+        NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
+      ],
+      playerAuthorityStartupRecovery: {
+        ...cleanupReceipt,
+        sessionId: "core-restarted-cleanup-and-active-macro",
+        macroSessionId: "macro-session-active",
+        recoveredMacroOperationId: "macro-operation-active",
+        macroAlgorithmVersion: "pure-idle-macro-v10",
+        macroSimulationMilliseconds: 60_000,
+        macroWallMilliseconds: 4_000,
       },
     },
   }), (error) => error.code === "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID");

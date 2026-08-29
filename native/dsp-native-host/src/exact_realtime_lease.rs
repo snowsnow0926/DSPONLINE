@@ -245,6 +245,14 @@ pub struct ExactRealtimeLease {
     pub macro_session: Option<ExactRealtimeMacroSession>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_finished_macro_session_id: Option<String>,
+    /// Revision at which the last macro session was durably closed. Together
+    /// with `last_finished_macro_session_id`, the lease run/session identity,
+    /// and the current ACK this is a bounded main-only cleanup intent: a new
+    /// Electron process can still disable time warp after a lost finish reply.
+    /// Legacy leases that predate this field remain readable, but cannot emit
+    /// a cleanup intent because their finish revision is not provable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_finished_macro_revision: Option<u64>,
     /// Set only after CoreRegistry has verified the fixed recovery catalog at
     /// player-authority activation. It lets a later Host process reopen the
     /// already-ACKed session without treating an arbitrary legacy active
@@ -527,6 +535,7 @@ impl SaveStore {
             pending_advance: None,
             macro_session: None,
             last_finished_macro_session_id: None,
+            last_finished_macro_revision: None,
             startup_resume_enabled: false,
             pause: None,
             finalization: None,
@@ -827,6 +836,7 @@ impl SaveStore {
                     last_acknowledged_advance: None,
                 });
                 lease.last_finished_macro_session_id = None;
+                lease.last_finished_macro_revision = None;
             }
         }
         lease.pending_advance = Some(pending);
@@ -862,6 +872,7 @@ impl SaveStore {
         }
         lease.macro_session = None;
         lease.last_finished_macro_session_id = Some(macro_session_id.to_owned());
+        lease.last_finished_macro_revision = Some(lease.acknowledged.revision);
         self.write_exact_realtime_lease(&lease)
     }
 
@@ -1249,6 +1260,10 @@ impl SaveStore {
         if published != expected_publication {
             bail!("native player-authority command ACK checkpoint is not current")
         }
+        // `require_exact_realtime_lease()` already strictly decoded and
+        // request-bound this payload. Inspect the normalized JSON in place so
+        // a rare cleanup ACK does not clone a command as large as 1.75 MiB.
+        let retires_macro_cleanup = player_authority_command_disables_time_warp(&pending.command);
         lease.acknowledged = ExactRealtimeAcknowledged {
             sequence: pending.sequence,
             command_id: Some(pending.command_id.clone()),
@@ -1261,6 +1276,10 @@ impl SaveStore {
             settled_deadline_ms: pending.settled_deadline_ms,
         };
         lease.pending_command = None;
+        if retires_macro_cleanup {
+            lease.last_finished_macro_session_id = None;
+            lease.last_finished_macro_revision = None;
+        }
         self.write_exact_realtime_lease(&lease)
     }
 
@@ -1917,6 +1936,7 @@ fn validate_exact_realtime_lease(lease: &ExactRealtimeLease) -> anyhow::Result<(
                 || lease.pending_advance.is_some()
                 || lease.macro_session.is_some()
                 || lease.last_finished_macro_session_id.is_some()
+                || lease.last_finished_macro_revision.is_some()
             {
                 bail!("native experiment lease cannot bind a player-authority session")
             }
@@ -2057,11 +2077,35 @@ fn validate_exact_realtime_lease(lease: &ExactRealtimeLease) -> anyhow::Result<(
             bail!("native player-authority macro session has no pending or acknowledged advance")
         }
     }
-    if let Some(finished) = lease.last_finished_macro_session_id.as_deref() {
-        if purpose != ExactRealtimeLeasePurpose::PlayerAuthority || lease.macro_session.is_some() {
-            bail!("native player-authority finished macro identity conflicts")
+    match (
+        lease.last_finished_macro_session_id.as_deref(),
+        lease.last_finished_macro_revision,
+    ) {
+        (None, None) => {}
+        // A pre-marker lease may contain only the historical finish ID. It is
+        // readable for finish idempotency but is deliberately insufficient to
+        // publish a cleanup intent after restart.
+        (Some(finished), None) => {
+            if purpose != ExactRealtimeLeasePurpose::PlayerAuthority
+                || lease.macro_session.is_some()
+            {
+                bail!("native player-authority finished macro identity conflicts")
+            }
+            validate_logical_id(finished, 128, "finished macro session ID")?;
         }
-        validate_logical_id(finished, 128, "finished macro session ID")?;
+        (Some(finished), Some(revision)) => {
+            if purpose != ExactRealtimeLeasePurpose::PlayerAuthority
+                || lease.macro_session.is_some()
+                || revision > lease.acknowledged.revision
+            {
+                bail!("native player-authority finished macro cleanup identity conflicts")
+            }
+            validate_logical_id(finished, 128, "finished macro session ID")?;
+            validate_safe_integer(revision, 0, "finished macro revision")?;
+        }
+        (None, Some(_)) => {
+            bail!("native player-authority finished macro cleanup revision has no session")
+        }
     }
     if let Some(pending) = lease.pending_advance.as_ref() {
         if purpose != ExactRealtimeLeasePurpose::PlayerAuthority
@@ -2111,6 +2155,7 @@ fn validate_exact_realtime_lease(lease: &ExactRealtimeLease) -> anyhow::Result<(
                 || lease.pending_advance.is_some()
                 || lease.macro_session.is_some()
                 || lease.last_finished_macro_session_id.is_some()
+                || lease.last_finished_macro_revision.is_some()
                 || lease.startup_resume_enabled
                 || lease.pause.is_some()
                 || lease.finalization.is_some()
@@ -2399,6 +2444,26 @@ pub(crate) fn decode_player_authority_command_payload(
         bail!("native player-authority command payload bounds are invalid")
     }
     Ok(command)
+}
+
+fn player_authority_command_disables_time_warp(command: &Value) -> bool {
+    command
+        .get("topLevelChanges")
+        .and_then(Value::as_array)
+        .is_some_and(|changes| {
+            changes.iter().any(|change| {
+                change
+                    .get("path")
+                    .and_then(Value::as_array)
+                    .is_some_and(|path| {
+                        path.len() == 2
+                            && path[0].as_str() == Some("timeWarp")
+                            && path[1].as_str() == Some("enabled")
+                    })
+                    && change.get("operation").and_then(Value::as_str) == Some("set")
+                    && change.get("value").and_then(Value::as_bool) == Some(false)
+            })
+        })
 }
 
 /// Renderer-generated delete patches omit `value`, while the established Rust
@@ -2911,6 +2976,7 @@ mod tests {
         assert!(value.get("pendingAdvance").is_none());
         assert!(value.get("macroSession").is_none());
         assert!(value.get("lastFinishedMacroSessionId").is_none());
+        assert!(value.get("lastFinishedMacroRevision").is_none());
         let acknowledged = value.get("acknowledged").unwrap();
         assert!(acknowledged.get("commandBaseRevision").is_none());
         assert!(acknowledged.get("commandRequestSha256").is_none());

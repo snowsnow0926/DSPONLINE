@@ -675,6 +675,14 @@ pub struct CorePlayerAuthorityStartupRecoveryReceipt {
     pub macro_simulation_milliseconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub macro_wall_milliseconds: Option<u64>,
+    /// Main-process-only intent left after a macro finish ACK until the
+    /// renderer's time-warp-disable command is itself durably acknowledged.
+    /// These two fields are emitted as a pair and are bound by this receipt's
+    /// session/run identity. They never enter GameState or a public envelope.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_macro_cleanup_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_macro_cleanup_revision: Option<u64>,
     pub summary: CoreStateSummary,
 }
 
@@ -1986,6 +1994,15 @@ impl CoreRegistry {
             .macro_session
             .as_ref()
             .and_then(|session| session.last_acknowledged_advance.clone());
+        let (pending_macro_cleanup_session_id, pending_macro_cleanup_revision) = match (
+            acknowledged.last_finished_macro_session_id.as_ref(),
+            acknowledged.last_finished_macro_revision,
+        ) {
+            (Some(session_id), Some(revision)) => (Some(session_id.clone()), Some(revision)),
+            // Legacy finish IDs intentionally cannot manufacture a revision-
+            // bound cleanup intent after restart.
+            _ => (None, None),
+        };
         let receipt = CorePlayerAuthorityStartupRecoveryReceipt {
             schema_version: 1,
             kind: "native-core-player-authority-startup-recovery-v1",
@@ -2046,6 +2063,8 @@ impl CoreRegistry {
                         .as_ref()
                         .map(|advance| advance.wall_milliseconds)
                 }),
+            pending_macro_cleanup_session_id,
+            pending_macro_cleanup_revision,
             summary,
         };
         self.player_authority_startup_recovery = Some(receipt.clone());
@@ -4667,6 +4686,45 @@ mod tests {
         }
     }
 
+    fn player_authority_time_warp_disable_command(
+        base_revision: u64,
+        command_id: &str,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [{
+                    "path": ["timeWarp", "enabled"],
+                    "operation": "set",
+                    "value": false
+                }, {
+                    "path": ["timeWarp", "effectiveMultiplier"],
+                    "operation": "set",
+                    "value": 1
+                }, {
+                    "path": ["timeWarp", "requiredPowerKw"],
+                    "operation": "set",
+                    "value": 0
+                }, {
+                    "path": ["timeWarp", "allocatedPowerKw"],
+                    "operation": "set",
+                    "value": 0
+                }],
+                "changedEntities": [],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
     fn player_authority_macro_request(
         base_revision: u64,
         macro_session_id: &str,
@@ -4922,6 +4980,7 @@ mod tests {
             pending_advance: None,
             macro_session: None,
             last_finished_macro_session_id: None,
+            last_finished_macro_revision: None,
             startup_resume_enabled: false,
             pause: None,
             finalization: None,
@@ -7943,6 +8002,10 @@ mod tests {
             finished.lease.last_finished_macro_session_id.as_deref(),
             Some("macro-session-1")
         );
+        assert_eq!(
+            finished.lease.last_finished_macro_revision,
+            Some(committed.revision)
+        );
         let finished_retry = registry
             .finish_player_authority_macro_session(&mut store, &session_id, finish())
             .unwrap();
@@ -7959,6 +8022,135 @@ mod tests {
             )
             .unwrap();
         assert_eq!(tick.revision, committed.revision + 1);
+        let after_tick = store.require_exact_realtime_lease().unwrap();
+        assert_eq!(
+            after_tick.last_finished_macro_session_id.as_deref(),
+            Some("macro-session-1")
+        );
+        assert_eq!(
+            after_tick.last_finished_macro_revision,
+            Some(committed.revision)
+        );
+        registry
+            .commit_player_authority_macro_advance(
+                &mut store,
+                &session_id,
+                player_authority_macro_request(
+                    tick.revision,
+                    "macro-session-2",
+                    "macro-operation-2",
+                ),
+            )
+            .unwrap();
+        let next_macro = store.require_exact_realtime_lease().unwrap();
+        assert!(next_macro.last_finished_macro_session_id.is_none());
+        assert!(next_macro.last_finished_macro_revision.is_none());
+    }
+
+    #[test]
+    fn finished_macro_cleanup_survives_restart_and_retires_with_disable_ack() {
+        let (root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_macro_fixture();
+        let committed = registry
+            .commit_player_authority_macro_advance(
+                &mut store,
+                &session_id,
+                player_authority_macro_request(
+                    entry_checkpoint.revision,
+                    "macro-session-cleanup",
+                    "macro-operation-cleanup",
+                ),
+            )
+            .unwrap();
+        registry
+            .finish_player_authority_macro_session(
+                &mut store,
+                &session_id,
+                CoreFinishPlayerAuthorityMacroSessionRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    macro_session_id: "macro-session-cleanup".to_owned(),
+                },
+            )
+            .unwrap();
+        drop(registry);
+        drop(store);
+
+        let mut restarted_store = SaveStore::open(root.path()).unwrap();
+        let mut restarted_registry = resumable_player_authority_registry_for_test();
+        let finish_receipt = restarted_registry
+            .recover_player_authority_pending_command_on_startup(&mut restarted_store)
+            .unwrap()
+            .expect("finished macro cleanup must survive host restart");
+        assert_eq!(finish_receipt.run_id, "player-authority-run");
+        assert_eq!(
+            finish_receipt.pending_macro_cleanup_session_id.as_deref(),
+            Some("macro-session-cleanup")
+        );
+        assert_eq!(
+            finish_receipt.pending_macro_cleanup_revision,
+            Some(committed.revision)
+        );
+        assert_eq!(finish_receipt.revision, committed.revision);
+
+        let tick = restarted_registry
+            .commit_player_authority_tick(
+                &mut restarted_store,
+                &finish_receipt.session_id,
+                CoreCommitPlayerAuthorityTickRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    sequence: finish_receipt.next_sequence,
+                },
+            )
+            .unwrap();
+        assert_eq!(tick.revision, committed.revision + 1);
+        drop(restarted_registry);
+        drop(restarted_store);
+
+        let mut advanced_store = SaveStore::open(root.path()).unwrap();
+        let mut advanced_registry = resumable_player_authority_registry_for_test();
+        let advanced_receipt = advanced_registry
+            .recover_player_authority_pending_command_on_startup(&mut advanced_store)
+            .unwrap()
+            .expect("cleanup must survive later exact ticks");
+        assert_eq!(advanced_receipt.revision, tick.revision);
+        assert_eq!(
+            advanced_receipt.pending_macro_cleanup_session_id.as_deref(),
+            Some("macro-session-cleanup")
+        );
+        assert_eq!(
+            advanced_receipt.pending_macro_cleanup_revision,
+            Some(committed.revision)
+        );
+
+        let lost_reply = advanced_registry
+            .commit_player_authority_command_internal(
+                &mut advanced_store,
+                &advanced_receipt.session_id,
+                player_authority_time_warp_disable_command(
+                    advanced_receipt.revision,
+                    "disable-time-warp-after-finish",
+                ),
+                PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
+            )
+            .unwrap_err();
+        assert!(
+            format!("{lost_reply:#}").contains("lost response"),
+            "{lost_reply:#}"
+        );
+        let retired = advanced_store.require_exact_realtime_lease().unwrap();
+        assert!(retired.last_finished_macro_session_id.is_none());
+        assert!(retired.last_finished_macro_revision.is_none());
+        drop(advanced_registry);
+        drop(advanced_store);
+
+        let mut final_store = SaveStore::open(root.path()).unwrap();
+        let mut final_registry = resumable_player_authority_registry_for_test();
+        let final_receipt = final_registry
+            .recover_player_authority_pending_command_on_startup(&mut final_store)
+            .unwrap()
+            .expect("authority remains resumable after cleanup retirement");
+        assert!(final_receipt.pending_macro_cleanup_session_id.is_none());
+        assert!(final_receipt.pending_macro_cleanup_revision.is_none());
     }
 
     #[test]

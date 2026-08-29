@@ -684,11 +684,15 @@ function normalizePlayerAuthorityStartupRecovery(value) {
     "macroSessionId", "recoveredMacroOperationId", "macroAlgorithmVersion",
     "macroSimulationMilliseconds", "macroWallMilliseconds",
   ];
+  const cleanupKeys = [
+    "pendingMacroCleanupSessionId", "pendingMacroCleanupRevision",
+  ];
   const recoveryKeys = ["entryCheckpoint"];
   if (!value || typeof value !== "object" || Array.isArray(value) ||
       baseKeys.some((key) => !Object.hasOwn(value, key)) ||
       Reflect.ownKeys(value).some((key) => typeof key !== "string" ||
-        !baseKeys.includes(key) && !macroKeys.includes(key) && !recoveryKeys.includes(key))) {
+        !baseKeys.includes(key) && !macroKeys.includes(key) &&
+        !cleanupKeys.includes(key) && !recoveryKeys.includes(key))) {
     throw new NativeHostError(
       "native host returned an invalid player-authority startup recovery receipt",
       "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID",
@@ -716,6 +720,8 @@ function normalizePlayerAuthorityStartupRecovery(value) {
   const hasCommand = value.commandId !== null || value.commandBaseRevision !== null;
   const presentMacroKeys = macroKeys.filter((key) => Object.hasOwn(value, key));
   const hasMacro = presentMacroKeys.length > 0;
+  const presentCleanupKeys = cleanupKeys.filter((key) => Object.hasOwn(value, key));
+  const hasCleanup = presentCleanupKeys.length > 0;
   const validMacro = !hasMacro || (
     presentMacroKeys.length === macroKeys.length && !hasCommand &&
     changedEntityIds.length === 0 && changedBeltIds.length === 0 && !value.topologyDirty &&
@@ -728,6 +734,14 @@ function normalizePlayerAuthorityStartupRecovery(value) {
     Number.isSafeInteger(value.macroWallMilliseconds) &&
     value.macroWallMilliseconds >= 1 &&
     value.macroWallMilliseconds <= MAX_PLAYER_AUTHORITY_MACRO_BUDGET_MILLISECONDS
+  );
+  const validCleanup = !hasCleanup || (
+    presentCleanupKeys.length === cleanupKeys.length && !hasMacro &&
+    validLogicalId(value.pendingMacroCleanupSessionId, 128) &&
+    Number.isSafeInteger(value.pendingMacroCleanupRevision) &&
+    value.pendingMacroCleanupRevision >= 0 &&
+    Number.isSafeInteger(value.revision) &&
+    value.pendingMacroCleanupRevision <= value.revision
   );
   if (value.schemaVersion !== 1 ||
     value.kind !== NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY ||
@@ -746,6 +760,7 @@ function normalizePlayerAuthorityStartupRecovery(value) {
     changedEntityIds.length + changedBeltIds.length > 65_536 ||
     typeof value.topologyDirty !== "boolean" ||
     !validMacro ||
+    !validCleanup ||
     hasCommand && (!validLogicalId(value.commandId, 128) ||
       !Number.isSafeInteger(value.commandBaseRevision) || value.commandBaseRevision < 0 ||
       value.commandBaseRevision + 1 !== value.revision) ||
@@ -787,6 +802,10 @@ function normalizePlayerAuthorityStartupRecovery(value) {
       macroAlgorithmVersion: value.macroAlgorithmVersion,
       macroSimulationMilliseconds: value.macroSimulationMilliseconds,
       macroWallMilliseconds: value.macroWallMilliseconds,
+    } : {}),
+    ...(hasCleanup ? {
+      pendingMacroCleanupSessionId: value.pendingMacroCleanupSessionId,
+      pendingMacroCleanupRevision: value.pendingMacroCleanupRevision,
     } : {}),
     summary: Object.freeze(JSON.parse(JSON.stringify(summary))),
   });

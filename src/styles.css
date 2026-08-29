@@ -8087,6 +8087,30 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   background: #0f1412;
 }
 
+.native-construction-dock .dock-mode-buttons > span {
+  display: inline-flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: var(--cyan);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.native-construction-dock__notice {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 10px 12px;
+  border-left: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+  text-align: center;
+}
+
 /* Dense factories keep the side panels mounted while their authoritative
    state is projected at a lower cadence. Isolate layout/paint work here so a
    large tray or construction list cannot invalidate the canvas on every

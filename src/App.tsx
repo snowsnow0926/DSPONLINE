@@ -49,6 +49,7 @@ import { RecipeFocusPanel } from "./components/RecipeFocusPanel";
 import { FactoryRunStatus } from "./components/FactoryRunStatus";
 import { ItemReferenceActionsProvider } from "./components/ItemReference";
 import { NativeResourceRail } from "./components/NativeResourceRail";
+import { NativeConstructionDock } from "./components/NativeConstructionDock";
 import { OnboardingCoach } from "./components/OnboardingCoach";
 import { SpeedrunStatusPanel } from "./components/SpeedrunStatusPanel";
 import { MobileGameShell } from "./components/mobile/MobileGameShell";
@@ -443,6 +444,11 @@ import {
   selectNativeFactoryInventoryFrame,
   type NativeFactoryInventoryIdentity,
 } from "./game/nativeFactoryInventoryStore";
+import {
+  NativeConstructionInventoryStore,
+  createNativePlayerAuthorityConstructionInventorySource,
+  selectNativeConstructionInventoryFrame,
+} from "./game/nativeConstructionInventoryStore";
 import {
   NativeTechnologyWorkspaceStore,
   createNativePlayerAuthorityTechnologyProjectionSource,
@@ -2353,6 +2359,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativeFactoryInventoryStore.getSnapshot,
     nativeFactoryInventoryStore.getSnapshot,
   );
+  const nativeConstructionInventoryStoreRef = useRef<NativeConstructionInventoryStore | null>(null);
+  if (nativeConstructionInventoryStoreRef.current === null) {
+    nativeConstructionInventoryStoreRef.current = new NativeConstructionInventoryStore();
+  }
+  const nativeConstructionInventoryStore = nativeConstructionInventoryStoreRef.current;
+  const nativeConstructionInventorySnapshot = useSyncExternalStore(
+    nativeConstructionInventoryStore.subscribe,
+    nativeConstructionInventoryStore.getSnapshot,
+    nativeConstructionInventoryStore.getSnapshot,
+  );
   // Once main proves that it owns this exact native session, its durable Rust
   // revision becomes the projection clock. A concurrently advancing legacy JS
   // mirror must never overwrite that revision. Uncertain/faulted phases retain
@@ -2441,6 +2457,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const nativeFactoryInventoryFrame = useMemo(() => nativeFactoryInventoryIdentity
     ? selectNativeFactoryInventoryFrame(nativeFactoryInventorySnapshot, nativeFactoryInventoryIdentity)
     : null, [nativeFactoryInventoryIdentity, nativeFactoryInventorySnapshot]);
+  const nativeConstructionInventorySource = useMemo(() => nativeFactoryInventoryIdentity
+    ? createNativePlayerAuthorityConstructionInventorySource(desktopBridge, nativeFactoryInventoryIdentity)
+    : null, [desktopBridge, nativeFactoryInventoryIdentity]);
+  const nativeConstructionInventoryFrame = useMemo(() => nativeFactoryInventoryIdentity
+    ? selectNativeConstructionInventoryFrame(nativeConstructionInventorySnapshot, nativeFactoryInventoryIdentity)
+    : null, [nativeConstructionInventorySnapshot, nativeFactoryInventoryIdentity]);
   const nativeStellarWorkspaceStoreRef = useRef<NativeStellarWorkspaceStore | null>(null);
   if (nativeStellarWorkspaceStoreRef.current === null) {
     nativeStellarWorkspaceStoreRef.current = new NativeStellarWorkspaceStore();
@@ -3246,6 +3268,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativeFactoryInventoryIdentity,
     nativeFactoryInventorySource,
     nativeFactoryInventoryStore,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    if (!nativePlayerAuthorityOwnsRuntime || !nativeFactoryInventoryIdentity ||
+        !nativeConstructionInventorySource || !nativePlayerAuthorityActiveFrame) {
+      nativeConstructionInventoryStore.clear();
+      return;
+    }
+    void nativeConstructionInventoryStore.refresh(
+      nativeConstructionInventorySource,
+      nativeFactoryInventoryIdentity,
+    ).catch(() => undefined);
+  }, [
+    nativeConstructionInventorySource,
+    nativeConstructionInventoryStore,
+    nativeFactoryInventoryIdentity,
     nativePlayerAuthorityActiveFrame,
     nativePlayerAuthorityOwnsRuntime,
   ]);
@@ -17252,11 +17291,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         <button className={`sidebar-edge-toggle sidebar-edge-toggle--right${rightSidebarCollapsed ? " is-collapsed" : ""}`} type="button" onClick={() => setRightSidebarCollapsed((collapsed) => !collapsed)} title={rightSidebarCollapsed ? "边缘按钮：展开右侧检查器面板" : "边缘按钮：收起右侧检查器面板"} aria-label={rightSidebarCollapsed ? "边缘按钮：展开右侧检查器面板" : "边缘按钮：收起右侧检查器面板"}>{rightSidebarCollapsed ? <ChevronLeft size={15} /> : <ChevronRight size={15} />}</button>
       </div>
       <RuntimeRenderProfile id="construction-dock">
-      {nativePlayerAuthorityOwnsRuntime ? <section
-        className="construction-dock native-construction-dock-unavailable"
-        data-native-authority-unavailable="construction-inventory-v1"
-        role="status"
-      >施工库存尚未接入同 revision 的 Rust 投影，建造入口已安全暂停。</section> : <StableConstructionDock
+      {nativePlayerAuthorityOwnsRuntime ? <NativeConstructionDock
+        frame={nativeConstructionInventoryFrame}
+      /> : <StableConstructionDock
         game={panelGame}
         placement={placement}
         beltTier={dockBeltTier}

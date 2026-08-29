@@ -7,6 +7,7 @@ describe("native planet navigation App integration", () => {
   const app = readFileSync(resolve("src/App.tsx"), "utf8");
   const panels = readFileSync(resolve("src/components/GamePanels.tsx"), "utf8");
   const nativeRail = readFileSync(resolve("src/components/NativeResourceRail.tsx"), "utf8");
+  const nativeConstructionDock = readFileSync(resolve("src/components/NativeConstructionDock.tsx"), "utf8");
 
   it("routes every native factory projection with independently discovered Rust authority", () => {
     expect(app).toMatch(/import \{ createNativeProjectedActivePlanetCommand \}/);
@@ -82,7 +83,9 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeResourceRail[\s\S]*?frame=\{nativeFactoryInventoryFrame\}[\s\S]*?: <StableResourceRail/);
     expect(nativeRail).toMatch(/!frame \? <section[\s\S]*?data-native-authority-unavailable="tray-cargo-v1"/);
     expect(nativeRail).toMatch(/丢弃与建筑拖放仍保持关闭/);
-    expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <section[\s\S]*?data-native-authority-unavailable="construction-inventory-v1"[\s\S]*?: <StableConstructionDock/);
+    expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeConstructionDock[\s\S]*?frame=\{nativeConstructionInventoryFrame\}[\s\S]*?: <StableConstructionDock/);
+    expect(nativeConstructionDock).toMatch(/!frame[\s\S]*?data-native-authority-unavailable="construction-inventory-v1"/);
+    expect(nativeConstructionDock).toMatch(/放置、删除和制造仍保持关闭/);
     expect(app).toMatch(/enabled=\{nextMobileShell && !nativePlayerAuthorityOwnsRuntime\}/);
     expect(app).toMatch(/native-mobile-shell-unavailable[\s\S]*?为避免显示旧星球数据/);
 

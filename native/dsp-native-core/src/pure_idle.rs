@@ -2498,6 +2498,28 @@ fn exclusive_vein_sources(state: &CoreState) -> Result<BTreeSet<String>, String>
     Ok(sources)
 }
 
+/// Ray-power receivers are unlike wind, solar and geothermal facilities: their
+/// available generation is derived from the live Dyson swarm/sphere state.
+/// A certified solar-sail tail advances decay and absorption, so the exact
+/// prefix's persisted time-warp power snapshot is not a lower bound for that
+/// tail. Until the macro owns a per-grid renewable headroom certificate, fail
+/// closed whenever both domains would be active instead of continuing with a
+/// stale powered multiplier.
+fn has_dynamic_ray_power_source(state: &CoreState) -> Result<bool, String> {
+    for &entity_index in &state.factory_topology.power_source_indices {
+        let entity = state
+            .parse_entity(entity_index)
+            .map_err(|error| format!("power source decode failed: {error:#}"))?;
+        if entity.get("kind").and_then(Value::as_str) == Some("machine")
+            && entity.get("buildingId").and_then(Value::as_str) == Some("ray_receiver")
+            && entity.get("recipeId").and_then(Value::as_str) == Some("ray_power")
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn source_has_unbounded_vein(state: &CoreState, item_id: &str) -> Result<bool, String> {
     for &entity_index in &state.factory_topology.vein_indices {
         let entity = state
@@ -4141,6 +4163,12 @@ fn build_ordinary_flow_certificate(
     let finite_veins = build_finite_vein_certificates(state, snapshots, &sources)?;
     let research = build_research_sink_certificate(state, snapshots)?;
     let dyson_sail = build_dyson_sail_sink_certificate(state, snapshots)?;
+    if dyson_sail.is_some() && has_dynamic_ray_power_source(state)? {
+        return Err(
+            "solar-sail tail cannot reuse a time-warp power snapshot with a dynamic Dyson ray-power source"
+                .to_owned(),
+        );
+    }
     let dyson_rocket = if dyson_sail.is_none() {
         build_dyson_rocket_sink_certificate(state, snapshots)?
     } else {
@@ -5734,6 +5762,21 @@ mod tests {
                         family: None,
                         accepts: None,
                     },
+                    BuildingDefinition {
+                        id: "ray_receiver".into(),
+                        kind: "machine".into(),
+                        speed: 1.0,
+                        input_capacity: 0.0,
+                        output_capacity: 0.0,
+                        power_demand_kw: 0.0,
+                        power_generation_kw: 0.0,
+                        power_charge_kw: 0.0,
+                        energy_capacity_mj: 0.0,
+                        fuel_item_ids: Vec::new(),
+                        fuel_efficiency: 1.0,
+                        family: None,
+                        accepts: None,
+                    },
                 ],
                 recipes: vec![
                     RecipeDefinition {
@@ -5909,6 +5952,17 @@ mod tests {
                             item_id: "small_carrier_rocket".into(),
                             amount: 1.0,
                         }],
+                        outputs: Vec::new(),
+                    },
+                    RecipeDefinition {
+                        id: "ray_power".into(),
+                        name: "ray_power".into(),
+                        building_id: "ray_receiver".into(),
+                        duration: 1.0,
+                        required_tech_id: None,
+                        recursive_priority: 0.0,
+                        recursive_manufacturing: false,
+                        inputs: Vec::new(),
                         outputs: Vec::new(),
                     },
                 ],
@@ -6406,6 +6460,7 @@ mod tests {
         recipe_id: &str,
         output_item_id: &str,
         include_sail_launcher: bool,
+        include_ray_power: bool,
     ) -> CoreState {
         let mut base = powered_fixture_base(multiplier, "infinite");
         base["campaign"]["completedTaskIds"] = json!([
@@ -6515,6 +6570,25 @@ mod tests {
                 "sprayCoaterInstalled": false
             }));
         }
+        if include_ray_power {
+            entities.push(json!({
+                "id": "ray-power",
+                "kind": "machine",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "ray_receiver",
+                "recipeId": "ray_power",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "powerOutputKw": 0
+            }));
+        }
         fixture_state_from_parts_with_belts(
             base,
             entities,
@@ -6535,15 +6609,19 @@ mod tests {
     }
 
     fn productive_closed_recipe_macro_fixture(multiplier: f64) -> CoreState {
-        productive_single_recipe_macro_fixture(multiplier, "iron_ingot", "iron_ingot", false)
+        productive_single_recipe_macro_fixture(multiplier, "iron_ingot", "iron_ingot", false, false)
     }
 
     fn productive_solar_sail_product_macro_fixture(multiplier: f64) -> CoreState {
-        productive_single_recipe_macro_fixture(multiplier, "solar_sail", "solar_sail", false)
+        productive_single_recipe_macro_fixture(multiplier, "solar_sail", "solar_sail", false, false)
     }
 
     fn productive_solar_sail_launch_macro_fixture(multiplier: f64) -> CoreState {
-        productive_single_recipe_macro_fixture(multiplier, "solar_sail", "solar_sail", true)
+        productive_single_recipe_macro_fixture(multiplier, "solar_sail", "solar_sail", true, false)
+    }
+
+    fn productive_solar_sail_launch_with_ray_power_fixture(multiplier: f64) -> CoreState {
+        productive_single_recipe_macro_fixture(multiplier, "solar_sail", "solar_sail", true, true)
     }
 
     fn productive_rocket_macro_fixture(
@@ -9080,6 +9158,95 @@ mod tests {
                 "multiplier={multiplier}"
             );
         }
+    }
+
+    #[test]
+    fn macro_v10_sail_tail_with_dynamic_ray_power_fails_closed_deterministically() {
+        let initial = productive_solar_sail_launch_with_ray_power_fixture(15.0);
+        assert!(has_dynamic_ray_power_source(&initial).unwrap());
+
+        // Certificate construction is a disposable read-only probe. Rejecting
+        // the unsafe energy combination must not spend revision, exact credit
+        // or alter the player's canonical source state.
+        let source_hash = initial.summary().unwrap().canonical_sha256;
+        let source_revision = initial.revision;
+        let request = pure_idle_macro_request(source_revision, 600.0, 40.0);
+        let snapshots = exact_three_window_probe(&initial, &request).unwrap();
+        let rejection = build_ordinary_flow_certificate(&initial, &snapshots).unwrap_err();
+        assert!(rejection.contains("dynamic Dyson ray-power source"));
+        assert_eq!(initial.summary().unwrap().canonical_sha256, source_hash);
+        assert_eq!(initial.revision, source_revision);
+        assert_eq!(initial.pure_idle_macro_exact_seconds_used(), 0.0);
+
+        let mut exact_prefix = initial.clone();
+        let revision = exact_prefix.revision;
+        let result = advance_macro_v10(
+            &mut exact_prefix,
+            &pure_idle_macro_request(revision, 30.0, 2.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let prefix_state = exact_prefix.materialize().unwrap();
+
+        let mut long = initial.clone();
+        let revision = long.revision;
+        let result =
+            advance_macro_v10(&mut long, &pure_idle_macro_request(revision, 600.0, 40.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("dynamic Dyson ray-power source")),
+            "reason={:?}",
+            result.reason,
+        );
+        let long_state = long.materialize().unwrap();
+        for frozen in [
+            "entities",
+            "belts",
+            "totalProduced",
+            "quantumLogisticsNetwork",
+            "research",
+            "construction",
+            "constructionAutomation",
+            "dysonSwarm",
+            "dysonSphere",
+            "dysonEngineering",
+            "dysonPlans",
+            "endgame",
+        ] {
+            assert_eq!(long_state[frozen], prefix_state[frozen], "field={frozen}");
+        }
+        assert_eq!(number_at(Some(&long_state), &["elapsedSeconds"]), 600.0);
+
+        // One long window and 1/5/60-second boundary shapes retain identical
+        // public bytes even though every unsafe productive tail freezes.
+        let mut segmented = initial;
+        for seconds in [30.0, 1.0, 5.0, 60.0, 504.0] {
+            let revision = segmented.revision;
+            let result = advance_macro_v10(
+                &mut segmented,
+                &pure_idle_macro_request(revision, seconds, seconds / 15.0),
+            )
+            .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+        }
+        assert_eq!(
+            segmented.summary().unwrap().canonical_sha256,
+            long.summary().unwrap().canonical_sha256,
+        );
+
+        // Independent static renewable generation keeps the established sail
+        // certificate and productive path; the new gate is narrowly scoped.
+        let static_renewable = productive_solar_sail_launch_macro_fixture(15.0);
+        assert!(!has_dynamic_ray_power_source(&static_renewable).unwrap());
+        let static_request = pure_idle_macro_request(static_renewable.revision, 600.0, 40.0);
+        let static_snapshots =
+            exact_three_window_probe(&static_renewable, &static_request).unwrap();
+        let static_certificate =
+            build_ordinary_flow_certificate(&static_renewable, &static_snapshots).unwrap();
+        assert!(static_certificate.dyson_sail.is_some());
     }
 
     #[test]

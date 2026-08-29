@@ -63,6 +63,11 @@ test("player-authority clock state is exact, bounded and contains no writer iden
     lastErrorCode: null,
   };
   assert.deepEqual(normalizeRendererNativeResult("playerAuthorityState", state), state);
+  const hinted = {
+    ...state,
+    macroRecoveryHint: { kind: "finished-pending-disable", revision: 9 },
+  };
+  assert.deepEqual(normalizeRendererNativeResult("playerAuthorityState", hinted), hinted);
   for (const invalid of [
     { ...state, ownerId: "main-player-authority" },
     { ...state, checkpoint: { generation: 8, rootHash: SHA_A, revision: 11 } },
@@ -70,6 +75,8 @@ test("player-authority clock state is exact, bounded and contains no writer iden
     { ...state, sessionId: null },
     { ...state, queuedCommands: 65 },
     { ...state, lastErrorCode: "private-path" },
+    { ...state, macroRecoveryHint: { kind: "finished-pending-disable", revision: 12 } },
+    { ...state, macroRecoveryHint: { kind: "other", revision: 9 } },
   ]) {
     assert.throws(
       () => normalizeRendererNativeResult("playerAuthorityState", invalid),
@@ -569,6 +576,30 @@ test("Electron invoke rejection is reconstructed from only a published suffix", 
     message: "Windows 原生权威检查点验证失败，请重试",
   });
   assert.equal(busy.code, "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY");
+
+  const rebase = createRendererNativeRejection(new Error(
+    "Error invoking remote method（NATIVE_PLAYER_AUTHORITY_MACRO_START_REBASE_REQUIRED）",
+  ), {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+    message: "Windows 原生纯挂机启动失败，请重试",
+  });
+  assert.equal(rebase.code, "NATIVE_PLAYER_AUTHORITY_MACRO_START_REBASE_REQUIRED");
+
+  const macroBusy = createRendererNativeRejection(new Error(
+    "Error invoking remote method（NATIVE_PLAYER_AUTHORITY_MACRO_BUSY）",
+  ), {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+    message: "Windows 原生纯挂机恢复失败，请重试",
+  });
+  assert.equal(macroBusy.code, "NATIVE_PLAYER_AUTHORITY_MACRO_BUSY");
+
+  const macroUncertain = createRendererNativeRejection(new Error(
+    "Error invoking remote method（NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN）",
+  ), {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+    message: "Windows 原生纯挂机推进结果不确定，正在恢复",
+  });
+  assert.equal(macroUncertain.code, "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN");
 });
 
 test("AbortError identity remains public without its private message", () => {

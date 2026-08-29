@@ -172,6 +172,21 @@ test("broker serves only the trusted renderer and re-normalizes every read", () 
   );
 });
 
+test("broker exposes only a bounded same-revision recovered-finish hint", () => {
+  let hint = { kind: "finished-pending-disable", revision: 40 };
+  const broker = new NativePlayerAuthorityStateBroker({
+    runtime: { snapshot: () => active() },
+    getMacroRecoveryHint: () => hint,
+    isTrustedRendererOwner: (ownerId) => ownerId === 7,
+  });
+  assert.deepEqual(broker.read(7).macroRecoveryHint, hint);
+  hint = { kind: "finished-pending-disable", revision: 42 };
+  assert.throws(
+    () => broker.read(7),
+    (error) => error.name === "NativePlayerAuthorityStateBrokerError",
+  );
+});
+
 test("macro-active normalizer returns only a frozen scalar status and redacts every authority ID", () => {
   const result = normalizeNativePlayerAuthorityState(macroSnapshot());
   assert.deepEqual(result, {

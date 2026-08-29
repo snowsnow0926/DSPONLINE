@@ -73,7 +73,9 @@ const PUBLIC_NATIVE_ERROR_CODES = new Set([
   "NATIVE_HOST_UNAVAILABLE", "NATIVE_HOST_WRITE_FAILED", "NATIVE_OPERATION_FAILED",
   "NATIVE_PERFORMANCE_POLICY_READ_FAILED", "NATIVE_PERFORMANCE_POLICY_WRITE_FAILED",
   "NATIVE_PLAYER_AUTHORITY_STATE_FAILED", "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+  "NATIVE_PLAYER_AUTHORITY_MACRO_BUSY", "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN",
   "NATIVE_PLAYER_AUTHORITY_CHECKPOINT_FAILED", "NATIVE_PLAYER_AUTHORITY_EXPORT_FAILED",
+  "NATIVE_PLAYER_AUTHORITY_MACRO_START_REBASE_REQUIRED",
   "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY", "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_STALE",
   "NATIVE_PROTOCOL_INVALID", "NATIVE_SAVE_ABORT_FAILED", "NATIVE_SAVE_BEGIN_FAILED",
   "NATIVE_SAVE_COMMIT_FAILED", "NATIVE_SAVE_COMPACT_FAILED", "NATIVE_SAVE_READ_FAILED",
@@ -4335,11 +4337,14 @@ function normalizeCoreClose(value) {
 }
 
 function normalizePlayerAuthorityV1State(value) {
-  const source = exactObject(value, [
+  const keys = [
     "schemaVersion", "phase", "sessionId", "runId", "revision", "acknowledgedSequence",
     "nextSequence", "nextDeadlineMs", "inFlight", "currentOperation", "queuedCommands",
     "lastErrorCode",
-  ], "native player-authority state");
+  ];
+  if (value !== null && typeof value === "object" && !Array.isArray(value) &&
+      Object.hasOwn(value, "macroRecoveryHint")) keys.push("macroRecoveryHint");
+  const source = exactObject(value, keys, "native player-authority state");
   if (source.schemaVersion !== 1) throw protocolError("native player-authority state schema");
   const phase = oneOf(source.phase, [
     "idle", "activating", "recovering", "active", "uncertain", "faulted", "shutdown",
@@ -4386,6 +4391,25 @@ function normalizePlayerAuthorityV1State(value) {
       ["idle", "activating", "recovering"].includes(phase) && !emptyIdentity) {
     throw protocolError("native player-authority state identity");
   }
+  let macroRecoveryHint = null;
+  if (Object.hasOwn(source, "macroRecoveryHint")) {
+    const hint = exactObject(
+      source.macroRecoveryHint,
+      ["kind", "revision"],
+      "native player-authority macro recovery hint",
+    );
+    if (hint.kind !== "finished-pending-disable" || phase !== "active") {
+      throw protocolError("native player-authority macro recovery hint");
+    }
+    const hintRevision = safeInteger(
+      hint.revision,
+      "native player-authority macro recovery hint revision",
+    );
+    if (revision === null || hintRevision > revision) {
+      throw protocolError("native player-authority macro recovery hint revision");
+    }
+    macroRecoveryHint = { kind: "finished-pending-disable", revision: hintRevision };
+  }
   return {
     schemaVersion: 1,
     phase,
@@ -4399,6 +4423,7 @@ function normalizePlayerAuthorityV1State(value) {
     currentOperation,
     queuedCommands,
     lastErrorCode,
+    ...(macroRecoveryHint ? { macroRecoveryHint } : {}),
   };
 }
 

@@ -48,6 +48,15 @@ function hostAdvanceRequest(overrides = {}) {
   };
 }
 
+function macroStartRequest(overrides = {}) {
+  return {
+    expectedRevision: 7,
+    simulationMilliseconds: 60_000,
+    wallMilliseconds: 4_000,
+    ...overrides,
+  };
+}
+
 function authoritySnapshot(overrides = {}) {
   return {
     phase: "active",
@@ -129,6 +138,12 @@ function runtimeFixture(options = {}) {
     createId: options.createId ?? (() => ids.shift()),
     ...(options.recoveredOperationId
       ? { recoveredOperationId: options.recoveredOperationId }
+      : {}),
+    ...(options.pendingMacroCleanupSessionId
+      ? {
+          pendingMacroCleanupSessionId: options.pendingMacroCleanupSessionId,
+          pendingMacroCleanupRevision: options.pendingMacroCleanupRevision,
+        }
       : {}),
   });
   return {
@@ -311,7 +326,7 @@ test("startup recovery accepts one complete macro identity and rejects a partial
 
 test("main-owned broker starts, advances and finishes without exposing authority identities", async () => {
   const { broker, calls } = runtimeFixture();
-  const first = await broker.start({ simulationMilliseconds: 60_000, wallMilliseconds: 4_000 });
+  const first = await broker.start(macroStartRequest());
   assert.deepEqual(first, {
     schemaVersion: 1,
     state: "macro-active",
@@ -352,6 +367,23 @@ test("main-owned broker starts, advances and finishes without exposing authority
   }
 });
 
+test("start rejects a stale observed revision before issuing identities or mutating the Host", async () => {
+  let issued = 0;
+  const { broker, calls } = runtimeFixture({
+    snapshot: authoritySnapshot({ revision: 8 }),
+    createId: () => {
+      issued += 1;
+      return `unexpected-${issued}`;
+    },
+  });
+  await assert.rejects(
+    broker.start(macroStartRequest({ expectedRevision: 7 })),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_START_REBASE_REQUIRED",
+  );
+  assert.equal(issued, 0);
+  assert.equal(calls.length, 0);
+});
+
 test("inclusive one-millisecond and thirty-day bounds remain valid and one operation stays single-flight", async () => {
   const { registry, calls } = registryFixture();
   await registry.commitPlayerAuthorityMacroAdvance("main-player-authority", hostAdvanceRequest({
@@ -364,12 +396,12 @@ test("inclusive one-millisecond and thirty-day bounds remain valid and one opera
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
   const value = runtimeFixture({ beforeAdvanceComplete: () => gate });
-  const first = value.broker.start({
+  const first = value.broker.start(macroStartRequest({
     simulationMilliseconds: MAX_MACRO_BUDGET_MILLISECONDS,
     wallMilliseconds: 1,
-  });
+  }));
   await assert.rejects(
-    value.broker.start({ simulationMilliseconds: 1, wallMilliseconds: 1 }),
+    value.broker.start(macroStartRequest({ simulationMilliseconds: 1, wallMilliseconds: 1 })),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_BUSY",
   );
   release();
@@ -383,6 +415,7 @@ test("broker rejects forged identity fields, duplicate IDs and stale receipts be
   await t.test("forged start identity", async () => {
     const { broker, calls } = runtimeFixture();
     await assert.rejects(broker.start({
+      expectedRevision: 7,
       simulationMilliseconds: 1_000,
       wallMilliseconds: 1_000,
       sessionId: "renderer-forged",
@@ -391,7 +424,7 @@ test("broker rejects forged identity fields, duplicate IDs and stale receipts be
   });
   await t.test("forged finish identity", async () => {
     const { broker, calls } = runtimeFixture();
-    await broker.start({ simulationMilliseconds: 1_000, wallMilliseconds: 1_000 });
+    await broker.start(macroStartRequest({ simulationMilliseconds: 1_000, wallMilliseconds: 1_000 }));
     await assert.rejects(
       broker.finish({ macroSessionId: "renderer-forged" }),
       (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_REQUEST_INVALID",
@@ -400,7 +433,7 @@ test("broker rejects forged identity fields, duplicate IDs and stale receipts be
   });
   await t.test("duplicate operation ID", async () => {
     const { broker, calls } = runtimeFixture({ createId: () => "same" });
-    await broker.start({ simulationMilliseconds: 1_000, wallMilliseconds: 1_000 });
+    await broker.start(macroStartRequest({ simulationMilliseconds: 1_000, wallMilliseconds: 1_000 }));
     await assert.rejects(
       broker.advance({ simulationMilliseconds: 1_000, wallMilliseconds: 1_000 }),
       (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_ID_REUSED",
@@ -412,16 +445,16 @@ test("broker rejects forged identity fields, duplicate IDs and stale receipts be
       advanceReceiptOverrides: { sessionId: "core-stale" },
     });
     await assert.rejects(
-      broker.start({ simulationMilliseconds: 1_000, wallMilliseconds: 1_000 }),
+      broker.start(macroStartRequest({ simulationMilliseconds: 1_000, wallMilliseconds: 1_000 })),
       (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_RECEIPT_INVALID",
     );
   });
   await t.test("out-of-range budget", async () => {
     const { broker, calls } = runtimeFixture();
-    await assert.rejects(broker.start({
+    await assert.rejects(broker.start(macroStartRequest({
       simulationMilliseconds: MAX_MACRO_BUDGET_MILLISECONDS + 1,
       wallMilliseconds: 1,
-    }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_REQUEST_INVALID");
+    })), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_REQUEST_INVALID");
     assert.equal(calls.length, 0);
   });
 });
@@ -429,19 +462,24 @@ test("broker rejects forged identity fields, duplicate IDs and stale receipts be
 test("uncertain advance and finish recover the exact main-generated identity", async () => {
   const advance = runtimeFixture({ loseFirstAdvance: true });
   await assert.rejects(
-    advance.broker.start({ simulationMilliseconds: 60_000, wallMilliseconds: 4_000 }),
+    advance.broker.start(macroStartRequest()),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN",
   );
   const recoveredAdvance = await advance.broker.recover();
   assert.equal(recoveredAdvance.recovered, true);
   assert.equal(recoveredAdvance.revision, 9);
+  assert.deepEqual(await advance.broker.recover(), recoveredAdvance);
   const advanceCalls = advance.calls.filter(([kind]) => kind === "advance");
   assert.equal(advanceCalls.length, 1);
   const pendingRecovery = advance.calls.find(([kind]) => kind === "recover")[1];
   assert.deepEqual(pendingRecovery.request, advanceCalls[0][1]);
+  await advance.broker.advance({ simulationMilliseconds: 30_000, wallMilliseconds: 2_000 });
+  const laterStartup = await advance.broker.recover();
+  assert.equal(laterStartup.revision, 11);
+  assert.equal(Object.hasOwn(laterStartup, "previousRevision"), false);
 
   const finish = runtimeFixture({ loseFirstFinish: true });
-  await finish.broker.start({ simulationMilliseconds: 60_000, wallMilliseconds: 4_000 });
+  await finish.broker.start(macroStartRequest());
   await assert.rejects(
     finish.broker.finish(),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN",
@@ -453,10 +491,143 @@ test("uncertain advance and finish recover the exact main-generated identity", a
     revision: 9,
     recovered: true,
   });
+  finish.setSnapshot(authoritySnapshot({
+    revision: 10,
+    inFlight: true,
+    currentOperation: "tick",
+  }));
+  assert.equal(finish.broker.recoveryHint(), null);
+  finish.setSnapshot(authoritySnapshot({ revision: 10 }));
+  assert.deepEqual(finish.broker.recoveryHint(), {
+    kind: "finished-pending-disable",
+    revision: 9,
+  });
+  assert.deepEqual(await finish.broker.recover(), recoveredFinish);
+  assert.equal(finish.broker.observeCommittedCommand({
+    sessionId: "core-main-1",
+    baseRevision: 10,
+    revision: 11,
+    command: {
+      topLevelChanges: [{
+        path: ["timeWarp", "enabled"], operation: "set", value: false,
+      }],
+    },
+  }), true);
+  assert.equal(finish.broker.recoveryHint(), null);
   assert.deepEqual(
     finish.calls.find(([kind]) => kind === "recover")[1].request,
     finish.calls.find(([kind]) => kind === "finish")[1],
   );
+});
+
+test("a lost normal finish reply replays one recovered terminal receipt without finishing twice", async () => {
+  const value = runtimeFixture();
+  await value.broker.start(macroStartRequest());
+  const ordinary = await value.broker.finish();
+  assert.deepEqual(ordinary, { schemaVersion: 1, state: "finished", revision: 9 });
+  assert.deepEqual(value.broker.recoveryHint(), {
+    kind: "finished-pending-disable",
+    revision: 9,
+  });
+
+  // The renderer never observed `ordinary` (for example, it reloaded after
+  // main/Rust committed the finish). Its replacement asks main to recover.
+  const replay = await value.broker.recover();
+  assert.deepEqual(replay, {
+    schemaVersion: 1,
+    state: "finished",
+    revision: 9,
+    recovered: true,
+  });
+  assert.equal(value.calls.filter(([kind]) => kind === "finish").length, 1);
+  assert.equal(value.calls.filter(([kind]) => kind === "recover").length, 0);
+
+  value.setSnapshot(authoritySnapshot({
+    revision: 10,
+    inFlight: true,
+    currentOperation: "tick",
+  }));
+  assert.equal(value.broker.recoveryHint(), null);
+  assert.deepEqual(await value.broker.recover(), replay);
+  value.setSnapshot(authoritySnapshot({ revision: 10 }));
+  assert.deepEqual(await value.broker.recover(), replay);
+  value.setSnapshot(authoritySnapshot({
+    revision: 11,
+    inFlight: true,
+    currentOperation: "command",
+  }));
+  assert.equal(value.broker.observeCommittedCommand({
+    sessionId: "core-main-1",
+    baseRevision: 10,
+    revision: 11,
+    command: {
+      topLevelChanges: [{
+        path: ["timeWarp", "enabled"], operation: "set", value: false,
+      }],
+    },
+  }), true);
+  assert.equal(value.broker.recoveryHint(), null);
+});
+
+test("cached recovery receipts never cross authority lineage or macro identity", async (t) => {
+  for (const [label, overrides] of [
+    ["session", { sessionId: "core-other" }],
+    ["run", { runId: "run-other" }],
+    ["revision regression", { revision: 8 }],
+  ]) {
+    await t.test(label, async () => {
+      const value = runtimeFixture({ loseFirstFinish: true });
+      await value.broker.start(macroStartRequest());
+      await assert.rejects(
+        value.broker.finish(),
+        (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN",
+      );
+      await value.broker.recover();
+      value.setSnapshot(authoritySnapshot({ revision: 9, ...overrides }));
+      assert.equal(value.broker.recoveryHint(), null);
+      await assert.rejects(
+        value.broker.recover(),
+        (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_RECOVERY_UNAVAILABLE",
+      );
+    });
+  }
+
+  await t.test("macro session", async () => {
+    const value = runtimeFixture({ loseFirstAdvance: true });
+    await assert.rejects(
+      value.broker.start(macroStartRequest()),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN",
+    );
+    await value.broker.recover();
+    value.setSnapshot(authoritySnapshot({
+      phase: "macro-active",
+      revision: 9,
+      macroSessionId: "native-macro-session-other",
+      macroAlgorithmVersion: "native-pure-idle-macro-v10",
+    }));
+    await assert.rejects(
+      value.broker.recover(),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_RECOVERY_UNAVAILABLE",
+    );
+  });
+
+  await t.test("algorithm", async () => {
+    const value = runtimeFixture({ loseFirstAdvance: true });
+    await assert.rejects(
+      value.broker.start(macroStartRequest()),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN",
+    );
+    await value.broker.recover();
+    value.setSnapshot(authoritySnapshot({
+      phase: "macro-active",
+      revision: 9,
+      macroSessionId: "native-macro-session-session-a",
+      macroAlgorithmVersion: "native-pure-idle-macro-v11-other",
+    }));
+    const startup = await value.broker.recover();
+    assert.equal(Object.hasOwn(startup, "previousRevision"), false);
+    assert.equal(startup.algorithmVersion, "native-pure-idle-macro-v11-other");
+  });
 });
 
 test("startup-recovered macro is adopted without renderer identity or a second Host mutation", async () => {
@@ -482,6 +653,46 @@ test("startup-recovered macro is adopted without renderer identity or a second H
     broker.recover({ operationId: "renderer-forged" }),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_REQUEST_INVALID",
   );
+});
+
+test("startup-recovered finished cleanup replays only inside the same main-owned lineage", async () => {
+  const value = runtimeFixture({
+    snapshot: authoritySnapshot({ revision: 12 }),
+    pendingMacroCleanupSessionId: "native-macro-session-finished-before-restart",
+    pendingMacroCleanupRevision: 9,
+  });
+  assert.deepEqual(value.broker.recoveryHint(), {
+    kind: "finished-pending-disable",
+    revision: 9,
+  });
+  assert.deepEqual(await value.broker.recover(), {
+    schemaVersion: 1,
+    state: "finished",
+    revision: 9,
+    recovered: true,
+  });
+  assert.equal(value.calls.length, 0);
+  assert.equal(value.broker.observeCommittedCommand({
+    sessionId: "core-main-1",
+    baseRevision: 12,
+    revision: 13,
+    command: {
+      topLevelChanges: [{
+        path: ["timeWarp", "enabled"], operation: "set", value: false,
+      }],
+    },
+  }), true);
+  assert.equal(value.broker.recoveryHint(), null);
+
+  assert.throws(() => runtimeFixture({
+    snapshot: authoritySnapshot({ revision: 8 }),
+    pendingMacroCleanupSessionId: "native-macro-session-future",
+    pendingMacroCleanupRevision: 9,
+  }), /cleanup lineage/i);
+  assert.throws(() => new NativePlayerAuthorityMacroBroker({
+    runtime: value.runtime,
+    pendingMacroCleanupSessionId: "native-macro-session-partial",
+  }), /pending macro cleanup/i);
 });
 
 test("renderer macro receipts expose only bounded progress and never durable identities", () => {
@@ -545,11 +756,12 @@ test("renderer macro receipts expose only bounded progress and never durable ide
   }
 });
 
-test("desktop exposes only budget-only macro IPC while main owns every identity", () => {
+test("desktop exposes only a start revision fence and budgets while main owns every identity", () => {
   const main = readFileSync("desktop/main.cjs", "utf8");
   const preload = readFileSync("desktop/preload.cjs", "utf8");
   assert.match(main, /new NativePlayerAuthorityMacroBroker\(\{[\s\S]*?runtime:\s*nativePlayerAuthorityRuntime/);
   assert.match(main, /recoveredOperationId:\s*playerAuthorityStartupRecovery\.recoveredMacroOperationId/);
+  assert.match(main, /pendingMacroCleanupSessionId:[\s\S]*?playerAuthorityStartupRecovery\.pendingMacroCleanupSessionId/);
   assert.match(main, /desktop:native-player-authority-macro-start"[\s\S]*?nativePlayerAuthorityMacroBroker\.start\(request\)/);
   assert.match(main, /desktop:native-player-authority-macro-advance"[\s\S]*?nativePlayerAuthorityMacroBroker\.advance\(request\)/);
   assert.match(main, /desktop:native-player-authority-macro-finish"[\s\S]*?nativePlayerAuthorityMacroBroker\.finish\(request\)/);

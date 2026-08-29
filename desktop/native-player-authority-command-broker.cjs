@@ -128,11 +128,13 @@ class NativePlayerAuthorityCommandBroker {
   constructor(options) {
     if (!isRecord(options) || !options.runtime || typeof options.runtime.snapshot !== "function" ||
         typeof options.runtime.commitCommand !== "function" ||
-        typeof options.isTrustedRendererOwner !== "function") {
+        typeof options.isTrustedRendererOwner !== "function" ||
+        options.onCommittedCommand !== undefined && typeof options.onCommittedCommand !== "function") {
       throw new TypeError("native player-authority command broker options are invalid");
     }
     this.runtime = options.runtime;
     this.isTrustedRendererOwner = options.isTrustedRendererOwner;
+    this.onCommittedCommand = options.onCommittedCommand ?? (() => undefined);
   }
 
   ownsSession(sessionId) {
@@ -165,12 +167,6 @@ class NativePlayerAuthorityCommandBroker {
       baseRevision: request.baseRevision,
       command: request.command,
     });
-    if (!this.isTrustedRendererOwner(rendererOwnerId)) {
-      throw brokerError(
-        "native player-authority command renderer disappeared before delivery",
-        "NATIVE_PLAYER_AUTHORITY_COMMAND_RENDERER_UNTRUSTED",
-      );
-    }
     assertActiveSnapshot(result, request, "receipt");
     if (result.previousRevision !== request.baseRevision ||
         result.revision !== request.baseRevision + 1 || result.inFlight !== false ||
@@ -192,6 +188,24 @@ class NativePlayerAuthorityCommandBroker {
       throw brokerError(
         "native player-authority change receipt exceeds its ID budget",
         "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+      );
+    }
+    try {
+      this.onCommittedCommand(Object.freeze({
+        sessionId: request.sessionId,
+        baseRevision: request.baseRevision,
+        revision: result.revision,
+        command: request.command,
+      }));
+    } catch {
+      // The gameplay command is already durable. Optional main-owned observers
+      // may lose diagnostics, but must never turn a committed command into an
+      // uncertain renderer outcome.
+    }
+    if (!this.isTrustedRendererOwner(rendererOwnerId)) {
+      throw brokerError(
+        "native player-authority command renderer disappeared before delivery",
+        "NATIVE_PLAYER_AUTHORITY_COMMAND_RENDERER_UNTRUSTED",
       );
     }
     return Object.freeze({

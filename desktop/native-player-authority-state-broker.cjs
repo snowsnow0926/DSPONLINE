@@ -273,7 +273,25 @@ function fallbackMacroPausedReason(common) {
   return common.phase === "shutdown" ? "macro-runtime-shutdown" : "macro-runtime-faulted";
 }
 
-function normalizeNativePlayerAuthorityState(value, macroDetails) {
+function normalizeMacroRecoveryHint(value, common) {
+  if (value === undefined || value === null) return null;
+  if (!hasExactKeys(value, ["kind", "revision"]) ||
+      value.kind !== "finished-pending-disable" || common.phase !== "active") {
+    throw stateError("native player-authority macro recovery hint is invalid");
+  }
+  const revision = requireSafeInteger(
+    value.revision,
+    0,
+    Number.MAX_SAFE_INTEGER,
+    "macro recovery hint revision",
+  );
+  if (common.revision === null || revision > common.revision) {
+    throw stateError("native player-authority macro recovery hint is stale");
+  }
+  return Object.freeze({ kind: "finished-pending-disable", revision });
+}
+
+function normalizeNativePlayerAuthorityState(value, macroDetails, macroRecoveryHint) {
   const common = normalizeCommonState(value);
   const macroIdentity = normalizeMacroIdentity(value, common, macroDetails !== undefined && macroDetails !== null);
   if (!macroIdentity.macroState) {
@@ -283,6 +301,7 @@ function normalizeNativePlayerAuthorityState(value, macroDetails) {
     if (common.phase === "active" && common.lastErrorCode !== null) {
       throw stateError("active native player-authority state is incomplete");
     }
+    const recoveryHint = normalizeMacroRecoveryHint(macroRecoveryHint, common);
     return Object.freeze({
       schemaVersion: 1,
       phase: common.phase,
@@ -296,6 +315,7 @@ function normalizeNativePlayerAuthorityState(value, macroDetails) {
       currentOperation: common.currentOperation,
       queuedCommands: common.queuedCommands,
       lastErrorCode: common.lastErrorCode,
+      ...(recoveryHint ? { macroRecoveryHint: recoveryHint } : {}),
     });
   }
 
@@ -472,11 +492,14 @@ function deriveMacroDetails(runtime, snapshot) {
 class NativePlayerAuthorityStateBroker {
   constructor(options) {
     if (!isRecord(options) || !options.runtime || typeof options.runtime.snapshot !== "function" ||
-        typeof options.isTrustedRendererOwner !== "function") {
+        typeof options.isTrustedRendererOwner !== "function" ||
+        options.getMacroRecoveryHint !== undefined &&
+          typeof options.getMacroRecoveryHint !== "function") {
       throw new TypeError("native player-authority state broker options are invalid");
     }
     this.runtime = options.runtime;
     this.isTrustedRendererOwner = options.isTrustedRendererOwner;
+    this.getMacroRecoveryHint = options.getMacroRecoveryHint ?? (() => null);
     this.lastAuthorityIdentity = null;
     this.lastAuthorityRevision = null;
   }
@@ -495,7 +518,11 @@ class NativePlayerAuthorityStateBroker {
         ((Object.hasOwn(snapshot, "macroSessionId") && snapshot.macroSessionId !== null) ||
           (this.runtime.pendingMacroAction !== undefined && this.runtime.pendingMacroAction !== null)));
     if (!hasMacroInternals) {
-      const normalized = normalizeNativePlayerAuthorityState(snapshot);
+      const normalized = normalizeNativePlayerAuthorityState(
+        snapshot,
+        undefined,
+        this.getMacroRecoveryHint(),
+      );
       if (common.hasCompleteIdentity) {
         const identity = `${common.sessionId}\0${common.runId}`;
         if (this.lastAuthorityIdentity !== null && this.lastAuthorityIdentity !== identity) {

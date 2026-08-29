@@ -58,6 +58,7 @@ function brokerFixture(options = {}) {
   };
   const broker = new NativePlayerAuthorityCommandBroker({
     runtime,
+    ...(options.onCommittedCommand ? { onCommittedCommand: options.onCommittedCommand } : {}),
     isTrustedRendererOwner: options.isTrustedRendererOwner ?? ((ownerId) => ownerId === 7),
   });
   return { broker, calls, setSnapshot: (value) => { current = value; } };
@@ -77,6 +78,44 @@ test("trusted renderer command crosses only the main-owned durable runtime", asy
   assert.match(calls[0].commandId, /^renderer-17-[a-f0-9]{40}$/);
   assert.equal(calls[0].baseRevision, 17);
   assert.deepEqual(calls[0].command, command());
+});
+
+test("a main-only observer sees only validated durable commands and cannot poison their receipt", async () => {
+  const observed = [];
+  const { broker } = brokerFixture({
+    onCommittedCommand(value) {
+      observed.push(value);
+      throw new Error("observer diagnostic failed");
+    },
+  });
+  const result = await broker.commit(7, { sessionId: "core-1", command: command() });
+  assert.equal(result.revision, 18);
+  assert.equal(observed.length, 1);
+  assert.deepEqual(observed[0], {
+    sessionId: "core-1",
+    baseRevision: 17,
+    revision: 18,
+    command: command(),
+  });
+});
+
+test("a durable command retires main-only cleanup even when its renderer disappears before delivery", async () => {
+  let trustChecks = 0;
+  const observed = [];
+  const { broker } = brokerFixture({
+    isTrustedRendererOwner: () => {
+      trustChecks += 1;
+      return trustChecks === 1;
+    },
+    onCommittedCommand(value) { observed.push(value); },
+  });
+  await assert.rejects(
+    broker.commit(7, { sessionId: "core-1", command: command() }),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_COMMAND_RENDERER_UNTRUSTED",
+  );
+  assert.equal(trustChecks, 2);
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0].revision, 18);
 });
 
 test("identical lost-response retry derives the same durable command ID", async () => {

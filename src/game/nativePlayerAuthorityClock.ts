@@ -155,7 +155,10 @@ function isSettledActiveFrame(state: DesktopNativePlayerAuthorityClockState): bo
  * substitute for this exact schema check.
  */
 function normalizeClockState(value: Record<string, unknown>): DesktopNativePlayerAuthorityClockState {
-  if (!hasExactKeys(value, CLOCK_STATE_KEYS) || value.schemaVersion !== 1 ||
+  const clockStateKeys = Object.hasOwn(value, "macroRecoveryHint")
+    ? [...CLOCK_STATE_KEYS, "macroRecoveryHint"]
+    : CLOCK_STATE_KEYS;
+  if (!hasExactKeys(value, clockStateKeys) || value.schemaVersion !== 1 ||
     typeof value.phase !== "string" || !CLOCK_PHASES.has(value.phase as DesktopNativePlayerAuthorityPhase) ||
     typeof value.inFlight !== "boolean" ||
     !CLOCK_OPERATIONS.has(value.currentOperation as DesktopNativePlayerAuthorityOperation | null) ||
@@ -189,6 +192,20 @@ function normalizeClockState(value: Record<string, unknown>): DesktopNativePlaye
   if (value.phase === "active" && (!completeIdentity || lastErrorCode !== null)) {
     throw new TypeError("active native player-authority clock frame is incomplete");
   }
+  let macroRecoveryHint: DesktopNativePlayerAuthorityClockState["macroRecoveryHint"];
+  if (Object.hasOwn(value, "macroRecoveryHint")) {
+    const hint = value.macroRecoveryHint;
+    if (!isRecord(hint) || !hasExactKeys(hint, ["kind", "revision"]) ||
+      hint.kind !== "finished-pending-disable" || value.phase !== "active" ||
+      !Number.isSafeInteger(hint.revision) || (hint.revision as number) < 0 ||
+      revision === null || (hint.revision as number) > revision) {
+      throw new TypeError("native player-authority macro recovery hint is invalid");
+    }
+    macroRecoveryHint = Object.freeze({
+      kind: "finished-pending-disable",
+      revision: hint.revision as number,
+    });
+  }
   return Object.freeze({
     schemaVersion: 1,
     phase: value.phase as DesktopNativePlayerAuthorityPhase,
@@ -202,6 +219,7 @@ function normalizeClockState(value: Record<string, unknown>): DesktopNativePlaye
     currentOperation: value.currentOperation as DesktopNativePlayerAuthorityOperation | null,
     queuedCommands: value.queuedCommands as number,
     lastErrorCode,
+    ...(macroRecoveryHint ? { macroRecoveryHint } : {}),
   });
 }
 

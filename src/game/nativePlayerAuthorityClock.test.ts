@@ -106,6 +106,41 @@ describe("native player-authority clock validation", () => {
     }
   });
 
+  it("accepts only an active, bounded finish recovery hint and preserves it through pull", async () => {
+    const hinted = activeFrame({
+      revision: 12,
+      acknowledgedSequence: 6,
+      nextSequence: 7,
+      nextDeadlineMs: 12_000,
+      macroRecoveryHint: { kind: "finished-pending-disable", revision: 10 },
+    });
+    const normalized = normalizeNativePlayerAuthorityClockFrame(hinted);
+    expect(normalized).toEqual(hinted);
+    expect(Object.isFrozen(normalized)).toBe(true);
+    expect(Object.isFrozen((normalized as DesktopNativePlayerAuthorityClockState).macroRecoveryHint))
+      .toBe(true);
+
+    for (const malformed of [
+      { ...hinted, macroRecoveryHint: { kind: "unknown", revision: 10 } },
+      { ...hinted, macroRecoveryHint: { kind: "finished-pending-disable", revision: 13 } },
+      { ...hinted, macroRecoveryHint: { kind: "finished-pending-disable", revision: -1 } },
+      { ...hinted, macroRecoveryHint: {
+        kind: "finished-pending-disable", revision: 10, macroSessionId: "forged",
+      } },
+      { ...hinted, phase: "uncertain" as const },
+    ]) {
+      expect(() => normalizeNativePlayerAuthorityClockFrame(malformed))
+        .toThrow(/macro recovery hint/i);
+    }
+
+    const value = clockFixture(hinted);
+    value.controller.start();
+    await settlePromises();
+    expect(value.controller.getSnapshot().currentFrame).toEqual(hinted);
+    expect(value.controller.getSnapshot().lastConfirmedFrame?.macroRecoveryHint)
+      .toEqual({ kind: "finished-pending-disable", revision: 10 });
+  });
+
   it("accepts identity-free pre-authority and fault frames without manufacturing a session", () => {
     const identityFree = {
       ...activeFrame(),

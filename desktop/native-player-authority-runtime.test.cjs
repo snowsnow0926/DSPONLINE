@@ -106,11 +106,18 @@ function fixture(overrides = {}) {
     async commitPlayerAuthorityTick(ownerId, request) {
       calls.push(["tick", ownerId, request]);
       const revision = 7 + request.sequence;
+      macroSequence = request.sequence;
+      macroSettledDeadlineMs = 10_000 + request.sequence * 1_000;
+      macroCheckpoint = {
+        generation: 3 + request.sequence,
+        rootHash: HASH_A,
+        revision,
+      };
       return {
         sequence: request.sequence,
         revision,
         duplicate: false,
-        checkpoint: { generation: 3 + request.sequence, rootHash: HASH_A, revision },
+        checkpoint: macroCheckpoint,
         summary: summary(revision),
       };
     },
@@ -200,12 +207,12 @@ function fixture(overrides = {}) {
     registry,
     ownerId: "main-player-authority",
     now: () => now,
-    schedule: (callback, delay) => {
+    schedule: overrides.schedule ?? ((callback, delay) => {
       const token = { callback, delay, cancelled: false };
       timers.push(token);
       return token;
-    },
-    cancel: (token) => { token.cancelled = true; },
+    }),
+    cancel: overrides.cancel ?? ((token) => { token.cancelled = true; }),
     minimumYieldMs: 1,
   });
   return {
@@ -402,7 +409,7 @@ test("macro broker treats persistence BUSY as a definite no-op and remains retry
   const activeGate = deferred();
   const activeBoundary = value.runtime.withSettledPersistenceBoundary(() => activeGate.promise);
   await assert.rejects(
-    broker.start({ simulationMilliseconds: 30_000, wallMilliseconds: 5_000 }),
+    broker.start({ expectedRevision: 7, simulationMilliseconds: 30_000, wallMilliseconds: 5_000 }),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
   );
   assert.equal(value.calls.filter(([operation]) => operation === "macro-advance").length, 0);
@@ -410,12 +417,23 @@ test("macro broker treats persistence BUSY as a definite no-op and remains retry
     broker.recover(),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_RECOVERY_UNAVAILABLE",
   );
+  value.setNow(11_000);
   activeGate.resolve("active-released");
   assert.equal(await activeBoundary, "active-released");
+  await value.runtime.settleDue();
+  assert.equal(value.runtime.snapshot().revision, 8);
 
-  const started = await broker.start({ simulationMilliseconds: 30_000, wallMilliseconds: 5_000 });
+  await assert.rejects(
+    broker.start({ expectedRevision: 7, simulationMilliseconds: 30_000, wallMilliseconds: 5_000 }),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_START_REBASE_REQUIRED",
+  );
+  assert.equal(value.calls.filter(([operation]) => operation === "macro-advance").length, 0);
+
+  const started = await broker.start({
+    expectedRevision: 8, simulationMilliseconds: 30_000, wallMilliseconds: 5_000,
+  });
   assert.equal(started.state, "macro-active");
-  assert.equal(started.revision, 9);
+  assert.equal(started.revision, 10);
 
   const macroGate = deferred();
   const macroBoundary = value.runtime.withStartupReconciliationBoundary(() => macroGate.promise);
@@ -434,8 +452,8 @@ test("macro broker treats persistence BUSY as a definite no-op and remains retry
   assert.equal(await macroBoundary, "macro-released");
 
   const advanced = await broker.advance({ simulationMilliseconds: 30_000, wallMilliseconds: 5_000 });
-  assert.equal(advanced.revision, 11);
-  assert.deepEqual(await broker.finish(), { schemaVersion: 1, state: "finished", revision: 11 });
+  assert.equal(advanced.revision, 12);
+  assert.deepEqual(await broker.finish(), { schemaVersion: 1, state: "finished", revision: 12 });
   assert.equal(value.calls.filter(([operation]) => operation === "macro-advance").length, 2);
   assert.equal(value.calls.filter(([operation]) => operation === "macro-finish").length, 1);
 });
@@ -756,6 +774,119 @@ test("macro advances suspend exact ticks, preserve one session, and resume only 
   assert.equal(value.timers.at(-1).delay, 1);
 });
 
+test("real runtime finish recovery survives an overdue exact tick starting before broker delivery", async (t) => {
+  const run = async (loseFirstFinish) => {
+    const tickGate = deferred();
+    let finishAttempts = 0;
+    const value = fixture({
+      schedule(callback, delay) {
+        const token = { callback, delay, cancelled: false };
+        if (delay <= 1) queueMicrotask(() => {
+          if (!token.cancelled) callback();
+        });
+        return token;
+      },
+      registry: {
+        async commitPlayerAuthorityTick(ownerId, request) {
+          value.calls.push(["tick", ownerId, request]);
+          await tickGate.promise;
+          const revision = 7 + request.sequence;
+          return {
+            sequence: request.sequence,
+            revision,
+            duplicate: false,
+            checkpoint: { generation: 4 + request.sequence, rootHash: HASH_A, revision },
+            summary: summary(revision),
+          };
+        },
+        async finishPlayerAuthorityMacroSession(ownerId, request) {
+          value.calls.push(["macro-finish", ownerId, request]);
+          finishAttempts += 1;
+          if (loseFirstFinish && finishAttempts === 1) throw new Error("lost finish ACK");
+          const checkpoint = { generation: 4, rootHash: HASH_A, revision: 9 };
+          return {
+            lease: {
+              kind: "native-core-exact-realtime-player-authority-lease-v1",
+              phase: "active",
+              runId: request.runId,
+              mode: "normal",
+              slot: "normal-main",
+              checkpoint,
+              acknowledged: {
+                sequence: 2,
+                revision: 9,
+                checkpoint,
+                settledDeadlineMs: 14_000,
+              },
+              pendingTick: null,
+              pendingCommand: null,
+              pendingAdvance: null,
+              macroSession: null,
+              lastFinishedMacroSessionId: request.macroSessionId,
+            },
+            summary: summary(9),
+          };
+        },
+      },
+    });
+    await value.runtime.activate({
+      sessionId: "core-main-1", runId: "player-run-1",
+      expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+    });
+    const ids = ["session-race", "operation-race"];
+    const broker = new NativePlayerAuthorityMacroBroker({
+      runtime: value.runtime,
+      createId: () => ids.shift(),
+    });
+    await broker.start({
+      expectedRevision: 7,
+      simulationMilliseconds: 60_000,
+      wallMilliseconds: 4_000,
+    });
+    value.setNow(30_000);
+
+    let receipt;
+    if (loseFirstFinish) {
+      await assert.rejects(
+        broker.finish(),
+        (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN",
+      );
+      receipt = await broker.recover();
+      assert.equal(receipt.recovered, true);
+    } else {
+      receipt = await broker.finish();
+      assert.equal(Object.hasOwn(receipt, "recovered"), false);
+    }
+    assert.equal(receipt.state, "finished");
+    assert.equal(receipt.revision, 9);
+    assert.equal(value.runtime.snapshot().phase, "active");
+    assert.equal(value.runtime.snapshot().inFlight, true);
+    assert.equal(value.runtime.snapshot().currentOperation, "tick");
+    assert.deepEqual(await broker.recover(), {
+      schemaVersion: 1,
+      state: "finished",
+      revision: 9,
+      recovered: true,
+    });
+    assert.equal(
+      value.calls.filter(([operation]) => operation === "macro-finish").length,
+      loseFirstFinish ? 2 : 1,
+    );
+
+    value.setNow(10_000);
+    tickGate.resolve();
+    for (let index = 0; index < 8; index += 1) await Promise.resolve();
+    return value.runtime.snapshot();
+  };
+
+  await t.test("normal finish", async () => {
+    assert.equal((await run(false)).phase, "active");
+  });
+  await t.test("uncertain finish recovery", async () => {
+    assert.equal((await run(true)).phase, "active");
+  });
+});
+
 test("lost macro responses retry the exact durable operation without advancing twice", async () => {
   let attempts = 0;
   const value = fixture({
@@ -1011,6 +1142,8 @@ test("durable startup receipt adopts the main-owned Rust session and continues i
     nextDeadlineMs: 11_000,
     commandId: "durable-command-4",
     commandBaseRevision: 10,
+    pendingMacroCleanupSessionId: "macro-session-finished-before-restart",
+    pendingMacroCleanupRevision: 9,
     ...changeReceipt({ changedEntityIds: ["entity-a"], topologyDirty: false }),
     summary: recoveredSummary,
   });

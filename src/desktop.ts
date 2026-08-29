@@ -55,6 +55,11 @@ export type DesktopNativePlayerAuthorityMacroPhase =
 
 export type DesktopNativePlayerAuthorityMacroOperation = "advance" | "finish";
 
+export interface DesktopNativePlayerAuthorityMacroRecoveryHint {
+  readonly kind: "finished-pending-disable";
+  readonly revision: number;
+}
+
 export type DesktopNativePlayerAuthorityMacroPausedReason =
   | "macro-window-active"
   | "macro-advance-committing"
@@ -84,6 +89,8 @@ export interface DesktopNativePlayerAuthorityClockState {
   readonly currentOperation: DesktopNativePlayerAuthorityOperation | null;
   readonly queuedCommands: number;
   readonly lastErrorCode: string | null;
+  /** Main-owned durable finish recovery still needs the renderer to disable time warp. */
+  readonly macroRecoveryHint?: DesktopNativePlayerAuthorityMacroRecoveryHint;
 }
 
 /**
@@ -246,6 +253,12 @@ export interface DesktopNativePlayerAuthorityMacroBudgetRequest {
   readonly wallMilliseconds: number;
 }
 
+export interface DesktopNativePlayerAuthorityMacroStartRequest
+  extends DesktopNativePlayerAuthorityMacroBudgetRequest {
+  /** Optimistic fence only; main still owns every session/run/operation identity. */
+  readonly expectedRevision: number;
+}
+
 /** Identity-free receipt; all durable macro IDs remain inside main/Rust. */
 export interface DesktopNativePlayerAuthorityMacroReceipt {
   readonly schemaVersion: 1;
@@ -280,9 +293,9 @@ export interface DesktopBridge {
   exportNativePlayerAuthorityV47?: (
     request: DesktopNativePlayerAuthorityExportRequest,
   ) => Promise<DesktopNativePlayerAuthorityExportResult>;
-  /** Budget-only request; session/run/operation IDs cannot be supplied by the renderer. */
+  /** Revision-fenced budget; session/run/operation IDs cannot be supplied by the renderer. */
   startNativePlayerAuthorityMacro?: (
-    request: DesktopNativePlayerAuthorityMacroBudgetRequest,
+    request: DesktopNativePlayerAuthorityMacroStartRequest,
   ) => Promise<DesktopNativePlayerAuthorityMacroReceipt>;
   advanceNativePlayerAuthorityMacro?: (
     request: DesktopNativePlayerAuthorityMacroBudgetRequest,

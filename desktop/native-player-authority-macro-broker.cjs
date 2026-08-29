@@ -3,10 +3,11 @@
 /*
  * Main-process-only control surface for productive PureIdleMacroV10 windows.
  *
- * Callers provide only two bounded integer millisecond budgets. Session,
- * lease, run and operation identities never cross the renderer boundary:
- * this broker derives the current revision from the authority runtime and
- * creates non-reusable macro/operation IDs inside Electron's main process.
+ * Callers provide bounded integer millisecond budgets and, for start only,
+ * the revision they observed. Session, lease, run and operation identities
+ * never cross the renderer boundary: this broker derives the current
+ * authority identity and creates non-reusable macro/operation IDs inside
+ * Electron's main process.
  * The runtime remains the only lifecycle state machine and the Rust Host
  * remains the only durable stage/WAL/checkpoint/ACK authority.
  */
@@ -65,6 +66,23 @@ function normalizeBudgetRequest(value) {
   });
 }
 
+function normalizeStartRequest(value) {
+  if (!exactKeys(value, ["expectedRevision", "simulationMilliseconds", "wallMilliseconds"]) ||
+      !Number.isSafeInteger(value.expectedRevision) || value.expectedRevision < 0) {
+    throw brokerError(
+      "native player-authority macro start request is invalid",
+      "NATIVE_PLAYER_AUTHORITY_MACRO_REQUEST_INVALID",
+    );
+  }
+  return Object.freeze({
+    expectedRevision: value.expectedRevision,
+    budgets: normalizeBudgetRequest({
+      simulationMilliseconds: value.simulationMilliseconds,
+      wallMilliseconds: value.wallMilliseconds,
+    }),
+  });
+}
+
 function requireNoRequest(value, label) {
   if (value !== undefined && !exactKeys(value, [])) {
     throw brokerError(
@@ -82,6 +100,25 @@ function requireAuthorityIdentity(snapshot, phases, label) {
     throw brokerError(
       `native player-authority macro ${label} is not settled`,
       "NATIVE_PLAYER_AUTHORITY_MACRO_UNAVAILABLE",
+    );
+  }
+  return Object.freeze({
+    sessionId: snapshot.sessionId,
+    runId: snapshot.runId,
+    revision: snapshot.revision,
+  });
+}
+
+function requireFinishedLineage(snapshot, expected, label, allowRevisionAdvance) {
+  if (!isRecord(snapshot) || !["active", "uncertain"].includes(snapshot.phase) ||
+      !validLogicalId(snapshot.sessionId) || !validLogicalId(snapshot.runId) ||
+      snapshot.sessionId !== expected.sessionId || snapshot.runId !== expected.runId ||
+      !Number.isSafeInteger(snapshot.revision) ||
+      (allowRevisionAdvance ? snapshot.revision < expected.revision : snapshot.revision !== expected.revision) ||
+      snapshot.macroSessionId !== null || snapshot.macroAlgorithmVersion !== null) {
+    throw brokerError(
+      `native player-authority macro ${label} lineage is stale`,
+      "NATIVE_PLAYER_AUTHORITY_MACRO_RECEIPT_INVALID",
     );
   }
   return Object.freeze({
@@ -123,6 +160,14 @@ class NativePlayerAuthorityMacroBroker {
         options.createId !== undefined && typeof options.createId !== "function") {
       throw new TypeError("native player-authority macro broker options are invalid");
     }
+    const hasCleanupSession = options.pendingMacroCleanupSessionId !== undefined;
+    const hasCleanupRevision = options.pendingMacroCleanupRevision !== undefined;
+    if (hasCleanupSession !== hasCleanupRevision || hasCleanupSession &&
+        (!validLogicalId(options.pendingMacroCleanupSessionId) ||
+          !Number.isSafeInteger(options.pendingMacroCleanupRevision) ||
+          options.pendingMacroCleanupRevision < 0)) {
+      throw new TypeError("native player-authority pending macro cleanup is invalid");
+    }
     if (options.recoveredOperationId !== undefined &&
         !validLogicalId(options.recoveredOperationId)) {
       throw new TypeError("native player-authority recovered macro operation ID is invalid");
@@ -132,6 +177,7 @@ class NativePlayerAuthorityMacroBroker {
     this.issuedIds = new Set();
     this.pending = null;
     this.inFlight = false;
+    this.lastRecovered = null;
     const snapshot = this.runtime.snapshot();
     this.activeMacroSessionId = null;
     if (snapshot?.phase === "macro-active") {
@@ -149,6 +195,27 @@ class NativePlayerAuthorityMacroBroker {
         throw new TypeError("native player-authority recovered macro identity was reused");
       }
       this.issuedIds.add(options.recoveredOperationId);
+    }
+    if (hasCleanupSession) {
+      const identity = requireAuthorityIdentity(snapshot, ["active"], "startup cleanup");
+      if (snapshot.macroSessionId !== null || snapshot.macroAlgorithmVersion !== null ||
+          options.pendingMacroCleanupRevision > identity.revision ||
+          this.activeMacroSessionId !== null || this.issuedIds.has(options.pendingMacroCleanupSessionId)) {
+        throw new TypeError("native player-authority pending macro cleanup lineage is invalid");
+      }
+      this.issuedIds.add(options.pendingMacroCleanupSessionId);
+      this.lastRecovered = Object.freeze({
+        receipt: Object.freeze({
+          schemaVersion: 1,
+          state: "finished",
+          revision: options.pendingMacroCleanupRevision,
+          recovered: true,
+        }),
+        sessionId: identity.sessionId,
+        runId: identity.runId,
+        macroSessionId: options.pendingMacroCleanupSessionId,
+        algorithmVersion: null,
+      });
     }
   }
 
@@ -197,9 +264,15 @@ class NativePlayerAuthorityMacroBroker {
 
   async start(rawRequest) {
     this.assertAvailable();
-    const budgets = normalizeBudgetRequest(rawRequest);
+    const request = normalizeStartRequest(rawRequest);
     const before = this.runtime.snapshot();
     const identity = requireAuthorityIdentity(before, ["active"], "start");
+    if (identity.revision !== request.expectedRevision) {
+      throw brokerError(
+        "native player-authority macro start revision must be rebased",
+        "NATIVE_PLAYER_AUTHORITY_MACRO_START_REBASE_REQUIRED",
+      );
+    }
     if (before.macroSessionId !== null || this.activeMacroSessionId !== null || this.pending !== null) {
       throw brokerError(
         "native player-authority macro session is already active",
@@ -208,7 +281,7 @@ class NativePlayerAuthorityMacroBroker {
     }
     const macroSessionId = this.issueId("macro-session");
     const operationId = this.issueId("macro-operation");
-    return this.commitAdvance(identity, macroSessionId, operationId, budgets);
+    return this.commitAdvance(identity, macroSessionId, operationId, request.budgets);
   }
 
   async advance(rawRequest) {
@@ -252,6 +325,7 @@ class NativePlayerAuthorityMacroBroker {
       );
       this.activeMacroSessionId = macroSessionId;
       this.pending = null;
+      this.lastRecovered = null;
       return receipt;
     } catch (cause) {
       // The runtime reports this code only before it stages or calls the Host.
@@ -295,20 +369,31 @@ class NativePlayerAuthorityMacroBroker {
     });
     this.inFlight = true;
     try {
-      await this.runtime.finishMacroSession({ macroSessionId: this.activeMacroSessionId });
-      const after = this.runtime.snapshot();
-      const settled = requireAuthorityIdentity(after, ["active"], "finish receipt");
-      if (settled.sessionId !== identity.sessionId || settled.runId !== identity.runId ||
-          settled.revision !== identity.revision || after.macroSessionId !== null ||
-          after.macroAlgorithmVersion !== null) {
-        throw brokerError(
-          "native player-authority macro finish receipt is stale",
-          "NATIVE_PLAYER_AUTHORITY_MACRO_RECEIPT_INVALID",
-        );
-      }
+      const finished = await this.runtime.finishMacroSession({
+        macroSessionId: this.activeMacroSessionId,
+      });
+      requireFinishedLineage(finished, identity, "finish result", false);
+      requireFinishedLineage(this.runtime.snapshot(), identity, "finish receipt", true);
+      const macroSessionId = this.activeMacroSessionId;
       this.activeMacroSessionId = null;
       this.pending = null;
-      return Object.freeze({ schemaVersion: 1, state: "finished", revision: settled.revision });
+      // Keep an idempotent replay receipt in main until the renderer's durable
+      // time-warp-disable command is observed. The first caller still receives
+      // the ordinary result; a renderer reload after a lost IPC reply can
+      // recover the same terminal result without finishing or advancing twice.
+      this.lastRecovered = Object.freeze({
+        receipt: Object.freeze({
+          schemaVersion: 1,
+          state: "finished",
+          revision: identity.revision,
+          recovered: true,
+        }),
+        sessionId: identity.sessionId,
+        runId: identity.runId,
+        macroSessionId,
+        algorithmVersion: null,
+      });
+      return Object.freeze({ schemaVersion: 1, state: "finished", revision: identity.revision });
     } catch (cause) {
       if (isPersistenceBoundaryBusy(cause)) {
         this.pending = null;
@@ -329,10 +414,88 @@ class NativePlayerAuthorityMacroBroker {
     }
   }
 
+  validatedLastRecovered(before = this.runtime.snapshot(), allowTransientFinished = false) {
+    const cached = this.lastRecovered;
+    if (!cached || this.pending !== null) return null;
+    if (!isRecord(before) || !validLogicalId(before.sessionId) || !validLogicalId(before.runId) ||
+        !Number.isSafeInteger(before.revision) || before.revision < 0) {
+      this.lastRecovered = null;
+      return null;
+    }
+    if (before.sessionId !== cached.sessionId || before.runId !== cached.runId ||
+        before.revision < cached.receipt.revision) {
+      this.lastRecovered = null;
+      return null;
+    }
+    if (cached.receipt.state === "macro-active") {
+      if (before.phase === "macro-active" && before.inFlight === false &&
+          before.currentOperation === null && before.queuedCommands === 0 &&
+          before.revision === cached.receipt.revision &&
+          this.activeMacroSessionId === cached.macroSessionId &&
+          before.macroSessionId === cached.macroSessionId &&
+          before.macroAlgorithmVersion === cached.algorithmVersion) return cached;
+      // A new operation can temporarily move the same macro lineage away from
+      // settled macro-active. Its success path clears this cache; do not erase
+      // the prior idempotent receipt merely because a transition is in flight.
+      if (this.activeMacroSessionId === cached.macroSessionId &&
+          before.macroSessionId === cached.macroSessionId) return null;
+      this.lastRecovered = null;
+      return null;
+    }
+    if (this.activeMacroSessionId !== null || before.macroSessionId !== null ||
+        before.macroAlgorithmVersion !== null) {
+      this.lastRecovered = null;
+      return null;
+    }
+    if (before.phase === "active" && before.inFlight === false &&
+        before.currentOperation === null && before.queuedCommands === 0) return cached;
+    // Exact tick/command transitions remain in the same authority lineage.
+    // Keep the finish hint until the clock is settled instead of deleting it
+    // during the active-before-finally publication window.
+    if (["active", "uncertain"].includes(before.phase)) {
+      return allowTransientFinished ? cached : null;
+    }
+    this.lastRecovered = null;
+    return null;
+  }
+
+  recoveryHint() {
+    const cached = this.validatedLastRecovered();
+    return cached?.receipt.state === "finished"
+      ? Object.freeze({ kind: "finished-pending-disable", revision: cached.receipt.revision })
+      : null;
+  }
+
+  observeCommittedCommand(value) {
+    // Receipt validation and durability already happened in the command
+    // broker. A following queued tick/command may have entered flight before
+    // this observer runs, but the same-lineage immutable cleanup marker must
+    // still retire in this process.
+    const cached = this.validatedLastRecovered(this.runtime.snapshot(), true);
+    if (!cached || cached.receipt.state !== "finished" || !isRecord(value) ||
+        value.sessionId !== cached.sessionId || !Number.isSafeInteger(value.baseRevision) ||
+        value.baseRevision < cached.receipt.revision ||
+        value.revision !== value.baseRevision + 1 || !isRecord(value.command) ||
+        !Array.isArray(value.command.topLevelChanges)) return false;
+    const disabled = value.command.topLevelChanges.some((change) =>
+      isRecord(change) && Array.isArray(change.path) && change.path.length === 2 &&
+      change.path[0] === "timeWarp" && change.path[1] === "enabled" &&
+      change.operation === "set" && change.value === false);
+    if (!disabled) return false;
+    this.lastRecovered = null;
+    return true;
+  }
+
   async recover(rawRequest) {
     this.assertAvailable();
     requireNoRequest(rawRequest, "recovery");
     const before = this.runtime.snapshot();
+    // A settled hint can race with the next exact tick/command before this IPC
+    // reaches main. The immutable terminal receipt remains safe to replay as
+    // long as its authority lineage is unchanged and no macro identity has
+    // reappeared; only hint publication itself requires a settled clock.
+    const cached = this.validatedLastRecovered(before, true);
+    if (cached) return cached.receipt;
     if (before?.phase === "macro-active" && this.pending === null &&
         this.activeMacroSessionId === before.macroSessionId) {
       const identity = requireAuthorityIdentity(before, ["macro-active"], "startup recovery");
@@ -357,38 +520,50 @@ class NativePlayerAuthorityMacroBroker {
       );
     }
     this.inFlight = true;
+    const pending = this.pending;
     try {
-      await this.runtime.retryUncertain();
-      if (this.pending.kind === "advance") {
+      const recovered = await this.runtime.retryUncertain();
+      if (pending.kind === "advance") {
         const receipt = sanitizedActiveReceipt(
           this.runtime.snapshot(),
-          { ...this.pending.identity, macroSessionId: this.pending.macroSessionId },
-          this.pending.budgets,
+          { ...pending.identity, macroSessionId: pending.macroSessionId },
+          pending.budgets,
           true,
         );
-        this.activeMacroSessionId = this.pending.macroSessionId;
+        this.activeMacroSessionId = pending.macroSessionId;
+        this.lastRecovered = Object.freeze({
+          receipt,
+          sessionId: pending.identity.sessionId,
+          runId: pending.identity.runId,
+          macroSessionId: pending.macroSessionId,
+          algorithmVersion: receipt.algorithmVersion,
+        });
         this.pending = null;
         return receipt;
       }
-      const after = this.runtime.snapshot();
-      const settled = requireAuthorityIdentity(after, ["active"], "recovered finish receipt");
-      if (settled.sessionId !== this.pending.identity.sessionId ||
-          settled.runId !== this.pending.identity.runId ||
-          settled.revision !== this.pending.identity.revision || after.macroSessionId !== null ||
-          after.macroAlgorithmVersion !== null) {
-        throw brokerError(
-          "native player-authority recovered finish receipt is stale",
-          "NATIVE_PLAYER_AUTHORITY_MACRO_RECEIPT_INVALID",
-        );
-      }
+      requireFinishedLineage(recovered, pending.identity, "recovered finish result", false);
+      requireFinishedLineage(
+        this.runtime.snapshot(),
+        pending.identity,
+        "recovered finish receipt",
+        true,
+      );
       this.activeMacroSessionId = null;
-      this.pending = null;
-      return Object.freeze({
+      const receipt = Object.freeze({
         schemaVersion: 1,
         state: "finished",
-        revision: settled.revision,
+        revision: pending.identity.revision,
         recovered: true,
       });
+      this.lastRecovered = Object.freeze({
+        receipt,
+        sessionId: pending.identity.sessionId,
+        runId: pending.identity.runId,
+        macroSessionId: pending.macroSessionId,
+        algorithmVersion: null,
+      });
+      this.pending = null;
+      return receipt;
     } catch (cause) {
       if (cause instanceof NativePlayerAuthorityMacroBrokerError) throw cause;
       throw brokerError(

@@ -262,10 +262,12 @@ function validateStartupRecoveryReceipt(value, ownerId) {
     "macroSessionId", "recoveredMacroOperationId", "macroAlgorithmVersion",
     "macroSimulationMilliseconds", "macroWallMilliseconds",
   ];
+  const cleanupKeys = ["pendingMacroCleanupSessionId", "pendingMacroCleanupRevision"];
   const recoveryKeys = ["entryCheckpoint"];
   if (!isRecord(value) || baseKeys.some((key) => !Object.hasOwn(value, key)) ||
       Reflect.ownKeys(value).some((key) => typeof key !== "string" ||
-        !baseKeys.includes(key) && !macroKeys.includes(key) && !recoveryKeys.includes(key)) ||
+        !baseKeys.includes(key) && !macroKeys.includes(key) &&
+        !cleanupKeys.includes(key) && !recoveryKeys.includes(key)) ||
       value.schemaVersion !== 1 ||
       value.kind !== "native-core-player-authority-startup-recovery-v1" ||
       value.ownerId !== ownerId) {
@@ -384,6 +386,32 @@ function validateStartupRecoveryReceipt(value, ownerId) {
       }),
     });
   }
+  const presentCleanupKeys = cleanupKeys.filter((key) => Object.hasOwn(value, key));
+  let pendingMacroCleanup = null;
+  if (presentCleanupKeys.length > 0) {
+    if (presentCleanupKeys.length !== cleanupKeys.length || macroSession !== null) {
+      throw runtimeError(
+        "native player-authority startup macro cleanup receipt is incomplete",
+        "NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID",
+      );
+    }
+    const macroSessionId = requireLogicalId(
+      value.pendingMacroCleanupSessionId,
+      "startup recovery pendingMacroCleanupSessionId",
+    );
+    const cleanupRevision = requireSafeInteger(
+      value.pendingMacroCleanupRevision,
+      0,
+      "startup recovery pendingMacroCleanupRevision",
+    );
+    if (cleanupRevision > revision || entryCheckpoint && cleanupRevision < entryCheckpoint.revision) {
+      throw runtimeError(
+        "native player-authority startup macro cleanup revision is invalid",
+        "NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID",
+      );
+    }
+    pendingMacroCleanup = Object.freeze({ macroSessionId, revision: cleanupRevision });
+  }
   return {
     sessionId,
     runId,
@@ -394,6 +422,7 @@ function validateStartupRecoveryReceipt(value, ownerId) {
     nextDeadlineMs,
     lastCommand,
     macroSession,
+    pendingMacroCleanup,
   };
 }
 

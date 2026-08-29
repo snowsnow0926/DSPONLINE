@@ -769,6 +769,7 @@ async function initializeNativeHost() {
     });
     nativePlayerAuthorityStateBroker = new NativePlayerAuthorityStateBroker({
       runtime: nativePlayerAuthorityRuntime,
+      getMacroRecoveryHint: () => nativePlayerAuthorityMacroBroker?.recoveryHint() ?? null,
       isTrustedRendererOwner: (ownerId) => Boolean(
         mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
       ),
@@ -780,6 +781,8 @@ async function initializeNativeHost() {
     }
     nativePlayerAuthorityCommandBroker = new NativePlayerAuthorityCommandBroker({
       runtime: nativePlayerAuthorityRuntime,
+      onCommittedCommand: (receipt) =>
+        nativePlayerAuthorityMacroBroker?.observeCommittedCommand(receipt),
       isTrustedRendererOwner: (ownerId) => Boolean(
         mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
       ),
@@ -792,6 +795,14 @@ async function initializeNativeHost() {
       runtime: nativePlayerAuthorityRuntime,
       ...(playerAuthorityStartupRecovery?.recoveredMacroOperationId
         ? { recoveredOperationId: playerAuthorityStartupRecovery.recoveredMacroOperationId }
+        : {}),
+      ...(playerAuthorityStartupRecovery?.pendingMacroCleanupSessionId
+        ? {
+            pendingMacroCleanupSessionId:
+              playerAuthorityStartupRecovery.pendingMacroCleanupSessionId,
+            pendingMacroCleanupRevision:
+              playerAuthorityStartupRecovery.pendingMacroCleanupRevision,
+          }
         : {}),
     });
     nativePlayerAuthorityProjectionBroker = new NativePlayerAuthorityProjectionBroker({

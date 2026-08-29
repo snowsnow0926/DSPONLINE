@@ -138,8 +138,9 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   getReleaseInfo: () => ipcRenderer.invoke("desktop:release-info"),
   getNativePerformanceStatus: () => invokeNative("desktop:native-status", { fallbackCode: "NATIVE_STATUS_FAILED", message: "无法读取 Windows 原生性能服务状态" }),
   // Authority identity and durable control remain main-owned. The only macro
-  // mutation surface accepts bounded time budgets (or an empty finish/retry)
-  // and never accepts a session, run, checkpoint, lease or operation ID.
+  // mutation surface accepts bounded time budgets plus a start-only observed
+  // revision fence (or an empty finish/retry), and never accepts a session,
+  // run, checkpoint, lease or operation ID.
   getNativePlayerAuthorityState: () => invokeNative("desktop:native-player-authority-state", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_STATE_FAILED", message: "无法读取 Windows 原生玩家权威时钟" }),
   onNativePlayerAuthorityState: subscribeNativePlayerAuthorityState,
   // Response-only internal handshake. The listener cannot start a handoff,

@@ -57,13 +57,6 @@ pub(crate) struct QuantumActiveScan {
 }
 
 #[derive(Debug, Clone)]
-struct QuantumEndpointSignature {
-    entity_index: usize,
-    entity_id: String,
-    collector: bool,
-}
-
-#[derive(Debug, Clone)]
 struct QuantumSlotPlan {
     entity_index: usize,
     entity_id: String,
@@ -74,6 +67,15 @@ struct QuantumSlotPlan {
     /// Preserve both views when a MOD save contains duplicate item slots.
     flush_slot: Slot,
     slot: Slot,
+}
+
+#[derive(Debug, Clone)]
+struct QuantumCollectorPlan {
+    entity_index: usize,
+    entity_id: String,
+    item_id: String,
+    key: String,
+    continuously_productive: bool,
 }
 
 /// Runtime-only counterpart of the JavaScript `SimulationLookupContext`
@@ -88,21 +90,24 @@ struct QuantumSlotPlan {
 pub(crate) struct QuantumLogisticsDirectory {
     topology: Arc<FactoryTopology>,
     entity_count: usize,
-    endpoints: Vec<QuantumEndpointSignature>,
     endpoint_indices: Vec<usize>,
-    collector_indices: Vec<usize>,
+    collector_plans: Vec<QuantumCollectorPlan>,
     upload_plans: Vec<QuantumSlotPlan>,
     download_plans: Vec<QuantumSlotPlan>,
     upload_by_station: HashMap<usize, Vec<usize>>,
     upload_by_item: HashMap<String, Vec<usize>>,
+    collector_by_station: HashMap<usize, usize>,
+    collector_by_item: HashMap<String, Vec<usize>>,
     download_by_station: HashMap<usize, Vec<usize>>,
     download_by_station_item: HashMap<(usize, String), Vec<usize>>,
     pending_flush: BTreeSet<usize>,
     pending_download: BTreeSet<usize>,
+    pending_boundary_upload: BTreeSet<usize>,
     runtime_written_station_indices: BTreeSet<usize>,
     inventory_written_station_indices: BTreeSet<usize>,
     flush_all_pending: bool,
     download_all_pending: bool,
+    boundary_upload_all_pending: bool,
     tower_stack_terms: Vec<f64>,
     tower_stacks: f64,
     collector_stacks: f64,
@@ -116,21 +121,24 @@ impl Default for QuantumLogisticsDirectory {
         Self {
             topology: Arc::new(FactoryTopology::default()),
             entity_count: 0,
-            endpoints: Vec::new(),
             endpoint_indices: Vec::new(),
-            collector_indices: Vec::new(),
+            collector_plans: Vec::new(),
             upload_plans: Vec::new(),
             download_plans: Vec::new(),
             upload_by_station: HashMap::new(),
             upload_by_item: HashMap::new(),
+            collector_by_station: HashMap::new(),
+            collector_by_item: HashMap::new(),
             download_by_station: HashMap::new(),
             download_by_station_item: HashMap::new(),
             pending_flush: BTreeSet::new(),
             pending_download: BTreeSet::new(),
+            pending_boundary_upload: BTreeSet::new(),
             runtime_written_station_indices: BTreeSet::new(),
             inventory_written_station_indices: BTreeSet::new(),
             flush_all_pending: true,
             download_all_pending: true,
+            boundary_upload_all_pending: true,
             tower_stack_terms: Vec::new(),
             tower_stacks: 0.0,
             collector_stacks: 0.0,
@@ -680,16 +688,28 @@ impl QuantumLogisticsDirectory {
                 directory.fallback_full_scan = true;
             }
             let collector = is_quantum_collector(endpoint);
-            directory.endpoints.push(QuantumEndpointSignature {
-                entity_index,
-                entity_id: entity_id.to_owned(),
-                collector,
-            });
             directory.endpoint_indices.push(entity_index);
             let stacks = finite_number(endpoint.get("machineCount")).floor().max(0.0);
             if collector {
-                directory.collector_indices.push(entity_index);
                 directory.collector_stacks += stacks;
+                let Some(item_id) = string_at(endpoint, "storedItemId").filter(|id| !id.is_empty())
+                else {
+                    directory.fallback_full_scan = true;
+                    continue;
+                };
+                if !item_id.is_ascii()
+                    || item_id.contains(':')
+                    || !state.catalog.items.contains_key(item_id)
+                {
+                    directory.fallback_full_scan = true;
+                }
+                directory.collector_plans.push(QuantumCollectorPlan {
+                    entity_index,
+                    entity_id: entity_id.to_owned(),
+                    item_id: item_id.to_owned(),
+                    key: format!("{entity_id}:{item_id}"),
+                    continuously_productive: finite_number(endpoint.get("machineCount")) > 0.0,
+                });
                 continue;
             }
             directory.tower_stack_terms.push(stacks);
@@ -745,6 +765,16 @@ impl QuantumLogisticsDirectory {
                 .entry(plan.item_id.clone())
                 .or_default()
                 .push(plan_index);
+        }
+        for (collector_index, plan) in directory.collector_plans.iter().enumerate() {
+            directory
+                .collector_by_station
+                .insert(plan.entity_index, collector_index);
+            directory
+                .collector_by_item
+                .entry(plan.item_id.clone())
+                .or_default()
+                .push(collector_index);
         }
         for (plan_index, plan) in directory.download_plans.iter().enumerate() {
             directory
@@ -819,6 +849,21 @@ impl QuantumLogisticsDirectory {
                 .as_ref()
                 == Some(&plan.flush_slot)
         })
+    }
+
+    fn collector_plan_matches(entities: &[Value], plan: &QuantumCollectorPlan) -> bool {
+        entities
+            .get(plan.entity_index)
+            .and_then(Value::as_object)
+            .is_some_and(|endpoint| {
+                string_at(endpoint, "id") == Some(plan.entity_id.as_str())
+                    && string_at(endpoint, "storedItemId") == Some(plan.item_id.as_str())
+                    && is_quantum_collector(endpoint)
+            })
+    }
+
+    fn boundary_upload_rows(&self) -> usize {
+        self.collector_plans.len() + self.upload_plans.len()
     }
 
     fn selected_plan_indices(
@@ -915,6 +960,36 @@ impl QuantumLogisticsDirectory {
         (selected, scan)
     }
 
+    fn selected_boundary_upload_rows(
+        &self,
+        state: &CoreState,
+        entities: &[Value],
+    ) -> (Option<Vec<usize>>, QuantumActiveScan) {
+        let collector_rows = self.collector_plans.len();
+        let (selected, mut scan) = self.selected_plan_indices(
+            self.boundary_upload_rows(),
+            self.boundary_upload_all_pending,
+            &self.pending_boundary_upload,
+            self.topology_matches(state, entities),
+        );
+        if selected.as_ref().is_some_and(|indices| {
+            indices.iter().any(|&row| {
+                if row < collector_rows {
+                    !Self::collector_plan_matches(entities, &self.collector_plans[row])
+                } else {
+                    !Self::plan_matches(entities, &self.upload_plans[row - collector_rows], true)
+                }
+            })
+        }) {
+            scan.selected_rows = self.entity_count;
+            scan.total_rows = self.entity_count;
+            scan.dense_fallback = true;
+            scan.directory_fallback = true;
+            return (None, scan);
+        }
+        (selected, scan)
+    }
+
     pub(crate) fn endpoint_indices<'a>(
         &'a self,
         state: &CoreState,
@@ -928,30 +1003,23 @@ impl QuantumLogisticsDirectory {
         !self.fallback_full_scan && self.topology_matches(state, entities)
     }
 
-    fn upload_index_matches(&self, entities: &[Value]) -> bool {
-        self.upload_plans
-            .iter()
-            .all(|plan| Self::plan_matches(entities, plan, true))
-            && self
-                .endpoints
-                .iter()
-                .filter(|signature| signature.collector)
-                .all(|signature| {
-                    entities
-                        .get(signature.entity_index)
-                        .and_then(Value::as_object)
-                        .is_some_and(|endpoint| {
-                            string_at(endpoint, "id") == Some(signature.entity_id.as_str())
-                                && is_quantum_collector(endpoint)
-                        })
-                })
-    }
-
     pub(crate) fn wake_from_stations(&mut self, station_indices: &[usize]) {
         if !self.flush_all_pending {
             for station_index in station_indices {
                 if let Some(plan_indices) = self.upload_by_station.get(station_index) {
                     self.pending_flush.extend(plan_indices.iter().copied());
+                }
+            }
+        }
+        if !self.boundary_upload_all_pending {
+            for station_index in station_indices {
+                if let Some(&collector_index) = self.collector_by_station.get(station_index) {
+                    self.pending_boundary_upload.insert(collector_index);
+                }
+                if let Some(plan_indices) = self.upload_by_station.get(station_index) {
+                    let collector_rows = self.collector_plans.len();
+                    self.pending_boundary_upload
+                        .extend(plan_indices.iter().map(|index| collector_rows + index));
                 }
             }
         }
@@ -985,12 +1053,22 @@ impl QuantumLogisticsDirectory {
     }
 
     pub(crate) fn wake_flush_items<'a>(&mut self, item_ids: impl Iterator<Item = &'a String>) {
-        if self.flush_all_pending {
-            return;
-        }
         for item_id in item_ids {
-            if let Some(plan_indices) = self.upload_by_item.get(item_id) {
+            if !self.flush_all_pending
+                && let Some(plan_indices) = self.upload_by_item.get(item_id)
+            {
                 self.pending_flush.extend(plan_indices.iter().copied());
+            }
+            if !self.boundary_upload_all_pending {
+                if let Some(collector_indices) = self.collector_by_item.get(item_id) {
+                    self.pending_boundary_upload
+                        .extend(collector_indices.iter().copied());
+                }
+                if let Some(plan_indices) = self.upload_by_item.get(item_id) {
+                    let collector_rows = self.collector_plans.len();
+                    self.pending_boundary_upload
+                        .extend(plan_indices.iter().map(|index| collector_rows + index));
+                }
             }
         }
     }
@@ -1020,6 +1098,18 @@ impl QuantumLogisticsDirectory {
             }
         }
         self.pending_download.extend(retain);
+    }
+
+    fn commit_boundary_upload(&mut self, selected: &[usize], retain: BTreeSet<usize>) {
+        if self.boundary_upload_all_pending {
+            self.boundary_upload_all_pending = false;
+            self.pending_boundary_upload.clear();
+        } else {
+            for index in selected {
+                self.pending_boundary_upload.remove(index);
+            }
+        }
+        self.pending_boundary_upload.extend(retain);
     }
 
     fn mark_download_runtime_written(&mut self, entity_index: usize) {
@@ -1100,9 +1190,15 @@ impl QuantumLogisticsDirectory {
 
     pub(crate) fn estimated_bytes(&self) -> u64 {
         let string_bytes = self
-            .endpoints
+            .collector_plans
             .iter()
-            .map(|endpoint| endpoint.entity_id.capacity())
+            .flat_map(|plan| {
+                [
+                    plan.entity_id.capacity(),
+                    plan.item_id.capacity(),
+                    plan.key.capacity(),
+                ]
+            })
             .chain(self.upload_plans.iter().flat_map(|plan| {
                 [
                     plan.entity_id.capacity(),
@@ -1122,14 +1218,14 @@ impl QuantumLogisticsDirectory {
                 ]
             }))
             .sum::<usize>();
-        (self.endpoints.capacity() * size_of::<QuantumEndpointSignature>()
-            + self.endpoint_indices.capacity() * size_of::<usize>()
-            + self.collector_indices.capacity() * size_of::<usize>()
+        (self.endpoint_indices.capacity() * size_of::<usize>()
+            + self.collector_plans.capacity() * size_of::<QuantumCollectorPlan>()
             + self.upload_plans.capacity() * size_of::<QuantumSlotPlan>()
             + self.download_plans.capacity() * size_of::<QuantumSlotPlan>()
             + self.tower_stack_terms.capacity() * size_of::<f64>()
             + (self.pending_flush.len()
                 + self.pending_download.len()
+                + self.pending_boundary_upload.len()
                 + self.runtime_written_station_indices.len()
                 + self.inventory_written_station_indices.len())
                 * size_of::<usize>()
@@ -2156,22 +2252,17 @@ pub(crate) fn settle_uploads(
 ) -> anyhow::Result<QuantumActiveScan> {
     let mut network = parse_network(base)?;
     if !network.enabled {
-        return Ok(QuantumActiveScan::default());
+        return Ok(QuantumActiveScan {
+            total_rows: directory.boundary_upload_rows(),
+            ..QuantumActiveScan::default()
+        });
     }
-    // This boundary already visits every upload plan and collector to build
-    // the shared budget. Fold exact frozen-lookup validation into that same
-    // O(upload) phase, then latch the legacy path if an impossible internal
-    // membership/key/rank mismatch is observed. Ordinary per-second steps do
-    // not rescan all endpoints merely to guard an immutable Arc-bound cache.
-    if directory.can_use_index(state, entities) && !directory.upload_index_matches(entities) {
-        directory.fallback_full_scan = true;
-    }
-    let existing_flow = network.runtime_flow.clone();
-    let mut flow = previous_flow
-        .clone()
-        .unwrap_or_else(|| create_flow(base, entities, &network, boundary_second));
-    synchronize_existing_boundary_uploads(&mut flow, existing_flow.as_ref());
-    let bandwidth = if directory.can_use_index(state, entities) {
+    // Commands and topology changes replace the Arc-bound directory. Within
+    // one immutable topology, validate only the rows selected by exact reverse
+    // dependencies instead of rescanning every upload slot and collector at
+    // every five-second boundary.
+    let indexed_before_flush = directory.can_use_index(state, entities);
+    let bandwidth = if indexed_before_flush {
         directory.indexed_runtime_bandwidth(base)
     } else {
         let (per_minute, tower_stacks, collector_stacks) =
@@ -2182,6 +2273,15 @@ pub(crate) fn settle_uploads(
             collector_stacks,
         }
     };
+    let existing_flow = network.runtime_flow.clone();
+    let mut flow = previous_flow.clone().unwrap_or_else(|| {
+        if indexed_before_flush {
+            create_flow_with_bandwidth(&network, boundary_second, bandwidth)
+        } else {
+            create_flow(base, entities, &network, boundary_second)
+        }
+    });
+    synchronize_existing_boundary_uploads(&mut flow, existing_flow.as_ref());
     flow.global_upload_per_minute = bandwidth.per_minute;
     flow.global_download_per_minute = bandwidth.per_minute;
     flow.quantum_tower_stacks = bandwidth.tower_stacks;
@@ -2198,48 +2298,51 @@ pub(crate) fn settle_uploads(
         runtime_bandwidth,
         true,
     )?;
+    if flush_scan.directory_fallback {
+        directory.fallback_full_scan = true;
+    }
     network = parse_network(base)?;
 
-    let use_index = directory.can_use_index(state, entities);
+    let (selected_rows, upload_scan) = directory.selected_boundary_upload_rows(state, entities);
+    if upload_scan.directory_fallback {
+        directory.fallback_full_scan = true;
+    }
+    let use_index = selected_rows.is_some();
     let reserved = (!use_index).then(|| reserved_outgoing(entities));
     let mut requests = Vec::new();
     let mut request_positions = HashMap::new();
-    let collector_indices = if use_index {
-        directory.collector_indices.as_slice()
-    } else {
-        indexed_endpoint_indices
-    };
-    for &entity_index in collector_indices {
-        let endpoint = entities[entity_index]
-            .as_object()
-            .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
-        if !use_index && !is_quantum_collector(endpoint) {
-            continue;
-        }
-        let Some(item_id) = string_at(endpoint, "storedItemId") else {
-            continue;
-        };
-        let available = floor_u64(item_amount(endpoint, "outputs", item_id));
-        if available > 0 {
-            let key = format!(
-                "{}:{item_id}",
-                string_at(endpoint, "id").unwrap_or_default()
-            );
-            upsert_request_in_stable_order(
-                &mut requests,
-                &mut request_positions,
-                Request {
-                    key,
-                    entity_index,
-                    item_id: item_id.to_owned(),
-                    amount: BigUint::from(available),
-                    priority: 1,
-                },
-            );
-        }
-    }
-    if use_index {
-        for plan in &directory.upload_plans {
+    let mut request_rows = HashMap::<String, usize>::new();
+    let mut retain_rows = BTreeSet::new();
+    if let Some(selected_rows) = selected_rows.as_ref() {
+        let collector_rows = directory.collector_plans.len();
+        for &row in selected_rows {
+            if row < collector_rows {
+                let plan = &directory.collector_plans[row];
+                if plan.continuously_productive {
+                    retain_rows.insert(row);
+                }
+                let endpoint = entities[plan.entity_index]
+                    .as_object()
+                    .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
+                let available = floor_u64(item_amount(endpoint, "outputs", &plan.item_id));
+                if available < 1 {
+                    continue;
+                }
+                request_rows.insert(plan.key.clone(), row);
+                upsert_request_in_stable_order(
+                    &mut requests,
+                    &mut request_positions,
+                    Request {
+                        key: plan.key.clone(),
+                        entity_index: plan.entity_index,
+                        item_id: plan.item_id.clone(),
+                        amount: BigUint::from(available),
+                        priority: 1,
+                    },
+                );
+                continue;
+            }
+            let plan = &directory.upload_plans[row - collector_rows];
             let endpoint = entities[plan.entity_index]
                 .as_object()
                 .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
@@ -2251,6 +2354,7 @@ pub(crate) fn settle_uploads(
             if available < 1 {
                 continue;
             }
+            request_rows.insert(plan.key.clone(), row);
             upsert_request_in_stable_order(
                 &mut requests,
                 &mut request_positions,
@@ -2264,6 +2368,35 @@ pub(crate) fn settle_uploads(
             );
         }
     } else {
+        for &entity_index in indexed_endpoint_indices {
+            let endpoint = entities[entity_index]
+                .as_object()
+                .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
+            if !is_quantum_collector(endpoint) {
+                continue;
+            }
+            let Some(item_id) = string_at(endpoint, "storedItemId") else {
+                continue;
+            };
+            let available = floor_u64(item_amount(endpoint, "outputs", item_id));
+            if available > 0 {
+                let key = format!(
+                    "{}:{item_id}",
+                    string_at(endpoint, "id").unwrap_or_default()
+                );
+                upsert_request_in_stable_order(
+                    &mut requests,
+                    &mut request_positions,
+                    Request {
+                        key,
+                        entity_index,
+                        item_id: item_id.to_owned(),
+                        amount: BigUint::from(available),
+                        priority: 1,
+                    },
+                );
+            }
+        }
         for &entity_index in indexed_endpoint_indices {
             let endpoint = entities[entity_index]
                 .as_object()
@@ -2318,6 +2451,12 @@ pub(crate) fn settle_uploads(
     );
     for request in &requests {
         let amount = accepted.get(&request.key).cloned().unwrap_or_default();
+        if use_index
+            && amount < request.amount
+            && let Some(&row) = request_rows.get(&request.key)
+        {
+            retain_rows.insert(row);
+        }
         let amount_number = amount.to_u64().unwrap_or(MAX_SAFE_INTEGER) as f64;
         if amount_number < 1.0 {
             continue;
@@ -2340,7 +2479,10 @@ pub(crate) fn settle_uploads(
     }
     network.runtime_flow = Some(flow);
     write_network(base, &network)?;
-    Ok(flush_scan)
+    if let Some(selected_rows) = selected_rows.as_ref() {
+        directory.commit_boundary_upload(selected_rows, retain_rows);
+    }
+    Ok(upload_scan)
 }
 
 fn completed_tech(base: &Map<String, Value>, id: &str) -> bool {
@@ -2812,6 +2954,31 @@ mod tests {
         })
     }
 
+    fn quantum_collector(
+        id: impl Into<String>,
+        item_id: &str,
+        machine_count: f64,
+        output: f64,
+    ) -> Value {
+        serde_json::json!({
+            "id": id.into(),
+            "kind": "station",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "orbital_collector",
+            "machineCount": machine_count,
+            "quantumMode": "quantum",
+            "storedItemId": item_id,
+            "inputs": { (item_id): 0 },
+            "outputs": { (item_id): output },
+            "stationRoutes": [],
+            "stationLastTransfer": 0,
+            "productionRate": 0,
+            "utilization": 0,
+            "routingCursor": 0
+        })
+    }
+
     fn set_test_item(entity: &mut Value, record: &str, item_id: &str, amount: f64) {
         set_item_amount(
             entity.as_object_mut().expect("quantum test station"),
@@ -2836,6 +3003,31 @@ mod tests {
             "base": base,
             "entities": entities,
         }))
+        .unwrap()
+    }
+
+    fn settle_upload_boundary(
+        state: &CoreState,
+        base: &mut Map<String, Value>,
+        entities: &mut [Value],
+        directory: &mut QuantumLogisticsDirectory,
+        boundary_second: f64,
+    ) -> QuantumActiveScan {
+        base.insert("elapsedSeconds".to_owned(), Value::from(boundary_second));
+        let endpoint_indices = state.factory_topology.quantum_endpoint_indices.clone();
+        let bandwidth = directory.legacy_runtime_bandwidth(state, base, entities);
+        settle_uploads(
+            state,
+            base,
+            entities,
+            boundary_second,
+            None,
+            SETTLEMENT_SECONDS,
+            &endpoint_indices,
+            directory,
+            &crate::station_route_ledger::StationRouteLedger::default(),
+            bandwidth,
+        )
         .unwrap()
     }
 
@@ -3350,6 +3542,303 @@ mod tests {
     }
 
     #[test]
+    fn boundary_upload_directory_is_quiet_and_one_collector_wake_is_o_one() {
+        let mut source = (0..32)
+            .map(|index| {
+                quantum_station(
+                    format!("supply-{index}"),
+                    "iron_ore",
+                    "supply",
+                    0.0,
+                    0.0,
+                    vec![],
+                )
+            })
+            .collect::<Vec<_>>();
+        source
+            .extend((0..16).map(|index| {
+                quantum_collector(format!("collector-{index}"), "iron_ore", 0.0, 0.0)
+            }));
+        let state = crate::simple_factory::tests::fixture_state(&source);
+        let mut active_base = active_quantum_base(0);
+        let mut oracle_base = active_base.clone();
+        let mut active_entities = source.clone();
+        let mut oracle_entities = source;
+        let mut active_directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+        let mut oracle_directory = QuantumLogisticsDirectory::build(&state, &oracle_entities);
+        oracle_directory.fallback_full_scan = true;
+
+        let initial = settle_upload_boundary(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut active_directory,
+            5.0,
+        );
+        settle_upload_boundary(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut oracle_directory,
+            5.0,
+        );
+        assert_eq!(initial.selected_rows, 48);
+        assert_eq!(
+            quantum_oracle_bytes(&active_base, &active_entities),
+            quantum_oracle_bytes(&oracle_base, &oracle_entities)
+        );
+
+        let quiet = settle_upload_boundary(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut active_directory,
+            10.0,
+        );
+        settle_upload_boundary(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut oracle_directory,
+            10.0,
+        );
+        assert_eq!(quiet.selected_rows, 0);
+        assert_eq!(quiet.total_rows, 48);
+        assert!(!quiet.dense_fallback);
+        assert!(!quiet.directory_fallback);
+        assert_eq!(
+            quantum_oracle_bytes(&active_base, &active_entities),
+            quantum_oracle_bytes(&oracle_base, &oracle_entities)
+        );
+
+        let collector_entity_index = 39;
+        set_test_item(
+            &mut active_entities[collector_entity_index],
+            "outputs",
+            "iron_ore",
+            9.0,
+        );
+        set_test_item(
+            &mut oracle_entities[collector_entity_index],
+            "outputs",
+            "iron_ore",
+            9.0,
+        );
+        active_directory.wake_from_stations(&[collector_entity_index]);
+        let woken = settle_upload_boundary(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut active_directory,
+            15.0,
+        );
+        settle_upload_boundary(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut oracle_directory,
+            15.0,
+        );
+        assert_eq!(woken.selected_rows, 1);
+        assert_eq!(
+            quantum_oracle_bytes(&active_base, &active_entities),
+            quantum_oracle_bytes(&oracle_base, &oracle_entities)
+        );
+
+        let quiet_again = settle_upload_boundary(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut active_directory,
+            20.0,
+        );
+        settle_upload_boundary(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut oracle_directory,
+            20.0,
+        );
+        assert_eq!(quiet_again.selected_rows, 0);
+        assert_eq!(
+            quantum_oracle_bytes(&active_base, &active_entities),
+            quantum_oracle_bytes(&oracle_base, &oracle_entities)
+        );
+    }
+
+    #[test]
+    fn boundary_upload_directory_uses_dense_fallback_at_three_quarters() {
+        let source = (0..4)
+            .map(|index| {
+                quantum_station(
+                    format!("supply-{index}"),
+                    "iron_ore",
+                    "supply",
+                    0.0,
+                    0.0,
+                    vec![],
+                )
+            })
+            .collect::<Vec<_>>();
+        let state = crate::simple_factory::tests::fixture_state(&source);
+        let mut active_base = active_quantum_base(0);
+        let mut oracle_base = active_base.clone();
+        let mut active_entities = source.clone();
+        let mut oracle_entities = source;
+        let mut active_directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+        let mut oracle_directory = QuantumLogisticsDirectory::build(&state, &oracle_entities);
+        oracle_directory.fallback_full_scan = true;
+        settle_upload_boundary(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut active_directory,
+            5.0,
+        );
+        settle_upload_boundary(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut oracle_directory,
+            5.0,
+        );
+
+        for entity_index in 0..3 {
+            set_test_item(
+                &mut active_entities[entity_index],
+                "outputs",
+                "iron_ore",
+                1.0,
+            );
+            set_test_item(
+                &mut oracle_entities[entity_index],
+                "outputs",
+                "iron_ore",
+                1.0,
+            );
+        }
+        active_directory.wake_from_stations(&[0, 1, 2]);
+        let scan = settle_upload_boundary(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut active_directory,
+            10.0,
+        );
+        settle_upload_boundary(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut oracle_directory,
+            10.0,
+        );
+        assert_eq!(scan.selected_rows, 4);
+        assert_eq!(scan.total_rows, 4);
+        assert!(scan.dense_fallback);
+        assert!(!scan.directory_fallback);
+        assert_eq!(
+            quantum_oracle_bytes(&active_base, &active_entities),
+            quantum_oracle_bytes(&oracle_base, &oracle_entities)
+        );
+    }
+
+    #[test]
+    fn boundary_upload_mod_rows_fail_closed_to_full_scan() {
+        let source = vec![quantum_station(
+            "mod-station",
+            "mod:量子矿石/Ω",
+            "supply",
+            0.0,
+            7.0,
+            vec![],
+        )];
+        let state = crate::simple_factory::tests::fixture_state(&source);
+        let mut indexed_base = active_quantum_base(0);
+        let mut oracle_base = indexed_base.clone();
+        let mut indexed_entities = source.clone();
+        let mut oracle_entities = source;
+        let mut indexed_directory = QuantumLogisticsDirectory::build(&state, &indexed_entities);
+        let mut oracle_directory = QuantumLogisticsDirectory::build(&state, &oracle_entities);
+        oracle_directory.fallback_full_scan = true;
+        let scan = settle_upload_boundary(
+            &state,
+            &mut indexed_base,
+            &mut indexed_entities,
+            &mut indexed_directory,
+            5.0,
+        );
+        settle_upload_boundary(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &mut oracle_directory,
+            5.0,
+        );
+        assert!(scan.directory_fallback);
+        assert_eq!(
+            quantum_oracle_bytes(&indexed_base, &indexed_entities),
+            quantum_oracle_bytes(&oracle_base, &oracle_entities)
+        );
+    }
+
+    #[test]
+    fn boundary_upload_persistent_and_segment_rebuilds_are_byte_identical() {
+        let mut source = (0..8)
+            .map(|index| {
+                quantum_station(
+                    format!("supply-{index}"),
+                    "iron_ore",
+                    "supply",
+                    0.0,
+                    0.0,
+                    vec![],
+                )
+            })
+            .collect::<Vec<_>>();
+        source.push(quantum_collector("collector-a", "iron_ore", 0.0, 6_000.0));
+        source.push(quantum_collector("collector-b", "iron_ore", 0.0, 5_000.0));
+        let state = crate::simple_factory::tests::fixture_state(&source);
+        let mut persistent_base = active_quantum_base(0);
+        let mut segmented_base = persistent_base.clone();
+        let mut persistent_entities = source.clone();
+        let mut segmented_entities = source;
+        let mut persistent_directory =
+            QuantumLogisticsDirectory::build(&state, &persistent_entities);
+        let mut saw_sparse = false;
+
+        for boundary in [5.0, 10.0, 15.0, 20.0] {
+            if boundary == 10.0 {
+                set_test_item(&mut persistent_entities[3], "outputs", "iron_ore", 17.0);
+                set_test_item(&mut segmented_entities[3], "outputs", "iron_ore", 17.0);
+                persistent_directory.wake_from_stations(&[3]);
+            }
+            let scan = settle_upload_boundary(
+                &state,
+                &mut persistent_base,
+                &mut persistent_entities,
+                &mut persistent_directory,
+                boundary,
+            );
+            let mut segmented_directory =
+                QuantumLogisticsDirectory::build(&state, &segmented_entities);
+            settle_upload_boundary(
+                &state,
+                &mut segmented_base,
+                &mut segmented_entities,
+                &mut segmented_directory,
+                boundary,
+            );
+            saw_sparse |= scan.selected_rows < scan.total_rows;
+            assert_eq!(
+                quantum_oracle_bytes(&persistent_base, &persistent_entities),
+                quantum_oracle_bytes(&segmented_base, &segmented_entities),
+                "boundary {boundary}"
+            );
+        }
+        assert!(saw_sparse);
+    }
+
+    #[test]
     fn opaque_fractional_routes_match_permissive_full_scan_reservations() {
         let routes = vec![
             serde_json::json!({
@@ -3475,7 +3964,9 @@ mod tests {
         let (selected, scan) = directory.selected_flush_plans(&state, &mismatched, false);
         assert!(selected.is_none());
         assert!(scan.directory_fallback);
-        assert!(!directory.upload_index_matches(&mismatched));
+        let (selected, upload_scan) = directory.selected_boundary_upload_rows(&state, &mismatched);
+        assert!(selected.is_none());
+        assert!(upload_scan.directory_fallback);
 
         let mut mod_source = source;
         mod_source[0]["stationSlots"][0]["itemId"] = Value::from("mod:量子矿石/Ω");

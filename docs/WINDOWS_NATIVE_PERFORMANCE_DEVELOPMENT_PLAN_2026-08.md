@@ -1552,7 +1552,7 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 >
 > 分支：`codex/windows-native-plan-completion`
 >
-> 本节验证的运行时代码 HEAD：`c27879c257`；仍是本地开发候选，未签名、未部署、未连接生产。GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 版本 1.2.3 均未改变。
+> 本节最近一次闭合验证的运行时代码 HEAD：`eb7ee8a18c`；仍是本地开发候选，未签名、未部署、未连接生产。GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 版本 1.2.3 均未改变，`authorityEligible=false` 继续保持关闭。
 
 ### 24.1 当前完成度口径
 
@@ -1560,12 +1560,12 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 
 | 目标 | 估算进度 | 已闭合的主要切片 | 仍未闭合 |
 | --- | ---: | --- | --- |
-| Rust 唯一玩家可见权威 | 约 65% | main-owned 连续时钟、durable 命令回执和启动恢复、同 revision 投影、接管前完整覆盖门禁；普通闭合配方、科研、火箭和太阳帆的部分纯挂机守恒证书 | `authorityEligible=false`；完整 productive pure-idle/offline/time-warp、出口、合同、有限资源和全部玩家命令覆盖仍不足；renderer/Worker 仍保留完整 GameState |
-| 完整薄 UI | 约 58% | 主画布、minimap、运行状态、星球导航、施工摘要/队列、选择工具栏、桌面/移动 inspector、多选与连接预览均可消费同 revision 有界 Rust 投影 | 科研、配方、星图、戴森、运营、银河、空间站等大工作区仍以完整 GameState 为主要输入；不是完整薄 renderer |
-| 真正 `O(active)` 物流 | 约 85% | 线路活动调度、本地活动线路/缓冲唤醒、星际 peer directory、跨 revision active demand queue 与反向唤醒；本地/星际 ready 及 dispatch 外层现保留独立候选，并按库存、容量、电力、warper、路线、量子、技术和拓扑事件反向唤醒；warper refill、station power、活动 route-ledger、拥堵更新和量子普通 flush/休眠 download 均有 75% 稠密稳定退化和 MOD/失配失败关闭；量子运行带宽与 all-scope raw-cargo 预留/在途账本复用持久目录和共享 route ledger | 五秒上传预算仍检查全部上传计划和活动采集器；施工量子需求、模式过渡、构建/拓扑重编、75% 高扇出及 fail-closed 路径会有意全扫；正容量下载端点是语义活动集合，稠密时不可休眠，故整体物流仍不是完整 `O(active)` |
-| 全领域确定性原生并行 | 约 55% | 普通机器和线路内核外，已并行或复用矿脉、物流 readiness/congestion、量子、施工、轨道终端、射线接收器、银河出口、任务指标和历史诊断等只读探针 | 共享状态的固定顺序提交、生产历史浮点累加、无采样任务扫描、完整离线/纯挂机及若干跨域阶段仍串行；尚无跨 CPU/Windows 版本的 24 小时矩阵 |
-| 整体代码目标 | 约 72% | 上述切片已提交且有局部/完整回归 | 不能等同发布成熟度 |
-| 可放心发布成熟度 | 约 48% | 本机类型、单元、native 边界、Rust core 和 build 门禁通过 | 完整 E2E/server 本 HEAD 新鲜矩阵、真实大档全进程 A/B、24 小时、多硬件、Defender/磁盘故障、签名和灰度均未完成 |
+| Rust 唯一玩家可见权威 | 约 69% | main-owned 连续时钟、durable 命令回执和启动恢复、同 revision 投影、接管前完整覆盖门禁；公开存档/云/恢复边界已在 native ownership 下失败关闭；普通闭合配方、科研、火箭和太阳帆具备部分纯挂机守恒证书；科研队列与自动续研已有小范围原生命令 | `authorityEligible=false`；完整 productive pure-idle/offline/time-warp、出口、合同、有限资源、公开主档写回和全部玩家命令覆盖仍不足；renderer/Worker 仍保留完整 GameState |
+| 完整薄 UI | 约 76% | 主画布、minimap、运行状态、星球导航、施工摘要/队列、选择/检查器、科研、配方、星际工业、量子库存、完整星图目录和戴森规划均可消费同 revision 有界 Rust 投影；戴森在原生模式只读且不回退旧 GameState | 戴森设计、科研启动/暂停/恢复、全局行星切换及托盘/手持物、蓝图、运营、银河、空间站等操作仍未全部原生命令化；不是完整薄 renderer |
+| 真正 `O(active)` 物流 | 约 90% | 线路活动调度、本地/星际 ready 与 dispatch、peer directory、跨 revision demand queue、量子普通 flush/休眠 download、量子五秒上传边界均使用持久活动/待处理集合和反向唤醒；安静 48 行上传目录校准后检查 0 行，单采集器唤醒检查 1 行；所有稀疏路径保留 75% 稠密退化和 MOD/失配失败关闭 | 施工量子需求仍扫描领域；network parse/write 仍遍历库存键；活动请求分配为 `O(A log A)`；模式/拓扑重编、连续生产采集器、自然稠密和 fail-closed 路径按语义仍会全扫，故整体物流尚不能标记 100% |
+| 全领域确定性原生并行 | 约 61% | 普通机器和线路内核外，已并行或复用矿脉、物流 readiness/congestion、量子、施工、轨道终端、射线接收器、银河出口、任务指标、历史诊断与生产历史刷新；生产历史使用固定 2,048 行分片和原顺序提交 | 共享状态的固定顺序写入、完整离线/纯挂机及若干跨域阶段仍串行；尚无跨 CPU、Windows 10/11、不同调度和 24 小时矩阵 |
+| 整体代码目标 | 约 85% | 本节列出的原生权威、薄 UI、活动物流、确定性并行和存档保护切片均已形成可回归提交 | 不能等同发布成熟度；剩余项目以跨域权威和真实运行门禁为主 |
+| 可放心发布成熟度 | 约 57% | 本机类型、完整单元、native 边界、Rust core、production build 和启动预算已有本 HEAD 新鲜结果 | 完整 E2E/server、真实大档全进程 24 小时、多硬件、Defender/磁盘故障、安装/覆盖升级、签名和灰度均未完成 |
 
 ### 24.2 本轮关键实现
 
@@ -1579,16 +1579,24 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 8. 本轮把本地/星际 ready 外层改为跨 revision 保留的 ready 集合与反向待处理队列；星际派遣与 readiness 分队列，保证 readiness 之后的量子、皮带和 warper 写入不会被同一步派遣探测提前排空。构建期完整校验 key/rank/order，活动拓扑每个缓存只校验一次；稳态候选达到 75%、遇到 opaque/MOD、非法 pending 或目录失配时按稳定全序失败关闭。1/5/60 秒字节 oracle 只覆盖 readiness/功率/派遣/线路推进切片，不冒充完整 `simulate_step` 五秒量子边界证明。
 9. 本轮继续把本地 dispatch 的旧全站外层改为 revision 私有需求队列：需求侧容量/载具变化直接唤醒自身，供应侧库存/载具/路线变化按本地 `(planet, item)` 反向目录展开，ready 候选和功率恢复边分别补入同一稳定实体顺序。缓存只在整批派遣成功后提交；候选达到全部本地站 75%、opaque/MOD 路线、非法 pending 或构建期精确 key/rank/order 失配时仍走旧完整站序。逐秒 dispatch + local route 专项在 1/5/60 秒与 full-station oracle 字节严格一致；该证据不包含完整 `simulate_step` 的量子五秒边界，也不证明剩余量子/全局预留阶段为 `O(active)`。
 10. 本轮为量子物流建立 revision 私有 `QuantumLogisticsDirectory`。塔/采集器堆叠、上传/下载 slot 与 station/item 反向键只在打开、科技/玩家命令或拓扑变化时重编；普通 flush 使用持久 pending 集合，容量为零的下载计划休眠，库存/容量、belt credit、本地/星际路线写回、量子库存释放和模式/拓扑变化精确唤醒。共享 `StationRouteLedger` 同一次路线解析生成量子专用 raw-cargo/all-scope 预留与在途视图，保持未知 scope、小数 cargo“累加后取整”的旧语义。正容量需求即使仓库无货也保持活动，以保留共享带宽公平性；75% 稠密、非 ASCII/MOD slot、精确 key/rank/slot 或拓扑失配按稳定全序失败关闭。普通步与五秒边界只把实际库存写入站反向唤醒，不再无条件唤醒全部量子端点。Rust full-scan oracle 逐秒覆盖 1～60 秒并校验每个五秒下载边界，完整 JS↔Rust 差分覆盖 1/4/5/10/60/600 秒；本阶段仍串行提交，线程数不参与量子分配顺序。
+11. `26b205d` 与 `78cbf24` 增加完整、有界、分页的 `star-map-catalog-v1`，并让星图恒星系、行星、资源与特征目录在原生权威模式只读取该投影。session、revision、registry fingerprint、分页链或 MOD/UTF-8 校验失败时整页失败关闭，星图修改操作继续只读。
+12. `451a38f` 把生产历史刷新改为固定 2,048 行私有分片和主线程原顺序提交，不改变 IEEE-754、舍入或负零语义。76,898,141 字节、80,674 个实体、155,746 条线路的真实只读存档中，生产历史阶段中位从 84.272 ms 降至 28.593 ms（2.95×），库存/速率阶段从 50.912 ms 降至 21.091 ms（2.41×），完整模拟秒从 1,751.84 ms 降至 1,165.17 ms（1.50×）；1/2/4/8/16 线程与 JavaScript oracle 的规范哈希一致。该结果仍未达到“现实 1 秒推进 1 个模拟秒”。
+13. `79f3d2b` 与 `16be03f` 封住原生权威持久化边界：native ownership 下的本地自动保存只接受并读回 Rust durable checkpoint，手动导出走原生 v47 流；公开云自动同步、导入/恢复、槽位/快照、内容包替换和返回主菜单在缺少完整原生公开写回与恢复链时失败关闭。它优先避免陈旧 renderer GameState 覆盖 Rust 状态，不把“按钮暂时不可用”伪装成保存成功。
+14. `b33e143`、`a10fd74` 与 `e9aeafe` 增加 `dyson-workspace-v1` 六类独立分页投影和完整只读薄 UI，显示全局/逐恒星系结构、火箭、太阳帆、功率、壳层、轨道、节点、框架、壳面与工程指标。只有恒星系选择和关闭可交互；全部设计/发射修改在原生命令闭合前禁用，loading 或旧 revision 不显示保留帧，也不读取旧 JavaScript 戴森状态。
+15. `af4d308` 与 `52165fc` 为原生科研开放已证明闭合的小范围命令：向已有有限科研追加队列、移出队列并级联移除失去前置的后续项、切换无限科研自动续研。开始/选择/暂停/取消/恢复和无限科研目标选择仍在 UI 明确禁用；Rust 对旧 revision、完成边界、未知科技、依赖次序和跨域夹带全部失败关闭。
+16. `eb7ee8a` 把五秒量子上传边界也接入持久 active/pending 集合、station/item/collector 反向索引和稳定公平次序。安静 48 行目录首次校准后选中 0 行，单采集器唤醒选中 1 行，3/4 活动时精确稠密退化；MOD、未知或签名漂移回到旧全序扫描。分段推进、目录重建与 full-scan oracle 逐字节一致；未接纳请求保持 active，候选失败不提交目录状态。
 
 ### 24.3 本 HEAD 新鲜验证
 
 - TypeScript：通过。
-- Vitest：220 文件通过、14 文件条件跳过；1,819 项通过、29 项跳过、0 失败。
-- Production build：1,992 modules；startup gzip 179,983 B、JavaScript 86,816 B、CSS 93,167 B、最大启动 JS 58,974 B、menu 253,608 B、forbidden 0。
-- Windows native/desktop JavaScript：272 通过、1 个目录 symlink 权限条件跳过、0 失败。
-- Rust core：`321/321`，本机 `--test-threads=16` 新鲜通过；`cargo fmt --check` 与 clippy `--all-targets -D warnings` 通过。
-- 星际活动需求专项：33/33；新增 waypoint hub 完成唤醒、power edge、peer reuse 和 full-scan oracle 均通过。
-- 本轮没有在该 HEAD 重新运行 server/API、完整 Chromium E2E、durable E2E、真实大档全进程 A/B 或安装包构建，因此不得复用旧包 SHA 或旧 final gate 作为本 HEAD 发布证据。
+- Vitest：246 文件通过、14 文件条件跳过；2,009 项通过、29 项跳过、0 失败。
+- Production build：2,008 modules；startup gzip 179,981 B、JavaScript 86,814 B、CSS 93,167 B、最大启动 JS 58,974 B、menu 253,622 B、forbidden 0。
+- Windows native/desktop JavaScript：322 通过、1 个目录 symlink 权限条件跳过、0 失败。
+- Rust core：`456/456` 串行新鲜通过；量子上传专项 20/20，科研 command 域 54/54；`cargo fmt --check` 与 clippy `--all-targets -D warnings` 通过。
+- 原生 Dyson store/UI/App 定向：15/15；原生科研 helper/UI/App 定向：11/11。
+- 生产历史真实大档矩阵：candidate 12/12、baseline 3/3；所有线程和 JavaScript oracle 的摘要哈希均为 `5cdb3da983444e3166866290deb1124a4bab1d55591937c2ce677e032014ddc1`。
+- Windows 高并发 Rust 测试仍保留两类未归因抖动：一次进程级 `0xc0000005`，一次 transition 并行矩阵失败；对应测试隔离运行通过，完整 core 串行通过。该证据不得删除，也不能用来宣称多硬件门禁已经完成。
+- 本轮没有在该 HEAD 重新运行 server/API、完整 Chromium E2E、durable E2E、24 小时全进程长跑、多硬件矩阵或安装包构建，因此不得复用旧包 SHA 或旧 final gate 作为本 HEAD 发布证据。
 
 ### 24.4 28 线程测试主机异常边界
 
@@ -1599,7 +1607,7 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 ### 24.5 下一批开发顺序
 
 1. 扩展原生物料/命令覆盖，只有所有玩家可达规则、离线和时间扭曲都通过守恒与确定性门禁后才允许 `authorityEligible=true`。
-2. 把科研、配方、星图、戴森、运营、银河和空间站工作区逐个替换为有界同 revision 投影；完成前 renderer 仍不是完整薄 UI。
-3. 继续收敛五秒量子上传预算对全部上传计划/活动采集器的扫描，以及施工量子需求和模式过渡等跨域边界；运行带宽、独立路线预留/在途提取、普通 flush 与容量为零的 download 外层已转为持久目录/活动集合。后续继续用稳定 full-scan oracle 做 1/5/60 秒严格等价回归，不能把正容量需求、高扇出自然稠密或 fail-closed 场景包装成稀疏收益。
+2. 科研、配方、星图和戴森只读面已迁移；下一步补齐全局行星切换、托盘/手持物与建筑交互的原生命令，再迁移蓝图、运营、银河和空间站。完成前 renderer 仍不是完整薄 UI。
+3. 五秒量子上传预算已转为活动集合；下一步收敛施工量子需求、库存表解析/写回和模式过渡等跨域边界。继续用稳定 full-scan oracle 做 1/5/60 秒严格等价回归，不能把 `O(A log A)` 活动排序、连续生产、高扇出自然稠密或 fail-closed 场景包装成 `O(active)` 完成。
 4. 对剩余跨域只读探针实施固定分片私有输出、稳定顺序提交；共享浮点和物料写入只有在逐线程规范哈希一致时才并行。
 5. 在功能代码冻结后重新执行 server/API、完整 E2E、真实大档全进程峰值/吞吐/保存 P95、24 小时和多硬件矩阵；签名、云往返和发布仍交给独立 Release Agent。

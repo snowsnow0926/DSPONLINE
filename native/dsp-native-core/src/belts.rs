@@ -16,6 +16,7 @@ use crate::state::{
 };
 
 const EPSILON: f64 = 0.0001;
+const SOURCE_SNAPSHOT_ROWS_PER_CHUNK: usize = 1_024;
 const TARGET_CAPACITY_ROWS_PER_CHUNK: usize = 1_024;
 
 #[inline]
@@ -551,6 +552,16 @@ impl ActiveSelection {
                 selected_group_indices,
                 ..
             } => ActiveGroupIndices::Mask(selected_group_indices.iter()),
+        }
+    }
+
+    fn group_index_at(&self, selected_index: usize) -> usize {
+        match self {
+            Self::All | Self::Dense { .. } => selected_index,
+            Self::Mask {
+                selected_group_indices,
+                ..
+            } => expand_compact_index(selected_group_indices[selected_index]),
         }
     }
 
@@ -1358,6 +1369,13 @@ struct Group {
     candidates: Vec<Candidate>,
     first_inactive_route: Option<usize>,
     inactive_routes: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BeltSourceSnapshot {
+    group_index: usize,
+    available: f64,
+    source_had_output: bool,
 }
 
 /// One target-capacity query in persisted first-use order. Routes that feed
@@ -3415,6 +3433,86 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
     admission_reason_with_entities(state, &entities)
 }
 
+fn reset_belt_source_snapshots_with_runtime<'a, ResolveItem>(
+    entities: &[Value],
+    prepared_routes: &PreparedRoutes,
+    selection: &ActiveSelection,
+    groups: &mut [Group],
+    executor: &DeterministicRuntime,
+    resolve_item: ResolveItem,
+) -> anyhow::Result<()>
+where
+    ResolveItem: Fn(u32) -> Option<&'a str> + Send + Sync,
+{
+    let group_count = prepared_routes.groups.len();
+    let selected_group_count = selection.selected_groups(group_count);
+    if executor.worker_count_for_items(selected_group_count) == 1 {
+        // Keep the one-worker path identical to the legacy persisted-order
+        // loop: resolve, probe, and reset each selected group immediately.
+        for group_index in selection.group_indices(group_count) {
+            let group = &mut groups[group_index];
+            let prepared_group = &prepared_routes.groups[group_index];
+            let item_id = resolve_item(prepared_group.item_symbol)
+                .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
+            let source = entities[expand_compact_index(prepared_group.source_index)]
+                .as_object()
+                .expect("validated source");
+            group.reset(
+                (output_amount(source, item_id) + EPSILON).floor(),
+                source
+                    .get("outputs")
+                    .and_then(Value::as_object)
+                    .is_some_and(|outputs| outputs.contains_key(item_id)),
+            );
+        }
+        return Ok(());
+    }
+
+    // Source rows are immutable probes. Fixed ascending chunks may therefore
+    // read them in private workers; ordered collection and this serial replay
+    // retain the exact group order, lowest failing symbol, and workspace
+    // mutation boundary of the one-worker loop.
+    let chunk_results = executor.ordered_chunk_map(
+        selected_group_count,
+        SOURCE_SNAPSHOT_ROWS_PER_CHUNK,
+        |_, range| {
+            range
+                .map(|selected_index| {
+                    let group_index = selection.group_index_at(selected_index);
+                    let prepared_group = &prepared_routes.groups[group_index];
+                    let item_id = resolve_item(prepared_group.item_symbol)
+                        .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
+                    let source = entities[expand_compact_index(prepared_group.source_index)]
+                        .as_object()
+                        .expect("validated source");
+                    Ok(BeltSourceSnapshot {
+                        group_index,
+                        available: (output_amount(source, item_id) + EPSILON).floor(),
+                        source_had_output: source
+                            .get("outputs")
+                            .and_then(Value::as_object)
+                            .is_some_and(|outputs| outputs.contains_key(item_id)),
+                    })
+                })
+                .collect::<Vec<anyhow::Result<BeltSourceSnapshot>>>()
+        },
+    );
+    let mut snapshots = chunk_results.into_iter().flatten();
+    for expected_group_index in selection.group_indices(group_count) {
+        let snapshot = snapshots
+            .next()
+            .ok_or_else(|| anyhow!("native belt source snapshot result is missing"))??;
+        if snapshot.group_index != expected_group_index {
+            bail!("native belt source snapshot order changed");
+        }
+        groups[expected_group_index].reset(snapshot.available, snapshot.source_had_output);
+    }
+    if snapshots.next().is_some() {
+        bail!("native belt source snapshot result count changed");
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn transfer_with_bandwidth(
     state: &CoreState,
@@ -3481,24 +3579,14 @@ pub(crate) fn transfer_with_bandwidth(
         ..
     } = &mut belt_runtime.workspace;
     debug_assert_eq!(groups.len(), prepared_routes.groups.len());
-    for group_index in selection.group_indices(prepared_routes.groups.len()) {
-        let group = &mut groups[group_index];
-        let prepared_group = &prepared_routes.groups[group_index];
-        let item_id = state
-            .symbols
-            .resolve(prepared_group.item_symbol)
-            .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
-        let source = entities[expand_compact_index(prepared_group.source_index)]
-            .as_object()
-            .expect("validated source");
-        group.reset(
-            (output_amount(source, item_id) + EPSILON).floor(),
-            source
-                .get("outputs")
-                .and_then(Value::as_object)
-                .is_some_and(|outputs| outputs.contains_key(item_id)),
-        );
-    }
+    reset_belt_source_snapshots_with_runtime(
+        entities,
+        prepared_routes,
+        &selection,
+        groups,
+        deterministic_runtime(),
+        |item_symbol| state.symbols.resolve(item_symbol),
+    )?;
     profiler.mark("belt-transfer-source-snapshot");
 
     let target_capacity_diagnostics = prepare_transfer_target_capacities_with_runtime(
@@ -4270,6 +4358,222 @@ mod tests {
             runtime.total_dirty.iter().copied().collect(),
             runtime.touched_routes.signature(),
         )
+    }
+
+    const SOURCE_SNAPSHOT_ITEMS: [&str; 2] = ["mod:扩展/单极磁石", "emoji/🚀"];
+
+    fn source_snapshot_item(symbol: u32) -> Option<&'static str> {
+        SOURCE_SNAPSHOT_ITEMS.get(symbol as usize).copied()
+    }
+
+    fn source_snapshot_fixture(group_count: usize) -> (Vec<Value>, PreparedRoutes) {
+        let mut entities = Vec::with_capacity(group_count);
+        let mut groups = Vec::with_capacity(group_count);
+        for group_index in 0..group_count {
+            let item_symbol = u32::try_from(group_index % SOURCE_SNAPSHOT_ITEMS.len()).unwrap();
+            let item_id = source_snapshot_item(item_symbol).unwrap();
+            let mut outputs = Map::new();
+            match group_index % 5 {
+                0 => {
+                    outputs.insert(item_id.to_owned(), Value::from(group_index as f64 + 10.75));
+                }
+                1 => {
+                    outputs.insert("mod:无关/保留".to_owned(), Value::from(group_index));
+                }
+                2 => {
+                    outputs.insert(item_id.to_owned(), Value::Null);
+                }
+                3 => {
+                    outputs.insert(item_id.to_owned(), Value::from("MOD-invalid-number"));
+                }
+                _ => {
+                    outputs.insert(item_id.to_owned(), Value::from(-0.0));
+                }
+            }
+            entities.push(json!({
+                "id": format!("MOD/源-{group_index}-中"),
+                "outputs": outputs,
+                "modPayload": { "unicode": "量子🚀" }
+            }));
+            groups.push(PreparedGroup {
+                source_index: compact_index(group_index, "source snapshot entity index").unwrap(),
+                item_symbol,
+                balanced_splitter: false,
+                always_awake: false,
+                route_indices: Box::default(),
+            });
+        }
+        (
+            entities,
+            PreparedRoutes {
+                routes: Vec::new(),
+                groups,
+                target_slot_count: 0,
+                total_capacity: 0.0,
+                group_by_key: Arc::new(HashMap::new()),
+            },
+        )
+    }
+
+    type SourceSnapshotSignature = Vec<(u64, bool, bool, usize, bool, usize)>;
+
+    fn seeded_source_snapshot_groups(group_count: usize) -> Vec<Group> {
+        (0..group_count)
+            .map(|group_index| Group {
+                available: -(group_index as f64 + 1.0),
+                source_had_output: false,
+                first_candidate: Some(Candidate {
+                    route_index: group_index,
+                    allowance: 3.0,
+                    moved: 1.0,
+                }),
+                candidates: vec![Candidate {
+                    route_index: group_index,
+                    allowance: 5.0,
+                    moved: 2.0,
+                }],
+                first_inactive_route: Some(group_index),
+                inactive_routes: vec![group_index],
+            })
+            .collect()
+    }
+
+    fn source_snapshot_signature(groups: &[Group]) -> SourceSnapshotSignature {
+        groups
+            .iter()
+            .map(|group| {
+                (
+                    group.available.to_bits(),
+                    group.source_had_output,
+                    group.first_candidate.is_some(),
+                    group.candidates.len(),
+                    group.first_inactive_route.is_some(),
+                    group.inactive_routes.len(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dense_source_snapshots_match_serial_bitwise_at_one_two_four_and_eight_workers() {
+        let group_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257;
+        let (entities, prepared) = source_snapshot_fixture(group_count);
+        let run = |workers| {
+            let selection = ActiveSelection::Dense {
+                // Dense mode deliberately ignores and merely recycles this
+                // wake scratch; the probe order must remain the full flat row order.
+                selected_group_indices: vec![9, 3, 1],
+                selected_route_indices: Vec::new(),
+            };
+            let mut groups = seeded_source_snapshot_groups(group_count);
+            reset_belt_source_snapshots_with_runtime(
+                &entities,
+                &prepared,
+                &selection,
+                &mut groups,
+                &DeterministicRuntime::for_test(workers),
+                source_snapshot_item,
+            )
+            .unwrap();
+            source_snapshot_signature(&groups)
+        };
+
+        let expected = run(1);
+        for workers in [2, 4, 8] {
+            assert_eq!(run(workers), expected, "workers={workers}");
+        }
+        assert_eq!(expected[0].0, 10.0_f64.to_bits());
+        assert!(expected[0].1);
+        assert_eq!(expected[1].0, 0.0_f64.to_bits());
+        assert!(!expected[1].1);
+        assert_eq!(expected[2].0, 0.0_f64.to_bits());
+        assert!(
+            expected[2].1,
+            "present invalid values retain output-key evidence"
+        );
+        assert!(
+            expected
+                .iter()
+                .all(|row| !row.2 && row.3 == 0 && !row.4 && row.5 == 0)
+        );
+    }
+
+    #[test]
+    fn sparse_source_snapshots_match_serial_and_leave_sleeping_groups_untouched() {
+        let selected_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 37;
+        let group_count = selected_count * 2 + 1;
+        let (entities, prepared) = source_snapshot_fixture(group_count);
+        let selected_group_indices = (0..selected_count)
+            .map(|index| compact_index(index * 2, "sparse source snapshot group").unwrap())
+            .collect::<Vec<_>>();
+        let run = |workers| {
+            let selection = ActiveSelection::Mask {
+                selected_group_indices: selected_group_indices.clone(),
+                selected_route_indices: Vec::new(),
+            };
+            let mut groups = seeded_source_snapshot_groups(group_count);
+            reset_belt_source_snapshots_with_runtime(
+                &entities,
+                &prepared,
+                &selection,
+                &mut groups,
+                &DeterministicRuntime::for_test(workers),
+                source_snapshot_item,
+            )
+            .unwrap();
+            source_snapshot_signature(&groups)
+        };
+
+        let expected = run(1);
+        for workers in [2, 4, 8] {
+            assert_eq!(run(workers), expected, "workers={workers}");
+        }
+        assert_eq!(expected[0].0, 10.0_f64.to_bits());
+        assert_eq!(expected[1].0, (-2.0_f64).to_bits());
+        assert!(
+            expected[1].2 && expected[1].4,
+            "sleeping group was not reset"
+        );
+        assert_eq!(
+            expected[group_count - 1].0,
+            (-(group_count as f64)).to_bits()
+        );
+    }
+
+    #[test]
+    fn source_snapshot_missing_symbol_keeps_first_error_and_serial_mutation_boundary() {
+        let group_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 64;
+        let first_missing = 17;
+        let second_missing = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 5;
+        let (entities, mut prepared) = source_snapshot_fixture(group_count);
+        prepared.groups[first_missing].item_symbol = 77;
+        prepared.groups[second_missing].item_symbol = 88;
+        let run = |workers| {
+            let mut groups = seeded_source_snapshot_groups(group_count);
+            let error = reset_belt_source_snapshots_with_runtime(
+                &entities,
+                &prepared,
+                &ActiveSelection::All,
+                &mut groups,
+                &DeterministicRuntime::for_test(workers),
+                source_snapshot_item,
+            )
+            .unwrap_err()
+            .to_string();
+            (error, source_snapshot_signature(&groups))
+        };
+
+        let expected = run(1);
+        for workers in [2, 4, 8] {
+            assert_eq!(run(workers), expected, "workers={workers}");
+        }
+        assert_eq!(expected.0, "native prepared belt item is missing");
+        assert!(!expected.1[first_missing - 1].2);
+        assert!(
+            expected.1[first_missing].2,
+            "the first invalid symbol must stop stable replay before that group"
+        );
+        assert!(expected.1[first_missing + 1].2);
     }
 
     #[test]

@@ -45,6 +45,10 @@ describe("native player-authority command App boundary", () => {
     expect(start).toBeGreaterThanOrEqual(0);
     expect(block).toMatch(/nativePlayerAuthorityOwnsRuntimeRef\.current/);
     expect(block).toMatch(/nativePlayerAuthorityCommandInFlightRef\.current/);
+    expect(block).toMatch(/projectedRevision !== binding\.source\.baseRevision/);
+    expect(block.indexOf("projectedRevision !== binding.source.baseRevision")).toBeLessThan(
+      block.indexOf("buildCommand(binding.source.baseRevision)"),
+    );
     expect(block).toMatch(/buildCommand\(binding\.source\.baseRevision\)/);
     expect(block).toMatch(/nativePlayerAuthorityCommandInFlightRef\.current = true[\s\S]*?binding\.source\.applyCommand\(command\)/);
     expect(block).toMatch(/invalidateFactoryAlertProjection\(\)/);

@@ -6348,6 +6348,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [invalidateFactoryAlertProjection, publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
 
   const commitNativeProjectedCommand = useCallback((
+    projectedRevision: number,
     buildCommand: (baseRevision: number) => SimulationCommandPatch | null,
   ): boolean => {
     if (rejectPlayerStateEditDuringPrimarySave()) return false;
@@ -6358,6 +6359,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const binding = nativePlayerAuthorityCommandBindingRef.current;
     if (!binding || nativePlayerAuthorityCommandInFlightRef.current) {
       setNotice("Windows 原生权威正在确认上一条命令或等待稳定 revision；本次操作未应用");
+      return false;
+    }
+    if (!Number.isSafeInteger(projectedRevision) || projectedRevision !== binding.source.baseRevision) {
+      setNotice("原生投影视图已过期；等待当前权威 revision 刷新后再操作");
       return false;
     }
     let command: SimulationCommandPatch | null;
@@ -14968,7 +14973,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               if (changed) setStarMapOpen(false);
               return changed;
             }}
-            onNativeRoleChange={(planetId, currentRole, targetRole) => commitNativeProjectedCommand((baseRevision) =>
+            onNativeRoleChange={(projectedRevision, planetId, currentRole, targetRole) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
               createNativeProjectedPlanetRoleCommand({ baseRevision, planetId, currentRole, targetRole }))}
             onRoleChange={(planetId: PlanetId, role: PlanetIndustryRole) => commitGame((current) => setPlanetIndustryRole(current, planetId, role))}
             onPlanetMetadataChange={(planetId, metadata) => commitGame((current) => setPlanetDisplayMetadata(current, planetId, metadata))}
@@ -14976,14 +14981,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onUpgradeAllStations={handleUpgradeAllInterstellarStations}
             onAttachAllQuantumStations={handleAttachAllQuantumStations}
             onCollectorQuantumModeChange={handleAllOrbitalCollectorsQuantumMode}
-            onNativeQuantumItemCapacityChange={(itemId, currentCapacity, targetCapacity) => commitNativeProjectedCommand((baseRevision) =>
+            onNativeQuantumItemCapacityChange={(projectedRevision, itemId, currentCapacity, targetCapacity) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
               createNativeProjectedQuantumItemCapacityCommand({ baseRevision, itemId, currentCapacity, targetCapacity }))}
             onQuantumItemCapacityChange={(itemId, value) => commitGame((current) => setQuantumLogisticsItemCapacity(current, itemId, value))}
-            onNativeStationPriorityChange={(stationId, slotIndex, currentPriority, targetPriority) => commitNativeProjectedCommand((baseRevision) =>
+            onNativeStationPriorityChange={(projectedRevision, stationId, slotIndex, currentPriority, targetPriority) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
               createNativeProjectedStationPriorityCommand({ baseRevision, stationId, slotIndex, currentPriority, targetPriority }))}
             onStationPriorityChange={(entityId: string, slotIndex: number, priority: LogisticsPriority) => commitGame((current) => setStationSlotPriority(current, entityId, slotIndex, priority))}
             onStationMinimumLoadChange={(entityId: string, slotIndex: number, minimumLoad: StationMinimumLoad) => commitGame((current) => setStationSlotMinimumLoad(current, entityId, slotIndex, minimumLoad))}
-            onNativeStationLimitsChange={(stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock) => commitNativeProjectedCommand((baseRevision) =>
+            onNativeStationLimitsChange={(projectedRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
               createNativeProjectedStationLimitsCommand({ baseRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock }))}
             onStationLimitsChange={(entityId: string, slotIndex: number, minStock: number, maxStock: number) => commitGame((current) => setStationSlotLimits(current, entityId, slotIndex, minStock, maxStock))}
             onFocusStation={focusStellarStation}

@@ -391,10 +391,10 @@ describe("NativeIndustryConsole", () => {
       inputValue(targetLimit, "0");
     });
 
-    expect(onNativeStationPriorityChange).toHaveBeenCalledWith(TARGET_STATION.stationId, 1, 2, 0);
-    expect(onNativeRoleChange).toHaveBeenCalledWith("home", "manufacturing", "mining");
-    expect(onNativeStationLimitsChange).toHaveBeenCalledWith(SOURCE_STATION.stationId, 0, 50, 500, 0, 500);
-    expect(onNativeStationLimitsChange).toHaveBeenCalledWith(TARGET_STATION.stationId, 1, 10, 200, 10, 0);
+    expect(onNativeStationPriorityChange).toHaveBeenCalledWith(9, TARGET_STATION.stationId, 1, 2, 0);
+    expect(onNativeRoleChange).toHaveBeenCalledWith(9, "home", "manufacturing", "mining");
+    expect(onNativeStationLimitsChange).toHaveBeenCalledWith(9, SOURCE_STATION.stationId, 0, 50, 500, 0, 500);
+    expect(onNativeStationLimitsChange).toHaveBeenCalledWith(9, TARGET_STATION.stationId, 1, 10, 200, 10, 0);
 
     const priorityZeroRoute = Object.freeze({ ...ROUTE, priority: 0 }) as typeof ROUTE;
     const priorityZeroModel = Object.freeze({
@@ -410,7 +410,7 @@ describe("NativeIndustryConsole", () => {
       refreshedPriority.value = "2";
       refreshedPriority.dispatchEvent(new Event("change", { bubbles: true }));
     });
-    expect(onNativeStationPriorityChange).toHaveBeenLastCalledWith(TARGET_STATION.stationId, 1, 0, 2);
+    expect(onNativeStationPriorityChange).toHaveBeenLastCalledWith(10, TARGET_STATION.stationId, 1, 0, 2);
 
     expect(onRoleChange).not.toHaveBeenCalled();
     expect(onStationPriorityChange).not.toHaveBeenCalled();
@@ -462,7 +462,7 @@ describe("NativeQuantumInventoryConsole", () => {
     const preset = Array.from(host.querySelectorAll<HTMLButtonElement>("[aria-label='铁矿石容量预设'] button"))
       .find((button) => button.textContent === "1亿")!;
     act(() => preset.click());
-    expect(onNativeItemCapacityChange).toHaveBeenCalledWith("iron_ore", "100000", "100000000");
+    expect(onNativeItemCapacityChange).toHaveBeenCalledWith(9, "iron_ore", "100000", "100000000");
 
     act(() => root.render(<AppLocaleProvider><NativeQuantumInventoryConsole
       readModel={null}

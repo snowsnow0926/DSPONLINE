@@ -18775,7 +18775,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           onOpenCanvasBookmark={openCanvasBookmark}
           onRemoveCanvasBookmark={(bookmarkId) => commitGame((current) => removeCanvasBookmark(current, bookmarkId))}
         />) : null}
-        {recipesOpen ? <RecipeWorkspace open readOnly={nativePlayerAuthorityOwnsRuntime} readModel={recipeWorkspaceReadModel} onReadRequest={updateRecipeWorkspaceSelector} mobile={nextMobileShell} mobileSubview={mobileWorkspaceSubview} onMobileOpenDetail={mobileNavigation.openWorkspaceSubview} onMobileReplaceDetail={(subview) => mobileNavigation.replaceWorkspaceSubview(subview)} focusItemId={campaignFocusItemId} onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setRecipesOpen(false)} onFocus={onRecipeFocusChange} onLocateProductionLine={locateRecipeWorkspaceProduction} /> : null}
+        {recipesOpen ? <RecipeWorkspace open readOnly={nativePlayerAuthorityOwnsRuntime && (!nativeRecipeFocusReadModel || nativePlayerAuthorityCommandPending)} readModel={recipeWorkspaceReadModel} onReadRequest={updateRecipeWorkspaceSelector} mobile={nextMobileShell} mobileSubview={mobileWorkspaceSubview} onMobileOpenDetail={mobileNavigation.openWorkspaceSubview} onMobileReplaceDetail={(subview) => mobileNavigation.replaceWorkspaceSubview(subview)} focusItemId={campaignFocusItemId} onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setRecipesOpen(false)} onFocus={onRecipeFocusChange} onLocateProductionLine={locateRecipeWorkspaceProduction} /> : null}
         {campaignOpen && !nativePlayerAuthorityOwnsRuntime ? (
           <CampaignWorkspace
             open

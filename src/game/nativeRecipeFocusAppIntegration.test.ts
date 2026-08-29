@@ -28,6 +28,7 @@ describe("native recipe-focus App integration", () => {
     expect(panel).toMatch(/onModeChange=\{onRecipeFocusModeChange\}/);
     expect(panel).toMatch(/onPositionChange=\{onRecipeFocusPositionChange\}/);
     expect(panel).not.toMatch(/rejectLegacyFactoryInteractionWhileNative/);
+    expect(app).toMatch(/<RecipeWorkspace open readOnly=\{nativePlayerAuthorityOwnsRuntime && \(!nativeRecipeFocusReadModel \|\| nativePlayerAuthorityCommandPending\)\}/);
   });
 
   it("does not consult stale JavaScript focus while native authority owns runtime", () => {

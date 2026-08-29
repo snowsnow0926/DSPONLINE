@@ -34,6 +34,7 @@ describe("native player-authority command App boundary", () => {
     expect(commit).toMatch(/createSimulationCommandPatch\(current, next, binding\.source\.baseRevision\)/);
     expect(commit).toMatch(/binding\.source\.applyCommand\(command\)/);
     expect(commit).toMatch(/does not install `next` or predict the[\s\S]*?bounded projections/);
+    expect(commit).toMatch(/\.finally\(async \(\) => \{[\s\S]*?try \{[\s\S]*?await nativePlayerAuthorityClockRef\.current\?\.refresh\(\)[\s\S]*?\} finally \{[\s\S]*?nativePlayerAuthorityCommandInFlightRef\.current = false/);
     expect(commit.slice(nativeBranch, historyRecord)).not.toMatch(/publishRuntimeGame|gameRef\.current\s*=|setGame\(|gameHistoryRef\.current\.record/);
   });
 
@@ -52,7 +53,7 @@ describe("native player-authority command App boundary", () => {
     expect(block).toMatch(/buildCommand\(binding\.source\.baseRevision\)/);
     expect(block).toMatch(/nativePlayerAuthorityCommandInFlightRef\.current = true[\s\S]*?binding\.source\.applyCommand\(command\)/);
     expect(block).toMatch(/invalidateFactoryAlertProjection\(\)/);
-    expect(block).toMatch(/\.finally\(\(\) => \{[\s\S]*?nativePlayerAuthorityCommandInFlightRef\.current = false/);
+    expect(block).toMatch(/\.finally\(async \(\) => \{[\s\S]*?try \{[\s\S]*?await nativePlayerAuthorityClockRef\.current\?\.refresh\(\)[\s\S]*?\} finally \{[\s\S]*?nativePlayerAuthorityCommandInFlightRef\.current = false/);
     expect(block).not.toMatch(/createSimulationCommandPatch|gameRef\.current|publishRuntimeGame|setGame\(|gameHistoryRef\.current\.record/);
   });
 

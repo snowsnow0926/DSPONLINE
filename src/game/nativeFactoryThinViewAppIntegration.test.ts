@@ -95,13 +95,14 @@ describe("factory thin-view App consumption", () => {
     const app = readFileSync(resolve("src/App.tsx"), "utf8");
 
     expect(app).toMatch(/selectNativeAuthoritativeFactoryWorkspaceFrame\(nativeFactoryThinViewSnapshot/);
-    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\s*\?\s*null\s*:\s*createWebFactoryRunStatusReadModel\(game\)/);
-    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\s*\?\s*null\s*:\s*createWebFactoryConstructionHeadlineReadModel\(game\)/);
-    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\s*\?\s*null\s*:\s*createWebFactoryConstructionWorkspaceReadModel\(game\)/);
-    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\s*\?\s*null\s*:\s*createPlanetNavigationReadModel\(game\)/);
-    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\?\.runStatus\s*\?\?/);
-    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\?\.constructionWorkspace\s*\?\?/);
-    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\?\.planetNavigation\s*\?\?/);
+    expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime\s*\?\s*null\s*:\s*createWebFactoryRunStatusReadModel\(game\)/);
+    expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime\s*\?\s*null\s*:\s*createWebFactoryConstructionHeadlineReadModel\(game\)/);
+    expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime\s*\?\s*null\s*:\s*createWebFactoryConstructionWorkspaceReadModel\(game\)/);
+    expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime\s*\?\s*null\s*:\s*createPlanetNavigationReadModel\(game\)/);
+    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\?\.runStatus\s*\?\?\s*nativePendingFactoryRunStatusReadModel/);
+    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\?\.constructionWorkspace\s*\?\?\s*nativePendingFactoryConstructionWorkspaceReadModel/);
+    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame\?\.planetNavigation\s*\?\?\s*nativePendingFactoryPlanetNavigationReadModel/);
+    expect(app).toMatch(/nativeFactoryProjectionPending[\s\S]*?正在核对 Windows 原生星球数据/);
   });
 
   it("feeds SelectionToolbar counts and lock state from the bounded atomic selection", () => {
@@ -176,8 +177,9 @@ describe("factory thin-view App consumption", () => {
     // Native rows remain display-only. Every specialized control and command
     // still receives stable entity/belt IDs through the existing callbacks.
     expect(app).toMatch(/const factorySelectionReadGame = useMemo\([\s\S]*?entities: factoryInteractionRows\.projectionEntities[\s\S]*?belts: factoryInteractionRows\.projectionBelts/);
-    expect(app).toMatch(/const factoryInspectorGame = inspectorTab === "inspect" \? factorySelectionReadGame : panelGame/);
+    expect(app).toMatch(/const factoryInspectorGame = nativePlayerAuthorityOwnsRuntime \|\| inspectorTab === "inspect"[\s\S]*?\? factorySelectionReadGame[\s\S]*?: panelGame/);
     expect(app).toMatch(/<StableInspectorPanel[\s\S]*?game=\{factoryInspectorGame\}/);
+    expect(app).toMatch(/<StableInspectorPanel[\s\S]*?readOnly=\{nativePlayerAuthorityOwnsRuntime\}/);
     expect(panels).toMatch(/<EntityInspector game=\{props\.game\} entity=\{props\.selectedEntity\}/);
     expect(panels).toMatch(/<BeltInspector game=\{props\.game\} belt=\{props\.selectedBelt\}/);
     expect(panels).toMatch(/canUpgradeEntity\(game, entity\.id\)/);

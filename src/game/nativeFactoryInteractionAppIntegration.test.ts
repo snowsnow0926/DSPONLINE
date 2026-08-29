@@ -30,6 +30,9 @@ describe("native factory interaction App wiring", () => {
     expect(interactionBlock).not.toMatch(/game\.entities\.(?:find|filter)|game\.belts\.(?:find|filter)|canvasGame\.belts\.(?:find|filter)/);
     expect(interactionBlock).toMatch(/const factorySelectionReadGame = useMemo\([\s\S]*?entities: factoryInteractionRows\.projectionEntities/);
     expect(interactionBlock).toMatch(/belts: factoryInteractionRows\.projectionBelts/);
+    expect(interactionBlock).toMatch(/activePlanetId: factoryCanvasPlanetId/);
+    expect(interactionBlock).toMatch(/cargo: null/);
+    expect(interactionBlock).toMatch(/tray: \{\}/);
   });
 
   it("uses exact native rows for connection previews but revalidates commands on authority state", () => {
@@ -43,9 +46,13 @@ describe("native factory interaction App wiring", () => {
       app.indexOf("useEffect(() => { connectRequestRef.current = onConnect;", app.indexOf("const onConnect = useCallback(")),
     );
 
-    expect(readStateBlock).toMatch(/selectFactoryConnectionReadState\([\s\S]*?nativeAuthoritativeFactoryCanvasFrameRef\.current/);
-    expect(readStateBlock).toMatch(/sessionId: nativePlayerAuthorityActiveFrame\?\.sessionId \?\? null/);
-    expect(readStateBlock).toMatch(/revision: factoryThinViewExpectedRevision/);
+    expect(readStateBlock).toMatch(/const frame = nativeAuthoritativeFactoryCanvasFrameRef\.current/);
+    expect(readStateBlock).toMatch(/nativePlayerAuthorityOwnsRuntimeRef\.current[\s\S]*?!frame[\s\S]*?!frame\.entityById\.has\(sourceEntityId\)/);
+    expect(readStateBlock).toMatch(/selectFactoryConnectionReadState\([\s\S]*?gameRef\.current,[\s\S]*?frame,/);
+    expect(readStateBlock).toMatch(/sessionId: frame\?\.sessionId \?\? nativePlayerAuthorityActiveFrame\?\.sessionId \?\? null/);
+    expect(readStateBlock).toMatch(/revision: frame\?\.revision \?\? factoryThinViewExpectedRevision/);
+    expect(readStateBlock).toMatch(/planetId: frame\?\.planetId \?\? gameRef\.current\.activePlanetId/);
+    expect(readStateBlock).toMatch(/nativePlayerAuthorityOwnsRuntimeRef\.current && frame && result\.entities !== frame\.entities/);
     expect(readStateBlock).toMatch(/const state = getFactoryConnectionReadState\(connection\.source, connection\.target\)/);
     expect(readStateBlock).not.toMatch(/gameRef\.current\.(?:entities|belts)\.(?:find|filter)/);
 

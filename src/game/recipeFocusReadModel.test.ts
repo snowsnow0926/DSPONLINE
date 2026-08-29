@@ -121,7 +121,8 @@ describe("recipe focus thin read model", () => {
     expect(RECIPE_FOCUS_NATIVE_BASE_FIELDS).toEqual(["recipeFocus"]);
     expect(app).toMatch(/baseFields:\s*\[\.\.\.RECIPE_FOCUS_NATIVE_BASE_FIELDS\]/);
     expect(app).toMatch(/selectNativeRecipeFocusReadModel\(nativeFactoryThinViewSnapshot/);
-    expect(app).toMatch(/nativePlayerAuthorityBoundFrame\s*\?\s*nativeRecipeFocusReadModel\s*:\s*webRecipeFocusReadModel/);
+    expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime\s*\?\s*nativeRecipeFocusReadModel\s*:\s*webRecipeFocusReadModel/);
+    expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? null : createWebRecipeFocusReadModel\(game\)/);
     expect(app).toMatch(/<RecipeFocusPanel\s+model=\{recipeFocusReadModel\}/);
     expect(app).not.toMatch(/<RecipeFocusPanel\s+game=\{/);
     expect(panel).toMatch(/RecipeFocusReadModel/);

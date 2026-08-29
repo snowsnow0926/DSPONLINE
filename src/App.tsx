@@ -436,6 +436,7 @@ import {
   createNativeProjectedQueueTechnologyCommand,
   createNativeProjectedRemoveQueuedTechnologyCommand,
 } from "./game/nativeProjectedTechnologyCommands";
+import { createNativeProjectedActivePlanetCommand } from "./game/nativeProjectedPlanetNavigationCommands";
 import {
   RECIPE_WORKSPACE_PROJECTION_LIMITS,
   createWebRecipeWorkspaceReadModel,
@@ -463,6 +464,7 @@ import {
   collectCanvasSelectionBeltIds,
   selectFactoryCanvasRows,
   selectNativeAuthoritativeFactoryCanvasFrame,
+  type FactoryCanvasRows,
 } from "./game/nativeFactoryCanvasFrame";
 import {
   createNativeFactoryInteractionPinRequest,
@@ -471,9 +473,19 @@ import {
   selectFactoryInteractionRows,
   selectNativeAuthoritativeFactoryInteractionRows,
   selectNativeFactorySelectionRelatedEntityIds,
+  type FactoryInteractionRows,
 } from "./game/nativeFactoryInteractionFrame";
 import { selectNativeAuthoritativeFactoryWorkspaceFrame } from "./game/nativeFactoryWorkspaceFrame";
-import { FACTORY_READ_MODEL_LIMITS, type FactoryViewportBoundsReadModel } from "./game/factoryReadModels";
+import {
+  FACTORY_READ_MODEL_LIMITS,
+  FACTORY_READ_MODEL_SCHEMA,
+  type FactoryConstructionHeadlineReadModel,
+  type FactoryConstructionWorkspaceReadModel,
+  type FactoryRunStatusReadModel,
+  type FactoryViewportBoundsReadModel,
+  type FactoryViewportReadModel,
+  type PlanetNavigationReadModel,
+} from "./game/factoryReadModels";
 import {
   factoryViewportProvesWholePlanet,
   selectFactoryConstructionHeadlineReadModel,
@@ -492,8 +504,15 @@ import {
   selectBoundNativePlayerAuthorityFrame,
   selectNativePlayerAuthorityMacroStatus,
 } from "./game/nativePlayerAuthorityClock";
+import { NativePlanetNavigationDiscoveryStore } from "./game/nativePlanetNavigationDiscoveryStore";
+import {
+  evaluateNativePlanetTransition,
+  nativePlanetRouteRequiresBootstrap,
+  retainNativePlanetRouteIdentity,
+} from "./game/nativePlanetNavigationReconciliation";
 import {
   createNativePlayerAuthorityCommandSource,
+  type NativePlayerAuthorityCommandReceipt,
   type NativePlayerAuthorityCommandSource,
 } from "./game/nativePlayerAuthorityCommandSource";
 import {
@@ -1647,6 +1666,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const canvasStackMembershipRef = useRef<ReadonlyMap<string, string>>(new Map());
   const canvasNodeCommitStartedAtRef = useRef(0);
   const canvasDragStopCountRef = useRef(0);
+  const factoryGestureEpochRef = useRef(0);
+  const nodeDragGestureEpochRef = useRef<number | null>(null);
   const multiDragStartRef = useRef<{
     primaryId: string;
     primaryPosition: { x: number; y: number };
@@ -1854,6 +1875,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const regionPointerRef = useRef<{ pointerId: number; start: { x: number; y: number } } | null>(null);
   const regionResizeRef = useRef<{
     pointerId: number;
+    element: HTMLButtonElement;
     region: CanvasRegion;
     handle: CanvasRegionResizeHandle;
     start: { x: number; y: number };
@@ -1874,6 +1896,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const suppressConnectionClickTimerRef = useRef(0);
   const viewportRef = useRef<CanvasViewport>({ ...initialViewport });
   const pendingPlanetViewportRef = useRef(new Map<PlanetId, { viewport: CanvasViewport; timer: number }>());
+  const [pendingNativePlanetChange, setPendingNativePlanetChange] = useState<{
+    readonly sessionId: string;
+    readonly acceptedRevision: number;
+    readonly previousPlanetId: PlanetId;
+    readonly planetId: PlanetId;
+    readonly leavingViewport: CanvasViewport;
+    readonly destinationViewport: CanvasViewport;
+    readonly reducedMotion: boolean;
+  } | null>(null);
   const viewportOnlyGameStateRef = useRef<GameState | null>(null);
   const canvasSizeRef = useRef<{ width: number; height: number } | null>(null);
   const canvasPointerMotionRef = useRef(createCanvasPointerMotionSession());
@@ -2162,6 +2193,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const factoryThinViewExpectedRevision = nativePlayerAuthorityBoundFrame?.revision ??
     nativePlayerAuthorityMacroStatus?.revision ??
     simulationStateRevisionRef.current;
+  const nativePlanetNavigationDiscoveryStoreRef = useRef<NativePlanetNavigationDiscoveryStore | null>(null);
+  if (nativePlanetNavigationDiscoveryStoreRef.current === null) {
+    nativePlanetNavigationDiscoveryStoreRef.current = new NativePlanetNavigationDiscoveryStore();
+  }
+  const nativePlanetNavigationDiscoveryStore = nativePlanetNavigationDiscoveryStoreRef.current;
+  const nativePlanetNavigationDiscoverySnapshot = useSyncExternalStore(
+    nativePlanetNavigationDiscoveryStore.subscribe,
+    nativePlanetNavigationDiscoveryStore.getSnapshot,
+    nativePlanetNavigationDiscoveryStore.getSnapshot,
+  );
   const nativeTechnologyWorkspaceStoreRef = useRef<NativeTechnologyWorkspaceStore | null>(null);
   if (nativeTechnologyWorkspaceStoreRef.current === null) {
     nativeTechnologyWorkspaceStoreRef.current = new NativeTechnologyWorkspaceStore();
@@ -2422,17 +2463,94 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           : "inactive";
   const nativeFactoryThinViewActive = nativeFactoryThinViewMode === "native-authoritative" ||
     nativeFactoryThinViewMode === "javascript-shadow";
+  useEffect(() => {
+    if (nativeFactoryThinViewMode === "native-authoritative-paused") {
+      // Keep the last verified discovery atom for diagnostics while the native
+      // clock is uncertain. It is not eligible to drive a newer projection.
+      return;
+    }
+    if (nativeFactoryThinViewMode !== "native-authoritative" ||
+      !nativePlayerAuthorityActiveFrame?.sessionId) {
+      nativePlanetNavigationDiscoveryStore.clear();
+      return;
+    }
+    const source = createNativePlayerAuthorityProjectionSource(
+      desktopBridge,
+      nativePlayerAuthorityActiveFrame.sessionId,
+    );
+    if (!source) {
+      nativePlanetNavigationDiscoveryStore.clear();
+      return;
+    }
+    void nativePlanetNavigationDiscoveryStore.refresh(source, {
+      enabled: true,
+      sessionId: nativePlayerAuthorityActiveFrame.sessionId,
+      expectedRevision: factoryThinViewExpectedRevision,
+    }).catch(() => undefined);
+  }, [
+    desktopBridge,
+    factoryThinViewExpectedRevision,
+    nativeFactoryThinViewMode,
+    nativePlanetNavigationDiscoveryStore,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+  ]);
+  const nativePlanetNavigationDiscoveryFrame = nativePlanetNavigationDiscoverySnapshot.frame;
+  const nativeFactoryAuthoritativeRoute = nativePlanetNavigationDiscoverySnapshot.status === "ready" &&
+      nativePlanetNavigationDiscoveryFrame !== null &&
+      nativePlanetNavigationDiscoveryFrame.sessionId === nativePlayerAuthorityActiveFrame?.sessionId &&
+      nativePlanetNavigationDiscoveryFrame.revision === factoryThinViewExpectedRevision
+    ? nativePlanetNavigationDiscoveryFrame
+    : null;
+  const nativeFactoryProjectionRouteReady = nativeFactoryThinViewMode !== "native-authoritative" ||
+    nativeFactoryAuthoritativeRoute !== null;
+  const [nativeFactoryConfirmedProjectionRoute, setNativeFactoryConfirmedProjectionRoute] = useState<{
+    readonly sessionId: string;
+    readonly planetId: PlanetId;
+  } | null>(null);
+  const nativeFactoryExactProjectionRoute = nativeFactoryAuthoritativeRoute
+    ? {
+        sessionId: nativeFactoryAuthoritativeRoute.sessionId,
+        planetId: nativeFactoryAuthoritativeRoute.currentPlanetId as PlanetId,
+      }
+    : null;
+  // Discovery is exact-revision gated, so it is briefly absent on every normal
+  // Rust clock tick. Retain only the last confirmed route identity for that
+  // same session during this read gap. It never enables an IPC read: the
+  // separate `nativeFactoryProjectionRouteReady` proof below still requires the
+  // current exact discovery atom.
+  const nativeFactoryDiscoveredProjectionRoute = retainNativePlanetRouteIdentity(
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativeFactoryExactProjectionRoute,
+    nativeFactoryConfirmedProjectionRoute,
+  );
+  const nativeFactoryUnpinnedBootstrap = nativePlanetRouteRequiresBootstrap(
+    nativeFactoryThinViewMode === "native-authoritative",
+    nativeFactoryConfirmedProjectionRoute,
+    nativeFactoryDiscoveredProjectionRoute,
+  );
+  // The unbound token is deliberately not derived from the legacy GameState.
+  // Every native read below is disabled until discovery proves the exact
+  // session/revision/current-planet tuple, so this value can only appear in the
+  // bounded loading shell and can never address authoritative gameplay data.
+  const nativeFactoryProjectionPlanetId = nativeFactoryThinViewMode === "native-authoritative"
+    ? (nativeFactoryDiscoveredProjectionRoute?.planetId ?? "__native_route_unbound__" as PlanetId)
+    : game.activePlanetId;
+  const factoryGestureRouteKey = nativeFactoryThinViewMode === "native-authoritative"
+    ? `${nativePlayerAuthorityActiveFrame?.sessionId ?? "unbound"}:${nativeFactoryProjectionPlanetId}`
+    : `web:${game.activePlanetId}`;
   const factoryThinViewAllSelectedEntityIds = useMemo(
-    () => [...new Set(selectedEntityIds)],
-    [selectedEntityIds],
+    () => nativeFactoryUnpinnedBootstrap ? [] : [...new Set(selectedEntityIds)],
+    [nativeFactoryUnpinnedBootstrap, selectedEntityIds],
   );
   const factoryThinViewSelectedEntityIds = useMemo(
     () => factoryThinViewAllSelectedEntityIds.slice(0, FACTORY_READ_MODEL_LIMITS.selectedEntityRows),
     [factoryThinViewAllSelectedEntityIds],
   );
   const factoryThinViewAllSelectedBeltIds = useMemo(
-    () => [...new Set(selectedBeltId ? [selectedBeltId, ...selectedBeltIds] : selectedBeltIds)],
-    [selectedBeltId, selectedBeltIds],
+    () => nativeFactoryUnpinnedBootstrap
+      ? []
+      : [...new Set(selectedBeltId ? [selectedBeltId, ...selectedBeltIds] : selectedBeltIds)],
+    [nativeFactoryUnpinnedBootstrap, selectedBeltId, selectedBeltIds],
   );
   const factoryThinViewSelectedBeltIds = useMemo(
     () => factoryThinViewAllSelectedBeltIds.slice(0, FACTORY_READ_MODEL_LIMITS.selectedBeltRows),
@@ -2442,7 +2560,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     () => selectNativeFactorySelectionRelatedEntityIds(nativeFactoryThinViewSnapshot, {
       sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
       revision: factoryThinViewExpectedRevision,
-      planetId: game.activePlanetId,
+      planetId: nativeFactoryProjectionPlanetId,
       selectedEntityIds: factoryThinViewSelectedEntityIds,
       selectedBeltIds: factoryThinViewSelectedBeltIds,
     }),
@@ -2450,29 +2568,32 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       factoryThinViewExpectedRevision,
       factoryThinViewSelectedBeltIds,
       factoryThinViewSelectedEntityIds,
-      game.activePlanetId,
+      nativeFactoryProjectionPlanetId,
       nativeFactoryThinViewSnapshot,
       nativePlayerAuthorityActiveFrame?.sessionId,
     ],
   );
   const factoryInteractionConnectionEntityIds = useMemo(
-    () => [...new Set([connectionDraft?.nodeId, connectionCandidateNodeId].filter((id): id is string => Boolean(id)))],
-    [connectionCandidateNodeId, connectionDraft?.nodeId],
+    () => nativeFactoryUnpinnedBootstrap
+      ? []
+      : [...new Set([connectionDraft?.nodeId, connectionCandidateNodeId].filter((id): id is string => Boolean(id)))],
+    [connectionCandidateNodeId, connectionDraft?.nodeId, nativeFactoryUnpinnedBootstrap],
   );
   const factoryInteractionPinRequest = useMemo(
     () => createNativeFactoryInteractionPinRequest({
       selectedEntityIds: factoryThinViewAllSelectedEntityIds,
-      selectedBeltIds,
-      primarySelectedBeltId: selectedBeltId,
+      selectedBeltIds: factoryThinViewAllSelectedBeltIds,
+      primarySelectedBeltId: nativeFactoryUnpinnedBootstrap ? null : selectedBeltId,
       connectionEntityIds: factoryInteractionConnectionEntityIds,
       relatedEntityIds: factoryThinViewRelatedEntityIds,
     }),
     [
       factoryInteractionConnectionEntityIds,
+      factoryThinViewAllSelectedBeltIds,
       factoryThinViewAllSelectedEntityIds,
       factoryThinViewRelatedEntityIds,
+      nativeFactoryUnpinnedBootstrap,
       selectedBeltId,
-      selectedBeltIds,
     ],
   );
   const factoryViewportPinnedEntityIds = factoryInteractionPinRequest.entityIds;
@@ -2489,10 +2610,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   );
   const nativeAuthoritativeFactoryCanvasFrame = useMemo(
     () => selectNativeAuthoritativeFactoryCanvasFrame(nativeFactoryThinViewSnapshot, {
-      enabled: nativeFactoryThinViewMode === "native-authoritative",
+      enabled: nativeFactoryThinViewMode === "native-authoritative" && nativeFactoryProjectionRouteReady,
       sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
       expectedRevision: factoryThinViewExpectedRevision,
-      planetId: game.activePlanetId,
+      planetId: nativeFactoryProjectionPlanetId,
       bounds: nativeFactoryViewportBounds,
       requestedPinnedEntityIds: factoryViewportPinnedEntityIds,
       requestedPinnedBeltIds: factoryViewportPinnedBeltIds,
@@ -2508,7 +2629,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       factoryInteractionPinRequest.truncated,
       factoryViewportPinnedBeltIds,
       factoryViewportPinnedEntityIds,
-      game.activePlanetId,
+      nativeFactoryProjectionPlanetId,
+      nativeFactoryProjectionRouteReady,
       nativeFactoryThinViewMode,
       nativeFactoryThinViewSnapshot,
       nativeFactoryViewportBounds,
@@ -2519,13 +2641,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   nativeAuthoritativeFactoryCanvasFrameRef.current = nativeAuthoritativeFactoryCanvasFrame;
   const nativeAuthoritativeFactoryInteractionRows = useMemo(
     () => selectNativeAuthoritativeFactoryInteractionRows(nativeAuthoritativeFactoryCanvasFrame, {
-      enabled: nativeFactoryThinViewMode === "native-authoritative",
+      enabled: nativeFactoryThinViewMode === "native-authoritative" && nativeFactoryProjectionRouteReady,
       sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
       revision: factoryThinViewExpectedRevision,
-      planetId: game.activePlanetId,
-      selectedEntityIds,
-      selectedBeltIds,
-      primarySelectedBeltId: selectedBeltId,
+      planetId: nativeFactoryProjectionPlanetId,
+      selectedEntityIds: factoryThinViewAllSelectedEntityIds,
+      selectedBeltIds: factoryThinViewAllSelectedBeltIds,
+      primarySelectedBeltId: nativeFactoryUnpinnedBootstrap ? null : selectedBeltId,
       connectionEntityIds: factoryInteractionConnectionEntityIds,
       requestedPinnedEntityIds: factoryViewportPinnedEntityIds,
       requestedPinnedBeltIds: factoryViewportPinnedBeltIds,
@@ -2534,28 +2656,31 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     [
       factoryInteractionConnectionEntityIds,
       factoryInteractionPinRequest.truncated,
+      factoryThinViewAllSelectedBeltIds,
+      factoryThinViewAllSelectedEntityIds,
       factoryThinViewExpectedRevision,
       factoryViewportPinnedBeltIds,
       factoryViewportPinnedEntityIds,
-      game.activePlanetId,
+      nativeFactoryProjectionPlanetId,
+      nativeFactoryProjectionRouteReady,
+      nativeFactoryUnpinnedBootstrap,
       nativeAuthoritativeFactoryCanvasFrame,
       nativeFactoryThinViewMode,
       nativePlayerAuthorityActiveFrame?.sessionId,
       selectedBeltId,
-      selectedBeltIds,
-      selectedEntityIds,
     ],
   );
   const nativeAuthoritativeFactoryWorkspaceFrame = useMemo(
     () => selectNativeAuthoritativeFactoryWorkspaceFrame(nativeFactoryThinViewSnapshot, {
-      enabled: nativeFactoryThinViewMode === "native-authoritative",
+      enabled: nativeFactoryThinViewMode === "native-authoritative" && nativeFactoryProjectionRouteReady,
       sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
       expectedRevision: factoryThinViewExpectedRevision,
-      activePlanetId: game.activePlanetId,
+      activePlanetId: nativeFactoryProjectionPlanetId,
     }),
     [
       factoryThinViewExpectedRevision,
-      game.activePlanetId,
+      nativeFactoryProjectionPlanetId,
+      nativeFactoryProjectionRouteReady,
       nativeFactoryThinViewMode,
       nativeFactoryThinViewSnapshot,
       nativePlayerAuthorityActiveFrame?.sessionId,
@@ -2599,73 +2724,146 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   useEffect(() => () => nativePlayerAuthorityMacroController?.dispose(), [nativePlayerAuthorityMacroController]);
   const nativeRecipeFocusReadModel = useMemo(
     () => selectNativeRecipeFocusReadModel(nativeFactoryThinViewSnapshot, {
-      enabled: nativeFactoryThinViewMode === "native-authoritative",
+      enabled: nativeFactoryThinViewMode === "native-authoritative" && nativeFactoryProjectionRouteReady,
       sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
       expectedRevision: factoryThinViewExpectedRevision,
-      activePlanetId: game.activePlanetId,
+      activePlanetId: nativeFactoryProjectionPlanetId,
     }),
     [
       factoryThinViewExpectedRevision,
-      game.activePlanetId,
+      nativeFactoryProjectionPlanetId,
+      nativeFactoryProjectionRouteReady,
       nativeFactoryThinViewMode,
       nativeFactoryThinViewSnapshot,
       nativePlayerAuthorityActiveFrame?.sessionId,
     ],
   );
+  const nativeFactoryRouteUnsafe = nativePlayerAuthorityOwnsRuntime &&
+    (nativeFactoryThinViewMode !== "native-authoritative" ||
+      nativeFactoryUnpinnedBootstrap || pendingNativePlanetChange !== null);
+  const nativeFactoryProjectionPending = nativePlayerAuthorityOwnsRuntime &&
+    (!nativeAuthoritativeFactoryWorkspaceFrame || !nativeAuthoritativeFactoryCanvasFrame ||
+      nativeFactoryRouteUnsafe);
+  const nativeFactoryProjectionPendingRef = useRef(nativeFactoryProjectionPending);
+  nativeFactoryProjectionPendingRef.current = nativeFactoryProjectionPending;
+  const factoryGestureSurfaceKey = `${factoryGestureRouteKey}:${nativeFactoryRouteUnsafe ? "unsafe" : "stable"}`;
+  const factoryConfirmedActivePlanetId = nativePlayerAuthorityOwnsRuntime
+    ? nativeAuthoritativeFactoryWorkspaceFrame?.planetNavigation.activePlanetId as PlanetId | undefined ?? null
+    : game.activePlanetId;
+  const factoryCanvasPlanetId = factoryConfirmedActivePlanetId ?? nativeFactoryProjectionPlanetId;
+  const nativePendingFactoryRunStatusReadModel = useMemo<FactoryRunStatusReadModel>(() => ({
+    schema: FACTORY_READ_MODEL_SCHEMA,
+    source: "native-core",
+    revision: factoryThinViewExpectedRevision,
+    activePlanetId: nativeFactoryProjectionPlanetId,
+    paused: true,
+  }), [factoryThinViewExpectedRevision, nativeFactoryProjectionPlanetId]);
+  const nativePendingFactoryConstructionHeadlineReadModel = useMemo<FactoryConstructionHeadlineReadModel>(() => ({
+    schema: FACTORY_READ_MODEL_SCHEMA,
+    source: "native-core",
+    revision: factoryThinViewExpectedRevision,
+    activePlanetId: nativeFactoryProjectionPlanetId,
+    activePlanetDisplayName: "等待原生投影",
+    constructionQueueCount: 0,
+  }), [factoryThinViewExpectedRevision, nativeFactoryProjectionPlanetId]);
+  const nativePendingFactoryConstructionWorkspaceReadModel = useMemo<FactoryConstructionWorkspaceReadModel>(() => ({
+    schema: FACTORY_READ_MODEL_SCHEMA,
+    source: "native-core",
+    revision: factoryThinViewExpectedRevision,
+    activePlanetId: nativeFactoryProjectionPlanetId,
+    queue: { rows: [], totalCount: 0, truncated: false },
+    automation: {
+      enabled: false,
+      quantumSourceEnabled: false,
+      totalCrafted: 0,
+      lastCraftedId: null,
+      targets: { rows: [], totalCount: 0, truncated: false },
+      jobs: { rows: [], totalCount: 0, truncated: false },
+      destroyedByproducts: { rows: [], totalCount: 0, truncated: false },
+    },
+  }), [factoryThinViewExpectedRevision, nativeFactoryProjectionPlanetId]);
+  const nativePendingFactoryPlanetNavigationReadModel = useMemo<PlanetNavigationReadModel>(() => ({
+    schema: FACTORY_READ_MODEL_SCHEMA,
+    activePlanetId: nativeFactoryProjectionPlanetId,
+    planets: { rows: [], totalCount: 0, truncated: false },
+  }), [nativeFactoryProjectionPlanetId]);
+  const nativePendingFactoryViewportReadModel = useMemo<FactoryViewportReadModel>(() => ({
+    schema: "factory-viewport-read-model-v1",
+    source: "native-core",
+    revision: factoryThinViewExpectedRevision,
+    planetId: nativeFactoryProjectionPlanetId,
+    bounds: nativeFactoryViewportBounds,
+    pinnedEntityIds: [],
+    pinnedBeltIds: [],
+    planetTotals: { entities: 0, belts: 0 },
+    viewportTotals: { entities: 0, belts: 0 },
+    worldBounds: nativeFactoryViewportBounds,
+    entities: [],
+    belts: [],
+    broadQueryFallback: false,
+  }), [factoryThinViewExpectedRevision, nativeFactoryProjectionPlanetId, nativeFactoryViewportBounds]);
   const webRecipeFocusReadModel = useMemo(
-    () => nativePlayerAuthorityBoundFrame ? null : createWebRecipeFocusReadModel(game),
-    [game.recipeFocus, nativePlayerAuthorityBoundFrame],
+    () => nativePlayerAuthorityOwnsRuntime ? null : createWebRecipeFocusReadModel(game),
+    [game.recipeFocus, nativePlayerAuthorityOwnsRuntime],
   );
-  const recipeFocusReadModel = nativePlayerAuthorityBoundFrame
+  const recipeFocusReadModel = nativePlayerAuthorityOwnsRuntime
     ? nativeRecipeFocusReadModel
     : webRecipeFocusReadModel;
   const webFactoryRunStatusReadModel = useMemo(
-    () => nativeAuthoritativeFactoryWorkspaceFrame ? null : createWebFactoryRunStatusReadModel(game),
-    [game.activePlanetId, game.paused, nativeAuthoritativeFactoryWorkspaceFrame],
+    () => nativePlayerAuthorityOwnsRuntime ? null : createWebFactoryRunStatusReadModel(game),
+    [game.activePlanetId, game.paused, nativePlayerAuthorityOwnsRuntime],
   );
   const factoryRunStatusReadModel = useMemo(
-    () => nativeAuthoritativeFactoryWorkspaceFrame?.runStatus ?? selectFactoryRunStatusReadModel(
-      webFactoryRunStatusReadModel!,
-      nativeFactoryThinViewSnapshot,
-      factoryThinViewExpectedRevision,
-    ),
-    [factoryThinViewExpectedRevision, nativeAuthoritativeFactoryWorkspaceFrame, nativeFactoryThinViewSnapshot, webFactoryRunStatusReadModel],
+    () => nativePlayerAuthorityOwnsRuntime
+      ? nativeAuthoritativeFactoryWorkspaceFrame?.runStatus ?? nativePendingFactoryRunStatusReadModel
+      : selectFactoryRunStatusReadModel(
+          webFactoryRunStatusReadModel!,
+          nativeFactoryThinViewSnapshot,
+          factoryThinViewExpectedRevision,
+        ),
+    [factoryThinViewExpectedRevision, nativeAuthoritativeFactoryWorkspaceFrame, nativeFactoryThinViewSnapshot, nativePendingFactoryRunStatusReadModel, nativePlayerAuthorityOwnsRuntime, webFactoryRunStatusReadModel],
   );
   const webFactoryConstructionHeadlineReadModel = useMemo(
-    () => nativeAuthoritativeFactoryWorkspaceFrame ? null : createWebFactoryConstructionHeadlineReadModel(game),
-    [game.activePlanetId, game.constructionQueue.length, nativeAuthoritativeFactoryWorkspaceFrame],
+    () => nativePlayerAuthorityOwnsRuntime ? null : createWebFactoryConstructionHeadlineReadModel(game),
+    [game.activePlanetId, game.constructionQueue.length, nativePlayerAuthorityOwnsRuntime],
   );
   const factoryConstructionHeadlineReadModel = useMemo(
-    () => nativeAuthoritativeFactoryWorkspaceFrame?.constructionHeadline ?? selectFactoryConstructionHeadlineReadModel(
-      webFactoryConstructionHeadlineReadModel!,
-      nativeFactoryThinViewSnapshot,
-      factoryThinViewExpectedRevision,
-    ),
-    [factoryThinViewExpectedRevision, nativeAuthoritativeFactoryWorkspaceFrame, nativeFactoryThinViewSnapshot, webFactoryConstructionHeadlineReadModel],
+    () => nativePlayerAuthorityOwnsRuntime
+      ? nativeAuthoritativeFactoryWorkspaceFrame?.constructionHeadline ?? nativePendingFactoryConstructionHeadlineReadModel
+      : selectFactoryConstructionHeadlineReadModel(
+          webFactoryConstructionHeadlineReadModel!,
+          nativeFactoryThinViewSnapshot,
+          factoryThinViewExpectedRevision,
+        ),
+    [factoryThinViewExpectedRevision, nativeAuthoritativeFactoryWorkspaceFrame, nativeFactoryThinViewSnapshot, nativePendingFactoryConstructionHeadlineReadModel, nativePlayerAuthorityOwnsRuntime, webFactoryConstructionHeadlineReadModel],
   );
   const webFactoryConstructionWorkspaceReadModel = useMemo(
-    () => nativeAuthoritativeFactoryWorkspaceFrame ? null : createWebFactoryConstructionWorkspaceReadModel(game),
-    [game, nativeAuthoritativeFactoryWorkspaceFrame],
+    () => nativePlayerAuthorityOwnsRuntime ? null : createWebFactoryConstructionWorkspaceReadModel(game),
+    [game, nativePlayerAuthorityOwnsRuntime],
   );
   const factoryConstructionWorkspaceReadModel = useMemo(
-    () => nativeAuthoritativeFactoryWorkspaceFrame?.constructionWorkspace ?? selectFactoryConstructionWorkspaceReadModel(
-      webFactoryConstructionWorkspaceReadModel!,
-      nativeFactoryThinViewSnapshot,
-      factoryThinViewExpectedRevision,
-    ),
-    [factoryThinViewExpectedRevision, nativeAuthoritativeFactoryWorkspaceFrame, nativeFactoryThinViewSnapshot, webFactoryConstructionWorkspaceReadModel],
+    () => nativePlayerAuthorityOwnsRuntime
+      ? nativeAuthoritativeFactoryWorkspaceFrame?.constructionWorkspace ?? nativePendingFactoryConstructionWorkspaceReadModel
+      : selectFactoryConstructionWorkspaceReadModel(
+          webFactoryConstructionWorkspaceReadModel!,
+          nativeFactoryThinViewSnapshot,
+          factoryThinViewExpectedRevision,
+        ),
+    [factoryThinViewExpectedRevision, nativeAuthoritativeFactoryWorkspaceFrame, nativeFactoryThinViewSnapshot, nativePendingFactoryConstructionWorkspaceReadModel, nativePlayerAuthorityOwnsRuntime, webFactoryConstructionWorkspaceReadModel],
   );
   const webFactoryPlanetNavigationReadModel = useMemo(
-    () => nativeAuthoritativeFactoryWorkspaceFrame ? null : createPlanetNavigationReadModel(game),
-    [game, nativeAuthoritativeFactoryWorkspaceFrame],
+    () => nativePlayerAuthorityOwnsRuntime ? null : createPlanetNavigationReadModel(game),
+    [game, nativePlayerAuthorityOwnsRuntime],
   );
   const factoryPlanetNavigationReadModel = useMemo(
-    () => nativeAuthoritativeFactoryWorkspaceFrame?.planetNavigation ?? selectFactoryPlanetNavigationReadModel(
-      webFactoryPlanetNavigationReadModel!,
-      nativeFactoryThinViewSnapshot,
-      factoryThinViewExpectedRevision,
-    ),
-    [factoryThinViewExpectedRevision, nativeAuthoritativeFactoryWorkspaceFrame, nativeFactoryThinViewSnapshot, webFactoryPlanetNavigationReadModel],
+    () => nativePlayerAuthorityOwnsRuntime
+      ? nativeAuthoritativeFactoryWorkspaceFrame?.planetNavigation ?? nativePendingFactoryPlanetNavigationReadModel
+      : selectFactoryPlanetNavigationReadModel(
+          webFactoryPlanetNavigationReadModel!,
+          nativeFactoryThinViewSnapshot,
+          factoryThinViewExpectedRevision,
+        ),
+    [factoryThinViewExpectedRevision, nativeAuthoritativeFactoryWorkspaceFrame, nativeFactoryThinViewSnapshot, nativePendingFactoryPlanetNavigationReadModel, nativePlayerAuthorityOwnsRuntime, webFactoryPlanetNavigationReadModel],
   );
   const factoryActivePlanetNavigationRow = useMemo(
     () => factoryPlanetNavigationReadModel.planets.rows.find(
@@ -2702,7 +2900,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         ? "empty" as const
         : "loading" as const;
   const webFactoryViewportReadModel = useMemo(
-    () => nativeAuthoritativeFactoryCanvasFrame ? null : createWebFactoryViewportReadModel(game, {
+    () => nativePlayerAuthorityOwnsRuntime ? null : createWebFactoryViewportReadModel(game, {
       planetId: game.activePlanetId,
       bounds: nativeFactoryViewportBounds,
       pinnedEntityIds: factoryViewportPinnedEntityIds,
@@ -2714,26 +2912,28 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       game.activePlanetId,
       game.belts,
       game.entities,
-      nativeAuthoritativeFactoryCanvasFrame,
+      nativePlayerAuthorityOwnsRuntime,
       nativeFactoryViewportBounds,
     ],
   );
   const factoryViewportReadModel = useMemo(
-    () => nativeAuthoritativeFactoryCanvasFrame?.viewportReadModel ?? selectFactoryViewportReadModel(
-      webFactoryViewportReadModel!,
-      nativeFactoryThinViewSnapshot,
-      factoryThinViewExpectedRevision,
-      {
-        bounds: nativeFactoryViewportBounds,
-        requestedPinnedEntityIds: factoryViewportPinnedEntityIds,
-        requestedPinnedBeltIds: factoryViewportPinnedBeltIds,
-        projectionEnabled: nativeFactoryThinViewActive,
-        requestTruncated:
-          factoryInteractionPinRequest.truncated ||
-          factoryThinViewAllSelectedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
-          factoryThinViewAllSelectedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows,
-      },
-    ),
+    () => nativePlayerAuthorityOwnsRuntime
+      ? nativeAuthoritativeFactoryCanvasFrame?.viewportReadModel ?? nativePendingFactoryViewportReadModel
+      : selectFactoryViewportReadModel(
+          webFactoryViewportReadModel!,
+          nativeFactoryThinViewSnapshot,
+          factoryThinViewExpectedRevision,
+          {
+            bounds: nativeFactoryViewportBounds,
+            requestedPinnedEntityIds: factoryViewportPinnedEntityIds,
+            requestedPinnedBeltIds: factoryViewportPinnedBeltIds,
+            projectionEnabled: nativeFactoryThinViewActive,
+            requestTruncated:
+              factoryInteractionPinRequest.truncated ||
+              factoryThinViewAllSelectedEntityIds.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows ||
+              factoryThinViewAllSelectedBeltIds.length > FACTORY_READ_MODEL_LIMITS.selectedBeltRows,
+          },
+        ),
     [
       factoryThinViewAllSelectedBeltIds.length,
       factoryThinViewAllSelectedEntityIds.length,
@@ -2745,6 +2945,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       nativeFactoryThinViewActive,
       nativeFactoryViewportBounds,
       nativeAuthoritativeFactoryCanvasFrame,
+      nativePendingFactoryViewportReadModel,
+      nativePlayerAuthorityOwnsRuntime,
       webFactoryViewportReadModel,
     ],
   );
@@ -2755,6 +2957,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return;
     }
     if (!nativeFactoryThinViewActive) {
+      nativeFactoryThinViewStore.clear();
+      return;
+    }
+    if (nativeFactoryThinViewMode === "native-authoritative" && !nativeFactoryProjectionRouteReady) {
       nativeFactoryThinViewStore.clear();
       return;
     }
@@ -2789,7 +2995,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       },
       viewport: {
         baseFields: [...RECIPE_FOCUS_NATIVE_BASE_FIELDS],
-        planetId: game.activePlanetId,
+        planetId: nativeFactoryProjectionPlanetId,
         bounds: nativeFactoryViewportBounds,
         entityCursor: 0,
         entityLimit: 256,
@@ -2807,7 +3013,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     factoryThinViewSelectedEntityIds,
     factoryViewportPinnedBeltIds,
     factoryViewportPinnedEntityIds,
-    game.activePlanetId,
+    nativeFactoryProjectionPlanetId,
+    nativeFactoryProjectionRouteReady,
     nativeFactoryViewportBounds,
     nativeFactoryThinViewStore,
     nativeFactoryThinViewActive,
@@ -3271,27 +3478,61 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     connectionCandidateNodeIdRef.current = nodeId;
     setConnectionCandidateNodeId(nodeId);
   }, []);
+  const abortCanvasGestureLifecycle = useCallback(() => {
+    factoryGestureEpochRef.current += 1;
+    const capture = canvasPointerCaptureRef.current;
+    if (capture) {
+      try { if (capture.element.hasPointerCapture(capture.pointerId)) capture.element.releasePointerCapture(capture.pointerId); } catch { /* WebView can invalidate the pointer during modal focus changes. */ }
+    }
+    canvasPointerCaptureRef.current = null;
+    canvasPointerMotionRef.current = stopCanvasPointerMotionSession(canvasPointerMotionRef.current);
+    if (canvasPointerMotionFrameRef.current != null) window.cancelAnimationFrame(canvasPointerMotionFrameRef.current);
+    canvasPointerMotionFrameRef.current = null;
+    const canvas = factoryCanvasRef.current;
+    const capturedPointerIds = new Set<number>(activeCanvasTouchesRef.current.keys());
+    if (regionPointerRef.current) capturedPointerIds.add(regionPointerRef.current.pointerId);
+    if (canvas) {
+      for (const pointerId of capturedPointerIds) {
+        try { if (canvas.hasPointerCapture(pointerId)) canvas.releasePointerCapture(pointerId); } catch { /* Route replacement can detach capture between checks. */ }
+      }
+    }
+    const resizeCapture = regionResizeRef.current;
+    if (resizeCapture) {
+      try {
+        if (resizeCapture.element.hasPointerCapture(resizeCapture.pointerId)) {
+          resizeCapture.element.releasePointerCapture(resizeCapture.pointerId);
+        }
+      } catch { /* The region handle may already have unmounted at the revision boundary. */ }
+    }
+    activeCanvasTouchesRef.current.clear();
+    canvasMultiTouchRef.current = null;
+    regionPointerRef.current = null;
+    regionResizeRef.current = null;
+    nodeDragActiveRef.current = false;
+    nodeDragGestureEpochRef.current = null;
+    multiDragStartRef.current = null;
+    dragAlignmentSpatialIndexRef.current = null;
+    alignmentSpatialIndexRef.current = null;
+    connectionHandleSpatialIndexRef.current = null;
+    blockCanvasTouchRef.current = false;
+    syntheticTouchCancelRef.current = false;
+    suppressConnectionClickRef.current = false;
+    window.clearTimeout(suppressConnectionClickTimerRef.current);
+    ctrlHeldRef.current = false;
+    selectionModeRef.current = false;
+    deleteModeRef.current = false;
+    setCtrlHeld(false);
+    setDraggedEntityIds([]);
+    setAlignmentGuides({ x: null, y: null });
+    setRegionDraft(null);
+    setRegionResizePreview(null);
+  }, []);
+  useLayoutEffect(() => {
+    if (nativeFactoryRouteUnsafe) abortCanvasGestureLifecycle();
+  }, [abortCanvasGestureLifecycle, nativeFactoryRouteUnsafe]);
   useEffect(() => {
     const resetAfterDialog = () => {
-      const capture = canvasPointerCaptureRef.current;
-      if (capture) {
-        try { if (capture.element.hasPointerCapture(capture.pointerId)) capture.element.releasePointerCapture(capture.pointerId); } catch { /* WebView can invalidate the pointer during modal focus changes. */ }
-      }
-      canvasPointerCaptureRef.current = null;
-      if (canvasPointerMotionFrameRef.current != null) window.cancelAnimationFrame(canvasPointerMotionFrameRef.current);
-      canvasPointerMotionFrameRef.current = null;
-      activeCanvasTouchesRef.current.clear();
-      canvasMultiTouchRef.current = null;
-      regionPointerRef.current = null;
-      regionResizeRef.current = null;
-      nodeDragActiveRef.current = false;
-      dragAlignmentSpatialIndexRef.current = null;
-      blockCanvasTouchRef.current = false;
-      syntheticTouchCancelRef.current = false;
-      ctrlHeldRef.current = false;
-      setCtrlHeld(false);
-      setAlignmentGuides({ x: null, y: null });
-      setRegionDraft(null);
+      abortCanvasGestureLifecycle();
       flowStore.getState().cancelConnection();
       flowStore.setState({ connectionClickStartHandle: null });
       clickConnectionPreviewRef.current = null;
@@ -3307,7 +3548,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
     window.addEventListener(GAME_DIALOG_CLOSED_EVENT, resetAfterDialog);
     return () => window.removeEventListener(GAME_DIALOG_CLOSED_EVENT, resetAfterDialog);
-  }, [flowStore]);
+  }, [abortCanvasGestureLifecycle, flowStore]);
   const lowEndMobile = useLowEndMobile();
   const nextMobileShell = mobileUiPreference === "next";
   const canvasMinimumZoom = nextMobileShell && game.settings.fontScale >= 2 ? 0.35 : 0.25;
@@ -3422,7 +3663,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     systemSpaceStationOpen || orbitalStationOpen ||
     blueprintsOpen || dysonPlannerOpen || operationsOpen || campaignOpen || galaxyOpen || constructionCenterOpen ||
     (nextMobileShell && mobileNavigation.route.kind === "hub");
-  const canvasWorkspacePaused = canvasWorkspaceHidden;
+  const canvasWorkspacePaused = canvasWorkspaceHidden || nativeFactoryProjectionPending;
   const canvasRefreshPaused = canvasWorkspacePaused || game.paused;
   const updateConnectionDraft = useCallback((draft: ConnectionDraft | null) => {
     connectionDraftRef.current = draft;
@@ -6623,8 +6864,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         setNotice(code === "NATIVE_PLAYER_AUTHORITY_COMMAND_TRANSPORT_UNCERTAIN"
           ? "原生玩家命令结果暂时无法确认；已停止重试并等待权威恢复，旧 JavaScript 状态未被安装"
           : "原生玩家命令未通过权威校验；本次操作未应用");
-      }).finally(() => {
-        nativePlayerAuthorityCommandInFlightRef.current = false;
+      }).finally(async () => {
+        try {
+          await nativePlayerAuthorityClockRef.current?.refresh();
+        } finally {
+          nativePlayerAuthorityCommandInFlightRef.current = false;
+        }
       });
       return true;
     }
@@ -6650,6 +6895,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const commitNativeProjectedCommand = useCallback((
     projectedRevision: number,
     buildCommand: (baseRevision: number) => SimulationCommandPatch | null,
+    afterCommitted?: (receipt: NativePlayerAuthorityCommandReceipt) => void,
   ): boolean => {
     if (rejectPlayerStateEditDuringPrimarySave()) return false;
     if (!nativePlayerAuthorityOwnsRuntimeRef.current) {
@@ -6674,21 +6920,41 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     if (!command) return false;
     nativePlayerAuthorityCommandInFlightRef.current = true;
-    void binding.source.applyCommand(command).then(() => {
+    void binding.source.applyCommand(command).then((receipt) => {
       // Never install or predict the projected edit locally. The next exact
       // authority revision refreshes every affected bounded read model.
       invalidateFactoryAlertProjection();
+      try {
+        afterCommitted?.(receipt);
+      } catch {
+        // The durable Rust command already succeeded. A renderer-only refresh
+        // callback must not be mislabeled as an authority command failure.
+        setNotice("原生命令已提交；界面刷新失败，请等待下一次权威投影");
+      }
     }).catch((error: unknown) => {
       const code = error && typeof error === "object" && "code" in error &&
         typeof error.code === "string" ? error.code : "";
       setNotice(code === "NATIVE_PLAYER_AUTHORITY_COMMAND_TRANSPORT_UNCERTAIN"
         ? "原生玩家命令结果暂时无法确认；已停止重试并等待权威恢复"
         : "原生投影命令未通过当前 revision 的权威校验；本次操作未应用");
-    }).finally(() => {
-      nativePlayerAuthorityCommandInFlightRef.current = false;
+    }).finally(async () => {
+      // A desktop transport may commit durably without delivering its push.
+      // Pull the main-owned clock once after every terminal command outcome;
+      // this is reconciliation only and never resends the mutation.
+      try {
+        await nativePlayerAuthorityClockRef.current?.refresh();
+      } finally {
+        nativePlayerAuthorityCommandInFlightRef.current = false;
+      }
     });
     return true;
   }, [invalidateFactoryAlertProjection, rejectPlayerStateEditDuringPrimarySave]);
+
+  const rejectLegacyFactoryInteractionWhileNative = useCallback((label: string): boolean => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current) return false;
+    setNotice(`Windows 原生权威尚未接入${label}命令；本次操作未应用，也不会读取旧星球数据`);
+    return true;
+  }, []);
 
   useEffect(() => {
     const loopback = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost";
@@ -8907,7 +9173,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         setSelectedEntityIds([]);
         setSelectedBeltId(null);
         setSelectedBeltIds([]);
-        commitGame((current) => dropCargoToTray(current));
+        if (!rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) {
+          commitGame((current) => dropCargoToTray(current));
+        }
       } else if (gameRef.current.timeWarp.enabled) {
         // The idle overlay owns the interaction surface. Do not let global
         // shortcuts mutate the hidden factory while it is active.
@@ -8916,6 +9184,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         event.preventDefault();
         togglePause();
       } else if (event.key === "Delete" && !editing && !document.querySelector('[role="dialog"]')) {
+        if (rejectLegacyFactoryInteractionWhileNative("建筑与线路回收")) return;
         const entityIds = selectedEntityIdsRef.current.filter((entityId) =>
           gameRef.current.entities.some((entity) => entity.id === entityId && (entity.kind !== "vein" || entity.minerCount > 0)));
         const beltIds = [...new Set([...selectedBeltIdsRef.current, ...(selectedBeltIdRef.current ? [selectedBeltIdRef.current] : [])])];
@@ -8939,7 +9208,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [closeCommandPalette, commandPaletteOpen, commitGame, flowStore, mobileNavigation.overlay, mobileNavigation.requestBack, mobileNavigation.route.kind, nextMobileShell, openCommandPalette, playTone, redoGame, togglePause, undoGame]);
+  }, [closeCommandPalette, commandPaletteOpen, commitGame, flowStore, mobileNavigation.overlay, mobileNavigation.requestBack, mobileNavigation.route.kind, nextMobileShell, openCommandPalette, playTone, redoGame, rejectLegacyFactoryInteractionWhileNative, togglePause, undoGame]);
 
   const onMiningStop = useCallback(() => {
     if (miningTimerRef.current != null) window.clearInterval(miningTimerRef.current);
@@ -8948,13 +9217,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   const onMiningStart = useCallback((entityId: string) => {
+    if (rejectLegacyFactoryInteractionWhileNative("手动采矿")) return;
     if (miningTimerRef.current != null) window.clearInterval(miningTimerRef.current);
     setMiningEntityId(entityId);
     commitGame((current) => manualMine(current, entityId, 1));
     miningTimerRef.current = window.setInterval(() => {
       commitGame((current) => manualMine(current, entityId, 1));
     }, 320);
-  }, [commitGame]);
+  }, [commitGame, rejectLegacyFactoryInteractionWhileNative]);
 
   useEffect(() => {
     window.addEventListener("pointerup", onMiningStop);
@@ -8969,16 +9239,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [onMiningStop]);
 
   const onPickOutput = useCallback((entityId: string, itemId: ItemId) => {
+    if (rejectLegacyFactoryInteractionWhileNative("建筑物资交互")) return;
     commitGame((current) => pickFromEntity(current, entityId, itemId));
-  }, [commitGame]);
+  }, [commitGame, rejectLegacyFactoryInteractionWhileNative]);
 
   const onPickInput = useCallback((entityId: string, itemId: ItemId) => {
+    if (rejectLegacyFactoryInteractionWhileNative("建筑物资交互")) return;
     commitGame((current) => pickFromEntityInput(current, entityId, itemId));
-  }, [commitGame]);
+  }, [commitGame, rejectLegacyFactoryInteractionWhileNative]);
 
   const onDropCargo = useCallback((entityId: string) => {
+    if (rejectLegacyFactoryInteractionWhileNative("建筑物资交互")) return;
     commitGame((current) => dropCargoToEntity(current, entityId));
-  }, [commitGame]);
+  }, [commitGame, rejectLegacyFactoryInteractionWhileNative]);
 
   const onDropDraggedItem = useCallback((
     targetEntityId: string,
@@ -8986,21 +9259,24 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     sourceKind: DraggedItemSourceKind,
     sourceId?: string,
   ) => {
+    if (rejectLegacyFactoryInteractionWhileNative("建筑物资交互")) return;
     commitGame((current) => sourceKind === "node" && sourceId
       ? moveEntityOutputToEntity(current, sourceId, targetEntityId, itemId)
       : sourceKind === "node-input" && sourceId
         ? moveEntityInputToEntity(current, sourceId, targetEntityId, itemId)
         : moveTrayItemToEntity(current, targetEntityId, itemId));
-  }, [commitGame]);
+  }, [commitGame, rejectLegacyFactoryInteractionWhileNative]);
 
   const handleStowCargo = useCallback(() => {
+    if (rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
     const before = gameRef.current;
     const next = dropCargoToTray(before);
     if (next === before) return;
     if (commitGame(() => next)) recordBasicOnboardingEvent("cargo-stowed");
-  }, [commitGame]);
+  }, [commitGame, rejectLegacyFactoryInteractionWhileNative]);
 
   const handleDraggedItemToTray = useCallback((itemId: ItemId, sourceKind: DraggedItemSourceKind, sourceId?: string) => {
+    if (rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
     if (!sourceId || (sourceKind !== "node" && sourceKind !== "node-input")) return;
     const before = gameRef.current;
     const next = sourceKind === "node"
@@ -9008,9 +9284,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       : moveEntityInputToTray(before, sourceId, itemId);
     if (next === before) return;
     if (commitGame(() => next)) recordBasicOnboardingEvent("cargo-stowed");
-  }, [commitGame]);
+  }, [commitGame, rejectLegacyFactoryInteractionWhileNative]);
 
   const expandEntityGroup = useCallback((entityId: string, requestedCount = 1, point?: { x: number; y: number }) => {
+    if (rejectLegacyFactoryInteractionWhileNative("建筑放置与扩建")) return undefined;
     const current = gameRef.current;
     const entity = current.entities.find((candidate) => candidate.id === entityId);
     if (!entity) return null;
@@ -9047,7 +9324,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       planetId: nextEntity.planetId,
       remaining: next.construction[constructionId] ?? 0,
     };
-  }, [commitGame, playTone, spawnInteractionBurst]);
+  }, [commitGame, playTone, rejectLegacyFactoryInteractionWhileNative, spawnInteractionBurst]);
 
   const expandPlacedEntity = useCallback((entityId: string, requestedCount: PlacementCount) => {
     const keepContinuous = ctrlHeldRef.current;
@@ -9071,6 +9348,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [expandEntityGroup]);
 
   const handleRemoveEntity = useCallback(async (entityId: string, count?: number) => {
+    if (rejectLegacyFactoryInteractionWhileNative("建筑回收")) return;
     const entity = gameRef.current.entities.find((candidate) => candidate.id === entityId);
     if (!entity) return;
     const availableCount = entity.kind === "vein" ? entity.minerCount : entity.machineCount;
@@ -9100,7 +9378,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice(`已完整回收${getBuilding(entity.buildingId).name} ×${entity.machineCount}`);
     }
     playTone("remove");
-  }, [commitGame, gameDialog, playTone]);
+  }, [commitGame, gameDialog, playTone, rejectLegacyFactoryInteractionWhileNative]);
 
   const onInstallMiner = useCallback((entityId: string, count: PlacementCount) => {
     expandPlacedEntity(entityId, count);
@@ -9149,7 +9427,199 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     commitGame((current) => setEntityGenerationPriority(current, entityId, priority));
   }, [commitGame]);
 
+  const resetPlanetScopedFactoryUi = useCallback(() => {
+    abortCanvasGestureLifecycle();
+    onMiningStop();
+    flowStore.getState().cancelConnection();
+    flowStore.setState({ connectionClickStartHandle: null });
+    clickConnectionPreviewRef.current = null;
+    clickConnectionSucceededRef.current = false;
+    connectionDraftRef.current = null;
+    connectionCandidateNodeIdRef.current = null;
+    batchConnectionModeRef.current = false;
+    batchConnectionsRef.current = [];
+    batchConnectionDraftRef.current = null;
+    batchConnectionDraftBaseRef.current = null;
+    dragConnectionStartRef.current = null;
+    continuousPlacementRef.current = null;
+    setClickConnectionPreview(null);
+    setClickConnectionTone("pending");
+    setClickConnectionSnapPoint(null);
+    updateConnectionDraft(null);
+    setConnectionCandidateNodeId(null);
+    setConnectionHint(null);
+    setBatchConnectionMode(false);
+    setBatchConnections([]);
+    setBatchConnectionFailures([]);
+    setBatchConnectionFeedback(null);
+    setMobileBatchConnectionExpanded(false);
+    selectedEntityIdsRef.current = [];
+    selectedBeltIdRef.current = null;
+    selectedBeltIdsRef.current = [];
+    setSelectedEntityIds([]);
+    setSelectedBeltId(null);
+    setSelectedBeltIds([]);
+    setFocusedBeltNetworkId(null);
+    setProductionLineFocus(null);
+    setLineFindMode(false);
+    setAutoLayoutUndo(null);
+    setPlacement(null);
+    setBlueprintPlacementId(null);
+    setBlueprintsOpen(false);
+    setInspectorTab("inspect");
+    setSelectionMode(false);
+    setDeleteMode(false);
+    setRegionMode(false);
+    setRegionDraft(null);
+    setRegionResizePreview(null);
+    setSelectedRegionId(null);
+    setMobileCanvasMode("browse");
+    setMobileContinuousPlacement(false);
+    setMobileActionEntityId(null);
+    setHoveredBeltId(null);
+    setHoveredNodeId(null);
+    setFocusedNodeId(null);
+    setNodes([]);
+  }, [abortCanvasGestureLifecycle, flowStore, onMiningStop, setNodes, updateConnectionDraft]);
+
+  useEffect(() => {
+    const workspace = nativeAuthoritativeFactoryWorkspaceFrame;
+    const canvas = nativeAuthoritativeFactoryCanvasFrame;
+    if (!workspace || !canvas || workspace.sessionId !== canvas.sessionId ||
+      workspace.revision !== canvas.revision ||
+      workspace.planetNavigation.activePlanetId !== canvas.planetId) return;
+    if (nativeFactoryUnpinnedBootstrap) resetPlanetScopedFactoryUi();
+    setNativeFactoryConfirmedProjectionRoute((current) =>
+      current?.sessionId === workspace.sessionId && current.planetId === canvas.planetId
+        ? current
+        : { sessionId: workspace.sessionId, planetId: canvas.planetId });
+  }, [
+    nativeAuthoritativeFactoryCanvasFrame,
+    nativeAuthoritativeFactoryWorkspaceFrame,
+    nativeFactoryUnpinnedBootstrap,
+    resetPlanetScopedFactoryUi,
+  ]);
+
+  const finishPlanetViewChange = useCallback((
+    previousPlanetId: PlanetId,
+    planetId: PlanetId,
+    destinationViewport: CanvasViewport,
+    reducedMotion: boolean,
+    notice: string,
+  ) => {
+    resetPlanetScopedFactoryUi();
+    if (!reducedMotion) setPlanetTransition({ id: Date.now(), from: previousPlanetId, to: planetId });
+    playTone("travel");
+    viewportRef.current = { ...destinationViewport };
+    setViewportZoom(destinationViewport.zoom);
+    setPendingBlueprintViewport({ ...destinationViewport });
+    setMinimapViewport({ ...destinationViewport });
+    setViewport(destinationViewport, { duration: reducedMotion ? 0 : 180 });
+    setNotice(notice);
+  }, [playTone, resetPlanetScopedFactoryUi, setViewport]);
+
+  useEffect(() => {
+    const pending = pendingNativePlanetChange;
+    const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+    const canvasFrame = nativeAuthoritativeFactoryCanvasFrame;
+    const target = pending && frame
+      ? frame.planetNavigation.planets.rows.find((row) => row.planetId === pending.planetId)
+      : undefined;
+    const decision = evaluateNativePlanetTransition(
+      pending,
+      frame
+        ? {
+            sessionId: frame.sessionId,
+            revision: frame.revision,
+            activePlanetId: frame.planetNavigation.activePlanetId,
+            targetRowActive: target?.active === true,
+          }
+        : null,
+      canvasFrame
+        ? { sessionId: canvasFrame.sessionId, revision: canvasFrame.revision, planetId: canvasFrame.planetId }
+        : null,
+    );
+    if (decision === "idle" || decision === "waiting") return;
+    if (decision !== "ready" || !pending || !target) {
+      setPendingNativePlanetChange(null);
+      setNotice(decision === "session-mismatch"
+        ? "原生权威会话已变化；已取消旧星球界面跳转，不会回退存档"
+        : decision === "projection-mismatch"
+          ? "原生星球画布与导航投影不一致；界面保持原位并等待复核"
+          : decision === "target-mismatch"
+            ? "原生星球切换回执与最新投影不一致；界面保持原位并等待复核"
+            : "原生星球导航投影不完整；界面保持原位并等待刷新");
+      return;
+    }
+    setPendingNativePlanetChange(null);
+    persistPlanetViewport(pending.previousPlanetId, pending.leavingViewport);
+    finishPlanetViewChange(
+      pending.previousPlanetId,
+      pending.planetId,
+      pending.destinationViewport,
+      pending.reducedMotion,
+      `已切换至${target.displayName}`,
+    );
+  }, [
+    finishPlanetViewChange,
+    nativeAuthoritativeFactoryCanvasFrame,
+    nativeAuthoritativeFactoryWorkspaceFrame,
+    pendingNativePlanetChange,
+    persistPlanetViewport,
+  ]);
+
   const onPlanetChange = useCallback((planetId: PlanetId): boolean => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      if (pendingNativePlanetChange) {
+        setNotice("Windows 原生星球切换正在完成界面确认；本次重复切换未应用");
+        return false;
+      }
+      const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+      if (!frame) {
+        setNotice("原生星球导航正在等待当前 revision；本次切换未应用");
+        return false;
+      }
+      const previousPlanetId = frame.planetNavigation.activePlanetId as PlanetId;
+      if (previousPlanetId === planetId) return true;
+      const target = frame.planetNavigation.planets.rows.find((row) => row.planetId === planetId);
+      if (!target?.discovered || !target.colonized) {
+        setNotice("目标行星尚未解锁或殖民；本次切换未应用");
+        return false;
+      }
+      const leavingViewport = { ...viewportRef.current };
+      // Camera positions and reduced-motion are renderer preferences, not
+      // gameplay authority. Inventory, tray and metrics never come from this
+      // stale JS mirror; Rust expands the single travel intent atomically.
+      const destinationViewport = gameRef.current.planetViewports[planetId] ?? { x: 510, y: 250, zoom: 0.84 };
+      const reducedMotion = gameRef.current.settings.reducedMotion;
+      commitNativeProjectedCommand(
+        frame.revision,
+        (baseRevision) => {
+          const command = createNativeProjectedActivePlanetCommand(frame, planetId);
+          return command?.baseRevision === baseRevision ? command : null;
+        },
+        (receipt) => {
+          // The receipt proves the durable mutation. Route the next bounded
+          // read, but delay every visible transition until that newer Rust
+          // projection independently confirms the target planet.
+          setPendingNativePlanetChange({
+            sessionId: frame.sessionId,
+            acceptedRevision: receipt.revision,
+            previousPlanetId,
+            planetId,
+            leavingViewport,
+            destinationViewport,
+            reducedMotion,
+          });
+        },
+      );
+      // `true` means the requested planet is already visible and safe for a
+      // caller to focus/select inside. A queued native command is deliberately
+      // not reported as completed; its visible continuation waits for the
+      // independently verified target projection above.
+      return false;
+    }
+
     const current = gameRef.current;
     const cargo = current.cargo;
     const previousPlanetId = current.activePlanetId;
@@ -9162,49 +9632,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       planetViewports: { ...nextPlanetState.planetViewports, [previousPlanetId]: leavingViewport },
     };
     if (!commitGame(() => next)) return false;
-
-    onMiningStop();
-    flowStore.getState().cancelConnection();
-    flowStore.setState({ connectionClickStartHandle: null });
-    clickConnectionPreviewRef.current = null;
-    clickConnectionSucceededRef.current = false;
-    setClickConnectionPreview(null);
-    setClickConnectionTone("pending");
-    setClickConnectionSnapPoint(null);
-    updateConnectionDraft(null);
-    setConnectionHint(null);
     const destinationViewport = next.planetViewports[planetId] ?? { x: 510, y: 250, zoom: 0.84 };
-    if (!current.settings.reducedMotion) setPlanetTransition({ id: Date.now(), from: previousPlanetId, to: planetId });
-    playTone("travel");
-    selectedEntityIdsRef.current = [];
-    selectedBeltIdRef.current = null;
-    selectedBeltIdsRef.current = [];
-    setSelectedEntityIds([]);
-    setSelectedBeltId(null);
-    setSelectedBeltIds([]);
-    setFocusedBeltNetworkId(null);
-    setPlacement(null);
-    setBlueprintPlacementId(null);
-    setRegionMode(false);
-    setRegionDraft(null);
-    setRegionResizePreview(null);
-    setSelectedRegionId(null);
-    regionPointerRef.current = null;
-    regionResizeRef.current = null;
-    setNodes([]);
-    viewportRef.current = { ...destinationViewport };
-    setViewportZoom(destinationViewport.zoom);
-    setPendingBlueprintViewport({ ...destinationViewport });
-    setMinimapViewport({ ...destinationViewport });
-    setViewport(destinationViewport, { duration: current.settings.reducedMotion ? 0 : 180 });
-    if (cargo) {
-      const titanium = cargo.itemId === "titanium_ore" || cargo.itemId === "titanium_ingot";
-      setNotice(`${titanium ? "托钛天王" : "手提星际运输"}：${ITEMS[cargo.itemId].name} ×${cargo.amount} 已抵达${getPlanetDisplayName(next, planetId)}`);
-    } else {
-      setNotice(`已切换至${getPlanetDisplayName(next, planetId)}`);
-    }
+    const destinationName = getPlanetDisplayName(next, planetId);
+    const notice = cargo
+      ? `${cargo.itemId === "titanium_ore" || cargo.itemId === "titanium_ingot" ? "托钛天王" : "手提星际运输"}：${ITEMS[cargo.itemId].name} ×${cargo.amount} 已抵达${destinationName}`
+      : `已切换至${destinationName}`;
+    finishPlanetViewChange(
+      previousPlanetId,
+      planetId,
+      destinationViewport,
+      current.settings.reducedMotion,
+      notice,
+    );
     return true;
-  }, [commitGame, flowStore, onMiningStop, playTone, setNodes, setViewport, updateConnectionDraft]);
+  }, [
+    commitGame,
+    commitNativeProjectedCommand,
+    finishPlanetViewChange,
+    nativeAuthoritativeFactoryWorkspaceFrame,
+    pendingNativePlanetChange,
+  ]);
 
   const onExploreSystem = useCallback((systemId: StarSystemId) => {
     commitGame((current) => exploreStarSystem(current, systemId));
@@ -9223,9 +9670,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     playTone("place");
   }, [commitGame, playTone]);
 
-  const activePlanetEntityCount = canvasRenderSnapshot.planetId === game.activePlanetId
-    ? canvasRenderSnapshot.entityById.size
-    : game.entities.filter((entity) => entity.planetId === game.activePlanetId).length;
+  const activePlanetEntityCount = nativePlayerAuthorityOwnsRuntime
+    ? nativeAuthoritativeFactoryCanvasFrame?.planetTotals.entities ?? 0
+    : canvasRenderSnapshot.planetId === game.activePlanetId
+      ? canvasRenderSnapshot.entityById.size
+      : game.entities.filter((entity) => entity.planetId === game.activePlanetId).length;
   const automaticPerformanceMode = activePlanetEntityCount >= 300 || constrainedMobile || lowFrameRateMode;
   const performanceVisualMode = endgameExtremeMode || game.settings.performanceMode || automaticPerformanceMode;
   const largeFactoryMode = performanceVisualMode && (activePlanetEntityCount >= 150 || constrainedMobile);
@@ -9307,6 +9756,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   const openCommandWorkspace = useCallback(async (workspace: CommandWorkspace) => {
+    if (workspace === "blueprints" && rejectLegacyFactoryInteractionWhileNative("蓝图管理")) return;
+    if (workspace === "resources" && rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
     closeAllWorkspaces();
     const authoritySyncId = authorityWorkspaceSyncIdRef.current + 1;
     authorityWorkspaceSyncIdRef.current = authoritySyncId;
@@ -9384,7 +9835,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }
       }
     }
-  }, [closeAllWorkspaces, mobileNavigation.openSheet, mobileNavigation.openWorkspace, mobileNavigation.replaceModalWithSheet, mobileNavigation.replaceModalWithWorkspace, nextMobileShell, refreshAuthoritativeUiMirror, requestAuthoritativeStatisticsHistory]);
+  }, [closeAllWorkspaces, mobileNavigation.openSheet, mobileNavigation.openWorkspace, mobileNavigation.replaceModalWithSheet, mobileNavigation.replaceModalWithWorkspace, nextMobileShell, refreshAuthoritativeUiMirror, rejectLegacyFactoryInteractionWhileNative, requestAuthoritativeStatisticsHistory]);
 
   const openSystemSpaceStation = useCallback((systemId: StarSystemId) => {
     closeAllWorkspaces();
@@ -9559,8 +10010,30 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     return true;
   }, [clearHistory, invalidateFactoryAlertProjection, onMiningStop, readNativeAuthorityPersistenceBoundary, setNodes, setViewport]);
 
+  const readConfirmedFactoryPlanetId = useCallback((): PlanetId | null => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current) return gameRef.current.activePlanetId;
+    return nativeAuthoritativeFactoryCanvasFrameRef.current?.planetId ?? null;
+  }, []);
+
+  const ensureFactoryPlanetVisible = useCallback((planetId: PlanetId): boolean => {
+    const activePlanetId = readConfirmedFactoryPlanetId();
+    if (activePlanetId === null) {
+      setNotice("Windows 原生星球画面尚未确认；本次定位未执行");
+      return false;
+    }
+    return activePlanetId === planetId || onPlanetChange(planetId);
+  }, [onPlanetChange, readConfirmedFactoryPlanetId]);
+
   const focusEntityIds = useCallback((entityIds: string[]) => {
-    const selected = gameRef.current.entities.filter((entity) => entityIds.includes(entity.id));
+    const nativeFrame = nativePlayerAuthorityOwnsRuntimeRef.current
+      ? nativeAuthoritativeFactoryCanvasFrameRef.current
+      : null;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current && !nativeFrame) {
+      setNotice("Windows 原生建筑画面尚未确认；本次定位未执行");
+      return;
+    }
+    const selected = (nativeFrame?.entities ?? gameRef.current.entities)
+      .filter((entity) => entityIds.includes(entity.id));
     if (selected.length === 0) return;
     const center = selected.reduce((total, entity) => ({
       x: total.x + entity.position.x + 128,
@@ -9577,14 +10050,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (!targetId) return;
     const target = gameRef.current.entities.find((entity) => entity.id === targetId);
     if (!target) return;
-    if (gameRef.current.activePlanetId !== target.planetId && !onPlanetChange(target.planetId)) return;
+    if (!ensureFactoryPlanetVisible(target.planetId)) return;
     setSelectedEntityIds([target.id]);
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
     setMobilePanel(null);
     focusEntityIds([target.id]);
     setNotice(`已定位连续拉线目标：${batchConnectionEntityLabel(target)}`);
-  }, [focusEntityIds, onPlanetChange]);
+  }, [ensureFactoryPlanetVisible, focusEntityIds]);
 
   const focusPlacedEntity = useCallback((entityId: string, nativeTarget?: CommandPaletteNativeEntityTarget) => {
     if (nativeTarget) {
@@ -9602,7 +10075,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         setNotice("原生命令搜索结果已过期，本次定位已安全取消");
         return;
       }
-      if (focusPlan.changePlanet && !onPlanetChange(focusPlan.planetId)) return;
+      if (!ensureFactoryPlanetVisible(focusPlan.planetId)) return;
       setSelectedEntityIds([entityId]);
       setSelectedBeltId(null);
       setSelectedBeltIds([]);
@@ -9618,7 +10091,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     const entity = gameRef.current.entities.find((candidate) => candidate.id === entityId);
     if (!entity) return;
-    if (gameRef.current.activePlanetId !== entity.planetId && !onPlanetChange(entity.planetId)) return;
+    if (!ensureFactoryPlanetVisible(entity.planetId)) return;
     setSelectedEntityIds([entityId]);
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
@@ -9627,7 +10100,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (nextMobileShell) mobileNavigation.replaceModalWithSheet("inspector");
     window.setTimeout(() => focusEntityIds([entityId]), gameRef.current.settings.reducedMotion ? 0 : 50);
     setNotice(`已定位：${entity.buildingId ? getBuilding(entity.buildingId).name : entity.resourceId ? ITEMS[entity.resourceId].name : entity.id}`);
-  }, [focusEntityIds, mobileNavigation.replaceModalWithSheet, nativeCoreProjectionSessionId, nativePlayerAuthorityClock, nextMobileShell, onPlanetChange, setCenter]);
+  }, [ensureFactoryPlanetVisible, focusEntityIds, mobileNavigation.replaceModalWithSheet, nativeCoreProjectionSessionId, nativePlayerAuthorityClock, nextMobileShell, setCenter]);
 
   const locateProductionLine = useCallback((itemId: ItemId, planetId: PlanetId) => {
     const location = getProductionLineLocations(gameRef.current, itemId).find((candidate) => candidate.planetId === planetId);
@@ -9635,7 +10108,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice(`${ITEMS[itemId].name}在${getPlanetDisplayName(gameRef.current, planetId)}没有可定位的生产设备`);
       return;
     }
-    if (gameRef.current.activePlanetId !== planetId && !onPlanetChange(planetId)) return;
+    if (!ensureFactoryPlanetVisible(planetId)) return;
     closeAllWorkspaces();
     setCommandPaletteOpen(false);
     setMobilePanel(null);
@@ -9645,7 +10118,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (nextMobileShell) mobileNavigation.goFactory();
     window.setTimeout(() => focusEntityIds(location.producerEntityIds), gameRef.current.settings.reducedMotion ? 0 : 50);
     setNotice(`已定位${getPlanetDisplayName(gameRef.current, planetId)}的${ITEMS[itemId].name}产线 · ${location.producerEntityIds.length} 个生产节点`);
-  }, [closeAllWorkspaces, focusEntityIds, mobileNavigation.goFactory, nextMobileShell, onPlanetChange]);
+  }, [closeAllWorkspaces, ensureFactoryPlanetVisible, focusEntityIds, mobileNavigation.goFactory, nextMobileShell]);
 
   const locateRecipeWorkspaceProduction = useCallback(async (itemId: ItemId, planetId: PlanetId) => {
     if (!nativePlayerAuthorityBoundFrame) {
@@ -9745,7 +10218,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     },
     onLocate: (itemId: ItemId) => {
       const locations = getProductionLineLocations(gameRef.current, itemId);
-      const target = locations.find((location) => location.planetId === gameRef.current.activePlanetId) ?? locations[0];
+      const activePlanetId = readConfirmedFactoryPlanetId();
+      if (activePlanetId === null) {
+        setNotice("Windows 原生星球画面尚未确认；本次定位未执行");
+        return;
+      }
+      const target = locations.find((location) => location.planetId === activePlanetId) ?? locations[0];
       if (!target) {
         setNotice(`${ITEMS[itemId].name}在当前存档中没有可定位的生产设备`);
         return;
@@ -9753,7 +10231,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       locateProductionLine(itemId, target.planetId);
     },
     onOpenCodex: (itemId: ItemId) => openRecipeFocus(itemId),
-  }), [locateProductionLine, openRecipeFocus]);
+  }), [locateProductionLine, openRecipeFocus, readConfirmedFactoryPlanetId]);
 
   const cycleProductionLineTarget = useCallback((direction: -1 | 1) => {
     setProductionLineFocus((current) => {
@@ -9812,6 +10290,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [commitGame, gameDialog]);
 
   const autoLayoutEntities = useCallback((entityIds?: readonly string[]) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      setNotice("Windows 原生权威暂未开放自动布局写入；本次操作未应用");
+      return;
+    }
     const current = gameRef.current;
     const moves = planFactoryAutoLayout(current, current.activePlanetId, entityIds);
     if (moves.length === 0) {
@@ -9836,6 +10318,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [canvasMinimumZoom, commitGame, fitView, setNodes]);
 
   const undoAutoLayout = useCallback(() => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      setNotice("Windows 原生权威暂未开放自动布局撤销；本次操作未应用");
+      return;
+    }
     if (!autoLayoutUndo || autoLayoutUndo.planetId !== gameRef.current.activePlanetId) return;
     const existingIds = new Set(gameRef.current.entities.map((entity) => entity.id));
     const positions = autoLayoutUndo.positions.filter((entry) => existingIds.has(entry.id));
@@ -9855,10 +10341,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [autoLayoutUndo, canvasMinimumZoom, commitGame, fitView, setNodes]);
 
   const focusBeltNetwork = useCallback((beltId: string, planetId?: PlanetId) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      setNotice("Windows 原生线路网络正在迁移到有界读取；本次定位未执行");
+      return;
+    }
     const snapshot = analyzeBeltNetwork(gameRef.current, beltId);
     if (!snapshot) return;
     const destination = planetId ?? snapshot.planetId;
-    if (gameRef.current.activePlanetId !== destination && !onPlanetChange(destination)) return;
+    if (!ensureFactoryPlanetVisible(destination)) return;
     setFocusedBeltNetworkId(beltId);
     setHighlightedTaskId(null);
     setSelectedBeltId(beltId);
@@ -9868,10 +10358,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setStatisticsOpen(false);
     setMobilePanel(null);
     window.setTimeout(() => focusEntityIds(snapshot.entityIds), gameRef.current.settings.reducedMotion ? 0 : 40);
-  }, [focusEntityIds, onPlanetChange]);
+  }, [ensureFactoryPlanetVisible, focusEntityIds]);
 
   const openCanvasBookmark = useCallback((bookmark: CanvasBookmark) => {
-    if (gameRef.current.activePlanetId !== bookmark.planetId && !onPlanetChange(bookmark.planetId)) return;
+    if (!ensureFactoryPlanetVisible(bookmark.planetId)) return;
     setStatisticsOpen(false);
     setFocusedBeltNetworkId(null);
     setHighlightedTaskId(null);
@@ -9884,10 +10374,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       void setViewport(bookmark.viewport, { duration: gameRef.current.settings.reducedMotion ? 0 : 260 });
     }, gameRef.current.settings.reducedMotion ? 0 : 40);
     setNotice(`已打开画布书签：${bookmark.name}`);
-  }, [onPlanetChange, setViewport]);
+  }, [ensureFactoryPlanetVisible, setViewport]);
 
   const selectAlert = useCallback((alert: FactoryAlert) => {
-    if (gameRef.current.activePlanetId !== alert.planetId && !onPlanetChange(alert.planetId)) return;
+    if (!ensureFactoryPlanetVisible(alert.planetId)) return;
     setSelectedEntityIds([alert.entityId]);
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
@@ -9900,10 +10390,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     focusEntityIds([alert.entityId]);
     setNotice(`已定位：${alert.title} · ${alert.reason}`);
     playTone("alert");
-  }, [focusEntityIds, onPlanetChange, playTone]);
+  }, [ensureFactoryPlanetVisible, focusEntityIds, playTone]);
 
   const focusStellarStation = useCallback((entityId: string, planetId: PlanetId) => {
-    if (gameRef.current.activePlanetId !== planetId && !onPlanetChange(planetId)) return;
+    if (!ensureFactoryPlanetVisible(planetId)) return;
     setSelectedEntityIds([entityId]);
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
@@ -9913,7 +10403,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setStarMapOpen(false);
     window.setTimeout(() => focusEntityIds([entityId]), gameRef.current.settings.reducedMotion ? 0 : 40);
     setNotice(`已定位星际物流问题：${getPlanetDisplayName(gameRef.current, planetId)}`);
-  }, [focusEntityIds, onPlanetChange]);
+  }, [ensureFactoryPlanetVisible, focusEntityIds]);
 
   const openCampaign = useCallback(() => {
     closeAllWorkspaces();
@@ -9989,7 +10479,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     const entity = gameRef.current.entities.find((candidate) => candidate.buildingId === navigation.buildingId);
     if (entity) {
-      if (gameRef.current.activePlanetId !== entity.planetId && !onPlanetChange(entity.planetId)) return;
+      if (!ensureFactoryPlanetVisible(entity.planetId)) return;
       setSelectedEntityIds([entity.id]);
       setSelectedBeltId(null);
       setInspectorTab("inspect");
@@ -10002,7 +10492,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setInspectorTab("fabricate");
     setMobilePanel("inspector");
     setNotice(`施工托盘已切换到${getBuilding(navigation.buildingId).name}`);
-  }, [closeAllWorkspaces, focusEntityIds, onPlanetChange, openCommandWorkspace]);
+  }, [closeAllWorkspaces, ensureFactoryPlanetVisible, focusEntityIds, openCommandWorkspace]);
 
   const runOnboardingAction = useCallback((stepId: OnboardingActionId) => {
     closeAllWorkspaces();
@@ -10019,7 +10509,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return;
     }
     if (stepId === "basic-place-stack") {
-      if (gameRef.current.activePlanetId !== "home" && !onPlanetChange("home")) return;
+      if (!ensureFactoryPlanetVisible("home")) return;
       setPlacement("wind_turbine");
       setPlacementCount(1);
       if (nextMobileShell) mobileNavigation.goFactory();
@@ -10042,7 +10532,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice("选择一项可研究科技加入队列");
       return;
     }
-    if (gameRef.current.activePlanetId !== "home" && !onPlanetChange("home")) return;
+    if (!ensureFactoryPlanetVisible("home")) return;
     if (stepId === "mine") {
       setSelectedEntityIds(["vein_iron"]);
       window.setTimeout(() => focusEntityIds(["vein_iron"]), 40);
@@ -10091,7 +10581,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return;
     }
     openCampaign();
-  }, [closeAllWorkspaces, focusBeltNetwork, focusEntityIds, focusPlacedEntity, mobileNavigation.goFactory, mobileNavigation.openSheet, navigateFromCampaign, nextMobileShell, onPlanetChange, openCampaign]);
+  }, [closeAllWorkspaces, ensureFactoryPlanetVisible, focusBeltNetwork, focusEntityIds, focusPlacedEntity, mobileNavigation.goFactory, mobileNavigation.openSheet, navigateFromCampaign, nextMobileShell, openCampaign]);
 
   const onSelectCampaignTask = useCallback((taskId: CampaignTaskId) => {
     commitGame((current) => selectCampaignTask(current, taskId));
@@ -10864,12 +11354,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [stopCanvasPointerMotion]);
 
   useEffect(() => {
-    if (canvasWorkspacePaused) stopCanvasPointerMotion();
-  }, [canvasWorkspacePaused, game.activePlanetId, stopCanvasPointerMotion]);
+    if (canvasWorkspaceHidden || nativeFactoryRouteUnsafe) stopCanvasPointerMotion();
+  }, [canvasWorkspaceHidden, game.activePlanetId, nativeFactoryRouteUnsafe, stopCanvasPointerMotion]);
 
-  const factoryCanvasRows = useMemo(() => selectFactoryCanvasRows(
-    nativeAuthoritativeFactoryCanvasFrame,
-    () => {
+  const factoryCanvasRows = useMemo<FactoryCanvasRows>(() => {
+    if (nativePlayerAuthorityOwnsRuntime && !nativeAuthoritativeFactoryCanvasFrame) {
+      return {
+        source: "native-authoritative",
+        revision: factoryThinViewExpectedRevision,
+        entities: [],
+        belts: [],
+        entityById: new Map<string, FactoryEntity>(),
+      };
+    }
+    return selectFactoryCanvasRows(nativeAuthoritativeFactoryCanvasFrame, () => {
       const entities = measureRuntimeTransitionPhase("active-planet-entity-filter", () =>
         canvasGame.entities.filter((entity) => entity.planetId === canvasGame.activePlanetId),
       { entities: canvasGame.entities.length });
@@ -10883,14 +11381,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           ? canvasRenderSnapshot.entityById
           : new Map(entities.map((entity) => [entity.id, entity] as const)),
       };
-    },
-  ), [
+    });
+  }, [
     canvasGame.activePlanetId,
     canvasGame.belts,
     canvasGame.entities,
     canvasRenderSnapshot.entityById,
     canvasRenderSnapshot.planetId,
+    factoryThinViewExpectedRevision,
     nativeAuthoritativeFactoryCanvasFrame,
+    nativePlayerAuthorityOwnsRuntime,
   ]);
   const activePlanetEntities = factoryCanvasRows.entities;
   const activePlanetBelts = factoryCanvasRows.belts;
@@ -10952,7 +11452,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   useEffect(() => () => connectionViewportPublisherRef.current?.cancel(), []);
   useEffect(() => {
     scheduleConnectionViewport(viewportRef.current, canvasSizeRef.current ?? canvasViewportSize);
-  }, [canvasGame.activePlanetId, canvasViewportSize, scheduleConnectionViewport]);
+  }, [canvasViewportSize, factoryCanvasPlanetId, scheduleConnectionViewport]);
   const selectedEntityIdSet = useMemo(() => new Set(selectedEntityIds), [selectedEntityIds]);
   const ordinaryViewportBounds = useMemo(() => {
     const size = canvasSizeRef.current ?? canvasViewportSize;
@@ -10992,7 +11492,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     return measureRuntimeTransitionPhase("canvas-topology-reconcile", () => {
       const next = reconcileFactoryCanvasTopology(
         canvasTopologyRef.current,
-        canvasGame.activePlanetId,
+        factoryCanvasPlanetId,
         activePlanetEntities,
         activePlanetBelts,
         topologyCacheFeatureActive && factoryCanvasRows.source === "web-game-state"
@@ -11002,7 +11502,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       canvasTopologyRef.current = next;
       return next;
     }, { entities: activePlanetEntities.length, belts: activePlanetBelts.length });
-  }, [activePlanetBelts, activePlanetEntities, canvasGame.activePlanetId, canvasRenderSnapshot.topologyRevision, factoryCanvasRows.source, topologyCacheFeatureActive]);
+  }, [activePlanetBelts, activePlanetEntities, canvasRenderSnapshot.topologyRevision, factoryCanvasPlanetId, factoryCanvasRows.source, topologyCacheFeatureActive]);
   const factoryMiniMapUsesNativeTopology = nativeFactoryThinViewActive &&
     factoryViewportProvesWholePlanet(factoryViewportReadModel);
   const factoryMiniMapEntities = factoryMiniMapUsesNativeTopology
@@ -11010,7 +11510,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     : canvasTopology.entities;
   const factoryMiniMapWorldBounds = factoryMiniMapUsesNativeTopology
     ? factoryViewportReadModel.worldBounds
-    : nativeAuthoritativeFactoryCanvasFrame?.worldBounds ?? webFactoryViewportReadModel!.worldBounds;
+    : nativeAuthoritativeFactoryCanvasFrame?.worldBounds ?? webFactoryViewportReadModel?.worldBounds ??
+      factoryViewportReadModel.worldBounds;
   const factoryMiniMapProjectionIsNative = factoryMiniMapUsesNativeTopology ||
     factoryCanvasRows.source === "native-authoritative";
 
@@ -11041,7 +11542,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const lineFindTrace = useMemo(() => {
     if (!lineFindMode || selectedEntityIds.length !== 1) return null;
     const revision = canvasTopology.revision;
-    const planetId = canvasGame.activePlanetId;
+    const planetId = factoryCanvasPlanetId;
     const cached = lineFindTraceCacheRef.current;
     if (!cached || cached.planetId !== planetId || cached.revision !== revision) {
       lineFindTraceCacheRef.current = { planetId, revision, traces: new Map() };
@@ -11052,7 +11553,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const entityId = selectedEntityIds[0];
     if (!traces.has(entityId)) traces.set(entityId, analyzeEntityLineTrace(canvasGame, entityId));
     return traces.get(entityId) ?? null;
-  }, [canvasGame.activePlanetId, canvasTopology.revision, lineFindMode, selectedEntityIds]);
+  }, [canvasGame, canvasTopology.revision, factoryCanvasPlanetId, lineFindMode, selectedEntityIds]);
   const lineFindUpstreamEntityIds = useMemo(() => new Set(lineFindTrace?.upstreamEntityIds ?? []), [lineFindTrace]);
   const lineFindDownstreamEntityIds = useMemo(() => new Set(lineFindTrace?.downstreamEntityIds ?? []), [lineFindTrace]);
   const lineFindUpstreamBeltIds = useMemo(() => new Set(lineFindTrace?.upstreamBeltIds ?? []), [lineFindTrace]);
@@ -11113,7 +11614,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     // collapsed to 96x32.
     width: CANVAS_STACK_PROXY_WIDTH,
     height: CANVAS_STACK_PROXY_HEIGHT,
-  })), [activePlanetEntities, canvasGame.activePlanetId, canvasRenderSnapshot.topologyRevision, factoryCanvasRows.revision]);
+  })), [activePlanetEntities, canvasRenderSnapshot.topologyRevision, factoryCanvasPlanetId, factoryCanvasRows.revision]);
   canvasPositionNodesRef.current = canvasPositionNodes;
   const canvasVisibleNodeCount = useMemo(() => countVisibleCanvasNodes(
     canvasPositionNodes,
@@ -11165,18 +11666,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const activeAlertEntityIds = useMemo(() => {
     const ids = new Set<string>();
     for (const [entityId, planetId] of visibleFactoryAlertProjection.rows) {
-      if (planetId === canvasGame.activePlanetId) ids.add(entityId);
+      if (planetId === factoryCanvasPlanetId) ids.add(entityId);
     }
     return ids;
-  }, [canvasGame.activePlanetId, visibleFactoryAlertProjection]);
+  }, [factoryCanvasPlanetId, visibleFactoryAlertProjection]);
   const activeCriticalAlertEntityIds = useMemo(() => {
     const ids = new Set<string>();
     for (const [entityId, planetId, codeIndex] of visibleFactoryAlertProjection.rows) {
       const code = visibleFactoryAlertProjection.codes[codeIndex];
-      if (planetId === canvasGame.activePlanetId && code && isCriticalFactoryAlertCode(code)) ids.add(entityId);
+      if (planetId === factoryCanvasPlanetId && code && isCriticalFactoryAlertCode(code)) ids.add(entityId);
     }
     return ids;
-  }, [canvasGame.activePlanetId, visibleFactoryAlertProjection]);
+  }, [factoryCanvasPlanetId, visibleFactoryAlertProjection]);
   const detailedCanvasBeltIds = useMemo(() => {
     const ids = new Set(selectedBeltIdSet);
     if (hoveredBeltId) ids.add(hoveredBeltId);
@@ -11274,9 +11775,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "presentationSignature" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "acceptedInputItemIds" | "producedOutputItemIds" | "connectionDraft" | "connectionViewportFull" | "dynamicEffects" | "presentationVisible" | "alertActive" | "stackHidden" | "stackMarker" | "stackHalo" | "stackCount" | "stackGroupId" | "stackMembershipToken" | "stackMemberIds" | "stackAlertCount" | "stackCriticalAlertCount" | "stackGeometryHandlesRequired">>(() => {
     const technology = getTechnology(canvasGame.research.selectedTechId);
     const progress = technology ? canvasGame.research.progressByTech[technology.id] ?? {} : {};
-    const planetProfile = getPlanetIndustrialProfile(canvasGame, canvasGame.activePlanetId);
+    const planetProfile = getPlanetIndustrialProfile(canvasGame, factoryCanvasPlanetId);
     return {
-      cargo: canvasGame.cargo,
+      cargo: nativePlayerAuthorityOwnsRuntime ? null : canvasGame.cargo,
       placement,
       placementCount,
       miningEntityId,
@@ -11296,9 +11797,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       researchLabel: technology?.name ?? null,
       researchCosts: technology?.costs.filter((cost) => (progress[cost.itemId] ?? 0) < cost.amount) ?? [],
       completedTechIds: canvasGame.research.completedTechIds,
-      paused: canvasGame.paused,
+      paused: nativePlayerAuthorityOwnsRuntime ? factoryRunStatusReadModel.paused : canvasGame.paused,
       powerDemandMultiplier: getDifficultyDefinition(canvasGame.settings.difficulty).powerDemandMultiplier,
-      solarGenerationMultiplier: getPlanetSolarPowerMultiplier(canvasGame, canvasGame.activePlanetId),
+      solarGenerationMultiplier: getPlanetSolarPowerMultiplier(canvasGame, factoryCanvasPlanetId),
       windGenerationMultiplier: planetProfile.windMultiplier,
       geothermalGenerationMultiplier: planetProfile.geothermalMultiplier,
       activeLogisticsEntityIds: beltNodeIndex.activeEntityIds,
@@ -11308,10 +11809,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       simulationMultiplier: getEffectiveSimulationMultiplier(canvasGame),
       extremeVisuals: extremeVisualsActive,
     };
-  }, [beltNodeIndex.activeEntityIds, canvasGame.activePlanetId, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, extremeVisualsActive, miningEntityId, placement, placementCount, stableOnAddBuilding, stableOnDropCargo, stableOnDropDraggedItem, stableOnEnergyModeChange, stableOnFuelChange, stableOnInstallMiner, stableOnInteractionLockChange, stableOnMiningStart, stableOnMiningStop, stableOnPickInput, stableOnPickOutput, stableOnRecipeChange, stableOnStackActivate]);
+  }, [beltNodeIndex.activeEntityIds, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, extremeVisualsActive, factoryCanvasPlanetId, factoryRunStatusReadModel.paused, miningEntityId, nativePlayerAuthorityOwnsRuntime, placement, placementCount, stableOnAddBuilding, stableOnDropCargo, stableOnDropDraggedItem, stableOnEnergyModeChange, stableOnFuelChange, stableOnInstallMiner, stableOnInteractionLockChange, stableOnMiningStart, stableOnMiningStop, stableOnPickInput, stableOnPickOutput, stableOnRecipeChange, stableOnStackActivate]);
 
   const canvasNodeSemanticRevisionToken = createCanvasNodeSemanticRevisionToken([
-    canvasGame.activePlanetId,
+    factoryCanvasPlanetId,
     factoryCanvasRows.source,
     factoryCanvasRows.revision ?? "web",
     canvasRenderSnapshot.runtimeRevision,
@@ -11385,7 +11886,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           const selected = selectedEntityIdSet.has(entity.id);
           const interactionProtected = fullDetailCanvasNodeIds.has(entity.id);
           const alertActive = activeAlertEntityIds.has(entity.id);
-          const draggable = !placement && !blueprintPlacementId && !entity.interactionLocked;
+          const draggable = !nativePlayerAuthorityOwnsRuntime && !placement && !blueprintPlacementId && !entity.interactionLocked;
           const presentationVisible = canvasNodeIntersectsWorldRectangle({
             id: entity.id,
             x: entity.position.x,
@@ -11415,7 +11916,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           const forceDynamicPresentation = interactionProtected || preserveMobileConstructionCenterDetail ||
             (canvasDetailPreference === "full" && canvasPresentationDetailStage !== "compact" && presentationVisible && !stackHidden && !stackMarker) ||
             Boolean(connectionDraft && connectExpandAll);
-          const lineTraceActive = Boolean(lineFindTrace && lineFindTrace.planetId === canvasGame.activePlanetId);
+          const lineTraceActive = Boolean(lineFindTrace && lineFindTrace.planetId === factoryCanvasPlanetId);
           const preserveInteractionVisibility = selected || interactionProtected;
           let focusClassName: string | undefined;
           let focusContextOnly = false;
@@ -11427,7 +11928,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           } else if (highlightedTaskId) {
             if (taskHighlight.entityIds.has(entity.id)) focusClassName = "factory-flow-node--task-focus";
             else focusContextOnly = true;
-          } else if (productionLineFocus?.planetId === canvasGame.activePlanetId) {
+          } else if (productionLineFocus?.planetId === factoryCanvasPlanetId) {
             if (locatedProductionEntityIds.has(entity.id)) focusClassName = "factory-flow-node--network-focus";
             else focusContextOnly = true;
           } else if (focusedBeltNetwork) {
@@ -11779,7 +12280,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasNodeSemanticRevisionToken, canvasPresentationDetailStage, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, factoryCanvasRows.revision, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
+  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasNodeSemanticRevisionToken, canvasPresentationDetailStage, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, factoryCanvasRows.revision, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nativePlayerAuthorityOwnsRuntime, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
 
   useLayoutEffect(() => {
     const startedAt = canvasNodeCommitStartedAtRef.current;
@@ -11814,7 +12315,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       connectionHandleSpatialIndexRef.current = buildConnectionHandleSpatialIndex(viewportRef.current);
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [canvasGame.activePlanetId, canvasRenderSnapshot.topologyRevision, connectionGeometryToken, viewportZoom]);
+  }, [canvasRenderSnapshot.topologyRevision, connectionGeometryToken, factoryCanvasPlanetId, viewportZoom]);
 
   const edgeRouteCenters = useMemo(() => {
     if (nodeDragActiveRef.current && edgeRouteCacheRef.current) return edgeRouteCacheRef.current.centers;
@@ -11866,12 +12367,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const item = ITEMS[belt.itemId];
       const capacity = getBeltCapacity(belt);
       const bundle = beltBundleMap.get(belt.id) ?? { index: 0, size: 1 };
-      const lineTraceActive = Boolean(lineFindTrace && lineFindTrace.planetId === canvasGame.activePlanetId);
+      const lineTraceActive = Boolean(lineFindTrace && lineFindTrace.planetId === factoryCanvasPlanetId);
       const focusTone = lineTraceActive
         ? lineFindUpstreamBeltIds.has(belt.id) ? "line-upstream" : lineFindDownstreamBeltIds.has(belt.id) ? "line-downstream" : "line-dim"
         : highlightedTaskId
         ? taskHighlight.beltIds.has(belt.id) ? "focus" : "dim"
-        : productionLineFocus?.planetId === canvasGame.activePlanetId
+        : productionLineFocus?.planetId === factoryCanvasPlanetId
           ? locatedProductionBeltIds.has(belt.id) ? "focus" : "dim"
         : focusedBeltNetwork
           ? focusedNetworkBeltIds.has(belt.id) ? "focus" : "dim"
@@ -11998,23 +12499,34 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const getFactoryConnectionReadState = useCallback((
     sourceEntityId: string | null | undefined,
     targetEntityId: string | null | undefined,
-  ) => selectFactoryConnectionReadState(
-    gameRef.current,
-    nativeAuthoritativeFactoryCanvasFrameRef.current,
-    {
-      sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
-      revision: factoryThinViewExpectedRevision,
-      planetId: game.activePlanetId,
-    },
-    sourceEntityId,
-    targetEntityId,
-  ), [factoryThinViewExpectedRevision, game.activePlanetId, nativePlayerAuthorityActiveFrame?.sessionId]);
+  ): GameState | null => {
+    const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current &&
+      (!frame || !sourceEntityId || !targetEntityId ||
+        !frame.entityById.has(sourceEntityId) || !frame.entityById.has(targetEntityId))) return null;
+    const result = selectFactoryConnectionReadState(
+      gameRef.current,
+      frame,
+      {
+        sessionId: frame?.sessionId ?? nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+        revision: frame?.revision ?? factoryThinViewExpectedRevision,
+        planetId: frame?.planetId ?? gameRef.current.activePlanetId,
+      },
+      sourceEntityId,
+      targetEntityId,
+    );
+    // The selector intentionally supports a Web fallback for PWA/shadow use.
+    // A native owner may only receive the endpoint-closed Rust frame.
+    if (nativePlayerAuthorityOwnsRuntimeRef.current && frame && result.entities !== frame.entities) return null;
+    return result;
+  }, [factoryThinViewExpectedRevision, nativePlayerAuthorityActiveFrame?.sessionId]);
   const isValidConnection = useCallback((connection: Connection | Edge) => {
     const sourceItem = parseHandleItem(connection.sourceHandle);
     const targetItem = parseHandleItem(connection.targetHandle);
     if (!connection.source || !connection.target || connection.source === connection.target ||
       !sourceItem || (!isUniversalInputHandle(connection.targetHandle) && sourceItem !== targetItem)) return false;
     const state = getFactoryConnectionReadState(connection.source, connection.target);
+    if (!state) return false;
     const source = state.entities.find((entity) => entity.id === connection.source);
     const target = state.entities.find((entity) => entity.id === connection.target);
     const draft = connectionDraftRef.current;
@@ -12034,6 +12546,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const universalPort = parseTargetPortIndex(params.handleId);
     if (!params.nodeId || !params.handleType || !params.handleId || (!itemId && universalPort === undefined)) return null;
     const readState = getFactoryConnectionReadState(params.nodeId, params.nodeId);
+    if (!readState) return null;
     const tier = resolveConnectionBeltTier(readState, beltTierMode, beltTier, params.nodeId, itemId ?? undefined);
     const draft = { nodeId: params.nodeId, handleId: params.handleId, itemId, handleType: params.handleType, tier } satisfies ConnectionDraft;
     updateConnectionDraft(draft);
@@ -12142,7 +12655,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [activateBatchConnectionMode, beginConnectionDraft, startClickConnectionPreview]);
 
   const longPressBindings = useLongPress<HTMLElement>({
+    disabled: nativeFactoryRouteUnsafe,
+    // Simulation revisions may advance faster than the 520 ms gesture. Only a
+    // route/session identity change or a genuinely unsafe transition cancels it.
+    resetKey: factoryGestureRouteKey,
     getTarget: (event) => {
+      if (nativeFactoryProjectionPendingRef.current) return null;
       if (!coarsePointer || placement || blueprintPlacementId) return null;
       const handle = getConnectionHandleTarget(event.target);
       if (handle?.handleType === "source") return encodeLongPressConnectionTarget(handle);
@@ -12150,6 +12668,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return element?.dataset.id ?? null;
     },
     onLongPress: (targetId) => {
+      if (nativeFactoryProjectionPendingRef.current) return;
       const connectionTarget = decodeLongPressConnectionTarget(targetId);
       if (connectionTarget) {
         const element = [...document.querySelectorAll<HTMLElement>(".factory-canvas .react-flow__handle.source")]
@@ -12273,6 +12792,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     const current = gameRef.current;
     const readState = getFactoryConnectionReadState(connection.source, connection.target);
+    if (!readState) return reject("原生工厂投影尚未确认当前星球，请稍后重试");
     const check = getBeltConnectionCheck(readState, connection.source, connection.target, itemId, draft.tier, targetPortIndex, defaultBeltLanesRef.current);
     if (!check.ok) return reject(check.label);
     if (!isValidConnection(connection)) return reject("当前端口、线路等级或并联设置不兼容");
@@ -12359,6 +12879,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const connection = connectionFromDraft(preview.draft, handle);
     const connectionItem = parseHandleItem(connection.sourceHandle) ?? preview.draft.itemId;
     const readState = getFactoryConnectionReadState(connection.source, connection.target);
+    if (!readState) {
+      setConnectionHint({ label: "正在等待原生工厂投影，暂不能校验端口", tone: "blocked" });
+      return;
+    }
     if (tone !== "valid" || !connection.source || !connection.target) {
       const check = connection.source && connection.target && connectionItem
         ? getBeltConnectionCheck(readState, connection.source, connection.target, connectionItem, preview.draft.tier,
@@ -12423,6 +12947,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const targetId = fromType === "target" ? fromNodeId : toNodeId;
     const current = gameRef.current;
     const readState = getFactoryConnectionReadState(sourceId, targetId);
+    if (!readState) {
+      setNotice("原生工厂投影尚未确认当前星球，运输线未建立");
+      setConnectionHint({ label: "正在等待原生工厂投影", tone: "blocked" });
+      return;
+    }
     const lockedTier = draft?.tier ?? resolveConnectionBeltTier(readState, beltTierMode, beltTier, fromNodeId, fromItem ?? undefined);
     const source = sourceId ? readState.entities.find((entity) => entity.id === sourceId) : undefined;
     const target = targetId ? readState.entities.find((entity) => entity.id === targetId) : undefined;
@@ -12503,6 +13032,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const current = gameRef.current;
     const sourceItem = parseHandleItem(connection?.sourceHandle) ?? preview.draft.itemId;
     const readState = getFactoryConnectionReadState(connection?.source, connection?.target);
+    if (!readState) {
+      setNotice("原生工厂投影尚未确认当前星球，运输线未建立");
+      setConnectionHint({ label: "正在等待原生工厂投影", tone: "blocked" });
+      return;
+    }
     const source = connection?.source ? readState.entities.find((entity) => entity.id === connection.source) : undefined;
     const target = connection?.target ? readState.entities.find((entity) => entity.id === connection.target) : undefined;
     let label = "请选择设备的高亮端口";
@@ -12538,6 +13072,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return false;
     }
     const readState = getFactoryConnectionReadState(connection.source, connection.target);
+    if (!readState) {
+      setNotice("原生工厂投影尚未确认当前星球，运输线未建立");
+      return false;
+    }
     const activeTier = lockedTier ?? connectionDraftRef.current?.tier ?? resolveConnectionBeltTier(readState, beltTierMode, beltTier, connection.source, sourceItem);
     const constructionId = getBeltConstructionId(activeTier);
     const tierName = activeTier === 3 ? "III" : activeTier === 2 ? "II" : "I";
@@ -12710,6 +13248,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [alignmentSpatialIndex]);
 
   const onNodeDrag = useCallback((_event: MouseEvent | TouchEvent, node: FactoryFlowNode, draggedNodes: FactoryFlowNode[]) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) return;
     const threshold = 7 / Math.max(0.3, viewportZoom);
     const index = dragAlignmentSpatialIndexRef.current ?? alignmentSpatialIndex;
     const moving = (draggedNodes.length > 0 ? draggedNodes : [node]).map((candidate) => ({
@@ -12759,6 +13298,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (!placement && batchConnectionModeRef.current) return;
     if (nextMobileShell && mobileCanvasMode === "layout" && !placement) return;
     if (placement) {
+      if (rejectLegacyFactoryInteractionWhileNative("建筑放置与扩建")) return;
       const entity = activeEntityById.get(node.id);
       const constructionId = entity?.kind === "vein" && entity.resourceId
         ? getExtractorBuildingId(entity.resourceId)
@@ -12812,7 +13352,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       } else if (nextMobileShell) mobileNavigation.openSheet("inspector", "peek");
       else setMobilePanel("inspector");
     }
-  }, [activeEntityById, blueprintPlacementId, completeClickConnectionAtPoint, expandEntityGroup, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, nextMobileShell, openCommandWorkspace, placement, placementCount, selectionMode]);
+  }, [activeEntityById, blueprintPlacementId, completeClickConnectionAtPoint, expandEntityGroup, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, nextMobileShell, openCommandWorkspace, placement, placementCount, rejectLegacyFactoryInteractionWhileNative, selectionMode]);
 
   const onNodeDoubleClick: NodeMouseHandler<FactoryFlowNode> = useCallback((_event, node) => {
     if (placement || blueprintPlacementId || !gameRef.current.settings.allowDoubleClickZoom) return;
@@ -12824,6 +13364,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const onRegionPointerDown = useCallback((event: React.PointerEvent<HTMLElement>) => {
     if (!regionMode || event.button !== 0 || placement || blueprintPlacementId || connectionDraftRef.current) return;
+    if (rejectLegacyFactoryInteractionWhileNative("生产区域编辑")) return;
     const target = event.target instanceof Element ? event.target : null;
     if (!target?.closest(".react-flow__pane") || target.closest(".canvas-region__label")) return;
     event.preventDefault();
@@ -12833,15 +13374,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     regionPointerRef.current = { pointerId: event.pointerId, start };
     setRegionDraft({ ...start, width: 0, height: 0 });
     setSelectedRegionId(null);
-  }, [blueprintPlacementId, placement, regionMode, screenToFlowPosition]);
+  }, [blueprintPlacementId, placement, regionMode, rejectLegacyFactoryInteractionWhileNative, screenToFlowPosition]);
 
   const onRegionResizeStart = useCallback((event: React.PointerEvent<HTMLButtonElement>, region: CanvasRegion, handle: CanvasRegionResizeHandle) => {
+    if (rejectLegacyFactoryInteractionWhileNative("生产区域编辑")) return;
     const start = snapFlowPosition(screenToFlowPosition({ x: event.clientX, y: event.clientY }));
-    regionResizeRef.current = { pointerId: event.pointerId, region: { ...region }, handle, start };
+    regionResizeRef.current = { pointerId: event.pointerId, element: event.currentTarget, region: { ...region }, handle, start };
     setRegionResizePreview({ regionId: region.id, rectangle: { x: region.x, y: region.y, width: region.width, height: region.height } });
     setRegionMode(false);
     setRegionDraft(null);
-  }, [screenToFlowPosition]);
+  }, [rejectLegacyFactoryInteractionWhileNative, screenToFlowPosition]);
 
   const onRegionPointerMove = useCallback((event: React.PointerEvent<HTMLElement>) => {
     const resize = regionResizeRef.current;
@@ -12873,6 +13415,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       const rectangle = resizeRegionRectangle(resize.region, resize.handle, resize.start, current);
       setRegionResizePreview(null);
       if (!cancelled) {
+        if (rejectLegacyFactoryInteractionWhileNative("生产区域编辑")) return;
         commitGame((currentGame) => resizeCanvasRegion(currentGame, resize.region.id, rectangle));
         setNotice(`生产区域已调整为 ${Math.round(rectangle.width)} × ${Math.round(rectangle.height)}`);
       }
@@ -12888,6 +13431,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const rectangle = rectangleFromPoints(drag.start, end);
     setRegionDraft(null);
     if (cancelled) return;
+    if (rejectLegacyFactoryInteractionWhileNative("生产区域编辑")) return;
     if (rectangle.width < 40 || rectangle.height < 40) {
       setNotice("生产区域至少需要 40 × 40 画布单位");
       return;
@@ -12898,7 +13442,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setSelectedRegionId(regionId);
     setNotice("生产区域已创建，可设置名称、背景色和边框色");
     playTone("place");
-  }, [commitGame, playTone, screenToFlowPosition]);
+  }, [commitGame, playTone, rejectLegacyFactoryInteractionWhileNative, screenToFlowPosition]);
 
   const restoreCanvasEntityPositions = useCallback(() => {
     setNodes((current) => current.map((node) => {
@@ -13027,6 +13571,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   const onPaneClick = useCallback((event: React.MouseEvent) => {
+    if ((placement || blueprintPlacementId) &&
+      rejectLegacyFactoryInteractionWhileNative(blueprintPlacementId ? "蓝图部署" : "建筑放置与扩建")) return;
     if (regionMode) {
       setSelectedRegionId(null);
       return;
@@ -13187,12 +13733,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setSelectedBeltIds([]);
     setFocusedBeltNetworkId(null);
     if (nextMobileShell && mobileNavigation.overlay?.kind === "sheet" && mobileNavigation.overlay.id === "inspector") mobileNavigation.requestBack();
-  }, [activePlanetBelts, blueprintAllowOverlap, blueprintPlacementId, canvasBatchRendererEnabled, commitGame, completeClickConnectionAtPoint, connectionDraft, expandEntityGroup, flowStore, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, mobileNavigation.overlay, mobileNavigation.requestBack, nextMobileShell, nodes, placement, placementCount, playTone, regionMode, screenToFlowPosition, selectionMode, spawnInteractionBurst, viewportZoom]);
+  }, [activePlanetBelts, blueprintAllowOverlap, blueprintPlacementId, canvasBatchRendererEnabled, commitGame, completeClickConnectionAtPoint, connectionDraft, expandEntityGroup, flowStore, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, mobileNavigation.overlay, mobileNavigation.requestBack, nextMobileShell, nodes, placement, placementCount, playTone, regionMode, rejectLegacyFactoryInteractionWhileNative, screenToFlowPosition, selectionMode, spawnInteractionBurst, viewportZoom]);
 
   const onCanvasDrop = useCallback((event: React.DragEvent) => {
     const buildingId = event.dataTransfer.getData("application/factory-building") as BuildingId;
     if (!buildingId) return;
     event.preventDefault();
+    if (rejectLegacyFactoryInteractionWhileNative("建筑拖放")) return;
     if (getBuilding(buildingId).kind === "miner") {
       setNotice(minerPlacementHint(buildingId));
       return;
@@ -13205,22 +13752,67 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     recordBasicOnboardingEvent("building-placed");
     if (placementCount > 1) recordBasicOnboardingEvent("building-stacked");
     setPlacement(null);
-  }, [commitGame, placementCount, playTone, screenToFlowPosition]);
+  }, [commitGame, placementCount, playTone, rejectLegacyFactoryInteractionWhileNative, screenToFlowPosition]);
 
+  const nativePendingFactoryInteractionRows = useMemo<FactoryInteractionRows>(() => ({
+    source: "native-authoritative",
+    revision: factoryThinViewExpectedRevision,
+    selectedEntities: [],
+    selectedEntity: null,
+    selectedBelt: null,
+    selectedBelts: [],
+    multiSelectedBelts: [],
+    projectionEntities: [],
+    projectionBelts: [],
+    entityById: new Map<string, FactoryEntity>(),
+    beltById: new Map<string, BeltConnection>(),
+    selectionToolbarReadModel: {
+      schema: FACTORY_READ_MODEL_SCHEMA,
+      source: "native-core",
+      revision: factoryThinViewExpectedRevision,
+      activePlanetId: nativeFactoryProjectionPlanetId,
+      selectedCount: 0,
+      selectedBeltCount: 0,
+      canLock: false,
+      canUnlock: false,
+    },
+    inspectorSummaryReadModel: {
+      schema: FACTORY_READ_MODEL_SCHEMA,
+      source: "native-core",
+      revision: factoryThinViewExpectedRevision,
+      activePlanetId: nativeFactoryProjectionPlanetId,
+      entity: null,
+      belt: null,
+    },
+    multiSelectionSummaryReadModel: {
+      schema: FACTORY_READ_MODEL_SCHEMA,
+      source: "native-core",
+      revision: factoryThinViewExpectedRevision,
+      activePlanetId: nativeFactoryProjectionPlanetId,
+      requestedEntityCount: 0,
+      requestedBeltCount: 0,
+      entityRows: { rows: [], totalCount: 0, truncated: false },
+      beltRows: { rows: [], totalCount: 0, truncated: false },
+    },
+  }), [factoryThinViewExpectedRevision, nativeFactoryProjectionPlanetId]);
   const factoryInteractionRows = useMemo(
-    () => selectFactoryInteractionRows(
-      nativeAuthoritativeFactoryInteractionRows,
-      () => createWebFactoryInteractionRows(game, {
-        selectedEntityIds,
-        selectedBeltIds,
-        primarySelectedBeltId: selectedBeltId,
-      }),
-    ),
+    () => nativePlayerAuthorityOwnsRuntime
+      ? nativeAuthoritativeFactoryInteractionRows ?? nativePendingFactoryInteractionRows
+      : selectFactoryInteractionRows(
+          nativeAuthoritativeFactoryInteractionRows,
+          () => createWebFactoryInteractionRows(game, {
+            selectedEntityIds,
+            selectedBeltIds,
+            primarySelectedBeltId: selectedBeltId,
+          }),
+        ),
     [
       game.activePlanetId,
       game.belts,
       game.entities,
       nativeAuthoritativeFactoryInteractionRows,
+      nativePendingFactoryInteractionRows,
+      nativePlayerAuthorityOwnsRuntime,
       selectedBeltId,
       selectedBeltIds,
       selectedEntityIds,
@@ -13315,16 +13907,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     ],
   );
   const selectedBelts = factoryInteractionRows.selectedBelts;
-  const factorySelectionReadGame = useMemo(() => factoryInteractionRows.source === "native-authoritative" &&
-    (selectedEntities.length > 0 || selectedBelt !== null)
+  const factorySelectionReadGame = useMemo(() => factoryInteractionRows.source === "native-authoritative"
     ? {
         ...panelGame,
+        activePlanetId: factoryCanvasPlanetId,
         entities: factoryInteractionRows.projectionEntities as FactoryEntity[],
         belts: factoryInteractionRows.projectionBelts as BeltConnection[],
+        cargo: null,
+        tray: {},
       }
     : panelGame,
-  [factoryInteractionRows, panelGame, selectedBelt, selectedEntities.length]);
-  const factoryInspectorGame = inspectorTab === "inspect" ? factorySelectionReadGame : panelGame;
+  [factoryCanvasPlanetId, factoryInteractionRows, panelGame]);
+  const factoryInspectorGame = nativePlayerAuthorityOwnsRuntime || inspectorTab === "inspect"
+    ? factorySelectionReadGame
+    : panelGame;
   const dockBeltTier = resolveConnectionBeltTier(game, beltTierMode, beltTier);
   const blueprintEligibleIds = useMemo(() => selectedEntityIds.length === 0
     ? []
@@ -13339,12 +13935,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     () => game.entities.some((entity) => entity.buildingId === "construction_center"),
     [game.entities],
   );
-  const activePlanetRegionCount = useMemo(
-    () => game.canvasRegions.reduce((count, region) => count + (region.planetId === game.activePlanetId ? 1 : 0), 0),
-    [game.activePlanetId, game.canvasRegions],
+  const factoryCanvasRegions = useMemo(
+    () => nativePlayerAuthorityOwnsRuntime
+      ? []
+      : canvasGame.canvasRegions.filter((region) => region.planetId === canvasGame.activePlanetId),
+    [canvasGame.activePlanetId, canvasGame.canvasRegions, nativePlayerAuthorityOwnsRuntime],
   );
+  const activePlanetRegionCount = factoryCanvasRegions.length;
 
   const confirmRemoveSelection = useCallback(async () => {
+    if (rejectLegacyFactoryInteractionWhileNative("批量回收")) return;
     const entityIds = [...selectedEntityIdsRef.current];
     const beltIds = [...new Set([
       ...selectedBeltIdsRef.current,
@@ -13384,7 +13984,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setSelectedBeltId(null);
     setNotice(`已回收 ${preview.entityCount} 个建筑节点和 ${preview.relatedBeltCount} 条相关传送带`);
     playTone("remove");
-  }, [commitGame, gameDialog, playTone]);
+  }, [commitGame, gameDialog, playTone, rejectLegacyFactoryInteractionWhileNative]);
 
   const batchIncreaseSelected = useCallback(async (amount: number) => {
     const entityIds = [...selectedEntityIdsRef.current];
@@ -13499,6 +14099,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [commitGame, playTone]);
 
   const copyEntitiesAsBlueprint = (entityIds: readonly string[]) => {
+    if (rejectLegacyFactoryInteractionWhileNative("蓝图复制")) return;
     const eligibleIds = getBlueprintEligibleEntityIds(gameRef.current, [...entityIds]);
     if (eligibleIds.length === 0) {
       setNotice("选区中没有可复制的设备");
@@ -13524,6 +14125,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const copySelectionAsBlueprint = () => copyEntitiesAsBlueprint(selectedEntityIds);
 
   const deployBlueprint = (blueprintId: string) => {
+    if (rejectLegacyFactoryInteractionWhileNative("蓝图部署")) return;
     setBlueprintPlacementId(blueprintId);
     setBlueprintsOpen(false);
     setDysonPlannerOpen(false);
@@ -13536,6 +14138,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   };
 
   const handleQuickCraftConstruction = (buildingId: ConstructionId, batches = 1) => {
+    if (rejectLegacyFactoryInteractionWhileNative("基础制造")) return;
     const before = gameRef.current;
     const plan = getConstructionQuickCraftPlan(before, buildingId, batches);
     const after = craftConstructionWithUpstream(before, buildingId, batches);
@@ -13557,6 +14160,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   };
 
   const handleDeleteConstructionInventory = async (constructionId: ConstructionId): Promise<boolean> => {
+    if (rejectLegacyFactoryInteractionWhileNative("施工库存删除")) return false;
     const current = gameRef.current;
     const amount = Math.max(0, Math.floor(current.construction[constructionId] ?? 0));
     if (amount < 1) {
@@ -13584,6 +14188,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   };
 
   const handleQuickCraftFleet = (recipeId: RecipeId, batches = 1) => {
+    if (rejectLegacyFactoryInteractionWhileNative("基础制造")) return;
     const before = gameRef.current;
     const plan = getRecursiveHandcraftPlan(before, recipeId, batches);
     const after = handcraftRecipeWithUpstream(before, recipeId, batches);
@@ -13785,6 +14390,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     console.warn(`[React Flow ${code}] ${message}`);
   }, []);
   const handleFactoryNodeDragStart = useCallback<OnNodeDrag<FactoryFlowNode>>((_event, node) => {
+    if (rejectLegacyFactoryInteractionWhileNative("建筑位置编辑")) return;
     if (blockCanvasTouchRef.current) return;
     const selectedIds = selectedEntityIdsRef.current.includes(node.id) ? selectedEntityIdsRef.current : [node.id];
     const members = collectCanvasDragMembers(activeEntityById, selectedIds);
@@ -13793,14 +14399,27 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setDraggedEntityIds([node.id, ...members.map((member) => member.id).filter((id) => id !== node.id)]);
     if (factoryCanvasRef.current) factoryCanvasRef.current.dataset.dragActiveCount = String(Math.max(1, members.length));
     nodeDragActiveRef.current = true;
+    nodeDragGestureEpochRef.current = factoryGestureEpochRef.current;
     dragAlignmentSpatialIndexRef.current = alignmentSpatialIndexRef.current ?? alignmentSpatialIndex;
-  }, [activeEntityById, alignmentSpatialIndex]);
+  }, [activeEntityById, alignmentSpatialIndex, rejectLegacyFactoryInteractionWhileNative]);
   const handleFactoryNodeDragStop = useCallback<OnNodeDrag<FactoryFlowNode>>((_event, node, draggedNodes) => {
+    const dragGestureEpoch = nodeDragGestureEpochRef.current;
+    nodeDragGestureEpochRef.current = null;
     nodeDragActiveRef.current = false;
     setDraggedEntityIds([]);
     dragAlignmentSpatialIndexRef.current = null;
     setCanvasGeometryRevision((revision) => revision + 1);
     setAlignmentGuides({ x: null, y: null });
+    if (dragGestureEpoch === null || dragGestureEpoch !== factoryGestureEpochRef.current) {
+      multiDragStartRef.current = null;
+      restoreCanvasEntityPositions();
+      return;
+    }
+    if (rejectLegacyFactoryInteractionWhileNative("建筑位置编辑")) {
+      multiDragStartRef.current = null;
+      restoreCanvasEntityPositions();
+      return;
+    }
     if (blockCanvasTouchRef.current) {
       multiDragStartRef.current = null;
       restoreCanvasEntityPositions();
@@ -13841,7 +14460,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     window.requestAnimationFrame(() => {
       connectionHandleSpatialIndexRef.current = buildConnectionHandleSpatialIndex(viewportRef.current);
     });
-  }, [blueprintAllowOverlap, commitGame, isEnglish, playTone, restoreCanvasEntityPositions]);
+  }, [blueprintAllowOverlap, commitGame, isEnglish, playTone, rejectLegacyFactoryInteractionWhileNative, restoreCanvasEntityPositions]);
   const handleFactoryFlowMove = useCallback<OnMove>((_event, viewport) => {
     viewportRef.current = viewport;
     if (connectionHandleSpatialIndexRef.current) connectionHandleSpatialIndexRef.current.viewport = viewport;
@@ -13865,8 +14484,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     // onMove without a matching onMoveEnd. Keep the same debounced persistence
     // boundary on the live move path so a valid zoom/pan cannot be lost when
     // the gesture-end callback is skipped.
-    persistPlanetViewport(gameRef.current.activePlanetId, viewport);
-  }, [blueprintPlacementId, canvasViewportSize, persistPlanetViewport, scheduleConnectionViewport, viewportZoom]);
+    if (factoryConfirmedActivePlanetId) persistPlanetViewport(factoryConfirmedActivePlanetId, viewport);
+  }, [blueprintPlacementId, canvasViewportSize, factoryConfirmedActivePlanetId, persistPlanetViewport, scheduleConnectionViewport, viewportZoom]);
   const handleFactoryFlowMoveEnd = useCallback<OnMove>((_event, viewport) => {
     viewportRef.current = viewport;
     if (connectionHandleSpatialIndexRef.current) connectionHandleSpatialIndexRef.current.viewport = viewport;
@@ -13886,12 +14505,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     if (blueprintPlacementId) setPendingBlueprintViewport(viewport);
     canvasMiniMapRef.current?.setViewport(viewport);
-    persistPlanetViewport(gameRef.current.activePlanetId, viewport);
-  }, [blueprintPlacementId, canvasViewportSize, persistPlanetViewport, scheduleConnectionViewport]);
+    if (factoryConfirmedActivePlanetId) persistPlanetViewport(factoryConfirmedActivePlanetId, viewport);
+  }, [blueprintPlacementId, canvasViewportSize, factoryConfirmedActivePlanetId, persistPlanetViewport, scheduleConnectionViewport]);
 
   const canvasFlowPresentationToken = [
     canvasGeometryRevision,
-    canvasGame.activePlanetId,
+    factoryCanvasPlanetId,
     `${canvasViewportSize.width}x${canvasViewportSize.height}`,
     canvasDetailPreference,
     canvasPresentationDetailStage,
@@ -13937,7 +14556,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     isEnglish,
     denseMinimapThrottleActive ? `${minimapViewport.x}:${minimapViewport.y}:${minimapViewport.zoom}` : "",
     blueprintPlacementId ? `${pendingBlueprintViewport.x}:${pendingBlueprintViewport.y}:${pendingBlueprintViewport.zoom}` : "",
-    canvasGame.canvasRegions.filter((region) => region.planetId === canvasGame.activePlanetId)
+    factoryCanvasRegions
       .map((region) => `${region.id}:${region.x}:${region.y}:${region.width}:${region.height}:${region.name}`).join(";"),
     canvasGame.constructionQueue.filter((entry) => entry.planetId === canvasGame.activePlanetId)
       .map((entry) => `${entry.id}:${entry.status ?? "pending-materials"}:${entry.position.x}:${entry.position.y}`).join(";"),
@@ -14013,6 +14632,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   if (!initialSimulationWorkerReady) {
     return <main className="game-shell game-shell--runtime-loading" data-simulation-worker="initializing">
       <div className="workspace-loading" role="status"><i /><span>正在验证工厂运行时</span></div>
+    </main>;
+  }
+  if (nextMobileShell && nativePlayerAuthorityOwnsRuntime) {
+    return <main className="game-shell native-mobile-shell-unavailable" data-native-authority-unavailable="mobile-shell-v1">
+      <section role="status" aria-live="polite" style={{ minHeight: "100dvh", display: "grid", placeItems: "center", padding: 24, background: "#08100e", color: "#d8f7ec", textAlign: "center" }}>
+        <div><strong>Windows 原生权威正在使用桌面薄界面</strong><p>移动端托盘、建造和手持物投影尚未闭合；为避免显示旧星球数据，当前界面已安全停用。</p><button type="button" onClick={switchToLegacyMobileUi}>切换到桌面布局</button></div>
+      </section>
     </main>;
   }
 
@@ -14157,7 +14783,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           else openCommandWorkspace("dyson");
           setNotice(null);
         }}
-        onOpenResources={() => { setMobilePanel((current) => current === "resources" ? null : "resources"); setNotice(null); }}
+        onOpenResources={() => {
+          if (rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
+          setMobilePanel((current) => current === "resources" ? null : "resources");
+          setNotice(null);
+        }}
         onOpenInspector={() => { setMobilePanel((current) => current === "inspector" ? null : "inspector"); setNotice(null); }}
         onOpenRecipes={() => { if (recipesOpen) closeAllWorkspaces(); else openCommandWorkspace("recipes"); setCampaignFocusItemId(null); setNotice(null); }}
         onOpenTechnology={() => { if (technologyOpen) closeAllWorkspaces(); else openCommandWorkspace("technology"); setCampaignFocusTechId(null); setNotice(null); }}
@@ -14166,7 +14796,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       />
       </RuntimeRenderProfile>
       <MobileGameShell
-        enabled={nextMobileShell}
+        enabled={nextMobileShell && !nativePlayerAuthorityOwnsRuntime}
         layout={compactLayout}
         game={game}
         factoryGame={factorySelectionReadGame}
@@ -14181,9 +14811,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           blueprintCount: game.blueprints.length,
           beltCount: activePlanetBelts.length,
           regionCount: activePlanetRegionCount,
-          canUndo: gameHistoryRef.current.canUndo,
-          canRedo: gameHistoryRef.current.canRedo,
-          canUndoAutoLayout: Boolean(autoLayoutUndo && autoLayoutUndo.planetId === game.activePlanetId),
+          canUndo: !nativePlayerAuthorityOwnsRuntime && gameHistoryRef.current.canUndo,
+          canRedo: !nativePlayerAuthorityOwnsRuntime && gameHistoryRef.current.canRedo,
+          canUndoAutoLayout: !nativePlayerAuthorityOwnsRuntime && Boolean(autoLayoutUndo && autoLayoutUndo.planetId === game.activePlanetId),
           minimapOpen: !minimapCollapsed,
           batchConnectionMode,
         }}
@@ -14205,6 +14835,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             setBlueprintPlacementId(null);
           },
           onRegion: () => {
+            if (rejectLegacyFactoryInteractionWhileNative("生产区域编辑")) return;
             setMobileCanvasMode("region");
             setRegionMode(true);
             setRegionDraft(null);
@@ -14217,6 +14848,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             setNotice("在空白画布拖拽创建生产区域");
           },
           onLayout: () => {
+            if (rejectLegacyFactoryInteractionWhileNative("建筑位置编辑")) return;
             setMobileCanvasMode("layout");
             setSelectionMode(false);
             setRegionMode(false);
@@ -14256,6 +14888,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }}
         factoryActions={{
           onPlacement: (buildingId) => {
+            if (rejectLegacyFactoryInteractionWhileNative("建筑放置与扩建")) return;
             setPlacement(buildingId);
             setBlueprintPlacementId(null);
             setSelectionMode(false);
@@ -14277,10 +14910,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onCraftFleet: handleQuickCraftFleet,
           onMissingCraft: handleMissingConstructionCraft,
           onDeleteConstruction: handleDeleteConstructionInventory,
-          onPickTray: (itemId) => commitGame((current) => pickFromTray(current, itemId)),
+          onPickTray: (itemId) => {
+            if (rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
+            commitGame((current) => pickFromTray(current, itemId));
+          },
           onDropCargo: handleStowCargo,
-          onDiscardTrayItems: (requests) => commitGame((current) => discardPlanetTrayItems(current, current.activePlanetId, requests)),
-          onSetTrayItemLimit: (value) => commitGame((current) => setPlanetTrayItemLimit(current, current.activePlanetId, value)),
+          onDiscardTrayItems: (requests) => {
+            if (rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
+            commitGame((current) => discardPlanetTrayItems(current, current.activePlanetId, requests));
+          },
+          onSetTrayItemLimit: (value) => {
+            if (rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
+            commitGame((current) => setPlanetTrayItemLimit(current, current.activePlanetId, value));
+          },
           onFocusSelection: () => {
             if (selectedEntityIds.length > 0) focusEntityIds(selectedEntityIds);
             else if (selectedBeltId) focusBeltNetwork(selectedBeltId);
@@ -14359,7 +15001,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         onRequestExit={mobileNavigation.requestExit}
         onSwitchLegacy={switchToLegacyMobileUi}
       />
-      {nextMobileShell && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay ? <MobilePlacementBar
+      {nextMobileShell && !nativePlayerAuthorityOwnsRuntime && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay ? <MobilePlacementBar
         mode={activeMobileCanvasMode}
         buildingId={placement}
         inventory={placement ? Math.floor(game.construction[placement] ?? 0) : 0}
@@ -14393,7 +15035,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }}
         onOpenInspector={() => mobileNavigation.openSheet("inspector", "half")}
       /> : null}
-      {nextMobileShell && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay && batchConnectionMode ? <section className={`mobile-batch-connection-actions${mobileBatchConnectionExpanded ? " is-expanded" : ""}`} aria-label="移动端连续拉线操作" aria-live="polite" data-expanded={mobileBatchConnectionExpanded ? "true" : "false"}>
+      {nextMobileShell && !nativePlayerAuthorityOwnsRuntime && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay && batchConnectionMode ? <section className={`mobile-batch-connection-actions${mobileBatchConnectionExpanded ? " is-expanded" : ""}`} aria-label="移动端连续拉线操作" aria-live="polite" data-expanded={mobileBatchConnectionExpanded ? "true" : "false"}>
         {mobileBatchConnectionExpanded ? <div className="mobile-batch-connection-actions__list" id="mobile-batch-connection-candidates" aria-label="连续拉线候选列表">
           <header><span><strong>全部候选</strong><small>最新候选优先 · 只预览，不会立即扣料</small></span><button type="button" onClick={() => setMobileBatchConnectionExpanded(false)} title="收起候选列表" aria-label="收起候选列表"><ChevronDown size={18} /></button></header>
           {batchConnections.length > 0 ? <ol>{[...batchConnections].reverse().map((selection, reverseIndex) => {
@@ -14418,7 +15060,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         {batchConnectionFeedback ? <p className="mobile-batch-connection-actions__feedback" role="status">{batchConnectionFeedback}</p> : null}
         {batchConnectionFailures.length > 0 ? <p className="mobile-batch-connection-actions__error" role="alert">最终复核未通过：{batchConnectionFailures.map((failure) => `第 ${failure.index + 1} 条：${failure.label}`).join("；")}</p> : null}
       </section> : null}
-      {nextMobileShell && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay && activeMobileCanvasMode === "select" ? <MobileSelectionContextBar
+      {nextMobileShell && !nativePlayerAuthorityOwnsRuntime && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay && activeMobileCanvasMode === "select" ? <MobileSelectionContextBar
         model={factorySelectionToolbarReadModel}
         canUpgrade={canUpgradeEntities(game, selectedEntityIds)}
         canUpgradeBelts={selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}
@@ -14452,7 +15094,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       /> : null}
       <div className="game-workspace">
         <RuntimeRenderProfile id="resource-rail">
-        <StableResourceRail
+        {nativePlayerAuthorityOwnsRuntime ? <aside
+          className="resource-rail native-resource-rail-unavailable"
+          data-native-authority-unavailable="tray-cargo-v1"
+          aria-label="Windows 原生物资托盘等待接入"
+        >
+          <section className="rail-block"><div className="rail-heading"><span>当前行星物资</span><strong>原生模式</strong></div><p role="status">托盘与手持物尚未接入同 revision 的 Rust 投影，已隐藏旧星球数据并禁用相关操作。</p></section>
+        </aside> : <StableResourceRail
           game={panelGame}
           onOpenCampaign={openCampaign}
           onOpenDysonPlanner={() => {
@@ -14464,7 +15112,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onSetTrayItemLimit={(value) => commitGame((current) => setPlanetTrayItemLimit(current, current.activePlanetId, value))}
           onDiscardTrayItems={(requests) => commitGame((current) => discardPlanetTrayItems(current, current.activePlanetId, requests))}
           onDropDraggedItem={handleDraggedItemToTray}
-        />
+        />}
         </RuntimeRenderProfile>
         <button className={`sidebar-edge-toggle sidebar-edge-toggle--left${leftSidebarCollapsed ? " is-collapsed" : ""}`} type="button" onClick={() => setLeftSidebarCollapsed((collapsed) => !collapsed)} title={leftSidebarCollapsed ? "边缘按钮：展开左侧物资面板" : "边缘按钮：收起左侧物资面板"} aria-label={leftSidebarCollapsed ? "边缘按钮：展开左侧物资面板" : "边缘按钮：收起左侧物资面板"}>{leftSidebarCollapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}</button>
         <RuntimeRenderProfile id="canvas-shell">
@@ -14476,15 +15124,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             data-detail-stage={canvasPresentationDetailStage}
             data-flow-commit-static={canvasFlowStaticPresentation ? "true" : "false"}
             data-flow-fully-deferred={canvasFlowFullyDeferred ? "true" : "false"}
+            data-native-projection-pending={nativeFactoryProjectionPending ? "true" : "false"}
+            aria-busy={nativeFactoryProjectionPending}
             aria-label="生产网络画布"
             ref={factoryCanvasRef}
             onPointerDownCapture={(event) => {
+              if (nativeFactoryProjectionPending) {
+                event.preventDefault();
+                event.stopPropagation();
+                return;
+              }
               longPressBindings.onPointerDownCapture?.(event);
               if (beginCanvasMultiTouch(event)) return;
               beginPlacementPointerMotion(event);
               onRegionPointerDown(event);
             }}
             onPointerMoveCapture={(event) => {
+              if (nativeFactoryProjectionPending) return;
               if (moveCanvasMultiTouch(event)) return;
               movePlacementPointerMotion(event);
               // A pressed primary pointer is panning the viewport. Re-running
@@ -14505,6 +15161,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               longPressBindings.onPointerUpCapture?.(event);
               stopCanvasPointerMotion();
               if (endCanvasMultiTouch(event)) return;
+              if (nativeFactoryProjectionPending) {
+                finishRegionPointer(event, true);
+                return;
+              }
               finishRegionPointer(event);
             }}
             onPointerCancelCapture={(event) => {
@@ -14524,6 +15184,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             setFocusedNodeId(nextNode?.dataset.id ?? null);
           }}
           onClickCapture={(event) => {
+            if (nativeFactoryProjectionPending) {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
             if (!placement && !blueprintPlacementId && clickConnectionPreviewRef.current &&
               completeClickConnectionAtPoint(event.clientX, event.clientY, batchConnectionModeRef.current || event.ctrlKey || event.shiftKey)) {
               event.preventDefault();
@@ -14538,11 +15203,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onPaneClick(event);
           }}
           onDoubleClick={(event) => {
+            if (nativeFactoryProjectionPending) return;
             if (game.settings.allowDoubleClickZoom && !regionMode && event.target instanceof Element && event.target.classList.contains("react-flow__pane") && !placement && !blueprintPlacementId) {
               void fitView({ padding: 0.18, minZoom: canvasMinimumZoom, duration: game.settings.reducedMotion ? 0 : 260 });
             }
           }}
         >
+          {nativeFactoryProjectionPending ? (
+            <div
+              className="native-factory-projection-pending"
+              role="status"
+              aria-live="polite"
+              style={{ position: "absolute", inset: 0, zIndex: 1000, display: "grid", placeItems: "center", background: "rgba(8, 13, 12, 0.88)", color: "#d8f7ec", pointerEvents: "all" }}
+            >
+              正在核对 Windows 原生星球数据，请稍候…
+            </div>
+          ) : null}
           <CanvasFlowCommitBoundary
             nodes={renderedFlowNodes}
             edges={renderedFlowEdges}
@@ -14632,7 +15308,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               endpoints={canvasLineEndpoints}
               routeCenters={edgeRouteCenters}
               topologyRevision={canvasTopology.revision}
-              planetId={canvasGame.activePlanetId}
+              planetId={factoryCanvasPlanetId}
               // The dense layer paints in screen space and receives every live
               // pan/zoom through its imperative handle. Read the same mutable
               // viewport ref here so a deferred React render cannot replay the
@@ -14646,13 +15322,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             /> : null}
             <ViewportPortal>
               <PendingBlueprintLayer
+                key={`blueprint:${factoryGestureSurfaceKey}`}
                 game={game}
-                planetId={canvasGame.activePlanetId}
+                planetId={factoryCanvasPlanetId}
                 viewport={pendingBlueprintViewport}
                 canvasSize={canvasViewportSize}
               />
               <CanvasRegionLayer
-                regions={canvasGame.canvasRegions.filter((region) => region.planetId === canvasGame.activePlanetId)}
+                key={`regions:${factoryGestureSurfaceKey}`}
+                regions={factoryCanvasRegions}
                 draft={regionDraft}
                 selectedRegionId={selectedRegionId}
                 resizePreview={regionResizePreview}
@@ -14664,6 +15342,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               {alignmentGuides.y != null ? <i className="alignment-guide alignment-guide--horizontal" style={{ top: alignmentGuides.y }} /> : null}
             </ViewportPortal>
             {!minimapCollapsed ? denseMinimapThrottleActive && !minimapCanvasFailed ? <CanvasMiniMap
+              key={`minimap:${factoryGestureSurfaceKey}`}
               ref={canvasMiniMapRef}
               nodes={factoryMiniMapEntities}
               worldBounds={factoryViewportReadModel.planetTotals.entities > 0
@@ -14717,17 +15396,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             <StablePlanetNavigator model={factoryPlanetNavigationReadModel} onPlanetChange={onPlanetChange} />
           </div> : <StablePlanetNavigator model={factoryPlanetNavigationReadModel} onPlanetChange={onPlanetChange} />}
 
-          <CanvasSelectionTools
+          {!nativePlayerAuthorityOwnsRuntime ? <CanvasSelectionTools
             selectionMode={selectionMode}
             regionMode={regionMode}
             lineFindMode={lineFindMode}
             batchConnectionMode={batchConnectionMode}
             blueprintCount={game.blueprints.length}
             beltCount={factoryActivePlanetNavigationRow?.beltCount ?? 0}
-            regionCount={game.canvasRegions.filter((region) => region.planetId === game.activePlanetId).length}
-            canUndo={gameHistoryRef.current.canUndo}
-            canRedo={gameHistoryRef.current.canRedo}
-            canUndoAutoLayout={Boolean(autoLayoutUndo && autoLayoutUndo.planetId === game.activePlanetId)}
+            regionCount={factoryCanvasRegions.length}
+            canUndo={!nativePlayerAuthorityOwnsRuntime && gameHistoryRef.current.canUndo}
+            canRedo={!nativePlayerAuthorityOwnsRuntime && gameHistoryRef.current.canRedo}
+            canUndoAutoLayout={!nativePlayerAuthorityOwnsRuntime && Boolean(autoLayoutUndo && autoLayoutUndo.planetId === game.activePlanetId)}
             leftSidebarCollapsed={leftSidebarCollapsed}
             rightSidebarCollapsed={rightSidebarCollapsed}
             onUndo={undoGame}
@@ -14794,7 +15473,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             }}
             onAutoLayout={() => autoLayoutEntities()}
             onUndoAutoLayout={undoAutoLayout}
-          />
+          /> : null}
           {blueprintPlacementId ? <section className="canvas-placement-options nodrag nopan" aria-label={isEnglish ? "Blueprint placement options" : "蓝图放置选项"}>
             <label>
               <input type="checkbox" checked={blueprintAllowOverlap} onChange={(event) => setBlueprintAllowOverlap(event.target.checked)} />
@@ -14820,8 +15499,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             <footer><button className="primary" type="button" disabled={batchConnections.length < 1} onClick={confirmBatchConnection}><Check size={14} />确认连接</button><button type="button" disabled={batchConnections.length < 1} onClick={clearBatchConnectionCandidates}><Trash2 size={14} />清空候选</button><button type="button" disabled={batchConnections.length < 1} onClick={undoLastBatchConnection} title="撤销最近一条候选"><X size={14} />撤销</button><button type="button" onClick={cancelBatchConnection}><X size={14} />取消</button></footer>
             <small>整批原子提交：任一线路非法或材料不足时全部不创建、全部不扣料。Ctrl/Shift 可临时保持连续拉线。</small>
           </section> : null}
-          {game.canvasRegions.find((region) => region.id === selectedRegionId && region.planetId === game.activePlanetId) ? <CanvasRegionEditor
-            region={game.canvasRegions.find((region) => region.id === selectedRegionId && region.planetId === game.activePlanetId)!}
+          {factoryCanvasRegions.find((region) => region.id === selectedRegionId) ? <CanvasRegionEditor
+            region={factoryCanvasRegions.find((region) => region.id === selectedRegionId)!}
             onChange={(changes) => commitGame((current) => updateCanvasRegion(current, selectedRegionId!, changes))}
             onRemove={() => {
               commitGame((current) => removeCanvasRegion(current, selectedRegionId!));
@@ -14831,7 +15510,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             }}
             onClose={() => setSelectedRegionId(null)}
           /> : null}
-          <SelectionToolbar
+          {!nativePlayerAuthorityOwnsRuntime ? <SelectionToolbar
             model={factorySelectionToolbarReadModel}
             eligibleCount={blueprintEligibleIds.length}
             canUpgrade={canUpgradeEntities(game, selectedEntityIds)}
@@ -14869,7 +15548,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               setSelectedBeltIds([]);
               setSelectedBeltId(null);
             }}
-          />
+          /> : null}
           {highlightedTaskId ? (
             <div className="task-path-indicator nodrag nopan">
               <span>任务生产路径</span>
@@ -14886,7 +15565,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               <button type="button" onClick={() => setFocusedBeltNetworkId(null)} aria-label="关闭运输网络聚焦">×</button>
             </div>
           ) : null}
-          {productionLineFocus?.planetId === game.activePlanetId ? (
+          {productionLineFocus?.planetId === factoryCanvasPlanetId ? (
             <div className="production-line-focus-indicator nodrag nopan">
               <span>物品产线定位</span>
               <strong>{ITEMS[productionLineFocus.itemId].name}</strong>
@@ -14937,6 +15616,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         <RuntimeRenderProfile id="inspector">
         <StableInspectorPanel
           game={factoryInspectorGame}
+          readOnly={nativePlayerAuthorityOwnsRuntime}
           inspectorReadModel={factoryInspectorSummaryReadModel}
           multiSelectionReadModel={factoryMultiSelectionSummaryReadModel}
           multiSelectedBelts={selectedBeltsForMultiSummary as BeltConnection[]}
@@ -15157,13 +15837,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         <button className={`sidebar-edge-toggle sidebar-edge-toggle--right${rightSidebarCollapsed ? " is-collapsed" : ""}`} type="button" onClick={() => setRightSidebarCollapsed((collapsed) => !collapsed)} title={rightSidebarCollapsed ? "边缘按钮：展开右侧检查器面板" : "边缘按钮：收起右侧检查器面板"} aria-label={rightSidebarCollapsed ? "边缘按钮：展开右侧检查器面板" : "边缘按钮：收起右侧检查器面板"}>{rightSidebarCollapsed ? <ChevronLeft size={15} /> : <ChevronRight size={15} />}</button>
       </div>
       <RuntimeRenderProfile id="construction-dock">
-      <StableConstructionDock
+      {nativePlayerAuthorityOwnsRuntime ? <section
+        className="construction-dock native-construction-dock-unavailable"
+        data-native-authority-unavailable="construction-inventory-v1"
+        role="status"
+      >施工库存尚未接入同 revision 的 Rust 投影，建造入口已安全暂停。</section> : <StableConstructionDock
         game={panelGame}
         placement={placement}
         beltTier={dockBeltTier}
         beltTierMode={beltTierMode}
         placementCount={placementCount}
         onPlacementChange={(buildingId) => {
+          if (rejectLegacyFactoryInteractionWhileNative("建筑放置与扩建")) return;
           setPlacement(buildingId);
           setBlueprintPlacementId(null);
           setSelectionMode(false);
@@ -15187,12 +15872,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         onStowCargo={handleStowCargo}
         onMissingCraftNavigate={handleMissingConstructionCraft}
         onDeleteConstruction={handleDeleteConstructionInventory}
-      />
+      />}
       </RuntimeRenderProfile>
-      <RuntimeRenderProfile id="onboarding">
+      {!nativePlayerAuthorityOwnsRuntime ? <RuntimeRenderProfile id="onboarding">
       <OnboardingCoach game={panelGame} onAction={runOnboardingAction} compact={nextMobileShell} />
-      </RuntimeRenderProfile>
-      <BlueprintWorkspace
+      </RuntimeRenderProfile> : null}
+      {!nativePlayerAuthorityOwnsRuntime ? <BlueprintWorkspace
         open={blueprintsOpen}
         game={game}
         factoryHeadlineReadModel={factoryConstructionHeadlineReadModel}
@@ -15214,7 +15899,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         onCancelQueue={(entryId) => commitGame((current) => cancelConstructionQueueEntry(current, entryId))}
         onExport={downloadBlueprint}
         onImport={importBlueprint}
-      />
+      /> : null}
       <CommandPalette
         open={commandPaletteOpen}
         game={game}

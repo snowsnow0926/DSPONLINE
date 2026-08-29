@@ -56,26 +56,139 @@ pub(crate) struct QuantumActiveScan {
     pub directory_fallback: bool,
 }
 
-#[derive(Debug, Clone)]
-struct QuantumSlotPlan {
-    entity_index: usize,
-    entity_id: String,
-    item_id: String,
-    key: String,
-    /// JavaScript's direct flush helper resolves the first matching supply
-    /// slot even though the boundary request keeps the highest-priority slot.
-    /// Preserve both views when a MOD save contains duplicate item slots.
-    flush_slot: Slot,
-    slot: Slot,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuantumSlotContract {
+    min_stock: u32,
+    max_stock: u32,
+    priority: i8,
 }
 
-#[derive(Debug, Clone)]
+impl QuantumSlotContract {
+    fn from_slot(slot: &Slot) -> Option<Self> {
+        Some(Self {
+            min_stock: u32::try_from(slot.min_stock as u64).ok()?,
+            max_stock: u32::try_from(slot.max_stock as u64).ok()?,
+            priority: i8::try_from(slot.priority).ok()?,
+        })
+        .filter(|contract| {
+            f64::from(contract.min_stock).to_bits() == slot.min_stock.to_bits()
+                && f64::from(contract.max_stock).to_bits() == slot.max_stock.to_bits()
+        })
+    }
+
+    fn matches(self, slot: &Slot) -> bool {
+        Self::from_slot(slot) == Some(self)
+    }
+}
+
+/// Compact immutable authority proof for one selected endpoint/item slot.
+/// Entity IDs remain in CoreState's exact row arena and item IDs in the
+/// directory's unique pool, so a large save does not allocate three strings
+/// and two complete Slot values for every supply/demand plan.
+#[derive(Debug, Clone, Copy)]
+struct QuantumSlotPlan {
+    entity_index: u32,
+    item_index: u32,
+    slot: QuantumSlotContract,
+}
+
+/// Only duplicate supply slots whose first match differs from the selected
+/// highest-priority match need a second contract. Ordinary one-slot plans pay
+/// no per-row cost for JavaScript's first-match flush rule.
+#[derive(Debug, Clone, Copy)]
+struct QuantumFlushOverride {
+    plan_index: u32,
+    slot: QuantumSlotContract,
+}
+
+#[derive(Debug, Clone, Copy)]
 struct QuantumCollectorPlan {
-    entity_index: usize,
-    entity_id: String,
-    item_id: String,
-    key: String,
+    entity_index: u32,
+    item_index: u32,
     continuously_productive: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct EntityPlanRanges {
+    offsets: Vec<u32>,
+}
+
+impl EntityPlanRanges {
+    fn build(entity_count: usize, plans: &[QuantumSlotPlan]) -> Option<Self> {
+        let mut offsets = Vec::with_capacity(entity_count.checked_add(1)?);
+        let mut plan_index = 0_usize;
+        for entity_index in 0..entity_count {
+            offsets.push(u32::try_from(plan_index).ok()?);
+            while plans
+                .get(plan_index)
+                .is_some_and(|plan| plan.entity_index as usize == entity_index)
+            {
+                plan_index += 1;
+            }
+            if plans
+                .get(plan_index)
+                .is_some_and(|plan| (plan.entity_index as usize) < entity_index)
+            {
+                return None;
+            }
+        }
+        offsets.push(u32::try_from(plan_index).ok()?);
+        (plan_index == plans.len()).then_some(Self { offsets })
+    }
+
+    fn range(&self, entity_index: usize) -> std::ops::Range<usize> {
+        self.offsets
+            .get(entity_index..=entity_index.saturating_add(1))
+            .filter(|range| range.len() == 2)
+            .map_or(0..0, |range| range[0] as usize..range[1] as usize)
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        (self.offsets.capacity() * size_of::<u32>()) as u64
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ItemPlanIndex {
+    offsets: Vec<u32>,
+    plan_indices: Vec<u32>,
+}
+
+impl ItemPlanIndex {
+    fn build(item_count: usize, plan_items: impl Iterator<Item = u32>) -> Option<Self> {
+        let mut buckets = vec![Vec::<u32>::new(); item_count];
+        for (plan_index, item_index) in plan_items.enumerate() {
+            buckets
+                .get_mut(item_index as usize)?
+                .push(u32::try_from(plan_index).ok()?);
+        }
+        let mut offsets = Vec::with_capacity(item_count.checked_add(1)?);
+        let mut plan_indices = Vec::new();
+        offsets.push(0);
+        for bucket in buckets {
+            plan_indices.extend(bucket);
+            offsets.push(u32::try_from(plan_indices.len()).ok()?);
+        }
+        offsets.shrink_to_fit();
+        plan_indices.shrink_to_fit();
+        Some(Self {
+            offsets,
+            plan_indices,
+        })
+    }
+
+    fn plans(&self, item_index: u32) -> &[u32] {
+        self.offsets
+            .get(item_index as usize..=item_index as usize + 1)
+            .filter(|range| range.len() == 2)
+            .map_or(&[], |range| {
+                &self.plan_indices[range[0] as usize..range[1] as usize]
+            })
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        ((self.offsets.capacity() + self.plan_indices.capacity()) * size_of::<u32>()) as u64
+    }
 }
 
 /// Runtime-only counterpart of the JavaScript `SimulationLookupContext`
@@ -91,15 +204,16 @@ pub(crate) struct QuantumLogisticsDirectory {
     topology: Arc<FactoryTopology>,
     entity_count: usize,
     endpoint_indices: Vec<usize>,
+    item_ids: Vec<Arc<str>>,
+    item_by_id: HashMap<Arc<str>, u32>,
     collector_plans: Vec<QuantumCollectorPlan>,
     upload_plans: Vec<QuantumSlotPlan>,
     download_plans: Vec<QuantumSlotPlan>,
-    upload_by_station: HashMap<usize, Vec<usize>>,
-    upload_by_item: HashMap<String, Vec<usize>>,
-    collector_by_station: HashMap<usize, usize>,
-    collector_by_item: HashMap<String, Vec<usize>>,
-    download_by_station: HashMap<usize, Vec<usize>>,
-    download_by_station_item: HashMap<(usize, String), Vec<usize>>,
+    upload_flush_overrides: Vec<QuantumFlushOverride>,
+    upload_by_station: EntityPlanRanges,
+    upload_by_item: ItemPlanIndex,
+    collector_by_item: ItemPlanIndex,
+    download_by_station: EntityPlanRanges,
     pending_flush: BTreeSet<usize>,
     pending_download: BTreeSet<usize>,
     pending_boundary_upload: BTreeSet<usize>,
@@ -122,15 +236,16 @@ impl Default for QuantumLogisticsDirectory {
             topology: Arc::new(FactoryTopology::default()),
             entity_count: 0,
             endpoint_indices: Vec::new(),
+            item_ids: Vec::new(),
+            item_by_id: HashMap::new(),
             collector_plans: Vec::new(),
             upload_plans: Vec::new(),
             download_plans: Vec::new(),
-            upload_by_station: HashMap::new(),
-            upload_by_item: HashMap::new(),
-            collector_by_station: HashMap::new(),
-            collector_by_item: HashMap::new(),
-            download_by_station: HashMap::new(),
-            download_by_station_item: HashMap::new(),
+            upload_flush_overrides: Vec::new(),
+            upload_by_station: EntityPlanRanges::default(),
+            upload_by_item: ItemPlanIndex::default(),
+            collector_by_item: ItemPlanIndex::default(),
+            download_by_station: EntityPlanRanges::default(),
             pending_flush: BTreeSet::new(),
             pending_download: BTreeSet::new(),
             pending_boundary_upload: BTreeSet::new(),
@@ -632,19 +747,38 @@ fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
         .collect()
 }
 
+fn intern_quantum_item(
+    item_ids: &mut Vec<Arc<str>>,
+    item_by_id: &mut HashMap<Arc<str>, u32>,
+    item_id: &str,
+) -> Option<u32> {
+    if let Some(index) = item_by_id.get(item_id) {
+        return Some(*index);
+    }
+    let index = u32::try_from(item_ids.len()).ok()?;
+    let owned = Arc::<str>::from(item_id);
+    item_ids.push(Arc::clone(&owned));
+    item_by_id.insert(owned, index);
+    Some(index)
+}
+
 fn upsert_slot_plan(
     plans: &mut Vec<QuantumSlotPlan>,
-    positions: &mut HashMap<String, usize>,
+    positions: &mut HashMap<(u32, u32), usize>,
     plan: QuantumSlotPlan,
-) {
-    if let Some(&position) = positions.get(&plan.key) {
+) -> Option<(usize, QuantumSlotContract)> {
+    let key = (plan.entity_index, plan.item_index);
+    if let Some(&position) = positions.get(&key) {
+        let first_slot = plans[position].slot;
         if plan.slot.priority > plans[position].slot.priority {
             plans[position].slot = plan.slot;
+            return Some((position, first_slot));
         }
     } else {
-        positions.insert(plan.key.clone(), plans.len());
+        positions.insert(key, plans.len());
         plans.push(plan);
     }
+    None
 }
 
 impl QuantumLogisticsDirectory {
@@ -687,6 +821,10 @@ impl QuantumLogisticsDirectory {
             if !entity_id.is_ascii() {
                 directory.fallback_full_scan = true;
             }
+            let Some(compact_entity_index) = u32::try_from(entity_index).ok() else {
+                directory.fallback_full_scan = true;
+                continue;
+            };
             let collector = is_quantum_collector(endpoint);
             directory.endpoint_indices.push(entity_index);
             let stacks = finite_number(endpoint.get("machineCount")).floor().max(0.0);
@@ -703,11 +841,17 @@ impl QuantumLogisticsDirectory {
                 {
                     directory.fallback_full_scan = true;
                 }
+                let Some(item_index) = intern_quantum_item(
+                    &mut directory.item_ids,
+                    &mut directory.item_by_id,
+                    item_id,
+                ) else {
+                    directory.fallback_full_scan = true;
+                    continue;
+                };
                 directory.collector_plans.push(QuantumCollectorPlan {
-                    entity_index,
-                    entity_id: entity_id.to_owned(),
-                    item_id: item_id.to_owned(),
-                    key: format!("{entity_id}:{item_id}"),
+                    entity_index: compact_entity_index,
+                    item_index,
                     continuously_productive: finite_number(endpoint.get("machineCount")) > 0.0,
                 });
                 continue;
@@ -722,72 +866,104 @@ impl QuantumLogisticsDirectory {
                 let Some(item_id) = slot.item_id.as_deref() else {
                     continue;
                 };
-                let positions = match slot.remote_mode.as_str() {
-                    "supply" => &mut upload_positions,
-                    "demand" => &mut download_positions,
-                    _ => continue,
-                };
-                let key = format!("{entity_id}:{item_id}");
                 if !item_id.is_ascii()
                     || item_id.contains(':')
                     || !state.catalog.items.contains_key(item_id)
-                    || positions.contains_key(&key)
                 {
                     directory.fallback_full_scan = true;
                 }
-                let plans = if slot.remote_mode == "supply" {
-                    &mut directory.upload_plans
-                } else {
-                    &mut directory.download_plans
+                let Some(item_index) = intern_quantum_item(
+                    &mut directory.item_ids,
+                    &mut directory.item_by_id,
+                    item_id,
+                ) else {
+                    directory.fallback_full_scan = true;
+                    continue;
                 };
-                upsert_slot_plan(
-                    plans,
-                    positions,
-                    QuantumSlotPlan {
-                        entity_index,
-                        entity_id: entity_id.to_owned(),
-                        item_id: item_id.to_owned(),
-                        key,
-                        flush_slot: slot.clone(),
-                        slot,
-                    },
-                );
+                let Some(slot_contract) = QuantumSlotContract::from_slot(&slot) else {
+                    directory.fallback_full_scan = true;
+                    continue;
+                };
+                let key = (compact_entity_index, item_index);
+                match slot.remote_mode.as_str() {
+                    "supply" => {
+                        if upload_positions.contains_key(&key) {
+                            directory.fallback_full_scan = true;
+                        }
+                        if let Some((plan_index, first_slot)) = upsert_slot_plan(
+                            &mut directory.upload_plans,
+                            &mut upload_positions,
+                            QuantumSlotPlan {
+                                entity_index: compact_entity_index,
+                                item_index,
+                                slot: slot_contract,
+                            },
+                        ) && directory
+                            .upload_flush_overrides
+                            .last()
+                            .is_none_or(|entry| entry.plan_index as usize != plan_index)
+                        {
+                            directory.upload_flush_overrides.push(QuantumFlushOverride {
+                                plan_index: u32::try_from(plan_index)
+                                    .expect("bounded native quantum upload plan"),
+                                slot: first_slot,
+                            });
+                        }
+                    }
+                    "demand" => {
+                        if download_positions.contains_key(&key) {
+                            directory.fallback_full_scan = true;
+                        }
+                        let _ = upsert_slot_plan(
+                            &mut directory.download_plans,
+                            &mut download_positions,
+                            QuantumSlotPlan {
+                                entity_index: compact_entity_index,
+                                item_index,
+                                slot: slot_contract,
+                            },
+                        );
+                    }
+                    _ => continue,
+                }
             }
         }
-        for (plan_index, plan) in directory.upload_plans.iter().enumerate() {
-            directory
-                .upload_by_station
-                .entry(plan.entity_index)
-                .or_default()
-                .push(plan_index);
-            directory
-                .upload_by_item
-                .entry(plan.item_id.clone())
-                .or_default()
-                .push(plan_index);
-        }
-        for (collector_index, plan) in directory.collector_plans.iter().enumerate() {
-            directory
-                .collector_by_station
-                .insert(plan.entity_index, collector_index);
-            directory
-                .collector_by_item
-                .entry(plan.item_id.clone())
-                .or_default()
-                .push(collector_index);
-        }
-        for (plan_index, plan) in directory.download_plans.iter().enumerate() {
-            directory
-                .download_by_station
-                .entry(plan.entity_index)
-                .or_default()
-                .push(plan_index);
-            directory
-                .download_by_station_item
-                .entry((plan.entity_index, plan.item_id.clone()))
-                .or_default()
-                .push(plan_index);
-        }
+        directory.endpoint_indices.shrink_to_fit();
+        directory.item_ids.shrink_to_fit();
+        directory.item_by_id.shrink_to_fit();
+        directory.collector_plans.shrink_to_fit();
+        directory.upload_plans.shrink_to_fit();
+        directory.download_plans.shrink_to_fit();
+        directory.upload_flush_overrides.shrink_to_fit();
+        directory.tower_stack_terms.shrink_to_fit();
+        directory.upload_by_station =
+            EntityPlanRanges::build(directory.entity_count, &directory.upload_plans)
+                .unwrap_or_else(|| {
+                    directory.fallback_full_scan = true;
+                    EntityPlanRanges::default()
+                });
+        directory.download_by_station =
+            EntityPlanRanges::build(directory.entity_count, &directory.download_plans)
+                .unwrap_or_else(|| {
+                    directory.fallback_full_scan = true;
+                    EntityPlanRanges::default()
+                });
+        directory.upload_by_item = ItemPlanIndex::build(
+            directory.item_ids.len(),
+            directory.upload_plans.iter().map(|plan| plan.item_index),
+        )
+        .unwrap_or_else(|| {
+            directory.fallback_full_scan = true;
+            ItemPlanIndex::default()
+        });
+        directory.collector_by_item = ItemPlanIndex::build(
+            directory.item_ids.len(),
+            directory.collector_plans.iter().map(|plan| plan.item_index),
+        )
+        .unwrap_or_else(|| {
+            directory.fallback_full_scan = true;
+            ItemPlanIndex::default()
+        });
         directory.cached_legacy_bandwidth = RuntimeBandwidth {
             per_minute: 0.0,
             tower_stacks: directory.tower_stacks,
@@ -800,12 +976,43 @@ impl QuantumLogisticsDirectory {
         Arc::ptr_eq(&self.topology, &state.factory_topology) && self.entity_count == entities.len()
     }
 
-    fn plan_matches(entities: &[Value], plan: &QuantumSlotPlan, frozen_mode: bool) -> bool {
+    fn item_id(&self, item_index: u32) -> Option<&str> {
+        self.item_ids.get(item_index as usize).map(AsRef::as_ref)
+    }
+
+    fn upload_flush_contract(
+        &self,
+        plan_index: usize,
+        selected: QuantumSlotContract,
+    ) -> QuantumSlotContract {
+        self.upload_flush_overrides
+            .binary_search_by_key(&(plan_index as u32), |entry| entry.plan_index)
+            .ok()
+            .and_then(|index| self.upload_flush_overrides.get(index))
+            .map_or(selected, |entry| entry.slot)
+    }
+
+    fn plan_matches(
+        &self,
+        state: &CoreState,
+        entities: &[Value],
+        plans: &[QuantumSlotPlan],
+        plan_index: usize,
+        remote_mode: &str,
+        frozen_mode: bool,
+    ) -> bool {
+        let Some(plan) = plans.get(plan_index) else {
+            return false;
+        };
+        let entity_index = plan.entity_index as usize;
+        let Some(item_id) = self.item_id(plan.item_index) else {
+            return false;
+        };
         let Some(endpoint) = entities
-            .get(plan.entity_index)
+            .get(entity_index)
             .and_then(Value::as_object)
             .filter(|endpoint| {
-                string_at(endpoint, "id") == Some(plan.entity_id.as_str())
+                string_at(endpoint, "id") == Some(&state.entities.ids[entity_index])
                     && (is_quantum_station(endpoint)
                         || (frozen_mode
                             && string_at(endpoint, "kind") == Some("station")
@@ -820,9 +1027,7 @@ impl QuantumLogisticsDirectory {
         };
         let mut selected = None::<Slot>;
         for slot in endpoint_slots {
-            if slot.item_id.as_deref() != Some(plan.item_id.as_str())
-                || slot.remote_mode != plan.slot.remote_mode
-            {
+            if slot.item_id.as_deref() != Some(item_id) || slot.remote_mode != remote_mode {
                 continue;
             }
             if selected
@@ -832,32 +1037,43 @@ impl QuantumLogisticsDirectory {
                 selected = Some(slot);
             }
         }
-        let highest_matches = selected.as_ref() == Some(&plan.slot);
+        let highest_matches = selected
+            .as_ref()
+            .is_some_and(|slot| plan.slot.matches(slot));
         if !highest_matches {
             return false;
         }
-        if plan.slot.remote_mode != "supply" {
+        if remote_mode != "supply" {
             return true;
         }
+        let flush_contract = self.upload_flush_contract(plan_index, plan.slot);
         slots(endpoint).is_ok_and(|slots| {
             slots
                 .into_iter()
                 .find(|slot| {
-                    slot.item_id.as_deref() == Some(plan.item_id.as_str())
-                        && slot.remote_mode == "supply"
+                    slot.item_id.as_deref() == Some(item_id) && slot.remote_mode == "supply"
                 })
                 .as_ref()
-                == Some(&plan.flush_slot)
+                .is_some_and(|slot| flush_contract.matches(slot))
         })
     }
 
-    fn collector_plan_matches(entities: &[Value], plan: &QuantumCollectorPlan) -> bool {
+    fn collector_plan_matches(
+        &self,
+        state: &CoreState,
+        entities: &[Value],
+        plan: &QuantumCollectorPlan,
+    ) -> bool {
+        let entity_index = plan.entity_index as usize;
+        let Some(item_id) = self.item_id(plan.item_index) else {
+            return false;
+        };
         entities
-            .get(plan.entity_index)
+            .get(entity_index)
             .and_then(Value::as_object)
             .is_some_and(|endpoint| {
-                string_at(endpoint, "id") == Some(plan.entity_id.as_str())
-                    && string_at(endpoint, "storedItemId") == Some(plan.item_id.as_str())
+                string_at(endpoint, "id") == Some(&state.entities.ids[entity_index])
+                    && string_at(endpoint, "storedItemId") == Some(item_id)
                     && is_quantum_collector(endpoint)
             })
     }
@@ -922,9 +1138,16 @@ impl QuantumLogisticsDirectory {
             self.topology_matches(state, entities),
         );
         if selected.as_ref().is_some_and(|indices| {
-            indices
-                .iter()
-                .any(|&index| !Self::plan_matches(entities, &self.upload_plans[index], frozen_mode))
+            indices.iter().any(|&index| {
+                !self.plan_matches(
+                    state,
+                    entities,
+                    &self.upload_plans,
+                    index,
+                    "supply",
+                    frozen_mode,
+                )
+            })
         }) {
             scan.selected_rows = self.entity_count;
             scan.total_rows = self.entity_count;
@@ -947,9 +1170,16 @@ impl QuantumLogisticsDirectory {
             self.topology_matches(state, entities),
         );
         if selected.as_ref().is_some_and(|indices| {
-            indices
-                .iter()
-                .any(|&index| !Self::plan_matches(entities, &self.download_plans[index], false))
+            indices.iter().any(|&index| {
+                !self.plan_matches(
+                    state,
+                    entities,
+                    &self.download_plans,
+                    index,
+                    "demand",
+                    false,
+                )
+            })
         }) {
             scan.selected_rows = self.entity_count;
             scan.total_rows = self.entity_count;
@@ -975,9 +1205,16 @@ impl QuantumLogisticsDirectory {
         if selected.as_ref().is_some_and(|indices| {
             indices.iter().any(|&row| {
                 if row < collector_rows {
-                    !Self::collector_plan_matches(entities, &self.collector_plans[row])
+                    !self.collector_plan_matches(state, entities, &self.collector_plans[row])
                 } else {
-                    !Self::plan_matches(entities, &self.upload_plans[row - collector_rows], true)
+                    !self.plan_matches(
+                        state,
+                        entities,
+                        &self.upload_plans,
+                        row - collector_rows,
+                        "supply",
+                        true,
+                    )
                 }
             })
         }) {
@@ -1006,28 +1243,30 @@ impl QuantumLogisticsDirectory {
     pub(crate) fn wake_from_stations(&mut self, station_indices: &[usize]) {
         if !self.flush_all_pending {
             for station_index in station_indices {
-                if let Some(plan_indices) = self.upload_by_station.get(station_index) {
-                    self.pending_flush.extend(plan_indices.iter().copied());
-                }
+                self.pending_flush
+                    .extend(self.upload_by_station.range(*station_index));
             }
         }
         if !self.boundary_upload_all_pending {
             for station_index in station_indices {
-                if let Some(&collector_index) = self.collector_by_station.get(station_index) {
+                if let Ok(collector_index) = self.collector_plans.binary_search_by_key(
+                    &u32::try_from(*station_index).unwrap_or(u32::MAX),
+                    |plan| plan.entity_index,
+                ) {
                     self.pending_boundary_upload.insert(collector_index);
                 }
-                if let Some(plan_indices) = self.upload_by_station.get(station_index) {
-                    let collector_rows = self.collector_plans.len();
-                    self.pending_boundary_upload
-                        .extend(plan_indices.iter().map(|index| collector_rows + index));
-                }
+                let collector_rows = self.collector_plans.len();
+                self.pending_boundary_upload.extend(
+                    self.upload_by_station
+                        .range(*station_index)
+                        .map(|index| collector_rows + index),
+                );
             }
         }
         if !self.download_all_pending {
             for station_index in station_indices {
-                if let Some(plan_indices) = self.download_by_station.get(station_index) {
-                    self.pending_download.extend(plan_indices.iter().copied());
-                }
+                self.pending_download
+                    .extend(self.download_by_station.range(*station_index));
             }
         }
     }
@@ -1043,32 +1282,44 @@ impl QuantumLogisticsDirectory {
                 self.pending_download.clear();
                 return;
             };
-            if let Some(plan_indices) = self
-                .download_by_station_item
-                .get(&(source_index, item_id.to_owned()))
-            {
-                self.pending_download.extend(plan_indices.iter().copied());
+            let Some(&item_index) = self.item_by_id.get(item_id) else {
+                continue;
+            };
+            for plan_index in self.download_by_station.range(source_index) {
+                if self.download_plans[plan_index].item_index == item_index {
+                    self.pending_download.insert(plan_index);
+                }
             }
         }
     }
 
     pub(crate) fn wake_flush_items<'a>(&mut self, item_ids: impl Iterator<Item = &'a String>) {
         for item_id in item_ids {
-            if !self.flush_all_pending
-                && let Some(plan_indices) = self.upload_by_item.get(item_id)
-            {
-                self.pending_flush.extend(plan_indices.iter().copied());
+            let Some(&item_index) = self.item_by_id.get(item_id.as_str()) else {
+                continue;
+            };
+            if !self.flush_all_pending {
+                self.pending_flush.extend(
+                    self.upload_by_item
+                        .plans(item_index)
+                        .iter()
+                        .map(|&index| index as usize),
+                );
             }
             if !self.boundary_upload_all_pending {
-                if let Some(collector_indices) = self.collector_by_item.get(item_id) {
-                    self.pending_boundary_upload
-                        .extend(collector_indices.iter().copied());
-                }
-                if let Some(plan_indices) = self.upload_by_item.get(item_id) {
-                    let collector_rows = self.collector_plans.len();
-                    self.pending_boundary_upload
-                        .extend(plan_indices.iter().map(|index| collector_rows + index));
-                }
+                self.pending_boundary_upload.extend(
+                    self.collector_by_item
+                        .plans(item_index)
+                        .iter()
+                        .map(|&index| index as usize),
+                );
+                let collector_rows = self.collector_plans.len();
+                self.pending_boundary_upload.extend(
+                    self.upload_by_item
+                        .plans(item_index)
+                        .iter()
+                        .map(|&index| collector_rows + index as usize),
+                );
             }
         }
     }
@@ -1121,7 +1372,7 @@ impl QuantumLogisticsDirectory {
         let indices = self
             .download_plans
             .iter()
-            .map(|plan| plan.entity_index)
+            .map(|plan| plan.entity_index as usize)
             .collect::<Vec<_>>();
         self.runtime_written_station_indices
             .extend(indices.iter().copied());
@@ -1133,8 +1384,11 @@ impl QuantumLogisticsDirectory {
     }
 
     fn mark_fallback_flush_runtime_rows(&mut self) {
-        self.inventory_written_station_indices
-            .extend(self.upload_plans.iter().map(|plan| plan.entity_index));
+        self.inventory_written_station_indices.extend(
+            self.upload_plans
+                .iter()
+                .map(|plan| plan.entity_index as usize),
+        );
     }
 
     pub(crate) fn take_runtime_written_station_indices(&mut self) -> Vec<usize> {
@@ -1189,47 +1443,42 @@ impl QuantumLogisticsDirectory {
     }
 
     pub(crate) fn estimated_bytes(&self) -> u64 {
-        let string_bytes = self
-            .collector_plans
+        let item_text_bytes = self
+            .item_ids
             .iter()
-            .flat_map(|plan| {
-                [
-                    plan.entity_id.capacity(),
-                    plan.item_id.capacity(),
-                    plan.key.capacity(),
-                ]
+            .map(|item| {
+                let header = size_of::<usize>() * 2;
+                let unaligned = header + item.len();
+                let alignment = std::mem::align_of::<usize>();
+                unaligned.div_ceil(alignment) * alignment
             })
-            .chain(self.upload_plans.iter().flat_map(|plan| {
-                [
-                    plan.entity_id.capacity(),
-                    plan.item_id.capacity(),
-                    plan.key.capacity(),
-                    plan.flush_slot.remote_mode.capacity(),
-                    plan.slot.remote_mode.capacity(),
-                ]
-            }))
-            .chain(self.download_plans.iter().flat_map(|plan| {
-                [
-                    plan.entity_id.capacity(),
-                    plan.item_id.capacity(),
-                    plan.key.capacity(),
-                    plan.flush_slot.remote_mode.capacity(),
-                    plan.slot.remote_mode.capacity(),
-                ]
-            }))
             .sum::<usize>();
+        // HashMap buckets include the stored pair plus one control byte. This
+        // deliberately counts the unique item lookup separately from the item
+        // arena; unlike the old plan estimate, no resident reverse index is
+        // omitted from the public memory diagnostic.
+        let item_lookup_bytes =
+            self.item_by_id.capacity() * (size_of::<(Arc<str>, u32)>() + size_of::<u8>());
+        let pending_tree_bytes = (self.pending_flush.len()
+            + self.pending_download.len()
+            + self.pending_boundary_upload.len()
+            + self.runtime_written_station_indices.len()
+            + self.inventory_written_station_indices.len())
+            * (size_of::<usize>() * 4);
         (self.endpoint_indices.capacity() * size_of::<usize>()
+            + self.item_ids.capacity() * size_of::<Arc<str>>()
+            + item_text_bytes
+            + item_lookup_bytes
             + self.collector_plans.capacity() * size_of::<QuantumCollectorPlan>()
             + self.upload_plans.capacity() * size_of::<QuantumSlotPlan>()
             + self.download_plans.capacity() * size_of::<QuantumSlotPlan>()
+            + self.upload_flush_overrides.capacity() * size_of::<QuantumFlushOverride>()
+            + self.upload_by_station.estimated_bytes() as usize
+            + self.upload_by_item.estimated_bytes() as usize
+            + self.collector_by_item.estimated_bytes() as usize
+            + self.download_by_station.estimated_bytes() as usize
             + self.tower_stack_terms.capacity() * size_of::<f64>()
-            + (self.pending_flush.len()
-                + self.pending_download.len()
-                + self.pending_boundary_upload.len()
-                + self.runtime_written_station_indices.len()
-                + self.inventory_written_station_indices.len())
-                * size_of::<usize>()
-            + string_bytes) as u64
+            + pending_tree_bytes) as u64
     }
 }
 
@@ -1262,6 +1511,15 @@ fn station_capacity(
     entity: &Map<String, Value>,
     slot: &Slot,
 ) -> anyhow::Result<f64> {
+    station_capacity_with_max_stock(state, base, entity, slot.max_stock)
+}
+
+fn station_capacity_with_max_stock(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entity: &Map<String, Value>,
+    max_stock: f64,
+) -> anyhow::Result<f64> {
     let building = string_at(entity, "buildingId")
         .and_then(|id| state.catalog.buildings.get(id))
         .ok_or_else(|| anyhow!("native quantum station building is missing"))?;
@@ -1270,8 +1528,8 @@ fn station_capacity(
         finite_number(entity.get("machineCount")),
         normalized_buffer_limit(base),
     );
-    Ok(if slot.max_stock > 0.0 {
-        rated.min(slot.max_stock)
+    Ok(if max_stock > 0.0 {
+        rated.min(max_stock)
     } else {
         rated
     })
@@ -1845,22 +2103,24 @@ pub(crate) fn flush_active_supply_buffers(
     };
     let mut normalized_for_deposit = false;
     for &plan_index in &selected {
-        let plan = &directory.upload_plans[plan_index];
-        let station = entities[plan.entity_index]
+        let plan = directory.upload_plans[plan_index];
+        let entity_index = plan.entity_index as usize;
+        let item_id = directory
+            .item_id(plan.item_index)
+            .ok_or_else(|| anyhow!("native quantum upload item index is invalid"))?;
+        let flush_slot = directory.upload_flush_contract(plan_index, plan.slot);
+        let station = entities[entity_index]
             .as_object_mut()
             .ok_or_else(|| anyhow!("native quantum station is invalid"))?;
-        let input = item_amount(station, "inputs", &plan.item_id)
-            .floor()
-            .max(0.0);
-        let output = item_amount(station, "outputs", &plan.item_id)
-            .floor()
-            .max(0.0);
+        let input = item_amount(station, "inputs", item_id).floor().max(0.0);
+        let output = item_amount(station, "outputs", item_id).floor().max(0.0);
         let outgoing = route_ledger
-            .quantum_reserved_outgoing(plan.entity_index, &plan.item_id)
+            .quantum_reserved_outgoing(entity_index, item_id)
             .floor()
             .max(0.0);
-        let from_output_available = (output - plan.flush_slot.min_stock - outgoing).max(0.0);
-        let from_input_available = (input - (plan.flush_slot.min_stock - output).max(0.0)).max(0.0);
+        let min_stock = f64::from(flush_slot.min_stock);
+        let from_output_available = (output - min_stock - outgoing).max(0.0);
+        let from_input_available = (input - (min_stock - output).max(0.0)).max(0.0);
         let requested = floor_u64(from_output_available + from_input_available);
         if requested < 1 {
             continue;
@@ -1869,32 +2129,21 @@ pub(crate) fn flush_active_supply_buffers(
             network.inventory.retain(|_, amount| !amount.is_zero());
             normalized_for_deposit = true;
         }
-        let accepted = deposit(&mut network, &plan.item_id, &BigUint::from(requested));
+        let accepted = deposit(&mut network, item_id, &BigUint::from(requested));
         let accepted_number = accepted.to_u64().unwrap_or(MAX_SAFE_INTEGER) as f64;
         if accepted_number < 1.0 {
             continue;
         }
         let from_output = from_output_available.min(accepted_number);
         if from_output > 0.0 {
-            set_item_amount(station, "outputs", &plan.item_id, output - from_output)?;
+            set_item_amount(station, "outputs", item_id, output - from_output)?;
         }
         let remaining = accepted_number - from_output;
         if remaining > 0.0 {
-            set_item_amount(
-                station,
-                "inputs",
-                &plan.item_id,
-                (input - remaining).max(0.0),
-            )?;
+            set_item_amount(station, "inputs", item_id, (input - remaining).max(0.0))?;
         }
-        record_immediate_upload(
-            base,
-            runtime_bandwidth,
-            &mut network,
-            &plan.item_id,
-            &accepted,
-        );
-        directory.mark_inventory_written(plan.entity_index);
+        record_immediate_upload(base, runtime_bandwidth, &mut network, item_id, &accepted);
+        directory.mark_inventory_written(entity_index);
     }
     write_network(base, &network)?;
     directory.commit_flush(&selected);
@@ -2140,22 +2389,25 @@ pub(crate) fn settle_active_downloads(
     let mut request_positions = HashMap::new();
     let mut retain = BTreeSet::new();
     for &plan_index in &selected {
-        let plan = &directory.download_plans[plan_index];
-        let station = entities[plan.entity_index]
+        let plan = directory.download_plans[plan_index];
+        let entity_index = plan.entity_index as usize;
+        let item_id = directory
+            .item_id(plan.item_index)
+            .ok_or_else(|| anyhow!("native quantum download item index is invalid"))?;
+        let station = entities[entity_index]
             .as_object()
             .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
-        let current = item_amount(station, "outputs", &plan.item_id)
-            .floor()
-            .max(0.0);
-        let local_capacity = station_capacity(state, base, station, &plan.slot)?
-            .floor()
-            .max(0.0);
+        let current = item_amount(station, "outputs", item_id).floor().max(0.0);
+        let local_capacity =
+            station_capacity_with_max_stock(state, base, station, f64::from(plan.slot.max_stock))?
+                .floor()
+                .max(0.0);
         let incoming = route_ledger
-            .quantum_in_flight(plan.entity_index, &plan.item_id)
+            .quantum_in_flight(entity_index, item_id)
             .max(0.0);
         let local_free = (local_capacity - current - incoming).max(0.0);
         let direct_through = if current <= local_capacity {
-            crate::belts::output_credit(state, credits, &plan.entity_id, &plan.item_id)
+            crate::belts::output_credit(state, credits, &state.entities.ids[entity_index], item_id)
         } else {
             0.0
         };
@@ -2171,11 +2423,11 @@ pub(crate) fn settle_active_downloads(
             &mut requests,
             &mut request_positions,
             Request {
-                key: plan.key.clone(),
-                entity_index: plan.entity_index,
-                item_id: plan.item_id.clone(),
+                key: format!("{}:{item_id}", &state.entities.ids[entity_index]),
+                entity_index,
+                item_id: item_id.to_owned(),
                 amount: BigUint::from(capacity),
-                priority: plan.slot.priority,
+                priority: i64::from(plan.slot.priority),
             },
         );
     }
@@ -2317,53 +2569,65 @@ pub(crate) fn settle_uploads(
         let collector_rows = directory.collector_plans.len();
         for &row in selected_rows {
             if row < collector_rows {
-                let plan = &directory.collector_plans[row];
+                let plan = directory.collector_plans[row];
                 if plan.continuously_productive {
                     retain_rows.insert(row);
                 }
-                let endpoint = entities[plan.entity_index]
+                let entity_index = plan.entity_index as usize;
+                let item_id = directory
+                    .item_id(plan.item_index)
+                    .ok_or_else(|| anyhow!("native quantum collector item index is invalid"))?;
+                let endpoint = entities[entity_index]
                     .as_object()
                     .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
-                let available = floor_u64(item_amount(endpoint, "outputs", &plan.item_id));
+                let available = floor_u64(item_amount(endpoint, "outputs", item_id));
                 if available < 1 {
                     continue;
                 }
-                request_rows.insert(plan.key.clone(), row);
+                let key = format!("{}:{item_id}", &state.entities.ids[entity_index]);
+                request_rows.insert(key.clone(), row);
                 upsert_request_in_stable_order(
                     &mut requests,
                     &mut request_positions,
                     Request {
-                        key: plan.key.clone(),
-                        entity_index: plan.entity_index,
-                        item_id: plan.item_id.clone(),
+                        key,
+                        entity_index,
+                        item_id: item_id.to_owned(),
                         amount: BigUint::from(available),
                         priority: 1,
                     },
                 );
                 continue;
             }
-            let plan = &directory.upload_plans[row - collector_rows];
-            let endpoint = entities[plan.entity_index]
+            let plan = directory.upload_plans[row - collector_rows];
+            let entity_index = plan.entity_index as usize;
+            let item_id = directory
+                .item_id(plan.item_index)
+                .ok_or_else(|| anyhow!("native quantum upload item index is invalid"))?;
+            let endpoint = entities[entity_index]
                 .as_object()
                 .ok_or_else(|| anyhow!("native quantum endpoint is invalid"))?;
-            let outgoing = route_ledger.quantum_reserved_outgoing(plan.entity_index, &plan.item_id);
+            let outgoing = route_ledger.quantum_reserved_outgoing(entity_index, item_id);
             let available = floor_u64(
-                (item_amount(endpoint, "outputs", &plan.item_id) - plan.slot.min_stock - outgoing)
+                (item_amount(endpoint, "outputs", item_id)
+                    - f64::from(plan.slot.min_stock)
+                    - outgoing)
                     .max(0.0),
             );
             if available < 1 {
                 continue;
             }
-            request_rows.insert(plan.key.clone(), row);
+            let key = format!("{}:{item_id}", &state.entities.ids[entity_index]);
+            request_rows.insert(key.clone(), row);
             upsert_request_in_stable_order(
                 &mut requests,
                 &mut request_positions,
                 Request {
-                    key: plan.key.clone(),
-                    entity_index: plan.entity_index,
-                    item_id: plan.item_id.clone(),
+                    key,
+                    entity_index,
+                    item_id: item_id.to_owned(),
                     amount: BigUint::from(available),
-                    priority: plan.slot.priority,
+                    priority: i64::from(plan.slot.priority),
                 },
             );
         }
@@ -3409,6 +3673,52 @@ mod tests {
         assert_ne!(
             refreshed.per_minute.to_bits(),
             cached_legacy.per_minute.to_bits()
+        );
+    }
+
+    #[test]
+    fn compact_directory_accounts_for_all_reverse_indexes_without_plan_strings() {
+        let entities = (0_usize..1_024)
+            .map(|index| {
+                quantum_station(
+                    format!("tower-{index}"),
+                    "iron_ore",
+                    if index.is_multiple_of(2) {
+                        "supply"
+                    } else {
+                        "demand"
+                    },
+                    0.0,
+                    0.0,
+                    vec![],
+                )
+            })
+            .collect::<Vec<_>>();
+        let state = crate::simple_factory::tests::fixture_state(&entities);
+        let directory = QuantumLogisticsDirectory::build(&state, &entities);
+
+        assert!(!directory.fallback_full_scan);
+        assert_eq!(directory.item_ids.len(), 1);
+        assert_eq!(directory.item_by_id.len(), 1);
+        assert!(size_of::<QuantumSlotPlan>() <= 20);
+        assert!(size_of::<QuantumCollectorPlan>() <= 12);
+        assert_eq!(
+            directory.upload_by_station.offsets.len(),
+            entities.len() + 1
+        );
+        assert_eq!(
+            directory.download_by_station.offsets.len(),
+            entities.len() + 1
+        );
+
+        let reverse_index_bytes = directory.upload_by_station.estimated_bytes()
+            + directory.upload_by_item.estimated_bytes()
+            + directory.collector_by_item.estimated_bytes()
+            + directory.download_by_station.estimated_bytes();
+        assert!(directory.estimated_bytes() >= reverse_index_bytes);
+        assert!(
+            directory.estimated_bytes() < entities.len() as u64 * 96,
+            "compact directory must not regress to per-plan entity/item/key Strings"
         );
     }
 

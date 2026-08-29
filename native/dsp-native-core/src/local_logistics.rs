@@ -25,12 +25,12 @@ const LOCAL_DISPATCH_DENSE_DENOMINATOR: usize = 4;
 
 #[derive(Debug, Clone)]
 struct Slot {
-    item_id: Option<String>,
+    item_id: Option<Arc<str>>,
     local_mode: LocalMode,
     minimum_load: f64,
     min_stock: f64,
     max_stock: f64,
-    priority: usize,
+    priority: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -301,7 +301,10 @@ fn stacked_capacity(base: f64, count: f64, limit: f64) -> f64 {
     }
 }
 
-fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
+fn slots_with_item_symbols(
+    entity: &Map<String, Value>,
+    item_symbols: &mut HashMap<String, Arc<str>>,
+) -> anyhow::Result<Vec<Slot>> {
     let values = entity
         .get("stationSlots")
         .and_then(Value::as_array)
@@ -323,8 +326,17 @@ fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
             {
                 bail!("native local station minimum load is invalid");
             }
+            let item_id = string_at(slot, "itemId").map(|item_id| {
+                if let Some(symbol) = item_symbols.get(item_id) {
+                    Arc::clone(symbol)
+                } else {
+                    let symbol = Arc::<str>::from(item_id);
+                    item_symbols.insert(item_id.to_owned(), Arc::clone(&symbol));
+                    symbol
+                }
+            });
             Ok(Slot {
-                item_id: string_at(slot, "itemId").map(str::to_owned),
+                item_id,
                 local_mode,
                 minimum_load,
                 min_stock: finite_number(slot.get("minStock")).floor().max(0.0),
@@ -333,10 +345,14 @@ fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
                     .get("priority")
                     .and_then(Value::as_u64)
                     .unwrap_or(1)
-                    .min(2) as usize,
+                    .min(2) as u8,
             })
         })
         .collect()
+}
+
+fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
+    slots_with_item_symbols(entity, &mut HashMap::new())
 }
 
 fn station_indices(entities: &[Value]) -> Vec<usize> {
@@ -365,8 +381,9 @@ pub(crate) struct LocalPeerDirectory {
     station_indices: Arc<[usize]>,
     runtime_station_indices: Arc<[usize]>,
     station_ranks: Arc<HashMap<usize, usize>>,
-    by_planet_item: Arc<HashMap<usize, HashMap<String, LocalPeers>>>,
+    by_planet_item: Arc<HashMap<usize, HashMap<Arc<str>, LocalPeers>>>,
     station_slots: Arc<HashMap<usize, Vec<Slot>>>,
+    slot_item_allocation_bytes: usize,
     station_planets: Arc<HashMap<usize, usize>>,
     has_local_pair: bool,
     local_waiting_station_indices: Arc<[usize]>,
@@ -457,30 +474,33 @@ impl LocalPeerDirectory {
         let planet_item_bytes = self
             .by_planet_item
             .values()
-            .flat_map(HashMap::iter)
-            .map(|(item_id, peers)| {
-                item_id.capacity()
-                    + (peers.supply.capacity() + peers.demand.capacity())
-                        * std::mem::size_of::<(usize, usize)>()
+            .map(|items| {
+                items.capacity()
+                    * (std::mem::size_of::<(Arc<str>, LocalPeers)>() + std::mem::size_of::<u8>())
+                    + items
+                        .values()
+                        .map(|peers| {
+                            (peers.supply.capacity() + peers.demand.capacity())
+                                * std::mem::size_of::<(usize, usize)>()
+                        })
+                        .sum::<usize>()
             })
             .sum::<usize>();
         let slot_bytes = self
             .station_slots
             .values()
-            .map(|slots| {
-                slots.capacity() * std::mem::size_of::<Slot>()
-                    + slots
-                        .iter()
-                        .filter_map(|slot| slot.item_id.as_ref())
-                        .map(String::capacity)
-                        .sum::<usize>()
-            })
-            .sum::<usize>();
+            .map(|slots| slots.capacity() * std::mem::size_of::<Slot>())
+            .sum::<usize>()
+            + self.slot_item_allocation_bytes;
         let hash_entry_bytes = self.by_planet_item.capacity()
-            * std::mem::size_of::<(usize, HashMap<String, LocalPeers>)>()
-            + self.station_slots.capacity() * std::mem::size_of::<(usize, Vec<Slot>)>()
-            + self.station_planets.capacity() * std::mem::size_of::<(usize, usize)>()
-            + self.station_ranks.capacity() * std::mem::size_of::<(usize, usize)>();
+            * (std::mem::size_of::<(usize, HashMap<Arc<str>, LocalPeers>)>()
+                + std::mem::size_of::<u8>())
+            + self.station_slots.capacity()
+                * (std::mem::size_of::<(usize, Vec<Slot>)>() + std::mem::size_of::<u8>())
+            + self.station_planets.capacity()
+                * (std::mem::size_of::<(usize, usize)>() + std::mem::size_of::<u8>())
+            + self.station_ranks.capacity()
+                * (std::mem::size_of::<(usize, usize)>() + std::mem::size_of::<u8>());
         (station_index_bytes + planet_item_bytes + slot_bytes + hash_entry_bytes) as u64
     }
 
@@ -1088,11 +1108,12 @@ fn build_peer_directory(
     station_indices: &[usize],
     runtime_station_indices: &[usize],
 ) -> anyhow::Result<LocalPeerDirectory> {
-    let mut by_planet_item = HashMap::<usize, HashMap<String, LocalPeers>>::new();
+    let mut by_planet_item = HashMap::<usize, HashMap<Arc<str>, LocalPeers>>::new();
     let mut station_slots = HashMap::with_capacity(station_indices.len());
     let mut station_planets = HashMap::with_capacity(station_indices.len());
     let mut local_route_demand_indices = Vec::new();
     let mut planet_symbols = HashMap::<String, usize>::new();
+    let mut item_symbols = HashMap::<String, Arc<str>>::new();
     for &station_index in station_indices {
         let station = entities[station_index].as_object().expect("station object");
         if !matches!(
@@ -1109,21 +1130,16 @@ fn build_peer_directory(
             planet_symbols.insert(planet_id.to_owned(), key);
             key
         };
-        let parsed_slots = slots(station)?;
+        let parsed_slots = slots_with_item_symbols(station, &mut item_symbols)?;
         for (slot_index, slot) in parsed_slots.iter().enumerate() {
-            let Some(item_id) = slot.item_id.as_deref() else {
+            let Some(item_id) = slot.item_id.as_ref() else {
                 continue;
             };
             if slot.local_mode == LocalMode::Storage {
                 continue;
             }
             let items = by_planet_item.entry(planet_key).or_default();
-            if !items.contains_key(item_id) {
-                items.insert(item_id.to_owned(), LocalPeers::default());
-            }
-            let peers = items
-                .get_mut(item_id)
-                .expect("inserted native local peer item");
+            let peers = items.entry(Arc::clone(item_id)).or_default();
             match slot.local_mode {
                 LocalMode::Supply => peers.supply.push((station_index, slot_index)),
                 LocalMode::Demand => peers.demand.push((station_index, slot_index)),
@@ -1204,6 +1220,18 @@ fn build_peer_directory(
     station_slots.shrink_to_fit();
     station_planets.shrink_to_fit();
     local_route_demand_indices.shrink_to_fit();
+    // All slot and peer keys share the same immutable item symbols. Account
+    // for each Arc allocation exactly once; the temporary interning map is
+    // released before the directory becomes resident.
+    let slot_item_allocation_bytes = item_symbols
+        .values()
+        .map(|item_id| {
+            let header = std::mem::size_of::<usize>() * 2;
+            let unaligned = header + item_id.len();
+            let alignment = std::mem::align_of::<usize>();
+            unaligned.div_ceil(alignment) * alignment
+        })
+        .sum();
     let station_ranks = station_indices
         .iter()
         .copied()
@@ -1224,6 +1252,7 @@ fn build_peer_directory(
         station_ranks: Arc::new(station_ranks),
         by_planet_item: Arc::new(by_planet_item),
         station_slots: Arc::new(station_slots),
+        slot_item_allocation_bytes,
         station_planets: Arc::new(station_planets),
         has_local_pair: has_local_demand && has_local_supply,
         local_waiting_station_indices: Arc::from(local_waiting_station_indices),
@@ -2772,6 +2801,46 @@ mod tests {
             "inputs": {},
             "outputs": { "mod:物流物料/Ω": 10 }
         })
+    }
+
+    #[test]
+    fn local_directory_interns_repeated_slot_items_and_keeps_compact_slots() {
+        let entities = (0_usize..64)
+            .map(|index| {
+                local_station(
+                    &format!("station-{index}"),
+                    if index.is_multiple_of(2) {
+                        "supply"
+                    } else {
+                        "demand"
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let indices = station_indices(&entities);
+        let directory = prepare_step_directory(&entities, &indices).unwrap();
+        let first_item = directory.station_slots[&indices[0]][0]
+            .item_id
+            .as_ref()
+            .expect("first station item");
+        let last_item = directory.station_slots[indices.last().expect("last station")][0]
+            .item_id
+            .as_ref()
+            .expect("last station item");
+        let peer_item = directory
+            .by_planet_item
+            .values()
+            .flat_map(HashMap::keys)
+            .next()
+            .expect("peer item");
+
+        assert!(Arc::ptr_eq(first_item, last_item));
+        assert!(Arc::ptr_eq(first_item, peer_item));
+        assert!(std::mem::size_of::<Slot>() <= 48);
+        assert!(
+            directory.slot_item_allocation_bytes < first_item.len() * directory.station_slots.len(),
+            "the resident estimate must count one shared item allocation, not one String per slot"
+        );
     }
 
     fn fixture_checksum(bytes: &[u8]) -> String {

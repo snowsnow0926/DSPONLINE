@@ -2421,17 +2421,24 @@ impl FactoryTopology {
             .iter()
             .map(Vec::capacity)
             .sum::<usize>();
-        (index_capacity * size_of::<usize>()) as u64
-            + (planet_index_capacity * size_of::<u32>()) as u64
-            + (self.belt_counts_by_planet.capacity() * size_of::<u32>()) as u64
-            + (self.device_counts_by_planet.capacity() * size_of::<f64>()) as u64
-            + (self.planet_viewport_indexes.capacity() * size_of::<PlanetViewportIndex>()) as u64
+        let index_bytes = (index_capacity * size_of::<usize>()) as u64;
+        let planet_bytes = (planet_index_capacity * size_of::<u32>()) as u64;
+        let aggregate_bytes = (self.belt_counts_by_planet.capacity() * size_of::<u32>()) as u64
+            + (self.device_counts_by_planet.capacity() * size_of::<f64>()) as u64;
+        let viewport_bytes = (self.planet_viewport_indexes.capacity()
+            * size_of::<PlanetViewportIndex>()) as u64
             + self
                 .planet_viewport_indexes
                 .iter()
                 .map(PlanetViewportIndex::estimated_bytes)
-                .sum::<u64>()
-            + self.entity_belt_adjacency.estimated_bytes()
+                .sum::<u64>();
+        let adjacency_bytes = self.entity_belt_adjacency.estimated_bytes();
+        if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tmemory-factory-breakdown\tindex={index_bytes},planet={planet_bytes},aggregate={aggregate_bytes},viewport={viewport_bytes},adjacency={adjacency_bytes},indexRows={index_capacity}"
+            );
+        }
+        index_bytes + planet_bytes + aggregate_bytes + viewport_bytes + adjacency_bytes
     }
 }
 
@@ -5537,32 +5544,43 @@ impl CoreState {
         let numeric_columns = entity_rows * 72 + belt_rows * 72;
         let index_overhead =
             self.entity_index.estimated_bytes() + self.belt_index.estimated_bytes();
-        let topology_index_bytes = self
+        let prepared_belt_route_bytes = self
             .prepared_belt_routes
             .as_ref()
             .map(|routes| routes.estimated_bytes())
-            .unwrap_or(0)
-            + self
-                .prepared_local_peer_directory
-                .as_ref()
-                .map(|directory| directory.estimated_bytes())
-                .unwrap_or(0)
-            + self
-                .prepared_quantum_logistics_directory
-                .as_ref()
-                .map(|directory| directory.estimated_bytes())
-                .unwrap_or(0)
-            + self
-                .prepared_interstellar_peer_directory
-                .as_ref()
-                .map(|directory| directory.estimated_bytes())
-                .unwrap_or(0)
-            + self
-                .prepared_interstellar_route_activity
-                .as_ref()
-                .map(|activity| activity.estimated_bytes())
-                .unwrap_or(0)
-            + self.factory_topology.estimated_bytes();
+            .unwrap_or(0);
+        let prepared_local_peer_bytes = self
+            .prepared_local_peer_directory
+            .as_ref()
+            .map(|directory| directory.estimated_bytes())
+            .unwrap_or(0);
+        let prepared_quantum_logistics_bytes = self
+            .prepared_quantum_logistics_directory
+            .as_ref()
+            .map(|directory| directory.estimated_bytes())
+            .unwrap_or(0);
+        let prepared_interstellar_peer_bytes = self
+            .prepared_interstellar_peer_directory
+            .as_ref()
+            .map(|directory| directory.estimated_bytes())
+            .unwrap_or(0);
+        let prepared_interstellar_activity_bytes = self
+            .prepared_interstellar_route_activity
+            .as_ref()
+            .map(|activity| activity.estimated_bytes())
+            .unwrap_or(0);
+        let factory_topology_bytes = self.factory_topology.estimated_bytes();
+        let topology_index_bytes = prepared_belt_route_bytes
+            + prepared_local_peer_bytes
+            + prepared_quantum_logistics_bytes
+            + prepared_interstellar_peer_bytes
+            + prepared_interstellar_activity_bytes
+            + factory_topology_bytes;
+        if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tmemory-topology-breakdown\tbelts={prepared_belt_route_bytes},local={prepared_local_peer_bytes},quantum={prepared_quantum_logistics_bytes},interstellar={prepared_interstellar_peer_bytes},activity={prepared_interstellar_activity_bytes},factory={factory_topology_bytes}"
+            );
+        }
         let belt_activity_runtime_bytes = self
             .prepared_belt_activity
             .as_ref()

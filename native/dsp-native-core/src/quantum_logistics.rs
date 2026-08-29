@@ -1,3 +1,6 @@
+#[cfg(test)]
+use std::cell::Cell;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::mem::size_of;
 use std::sync::Arc;
@@ -16,6 +19,11 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_INTEGER_DIGITS: usize = 256;
 const ITEM_CAPACITY_MIN: u64 = 10_000;
 const ITEM_CAPACITY_MAX: u64 = 10_000_000_000;
+
+#[cfg(test)]
+thread_local! {
+    static REQUEST_ORDER_COMPARISONS: Cell<usize> = const { Cell::new(0) };
+}
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BoundaryFlow {
@@ -54,6 +62,10 @@ pub(crate) struct QuantumActiveScan {
     pub total_rows: usize,
     pub dense_fallback: bool,
     pub directory_fallback: bool,
+    /// Requests ordered by the topology-bound rank table plus a linear merge.
+    /// These counters are runtime-only diagnostics and never enter GameState.
+    pub linear_order_rows: usize,
+    pub full_sort_rows: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +222,12 @@ pub(crate) struct QuantumLogisticsDirectory {
     collector_plans: Vec<QuantumCollectorPlan>,
     upload_plans: Vec<QuantumSlotPlan>,
     download_plans: Vec<QuantumSlotPlan>,
+    /// Inverse `(priority desc, request key asc)` ranks. The expensive sort is
+    /// paid once when the immutable topology directory is built; each active
+    /// boundary then orders only selected rows with four stable u32 radix
+    /// passes. Full/dense/permissive scans retain the historical comparator.
+    boundary_upload_order_rank: Vec<u32>,
+    download_order_rank: Vec<u32>,
     upload_flush_overrides: Vec<QuantumFlushOverride>,
     upload_by_station: EntityPlanRanges,
     upload_by_item: ItemPlanIndex,
@@ -252,6 +270,8 @@ impl Default for QuantumLogisticsDirectory {
             collector_plans: Vec::new(),
             upload_plans: Vec::new(),
             download_plans: Vec::new(),
+            boundary_upload_order_rank: Vec::new(),
+            download_order_rank: Vec::new(),
             upload_flush_overrides: Vec::new(),
             upload_by_station: EntityPlanRanges::default(),
             upload_by_item: ItemPlanIndex::default(),
@@ -1088,6 +1108,34 @@ fn upsert_slot_plan(
     None
 }
 
+fn build_request_order_rank(
+    mut entries: Vec<(usize, i64, String)>,
+    total_rows: usize,
+) -> Option<Vec<u32>> {
+    if entries.len() != total_rows || total_rows > u32::MAX as usize {
+        return None;
+    }
+    {
+        let mut keys = HashSet::with_capacity(entries.len());
+        if entries.iter().any(|(_, _, key)| !keys.insert(key.as_str())) {
+            // The legacy collector keeps the first request position and only
+            // replaces it for a strictly higher priority. A duplicate key is
+            // therefore not eligible for the pre-ranked unique-plan stream.
+            return None;
+        }
+    }
+    entries.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.2.cmp(&right.2)));
+    let mut ranks = vec![u32::MAX; total_rows];
+    for (rank, (row, _, _)) in entries.into_iter().enumerate() {
+        let slot = ranks.get_mut(row)?;
+        if *slot != u32::MAX {
+            return None;
+        }
+        *slot = u32::try_from(rank).ok()?;
+    }
+    ranks.iter().all(|rank| *rank != u32::MAX).then_some(ranks)
+}
+
 impl QuantumLogisticsDirectory {
     pub(crate) fn build(state: &CoreState, entities: &[Value]) -> Self {
         let mut directory = Self {
@@ -1245,6 +1293,75 @@ impl QuantumLogisticsDirectory {
         directory.download_plans.shrink_to_fit();
         directory.upload_flush_overrides.shrink_to_fit();
         directory.tower_stack_terms.shrink_to_fit();
+        let download_order_entries = directory
+            .download_plans
+            .iter()
+            .enumerate()
+            .map(|(row, plan)| {
+                let entity_index = plan.entity_index as usize;
+                if entity_index >= state.entities.ids.len() {
+                    return None;
+                }
+                let entity_id = &state.entities.ids[entity_index];
+                let item_id = directory.item_id(plan.item_index)?;
+                Some((
+                    row,
+                    i64::from(plan.slot.priority),
+                    format!("{entity_id}:{item_id}"),
+                ))
+            })
+            .collect::<Option<Vec<_>>>();
+        if let Some(ranks) = download_order_entries
+            .and_then(|entries| build_request_order_rank(entries, directory.download_plans.len()))
+        {
+            directory.download_order_rank = ranks;
+        } else {
+            directory.fallback_full_scan = true;
+        }
+        let mut upload_order_entries = Vec::with_capacity(
+            directory
+                .collector_plans
+                .len()
+                .saturating_add(directory.upload_plans.len()),
+        );
+        for (row, plan) in directory.collector_plans.iter().enumerate() {
+            let entity_index = plan.entity_index as usize;
+            if entity_index >= state.entities.ids.len() {
+                directory.fallback_full_scan = true;
+                continue;
+            }
+            let entity_id = &state.entities.ids[entity_index];
+            let Some(item_id) = directory.item_id(plan.item_index) else {
+                directory.fallback_full_scan = true;
+                continue;
+            };
+            upload_order_entries.push((row, 1, format!("{entity_id}:{item_id}")));
+        }
+        let collector_rows = directory.collector_plans.len();
+        for (plan_index, plan) in directory.upload_plans.iter().enumerate() {
+            let entity_index = plan.entity_index as usize;
+            if entity_index >= state.entities.ids.len() {
+                directory.fallback_full_scan = true;
+                continue;
+            }
+            let entity_id = &state.entities.ids[entity_index];
+            let Some(item_id) = directory.item_id(plan.item_index) else {
+                directory.fallback_full_scan = true;
+                continue;
+            };
+            upload_order_entries.push((
+                collector_rows + plan_index,
+                i64::from(plan.slot.priority),
+                format!("{entity_id}:{item_id}"),
+            ));
+        }
+        if let Some(ranks) =
+            build_request_order_rank(upload_order_entries, directory.boundary_upload_rows())
+        {
+            directory.boundary_upload_order_rank = ranks;
+        } else {
+            directory.fallback_full_scan = true;
+        }
         directory.upload_by_station =
             EntityPlanRanges::build(directory.entity_count, &directory.upload_plans)
                 .unwrap_or_else(|| {
@@ -1467,6 +1584,7 @@ impl QuantumLogisticsDirectory {
                     total_rows: self.entity_count,
                     dense_fallback: true,
                     directory_fallback: true,
+                    ..QuantumActiveScan::default()
                 },
             );
         }
@@ -1491,6 +1609,7 @@ impl QuantumLogisticsDirectory {
                 total_rows,
                 dense_fallback,
                 directory_fallback: false,
+                ..QuantumActiveScan::default()
             },
         )
     }
@@ -1966,6 +2085,8 @@ impl QuantumLogisticsDirectory {
             + self.collector_plans.capacity() * size_of::<QuantumCollectorPlan>()
             + self.upload_plans.capacity() * size_of::<QuantumSlotPlan>()
             + self.download_plans.capacity() * size_of::<QuantumSlotPlan>()
+            + self.boundary_upload_order_rank.capacity() * size_of::<u32>()
+            + self.download_order_rank.capacity() * size_of::<u32>()
             + self.construction_center_indices.capacity() * size_of::<usize>()
             + self.construction_row_by_entity.capacity() * size_of::<(u32, u32)>()
             + self.upload_flush_overrides.capacity() * size_of::<QuantumFlushOverride>()
@@ -1984,6 +2105,10 @@ fn combined_active_scan(left: QuantumActiveScan, right: QuantumActiveScan) -> Qu
         total_rows: left.total_rows.saturating_add(right.total_rows),
         dense_fallback: left.dense_fallback || right.dense_fallback,
         directory_fallback: left.directory_fallback || right.directory_fallback,
+        linear_order_rows: left
+            .linear_order_rows
+            .saturating_add(right.linear_order_rows),
+        full_sort_rows: left.full_sort_rows.saturating_add(right.full_sort_rows),
     }
 }
 
@@ -2227,13 +2352,108 @@ fn allocate_with_priority(budget: &BigUint, requests: &[Request], cursor: u64) -
     result
 }
 
+fn request_order(left: &Request, right: &Request) -> Ordering {
+    #[cfg(test)]
+    REQUEST_ORDER_COMPARISONS.with(|count| count.set(count.get().saturating_add(1)));
+    right
+        .priority
+        .cmp(&left.priority)
+        .then_with(|| left.key.cmp(&right.key))
+}
+
+#[cfg(test)]
+fn take_request_order_comparisons() -> usize {
+    REQUEST_ORDER_COMPARISONS.with(|count| {
+        let comparisons = count.get();
+        count.set(0);
+        comparisons
+    })
+}
+
 fn sorted_requests(requests: &mut [Request]) {
-    requests.sort_by(|left, right| {
-        right
-            .priority
-            .cmp(&left.priority)
-            .then_with(|| left.key.cmp(&right.key))
-    });
+    requests.sort_by(request_order);
+}
+
+fn request_indices_by_topology_rank(
+    request_rows: &[usize],
+    order_rank_by_row: &[u32],
+) -> Option<Vec<usize>> {
+    let mut current = (0..request_rows.len()).collect::<Vec<_>>();
+    let mut scratch = vec![0_usize; current.len()];
+    for shift in [0_u32, 8, 16, 24] {
+        let mut counts = [0_usize; 256];
+        for &request_index in &current {
+            let row = *request_rows.get(request_index)?;
+            let rank = *order_rank_by_row.get(row)?;
+            counts[((rank >> shift) & 0xff) as usize] += 1;
+        }
+        let mut next_offset = 0_usize;
+        for count in &mut counts {
+            let bucket_count = *count;
+            *count = next_offset;
+            next_offset = next_offset.checked_add(bucket_count)?;
+        }
+        for &request_index in &current {
+            let row = *request_rows.get(request_index)?;
+            let rank = *order_rank_by_row.get(row)?;
+            let bucket = ((rank >> shift) & 0xff) as usize;
+            let output_index = counts[bucket];
+            *scratch.get_mut(output_index)? = request_index;
+            counts[bucket] += 1;
+        }
+        std::mem::swap(&mut current, &mut scratch);
+    }
+    Some(current)
+}
+
+fn requests_by_topology_rank(
+    requests: &[Request],
+    request_rows: &[usize],
+    order_rank_by_row: &[u32],
+) -> Option<Vec<Request>> {
+    if requests.len() != request_rows.len() {
+        return None;
+    }
+    let indices = request_indices_by_topology_rank(request_rows, order_rank_by_row)?;
+    let ordered = indices
+        .into_iter()
+        .map(|index| requests.get(index).cloned())
+        .collect::<Option<Vec<_>>>()?;
+    ordered
+        .windows(2)
+        .all(|pair| request_order(&pair[0], &pair[1]) != Ordering::Greater)
+        .then_some(ordered)
+}
+
+fn merge_unique_request_streams(left: Vec<Request>, right: &[Request]) -> Option<Vec<Request>> {
+    if left
+        .windows(2)
+        .any(|pair| request_order(&pair[0], &pair[1]) == Ordering::Greater)
+        || right
+            .windows(2)
+            .any(|pair| request_order(&pair[0], &pair[1]) == Ordering::Greater)
+    {
+        return None;
+    }
+    let mut result = Vec::with_capacity(left.len().checked_add(right.len())?);
+    let mut left_index = 0_usize;
+    let mut right_index = 0_usize;
+    while left_index < left.len() && right_index < right.len() {
+        if request_order(&left[left_index], &right[right_index]) != Ordering::Greater {
+            result.push(left[left_index].clone());
+            left_index += 1;
+        } else {
+            result.push(right[right_index].clone());
+            right_index += 1;
+        }
+    }
+    result.extend(left[left_index..].iter().cloned());
+    result.extend(right[right_index..].iter().cloned());
+    let mut keys = HashSet::with_capacity(result.len());
+    result
+        .iter()
+        .all(|request| keys.insert(request.key.as_str()))
+        .then_some(result)
 }
 
 fn upsert_request_in_stable_order(
@@ -2766,17 +2986,17 @@ pub(crate) fn receive_supply_material_in_session(
     Ok(accepted_total)
 }
 
-pub(crate) fn settle_downloads(
+fn settle_downloads_with_request_count(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
     credits: &crate::belts::OutputCredits,
     boundary_second: f64,
     seconds: f64,
-) -> anyhow::Result<Option<BoundaryFlow>> {
+) -> anyhow::Result<(Option<BoundaryFlow>, usize)> {
     let mut network = parse_network(base)?;
     if !network.enabled {
-        return Ok(None);
+        return Ok((None, 0));
     }
     let mut flow = create_flow(base, entities, &network, boundary_second);
     let cargo = in_flight(entities);
@@ -2882,7 +3102,20 @@ pub(crate) fn settle_downloads(
     }
     network.set_runtime_flow(flow.clone());
     write_network(base, &network)?;
-    Ok(Some(flow))
+    Ok((Some(flow), allocation_requests.len()))
+}
+
+#[cfg(test)]
+fn settle_downloads(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    credits: &crate::belts::OutputCredits,
+    boundary_second: f64,
+    seconds: f64,
+) -> anyhow::Result<Option<BoundaryFlow>> {
+    settle_downloads_with_request_count(state, base, entities, credits, boundary_second, seconds)
+        .map(|(flow, _)| flow)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2913,7 +3146,15 @@ pub(crate) fn settle_active_downloads(
     let mut scan = combined_active_scan(station_scan, construction_scan);
     let (Some(selected), Some(indexed_construction_rows)) = (selected, selected_construction_rows)
     else {
-        let flow = settle_downloads(state, base, entities, credits, boundary_second, seconds)?;
+        let (flow, full_sort_rows) = settle_downloads_with_request_count(
+            state,
+            base,
+            entities,
+            credits,
+            boundary_second,
+            seconds,
+        )?;
+        scan.full_sort_rows = full_sort_rows;
         directory.mark_fallback_download_runtime_rows();
         return Ok((flow, scan));
     };
@@ -2921,6 +3162,8 @@ pub(crate) fn settle_active_downloads(
     let mut flow = create_flow_with_bandwidth(&network, boundary_second, bandwidth);
     let mut requests = Vec::new();
     let mut request_positions = HashMap::new();
+    let mut request_plan_rows = Vec::new();
+    let mut linear_order_eligible = true;
     let mut retain = BTreeSet::new();
     for &plan_index in &selected {
         let plan = directory.download_plans[plan_index];
@@ -2953,6 +3196,7 @@ pub(crate) fn settle_active_downloads(
         // its item has zero inventory: JavaScript first allocates the global
         // bandwidth and only then applies the per-item inventory budget.
         retain.insert(plan_index);
+        let previous_len = requests.len();
         upsert_request_in_stable_order(
             &mut requests,
             &mut request_positions,
@@ -2964,6 +3208,11 @@ pub(crate) fn settle_active_downloads(
                 priority: i64::from(plan.slot.priority),
             },
         );
+        if requests.len() == previous_len.saturating_add(1) {
+            request_plan_rows.push(plan_index);
+        } else {
+            linear_order_eligible = false;
+        }
     }
     let center_indices = directory
         .construction_center_indices_for_rows(&indexed_construction_rows)
@@ -2992,7 +3241,15 @@ pub(crate) fn settle_active_downloads(
         scan.total_rows = directory.download_rows();
         scan.dense_fallback = true;
         scan.directory_fallback = true;
-        let flow = settle_downloads(state, base, entities, credits, boundary_second, seconds)?;
+        let (flow, full_sort_rows) = settle_downloads_with_request_count(
+            state,
+            base,
+            entities,
+            credits,
+            boundary_second,
+            seconds,
+        )?;
+        scan.full_sort_rows = full_sort_rows;
         directory.mark_fallback_download_runtime_rows();
         return Ok((flow, scan));
     }
@@ -3006,7 +3263,9 @@ pub(crate) fn settle_active_downloads(
         .into_iter()
         .map(|demand| (demand.key.clone(), demand))
         .collect::<BTreeMap<_, _>>();
+    let station_request_count = requests.len();
     for demand in construction_demands.values() {
+        let previous_len = requests.len();
         upsert_request_in_stable_order(
             &mut requests,
             &mut request_positions,
@@ -3018,9 +3277,34 @@ pub(crate) fn settle_active_downloads(
                 priority: 1,
             },
         );
+        if requests.len() != previous_len.saturating_add(1) {
+            linear_order_eligible = false;
+        }
     }
-    let mut allocation_requests = requests.clone();
-    sorted_requests(&mut allocation_requests);
+    let linear_allocation_requests = (!scan.dense_fallback
+        && !scan.directory_fallback
+        && linear_order_eligible
+        && station_request_count == request_plan_rows.len())
+    .then(|| {
+        requests_by_topology_rank(
+            &requests[..station_request_count],
+            &request_plan_rows,
+            &directory.download_order_rank,
+        )
+        .and_then(|station_requests| {
+            merge_unique_request_streams(station_requests, &requests[station_request_count..])
+        })
+    })
+    .flatten();
+    let allocation_requests = if let Some(ordered) = linear_allocation_requests {
+        scan.linear_order_rows = ordered.len();
+        ordered
+    } else {
+        scan.full_sort_rows = requests.len();
+        let mut ordered = requests.clone();
+        sorted_requests(&mut ordered);
+        ordered
+    };
     let delivered = settle_outputs(
         &mut network,
         &allocation_requests,
@@ -3132,7 +3416,7 @@ pub(crate) fn settle_uploads(
     if flush_scan.directory_fallback {
         directory.fallback_full_scan = true;
     }
-    let (selected_rows, upload_scan) = directory.selected_boundary_upload_rows(state, entities);
+    let (selected_rows, mut upload_scan) = directory.selected_boundary_upload_rows(state, entities);
     if upload_scan.directory_fallback {
         directory.fallback_full_scan = true;
     }
@@ -3141,6 +3425,8 @@ pub(crate) fn settle_uploads(
     let mut requests = Vec::new();
     let mut request_positions = HashMap::new();
     let mut request_rows = HashMap::<String, usize>::new();
+    let mut request_source_rows = Vec::new();
+    let mut linear_order_eligible = true;
     let mut retain_rows = BTreeSet::new();
     if let Some(selected_rows) = selected_rows.as_ref() {
         let collector_rows = directory.collector_plans.len();
@@ -3163,6 +3449,7 @@ pub(crate) fn settle_uploads(
                 }
                 let key = format!("{}:{item_id}", &state.entities.ids[entity_index]);
                 request_rows.insert(key.clone(), row);
+                let previous_len = requests.len();
                 upsert_request_in_stable_order(
                     &mut requests,
                     &mut request_positions,
@@ -3174,6 +3461,11 @@ pub(crate) fn settle_uploads(
                         priority: 1,
                     },
                 );
+                if requests.len() == previous_len.saturating_add(1) {
+                    request_source_rows.push(row);
+                } else {
+                    linear_order_eligible = false;
+                }
                 continue;
             }
             let plan = directory.upload_plans[row - collector_rows];
@@ -3196,6 +3488,7 @@ pub(crate) fn settle_uploads(
             }
             let key = format!("{}:{item_id}", &state.entities.ids[entity_index]);
             request_rows.insert(key.clone(), row);
+            let previous_len = requests.len();
             upsert_request_in_stable_order(
                 &mut requests,
                 &mut request_positions,
@@ -3207,6 +3500,11 @@ pub(crate) fn settle_uploads(
                     priority: i64::from(plan.slot.priority),
                 },
             );
+            if requests.len() == previous_len.saturating_add(1) {
+                request_source_rows.push(row);
+            } else {
+                linear_order_eligible = false;
+            }
         }
     } else {
         for &entity_index in indexed_endpoint_indices {
@@ -3283,8 +3581,28 @@ pub(crate) fn settle_uploads(
             }
         }
     }
-    let mut allocation_requests = requests.clone();
-    sorted_requests(&mut allocation_requests);
+    let linear_allocation_requests = (use_index
+        && !upload_scan.dense_fallback
+        && !upload_scan.directory_fallback
+        && linear_order_eligible
+        && requests.len() == request_source_rows.len())
+    .then(|| {
+        requests_by_topology_rank(
+            &requests,
+            &request_source_rows,
+            &directory.boundary_upload_order_rank,
+        )
+    })
+    .flatten();
+    let allocation_requests = if let Some(ordered) = linear_allocation_requests {
+        upload_scan.linear_order_rows = ordered.len();
+        ordered
+    } else {
+        upload_scan.full_sort_rows = requests.len();
+        let mut ordered = requests.clone();
+        sorted_requests(&mut ordered);
+        ordered
+    };
     let accepted = settle_inputs(
         &mut network,
         &allocation_requests,
@@ -4189,6 +4507,194 @@ mod tests {
         }
     }
 
+    fn request_signature(requests: &[Request]) -> Vec<(String, String, String, i64)> {
+        requests
+            .iter()
+            .map(|request| {
+                (
+                    request.key.clone(),
+                    request.item_id.clone(),
+                    request.amount.to_str_radix(10),
+                    request.priority,
+                )
+            })
+            .collect()
+    }
+
+    fn next_order_seed(seed: &mut u64) -> u64 {
+        *seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *seed
+    }
+
+    #[test]
+    fn topology_rank_radix_matches_full_sort_for_random_active_subsets() {
+        let mut seed = 0x517c_c1b7_2722_0a95_u64;
+        for row_count in [1_usize, 2, 17, 257, 4_096] {
+            let mut all = Vec::with_capacity(row_count);
+            let mut entries = Vec::with_capacity(row_count);
+            for row in 0..row_count {
+                let random = next_order_seed(&mut seed);
+                let priority = (random % 17) as i64 - 8;
+                let key = format!("station-{random:016x}-{row:05}:item-{:02}", row % 23);
+                entries.push((row, priority, key.clone()));
+                all.push(Request {
+                    key,
+                    entity_index: row,
+                    item_id: format!("item-{:02}", row % 23),
+                    amount: BigUint::from((random % 10_000) + 1),
+                    priority,
+                });
+            }
+            let ranks = build_request_order_rank(entries, row_count).expect("unique ranks");
+            for sample in 0..32 {
+                let mut active_rows = (0..row_count)
+                    .filter(|row| {
+                        row_count <= 2
+                            || next_order_seed(&mut seed)
+                                .wrapping_add(*row as u64)
+                                .wrapping_add(sample)
+                                % 5
+                                != 0
+                    })
+                    .collect::<Vec<_>>();
+                if sample.is_multiple_of(2) {
+                    active_rows.reverse();
+                }
+                let active = active_rows
+                    .iter()
+                    .map(|&row| all[row].clone())
+                    .collect::<Vec<_>>();
+                let ordered = requests_by_topology_rank(&active, &active_rows, &ranks)
+                    .expect("linear active order");
+                let mut oracle = active;
+                sorted_requests(&mut oracle);
+                assert_eq!(
+                    request_signature(&ordered),
+                    request_signature(&oracle),
+                    "row_count={row_count}, sample={sample}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn topology_rank_order_has_linear_comparison_direction_against_full_sort() {
+        let row_count = 8_192_usize;
+        let mut seed = 0xa076_1d64_78bd_642f_u64;
+        let requests = (0..row_count)
+            .map(|row| {
+                let random = next_order_seed(&mut seed);
+                item_request(
+                    &format!("station-{random:016x}-{row:05}:item-{:02}", row % 31),
+                    &format!("item-{:02}", row % 31),
+                    (random % 10_000) + 1,
+                    (random % 29) as i64 - 14,
+                )
+            })
+            .collect::<Vec<_>>();
+        let entries = requests
+            .iter()
+            .enumerate()
+            .map(|(row, request)| (row, request.priority, request.key.clone()))
+            .collect();
+        let ranks = build_request_order_rank(entries, row_count).unwrap();
+        let rows = (0..row_count).rev().collect::<Vec<_>>();
+        let active = rows
+            .iter()
+            .map(|&row| requests[row].clone())
+            .collect::<Vec<_>>();
+
+        let _ = take_request_order_comparisons();
+        let linear = requests_by_topology_rank(&active, &rows, &ranks).unwrap();
+        let linear_comparisons = take_request_order_comparisons();
+        let mut oracle = active;
+        sorted_requests(&mut oracle);
+        let full_sort_comparisons = take_request_order_comparisons();
+
+        assert_eq!(request_signature(&linear), request_signature(&oracle));
+        assert!(
+            linear_comparisons <= row_count,
+            "rank path must validate with at most one adjacent comparison per row"
+        );
+        assert!(
+            full_sort_comparisons > linear_comparisons.saturating_mul(2),
+            "fixture must prove comparison-sort growth: linear={linear_comparisons}, full={full_sort_comparisons}"
+        );
+    }
+
+    #[test]
+    fn linear_station_construction_merge_preserves_priority_and_fair_cursor_long_run() {
+        let station_requests = vec![
+            item_request("tower-z:iron_ore", "iron_ore", 97, 1),
+            item_request("tower-a:iron_ore", "iron_ore", 113, 3),
+            item_request("tower-m:copper_ore", "copper_ore", 71, 1),
+            item_request("tower-b:iron_ore", "iron_ore", 89, -2),
+        ];
+        let entries = station_requests
+            .iter()
+            .enumerate()
+            .map(|(row, request)| (row, request.priority, request.key.clone()))
+            .collect();
+        let ranks = build_request_order_rank(entries, station_requests.len()).unwrap();
+        let station_rows = vec![0, 1, 2, 3];
+        let ranked = requests_by_topology_rank(&station_requests, &station_rows, &ranks).unwrap();
+        let construction_requests = vec![
+            item_request("construction-direct:center-a:iron_ore", "iron_ore", 61, 1),
+            item_request("construction-direct:center-z:iron_ore", "iron_ore", 67, 1),
+        ];
+        let merged = merge_unique_request_streams(ranked, &construction_requests).unwrap();
+        let mut oracle = station_requests;
+        oracle.extend(construction_requests);
+        sorted_requests(&mut oracle);
+        assert_eq!(request_signature(&merged), request_signature(&oracle));
+
+        let mut linear_cursor = 0_u64;
+        let mut oracle_cursor = 0_u64;
+        for step in 0_u64..4_096 {
+            let budget = BigUint::from((step.wrapping_mul(37) % 211) + 1);
+            let linear = allocate_with_priority(&budget, &merged, linear_cursor);
+            let full = allocate_with_priority(&budget, &oracle, oracle_cursor);
+            assert_eq!(linear.values, full.values, "allocation step {step}");
+            assert_eq!(linear.total, full.total, "total step {step}");
+            assert_eq!(linear.next_cursor, full.next_cursor, "cursor step {step}");
+            linear_cursor = linear.next_cursor;
+            oracle_cursor = full.next_cursor;
+        }
+    }
+
+    #[test]
+    fn duplicate_request_keeps_first_position_and_highest_priority_full_sort_semantics() {
+        let mut requests = Vec::new();
+        let mut positions = HashMap::new();
+        for request in [
+            item_request("tower-a:iron_ore", "iron_ore", 7, 1),
+            item_request("tower-b:iron_ore", "iron_ore", 11, 2),
+            item_request("tower-a:iron_ore", "iron_ore", 13, 5),
+            item_request("tower-a:iron_ore", "iron_ore", 17, 4),
+        ] {
+            upsert_request_in_stable_order(&mut requests, &mut positions, request);
+        }
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].key, "tower-a:iron_ore");
+        assert_eq!(requests[0].priority, 5);
+        assert_eq!(requests[0].amount, BigUint::from(13_u8));
+        assert!(
+            build_request_order_rank(
+                vec![
+                    (0, 1, "tower-a:iron_ore".to_owned()),
+                    (1, 5, "tower-a:iron_ore".to_owned()),
+                ],
+                2,
+            )
+            .is_none()
+        );
+        sorted_requests(&mut requests);
+        assert_eq!(requests[0].key, "tower-a:iron_ore");
+        assert_eq!(requests[0].priority, 5);
+    }
+
     #[test]
     fn item_amount_updates_reuse_existing_key_and_preserve_error_order() {
         let item_id = "mod:量子物流/Ω🚀";
@@ -4871,6 +5377,95 @@ mod tests {
     }
 
     #[test]
+    fn sparse_download_uses_linear_order_while_dense_boundary_keeps_full_sort_oracle() {
+        let source = (0..16)
+            .map(|index| {
+                quantum_station(
+                    format!("demand-{index:02}"),
+                    "iron_ore",
+                    "demand",
+                    0.0,
+                    if index == 0 { 0.0 } else { 1_000_000.0 },
+                    vec![],
+                )
+            })
+            .collect::<Vec<_>>();
+        let state = crate::simple_factory::tests::fixture_state(&source);
+        let mut active_base = active_quantum_base(0);
+        set_test_network_item(&mut active_base, "iron_ore", "10000");
+        let mut oracle_base = active_base.clone();
+        let mut active_entities = source.clone();
+        let mut oracle_entities = source;
+        let mut directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+        let credits = crate::belts::OutputCredits::default();
+        let route_ledger = crate::station_route_ledger::StationRouteLedger::default();
+
+        let (_, dense) = settle_active_downloads(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &credits,
+            5.0,
+            5.0,
+            &mut directory,
+            &route_ledger,
+        )
+        .unwrap();
+        settle_downloads(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &credits,
+            5.0,
+            5.0,
+        )
+        .unwrap();
+        assert!(dense.dense_fallback);
+        assert_eq!(dense.full_sort_rows, 1);
+        assert_eq!(dense.linear_order_rows, 0);
+        assert_eq!(
+            quantum_oracle_bytes(&active_base, &active_entities),
+            quantum_oracle_bytes(&oracle_base, &oracle_entities)
+        );
+
+        set_test_item(&mut active_entities[0], "outputs", "iron_ore", 0.0);
+        set_test_item(&mut oracle_entities[0], "outputs", "iron_ore", 0.0);
+        set_test_network_item(&mut active_base, "iron_ore", "31");
+        set_test_network_item(&mut oracle_base, "iron_ore", "31");
+        directory.wake_from_stations(&[0]);
+
+        let (_, sparse) = settle_active_downloads(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &credits,
+            10.0,
+            5.0,
+            &mut directory,
+            &route_ledger,
+        )
+        .unwrap();
+        settle_downloads(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &credits,
+            10.0,
+            5.0,
+        )
+        .unwrap();
+        assert_eq!(sparse.selected_rows, 1);
+        assert!(!sparse.dense_fallback);
+        assert!(!sparse.directory_fallback);
+        assert_eq!(sparse.linear_order_rows, 1);
+        assert_eq!(sparse.full_sort_rows, 0);
+        assert_eq!(
+            quantum_oracle_bytes(&active_base, &active_entities),
+            quantum_oracle_bytes(&oracle_base, &oracle_entities)
+        );
+    }
+
+    #[test]
     fn construction_active_downloads_match_full_scan_bytes_at_1_5_and_60_seconds() {
         for seconds in [1.0, 5.0, 60.0] {
             let (state, source_base, source_entities) = construction_quantum_fixture(8);
@@ -4892,6 +5487,9 @@ mod tests {
             assert_eq!(scan.selected_rows, 8);
             assert_eq!(scan.total_rows, 8);
             assert!(!scan.directory_fallback);
+            assert!(scan.dense_fallback);
+            assert_eq!(scan.linear_order_rows, 0);
+            assert_eq!(scan.full_sort_rows, 8);
         }
     }
 
@@ -5410,6 +6008,8 @@ mod tests {
             15.0,
         );
         assert_eq!(woken.selected_rows, 1);
+        assert_eq!(woken.linear_order_rows, 1);
+        assert_eq!(woken.full_sort_rows, 0);
         assert_eq!(
             quantum_oracle_bytes(&active_base, &active_entities),
             quantum_oracle_bytes(&oracle_base, &oracle_entities)
@@ -5506,6 +6106,8 @@ mod tests {
         assert_eq!(scan.total_rows, 4);
         assert!(scan.dense_fallback);
         assert!(!scan.directory_fallback);
+        assert_eq!(scan.linear_order_rows, 0);
+        assert_eq!(scan.full_sort_rows, 0);
         assert_eq!(
             quantum_oracle_bytes(&active_base, &active_entities),
             quantum_oracle_bytes(&oracle_base, &oracle_entities)
@@ -5545,6 +6147,8 @@ mod tests {
             5.0,
         );
         assert!(scan.directory_fallback);
+        assert_eq!(scan.linear_order_rows, 0);
+        assert_eq!(scan.full_sort_rows, 0);
         assert_eq!(
             quantum_oracle_bytes(&indexed_base, &indexed_entities),
             quantum_oracle_bytes(&oracle_base, &oracle_entities)

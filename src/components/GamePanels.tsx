@@ -421,6 +421,7 @@ type InspectorTab = "inspect" | "fabricate";
 
 interface InspectorPanelProps {
   readOnly?: boolean;
+  nativeActionPending?: boolean;
   game: GameState;
   inspectorReadModel: FactoryInspectorSummaryReadModel;
   multiSelectionReadModel: FactoryMultiSelectionSummaryReadModel;
@@ -2420,7 +2421,20 @@ function NativeReadOnlyInspectorPanel(props: InspectorPanelProps) {
       </section>
     );
   } else if (props.selectedEntity && inspectorProjectionReady) {
-    content = <DesktopInspectorLiveSummary game={projectionGame} entity={props.selectedEntity} belt={null} readModel={props.inspectorReadModel} />;
+    content = <>
+      <DesktopInspectorLiveSummary game={projectionGame} entity={props.selectedEntity} belt={null} readModel={props.inspectorReadModel} />
+      <section className="native-inspector-safe-actions" data-native-construction-removal="ordinary-complete-v1">
+        <strong>Rust 安全回收</strong>
+        <p>仅完整回收这一整组普通建筑。Rust 会在最后一刻重新检查缓存、线路、喷涂模块、施工引用和返还上限。</p>
+        <button
+          className="danger"
+          type="button"
+          disabled={props.nativeActionPending || props.selectedEntity.interactionLocked ||
+            !props.selectedEntity.buildingId || props.selectedEntity.machineCount < 1}
+          onClick={() => props.onRemoveEntity(props.selectedEntity!.id)}
+        ><Trash2 size={14} />{props.nativeActionPending ? "正在向 Rust 确认" : "安全回收整组建筑"}</button>
+      </section>
+    </>;
   } else if (props.selectedBelt && inspectorProjectionReady) {
     content = <DesktopInspectorLiveSummary game={projectionGame} entity={null} belt={props.selectedBelt} readModel={props.inspectorReadModel} />;
   } else {

@@ -6098,6 +6098,39 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   padding: 16px;
 }
 
+.native-inspector-safe-actions {
+  display: grid;
+  gap: 8px;
+  margin: 0 16px 16px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--coral) 42%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--coral) 7%, transparent);
+}
+
+.native-inspector-safe-actions > strong {
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.native-inspector-safe-actions > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.native-inspector-safe-actions > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  border-color: var(--theme-danger-border);
+  background: var(--theme-danger-bg);
+  color: var(--coral);
+}
+
 .inspector-empty {
   display: flex;
   align-items: center;

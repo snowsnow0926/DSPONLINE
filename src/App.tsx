@@ -455,6 +455,11 @@ import {
   type NativeConstructionPlacementSupportReason,
 } from "./game/nativeConstructionPlacement";
 import {
+  createNativeProjectedOrdinaryBuildingRemovalCommand,
+  readVerifiedNativeConstructionRemovalContext,
+  type NativeConstructionRemovalSupportReason,
+} from "./game/nativeConstructionRemoval";
+import {
   NativeTechnologyWorkspaceStore,
   createNativePlayerAuthorityTechnologyProjectionSource,
 } from "./game/nativeTechnologyWorkspaceStore";
@@ -1060,6 +1065,30 @@ function nativePlacementBlockedMessage(reason: NativeConstructionPlacementSuppor
   }
 }
 
+function nativeRemovalBlockedMessage(reason: NativeConstructionRemovalSupportReason): string {
+  switch (reason) {
+    case "entity-not-found": return "这栋建筑已经不存在；本次回收未执行";
+    case "invalid-entity": return "建筑记录不完整；本次回收未执行";
+    case "not-active-planet": return "建筑已不在当前行星；本次回收未执行";
+    case "interaction-locked": return "建筑已锁定，请先解锁再回收";
+    case "missing-building-id": return "该节点不是可回收的普通建筑";
+    case "unknown-building": return "Rust 内容目录中没有这个建筑；本次回收未执行";
+    case "missing-construction-definition": return "这个建筑没有可核对的施工返还定义；本次回收未执行";
+    case "unsupported-building-kind": return "矿机或物流站需要专用回收流程；本次回收未执行";
+    case "unsupported-building-domain": return "这个建筑同时关联其他系统，原生安全回收尚未覆盖";
+    case "entity-kind-mismatch": return "建筑类型与目录不一致；本次回收未执行";
+    case "invalid-machine-count": return "建筑堆叠数量无效；本次回收未执行";
+    case "empty-machine-stack": return "建筑堆叠已经为空；本次回收未执行";
+    case "spray-coater-installed": return "请先拆除喷涂模块，再回收整栋建筑";
+    case "buffered-material": return "建筑仍有输入或输出物资，请先清空缓存";
+    case "incident-belt": return "建筑仍连接传送带，请先拆线再回收";
+    case "construction-queue-reference": return "建筑仍被施工任务引用，暂不能回收";
+    case "blueprint-pruning-required": return "回收会触发蓝图历史清理，当前安全命令暂不执行";
+    case "invalid-construction-inventory": return "施工库存记录无效；本次回收未执行";
+    case "refund-overflow": return "返还后数量会超过安全上限；请先导出备份并联系存档救援";
+  }
+}
+
 function pureIdleProgressLabel(progress: PureIdleMacroProgress): string {
   if (progress.phase === "preparing-power") return "正在准备权威供电快照";
   if (progress.phase === "calibrating") return "正在执行有界精确校准";
@@ -1625,6 +1654,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const [nativePlacementContextPending, setNativePlacementContextPending] = useState(false);
   const nativePlacementContextPendingRef = useRef(false);
   const nativePlacementIntentRef = useRef({ buildingId: null as string | null, generation: 0 });
+  const [nativeRemovalContextPending, setNativeRemovalContextPending] = useState(false);
+  const nativeRemovalContextPendingRef = useRef(false);
+  const nativeRemovalRequestGenerationRef = useRef(0);
   const [beltTier, setBeltTier] = useState<BeltTier>(1);
   const [beltTierMode, setBeltTierMode] = useState<BeltTierMode>("auto");
   const [placementCount, setPlacementCount] = useState<PlacementCount>(1);
@@ -8276,6 +8308,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     cancelNativeBuildingPlacement();
   }, [
     cancelNativeBuildingPlacement,
+    nativePlayerAuthorityActiveFrame?.runId,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    nativeRemovalRequestGenerationRef.current += 1;
+    nativeRemovalContextPendingRef.current = false;
+    setNativeRemovalContextPending(false);
+  }, [
     nativePlayerAuthorityActiveFrame?.runId,
     nativePlayerAuthorityActiveFrame?.sessionId,
     nativePlayerAuthorityOwnsRuntime,
@@ -15545,6 +15586,100 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       () => setNotice(targetInteractionLocked ? "已由 Windows 原生权威锁定所选建筑" : "已由 Windows 原生权威解锁所选建筑"),
     );
   }, [commitNativeProjectedCommand, factoryInteractionRows, factorySelectionToolbarReadModel]);
+  const removeNativeOrdinaryBuilding = useCallback(async (entityId: string): Promise<void> => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativeRemovalContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次回收未提交");
+      return;
+    }
+    const projected = factoryInspectorSummaryReadModel.source === "native-core"
+      ? factoryInspectorSummaryReadModel.entity
+      : null;
+    if (!projected || projected.entityId !== entityId || factoryInspectorSummaryReadModel.belt !== null) {
+      setNotice("没有取得当前建筑的同 revision Rust 摘要；本次回收未提交");
+      return;
+    }
+    const buildingLabel = projected.buildingId
+      ? getConstructionDefinition(projected.buildingId)?.name ?? projected.buildingId
+      : "当前节点";
+    const count = Math.max(0, projected.machineCount);
+    const confirmed = await gameDialog.confirm(
+      `确认让 Rust 安全回收${buildingLabel}整组 ×${count}？只有建筑无缓存、无线路、无喷涂模块且不被施工任务引用时才会执行；材料会原子返还施工托盘。`,
+      { danger: true, confirmLabel: "确认安全回收" },
+    );
+    if (!confirmed) return;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId) {
+      setNotice("选择或权威会话已经变化；本次回收未提交");
+      return;
+    }
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    const registryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
+    if (!routeIdentity || !commandSource || commandSource.sessionId !== routeIdentity.sessionId ||
+        commandSource.runId !== routeIdentity.runId ||
+        commandSource.baseRevision !== routeIdentity.revision) {
+      setNotice("原生建筑摘要已经过期；请等待当前 revision 刷新后重试");
+      return;
+    }
+    const generation = nativeRemovalRequestGenerationRef.current + 1;
+    nativeRemovalRequestGenerationRef.current = generation;
+    nativeRemovalContextPendingRef.current = true;
+    setNativeRemovalContextPending(true);
+    try {
+      const context = await readVerifiedNativeConstructionRemovalContext(desktopBridge, {
+        sessionId: routeIdentity.sessionId,
+        runId: routeIdentity.runId,
+        revision: routeIdentity.revision,
+        registryFingerprint,
+      }, entityId);
+      if (nativeRemovalRequestGenerationRef.current !== generation) return;
+      if (!context) {
+        setNotice("没有取得同一 revision 的 Rust 回收凭证；存档未改变，请重试");
+        return;
+      }
+      if (!context.support.supported) {
+        setNotice(nativeRemovalBlockedMessage(context.support.reason ?? "unsupported-building-domain"));
+        return;
+      }
+      if (context.buildingId !== projected.buildingId || context.machineCount !== projected.machineCount) {
+        const latestLabel = context.buildingId
+          ? getConstructionDefinition(context.buildingId)?.name ?? context.buildingId
+          : buildingLabel;
+        const stillConfirmed = await gameDialog.confirm(
+          `Rust 最新 revision 显示将完整回收${latestLabel} ×${context.machineCount ?? 0}，施工托盘将从 ${context.currentConstruction ?? 0} 增加到 ${context.refundAfterRemoval ?? 0}。确认按最新结果执行？`,
+          { danger: true, confirmLabel: "按最新结果回收" },
+        );
+        if (!stillConfirmed || nativeRemovalRequestGenerationRef.current !== generation) return;
+      }
+      if (context.activePlanetId !== routeIdentity.planetId ||
+          selectedEntityIdsRef.current.length !== 1 || selectedEntityIdsRef.current[0] !== entityId) {
+        setNotice("建筑或行星在确认期间已经变化；存档未改变，请重试");
+        return;
+      }
+      commitNativeProjectedCommand(context.revision, (baseRevision) =>
+        baseRevision === context.revision
+          ? createNativeProjectedOrdinaryBuildingRemovalCommand(context)
+          : null,
+        () => {
+          selectedEntityIdsRef.current = [];
+          setSelectedEntityIds([]);
+          setNotice(`已由 Rust 安全回收${buildingLabel} ×${context.machineCount ?? count}，并返还施工托盘`);
+          playTone("remove");
+        },
+      );
+    } finally {
+      if (nativeRemovalRequestGenerationRef.current === generation) {
+        nativeRemovalContextPendingRef.current = false;
+        setNativeRemovalContextPending(false);
+      }
+    }
+  }, [
+    commitNativeProjectedCommand,
+    desktopBridge,
+    factoryInspectorSummaryReadModel,
+    playTone,
+  ]);
   const selectedBelts = factoryInteractionRows.selectedBelts;
   const factorySelectionReadGame = useMemo(() => factoryInteractionRows.source === "native-authoritative"
     ? {
@@ -17298,6 +17433,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         <StableInspectorPanel
           game={factoryInspectorGame}
           readOnly={nativePlayerAuthorityOwnsRuntime}
+          nativeActionPending={nativeRemovalContextPending || nativePlayerAuthorityCommandPending}
           inspectorReadModel={factoryInspectorSummaryReadModel}
           multiSelectionReadModel={factoryMultiSelectionSummaryReadModel}
           multiSelectedBelts={selectedBeltsForMultiSummary as BeltConnection[]}
@@ -17511,7 +17647,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onCraftItem={handleQuickCraftFleet}
           onQueueCraftItem={(recipeId, batches) => commitGame((current) => queueHandcraftRecipe(current, recipeId, batches))}
           onCancelCraftQueue={(entryId) => commitGame((current) => cancelHandcraftQueueEntry(current, entryId))}
-          onRemoveEntity={handleRemoveEntity}
+          onRemoveEntity={nativePlayerAuthorityOwnsRuntime ? removeNativeOrdinaryBuilding : handleRemoveEntity}
           onRemoveBelt={(beltId) => {
             commitGame((current) => removeBelt(current, beltId));
             setSelectedBeltId(null);

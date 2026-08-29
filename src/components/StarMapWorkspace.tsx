@@ -671,6 +671,85 @@ export function NativeStarMapCatalogConsole({
   </div>;
 }
 
+export function NativeStarMapWorkspace({
+  open,
+  mapCatalogFrame,
+  mapCatalogStatus = "ready",
+  readModel,
+  readStatus = "ready",
+  quantumReadModel,
+  quantumReadStatus = "ready",
+  industryReadRequest,
+  onIndustryReadRequest,
+  onClose,
+  onNativeRoleChange,
+  onNativeStationPriorityChange,
+  onNativeStationLimitsChange,
+  onFocusStation,
+  onNativeQuantumItemCapacityChange,
+}: {
+  open: boolean;
+  mapCatalogFrame: NativeStarMapCatalogFrame | null;
+  mapCatalogStatus?: StarMapNativeReadStatus;
+  readModel: NativeStarMapWorkspaceReadModel | null;
+  readStatus?: StarMapNativeReadStatus;
+  quantumReadModel: NativeStellarQuantumReadModel | null;
+  quantumReadStatus?: StarMapNativeReadStatus;
+  industryReadRequest: StarMapIndustryReadRequest;
+  onIndustryReadRequest: (request: StarMapIndustryReadRequest) => void;
+  onClose: () => void;
+  onNativeRoleChange?: NativePlanetRoleAction;
+  onNativeStationPriorityChange?: NativeStationPriorityAction;
+  onNativeStationLimitsChange?: NativeStationLimitsAction;
+  onFocusStation: (entityId: string, planetId: PlanetId) => void;
+  onNativeQuantumItemCapacityChange?: NativeQuantumItemCapacityAction;
+}) {
+  const [view, setView] = useState<"map" | "industry" | "quantum">("map");
+  const [mapQuery, setMapQuery] = useState("");
+  if (!open) return null;
+
+  const activeSystemId = mapCatalogFrame?.activeSystemId ?? readModel?.activeSystemId ?? null;
+  const activeSystemLabel = activeSystemId
+    ? mapCatalogFrame?.systemRowsById.get(activeSystemId)?.displayName ??
+      readModel?.systemRowsById.get(activeSystemId)?.displayName ??
+      "--"
+    : "--";
+  const unlockedCount = mapCatalogFrame?.summary.unlockedSystemCount ?? readModel?.summary.unlockedSystemCount ?? null;
+  const totalSystemCount = mapCatalogFrame?.summary.systemCount ?? readModel?.summary.systemCount ?? null;
+  const farthestBeaconDistance = mapCatalogFrame
+    ? Math.max(0, ...mapCatalogFrame.systems.filter((system) => system.discovered).map((system) => system.distanceFromOriginLy))
+    : readModel
+      ? Math.max(0, ...readModel.systems.filter((system) => system.unlocked).map((system) => system.distanceFromOriginLy))
+      : null;
+  const galaxySeed = mapCatalogFrame?.galaxySeed ?? readModel?.galaxySeed ?? null;
+
+  return <WorkspaceFrame className={`star-map-workspace star-map-workspace--${view}`} ariaLabel="星图" onRequestClose={onClose}>
+    <header className="star-map-header">
+      <div className="star-map-title">
+        <i><Telescope size={20} /></i>
+        <div><span>恒星级导航阵列</span><strong>{view === "map" ? "星图与行星探索" : view === "industry" ? "星际工业调度" : "量子空间库存"}</strong></div>
+      </div>
+      <div className="star-map-headline">
+        <span>已勘探 <strong>{unlockedCount === null ? "--" : unlockedCount}/{totalSystemCount === null ? "--" : totalSystemCount}</strong></span>
+        <span>当前坐标 <strong>{activeSystemLabel}</strong></span>
+        <span>最远航标 <strong>{farthestBeaconDistance === null ? "--" : `${farthestBeaconDistance.toFixed(1)} ly`}</strong></span>
+        <span>星区种子 <strong>#{galaxySeed ?? "--"}</strong></span>
+      </div>
+      <button className="star-map-close" type="button" onClick={onClose} title="关闭星图" aria-label="关闭星图"><X size={18} /></button>
+    </header>
+
+    <nav className="star-map-tabs" role="tablist" aria-label="星图视图">
+      <button type="button" role="tab" aria-selected={view === "map"} className={view === "map" ? "active" : ""} onClick={() => setView("map")}><Telescope size={14} />星图探索</button>
+      <button type="button" role="tab" aria-selected={view === "industry"} className={view === "industry" ? "active" : ""} onClick={() => setView("industry")}><Factory size={14} />星际工业</button>
+      <button type="button" role="tab" aria-selected={view === "quantum"} className={view === "quantum" ? "active" : ""} onClick={() => setView("quantum")}><Atom size={14} />量子库存</button>
+    </nav>
+
+    {view === "map" ? <NativeStarMapCatalogConsole frame={mapCatalogFrame} status={mapCatalogStatus} query={mapQuery} onQueryChange={setMapQuery} />
+      : view === "industry" ? <NativeIndustryConsole readModel={readModel} status={readStatus} selector={industryReadRequest} onSelectorChange={onIndustryReadRequest} onNativeRoleChange={onNativeRoleChange} onNativeStationPriorityChange={onNativeStationPriorityChange} onNativeStationLimitsChange={onNativeStationLimitsChange} onFocusStation={onFocusStation} />
+        : <NativeQuantumInventoryConsole readModel={quantumReadModel} status={quantumReadStatus} onNativeItemCapacityChange={onNativeQuantumItemCapacityChange} />}
+  </WorkspaceFrame>;
+}
+
 export function StarMapWorkspace({
   open,
   game,

@@ -33,31 +33,35 @@ describe("native stellar workspace App integration", () => {
   });
 
   it("passes only the selector-checked read model and fails closed for player authority", () => {
-    expect(app).toMatch(/nativeReadModel=\{nativeStarMapWorkspaceReadModel\}/);
-    expect(app).toMatch(/nativeReadStatus=\{nativeStarMapWorkspaceReadStatus\}/);
-    expect(app).toMatch(/nativeAuthorityRequired=\{Boolean\(nativePlayerAuthorityBoundFrame\)\}/);
-    expect(app).toMatch(/nativeMapCatalogFrame=\{nativeStarMapCatalogFrame\}/);
-    expect(app).toMatch(/nativeMapCatalogStatus=\{nativeStarMapCatalogStatus\}/);
+    expect(app).toMatch(/const NativeStarMapWorkspace = lazy/);
+    expect(app).toMatch(/starMapOpen \? nativePlayerAuthorityOwnsRuntime \? \([\s\S]*?<NativeStarMapWorkspace/);
+    expect(app).toMatch(/readModel=\{nativeStarMapWorkspaceReadModel\}/);
+    expect(app).toMatch(/readStatus=\{nativeStarMapWorkspaceReadStatus\}/);
+    expect(app).toMatch(/mapCatalogFrame=\{nativeStarMapCatalogFrame\}/);
+    expect(app).toMatch(/mapCatalogStatus=\{nativeStarMapCatalogStatus\}/);
     expect(app).toMatch(/industryReadRequest=\{starMapIndustryReadRequest\}/);
-    expect(workspace).toMatch(/nativeAuthorityRequired\s*\? <NativeIndustryConsole/);
     expect(workspace).toMatch(/当前不会读取或显示 JavaScript 存档中的旧星图数据/);
-    expect(workspace).toMatch(/view === "map" \? nativeAuthorityRequired \? nativeMapCatalogConsole/);
-    expect(app).toMatch(/nativeQuantumReadModel=\{nativeStellarQuantumReadModel\}/);
-    expect(app).toMatch(/nativeQuantumReadStatus=\{nativeStellarQuantumReadStatus\}/);
+    expect(app).toMatch(/quantumReadModel=\{nativeStellarQuantumReadModel\}/);
+    expect(app).toMatch(/quantumReadStatus=\{nativeStellarQuantumReadStatus\}/);
     expect(app).toMatch(/onNativeQuantumItemCapacityChange=\{[\s\S]*?commitNativeProjectedCommand[\s\S]*?createNativeProjectedQuantumItemCapacityCommand/);
-    expect(workspace).toMatch(/const nativeQuantumConsole = <NativeQuantumInventoryConsole/);
-    expect(workspace).toMatch(/onNativeItemCapacityChange=\{onNativeQuantumItemCapacityChange\}/);
-    expect(workspace).toMatch(/nativeAuthorityRequired \? nativeQuantumConsole : <QuantumInventoryConsole/);
+    expect(workspace).toMatch(/<NativeQuantumInventoryConsole readModel=\{quantumReadModel\}[\s\S]*?onNativeItemCapacityChange=\{onNativeQuantumItemCapacityChange\}/);
     const nativeQuantum = workspace.slice(
       workspace.indexOf("export function NativeQuantumInventoryConsole"),
-      workspace.indexOf("export function StarMapWorkspace"),
+      workspace.indexOf("export function NativeStarMapCatalogConsole"),
     );
     expect(nativeQuantum).not.toMatch(/\bgame\b|quantumLogisticsNetwork|getQuantumBandwidthSummary/);
     const nativeMap = workspace.slice(
       workspace.indexOf("export function NativeStarMapCatalogConsole"),
-      workspace.indexOf("export function StarMapWorkspace"),
+      workspace.indexOf("export function NativeStarMapWorkspace"),
     );
     expect(nativeMap).not.toMatch(/\bgame\b|getPlanetIndustrialProfile|isPlanetColonized|canColonizePlanet|canExploreStarSystem/);
+    const nativeWorkspace = workspace.slice(
+      workspace.indexOf("export function NativeStarMapWorkspace"),
+      workspace.indexOf("export function StarMapWorkspace"),
+    );
+    expect(nativeWorkspace).not.toMatch(/\bgame\b|GameState|nativeAuthorityRequired/);
+    expect(nativeWorkspace).toMatch(/view === "map" \? <NativeStarMapCatalogConsole/);
+    expect(nativeWorkspace).toMatch(/view === "industry" \? <NativeIndustryConsole/);
   });
 
   it("renders native routes and indexes without reconstructing authority routes from GameState", () => {
@@ -67,20 +71,23 @@ describe("native stellar workspace App integration", () => {
     expect(workspace).toMatch(/readModel\.stationRowsById\.get\(route\.targetStationId\)/);
     expect(workspace).toMatch(/readModel\?\.planetRowsById\.get\(selector\.planetId\)/);
     expect(workspace).toMatch(/readModel\?\.systemRowsById\.get\(selector\.systemId\)/);
-    expect(workspace).toMatch(/nativeAuthorityRequired[\s\S]*?<NativeIndustryConsole[\s\S]*?: <IndustryConsole game=\{game\}/);
+    expect(workspace).toMatch(/export function NativeStarMapWorkspace[\s\S]*?<NativeIndustryConsole/);
     expect(workspace).toMatch(/function IndustryConsole[\s\S]*?getStellarRouteSnapshots\(game\)/);
   });
 
   it("binds supported native configuration to exact projected commands while legacy edits retain commitGame", () => {
-    const industryBranch = workspace.match(/const industryConsole = nativeAuthorityRequired[\s\S]*?;\n/)?.[0] ?? "";
-    const nativeIndustryTag = industryBranch.match(/<NativeIndustryConsole[^>]*\/>/)?.[0] ?? "";
+    const nativeWorkspace = workspace.slice(
+      workspace.indexOf("export function NativeStarMapWorkspace"),
+      workspace.indexOf("export function StarMapWorkspace"),
+    );
+    const nativeIndustryTag = nativeWorkspace.match(/<NativeIndustryConsole[^>]*\/>/)?.[0] ?? "";
     expect(nativeIndustryTag).toContain("<NativeIndustryConsole");
     expect(nativeIndustryTag).toContain("onNativeRoleChange={onNativeRoleChange}");
     expect(nativeIndustryTag).toContain("onNativeStationPriorityChange={onNativeStationPriorityChange}");
     expect(nativeIndustryTag).toContain("onNativeStationLimitsChange={onNativeStationLimitsChange}");
     expect(nativeIndustryTag).not.toContain("onTravel={onTravel}");
     expect(nativeIndustryTag).not.toContain("onStationMinimumLoadChange={onStationMinimumLoadChange}");
-    expect(industryBranch).toMatch(/: <IndustryConsole game=\{game\}[\s\S]*?onRoleChange=\{onRoleChange\}[\s\S]*?onStationLimitsChange=\{onStationLimitsChange\}/);
+    expect(workspace).toMatch(/: <IndustryConsole game=\{game\}[\s\S]*?onRoleChange=\{onRoleChange\}[\s\S]*?onStationLimitsChange=\{onStationLimitsChange\}/);
     expect(workspace).toMatch(/工业定位、优先级和库存上下限使用当前投影 revision 的直接命令；最低装载率仍只读/);
     expect(workspace).toMatch(/aria-label=\{`\$\{route\.itemLabel\}航线优先级`\}[\s\S]*?disabled=\{!onNativeStationPriorityChange\}/);
     expect(workspace).toMatch(/aria-label=\{`\$\{route\.itemLabel\}最低装载率`\}[\s\S]*?value=\{route\.minimumLoad\} disabled/);

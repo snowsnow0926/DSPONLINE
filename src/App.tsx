@@ -1213,6 +1213,7 @@ const RecipeWorkspace = lazy(() => importWithRecovery(() => import("./components
 const StatisticsWorkspace = lazy(() => importWithRecovery(() => import("./components/StatisticsWorkspace"), "生产统计模块").then((module) => ({ default: module.StatisticsWorkspace })));
 const NativeStatisticsWorkspace = lazy(() => importWithRecovery(() => import("./components/NativeStatisticsWorkspace"), "原生生产统计模块").then((module) => ({ default: module.NativeStatisticsWorkspace })));
 const StarMapWorkspace = lazy(() => importWithRecovery(() => import("./components/StarMapWorkspace"), "星图模块").then((module) => ({ default: module.StarMapWorkspace })));
+const NativeStarMapWorkspace = lazy(() => importWithRecovery(() => import("./components/StarMapWorkspace"), "原生星图模块").then((module) => ({ default: module.NativeStarMapWorkspace })));
 const DysonPlannerWorkspace = lazy(() => importWithRecovery(() => import("./components/DysonPlannerWorkspace"), "戴森规划模块").then((module) => ({ default: module.DysonPlannerWorkspace })));
 const NativeDysonPlannerWorkspace = lazy(() => importWithRecovery(() => import("./components/DysonPlannerWorkspace"), "原生戴森规划模块").then((module) => ({ default: module.NativeDysonPlannerWorkspace })));
 const OfflineReportWorkspace = lazy(() => importWithRecovery(() => import("./components/OfflineReportWorkspace"), "离线报告模块").then((module) => ({ default: module.OfflineReportWorkspace })));
@@ -17977,17 +17978,32 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onSelectTask={onSelectCampaignTask}
           />
         ) : null}
-        {starMapOpen ? (
+        {starMapOpen ? nativePlayerAuthorityOwnsRuntime ? (
+          <NativeStarMapWorkspace
+            open
+            mapCatalogFrame={nativeStarMapCatalogFrame}
+            mapCatalogStatus={nativeStarMapCatalogStatus}
+            readModel={nativeStarMapWorkspaceReadModel}
+            readStatus={nativeStarMapWorkspaceReadStatus}
+            quantumReadModel={nativeStellarQuantumReadModel}
+            quantumReadStatus={nativeStellarQuantumReadStatus}
+            industryReadRequest={starMapIndustryReadRequest}
+            onIndustryReadRequest={updateStarMapIndustryReadRequest}
+            onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setStarMapOpen(false)}
+            onNativeRoleChange={(projectedRevision, planetId, currentRole, targetRole) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+              createNativeProjectedPlanetRoleCommand({ baseRevision, planetId, currentRole, targetRole }))}
+            onNativeQuantumItemCapacityChange={(projectedRevision, itemId, currentCapacity, targetCapacity) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+              createNativeProjectedQuantumItemCapacityCommand({ baseRevision, itemId, currentCapacity, targetCapacity }))}
+            onNativeStationPriorityChange={(projectedRevision, stationId, slotIndex, currentPriority, targetPriority) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+              createNativeProjectedStationPriorityCommand({ baseRevision, stationId, slotIndex, currentPriority, targetPriority }))}
+            onNativeStationLimitsChange={(projectedRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+              createNativeProjectedStationLimitsCommand({ baseRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock }))}
+            onFocusStation={focusStellarStation}
+          />
+        ) : (
           <StarMapWorkspace
             open
             game={game}
-            nativeMapCatalogFrame={nativeStarMapCatalogFrame}
-            nativeMapCatalogStatus={nativeStarMapCatalogStatus}
-            nativeReadModel={nativeStarMapWorkspaceReadModel}
-            nativeReadStatus={nativeStarMapWorkspaceReadStatus}
-            nativeQuantumReadModel={nativeStellarQuantumReadModel}
-            nativeQuantumReadStatus={nativeStellarQuantumReadStatus}
-            nativeAuthorityRequired={Boolean(nativePlayerAuthorityBoundFrame)}
             industryReadRequest={starMapIndustryReadRequest}
             onIndustryReadRequest={updateStarMapIndustryReadRequest}
             mobile={nextMobileShell}
@@ -18001,23 +18017,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               if (changed) setStarMapOpen(false);
               return changed;
             }}
-            onNativeRoleChange={(projectedRevision, planetId, currentRole, targetRole) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
-              createNativeProjectedPlanetRoleCommand({ baseRevision, planetId, currentRole, targetRole }))}
             onRoleChange={(planetId: PlanetId, role: PlanetIndustryRole) => commitGame((current) => setPlanetIndustryRole(current, planetId, role))}
             onPlanetMetadataChange={(planetId, metadata) => commitGame((current) => setPlanetDisplayMetadata(current, planetId, metadata))}
             onSystemNameChange={(systemId, customName) => commitGame((current) => setStarSystemDisplayName(current, systemId, customName))}
             onUpgradeAllStations={handleUpgradeAllInterstellarStations}
             onAttachAllQuantumStations={handleAttachAllQuantumStations}
             onCollectorQuantumModeChange={handleAllOrbitalCollectorsQuantumMode}
-            onNativeQuantumItemCapacityChange={(projectedRevision, itemId, currentCapacity, targetCapacity) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
-              createNativeProjectedQuantumItemCapacityCommand({ baseRevision, itemId, currentCapacity, targetCapacity }))}
             onQuantumItemCapacityChange={(itemId, value) => commitGame((current) => setQuantumLogisticsItemCapacity(current, itemId, value))}
-            onNativeStationPriorityChange={(projectedRevision, stationId, slotIndex, currentPriority, targetPriority) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
-              createNativeProjectedStationPriorityCommand({ baseRevision, stationId, slotIndex, currentPriority, targetPriority }))}
             onStationPriorityChange={(entityId: string, slotIndex: number, priority: LogisticsPriority) => commitGame((current) => setStationSlotPriority(current, entityId, slotIndex, priority))}
             onStationMinimumLoadChange={(entityId: string, slotIndex: number, minimumLoad: StationMinimumLoad) => commitGame((current) => setStationSlotMinimumLoad(current, entityId, slotIndex, minimumLoad))}
-            onNativeStationLimitsChange={(projectedRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
-              createNativeProjectedStationLimitsCommand({ baseRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock }))}
             onStationLimitsChange={(entityId: string, slotIndex: number, minStock: number, maxStock: number) => commitGame((current) => setStationSlotLimits(current, entityId, slotIndex, minStock, maxStock))}
             onFocusStation={focusStellarStation}
           />
@@ -18290,7 +18298,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         connectionHint={connectionHint}
         onPointerPosition={handleCanvasPointerPosition}
       />
-      <SpeedrunStatusPanel game={game} />
+      {!nativePlayerAuthorityOwnsRuntime ? <SpeedrunStatusPanel game={game} /> : null}
       {interactionBursts.map((burst) => <div className={`interaction-burst interaction-burst--${burst.tone}`} style={{ left: burst.x, top: burst.y }} key={burst.id}><i>{burst.tone === "warning" ? <Sparkles size={13} /> : <Check size={13} />}</i><span>{burst.label}</span></div>)}
       {saveFailure ? <aside className="save-emergency-warning" role="alert" aria-live="assertive">
         <AlertTriangle size={20} />

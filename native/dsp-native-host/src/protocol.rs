@@ -197,6 +197,13 @@ pub enum ControlRequest {
         #[serde(default)]
         selected_belt_ids: Vec<String>,
     },
+    CoreFactoryInventoryProjection {
+        session_id: String,
+        expected_revision: u64,
+        #[serde(default)]
+        cursor: usize,
+        limit: usize,
+    },
     CoreStatisticsProjection {
         session_id: String,
         min_elapsed_seconds: f64,
@@ -723,6 +730,46 @@ mod tests {
                 assert!(selected_belt_ids.is_empty());
             }
             _ => panic!("factory read-model defaults decoded as the wrong variant"),
+        }
+    }
+
+    #[test]
+    fn factory_inventory_protocol_preserves_revision_and_page_identity() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreFactoryInventoryProjection",
+            "sessionId": "core-1",
+            "expectedRevision": 47,
+            "cursor": 256,
+            "limit": 128
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreFactoryInventoryProjection {
+                session_id,
+                expected_revision,
+                cursor,
+                limit,
+            } => {
+                assert_eq!(session_id, "core-1");
+                assert_eq!(expected_revision, 47);
+                assert_eq!(cursor, 256);
+                assert_eq!(limit, 128);
+            }
+            _ => panic!("factory inventory operation decoded as the wrong variant"),
+        }
+
+        let defaults = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreFactoryInventoryProjection",
+            "sessionId": "core-2",
+            "expectedRevision": 0,
+            "limit": 1
+        }))
+        .unwrap();
+        match defaults {
+            ControlRequest::CoreFactoryInventoryProjection { cursor, .. } => {
+                assert_eq!(cursor, 0);
+            }
+            _ => panic!("factory inventory defaults decoded as the wrong variant"),
         }
     }
 

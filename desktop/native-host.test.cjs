@@ -6,6 +6,7 @@ const test = require("node:test");
 const {
   CONTROL_RESPONSE_KIND,
   MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
+  NATIVE_FACTORY_INVENTORY_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
@@ -24,6 +25,10 @@ const {
   normalizeNativeHostSpawnEnvironment,
   parseFrames,
 } = require("./native-host.cjs");
+
+test("native factory inventory capability matches the Rust host contract", () => {
+  assert.equal(NATIVE_FACTORY_INVENTORY_CAPABILITY, "native-core-factory-inventory-v1");
+});
 
 test("native frame codec survives arbitrary stream boundaries", () => {
   const first = encodeFrame({ requestId: 1, payload: Buffer.from("one") });
@@ -96,13 +101,26 @@ test("native projection transfer carries bounded identity and SHA-256 metadata",
   });
   assert.equal(factoryReadModelTransfer.header.projectionType, "factory-read-model-v1");
   assert.equal(JSON.parse(factoryReadModelTransfer.payload).schemaVersion, 1);
+  const factoryInventoryTransfer = encodeNativeProjectionTransfer({
+    sessionId: "core-1",
+    sequence: 10,
+    projectionType: "factory-inventory-v1",
+    result: {
+      schemaVersion: 1,
+      projectionType: "factory-inventory-v1",
+      revision: 13,
+      rows: [],
+    },
+  });
+  assert.equal(factoryInventoryTransfer.header.projectionType, "factory-inventory-v1");
+  assert.equal(JSON.parse(factoryInventoryTransfer.payload).revision, 13);
   for (const projectionType of [
     "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1",
     "dyson-workspace-v1",
   ]) {
     const stellarTransfer = encodeNativeProjectionTransfer({
       sessionId: "core-1",
-      sequence: 10,
+      sequence: 11,
       projectionType,
       result: {
         schemaVersion: projectionType === "stellar-industry-v2" ? 2 : 1,
@@ -553,6 +571,25 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     selectedItemId: "iron_ore",
     location: { planetId: "home", cursor: 0, limit: 4_097 },
   }), /recipe workspace projection request is invalid/);
+  await registry.factoryInventoryProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    cursor: 256,
+    limit: 128,
+  });
+  assert.throws(() => registry.factoryInventoryProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    cursor: 0,
+    limit: 257,
+  }), /factory inventory projection request is invalid/);
+  assert.throws(() => registry.factoryInventoryProjection(7, {
+    sessionId: "core-1",
+    expectedRevision: 2,
+    cursor: 0,
+    limit: 128,
+    path: "C:\\secret",
+  }), /factory inventory projection request is invalid/);
   assert.throws(() => registry.checkpoint(7, { sessionId: "core-1", savedAtMs: -1 }), /timestamp/);
   await registry.checkpoint(7, { sessionId: "core-1", savedAtMs: 2 });
   await registry.close(7, "core-1");
@@ -562,7 +599,8 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     "coreFactoryReadModelProjection", "coreRecipeWorkspaceProjection",
     "coreStarMapOverviewProjection", "coreStarMapCatalogProjection", "coreStellarIndustryProjection",
     "coreStellarIndustryProjectionV2", "coreStellarQuantumProjection",
-    "coreCommandPaletteEntitySearchProjection", "coreCheckpoint", "coreClose",
+    "coreCommandPaletteEntitySearchProjection", "coreFactoryInventoryProjection",
+    "coreCheckpoint", "coreClose",
   ]);
   assert.deepEqual(calls[3], {
     operation: "coreViewportProjectionV2",
@@ -663,6 +701,13 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     buildingIds: ["smelter"],
     resourceIds: [],
     planetIds: ["home"],
+  });
+  assert.deepEqual(calls[12], {
+    operation: "coreFactoryInventoryProjection",
+    sessionId: "core-1",
+    expectedRevision: 2,
+    cursor: 256,
+    limit: 128,
   });
 });
 

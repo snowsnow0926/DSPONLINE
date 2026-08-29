@@ -321,6 +321,8 @@ export interface DesktopBridge {
   getNativeCoreViewportProjection: (request: DesktopNativeCoreViewportProjectionRequest) => Promise<DesktopNativeCoreViewportProjectionResult>;
   getNativeCoreViewportProjectionV2: (request: DesktopNativeCoreViewportProjectionV2Request) => Promise<DesktopNativeCoreViewportProjectionV2Result>;
   getNativeCoreFactoryReadModel: (request: DesktopNativeCoreFactoryReadModelRequest) => Promise<DesktopNativeCoreFactoryReadModelResult>;
+  /** Independently paged active-planet tray and held stack for the native thin UI. */
+  getNativeCoreFactoryInventory?: (request: DesktopNativeCoreFactoryInventoryRequest) => Promise<DesktopNativeCoreFactoryInventoryResult>;
   getNativeCoreStatisticsProjection: (request: DesktopNativeCoreStatisticsProjectionRequest) => Promise<DesktopNativeCoreStatisticsProjectionResult>;
   getNativeCoreTechnologyProjection: (request: DesktopNativeCoreTechnologyProjectionRequest) => Promise<DesktopNativeCoreTechnologyProjectionResult>;
   /** Current Windows thin-UI host only; older shells fail closed instead of reading the Web GameState. */
@@ -923,6 +925,65 @@ export interface DesktopNativeCoreFactoryReadModelResult extends FactoryReadMode
   schemaVersion: 1;
   projectionType: "factory-read-model-v1";
   revision: number;
+}
+
+export interface DesktopNativeCoreFactoryInventoryRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  cursor: number;
+  limit: number;
+}
+
+export type DesktopNativeCoreFactoryInventoryCargoOrigin = {
+  kind: "node-output" | "node-input" | "tray";
+  id: string | null;
+};
+
+export type DesktopNativeCoreFactoryInventoryCargo = {
+  itemId: string;
+  amount: number;
+  origin: DesktopNativeCoreFactoryInventoryCargoOrigin | null;
+};
+
+export interface DesktopNativeCoreFactoryInventoryRow {
+  itemId: string;
+  amount: number;
+  freeCapacity: number;
+  overLimit: boolean;
+}
+
+export interface DesktopNativeCoreFactoryInventoryResult {
+  schemaVersion: 1;
+  projectionType: "factory-inventory-v1";
+  source: "native-core";
+  revision: number;
+  stateVersion: 47;
+  registryFingerprint: string;
+  activePlanetId: string;
+  cargo: DesktopNativeCoreFactoryInventoryCargo | null;
+  pickupTargetAmount: 100;
+  portableFleet: {
+    logistics_drone: number;
+    logistics_vessel: number;
+  };
+  trayItemLimit: number;
+  trayItemLimitBounds: {
+    minimum: 1000;
+    default: 1000000;
+    maximum: 100000000;
+  };
+  request: {
+    expectedRevision: number;
+    cursor: number;
+    limit: number;
+  };
+  totalCount: number;
+  rows: DesktopNativeCoreFactoryInventoryRow[];
+  nextCursor: number | null;
+  truncated: boolean;
+  limits: {
+    rows: 256;
+    projectionBytes: 1048576;
+  };
 }
 
 export interface DesktopNativeCoreStatisticsProjectionRequest extends DesktopNativeCoreSessionRequest {
@@ -1820,6 +1881,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
     }
   | {
       sessionId: string;
+      projectionType: "factory-inventory-v1";
+      payload: Omit<DesktopNativeCoreFactoryInventoryRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
       projectionType: "statistics-v1";
       payload: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">;
     }
@@ -1869,7 +1935,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
   payloadLength: number;
   sha256: string;
 }

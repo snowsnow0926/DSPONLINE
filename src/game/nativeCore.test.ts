@@ -219,6 +219,33 @@ describe("native core transferable projections", () => {
     })).resolves.toEqual(value);
   });
 
+  it("verifies and decodes a factory inventory page over the bounded transfer", async () => {
+    const value = {
+      schemaVersion: 1,
+      projectionType: "factory-inventory-v1",
+      source: "native-core",
+      revision: 14,
+      stateVersion: 47,
+      registryFingerprint: "builtin:test",
+      activePlanetId: "home",
+      cargo: null,
+      pickupTargetAmount: 100,
+      portableFleet: { logistics_drone: 0, logistics_vessel: 0 },
+      trayItemLimit: 1_000,
+      trayItemLimitBounds: { minimum: 1_000, default: 1_000_000, maximum: 100_000_000 },
+      request: { expectedRevision: 14, cursor: 0, limit: 32 },
+      totalCount: 0,
+      rows: [],
+      nextCursor: null,
+      truncated: false,
+      limits: { rows: 256, projectionBytes: 1_048_576 },
+    };
+    await expect(decodeNativeCoreProjectionTransfer(await transferFor(value), {
+      sessionId: "core-1",
+      projectionType: "factory-inventory-v1",
+    })).resolves.toEqual(value);
+  });
+
   it.each(["star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "dyson-workspace-v1"] as const)(
     "verifies and decodes the bounded %s block",
     async (projectionType) => {

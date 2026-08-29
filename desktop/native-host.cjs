@@ -29,6 +29,7 @@ const NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY =
   "native-core-player-authority-pure-idle-macro-v1";
 const NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY =
   "native-core-player-authority-startup-recovery-v1";
+const NATIVE_FACTORY_INVENTORY_CAPABILITY = "native-core-factory-inventory-v1";
 const MAIN_PLAYER_AUTHORITY_OWNER_ID = "main-player-authority";
 const MAX_DURABLE_PLAYER_AUTHORITY_COMMAND_BYTES = 1_750_000;
 const MAX_PLAYER_AUTHORITY_MACRO_BUDGET_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
@@ -66,7 +67,7 @@ function normalizeNativeHostSpawnEnvironment(value = {}) {
 
 function encodeNativeProjectionTransfer({ sessionId, sequence, projectionType, result }) {
   if (!validLogicalId(sessionId, 128) || !Number.isSafeInteger(sequence) || sequence < 1 ||
-    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(projectionType) || !result || typeof result !== "object" ||
+    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(projectionType) || !result || typeof result !== "object" ||
     result.schemaVersion !== (["viewport-v2", "stellar-industry-v2"].includes(projectionType) ? 2 : 1) || result.projectionType !== projectionType ||
     !Number.isSafeInteger(result.revision) || result.revision < 0) {
     throw new TypeError("native core projection transfer is invalid");
@@ -1030,6 +1031,25 @@ class NativeCoreSessionRegistry {
     });
   }
 
+  factoryInventoryProjection(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    exactObjectKeys(request, [
+      "sessionId", "expectedRevision", "cursor", "limit",
+    ], "native factory inventory projection request");
+    if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !Number.isSafeInteger(request.cursor) || request.cursor < 0 ||
+      !Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 256) {
+      throw new TypeError("native factory inventory projection request is invalid");
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreFactoryInventoryProjection",
+      sessionId: request.sessionId,
+      expectedRevision: request.expectedRevision,
+      cursor: request.cursor,
+      limit: request.limit,
+    });
+  }
+
   statisticsProjection(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     const validElapsed = (value) => Number.isFinite(value) && value >= 0 && value <= 30 * 24 * 60 * 60 * 10_000;
@@ -1912,6 +1932,7 @@ module.exports = {
   MAX_FRAME_PAYLOAD_BYTES,
   MAX_COMMAND_PALETTE_SEARCH_REQUEST_BYTES,
   MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
+  NATIVE_FACTORY_INVENTORY_CAPABILITY,
   NATIVE_EXACT_REALTIME_LEASE_CAPABILITY,
   NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,

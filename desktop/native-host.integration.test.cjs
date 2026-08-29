@@ -383,6 +383,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.ok(hello.capabilities.includes("native-core-viewport-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-viewport-projection-v2"));
   assert.ok(hello.capabilities.includes("native-core-factory-read-model-v1"));
+  assert.ok(hello.capabilities.includes("native-core-factory-inventory-v1"));
   assert.ok(hello.capabilities.includes("native-core-statistics-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-star-map-overview-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-stellar-industry-projection-v1"));
@@ -396,6 +397,10 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.ok(hello.capabilities.includes("native-core-player-authority-startup-recovery-v1"));
   const base = JSON.stringify({
     version: 47, mode: "normal", activePlanetId: "home", elapsedSeconds: 2, paused: false,
+    cargo: null,
+    tray: { iron_ore: 3 },
+    planetTrayItemLimits: { home: 1_000 },
+    portableFleet: { logistics_drone: 2, logistics_vessel: 1 },
     productionHistory: [
       { elapsedSeconds: 1, sampleDurationSeconds: 1, productionPerMinute: { iron_ore: 60 }, consumptionPerMinute: {}, inventory: { iron_ore: 3 }, planetProductionPerMinute: { home: { iron_ore: 60 } }, planetConsumptionPerMinute: { home: {} }, generationKw: 0, demandKw: 0 },
       { elapsedSeconds: 2, sampleDurationSeconds: 1, productionPerMinute: { iron_ore: 120 }, consumptionPerMinute: {}, inventory: { iron_ore: 5 }, planetProductionPerMinute: { home: { iron_ore: 120 } }, planetConsumptionPerMinute: { home: {} }, generationKw: 0, demandKw: 0 },
@@ -571,6 +576,37 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.deepEqual(factoryReadModel.selection.entityRows.rows.map((entity) => entity.entityId), ["vein"]);
   assert.deepEqual(factoryReadModel.selection.beltRows.rows.map((belt) => belt.beltId), ["belt"]);
   assert.equal(factoryReadModel.construction.queue.totalCount, 0);
+  const factoryInventory = await client.request({
+    operation: "coreFactoryInventoryProjection",
+    sessionId: opened.sessionId,
+    expectedRevision: 2,
+    cursor: 0,
+    limit: 32,
+  });
+  assert.doesNotThrow(() => normalizeRendererNativeResult(
+    "coreFactoryInventoryProjection",
+    factoryInventory,
+    { sessionId: opened.sessionId, expectedRevision: 2, cursor: 0, limit: 32 },
+  ));
+  assert.equal(factoryInventory.projectionType, "factory-inventory-v1");
+  assert.equal(factoryInventory.source, "native-core");
+  assert.equal(factoryInventory.revision, 2);
+  assert.equal(factoryInventory.stateVersion, 47);
+  assert.equal(factoryInventory.registryFingerprint, "builtin:test");
+  assert.equal(factoryInventory.activePlanetId, "home");
+  assert.deepEqual(factoryInventory.rows, [{
+    itemId: "iron_ore", amount: 3, freeCapacity: 997, overLimit: false,
+  }]);
+  assert.deepEqual(factoryInventory.portableFleet, {
+    logistics_drone: 2, logistics_vessel: 1,
+  });
+  await assert.rejects(client.request({
+    operation: "coreFactoryInventoryProjection",
+    sessionId: opened.sessionId,
+    expectedRevision: 1,
+    cursor: 0,
+    limit: 32,
+  }), /inventory projection request is invalid/);
   const statisticsProjection = await client.request({
     operation: "coreStatisticsProjection",
     sessionId: opened.sessionId,

@@ -361,6 +361,33 @@ function normalizeFactoryReadModelContext(value, label) {
   };
 }
 
+function normalizeFactoryInventoryContext(value, label) {
+  const source = exactObject(
+    value,
+    ["sessionId", "expectedRevision", "cursor", "limit"],
+    label,
+  );
+  const limit = safeInteger(source.limit, `${label} limit`, 1);
+  if (limit > 256) throw protocolError(`${label} limit`);
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    cursor: safeInteger(source.cursor, `${label} cursor`),
+    limit,
+  };
+}
+
+function factoryInventoryId(value, label) {
+  const result = opaqueId(value, label);
+  for (const character of result) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) {
+      throw protocolError(label);
+    }
+  }
+  return result;
+}
+
 function normalizeStatisticsProjectionContext(value, label) {
   const source = exactObject(value, ["minElapsedSeconds", "maxElapsedSeconds", "cursor", "limit", "planetId", "itemId"], label);
   const minElapsedSeconds = finiteNumber(source.minElapsedSeconds, `${label} minimum elapsed seconds`);
@@ -1632,6 +1659,173 @@ function normalizeCoreFactoryReadModelProjection(value, context) {
     planetNavigation,
     selection,
     construction,
+  };
+}
+
+function normalizeCoreFactoryInventoryProjection(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "revision", "stateVersion",
+    "registryFingerprint", "activePlanetId", "cargo", "pickupTargetAmount",
+    "portableFleet", "trayItemLimit", "trayItemLimitBounds", "request",
+    "totalCount", "rows", "nextCursor", "truncated", "limits",
+  ], "native factory inventory projection");
+  if (source.schemaVersion !== 1 || source.projectionType !== "factory-inventory-v1" ||
+      source.source !== "native-core" || source.stateVersion !== 47) {
+    throw protocolError("native factory inventory identity");
+  }
+  requireProjectionByteBudget(source, "native factory inventory projection");
+  const projectionContext = normalizeFactoryInventoryContext(
+    context,
+    "native factory inventory context",
+  );
+  const revision = safeInteger(source.revision, "native factory inventory revision");
+  if (revision !== projectionContext.expectedRevision || !projectionContext.sessionId) {
+    throw protocolError("native factory inventory revision binding");
+  }
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native factory inventory registry fingerprint",
+    256,
+  );
+  const activePlanetId = factoryInventoryId(source.activePlanetId, "native factory inventory active planet");
+  const cargo = source.cargo === null ? null : (() => {
+    const cargoSource = exactObject(
+      source.cargo,
+      ["itemId", "amount", "origin"],
+      "native factory inventory cargo",
+    );
+    const origin = cargoSource.origin === null ? null : (() => {
+      const originSource = exactObject(
+        cargoSource.origin,
+        ["kind", "id"],
+        "native factory inventory cargo origin",
+      );
+      return {
+        kind: oneOf(
+          originSource.kind,
+          ["node-output", "node-input", "tray"],
+          "native factory inventory cargo origin kind",
+        ),
+        id: originSource.id === null
+          ? null
+          : factoryInventoryId(originSource.id, "native factory inventory cargo origin ID"),
+      };
+    })();
+    return {
+      itemId: factoryInventoryId(cargoSource.itemId, "native factory inventory cargo item ID"),
+      amount: safeInteger(cargoSource.amount, "native factory inventory cargo amount", 1),
+      origin,
+    };
+  })();
+  if (source.pickupTargetAmount !== 100) {
+    throw protocolError("native factory inventory pickup target");
+  }
+  const portableSource = exactObject(
+    source.portableFleet,
+    ["logistics_drone", "logistics_vessel"],
+    "native factory portable fleet",
+  );
+  const portableFleet = {
+    logistics_drone: safeInteger(
+      portableSource.logistics_drone,
+      "native factory portable logistics drones",
+    ),
+    logistics_vessel: safeInteger(
+      portableSource.logistics_vessel,
+      "native factory portable logistics vessels",
+    ),
+  };
+  const boundsSource = exactObject(
+    source.trayItemLimitBounds,
+    ["minimum", "default", "maximum"],
+    "native factory tray item limit bounds",
+  );
+  if (boundsSource.minimum !== 1_000 || boundsSource.default !== 1_000_000 ||
+      boundsSource.maximum !== 100_000_000) {
+    throw protocolError("native factory tray item limit bounds");
+  }
+  const trayItemLimit = safeInteger(source.trayItemLimit, "native factory tray item limit", 1_000);
+  if (trayItemLimit > 100_000_000) throw protocolError("native factory tray item limit");
+  const requestSource = exactObject(
+    source.request,
+    ["expectedRevision", "cursor", "limit"],
+    "native factory inventory request echo",
+  );
+  if (requestSource.expectedRevision !== projectionContext.expectedRevision ||
+      requestSource.cursor !== projectionContext.cursor ||
+      requestSource.limit !== projectionContext.limit) {
+    throw protocolError("native factory inventory request binding");
+  }
+  const totalCount = safeInteger(source.totalCount, "native factory inventory total count");
+  if (projectionContext.cursor > totalCount || !Array.isArray(source.rows) ||
+      source.rows.length > projectionContext.limit) {
+    throw protocolError("native factory inventory page cardinality");
+  }
+  const rows = source.rows.map((row, index) => {
+    const rowSource = exactObject(
+      row,
+      ["itemId", "amount", "freeCapacity", "overLimit"],
+      `native factory inventory row[${index}]`,
+    );
+    const itemId = factoryInventoryId(rowSource.itemId, `native factory inventory row[${index}] item ID`);
+    const amount = safeInteger(rowSource.amount, `native factory inventory row[${index}] amount`, 1);
+    const freeCapacity = safeInteger(
+      rowSource.freeCapacity,
+      `native factory inventory row[${index}] free capacity`,
+    );
+    const overLimit = boolean(rowSource.overLimit, `native factory inventory row[${index}] over limit`);
+    if (freeCapacity !== Math.max(0, trayItemLimit - amount) || overLimit !== (amount > trayItemLimit)) {
+      throw protocolError(`native factory inventory row[${index}] capacity binding`);
+    }
+    return { itemId, amount, freeCapacity, overLimit };
+  });
+  const expectedRows = Math.min(projectionContext.limit, totalCount - projectionContext.cursor);
+  if (rows.length !== expectedRows) throw protocolError("native factory inventory page cardinality");
+  for (let index = 1; index < rows.length; index += 1) {
+    if (Buffer.compare(Buffer.from(rows[index - 1].itemId, "utf8"), Buffer.from(rows[index].itemId, "utf8")) >= 0) {
+      throw protocolError("native factory inventory row order");
+    }
+  }
+  const consumed = projectionContext.cursor + rows.length;
+  const expectedNextCursor = consumed < totalCount ? consumed : null;
+  const nextCursor = source.nextCursor === null
+    ? null
+    : safeInteger(source.nextCursor, "native factory inventory next cursor");
+  if (nextCursor !== expectedNextCursor ||
+      boolean(source.truncated, "native factory inventory truncated") !== (expectedNextCursor !== null)) {
+    throw protocolError("native factory inventory page continuation");
+  }
+  const limitsSource = exactObject(
+    source.limits,
+    ["rows", "projectionBytes"],
+    "native factory inventory limits",
+  );
+  if (limitsSource.rows !== 256 || limitsSource.projectionBytes !== MAX_NATIVE_PROJECTION_BYTES) {
+    throw protocolError("native factory inventory limits");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "factory-inventory-v1",
+    source: "native-core",
+    revision,
+    stateVersion: 47,
+    registryFingerprint,
+    activePlanetId,
+    cargo,
+    pickupTargetAmount: 100,
+    portableFleet,
+    trayItemLimit,
+    trayItemLimitBounds: { minimum: 1_000, default: 1_000_000, maximum: 100_000_000 },
+    request: {
+      expectedRevision: projectionContext.expectedRevision,
+      cursor: projectionContext.cursor,
+      limit: projectionContext.limit,
+    },
+    totalCount,
+    rows,
+    nextCursor,
+    truncated: expectedNextCursor !== null,
+    limits: { rows: 256, projectionBytes: MAX_NATIVE_PROJECTION_BYTES },
   };
 }
 
@@ -4648,6 +4842,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreViewportProjection: normalizeCoreViewportProjection,
   coreViewportProjectionV2: normalizeCoreViewportProjectionV2,
   coreFactoryReadModelProjection: normalizeCoreFactoryReadModelProjection,
+  coreFactoryInventoryProjection: normalizeCoreFactoryInventoryProjection,
   coreStatisticsProjection: normalizeCoreStatisticsProjection,
   coreTechnologyProjection: normalizeCoreTechnologyProjection,
   coreRecipeWorkspaceProjection: normalizeCoreRecipeWorkspaceProjection,

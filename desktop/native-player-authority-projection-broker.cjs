@@ -13,6 +13,7 @@ const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const PROJECTION_METHODS = Object.freeze({
   "viewport-v2": "viewportProjectionV2",
   "factory-read-model-v1": "factoryReadModelProjection",
+  "factory-inventory-v1": "factoryInventoryProjection",
   "statistics-v1": "statisticsProjection",
   "technology-v1": "technologyProjection",
   "recipe-workspace-v1": "recipeWorkspaceProjection",

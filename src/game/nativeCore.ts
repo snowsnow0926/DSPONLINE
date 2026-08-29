@@ -14,6 +14,8 @@ import {
   type DesktopNativeCoreViewportProjectionV2Result,
   type DesktopNativeCoreFactoryReadModelRequest,
   type DesktopNativeCoreFactoryReadModelResult,
+  type DesktopNativeCoreFactoryInventoryRequest,
+  type DesktopNativeCoreFactoryInventoryResult,
   type DesktopNativeCoreStatisticsProjectionRequest,
   type DesktopNativeCoreStatisticsProjectionResult,
   type DesktopNativeCoreTechnologyProjectionRequest,
@@ -47,6 +49,7 @@ type NativeCoreTransferProjection =
   | DesktopNativeCoreViewportProjectionResult
   | DesktopNativeCoreViewportProjectionV2Result
   | DesktopNativeCoreFactoryReadModelResult
+  | DesktopNativeCoreFactoryInventoryResult
   | DesktopNativeCoreStatisticsProjectionResult
   | DesktopNativeCoreTechnologyProjectionResult
   | DesktopNativeCoreRecipeWorkspaceProjectionResult
@@ -100,6 +103,7 @@ export interface WindowsNativeCoreShadow {
   viewportProjection(request: Omit<DesktopNativeCoreViewportProjectionRequest, "sessionId">): Promise<DesktopNativeCoreViewportProjectionResult>;
   viewportProjectionV2(request: Omit<DesktopNativeCoreViewportProjectionV2Request, "sessionId">): Promise<DesktopNativeCoreViewportProjectionV2Result>;
   factoryReadModel(request: Omit<DesktopNativeCoreFactoryReadModelRequest, "sessionId">): Promise<DesktopNativeCoreFactoryReadModelResult>;
+  factoryInventoryProjection?(request: Omit<DesktopNativeCoreFactoryInventoryRequest, "sessionId">): Promise<DesktopNativeCoreFactoryInventoryResult>;
   statisticsProjection(request: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStatisticsProjectionResult>;
   technologyProjection(request: Omit<DesktopNativeCoreTechnologyProjectionRequest, "sessionId">): Promise<DesktopNativeCoreTechnologyProjectionResult>;
   recipeWorkspaceProjection(request: Omit<DesktopNativeCoreRecipeWorkspaceProjectionRequest, "sessionId">): Promise<DesktopNativeCoreRecipeWorkspaceProjectionResult>;
@@ -343,6 +347,29 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
       });
     }
     return desktop.getNativeCoreFactoryReadModel({ sessionId: this.sessionId, ...request });
+  }
+
+  async factoryInventoryProjection(
+    request: Omit<DesktopNativeCoreFactoryInventoryRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreFactoryInventoryResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "factory-inventory-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreFactoryInventoryResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "factory-inventory-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreFactoryInventory !== "function") {
+      throw new Error("Windows 原生工厂库存投影不可用");
+    }
+    return desktop.getNativeCoreFactoryInventory({ sessionId: this.sessionId, ...request });
   }
 
   async statisticsProjection(

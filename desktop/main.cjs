@@ -1050,6 +1050,15 @@ function nativeFactoryReadModelResultContext(request) {
   };
 }
 
+function nativeFactoryInventoryResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    cursor: request?.cursor,
+    limit: request?.limit,
+  };
+}
+
 function nativeStatisticsProjectionResultContext(request) {
   return {
     minElapsedSeconds: request?.minElapsedSeconds,
@@ -1739,6 +1748,20 @@ ipcMain.handle("desktop:native-core-factory-read-model", async (event, request) 
   });
 });
 
+ipcMain.handle("desktop:native-core-factory-inventory", async (event, request) => {
+  return runRendererNativeOperation("coreFactoryInventoryProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生工厂库存请求失败，请重试",
+    resultContext: nativeFactoryInventoryResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "factory-inventory-v1", request);
+    }
+    return await nativeCoreSessions.factoryInventoryProjection(ownerId, request);
+  });
+});
+
 ipcMain.handle("desktop:native-core-statistics-projection", async (event, request) => {
   return runRendererNativeOperation("coreStatisticsProjection", {
     fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
@@ -1891,7 +1914,7 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
     if (!request || typeof request !== "object" ||
       !validNativeLogicalId(request.sessionId, 128) ||
       !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
-      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType) ||
+      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object" ||
       Object.prototype.hasOwnProperty.call(request.payload, "sessionId")) {
       throw new Error("原生投影二进制请求无效");
@@ -1910,6 +1933,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       rawResult = await nativeCoreSessions.viewportProjectionV2(ownerId, normalizedRequest);
     } else if (request.projectionType === "factory-read-model-v1") {
       rawResult = await nativeCoreSessions.factoryReadModelProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "factory-inventory-v1") {
+      rawResult = await nativeCoreSessions.factoryInventoryProjection(ownerId, normalizedRequest);
     } else if (request.projectionType === "statistics-v1") {
       rawResult = await nativeCoreSessions.statisticsProjection(ownerId, normalizedRequest);
     } else if (request.projectionType === "recipe-workspace-v1") {
@@ -1936,6 +1961,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
           ? "coreViewportProjectionV2"
           : request.projectionType === "factory-read-model-v1"
             ? "coreFactoryReadModelProjection"
+            : request.projectionType === "factory-inventory-v1"
+              ? "coreFactoryInventoryProjection"
             : request.projectionType === "statistics-v1"
               ? "coreStatisticsProjection"
               : request.projectionType === "recipe-workspace-v1"
@@ -1960,6 +1987,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
           ? nativeViewportProjectionV2ResultContext(normalizedRequest)
           : request.projectionType === "factory-read-model-v1"
             ? nativeFactoryReadModelResultContext(normalizedRequest)
+            : request.projectionType === "factory-inventory-v1"
+              ? nativeFactoryInventoryResultContext(normalizedRequest)
             : request.projectionType === "statistics-v1"
               ? nativeStatisticsProjectionResultContext(request.payload)
               : request.projectionType === "recipe-workspace-v1"

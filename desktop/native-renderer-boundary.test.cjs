@@ -478,6 +478,47 @@ function factoryReadModelProjection(overrides = {}) {
   };
 }
 
+function factoryInventoryContext(overrides = {}) {
+  return {
+    sessionId: "session-factory-inventory",
+    expectedRevision: 7,
+    cursor: 0,
+    limit: 2,
+    ...overrides,
+  };
+}
+
+function factoryInventoryProjection(overrides = {}) {
+  return {
+    schemaVersion: 1,
+    projectionType: "factory-inventory-v1",
+    source: "native-core",
+    revision: 7,
+    stateVersion: 47,
+    registryFingerprint: "builtin:test",
+    activePlanetId: "MOD-星球",
+    cargo: {
+      itemId: "iron_ore",
+      amount: 40,
+      origin: { kind: "node-output", id: "MOD-建筑" },
+    },
+    pickupTargetAmount: 100,
+    portableFleet: { logistics_drone: 3, logistics_vessel: 4 },
+    trayItemLimit: 1_000,
+    trayItemLimitBounds: { minimum: 1_000, default: 1_000_000, maximum: 100_000_000 },
+    request: { expectedRevision: 7, cursor: 0, limit: 2 },
+    totalCount: 3,
+    rows: [
+      { itemId: "MOD/item-beta", amount: 1_250, freeCapacity: 0, overLimit: true },
+      { itemId: "iron_ore", amount: 150, freeCapacity: 850, overLimit: false },
+    ],
+    nextCursor: 2,
+    truncated: true,
+    limits: { rows: 256, projectionBytes: 1_048_576 },
+    ...overrides,
+  };
+}
+
 function statisticsContext(overrides = {}) {
   return {
     minElapsedSeconds: 0,
@@ -1152,6 +1193,89 @@ test("factory read model is strictly bounded and revision-bound before renderer 
   });
 });
 
+test("factory inventory pages are exact, revision-bound, sorted, and conservation-safe", () => {
+  const projection = factoryInventoryProjection();
+  const context = factoryInventoryContext();
+  const normalized = normalizeRendererNativeResult(
+    "coreFactoryInventoryProjection",
+    projection,
+    context,
+  );
+  assert.deepEqual(normalized, projection);
+  assert.notEqual(normalized, projection);
+  assert.notEqual(normalized.rows[0], projection.rows[0]);
+  assert.notEqual(normalized.cargo, projection.cargo);
+
+  const rejects = (value, requestContext = context) => assert.throws(
+    () => normalizeRendererNativeResult("coreFactoryInventoryProjection", value, requestContext),
+    (error) => error?.code === "NATIVE_PROTOCOL_INVALID",
+  );
+  rejects(projection, factoryInventoryContext({ sessionId: "bad session" }));
+  rejects(projection, factoryInventoryContext({ expectedRevision: 8 }));
+  rejects(projection, factoryInventoryContext({ cursor: -1 }));
+  rejects(projection, factoryInventoryContext({ limit: 257 }));
+  rejects({ ...projection, source: "web-game-state" });
+  rejects({ ...projection, stateVersion: 46 });
+  rejects({ ...projection, revision: 8 });
+  rejects({ ...projection, registryFingerprint: "bad fingerprint" });
+  rejects({ ...projection, activePlanetId: "bad\ud800" });
+  rejects({ ...projection, activePlanetId: "bad\nplanet" });
+  rejects({ ...projection, cargo: { ...projection.cargo, amount: 0 } });
+  rejects({
+    ...projection,
+    cargo: { ...projection.cargo, origin: { kind: "tray" } },
+  });
+  rejects({
+    ...projection,
+    cargo: { ...projection.cargo, origin: { kind: "unknown", id: null } },
+  });
+  rejects({
+    ...projection,
+    portableFleet: { ...projection.portableFleet, logistics_drone: -1 },
+  });
+  rejects({
+    ...projection,
+    trayItemLimitBounds: { ...projection.trayItemLimitBounds, minimum: 0 },
+  });
+  rejects({ ...projection, trayItemLimit: 100_000_001 });
+  rejects({ ...projection, request: { ...projection.request, cursor: 1 } });
+  rejects({
+    ...projection,
+    rows: [projection.rows[1], projection.rows[0]],
+  });
+  rejects({
+    ...projection,
+    rows: [{ ...projection.rows[0], itemId: "bad\nitem" }, projection.rows[1]],
+  });
+  rejects({
+    ...projection,
+    rows: projection.rows.map((row, index) => index === 0 ? { ...row, freeCapacity: 1 } : row),
+  });
+  rejects({
+    ...projection,
+    rows: projection.rows.map((row, index) => index === 1 ? { ...row, overLimit: true } : row),
+  });
+  rejects({ ...projection, totalCount: 2 });
+  rejects({ ...projection, nextCursor: null });
+  rejects({ ...projection, truncated: false });
+  rejects({ ...projection, limits: { ...projection.limits, rows: 512 } });
+  rejects({ ...projection, path: SECRET_PATH });
+  rejects({
+    ...projection,
+    rows: [{
+      ...projection.rows[0],
+      itemId: "x".repeat(1_048_576),
+    }, projection.rows[1]],
+  });
+
+  const emptyCargo = factoryInventoryProjection({ cargo: null });
+  assert.equal(normalizeRendererNativeResult(
+    "coreFactoryInventoryProjection",
+    emptyCargo,
+    context,
+  ).cargo, null);
+});
+
 test("Electron main uses the dedicated native renderer boundary", () => {
   const source = fs.readFileSync(path.join(__dirname, "main.cjs"), "utf8");
   const preload = fs.readFileSync(path.join(__dirname, "preload.cjs"), "utf8");
@@ -1164,12 +1288,14 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.match(source, /function nativeViewportProjectionResultContext[\s\S]*?planetId:\s*request\?\.planetId[\s\S]*?bounds:\s*request\?\.bounds[\s\S]*?entityCursor:[\s\S]*?entityLimit:[\s\S]*?beltLimit:/);
   assert.match(source, /function nativeViewportProjectionV2ResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?planetId:\s*request\?\.planetId[\s\S]*?entityCursor:[\s\S]*?entityLimit:[\s\S]*?beltCursor:[\s\S]*?beltLimit:[\s\S]*?pinnedEntityIds:[\s\S]*?pinnedBeltIds:/);
   assert.match(source, /function nativeFactoryReadModelResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?selectedEntityIds:[\s\S]*?selectedBeltIds:/);
+  assert.match(source, /function nativeFactoryInventoryResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?cursor:[\s\S]*?limit:/);
   assert.match(source, /function nativeStatisticsProjectionResultContext[\s\S]*?minElapsedSeconds:[\s\S]*?maxElapsedSeconds:[\s\S]*?cursor:[\s\S]*?limit:[\s\S]*?planetId:[\s\S]*?itemId:/);
   assert.match(source, /function nativeTechnologyProjectionResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision/);
   assert.match(source, /desktop:native-core-projection"[\s\S]*?resultContext:\s*nativeCoreProjectionResultContext\(request\)/);
   assert.match(source, /desktop:native-core-viewport-projection"[\s\S]*?resultContext:\s*nativeViewportProjectionResultContext\(request\)/);
   assert.match(source, /desktop:native-core-viewport-projection-v2"[\s\S]*?runRendererNativeOperation\("coreViewportProjectionV2"[\s\S]*?resultContext:\s*nativeViewportProjectionV2ResultContext\(request\)/);
   assert.match(source, /desktop:native-core-factory-read-model"[\s\S]*?runRendererNativeOperation\("coreFactoryReadModelProjection"[\s\S]*?resultContext:\s*nativeFactoryReadModelResultContext\(request\)/);
+  assert.match(source, /desktop:native-core-factory-inventory"[\s\S]*?runRendererNativeOperation\("coreFactoryInventoryProjection"[\s\S]*?resultContext:\s*nativeFactoryInventoryResultContext\(request\)/);
   assert.match(source, /desktop:native-core-statistics-projection"[\s\S]*?resultContext:\s*nativeStatisticsProjectionResultContext\(request\)/);
   assert.match(source, /desktop:native-core-technology-projection"[\s\S]*?resultContext:\s*nativeTechnologyProjectionResultContext\(request\)/);
   assert.match(source, /desktop:native-core-projection-transfer[\s\S]*?nativeViewportProjectionResultContext\(request\.payload\)[\s\S]*?nativeViewportProjectionV2ResultContext\(normalizedRequest\)[\s\S]*?nativeFactoryReadModelResultContext\(normalizedRequest\)[\s\S]*?nativeStatisticsProjectionResultContext\(request\.payload\)[\s\S]*?nativeTechnologyProjectionResultContext\(normalizedRequest\)/);
@@ -1184,13 +1310,15 @@ test("Electron main uses the dedicated native renderer boundary", () => {
     .map((match) => match[1]);
   const preloadChannels = [...preload.matchAll(/invokeNative\("(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  assert.equal(mainChannels.length, 42);
+  assert.equal(mainChannels.length, 43);
   assert.ok(mainChannels.includes("desktop:native-player-authority-checkpoint"));
   assert.ok(preloadChannels.includes("desktop:native-player-authority-checkpoint"));
   assert.ok(mainChannels.includes("desktop:native-player-authority-export-v47"));
   assert.ok(preloadChannels.includes("desktop:native-player-authority-export-v47"));
   assert.ok(mainChannels.includes("desktop:native-core-star-map-catalog-projection"));
   assert.ok(preloadChannels.includes("desktop:native-core-star-map-catalog-projection"));
+  assert.ok(mainChannels.includes("desktop:native-core-factory-inventory"));
+  assert.ok(preloadChannels.includes("desktop:native-core-factory-inventory"));
   assert.ok(mainChannels.includes("desktop:native-core-stellar-quantum-projection"));
   assert.ok(preloadChannels.includes("desktop:native-core-stellar-quantum-projection"));
   assert.ok(mainChannels.includes("desktop:native-core-dyson-workspace-projection"));

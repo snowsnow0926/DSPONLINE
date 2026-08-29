@@ -2709,6 +2709,17 @@ impl CoreRegistry {
             .factory_read_model_projection(selected_entity_ids, selected_belt_ids)
     }
 
+    pub fn factory_inventory_projection(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        cursor: usize,
+        limit: usize,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?
+            .factory_inventory_projection(expected_revision, cursor, limit)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn statistics_projection(
         &self,

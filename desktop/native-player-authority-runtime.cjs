@@ -120,11 +120,12 @@ function sameCheckpoint(left, right) {
   return left.generation === right.generation && left.rootHash === right.rootHash && left.revision === right.revision;
 }
 
-function validateSummary(value, expectedRevision, label) {
+function validateSummary(value, expectedRevision, label, expectedPaused = false) {
   if (!isRecord(value) || value.revision !== expectedRevision || value.stateVersion !== 47 ||
-      value.mode !== "normal" || value.paused !== false || value.coverage?.authorityEligible !== true) {
+      value.mode !== "normal" || value.paused !== expectedPaused ||
+      value.coverage?.authorityEligible !== true) {
     throw runtimeError(
-      `${label} is not a complete running v47 player-authority state`,
+      `${label} is not a complete lifecycle-consistent v47 player-authority state`,
       "NATIVE_PLAYER_AUTHORITY_COVERAGE_INCOMPLETE",
     );
   }
@@ -178,6 +179,41 @@ function validateTickReceipt(value, context) {
     );
   }
   validateSummary(value.summary, value.revision, "native player-authority tick summary");
+  return { checkpoint, summary: value.summary };
+}
+
+function validatePauseLifecycleReceipt(value, context, request) {
+  const keys = [
+    "sequence", "baseRevision", "revision", "targetPaused", "settledDeadlineMs",
+    "checkpoint", "summary", "duplicate",
+  ];
+  if (!hasExactKeys(value, keys) || value.sequence !== context.nextSequence ||
+      value.baseRevision !== request.baseRevision || value.revision !== request.baseRevision + 1 ||
+      value.targetPaused !== request.targetPaused ||
+      value.settledDeadlineMs !== request.settledDeadlineMs ||
+      typeof value.duplicate !== "boolean") {
+    throw runtimeError(
+      "native player-authority pause lifecycle receipt is not the requested durable transition",
+      "NATIVE_PLAYER_AUTHORITY_PAUSE_RECEIPT_INVALID",
+    );
+  }
+  const checkpoint = normalizeCheckpoint(
+    value.checkpoint,
+    "native player-authority pause lifecycle checkpoint",
+  );
+  if (checkpoint.revision !== value.revision ||
+      checkpoint.generation < context.checkpoint.generation) {
+    throw runtimeError(
+      "native player-authority pause lifecycle checkpoint regressed",
+      "NATIVE_PLAYER_AUTHORITY_PAUSE_RECEIPT_INVALID",
+    );
+  }
+  validateSummary(
+    value.summary,
+    value.revision,
+    "native player-authority pause lifecycle summary",
+    request.targetPaused,
+  );
   return { checkpoint, summary: value.summary };
 }
 
@@ -242,13 +278,31 @@ function validateRecoveryReceipt(value, sessionId) {
       "NATIVE_PLAYER_AUTHORITY_COMMAND_RECOVERY_INVALID",
     );
   }
-  validateSummary(value.summary, revision, "recovered player-authority summary");
+  if (typeof value.summary?.paused !== "boolean") {
+    throw runtimeError(
+      "native player-authority recovery pause state is invalid",
+      "NATIVE_PLAYER_AUTHORITY_COMMAND_RECOVERY_INVALID",
+    );
+  }
+  const paused = value.summary.paused;
+  validateSummary(value.summary, revision, "recovered player-authority summary", paused);
   const changes = normalizeChangeReceipt(
     value,
     "recovered player-authority change receipt",
     "NATIVE_PLAYER_AUTHORITY_COMMAND_RECOVERY_INVALID",
   );
-  return { sessionId, runId, sequence, commandId, baseRevision, revision, settledDeadlineMs, checkpoint, changes };
+  return {
+    sessionId,
+    runId,
+    sequence,
+    commandId,
+    baseRevision,
+    revision,
+    settledDeadlineMs,
+    checkpoint,
+    changes,
+    paused,
+  };
 }
 
 function validateStartupRecoveryReceipt(value, ownerId) {
@@ -256,7 +310,7 @@ function validateStartupRecoveryReceipt(value, ownerId) {
     "schemaVersion", "kind", "ownerId", "sessionId", "runId", "registryFingerprint",
     "revision", "checkpoint", "acknowledgedSequence", "nextSequence",
     "settledDeadlineMs", "nextDeadlineMs", "commandId", "commandBaseRevision",
-    "changedEntityIds", "changedBeltIds", "topologyDirty", "summary",
+    "changedEntityIds", "changedBeltIds", "topologyDirty", "paused", "summary",
   ];
   const macroKeys = [
     "macroSessionId", "recoveredMacroOperationId", "macroAlgorithmVersion",
@@ -303,13 +357,14 @@ function validateStartupRecoveryReceipt(value, ownerId) {
   if (checkpoint.revision !== revision || entryCheckpoint && entryCheckpoint.revision > checkpoint.revision ||
       nextSequence !== acknowledgedSequence + 1 ||
       nextDeadlineMs !== settledDeadlineMs + TICK_MILLISECONDS ||
+      typeof value.paused !== "boolean" ||
       value.summary?.registryFingerprint !== value.registryFingerprint) {
     throw runtimeError(
       "native player-authority startup recovery chain is not contiguous",
       "NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID",
     );
   }
-  validateSummary(value.summary, revision, "startup recovery summary");
+  validateSummary(value.summary, revision, "startup recovery summary", value.paused);
   const changes = normalizeChangeReceipt(
     value,
     "startup recovery change receipt",
@@ -342,7 +397,7 @@ function validateStartupRecoveryReceipt(value, ownerId) {
   const presentMacroKeys = macroKeys.filter((key) => Object.hasOwn(value, key));
   let macroSession = null;
   if (presentMacroKeys.length > 0) {
-    if (presentMacroKeys.length !== macroKeys.length || lastCommand !== null ||
+    if (presentMacroKeys.length !== macroKeys.length || value.paused || lastCommand !== null ||
         changes.changedEntityIds.length !== 0 || changes.changedBeltIds.length !== 0 || changes.topologyDirty) {
       throw runtimeError(
         "native player-authority startup macro receipt is incomplete",
@@ -420,6 +475,7 @@ function validateStartupRecoveryReceipt(value, ownerId) {
     ...(entryCheckpoint ? { entryCheckpoint } : {}),
     nextSequence,
     nextDeadlineMs,
+    paused: value.paused,
     lastCommand,
     macroSession,
     pendingMacroCleanup,
@@ -594,6 +650,7 @@ class NativePlayerAuthorityRuntime {
         typeof options.registry.activatePlayerAuthority !== "function" ||
         typeof options.registry.commitPlayerAuthorityTick !== "function" ||
         typeof options.registry.commitPlayerAuthorityCommand !== "function" ||
+        typeof options.registry.commitPlayerAuthorityPause !== "function" ||
         typeof options.registry.recoverPlayerAuthorityCommand !== "function") {
       throw new TypeError("native player-authority runtime registry is invalid");
     }
@@ -617,6 +674,8 @@ class NativePlayerAuthorityRuntime {
     this.currentOperation = null;
     this.commandQueue = [];
     this.activeCommand = null;
+    this.pendingPauseAction = null;
+    this.pauseDrainInProgress = false;
     this.pendingMacroAction = null;
     // A main-owned checkpoint/export read holds the scheduler at an already
     // acknowledged durable boundary. It is intentionally separate from the
@@ -712,6 +771,7 @@ class NativePlayerAuthorityRuntime {
           checkpoint: recovered.checkpoint,
           nextSequence,
           nextDeadlineMs,
+          paused: recovered.paused,
           lastCommand: Object.freeze({
             commandId: recovered.commandId,
             baseRevision: recovered.baseRevision,
@@ -722,7 +782,11 @@ class NativePlayerAuthorityRuntime {
           macroSession: null,
         };
         recoveredCommand = this.context.lastCommand;
-        this.transition("active");
+        if (recovered.paused) {
+          if (this.inFlight === operation) this.inFlight = null;
+          this.currentOperation = null;
+        }
+        this.transition(recovered.paused ? "paused" : "active");
       })
       .catch((cause) => {
         const error = cause instanceof NativePlayerAuthorityRuntimeError
@@ -772,8 +836,11 @@ class NativePlayerAuthorityRuntime {
         );
       }
       this.context = recovered;
-      const snapshot = this.transition(recovered.macroSession ? "macro-active" : "active");
-      if (!recovered.macroSession) this.pump();
+      const phase = recovered.paused
+        ? "paused"
+        : recovered.macroSession ? "macro-active" : "active";
+      const snapshot = this.transition(phase);
+      if (phase === "active") this.pump();
       return recovered.lastCommand ? Object.freeze({
         ...snapshot,
         previousRevision: recovered.lastCommand.baseRevision,
@@ -819,6 +886,7 @@ class NativePlayerAuthorityRuntime {
         checkpoint: active.checkpoint,
         nextSequence,
         nextDeadlineMs,
+        paused: false,
         lastCommand: null,
         macroSession: null,
       };
@@ -877,6 +945,188 @@ class NativePlayerAuthorityRuntime {
   }
 
   /**
+   * Commits the player-visible pause flag and the exact-realtime lease phase as
+   * one durable Host transaction. The caller supplies only the desired state:
+   * this main-process runtime owns every identity, revision, and wall-clock
+   * field. A pause first drains the exact ticks that were due when the request
+   * was made. A resume installs a fresh anchor, so wall time spent paused can
+   * never become simulation backlog.
+   */
+  setPaused(targetPaused) {
+    if (typeof targetPaused !== "boolean") {
+      return Promise.reject(runtimeError(
+        "native player-authority pause target is invalid",
+        "NATIVE_PLAYER_AUTHORITY_PAUSE_INVALID",
+      ));
+    }
+    if (!this.context || this.shutdownRequested) {
+      return Promise.reject(runtimeError("native player-authority pause lifecycle is unavailable"));
+    }
+    if (this.phase === (targetPaused ? "paused" : "active") &&
+        !this.inFlight && this.pendingPauseAction === null) {
+      return Promise.resolve(this.snapshot());
+    }
+    const uncertainPhase = targetPaused ? "pause-uncertain" : "resume-uncertain";
+    if (this.phase === uncertainPhase && this.pendingPauseAction?.request?.targetPaused === targetPaused) {
+      return this.executePauseTransition();
+    }
+    const sourcePhase = targetPaused ? "active" : "paused";
+    if (this.phase !== sourcePhase || this.inFlight || this.currentOperation !== null ||
+        this.persistenceBoundaryInFlight || this.activeCommand || this.commandQueue.length > 0 ||
+        this.pendingPauseAction !== null || this.pendingMacroAction !== null ||
+        this.context.macroSession !== null) {
+      return Promise.reject(runtimeError(
+        "native player-authority pause lifecycle requires a settled boundary",
+        "NATIVE_PLAYER_AUTHORITY_PAUSE_BUSY",
+      ));
+    }
+    let requestedAtMs;
+    try {
+      const now = this.now();
+      if (!Number.isFinite(now) || now < 0) {
+        throw runtimeError(
+          "native player-authority pause clock is invalid",
+          "NATIVE_PLAYER_AUTHORITY_PAUSE_INVALID",
+        );
+      }
+      requestedAtMs = Math.floor(now);
+      if (!Number.isSafeInteger(requestedAtMs)) {
+        throw runtimeError(
+          "native player-authority pause clock exceeds the safe integer range",
+          "NATIVE_PLAYER_AUTHORITY_PAUSE_INVALID",
+        );
+      }
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    if (this.timer !== null) this.cancel(this.timer);
+    this.timer = null;
+    if (targetPaused) return this.drainDueTicksAndPause(requestedAtMs);
+    const previousSettledDeadlineMs = this.context.nextDeadlineMs - TICK_MILLISECONDS;
+    const settledDeadlineMs = Math.max(previousSettledDeadlineMs, requestedAtMs);
+    if (!Number.isSafeInteger(settledDeadlineMs + TICK_MILLISECONDS)) {
+      return Promise.reject(runtimeError(
+        "native player-authority resume clock exceeds the safe integer range",
+        "NATIVE_PLAYER_AUTHORITY_PAUSE_INVALID",
+      ));
+    }
+    this.pendingPauseAction = Object.freeze({
+      request: Object.freeze({
+        sessionId: this.context.sessionId,
+        runId: this.context.runId,
+        baseRevision: this.context.revision,
+        targetPaused: false,
+        settledDeadlineMs,
+      }),
+    });
+    return this.executePauseTransition();
+  }
+
+  async drainDueTicksAndPause(requestedAtMs) {
+    const context = this.context;
+    if (!context || this.phase !== "active" || this.pauseDrainInProgress) {
+      throw runtimeError(
+        "native player-authority pause drain cannot start",
+        "NATIVE_PLAYER_AUTHORITY_PAUSE_BUSY",
+      );
+    }
+    this.pauseDrainInProgress = true;
+    this.currentOperation = "pause";
+    this.transition("pausing");
+    try {
+      while (context.nextDeadlineMs <= requestedAtMs) {
+        await this.commitCurrentSequence({ pauseDrain: true });
+        if (this.shutdownRequested || this.context !== context || this.phase !== "pausing") {
+          throw runtimeError(
+            "native player-authority pause drain changed before completion",
+            "NATIVE_PLAYER_AUTHORITY_PAUSE_UNCERTAIN",
+          );
+        }
+      }
+      const settledDeadlineMs = context.nextDeadlineMs - TICK_MILLISECONDS;
+      this.pendingPauseAction = Object.freeze({
+        request: Object.freeze({
+          sessionId: context.sessionId,
+          runId: context.runId,
+          baseRevision: context.revision,
+          targetPaused: true,
+          settledDeadlineMs,
+        }),
+      });
+    } finally {
+      this.pauseDrainInProgress = false;
+      if (this.pendingPauseAction === null && this.currentOperation === "pause") {
+        this.currentOperation = null;
+      }
+    }
+    return this.executePauseTransition();
+  }
+
+  executePauseTransition() {
+    const context = this.context;
+    const pending = this.pendingPauseAction;
+    if (!context || !pending || this.inFlight || this.persistenceBoundaryInFlight) {
+      return Promise.reject(runtimeError(
+        "native player-authority pause transition is not pending",
+        "NATIVE_PLAYER_AUTHORITY_PAUSE_BUSY",
+      ));
+    }
+    const request = pending.request;
+    const operationName = request.targetPaused ? "pause" : "resume";
+    this.currentOperation = operationName;
+    this.transition(request.targetPaused ? "pausing" : "resuming");
+    let operation;
+    operation = Promise.resolve().then(() => this.registry.commitPlayerAuthorityPause(
+      this.ownerId,
+      request,
+    )).then((receipt) => {
+      if (this.shutdownRequested) {
+        throw runtimeError(
+          `native player-authority runtime shut down during ${operationName}`,
+          "NATIVE_PLAYER_AUTHORITY_RUNTIME_SHUTDOWN",
+        );
+      }
+      const validated = validatePauseLifecycleReceipt(receipt, context, request);
+      const nextSequence = context.nextSequence + 1;
+      const nextDeadlineMs = request.settledDeadlineMs + TICK_MILLISECONDS;
+      if (!Number.isSafeInteger(nextSequence) || !Number.isSafeInteger(nextDeadlineMs)) {
+        throw runtimeError("native player-authority pause clock exceeds the safe integer range");
+      }
+      context.revision = receipt.revision;
+      context.checkpoint = validated.checkpoint;
+      context.nextSequence = nextSequence;
+      context.nextDeadlineMs = nextDeadlineMs;
+      context.paused = request.targetPaused;
+      context.lastCommand = null;
+      this.pendingPauseAction = null;
+      if (this.inFlight === operation) this.inFlight = null;
+      this.currentOperation = null;
+      this.transition(request.targetPaused ? "paused" : "active");
+      return this.snapshot();
+    }).catch((cause) => {
+      const error = cause instanceof NativePlayerAuthorityRuntimeError
+        ? cause
+        : runtimeError(
+          `native player-authority ${operationName} outcome is uncertain`,
+          request.targetPaused
+            ? "NATIVE_PLAYER_AUTHORITY_PAUSE_UNCERTAIN"
+            : "NATIVE_PLAYER_AUTHORITY_RESUME_UNCERTAIN",
+          cause,
+        );
+      if (!this.shutdownRequested) {
+        this.transition(request.targetPaused ? "pause-uncertain" : "resume-uncertain", error);
+      }
+      throw error;
+    }).finally(() => {
+      if (this.inFlight === operation) this.inFlight = null;
+      this.currentOperation = null;
+      if (this.phase === "active") this.pump();
+    });
+    this.inFlight = operation;
+    return operation;
+  }
+
+  /**
    * Runs one main-process persistence read against an immutable, already ACKed
    * player-authority boundary. Every player-authority tick/command publishes
    * its checkpoint before the Rust lease ACK, so a manual save must validate
@@ -900,12 +1150,14 @@ class NativePlayerAuthorityRuntime {
     if (typeof operation !== "function") {
       throw new TypeError("native player-authority persistence operation is invalid");
     }
-    const phaseAllowed = this.phase === "active" || allowMacro && this.phase === "macro-active";
+    const phaseAllowed = this.phase === "active" || this.phase === "paused" ||
+      allowMacro && this.phase === "macro-active";
     if (!phaseAllowed || !this.context || this.inFlight ||
         this.currentOperation !== null || this.persistenceBoundaryInFlight ||
         this.pendingMacroAction !== null ||
         (!allowMacro && this.context.macroSession !== null) ||
-        (this.phase === "macro-active") !== (this.context.macroSession !== null)) {
+        (this.phase === "macro-active") !== (this.context.macroSession !== null) ||
+        this.pendingPauseAction !== null || this.pauseDrainInProgress) {
       throw runtimeError(
         "native player-authority persistence requires a settled active boundary",
         "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
@@ -924,6 +1176,7 @@ class NativePlayerAuthorityRuntime {
       checkpoint: Object.freeze({ ...context.checkpoint }),
       acknowledgedSequence: context.nextSequence - 1,
       settledDeadlineMs: context.nextDeadlineMs - TICK_MILLISECONDS,
+      paused: frozenPhase === "paused",
     });
     try {
       const result = await operation(boundary);
@@ -933,6 +1186,7 @@ class NativePlayerAuthorityRuntime {
           !sameCheckpoint(context.checkpoint, boundary.checkpoint) ||
           context.nextSequence - 1 !== boundary.acknowledgedSequence ||
           context.nextDeadlineMs - TICK_MILLISECONDS !== boundary.settledDeadlineMs ||
+          (this.phase === "paused") !== boundary.paused ||
           context.macroSession !== frozenMacroSession || this.pendingMacroAction !== null ||
           this.inFlight || this.currentOperation !== null) {
         throw runtimeError(
@@ -1149,7 +1403,8 @@ class NativePlayerAuthorityRuntime {
   }
 
   pump() {
-    if (this.phase !== "active" || !this.context || this.inFlight || this.persistenceBoundaryInFlight) return;
+    if (this.phase !== "active" || !this.context || this.inFlight || this.persistenceBoundaryInFlight ||
+        this.pendingPauseAction !== null || this.pauseDrainInProgress) return;
     if (!this.activeCommand && this.commandQueue.length > 0) {
       this.activeCommand = this.commandQueue.shift();
     }
@@ -1240,7 +1495,8 @@ class NativePlayerAuthorityRuntime {
 
   armTimer() {
     if (this.phase !== "active" || !this.context || this.timer !== null || this.inFlight ||
-        this.persistenceBoundaryInFlight || this.activeCommand || this.commandQueue.length > 0) return;
+        this.persistenceBoundaryInFlight || this.pendingPauseAction !== null || this.pauseDrainInProgress ||
+        this.activeCommand || this.commandQueue.length > 0) return;
     const now = this.now();
     if (!Number.isFinite(now)) {
       this.transition("faulted", runtimeError("native player-authority clock is invalid"));
@@ -1268,6 +1524,10 @@ class NativePlayerAuthorityRuntime {
   }
 
   retryUncertain() {
+    if (["pause-uncertain", "resume-uncertain"].includes(this.phase) &&
+        this.context && !this.inFlight && this.pendingPauseAction) {
+      return this.executePauseTransition();
+    }
     if (this.phase === "macro-uncertain" && this.context && !this.inFlight) {
       if (this.pendingMacroAction?.kind === "advance") return this.executeMacroAdvance();
       if (this.pendingMacroAction?.kind === "finish") return this.executeMacroFinish();
@@ -1291,7 +1551,7 @@ class NativePlayerAuthorityRuntime {
     return this.commitCurrentSequence();
   }
 
-  commitCurrentSequence() {
+  commitCurrentSequence(options = null) {
     const context = this.context;
     if (!context) return Promise.reject(runtimeError("native player-authority runtime is not active"));
     if (this.persistenceBoundaryInFlight) {
@@ -1300,7 +1560,8 @@ class NativePlayerAuthorityRuntime {
         "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
       ));
     }
-    this.currentOperation = "tick";
+    const pauseDrain = options?.pauseDrain === true;
+    this.currentOperation = pauseDrain ? "pause" : "tick";
     let invocation;
     try {
       invocation = this.registry.commitPlayerAuthorityTick(this.ownerId, {
@@ -1330,7 +1591,7 @@ class NativePlayerAuthorityRuntime {
       context.nextSequence = nextSequence;
       context.nextDeadlineMs = nextDeadlineMs;
       context.lastCommand = null;
-      this.transition("active");
+      this.transition(pauseDrain ? "pausing" : "active");
     }).catch((cause) => {
       const error = cause instanceof NativePlayerAuthorityRuntimeError
         ? cause
@@ -1342,8 +1603,8 @@ class NativePlayerAuthorityRuntime {
       throw error;
     }).finally(() => {
       if (this.inFlight === operation) this.inFlight = null;
-      this.currentOperation = null;
-      this.pump();
+      this.currentOperation = pauseDrain && this.pauseDrainInProgress ? "pause" : null;
+      if (!pauseDrain) this.pump();
     }).then(() => this.snapshot());
     this.inFlight = operation;
     return operation;

@@ -22,6 +22,8 @@ import {
   type DesktopNativeCoreConstructionPlacementContextResult,
   type DesktopNativeCoreConstructionBeltPlacementContextRequest,
   type DesktopNativeCoreConstructionBeltPlacementContextResult,
+  type DesktopNativeCoreConstructionBeltRemovalContextRequest,
+  type DesktopNativeCoreConstructionBeltRemovalContextResult,
   type DesktopNativeCoreConstructionRemovalContextRequest,
   type DesktopNativeCoreConstructionRemovalContextResult,
   type DesktopNativeCoreConstructionStackContextRequest,
@@ -63,6 +65,7 @@ type NativeCoreTransferProjection =
   | DesktopNativeCoreConstructionInventoryResult
   | DesktopNativeCoreConstructionPlacementContextResult
   | DesktopNativeCoreConstructionBeltPlacementContextResult
+  | DesktopNativeCoreConstructionBeltRemovalContextResult
   | DesktopNativeCoreConstructionRemovalContextResult
   | DesktopNativeCoreConstructionStackContextResult
   | DesktopNativeCoreStatisticsProjectionResult
@@ -122,6 +125,7 @@ export interface WindowsNativeCoreShadow {
   constructionInventoryProjection?(request: Omit<DesktopNativeCoreConstructionInventoryRequest, "sessionId">): Promise<DesktopNativeCoreConstructionInventoryResult>;
   constructionPlacementContext?(request: Omit<DesktopNativeCoreConstructionPlacementContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionPlacementContextResult>;
   constructionBeltPlacementContext?(request: Omit<DesktopNativeCoreConstructionBeltPlacementContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionBeltPlacementContextResult>;
+  constructionBeltRemovalContext?(request: Omit<DesktopNativeCoreConstructionBeltRemovalContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionBeltRemovalContextResult>;
   constructionRemovalContext?(request: Omit<DesktopNativeCoreConstructionRemovalContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionRemovalContextResult>;
   constructionStackContext?(request: Omit<DesktopNativeCoreConstructionStackContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionStackContextResult>;
   statisticsProjection(request: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStatisticsProjectionResult>;
@@ -459,6 +463,29 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
       throw new Error("Windows 原生传送带放置上下文不可用");
     }
     return desktop.getNativeCoreConstructionBeltPlacementContext({ sessionId: this.sessionId, ...request });
+  }
+
+  async constructionBeltRemovalContext(
+    request: Omit<DesktopNativeCoreConstructionBeltRemovalContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreConstructionBeltRemovalContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "construction-belt-removal-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreConstructionBeltRemovalContextResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "construction-belt-removal-context-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreConstructionBeltRemovalContext !== "function") {
+      throw new Error("Windows 原生传送带回收上下文不可用");
+    }
+    return desktop.getNativeCoreConstructionBeltRemovalContext({ sessionId: this.sessionId, ...request });
   }
 
   async constructionRemovalContext(

@@ -6109,6 +6109,9 @@ impl CoreState {
             return validate_planet_viewport_command(self, command);
         }
         if !command.removed_belt_ids.is_empty() {
+            if command.removed_belt_ids.len() == 1 {
+                return crate::construction_belt_removal_context::validate_command(self, command);
+            }
             return validate_belt_removal_command(self, command);
         }
         if command.changed_belts.iter().any(|record| {
@@ -11217,15 +11220,27 @@ mod tests {
         }
 
         let mut modded = player_command_state_for_registry("modded-belt-inventory-test");
-        for command in [
-            belt_lane_command(9, Value::from(2), Value::from(4)),
-            belt_removal_command(9, Value::from(6)),
-        ] {
-            let before = modded.canonical_sha256().unwrap();
-            assert!(modded.apply_player_authority_command(&command).is_err());
-            assert_eq!(modded.revision, 9);
-            assert_eq!(modded.canonical_sha256().unwrap(), before);
-        }
+        let before = modded.canonical_sha256().unwrap();
+        assert!(
+            modded
+                .apply_player_authority_command(&belt_lane_command(
+                    9,
+                    Value::from(2),
+                    Value::from(4),
+                ))
+                .is_err()
+        );
+        assert_eq!(modded.revision, 9);
+        assert_eq!(modded.canonical_sha256().unwrap(), before);
+
+        // A custom registry may retain ordinary opaque endpoints while using a
+        // built-in belt tier. The removal capability proves that exact belt
+        // and refund instead of rejecting the registry fingerprint wholesale.
+        let removed = modded
+            .apply_player_authority_command(&belt_removal_command(9, Value::from(6)))
+            .unwrap();
+        assert_eq!(removed.changed_belt_ids, ["belt-priority"]);
+        assert_eq!(modded.base_value()["construction"]["conveyor_belt_mk1"], 6);
     }
 
     #[test]

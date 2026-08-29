@@ -444,6 +444,24 @@ function normalizeConstructionBeltPlacementContext(value, label) {
   };
 }
 
+function normalizeConstructionBeltRemovalContext(value, label) {
+  const source = exactObject(
+    value,
+    ["sessionId", "expectedRevision", "expectedRegistryFingerprint", "beltId"],
+    label,
+  );
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} expected registry fingerprint`,
+      256,
+    ),
+    beltId: factoryInventoryId(source.beltId, `${label} belt ID`),
+  };
+}
+
 function normalizeConstructionRemovalContext(value, label) {
   const source = exactObject(
     value,
@@ -2527,6 +2545,149 @@ function normalizeCoreConstructionBeltPlacementContext(value, context) {
     nextBeltId,
     support: { supported, reason },
     placement,
+    limits: { projectionBytes: MAX_NATIVE_PROJECTION_BYTES },
+  };
+}
+
+function normalizeCoreConstructionBeltRemovalContext(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "revision", "stateVersion",
+    "registryFingerprint", "request", "activePlanetId", "beltId", "planetId",
+    "sourceId", "targetId", "tier", "lanes", "constructionId",
+    "currentConstruction", "refundAfterRemoval", "support", "limits",
+  ], "native construction belt removal context");
+  if (source.schemaVersion !== 1 ||
+      source.projectionType !== "construction-belt-removal-context-v1" ||
+      source.source !== "native-core" || source.stateVersion !== 47) {
+    throw protocolError("native construction belt removal identity");
+  }
+  requireProjectionByteBudget(source, "native construction belt removal context");
+  const projectionContext = normalizeConstructionBeltRemovalContext(
+    context,
+    "native construction belt removal request context",
+  );
+  const revision = safeInteger(source.revision, "native construction belt removal revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native construction belt removal registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint) {
+    throw protocolError("native construction belt removal revision binding");
+  }
+  const requestSource = exactObject(source.request, [
+    "expectedRevision", "expectedRegistryFingerprint", "beltId",
+  ], "native construction belt removal request echo");
+  const echoedRevision = safeInteger(
+    requestSource.expectedRevision,
+    "native construction belt removal echoed revision",
+  );
+  const echoedRegistryFingerprint = logicalId(
+    requestSource.expectedRegistryFingerprint,
+    "native construction belt removal echoed registry",
+    256,
+  );
+  const echoedBeltId = factoryInventoryId(
+    requestSource.beltId,
+    "native construction belt removal echoed belt ID",
+  );
+  if (echoedRevision !== projectionContext.expectedRevision ||
+      echoedRegistryFingerprint !== projectionContext.expectedRegistryFingerprint ||
+      echoedBeltId !== projectionContext.beltId) {
+    throw protocolError("native construction belt removal request binding");
+  }
+  const beltId = factoryInventoryId(source.beltId, "native construction belt removal belt ID");
+  if (beltId !== projectionContext.beltId) {
+    throw protocolError("native construction belt removal belt binding");
+  }
+  const activePlanetId = factoryInventoryId(
+    source.activePlanetId,
+    "native construction belt removal active planet",
+  );
+  const nullableId = (value, label) => value === null ? null : factoryInventoryId(value, label);
+  const nullableInteger = (value, label) => value === null ? null : safeInteger(value, label);
+  const planetId = nullableId(source.planetId, "native construction belt removal planet");
+  const sourceId = nullableId(source.sourceId, "native construction belt removal source");
+  const targetId = nullableId(source.targetId, "native construction belt removal target");
+  const tier = nullableInteger(source.tier, "native construction belt removal tier");
+  const lanes = nullableInteger(source.lanes, "native construction belt removal lanes");
+  const constructionId = nullableId(
+    source.constructionId,
+    "native construction belt removal construction ID",
+  );
+  const currentConstruction = nullableInteger(
+    source.currentConstruction,
+    "native construction belt removal current construction",
+  );
+  const refundAfterRemoval = nullableInteger(
+    source.refundAfterRemoval,
+    "native construction belt removal refund",
+  );
+  const supportSource = exactObject(
+    source.support,
+    ["supported", "reason"],
+    "native construction belt removal support",
+  );
+  const supported = boolean(
+    supportSource.supported,
+    "native construction belt removal support flag",
+  );
+  const reason = supportSource.reason === null
+    ? null
+    : oneOf(supportSource.reason, [
+        "unsupported-active-planet", "belt-not-found", "invalid-belt",
+        "not-active-planet", "unsupported-belt-domain", "unsupported-belt-tier",
+        "missing-construction-definition", "source-not-found", "target-not-found",
+        "unsupported-source-domain", "unsupported-target-domain",
+        "invalid-construction-inventory", "refund-overflow",
+      ], "native construction belt removal unsupported reason");
+  if (supported !== (reason === null)) {
+    throw protocolError("native construction belt removal support binding");
+  }
+  if (supported) {
+    const expectedConstructionId = { 1: "conveyor_belt_mk1", 2: "conveyor_belt_mk2", 3: "conveyor_belt_mk3" }[tier];
+    if (planetId !== activePlanetId || sourceId === null || targetId === null || sourceId === targetId ||
+        expectedConstructionId === undefined || constructionId !== expectedConstructionId ||
+        lanes === null || lanes < 1 || currentConstruction === null ||
+        refundAfterRemoval === null || refundAfterRemoval !== currentConstruction + lanes ||
+        !Number.isSafeInteger(refundAfterRemoval)) {
+      throw protocolError("native construction belt removal refund binding");
+    }
+  } else if (refundAfterRemoval !== null) {
+    throw protocolError("native construction belt removal unsupported refund");
+  }
+  const limitsSource = exactObject(
+    source.limits,
+    ["projectionBytes"],
+    "native construction belt removal limits",
+  );
+  if (limitsSource.projectionBytes !== MAX_NATIVE_PROJECTION_BYTES) {
+    throw protocolError("native construction belt removal limits");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "construction-belt-removal-context-v1",
+    source: "native-core",
+    revision,
+    stateVersion: 47,
+    registryFingerprint,
+    request: {
+      expectedRevision: projectionContext.expectedRevision,
+      expectedRegistryFingerprint: projectionContext.expectedRegistryFingerprint,
+      beltId: projectionContext.beltId,
+    },
+    activePlanetId,
+    beltId,
+    planetId,
+    sourceId,
+    targetId,
+    tier,
+    lanes,
+    constructionId,
+    currentConstruction,
+    refundAfterRemoval,
+    support: { supported, reason },
     limits: { projectionBytes: MAX_NATIVE_PROJECTION_BYTES },
   };
 }
@@ -5852,6 +6013,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreConstructionInventoryProjection: normalizeCoreConstructionInventoryProjection,
   coreConstructionPlacementContext: normalizeCoreConstructionPlacementContext,
   coreConstructionBeltPlacementContext: normalizeCoreConstructionBeltPlacementContext,
+  coreConstructionBeltRemovalContext: normalizeCoreConstructionBeltRemovalContext,
   coreConstructionRemovalContext: normalizeCoreConstructionRemovalContext,
   coreConstructionStackContext: normalizeCoreConstructionStackContext,
   coreStatisticsProjection: normalizeCoreStatisticsProjection,

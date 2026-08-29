@@ -329,6 +329,8 @@ export interface DesktopBridge {
   getNativeCoreConstructionPlacementContext?: (request: DesktopNativeCoreConstructionPlacementContextRequest) => Promise<DesktopNativeCoreConstructionPlacementContextResult>;
   /** Same-revision Rust-derived exact single ordinary-belt template and construction debit. */
   getNativeCoreConstructionBeltPlacementContext?: (request: DesktopNativeCoreConstructionBeltPlacementContextRequest) => Promise<DesktopNativeCoreConstructionBeltPlacementContextResult>;
+  /** Same-revision Rust-derived exact single ordinary-belt removal and construction refund. */
+  getNativeCoreConstructionBeltRemovalContext?: (request: DesktopNativeCoreConstructionBeltRemovalContextRequest) => Promise<DesktopNativeCoreConstructionBeltRemovalContextResult>;
   /** Same-revision Rust-derived complete ordinary-building recycling eligibility and exact refund. */
   getNativeCoreConstructionRemovalContext?: (request: DesktopNativeCoreConstructionRemovalContextRequest) => Promise<DesktopNativeCoreConstructionRemovalContextResult>;
   /** Same-revision Rust-derived ordinary-building stack target and exact material adjustment. */
@@ -1159,6 +1161,58 @@ export interface DesktopNativeCoreConstructionBeltPlacementContextResult {
       lastFlow: 0;
       routeMode: "auto" | "bezier" | "upper" | "lower";
     };
+  };
+  limits: {
+    projectionBytes: 1048576;
+  };
+}
+
+export interface DesktopNativeCoreConstructionBeltRemovalContextRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  beltId: string;
+}
+
+export type DesktopNativeCoreConstructionBeltRemovalUnsupportedReason =
+  | "unsupported-active-planet"
+  | "belt-not-found"
+  | "invalid-belt"
+  | "not-active-planet"
+  | "unsupported-belt-domain"
+  | "unsupported-belt-tier"
+  | "missing-construction-definition"
+  | "source-not-found"
+  | "target-not-found"
+  | "unsupported-source-domain"
+  | "unsupported-target-domain"
+  | "invalid-construction-inventory"
+  | "refund-overflow";
+
+export interface DesktopNativeCoreConstructionBeltRemovalContextResult {
+  schemaVersion: 1;
+  projectionType: "construction-belt-removal-context-v1";
+  source: "native-core";
+  revision: number;
+  stateVersion: 47;
+  registryFingerprint: string;
+  request: {
+    expectedRevision: number;
+    expectedRegistryFingerprint: string;
+    beltId: string;
+  };
+  activePlanetId: string;
+  beltId: string;
+  planetId: string | null;
+  sourceId: string | null;
+  targetId: string | null;
+  tier: 1 | 2 | 3 | null;
+  lanes: number | null;
+  constructionId: "conveyor_belt_mk1" | "conveyor_belt_mk2" | "conveyor_belt_mk3" | null;
+  currentConstruction: number | null;
+  refundAfterRemoval: number | null;
+  support: {
+    supported: boolean;
+    reason: DesktopNativeCoreConstructionBeltRemovalUnsupportedReason | null;
   };
   limits: {
     projectionBytes: 1048576;
@@ -2193,6 +2247,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
     }
   | {
       sessionId: string;
+      projectionType: "construction-belt-removal-context-v1";
+      payload: Omit<DesktopNativeCoreConstructionBeltRemovalContextRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
       projectionType: "construction-removal-context-v1";
       payload: Omit<DesktopNativeCoreConstructionRemovalContextRequest, "sessionId">;
     }
@@ -2252,7 +2311,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "construction-placement-context-v1" | "construction-belt-placement-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "construction-placement-context-v1" | "construction-belt-placement-context-v1" | "construction-belt-removal-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
   payloadLength: number;
   sha256: string;
 }

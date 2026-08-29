@@ -84,6 +84,7 @@ fn handle_request(
                     "native-core-construction-inventory-v1",
                     "native-core-construction-placement-context-v1",
                     "native-core-construction-belt-placement-context-v1",
+                    "native-core-construction-belt-removal-context-v1",
                     "native-core-construction-removal-context-v1",
                     "native-core-construction-stack-context-v1",
                     "native-core-statistics-projection-v1",
@@ -337,6 +338,17 @@ fn handle_request(
             &item_id,
             tier,
             lanes,
+        )?,
+        ControlRequest::CoreConstructionBeltRemovalContext {
+            session_id,
+            expected_revision,
+            expected_registry_fingerprint,
+            belt_id,
+        } => cores.construction_belt_removal_context(
+            &session_id,
+            expected_revision,
+            &expected_registry_fingerprint,
+            &belt_id,
         )?,
         ControlRequest::CoreConstructionRemovalContext {
             session_id,

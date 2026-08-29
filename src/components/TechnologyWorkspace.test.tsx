@@ -57,4 +57,64 @@ describe("TechnologyWorkspace", () => {
     act(() => compact.click());
     expect(onLayoutChange).toHaveBeenCalledWith("compact");
   });
+
+  it("exposes only the proven native queue and automation mutations", () => {
+    const game = createInitialState();
+    game.research.selectedTechId = "electromagnetic_matrix";
+    game.research.queuedTechIds = ["electromagnetism"];
+    game.research.completedTechIds.push("universe_matrix");
+    const readModel = createWebTechnologyWorkspaceReadModel(game);
+    const onSelect = vi.fn();
+    const onPauseResearch = vi.fn();
+    const onCancelResearch = vi.fn();
+    const onResumeResearch = vi.fn();
+    const onRemoveQueued = vi.fn();
+    const onSelectInfiniteResearch = vi.fn();
+    const onInfiniteResearchAutomation = vi.fn();
+    const onLayoutChange = vi.fn();
+    act(() => root.render(
+      <TechnologyWorkspace
+        open
+        readModel={readModel}
+        nativeAuthorityRequired
+        onClose={vi.fn()}
+        onSelect={onSelect}
+        onPauseResearch={onPauseResearch}
+        onCancelResearch={onCancelResearch}
+        onResumeResearch={onResumeResearch}
+        onRemoveQueued={onRemoveQueued}
+        onSelectInfiniteResearch={onSelectInfiniteResearch}
+        onInfiniteResearchAutomation={onInfiniteResearchAutomation}
+        onLayoutChange={onLayoutChange}
+      />,
+    ));
+
+    expect(Array.from(host.querySelectorAll<HTMLButtonElement>(".research-current-actions button"))
+      .every((button) => button.disabled)).toBe(true);
+    expect(Array.from(host.querySelectorAll<HTMLButtonElement>(".technology-layout-toggle button"))
+      .every((button) => button.disabled)).toBe(true);
+
+    const append = host.querySelector<HTMLButtonElement>('[data-tech-id="basic_logistics"]')!;
+    expect(append.disabled).toBe(false);
+    act(() => append.click());
+    expect(onSelect).toHaveBeenCalledWith("basic_logistics");
+
+    const remove = host.querySelector<HTMLButtonElement>('.research-queue__item button[aria-label*="电磁学"]')!;
+    expect(remove.disabled).toBe(false);
+    act(() => remove.click());
+    expect(onRemoveQueued).toHaveBeenCalledWith("electromagnetism");
+
+    act(() => host.querySelector<HTMLButtonElement>(".research-advanced-toggle")!.click());
+    const automation = host.querySelector<HTMLInputElement>('.infinite-research-console input[type="checkbox"]')!;
+    expect(automation.disabled).toBe(false);
+    act(() => automation.click());
+    expect(onInfiniteResearchAutomation).toHaveBeenCalledWith(!readModel.autoResearch);
+    expect(Array.from(host.querySelectorAll<HTMLButtonElement>(".infinite-research-console button"))
+      .every((button) => button.disabled)).toBe(true);
+    expect(onPauseResearch).not.toHaveBeenCalled();
+    expect(onCancelResearch).not.toHaveBeenCalled();
+    expect(onResumeResearch).not.toHaveBeenCalled();
+    expect(onSelectInfiniteResearch).not.toHaveBeenCalled();
+    expect(onLayoutChange).not.toHaveBeenCalled();
+  });
 });

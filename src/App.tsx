@@ -432,6 +432,11 @@ import {
 } from "./game/nativeProjectedPlayerCommands";
 import { createNativeProjectedQuantumItemCapacityCommand } from "./game/nativeProjectedQuantumCommands";
 import {
+  createNativeProjectedInfiniteResearchAutomationCommand,
+  createNativeProjectedQueueTechnologyCommand,
+  createNativeProjectedRemoveQueuedTechnologyCommand,
+} from "./game/nativeProjectedTechnologyCommands";
+import {
   RECIPE_WORKSPACE_PROJECTION_LIMITS,
   createWebRecipeWorkspaceReadModel,
   recipeWorkspaceSelectorsEqual,
@@ -2188,6 +2193,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const technologyWorkspaceReadModel = nativePlayerAuthorityBoundFrame
     ? nativeTechnologyWorkspaceReadModel
     : webTechnologyWorkspaceReadModel;
+  const nativeTechnologyCommandProjection = nativeTechnologyWorkspaceReadModel?.source === "native-core" &&
+      nativeTechnologyWorkspaceReadModel.revision === factoryThinViewExpectedRevision
+    ? nativeTechnologyWorkspaceSnapshot.frame?.projection ?? null
+    : null;
   const updateRecipeWorkspaceSelector = useCallback((selector: RecipeWorkspaceSelector) => {
     setRecipeWorkspaceSelector((current) => recipeWorkspaceSelectorsEqual(current, selector)
       ? current
@@ -15264,12 +15273,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           <TechnologyWorkspace
             open
             readModel={technologyWorkspaceReadModel}
+            nativeAuthorityRequired={Boolean(nativePlayerAuthorityBoundFrame)}
             mobile={nextMobileShell}
             mobileSubview={mobileWorkspaceSubview}
             onMobileOpenDetail={mobileNavigation.openWorkspaceSubview}
             focusTechId={campaignFocusTechId}
             onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setTechnologyOpen(false)}
             onSelect={(techId) => {
+              if (nativePlayerAuthorityBoundFrame) {
+                const projection = nativeTechnologyCommandProjection;
+                if (!projection) {
+                  setNotice("原生科研投影尚未完成当前 revision 校验；本次操作未应用");
+                  return;
+                }
+                const accepted = commitNativeProjectedCommand(projection.revision, (baseRevision) =>
+                  createNativeProjectedQueueTechnologyCommand({ baseRevision, projection, techId }));
+                if (!accepted) return;
+                trackAnalyticsEvent("research_queue");
+                recordBasicOnboardingEvent("research-selected");
+                return;
+              }
               const before = gameRef.current;
               const next = selectTechnology(before, techId);
               if (next === before) return;
@@ -15278,21 +15301,69 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
               recordBasicOnboardingEvent("research-selected");
             }}
             onPauseResearch={() => {
+              if (nativePlayerAuthorityBoundFrame) {
+                setNotice("原生权威暂未开放暂停科研；当前权威状态未改变");
+                return;
+              }
               commitGame((current) => pauseCurrentResearch(current));
               setNotice("科研已暂停，已投入矩阵与科技进度均已保留");
             }}
             onCancelResearch={() => {
+              if (nativePlayerAuthorityBoundFrame) {
+                setNotice("原生权威暂未开放取消科研；当前权威状态未改变");
+                return;
+              }
               commitGame((current) => cancelCurrentResearch(current));
               setNotice("当前科研已取消，重新选择时会从已有进度继续");
             }}
             onResumeResearch={() => {
+              if (nativePlayerAuthorityBoundFrame) {
+                setNotice("原生权威暂未开放继续科研；当前权威状态未改变");
+                return;
+              }
               commitGame((current) => resumePausedResearch(current));
               setNotice("已从保留进度继续科研");
             }}
-            onRemoveQueued={(techId) => commitGame((current) => removeQueuedTechnology(current, techId))}
-            onSelectInfiniteResearch={(researchId: InfiniteResearchId) => commitGame((current) => selectInfiniteResearch(current, researchId))}
-            onInfiniteResearchAutomation={(enabled) => commitGame((current) => setInfiniteResearchAutomation(current, enabled))}
-            onLayoutChange={(technologyLayout) => updateSettings({ technologyLayout })}
+            onRemoveQueued={(techId) => {
+              if (!nativePlayerAuthorityBoundFrame) {
+                commitGame((current) => removeQueuedTechnology(current, techId));
+                return;
+              }
+              const projection = nativeTechnologyCommandProjection;
+              if (!projection) {
+                setNotice("原生科研投影尚未完成当前 revision 校验；本次操作未应用");
+                return;
+              }
+              commitNativeProjectedCommand(projection.revision, (baseRevision) =>
+                createNativeProjectedRemoveQueuedTechnologyCommand({ baseRevision, projection, techId }));
+            }}
+            onSelectInfiniteResearch={(researchId: InfiniteResearchId) => {
+              if (nativePlayerAuthorityBoundFrame) {
+                setNotice("原生权威暂未开放无限科研目标切换；当前权威状态未改变");
+                return;
+              }
+              commitGame((current) => selectInfiniteResearch(current, researchId));
+            }}
+            onInfiniteResearchAutomation={(enabled) => {
+              if (!nativePlayerAuthorityBoundFrame) {
+                commitGame((current) => setInfiniteResearchAutomation(current, enabled));
+                return;
+              }
+              const projection = nativeTechnologyCommandProjection;
+              if (!projection) {
+                setNotice("原生科研投影尚未完成当前 revision 校验；本次操作未应用");
+                return;
+              }
+              commitNativeProjectedCommand(projection.revision, (baseRevision) =>
+                createNativeProjectedInfiniteResearchAutomationCommand({ baseRevision, projection, enabled }));
+            }}
+            onLayoutChange={(technologyLayout) => {
+              if (nativePlayerAuthorityBoundFrame) {
+                setNotice("原生权威暂未开放科技树布局写入；当前权威状态未改变");
+                return;
+              }
+              updateSettings({ technologyLayout });
+            }}
           />
         ) : <WorkspaceLoading label="正在同步权威科研状态…" />) : null}
         {statisticsOpen ? (authorityWorkspaceSync === "statistics" ? <WorkspaceLoading label="正在同步权威生产历史…" /> : <StatisticsWorkspace

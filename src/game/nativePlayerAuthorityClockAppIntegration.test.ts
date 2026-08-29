@@ -4,16 +4,38 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 describe("main-owned authority clock App wiring", () => {
-  it("binds the optional read-only clock to the already-open native controller session", () => {
+  it("binds the read-only clock to a renderer session or a trusted startup-recovered session", () => {
     const app = readFileSync(resolve("src/App.tsx"), "utf8");
 
     expect(app).toMatch(/new NativePlayerAuthorityClockController\(desktopBridge\)/);
     expect(app).toMatch(/useSyncExternalStore\([\s\S]*?nativePlayerAuthorityClock\.subscribe/);
     expect(app).toMatch(/nativeCoreProjectionSessionId = windowsNativeCoreBetaControllerRef\.current\.snapshot\(\)\.authority\.sessionId/);
-    expect(app).toMatch(/nativePlayerAuthorityClock\.bindSession\(nativeCoreProjectionSessionId\)/);
-    expect(app).toMatch(/selectActiveNativePlayerAuthorityFrame\([\s\S]*?nativeCoreProjectionSessionId/);
-    expect(app).toMatch(/selectBoundNativePlayerAuthorityFrame\([\s\S]*?nativeCoreProjectionSessionId/);
-    expect(app).toMatch(/selectNativePlayerAuthorityMacroStatus\([\s\S]*?nativePlayerAuthorityClockSnapshot,[\s\S]*?nativeCoreProjectionSessionId/);
+    expect(app).toMatch(/current\.currentFrame === null[\s\S]*?nativePlayerAuthorityClock\.bindSession\(nativeCoreProjectionSessionId\)/);
+    expect(app).toMatch(/nativePlayerAuthoritySessionId = nativePlayerAuthorityClockSnapshot\.expectedSessionId \?\?[\s\S]*?nativeCoreProjectionSessionId/);
+    expect(app).toMatch(/selectActiveNativePlayerAuthorityFrame\([\s\S]*?nativePlayerAuthoritySessionId/);
+    expect(app).toMatch(/selectBoundNativePlayerAuthorityFrame\([\s\S]*?nativePlayerAuthoritySessionId/);
+    expect(app).toMatch(/selectNativePlayerAuthorityMacroStatus\([\s\S]*?nativePlayerAuthorityClockSnapshot,[\s\S]*?nativePlayerAuthoritySessionId/);
+  });
+
+  it("fails closed before the first main-owned authority pull", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+    expect(app).toMatch(/nativePlayerAuthorityBootstrapPending = nativePlayerAuthorityClockSupported &&[\s\S]*?availability !== "ready"/);
+    expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime = nativePlayerAuthorityBootstrapPending \|\|/);
+
+    const workerComment = app.indexOf("Main/Rust is now the only mutable runtime");
+    const workerGuard = app.lastIndexOf("if (nativePlayerAuthorityOwnsRuntime)", workerComment);
+    const workerCreation = app.indexOf("new Worker(", workerComment);
+    expect(workerComment).toBeGreaterThanOrEqual(0);
+    expect(workerGuard).toBeGreaterThanOrEqual(0);
+    expect(workerCreation).toBeGreaterThan(workerGuard);
+
+    const recovery = app.slice(
+      app.indexOf("if (nativePlayerAuthorityOwnsRuntime) {\n      setPureIdleRecoveryContinueState"),
+      app.indexOf("const backgroundRecovery = await settlePureIdleBackgroundRecovery"),
+    );
+    expect(recovery.indexOf("if (nativePlayerAuthorityOwnsRuntime)")).toBeLessThan(
+      recovery.indexOf("claimPureIdleRecovery("),
+    );
   });
 
   it("uses the Rust authority revision without allowing the JS revision to overwrite it", () => {

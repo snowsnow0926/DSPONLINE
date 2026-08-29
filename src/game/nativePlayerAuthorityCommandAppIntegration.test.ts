@@ -7,12 +7,13 @@ describe("native player-authority command App boundary", () => {
   it("binds one command source to one exact active frame", () => {
     const app = readFileSync(resolve("src/App.tsx"), "utf8");
     const binding = app.slice(
-      app.indexOf("const nativePlayerAuthorityOwnsRuntime ="),
+      app.indexOf("const nativePlayerAuthorityRuntimeDetected ="),
       app.indexOf("const nativePlayerAuthorityMacroDisplay"),
     );
 
     expect(binding).toMatch(/nativePlayerAuthorityBoundFrame !== null/);
     expect(binding).toMatch(/nativePlayerAuthorityMacroStatus !== null/);
+    expect(binding).toMatch(/nativePlayerAuthorityOwnsRuntime = nativePlayerAuthorityBootstrapPending \|\|[\s\S]*?nativePlayerAuthorityRuntimeDetected/);
     expect(binding).toMatch(/if \(!nativePlayerAuthorityActiveFrame\)[\s\S]*?nativePlayerAuthorityCommandBindingRef\.current = null/);
     expect(binding).toMatch(/commandFrameKey[\s\S]*?sessionId[\s\S]*?runId[\s\S]*?revision[\s\S]*?acknowledgedSequence[\s\S]*?nextSequence[\s\S]*?nextDeadlineMs/);
     expect(binding).toMatch(/commandFrameKey = JSON\.stringify\(\[/);

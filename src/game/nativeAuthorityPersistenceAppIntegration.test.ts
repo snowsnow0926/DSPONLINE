@@ -14,6 +14,17 @@ function block(start: string, end: string): string {
 }
 
 describe("native authority persistence App boundary", () => {
+  it("treats the desktop clock bootstrap as protected before any JavaScript persistence", () => {
+    const boundary = block(
+      "const readNativeAuthorityPersistenceBoundary = useCallback",
+      "const issueLegacyJavaScriptAuthorityLease",
+    );
+    expect(boundary).toMatch(/availability !== "ready"[\s\S]*?protected: true[\s\S]*?bootstrap-pending/);
+    expect(boundary.indexOf('availability !== "ready"')).toBeLessThan(
+      boundary.indexOf("evaluateNativeAuthorityPersistenceBoundary("),
+    );
+  });
+
   it("rejects both JavaScript checkpoint APIs before every gameRef fallback", () => {
     const simulation = block(
       "const requestAuthoritativeSimulationCheckpoint = useCallback",
@@ -127,5 +138,33 @@ describe("native authority persistence App boundary", () => {
     const memory = block("const pauseForMemoryPressure", "const allowEditsDuringSaveRef");
     expect(memory).toMatch(/nativeAuthorityPersistenceProtectedRef\.current[\s\S]*?未被 JavaScript 假暂停[\s\S]*?return;/);
     expect(memory.indexOf("nativeAuthorityPersistenceProtectedRef.current")).toBeLessThan(memory.indexOf("gameRef.current = stopped"));
+  });
+
+  it("invalidates checkpoint batches and Worker continuations across a native takeover", () => {
+    const dispatch = block(
+      "const dispatchSimulationCheckpoint = useCallback",
+      "dispatchSimulationCheckpointRef.current",
+    );
+    expect(dispatch).toMatch(/legacyJavaScriptAuthorityLeaseIsCurrent\(pending\.authorityLease\)/);
+    expect(dispatch.indexOf("legacyJavaScriptAuthorityLeaseIsCurrent(pending.authorityLease)")).toBeLessThan(
+      dispatch.indexOf("worker.postMessage(request"),
+    );
+    expect(dispatch).toMatch(/nativeSaveTransaction\?\.write\(write\.records\)[\s\S]*?legacyJavaScriptAuthorityLeaseIsCurrent\(pending\.authorityLease\)[\s\S]*?commitLocalSaveInternalRecords\(write\.records\)[\s\S]*?legacyJavaScriptAuthorityLeaseIsCurrent\(pending\.authorityLease\)[\s\S]*?postMessage/);
+
+    const worker = block(
+      "worker.onmessage = async",
+      "worker.onerror = () =>",
+    );
+    expect(worker).toMatch(/workerContinuationIsCurrent\(\)[\s\S]*?nativeSaveTransaction\?\.commit\(\)[\s\S]*?workerContinuationIsCurrent\(\)/);
+    expect(worker).toMatch(/requestAuthoritativeSimulationCheckpointRef\.current\(\)[\s\S]*?workerContinuationIsCurrent\(\)/);
+    expect(worker).toMatch(/commitSimulationRuntimeRecoveryCheckpointInPersistenceWorker\([\s\S]*?workerContinuationIsCurrent\(\)/);
+    expect(worker).toMatch(/appendWindowsNativeWal\([\s\S]*?workerContinuationIsCurrent\(\)/);
+
+    const cleanup = block(
+      "// Invalidate the imperative identity before touching any pending",
+      "}, [abortPureIdleForWorkerFailure",
+    );
+    expect(cleanup.indexOf("simulationWorkerRef.current = null")).toBeLessThan(cleanup.indexOf("worker.terminate()"));
+    expect(cleanup.indexOf("worker.onmessage = null")).toBeLessThan(cleanup.indexOf("worker.terminate()"));
   });
 });

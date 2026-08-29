@@ -15,7 +15,7 @@ export interface NativeAuthorityCheckpointToken {
 
 export interface NativeAuthorityPersistenceBoundary {
   protected: boolean;
-  runtimeKind: NativeAuthorityRuntimeKind | "recovery-required";
+  runtimeKind: NativeAuthorityRuntimeKind | "bootstrap-pending" | "recovery-required";
   checkpointToken: NativeAuthorityCheckpointToken | null;
   canExportAuthoritativeV47: boolean;
   reason: string;

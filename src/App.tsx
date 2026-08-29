@@ -12272,6 +12272,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   ]);
   const activePlanetEntities = factoryCanvasRows.entities;
   const activePlanetBelts = factoryCanvasRows.belts;
+  // React Flow replays its current selection whenever the callback identity
+  // changes. Keep the callback stable across belt revisions while still
+  // reading the latest bounded viewport rows.
+  const activePlanetBeltsRef = useRef(activePlanetBelts);
+  activePlanetBeltsRef.current = activePlanetBelts;
   const automaticDenseCanvasMode = shouldAutoOptimizeDenseCanvas(activePlanetEntityCount, activePlanetBelts.length);
   const denseNodeLodActive = nodeLodFeatureActive || (automaticDenseCanvasMode && canvasPerformanceFeatures.nodeLod);
   const denseViewportCullingActive = viewportCullingFeatureActive || (automaticDenseCanvasMode && canvasPerformanceFeatures.viewportCulling);
@@ -12618,6 +12623,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const activateCanvasStack = useCallback((entityId: string, memberIds: readonly string[], mode: "select" | "cycle") => {
     const currentIndex = Math.max(0, memberIds.indexOf(entityId));
     const targetId = mode === "cycle" ? memberIds[(currentIndex + 1) % memberIds.length] ?? entityId : entityId;
+    selectedEntityIdsRef.current = [targetId];
+    selectedBeltIdRef.current = null;
+    selectedBeltIdsRef.current = [];
     setSelectedEntityIds([targetId]);
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
@@ -13642,9 +13650,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return;
     }
     if (!commitGame(() => result.state)) return;
+    const committedBeltIds = [...result.beltIds];
+    const primaryBeltId = committedBeltIds.length === 1 ? committedBeltIds[0] : null;
+    // The controlled React Flow edges arrive one effect after the new game
+    // revision. Publish their intended selection to the synchronous refs first
+    // so the old store's transient empty callback cannot erase it.
+    selectedEntityIdsRef.current = [];
+    selectedBeltIdRef.current = primaryBeltId;
+    selectedBeltIdsRef.current = committedBeltIds;
     setSelectedEntityIds([]);
-    setSelectedBeltId(result.beltIds.at(-1) ?? null);
-    setSelectedBeltIds(result.beltIds);
+    setSelectedBeltId(primaryBeltId);
+    setSelectedBeltIds(committedBeltIds);
     setInspectorTab("inspect");
     setRightSidebarCollapsed(false);
     const consumed = selections.reduce((sum, selection) => sum + defaultBeltLanesRef.current, 0);
@@ -14019,6 +14035,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if (!commitGame(() => result.state)) return false;
     clickConnectionSucceededRef.current = true;
     flowStore.getState().resetSelectedElements();
+    selectedEntityIdsRef.current = [];
+    selectedBeltIdRef.current = result.beltId;
+    selectedBeltIdsRef.current = [result.beltId];
     setSelectedEntityIds([]);
     setSelectedBeltId(result.beltId);
     setSelectedBeltIds([result.beltId]);
@@ -14170,14 +14189,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     // React Flow can emit a transient empty selection while node objects are
     // replaced by a simulation refresh. Pane clicks remain the explicit
     // cancellation path, so preserve a stable browse-mode selection here.
-    if (ids.length === 0 && selectedEdges.length === 0 && selectedEntityIdsRef.current.length > 0 && !selectionModeRef.current && !deleteModeRef.current) return;
+    if (ids.length === 0 && selectedEdges.length === 0 &&
+      (selectedEntityIdsRef.current.length > 0 || selectedBeltIdsRef.current.length > 0 || selectedBeltIdRef.current !== null) &&
+      !selectionModeRef.current && !deleteModeRef.current) return;
     // React Flow emits a transient single-node selection before beginning a
     // drag on an already-selected group. Keep the controlled group intact so
     // drag-start can snapshot every unlocked member and preserve offsets.
     if (selectionModeRef.current && ids.length === 1 && selectedEdges.length === 0 &&
       selectedEntityIdsRef.current.length > 1 && selectedEntityIdsRef.current.includes(ids[0])) return;
     const beltIds = new Set(collectCanvasSelectionBeltIds(
-      activePlanetBelts,
+      activePlanetBeltsRef.current,
       ids,
       selectedEdges.map((edge) => edge.id),
     ));
@@ -14189,7 +14210,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setSelectedBeltIds((current) => current.length === beltIds.size && current.every((id) => beltIds.has(id)) ? current : nextBeltIds);
     if (ids.length > 0 || beltIds.size > 1) setSelectedBeltId(null);
     else if (beltIds.size === 1) setSelectedBeltId([...beltIds][0]);
-  }, [activePlanetBelts, mobileCanvasMode, nextMobileShell]);
+  }, [mobileCanvasMode, nextMobileShell]);
 
   const onNodeClick: NodeMouseHandler<FactoryFlowNode> = useCallback((event, node) => {
     if (blueprintPlacementId) return;

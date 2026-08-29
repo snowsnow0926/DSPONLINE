@@ -47,7 +47,9 @@ describe("native-authoritative main canvas wiring", () => {
       app.indexOf("const handleFactoryNodeDragStop"),
     );
 
-    expect(selection).toMatch(/collectCanvasSelectionBeltIds\([\s\S]*?activePlanetBelts/);
+    expect(selection).toMatch(/collectCanvasSelectionBeltIds\([\s\S]*?activePlanetBeltsRef\.current/);
+    expect(selection).not.toMatch(/\}, \[activePlanetBelts,/);
+    expect(selection).toMatch(/selectedBeltIdsRef\.current\.length > 0/);
     expect(selection).not.toMatch(/gameRef\.current\.belts/);
     expect(drag).toMatch(/collectCanvasDragMembers\(activeEntityById, selectedIds\)/);
     expect(drag).not.toMatch(/gameRef\.current\.entities/);

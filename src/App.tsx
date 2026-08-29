@@ -516,6 +516,12 @@ import {
   createNativeProjectedStationPriorityCommand,
 } from "./game/nativeProjectedPlayerCommands";
 import { createNativeProjectedBeltPriorityCommand } from "./game/nativeProjectedBeltCommands";
+import {
+  createNativeProjectedEntityPowerPriorityCommand,
+  createNativeProjectedSplitterDistributionModeCommand,
+  type NativeProjectedEntityConfigurationBinding,
+  type NativeProjectedSplitterDistributionMode,
+} from "./game/nativeProjectedEntityConfigurationCommands";
 import { createNativeProjectedQuantumItemCapacityCommand } from "./game/nativeProjectedQuantumCommands";
 import {
   createNativeProjectedCargoReturnCommand,
@@ -16294,6 +16300,52 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       webFactoryInspectorSummaryReadModel,
     ],
   );
+  const nativeEntityConfigurationProjectionBinding = useMemo<NativeProjectedEntityConfigurationBinding | null>(() => {
+    if (!nativePlayerAuthorityOwnsRuntime || factoryInteractionRows.source !== "native-authoritative") return null;
+    const identity = factoryInteractionRows.projectionIdentity;
+    const projected = factoryInteractionRows.selectedEntity;
+    const inspectorEntity = factoryInspectorSummaryReadModel.source === "native-core"
+      ? factoryInspectorSummaryReadModel.entity
+      : null;
+    const selectionIdentity = factoryMultiSelectionSummaryReadModel.projectionIdentity;
+    if (!nativePlayerAuthorityActiveFrame || !identity || !selectionIdentity || !projected || !inspectorEntity ||
+        factoryInspectorSummaryReadModel.belt !== null || factoryInteractionRows.revision !== identity.revision ||
+        identity.sessionId !== nativePlayerAuthorityActiveFrame.sessionId ||
+        identity.runId !== nativePlayerAuthorityActiveFrame.runId ||
+        identity.revision !== nativePlayerAuthorityActiveFrame.revision ||
+        identity.planetId !== factoryInspectorSummaryReadModel.activePlanetId ||
+        selectionIdentity.sessionId !== identity.sessionId || selectionIdentity.runId !== identity.runId ||
+        selectionIdentity.revision !== identity.revision || selectionIdentity.planetId !== identity.planetId ||
+        factoryMultiSelectionSummaryReadModel.revision !== identity.revision ||
+        factoryMultiSelectionSummaryReadModel.activePlanetId !== identity.planetId ||
+        factoryMultiSelectionSummaryReadModel.requestedEntityCount !== 1 ||
+        factoryMultiSelectionSummaryReadModel.requestedBeltCount !== 0 ||
+        factoryMultiSelectionSummaryReadModel.entityRows.truncated ||
+        factoryMultiSelectionSummaryReadModel.beltRows.truncated ||
+        factoryMultiSelectionSummaryReadModel.entityRows.totalCount !== 1 ||
+        factoryMultiSelectionSummaryReadModel.entityRows.rows.length !== 1 ||
+        factoryMultiSelectionSummaryReadModel.beltRows.totalCount !== 0 ||
+        factoryMultiSelectionSummaryReadModel.beltRows.rows.length !== 0 ||
+        factoryMultiSelectionSummaryReadModel.entityRows.rows[0]?.entityId !== projected.id ||
+        inspectorEntity.entityId !== projected.id || inspectorEntity.planetId !== projected.planetId ||
+        inspectorEntity.kind !== projected.kind || inspectorEntity.interactionLocked !== projected.interactionLocked ||
+        inspectorEntity.buildingId !== (projected.buildingId ?? null) || projected.planetId !== identity.planetId) {
+      return null;
+    }
+    return Object.freeze({
+      sessionId: identity.sessionId,
+      runId: identity.runId,
+      revision: identity.revision,
+      activePlanetId: identity.planetId,
+      entity: projected,
+    });
+  }, [
+    factoryInspectorSummaryReadModel,
+    factoryInteractionRows,
+    factoryMultiSelectionSummaryReadModel,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
   const factorySelectionToolbarReadModel = useMemo(
     () => factoryInteractionRows.source === "native-authoritative"
       ? factoryInteractionRows.selectionToolbarReadModel
@@ -16724,6 +16776,64 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     factoryInspectorSummaryReadModel,
     factoryMultiSelectionSummaryReadModel,
   ]);
+  const changeNativeEntityPowerPriority = useCallback((
+    entityId: string,
+    targetPriority: PowerPriority,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次用电优先级未提交");
+      return;
+    }
+    const binding = nativeEntityConfigurationProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.id !== entityId || !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生建筑选择、session 或 revision 已变化；本次用电优先级未提交");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+      baseRevision === binding.revision
+        ? createNativeProjectedEntityPowerPriorityCommand(binding, targetPriority)
+        : null,
+      () => setNotice(`已由 Rust 将当前建筑用电优先级设为${targetPriority === 3 ? "高" : targetPriority === 2 ? "中" : "低"}`),
+    );
+    if (!accepted) setNotice("Rust 没有接受这次建筑用电优先级命令；存档未改变");
+  }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
+  const changeNativeSplitterDistributionMode = useCallback((
+    entityId: string,
+    targetMode: NativeProjectedSplitterDistributionMode,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次分流模式未提交");
+      return;
+    }
+    const binding = nativeEntityConfigurationProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.id !== entityId || !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生分流器选择、session 或 revision 已变化；本次分流模式未提交");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+      baseRevision === binding.revision
+        ? createNativeProjectedSplitterDistributionModeCommand(binding, targetMode)
+        : null,
+      () => setNotice(`已由 Rust 将当前分流器设为${targetMode === "balanced" ? "均衡分流" : "优先线路"}`),
+    );
+    if (!accepted) setNotice("Rust 没有接受这次分流模式命令；存档未改变");
+  }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
   const selectedBelts = factoryInteractionRows.selectedBelts;
   const dockBeltTier = nativePlayerAuthorityOwnsRuntime
     ? nativeBeltPlacementTier ?? beltTier
@@ -18462,10 +18572,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         {nativePlayerAuthorityOwnsRuntime ? <NativeFactoryInspectorPanel
           inspector={factoryInspectorSummaryReadModel}
           multiSelection={factoryMultiSelectionSummaryReadModel}
+          entityConfiguration={nativeEntityConfigurationProjectionBinding}
           pending={nativeRemovalContextPending || nativeStackContextPending || nativeBeltLaneContextPending || nativePlayerAuthorityCommandPending}
           onEntityLockChange={(_entityId, locked) => void commitNativeSelectionInteractionLock(locked)}
           onRemoveEntity={(entityId) => void removeNativeOrdinaryBuilding(entityId)}
           onStackCountChange={(entityId, targetCount) => void changeNativeOrdinaryBuildingStack(entityId, targetCount)}
+          onEntityPowerPriorityChange={changeNativeEntityPowerPriority}
+          onSplitterDistributionModeChange={changeNativeSplitterDistributionMode}
           onBeltLaneCountChange={(beltId, targetLanes) => void changeNativeOrdinaryBeltLanes(beltId, targetLanes)}
           onBeltPriorityChange={changeNativeOrdinaryBeltPriority}
           onRemoveBelt={(beltId) => void removeNativeOrdinaryBelt(beltId)}

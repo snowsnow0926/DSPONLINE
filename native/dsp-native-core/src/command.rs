@@ -65,6 +65,28 @@ const BUILTIN_ORDINARY_STACK_BUILDINGS: &[&str] = &[
     "wind_turbine",
 ];
 
+// Power-priority controls are intentionally narrower than the ordinary
+// placement/stack catalogs. They cover only built-in recipe consumers whose
+// exact runtime meaning is the shared 1..=3 consumer queue. Generators,
+// stations, storage, special logistics/megastructure controllers and unknown
+// content-pack entities stay fail-closed at this command boundary.
+const BUILTIN_POWER_PRIORITY_BUILDINGS: &[&str] = &[
+    "arc_smelter",
+    "assembling_machine_mk1",
+    "assembling_machine_mk2",
+    "assembling_machine_mk3",
+    "chemical_plant",
+    "em_rail_ejector",
+    "fractionator",
+    "matrix_lab",
+    "miniature_particle_collider",
+    "oil_refinery",
+    "plane_smelter",
+    "quantum_chemical_plant",
+    "spray_coater",
+    "vertical_launching_silo",
+];
+
 const UNSUPPORTED_ORDINARY_PLACEMENT_BUILDINGS: &[&str] = &[
     "galactic_material_exporter",
     "geothermal_power_station",
@@ -1623,6 +1645,17 @@ fn validate_entity_power_or_splitter_configuration_command(
     let object = entity
         .as_object()
         .ok_or_else(|| anyhow!("native player-authority configured entity is invalid"))?;
+    let require_active_planet = || -> anyhow::Result<()> {
+        let active_planet_id = state
+            .base_value()
+            .get("activePlanetId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("native player-authority active planet is missing"))?;
+        if object.get("planetId").and_then(Value::as_str) != Some(active_planet_id) {
+            bail!("native player-authority configured entity is not on the active planet")
+        }
+        Ok(())
+    };
     if let Some(locked) = object.get("interactionLocked")
         && locked.as_bool() != Some(false)
     {
@@ -1658,6 +1691,17 @@ fn validate_entity_power_or_splitter_configuration_command(
             }
         }
         "powerPriority" => {
+            require_active_planet()?;
+            let building_id = object.get("buildingId").and_then(Value::as_str);
+            if object.get("kind").and_then(Value::as_str) != Some("machine")
+                || !building_id.is_some_and(|building_id| {
+                    BUILTIN_POWER_PRIORITY_BUILDINGS.contains(&building_id)
+                })
+            {
+                bail!(
+                    "native player-authority power priority target is not a built-in ordinary consumer"
+                )
+            }
             target
                 .as_u64()
                 .filter(|priority| (1..=3).contains(priority))
@@ -1695,14 +1739,17 @@ fn validate_entity_power_or_splitter_configuration_command(
             }
         }
         "distributionMode" => {
+            require_active_planet()?;
             target
                 .as_str()
                 .filter(|mode| matches!(*mode, "balanced" | "priority"))
                 .ok_or_else(|| {
                     anyhow!("native player-authority splitter mode target is invalid")
                 })?;
-            if object.get("kind").and_then(Value::as_str) != Some("splitter") {
-                bail!("native player-authority splitter mode target is not a splitter")
+            if object.get("kind").and_then(Value::as_str) != Some("splitter")
+                || object.get("buildingId").and_then(Value::as_str) != Some("splitter_4way")
+            {
+                bail!("native player-authority splitter mode target is not the built-in splitter")
             }
             if let Some(current) = object.get("distributionMode") {
                 current
@@ -8834,6 +8881,96 @@ mod tests {
             .unwrap_err();
         assert!(format!("{error:#}").contains("current power grid is invalid"));
         assert_eq!(malformed.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_entity_configuration_rejects_foreign_or_non_builtin_targets_atomically() {
+        fn assert_rejected(
+            mut state: CoreState,
+            entity_id: &str,
+            field: &str,
+            value: Value,
+            expected_error: &str,
+        ) {
+            let before_revision = state.revision;
+            let before = state.canonical_sha256().unwrap();
+            let error = state
+                .apply_player_authority_command(&entity_leaf_command(
+                    before_revision,
+                    entity_id,
+                    field,
+                    value,
+                ))
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains(expected_error),
+                "unexpected error: {error:#}"
+            );
+            assert_eq!(state.revision, before_revision);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut foreign = player_entity_configuration_state();
+        let foreign_revision = foreign.revision;
+        foreign
+            .apply_command(&entity_leaf_command(
+                foreign_revision,
+                "smelter-a",
+                "planetId",
+                Value::from("ashen"),
+            ))
+            .unwrap();
+        assert_rejected(
+            foreign,
+            "smelter-a",
+            "powerPriority",
+            Value::from(1),
+            "not on the active planet",
+        );
+
+        let mut custom_machine = player_entity_configuration_state();
+        let custom_machine_revision = custom_machine.revision;
+        custom_machine
+            .apply_command(&entity_leaf_command(
+                custom_machine_revision,
+                "smelter-a",
+                "buildingId",
+                Value::from("MOD/custom-machine"),
+            ))
+            .unwrap();
+        assert_rejected(
+            custom_machine,
+            "smelter-a",
+            "powerPriority",
+            Value::from(1),
+            "not a built-in ordinary consumer",
+        );
+
+        assert_rejected(
+            player_station_configuration_state(),
+            "station-ils",
+            "powerPriority",
+            Value::from(1),
+            "not a built-in ordinary consumer",
+        );
+
+        let mut custom_splitter = player_entity_configuration_state();
+        let custom_splitter_revision = custom_splitter.revision;
+        custom_splitter
+            .apply_command(&entity_leaf_command(
+                custom_splitter_revision,
+                "splitter-a",
+                "buildingId",
+                Value::from("MOD/custom-splitter"),
+            ))
+            .unwrap();
+        assert_rejected(
+            custom_splitter,
+            "splitter-a",
+            "distributionMode",
+            Value::from("priority"),
+            "not the built-in splitter",
+        );
     }
 
     #[test]

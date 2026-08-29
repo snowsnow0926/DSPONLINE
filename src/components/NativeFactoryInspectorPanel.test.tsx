@@ -3,6 +3,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FactoryInspectorSummaryReadModel, FactoryMultiSelectionSummaryReadModel } from "../game/factoryReadModels";
+import type { NativeProjectedEntityConfigurationBinding } from "../game/nativeProjectedEntityConfigurationCommands";
+import type { FactoryEntity } from "../game/types";
 import { NativeFactoryInspectorPanel } from "./NativeFactoryInspectorPanel";
 
 const entity = {
@@ -41,6 +43,42 @@ function multi(overrides: Partial<FactoryMultiSelectionSummaryReadModel> = {}): 
   };
 }
 
+function projectedEntity(overrides: Partial<FactoryEntity> = {}): FactoryEntity {
+  return {
+    id: "smelter-a",
+    planetId: "home",
+    kind: "machine",
+    position: { x: 1, y: 2 },
+    interactionLocked: false,
+    buildingId: "arc_smelter",
+    recipeId: "iron_ingot",
+    powerPriority: 2,
+    routingCursor: 0,
+    machineCount: 1,
+    minerCount: 0,
+    inputs: {},
+    outputs: {},
+    progress: 0,
+    utilization: 0,
+    productionRate: 0,
+    ...overrides,
+  };
+}
+
+function configuration(
+  projected = projectedEntity(),
+  overrides: Partial<NativeProjectedEntityConfigurationBinding> = {},
+): NativeProjectedEntityConfigurationBinding {
+  return {
+    sessionId: "s",
+    runId: "r",
+    revision: 8,
+    activePlanetId: "home",
+    entity: projected,
+    ...overrides,
+  };
+}
+
 describe("NativeFactoryInspectorPanel", () => {
   let host: HTMLDivElement;
   let root: Root;
@@ -51,7 +89,7 @@ describe("NativeFactoryInspectorPanel", () => {
     const remove = vi.fn();
     const stack = vi.fn();
     const lock = vi.fn();
-    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi()} pending={false} onEntityLockChange={lock} onRemoveEntity={remove} onStackCountChange={stack} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
+    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi()} entityConfiguration={null} pending={false} onEntityLockChange={lock} onRemoveEntity={remove} onStackCountChange={stack} onEntityPowerPriorityChange={vi.fn()} onSplitterDistributionModeChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
     expect(host.textContent).toContain("MOD/建筑-一");
     expect(host.textContent).toContain("MOD/输入");
     const button = host.querySelector<HTMLButtonElement>('[data-native-construction-removal] button')!;
@@ -67,7 +105,7 @@ describe("NativeFactoryInspectorPanel", () => {
   });
 
   it("fails closed for a mismatched revision and never exposes the removal action", () => {
-    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi({ revision: 9 })} pending={false} onEntityLockChange={vi.fn()} onRemoveEntity={vi.fn()} onStackCountChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
+    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi({ revision: 9 })} entityConfiguration={null} pending={false} onEntityLockChange={vi.fn()} onRemoveEntity={vi.fn()} onStackCountChange={vi.fn()} onEntityPowerPriorityChange={vi.fn()} onSplitterDistributionModeChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
     expect(host.textContent).toContain("正在核对原生检查摘要");
     expect(host.querySelector("[data-native-construction-removal]")).toBeNull();
   });
@@ -100,10 +138,13 @@ describe("NativeFactoryInspectorPanel", () => {
         entityRows: { rows: [], totalCount: 0, truncated: false },
         beltRows: { rows: [selectedBelt], totalCount: 1, truncated: false },
       })}
+      entityConfiguration={null}
       pending={false}
       onEntityLockChange={vi.fn()}
       onRemoveEntity={vi.fn()}
       onStackCountChange={vi.fn()}
+      onEntityPowerPriorityChange={vi.fn()}
+      onSplitterDistributionModeChange={vi.fn()}
       onBeltLaneCountChange={lanes}
       onBeltPriorityChange={priority}
       onRemoveBelt={removeBelt}
@@ -122,5 +163,96 @@ describe("NativeFactoryInspectorPanel", () => {
     const remove = host.querySelector<HTMLButtonElement>("[data-native-belt-removal] button")!;
     act(() => remove.click());
     expect(removeBelt).toHaveBeenCalledWith("MOD-线路/β");
+  });
+
+  it("routes a same-revision built-in machine power priority without renderer prediction", () => {
+    const priority = vi.fn();
+    const projected = projectedEntity();
+    const ordinary = {
+      ...entity,
+      entityId: projected.id,
+      buildingId: projected.buildingId ?? null,
+      recipeId: projected.recipeId ?? null,
+      machineCount: projected.machineCount,
+      inputItems: { rows: [], totalCount: 0, truncated: false },
+    };
+    act(() => root.render(<NativeFactoryInspectorPanel
+      inspector={inspector({ entity: ordinary })}
+      multiSelection={multi({
+        entityRows: { rows: [ordinary], totalCount: 1, truncated: false },
+      })}
+      entityConfiguration={configuration(projected)}
+      pending={false}
+      onEntityLockChange={vi.fn()}
+      onRemoveEntity={vi.fn()}
+      onStackCountChange={vi.fn()}
+      onEntityPowerPriorityChange={priority}
+      onSplitterDistributionModeChange={vi.fn()}
+      onBeltLaneCountChange={vi.fn()}
+      onBeltPriorityChange={vi.fn()}
+      onRemoveBelt={vi.fn()}
+    />));
+    const buttons = [...host.querySelectorAll<HTMLButtonElement>("[data-native-entity-power-priority] button")];
+    expect(buttons).toHaveLength(3);
+    expect(buttons[1].textContent).toBe("中");
+    expect(buttons[1].disabled).toBe(true);
+    act(() => buttons[0].click());
+    expect(priority).toHaveBeenCalledWith("smelter-a", 3);
+    expect(host.querySelector("[data-native-splitter-mode]")).toBeNull();
+  });
+
+  it("routes built-in splitter mode and fails closed for stale or opaque configuration rows", () => {
+    const mode = vi.fn();
+    const splitter = projectedEntity({
+      id: "splitter-a",
+      kind: "splitter",
+      buildingId: "splitter_4way",
+      recipeId: undefined,
+      powerPriority: undefined,
+      distributionMode: "balanced",
+    });
+    const splitterSummary = {
+      ...entity,
+      entityId: splitter.id,
+      kind: splitter.kind,
+      buildingId: splitter.buildingId ?? null,
+      recipeId: null,
+      machineCount: 1,
+      inputItems: { rows: [], totalCount: 0, truncated: false },
+    };
+    const render = (entityConfiguration: NativeProjectedEntityConfigurationBinding | null, pending = false) => act(() => root.render(
+      <NativeFactoryInspectorPanel
+        inspector={inspector({ entity: splitterSummary })}
+        multiSelection={multi({ entityRows: { rows: [splitterSummary], totalCount: 1, truncated: false } })}
+        entityConfiguration={entityConfiguration}
+        pending={pending}
+        onEntityLockChange={vi.fn()}
+        onRemoveEntity={vi.fn()}
+        onStackCountChange={vi.fn()}
+        onEntityPowerPriorityChange={vi.fn()}
+        onSplitterDistributionModeChange={mode}
+        onBeltLaneCountChange={vi.fn()}
+        onBeltPriorityChange={vi.fn()}
+        onRemoveBelt={vi.fn()}
+      />,
+    ));
+    render(configuration(splitter), true);
+    let buttons = [...host.querySelectorAll<HTMLButtonElement>("[data-native-splitter-mode] button")];
+    expect(buttons).toHaveLength(2);
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+
+    render(configuration(splitter), false);
+    buttons = [...host.querySelectorAll<HTMLButtonElement>("[data-native-splitter-mode] button")];
+    act(() => buttons[1].click());
+    expect(mode).toHaveBeenCalledWith("splitter-a", "priority");
+
+    render(configuration(splitter, { revision: 7 }));
+    expect(host.querySelector("[data-native-splitter-mode]")).toBeNull();
+    render(configuration(projectedEntity({
+      id: "splitter-a",
+      kind: "splitter",
+      buildingId: "MOD/custom-splitter" as FactoryEntity["buildingId"],
+    })));
+    expect(host.querySelector("[data-native-splitter-mode]")).toBeNull();
   });
 });

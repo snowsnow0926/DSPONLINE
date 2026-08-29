@@ -7,15 +7,28 @@ import type {
   SelectedBeltReadModel,
   SelectedEntityReadModel,
 } from "../game/factoryReadModels";
+import {
+  getNativeProjectedPowerPriority,
+  getNativeProjectedSplitterDistributionMode,
+  type NativeProjectedEntityConfigurationBinding,
+  type NativeProjectedSplitterDistributionMode,
+} from "../game/nativeProjectedEntityConfigurationCommands";
+import type { PowerPriority } from "../game/types";
 import { QuantityValue } from "./QuantityValue";
 
 interface NativeFactoryInspectorPanelProps {
   inspector: FactoryInspectorSummaryReadModel;
   multiSelection: FactoryMultiSelectionSummaryReadModel;
+  entityConfiguration: NativeProjectedEntityConfigurationBinding | null;
   pending: boolean;
   onEntityLockChange: (entityId: string, locked: boolean) => void;
   onRemoveEntity: (entityId: string) => void;
   onStackCountChange: (entityId: string, targetCount: number) => void;
+  onEntityPowerPriorityChange: (entityId: string, targetPriority: PowerPriority) => void;
+  onSplitterDistributionModeChange: (
+    entityId: string,
+    targetMode: NativeProjectedSplitterDistributionMode,
+  ) => void;
   onBeltLaneCountChange: (beltId: string, targetLanes: number) => void;
   onBeltPriorityChange: (beltId: string, targetPriority: 0 | 1 | 2) => void;
   onRemoveBelt: (beltId: string) => void;
@@ -42,16 +55,33 @@ function itemRows(label: string, rows: readonly ItemQuantityReadModel[], truncat
   </section>;
 }
 
-function NativeEntitySummary({ entity, pending, onEntityLockChange, onRemoveEntity, onStackCountChange }: {
+function NativeEntitySummary({
+  entity,
+  configuration,
+  pending,
+  onEntityLockChange,
+  onRemoveEntity,
+  onStackCountChange,
+  onPowerPriorityChange,
+  onSplitterDistributionModeChange,
+}: {
   entity: SelectedEntityReadModel;
+  configuration: NativeProjectedEntityConfigurationBinding | null;
   pending: boolean;
   onEntityLockChange: (entityId: string, locked: boolean) => void;
   onRemoveEntity: (entityId: string) => void;
   onStackCountChange: (entityId: string, targetCount: number) => void;
+  onPowerPriorityChange: (entityId: string, targetPriority: PowerPriority) => void;
+  onSplitterDistributionModeChange: (
+    entityId: string,
+    targetMode: NativeProjectedSplitterDistributionMode,
+  ) => void;
 }) {
   const label = entity.buildingId
     ? constructionNames.get(entity.buildingId) ?? entity.buildingId
     : entity.resourceId ? itemLabel(entity.resourceId) : entity.entityId;
+  const powerPriority = getNativeProjectedPowerPriority(configuration);
+  const splitterDistributionMode = getNativeProjectedSplitterDistributionMode(configuration);
   return <>
     <section className="inspector-content native-factory-inspector__entity" aria-label="Windows 原生建筑摘要">
       <div className="inspector-identity"><i className="building-mark"><CircuitBoard size={18} /></i><div><span>Windows 原生建筑</span><strong>{label}</strong></div></div>
@@ -77,6 +107,38 @@ function NativeEntitySummary({ entity, pending, onEntityLockChange, onRemoveEnti
         onClick={() => onEntityLockChange(entity.entityId, !entity.interactionLocked)}
       ><LockKeyhole size={14} />{entity.interactionLocked ? "解除建筑锁定" : "锁定建筑"}</button>
     </section>
+    {powerPriority === null ? null : <section
+      className="native-inspector-safe-actions"
+      data-native-entity-power-priority="ordinary-single-v1"
+    >
+      <strong>Rust 用电优先级</strong>
+      <p>只修改当前内置普通生产建筑。Rust 会在最新 revision 重新核对建筑、行星和原优先级。</p>
+      <div className="native-inspector-stack-actions" role="group" aria-label="Windows 原生建筑用电优先级">
+        {([3, 2, 1] as const).map((priority) => <button
+          type="button"
+          key={priority}
+          disabled={pending || powerPriority === priority}
+          aria-pressed={powerPriority === priority}
+          onClick={() => onPowerPriorityChange(entity.entityId, priority)}
+        >{priority === 3 ? "高" : priority === 2 ? "中" : "低"}</button>)}
+      </div>
+    </section>}
+    {splitterDistributionMode === null ? null : <section
+      className="native-inspector-safe-actions"
+      data-native-splitter-mode="ordinary-single-v1"
+    >
+      <strong>Rust 分流模式</strong>
+      <p>只修改当前内置四向分流器；线路和在途物料不会在界面中预先改写。</p>
+      <div className="native-inspector-stack-actions" role="group" aria-label="Windows 原生分流器模式">
+        {(["balanced", "priority"] as const).map((mode) => <button
+          type="button"
+          key={mode}
+          disabled={pending || splitterDistributionMode === mode}
+          aria-pressed={splitterDistributionMode === mode}
+          onClick={() => onSplitterDistributionModeChange(entity.entityId, mode)}
+        >{mode === "balanced" ? "均衡" : "优先线路"}</button>)}
+      </div>
+    </section>}
     <section className="native-inspector-safe-actions" data-native-construction-stack="ordinary-single-v1">
       <strong>Rust 建筑堆叠</strong>
       <p>每次只增减一栋。Rust 会用最新 revision 重新核对建筑上限和施工托盘；旧档中超过新上限的堆叠仍可安全减少。</p>
@@ -177,10 +239,13 @@ function NativeBeltSummary({ belt, pending, onLaneCountChange, onPriorityChange,
 export function NativeFactoryInspectorPanel({
   inspector,
   multiSelection,
+  entityConfiguration,
   pending,
   onEntityLockChange,
   onRemoveEntity,
   onStackCountChange,
+  onEntityPowerPriorityChange,
+  onSplitterDistributionModeChange,
   onBeltLaneCountChange,
   onBeltPriorityChange,
   onRemoveBelt,
@@ -191,6 +256,18 @@ export function NativeFactoryInspectorPanel({
     multiSelection.source === "native-core" && multiSelection.revision === inspector.revision &&
     multiSelection.activePlanetId === inspector.activePlanetId;
   const selectedCount = multiSelection.requestedEntityCount + multiSelection.requestedBeltCount;
+  const projectionIdentity = multiSelection.projectionIdentity;
+  const currentEntityConfiguration = ready && inspector.entity && entityConfiguration &&
+    projectionIdentity && entityConfiguration.sessionId === projectionIdentity.sessionId &&
+    entityConfiguration.runId === projectionIdentity.runId &&
+    entityConfiguration.revision === projectionIdentity.revision &&
+    entityConfiguration.activePlanetId === projectionIdentity.planetId &&
+    entityConfiguration.entity.id === inspector.entity.entityId &&
+    entityConfiguration.entity.planetId === inspector.entity.planetId &&
+    entityConfiguration.entity.buildingId === (inspector.entity.buildingId ?? undefined) &&
+    entityConfiguration.entity.interactionLocked === inspector.entity.interactionLocked
+    ? entityConfiguration
+    : null;
   let content;
   if (!ready) {
     content = <section className="inspector-content native-read-only-unavailable" role="status"><strong>正在核对原生检查摘要</strong><p>旧 JavaScript 存档不会作为备用显示来源。</p></section>;
@@ -203,7 +280,16 @@ export function NativeFactoryInspectorPanel({
       <p>{complete ? "多选内容已经由同 revision 的 Rust 投影完整确认。" : "选择超过有界投影上限；修改功能保持关闭。"}</p>
     </section>;
   } else if (inspector.entity && !inspector.belt) {
-    content = <NativeEntitySummary entity={inspector.entity} pending={pending} onEntityLockChange={onEntityLockChange} onRemoveEntity={onRemoveEntity} onStackCountChange={onStackCountChange} />;
+    content = <NativeEntitySummary
+      entity={inspector.entity}
+      configuration={currentEntityConfiguration}
+      pending={pending}
+      onEntityLockChange={onEntityLockChange}
+      onRemoveEntity={onRemoveEntity}
+      onStackCountChange={onStackCountChange}
+      onPowerPriorityChange={onEntityPowerPriorityChange}
+      onSplitterDistributionModeChange={onSplitterDistributionModeChange}
+    />;
   } else if (inspector.belt && !inspector.entity) {
     content = <NativeBeltSummary belt={inspector.belt} pending={pending} onLaneCountChange={onBeltLaneCountChange} onPriorityChange={onBeltPriorityChange} onRemove={onRemoveBelt} />;
   } else {

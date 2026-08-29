@@ -308,7 +308,7 @@ export function NativeIndustryConsole({
   status: StarMapNativeReadStatus;
   selector: StarMapIndustryReadRequest;
   onSelectorChange: (selector: StarMapIndustryReadRequest) => void;
-  onTravel: (planetId: PlanetId) => boolean;
+  onTravel?: (planetId: PlanetId) => boolean;
   onNativeRoleChange?: NativePlanetRoleAction;
   onNativeStationPriorityChange?: NativeStationPriorityAction;
   onNativeStationLimitsChange?: NativeStationLimitsAction;
@@ -359,7 +359,7 @@ export function NativeIndustryConsole({
                 .filter((station) => station.planetId === planet.planetId)
                 .reduce((sum, station) => sum + (readModel.routeRowsByTargetStationId.get(station.stationId)?.length ?? 0), 0);
               return <div className={`stellar-planet-row${congestedStation || planet.power.powerFactor < 0.999 ? " stellar-planet-row--warning" : ""}`} key={planet.planetId}>
-                <button type="button" disabled={!planet.colonized} onClick={() => onTravel(planet.planetId as PlanetId)} title={planet.colonized ? `进入${planet.displayName}` : `${planet.displayName}尚未殖民`}>
+                <button type="button" disabled={!planet.colonized || !onTravel} onClick={() => onTravel?.(planet.planetId as PlanetId)} title={!planet.colonized ? `${planet.displayName}尚未殖民` : onTravel ? `进入${planet.displayName}` : "原生权威行星切换命令尚未接入"}>
                   <i><Orbit size={15} /></i><span><strong>{planet.displayName}</strong><small>{planet.profile.climateName} · {planet.stationCount} 物流站</small></span>
                 </button>
                 <label><span>工业角色</span><select aria-label={`${planet.displayName}工业角色`} aria-describedby="native-stellar-command-boundary" title={onNativeRoleChange ? "由当前原生投影 revision 提交" : "原生权威命令暂不可用"} value={planet.industryRole} disabled={!onNativeRoleChange} onChange={(event) => onNativeRoleChange?.(readModel.revision, planet.planetId as PlanetId, planet.industryRole, event.target.value as PlanetIndustryRole)}>{PLANET_ROLES.map((role) => <option value={role} key={role}>{PLANET_INDUSTRY_ROLE_LABELS[role]}</option>)}</select></label>
@@ -737,7 +737,7 @@ export function StarMapWorkspace({
   const nativeMapUnavailableBoundary = <div className="stellar-route-empty" data-native-stellar-panel="map-unavailable"><Database size={22} /><strong>原生权威星图探索暂不可用</strong><span>当前薄投影没有提供全局行星搜索、元数据、勘探、殖民与批量动作；为避免把当前筛选范围外的行星缺失解释成未殖民或 0，当前不会显示或使用 JavaScript 存档数据。</span></div>;
   const nativeQuantumConsole = <NativeQuantumInventoryConsole readModel={nativeQuantumReadModel ?? null} status={nativeQuantumReadStatus} onNativeItemCapacityChange={onNativeQuantumItemCapacityChange} />;
   const industryConsole = nativeAuthorityRequired
-    ? <NativeIndustryConsole readModel={nativeReadModel ?? null} status={nativeReadStatus} selector={industryReadRequest} onSelectorChange={onIndustryReadRequest} onTravel={onTravel} onNativeRoleChange={onNativeRoleChange} onNativeStationPriorityChange={onNativeStationPriorityChange} onNativeStationLimitsChange={onNativeStationLimitsChange} onFocusStation={onFocusStation} />
+    ? <NativeIndustryConsole readModel={nativeReadModel ?? null} status={nativeReadStatus} selector={industryReadRequest} onSelectorChange={onIndustryReadRequest} onNativeRoleChange={onNativeRoleChange} onNativeStationPriorityChange={onNativeStationPriorityChange} onNativeStationLimitsChange={onNativeStationLimitsChange} onFocusStation={onFocusStation} />
     : <IndustryConsole game={game} onTravel={onTravel} onRoleChange={onRoleChange} onStationPriorityChange={onStationPriorityChange} onStationMinimumLoadChange={onStationMinimumLoadChange} onStationLimitsChange={onStationLimitsChange} onFocusStation={onFocusStation} />;
 
   if (mobile && nativeAuthorityRequired) {

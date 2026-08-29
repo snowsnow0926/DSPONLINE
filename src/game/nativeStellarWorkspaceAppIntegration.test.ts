@@ -68,6 +68,7 @@ describe("native stellar workspace App integration", () => {
     expect(nativeIndustryTag).toContain("onNativeRoleChange={onNativeRoleChange}");
     expect(nativeIndustryTag).toContain("onNativeStationPriorityChange={onNativeStationPriorityChange}");
     expect(nativeIndustryTag).toContain("onNativeStationLimitsChange={onNativeStationLimitsChange}");
+    expect(nativeIndustryTag).not.toContain("onTravel={onTravel}");
     expect(nativeIndustryTag).not.toContain("onStationMinimumLoadChange={onStationMinimumLoadChange}");
     expect(industryBranch).toMatch(/: <IndustryConsole game=\{game\}[\s\S]*?onRoleChange=\{onRoleChange\}[\s\S]*?onStationLimitsChange=\{onStationLimitsChange\}/);
     expect(workspace).toMatch(/工业定位、优先级和库存上下限使用当前投影 revision 的直接命令；最低装载率仍只读/);

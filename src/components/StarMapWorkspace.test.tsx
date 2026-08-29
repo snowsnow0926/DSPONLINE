@@ -367,6 +367,7 @@ describe("NativeIndustryConsole", () => {
     clickButton("星际工业");
 
     const role = host.querySelector<HTMLSelectElement>("[aria-label='原生家园工业角色']")!;
+    const travel = host.querySelector<HTMLButtonElement>(".stellar-planet-row > button")!;
     const priority = host.querySelector<HTMLSelectElement>("[aria-label='原生铁矿航线航线优先级']")!;
     const minimumLoad = host.querySelector<HTMLSelectElement>("[aria-label='原生铁矿航线最低装载率']")!;
     const sourceLimit = host.querySelector<HTMLInputElement>("[aria-label='原生铁矿航线出口保底库存']")!;
@@ -379,6 +380,8 @@ describe("NativeIndustryConsole", () => {
     }
     expect(minimumLoad.disabled).toBe(true);
     expect(minimumLoad.getAttribute("aria-describedby")).toBe("native-stellar-command-boundary");
+    expect(travel.disabled).toBe(true);
+    expect(travel.title).toContain("行星切换命令尚未接入");
 
     act(() => {
       priority.value = "0";

@@ -4228,6 +4228,82 @@ fn validate_active_dyson_layer_command(
     Ok(())
 }
 
+fn player_planet_industry_role_is_valid(role: &str) -> bool {
+    matches!(
+        role,
+        "auto"
+            | "mining"
+            | "smelting"
+            | "manufacturing"
+            | "chemical"
+            | "research"
+            | "logistics"
+            | "power"
+    )
+}
+
+fn validate_planet_industry_role_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.top_level_changes.len() != 1
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority planet industry role command shape is invalid")
+    }
+    let change = &command.top_level_changes[0];
+    let planet_id = match change.path.as_slice() {
+        [
+            PathSegment::Key(root),
+            PathSegment::Key(directory),
+            PathSegment::Key(planet_id),
+        ] if root == "galaxy" && directory == "planetRoles" => planet_id.as_str(),
+        _ => bail!("native player-authority planet industry role path is not canonical"),
+    };
+    if !state
+        .catalog
+        .planets
+        .iter()
+        .any(|planet| planet.id == planet_id)
+    {
+        bail!("native player-authority planet industry role target is unknown")
+    }
+    let target = change
+        .value
+        .as_ref()
+        .filter(|_| change.operation == "set")
+        .and_then(Value::as_str)
+        .filter(|role| player_planet_industry_role_is_valid(role))
+        .ok_or_else(|| anyhow!("native player-authority planet industry role is invalid"))?;
+    let roles = state
+        .base_value()
+        .get("galaxy")
+        .and_then(Value::as_object)
+        .and_then(|galaxy| galaxy.get("planetRoles"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority planet role directory is invalid"))?;
+    let current = roles
+        .get(planet_id)
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|role| player_planet_industry_role_is_valid(role))
+                .ok_or_else(|| {
+                    anyhow!("native player-authority current planet industry role is invalid")
+                })
+        })
+        .transpose()?;
+    if current == Some(target) {
+        bail!("native player-authority planet industry role is unchanged")
+    }
+    Ok(())
+}
+
 fn validate_recipe_focus_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
@@ -5089,6 +5165,15 @@ impl CoreState {
             return validate_active_dyson_layer_command(self, command);
         }
         if command.top_level_changes.iter().any(|change| {
+            matches!(
+                change.path.as_slice(),
+                [PathSegment::Key(root), PathSegment::Key(directory), ..]
+                    if root == "galaxy" && directory == "planetRoles"
+            )
+        }) {
+            return validate_planet_industry_role_command(self, command);
+        }
+        if command.top_level_changes.iter().any(|change| {
             matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "activePlanetId")
         }) {
             return validate_active_planet_command(self, command);
@@ -5756,6 +5841,10 @@ mod tests {
                 "colonizedPlanetIds": ["home", "ashen"],
                 "missions": [],
                 "surveyProgressBySystem": { "helios": 1, "sigma": 1 }
+            },
+            "galaxy": {
+                "planetRoles": { "home": "auto" },
+                "modPayload": { "owner": "pack:test", "revision": 7 }
             },
             "metrics": { "generationKw": 1, "demandKw": 2, "powerFactor": 0.5 },
             "planetMetrics": {
@@ -9202,6 +9291,105 @@ mod tests {
             "dyson-layer-new"
         );
         assert_eq!(state.revision, 10);
+    }
+
+    #[test]
+    fn player_authority_applies_planet_industry_roles_from_the_current_revision() {
+        let mut state = player_command_state();
+
+        state
+            .apply_player_authority_command(&top_level_leaf_command(
+                state.revision,
+                &["galaxy", "planetRoles", "home"],
+                Value::from("mining"),
+            ))
+            .unwrap();
+        assert_eq!(
+            state.base_value()["galaxy"]["planetRoles"]["home"],
+            "mining"
+        );
+
+        state
+            .apply_player_authority_command(&top_level_leaf_command(
+                state.revision,
+                &["galaxy", "planetRoles", "home"],
+                Value::from("auto"),
+            ))
+            .unwrap();
+        state
+            .apply_player_authority_command(&top_level_leaf_command(
+                state.revision,
+                &["galaxy", "planetRoles", "ashen"],
+                Value::from("power"),
+            ))
+            .unwrap();
+
+        assert_eq!(state.base_value()["galaxy"]["planetRoles"]["home"], "auto");
+        assert_eq!(
+            state.base_value()["galaxy"]["planetRoles"]["ashen"],
+            "power"
+        );
+        assert_eq!(
+            state.base_value()["galaxy"]["modPayload"],
+            serde_json::json!({ "owner": "pack:test", "revision": 7 })
+        );
+        assert_eq!(state.revision, 12);
+    }
+
+    #[test]
+    fn player_authority_planet_industry_roles_fail_closed_without_mutation() {
+        let mut delete =
+            top_level_leaf_command(9, &["galaxy", "planetRoles", "home"], Value::from("mining"));
+        delete.top_level_changes[0].operation = "delete".to_owned();
+        delete.top_level_changes[0].value = None;
+        let mut mixed =
+            top_level_leaf_command(9, &["galaxy", "planetRoles", "home"], Value::from("mining"));
+        mixed.top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("paused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(true)),
+        });
+        let commands = [
+            top_level_leaf_command(9, &["galaxy", "planetRoles", "home"], Value::from("auto")),
+            top_level_leaf_command(
+                9,
+                &["galaxy", "planetRoles", "missing"],
+                Value::from("mining"),
+            ),
+            top_level_leaf_command(
+                9,
+                &["galaxy", "planetRoles", "home"],
+                Value::from("factory"),
+            ),
+            top_level_leaf_command(
+                9,
+                &["galaxy", "planetRoles"],
+                serde_json::json!({ "home": "mining" }),
+            ),
+            delete,
+            mixed,
+        ];
+        for command in commands {
+            let mut state = player_command_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut malformed = player_command_state();
+        malformed.base_value_mut()["galaxy"]["planetRoles"]["home"] = Value::from("factory");
+        let before = malformed.canonical_sha256().unwrap();
+        assert!(
+            malformed
+                .apply_player_authority_command(&top_level_leaf_command(
+                    malformed.revision,
+                    &["galaxy", "planetRoles", "home"],
+                    Value::from("mining"),
+                ))
+                .is_err()
+        );
+        assert_eq!(malformed.canonical_sha256().unwrap(), before);
     }
 
     #[test]

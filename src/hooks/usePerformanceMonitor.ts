@@ -134,7 +134,12 @@ export function usePerformanceMonitor(getGame: () => GameState, paused = false) 
   }, []);
 
   useEffect(() => {
-    if (!snapshot.active) return;
+    // Native authority deliberately keeps the renderer's last JavaScript
+    // GameState only as a sealed fallback checkpoint. Sampling that object
+    // would serialize a large, stale mirror every five seconds and turn the
+    // diagnostics panel into an accidental second state reader. The caller
+    // therefore pauses this sampler for the entire native-authority lease.
+    if (!snapshot.active || paused) return;
     let frameId = 0;
     let previousFrameAt = performance.now();
     let windowStartedAt = previousFrameAt;

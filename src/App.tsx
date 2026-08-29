@@ -3759,7 +3759,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     void windowsNativeCoreBetaControllerRef.current?.notifyCoreExit("renderer-unmount");
   }, []);
-  const performanceMonitor = usePerformanceMonitor(getCurrentGame, game.paused);
+  const performanceMonitor = usePerformanceMonitor(
+    getCurrentGame,
+    nativePlayerAuthorityOwnsRuntime || factoryRunStatusReadModel.paused,
+  );
   const publishTimeWarpComputeState = useCallback((next: TimeWarpComputeGovernorState) => {
     timeWarpComputeStateRef.current = next;
     setTimeWarpComputeState(next);
@@ -3998,7 +4001,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     blueprintsOpen || dysonPlannerOpen || operationsOpen || campaignOpen || galaxyOpen || constructionCenterOpen ||
     (nextMobileShell && mobileNavigation.route.kind === "hub");
   const canvasWorkspacePaused = canvasWorkspaceHidden || nativeFactoryProjectionPending;
-  const canvasRefreshPaused = canvasWorkspacePaused || game.paused;
+  const canvasRefreshPaused = canvasWorkspacePaused || factoryRunStatusReadModel.paused;
   const updateConnectionDraft = useCallback((draft: ConnectionDraft | null) => {
     connectionDraftRef.current = draft;
     setConnectionDraft(draft);
@@ -4071,7 +4074,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   useEffect(() => {
-    if (!coarsePointer || game.paused) {
+    if (!coarsePointer || factoryRunStatusReadModel.paused) {
       setLowFrameRateMode(false);
       return;
     }
@@ -4106,12 +4109,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
     frame = window.requestAnimationFrame(sample);
     return () => window.cancelAnimationFrame(frame);
-  }, [coarsePointer, game.paused]);
+  }, [coarsePointer, factoryRunStatusReadModel.paused]);
 
   useEffect(() => {
-    if (productionRefreshPreference !== "auto" || game.paused) return;
+    if (productionRefreshPreference !== "auto" || factoryRunStatusReadModel.paused) return;
     setAutomaticRefreshState(createAutomaticRefreshState(coarsePointer));
-  }, [coarsePointer, productionRefreshPreference]);
+  }, [coarsePointer, factoryRunStatusReadModel.paused, productionRefreshPreference]);
 
   useEffect(() => {
     if (productionRefreshPreference !== "auto") return;
@@ -4141,7 +4144,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     };
     frame = window.requestAnimationFrame(sample);
     return () => window.cancelAnimationFrame(frame);
-  }, [game.paused, productionRefreshPreference]);
+  }, [factoryRunStatusReadModel.paused, productionRefreshPreference]);
 
   useEffect(() => {
     let cancelled = false;
@@ -13022,7 +13025,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const activeConnectionViewportBounds = connectionDraft
     ? getConnectionViewportBounds(viewportRef.current, canvasSizeRef.current ?? canvasViewportSize)
     : ordinaryViewportBounds;
-  const visibleFactoryAlertProjection = !factoryAlertsEnabled || game.paused
+  const visibleFactoryAlertProjection = !factoryAlertsEnabled || factoryRunStatusReadModel.paused
     ? EMPTY_FACTORY_ALERT_PROJECTION
     : factoryAlertProjection;
   const alertCount = visibleFactoryAlertProjection.rows.length;
@@ -16312,7 +16315,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       data-performance-mode={performanceVisualMode ? "true" : "false"}
       data-performance-auto={automaticPerformanceMode ? "true" : "false"}
       data-mobile-performance={mobilePerformanceMode ? "true" : "false"}
-      data-simulation-paused={game.paused ? "true" : "false"}
+      data-simulation-paused={factoryRunStatusReadModel.paused ? "true" : "false"}
       data-simulation-worker={simulationWorkerActive ? "active" : "fallback"}
       data-native-authority-mode={nativePlayerAuthorityMacroReadOnly
         ? "macro-read-only"

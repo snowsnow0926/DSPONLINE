@@ -3550,6 +3550,7 @@ fn simulate_step(
     quantum_logistics_directory: &mut std::sync::Arc<
         crate::quantum_logistics::QuantumLogisticsDirectory,
     >,
+    construction_runtime: &mut std::sync::Arc<crate::construction::ConstructionRuntime>,
     interstellar_peer_directory: &mut std::sync::Arc<
         crate::interstellar_logistics::InterstellarPeerDirectory,
     >,
@@ -4565,15 +4566,26 @@ fn simulate_step(
     }
     profile_mark!("research-reset");
 
-    let construction_quantum_wake = crate::construction::run_centers(
+    let construction_outcome = crate::construction::run_centers(
         state,
         base,
         entities,
         seconds,
         &power_factors,
         &state.factory_topology.construction_center_indices,
+        std::sync::Arc::make_mut(construction_runtime),
     )?;
-    quantum_step_runtime.wake_construction_centers(&construction_quantum_wake.center_indices);
+    quantum_step_runtime
+        .wake_construction_centers(&construction_outcome.quantum_wake.center_indices);
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tconstruction-active\t{}/{}\tdense={}\tdirectory-fallback={}",
+            construction_outcome.scan.selected_rows,
+            construction_outcome.scan.total_rows,
+            construction_outcome.scan.dense_fallback,
+            construction_outcome.scan.directory_fallback,
+        );
+    }
     profile_mark!("construction");
 
     crate::dyson::run_ray_receivers(
@@ -4633,6 +4645,17 @@ fn simulate_step(
                 "DSP_NATIVE_CORE_PROFILE\tquantum-download-active\t{}/{}\tdense={}\tdirectory-fallback={}",
                 scan.selected_rows, scan.total_rows, scan.dense_fallback, scan.directory_fallback,
             );
+        }
+        let construction_inventory_wakes =
+            quantum_step_runtime.take_construction_inventory_written_center_indices();
+        let construction_step_runtime = std::sync::Arc::make_mut(construction_runtime);
+        if scan.directory_fallback {
+            // The permissive quantum oracle does not retain an indexed
+            // delivery trace. Its rare fallback therefore wakes every center
+            // rather than guessing which direct buffer changed.
+            construction_step_runtime.wake_all();
+        } else {
+            construction_step_runtime.wake_center_indices(&construction_inventory_wakes);
         }
         flow
     } else {
@@ -5173,6 +5196,7 @@ pub(crate) struct PreparedFactoryAdvance {
     pub local_peer_directory: std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
     pub quantum_logistics_directory:
         std::sync::Arc<crate::quantum_logistics::QuantumLogisticsDirectory>,
+    pub construction_runtime: std::sync::Arc<crate::construction::ConstructionRuntime>,
     pub interstellar_peer_directory:
         std::sync::Arc<crate::interstellar_logistics::InterstellarPeerDirectory>,
     pub interstellar_route_activity:
@@ -5250,6 +5274,13 @@ pub(crate) fn prepare_advance(
                 state, &entities,
             ))
         };
+    let mut construction_runtime = if let Some(runtime) = state.prepared_construction_runtime() {
+        runtime
+    } else {
+        std::sync::Arc::new(crate::construction::ConstructionRuntime::build(
+            state, &base, &entities,
+        ))
+    };
     let mut interstellar_route_activity =
         if let Some(activity) = state.prepared_interstellar_route_activity() {
             activity
@@ -5377,6 +5408,7 @@ pub(crate) fn prepare_advance(
             &belt_routes,
             &mut local_peer_directory,
             &mut quantum_logistics_directory,
+            &mut construction_runtime,
             &mut interstellar_peer_directory,
             &mut interstellar_route_activity,
             step,
@@ -5466,6 +5498,7 @@ pub(crate) fn prepare_advance(
         belt_activity,
         local_peer_directory,
         quantum_logistics_directory,
+        construction_runtime,
         interstellar_peer_directory,
         interstellar_route_activity,
     })

@@ -226,6 +226,7 @@ pub(crate) struct QuantumLogisticsDirectory {
     pending_boundary_upload: BTreeSet<usize>,
     runtime_written_station_indices: BTreeSet<usize>,
     inventory_written_station_indices: BTreeSet<usize>,
+    construction_inventory_written_center_indices: BTreeSet<usize>,
     flush_all_pending: bool,
     download_all_pending: bool,
     construction_download_all_pending: bool,
@@ -264,6 +265,7 @@ impl Default for QuantumLogisticsDirectory {
             pending_boundary_upload: BTreeSet::new(),
             runtime_written_station_indices: BTreeSet::new(),
             inventory_written_station_indices: BTreeSet::new(),
+            construction_inventory_written_center_indices: BTreeSet::new(),
             flush_all_pending: true,
             download_all_pending: true,
             construction_download_all_pending: true,
@@ -1887,6 +1889,12 @@ impl QuantumLogisticsDirectory {
             .collect()
     }
 
+    pub(crate) fn take_construction_inventory_written_center_indices(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.construction_inventory_written_center_indices)
+            .into_iter()
+            .collect()
+    }
+
     pub(crate) fn legacy_runtime_bandwidth(
         &mut self,
         state: &CoreState,
@@ -1948,7 +1956,8 @@ impl QuantumLogisticsDirectory {
             + self.pending_construction_download.len()
             + self.pending_boundary_upload.len()
             + self.runtime_written_station_indices.len()
-            + self.inventory_written_station_indices.len())
+            + self.inventory_written_station_indices.len()
+            + self.construction_inventory_written_center_indices.len())
             * (size_of::<usize>() * 4);
         (self.endpoint_indices.capacity() * size_of::<usize>()
             + self.item_ids.capacity() * size_of::<Arc<str>>()
@@ -3030,6 +3039,13 @@ pub(crate) fn settle_active_downloads(
                 amount.to_u64().unwrap_or(MAX_SAFE_INTEGER),
             )?;
             if applied > 0 {
+                if let Some(&row) = selected_construction_rows_by_id.get(&demand.entity_id)
+                    && let Some(&entity_index) = directory.construction_center_indices.get(row)
+                {
+                    directory
+                        .construction_inventory_written_center_indices
+                        .insert(entity_index);
+                }
                 add_flow(
                     &mut flow.downloaded,
                     &request.item_id,
@@ -4953,6 +4969,7 @@ mod tests {
             5.0,
         );
         assert_eq!(first.selected_rows, 16);
+        let _ = directory.take_construction_inventory_written_center_indices();
         let retained = settle_construction_download_pair(
             &state,
             &mut active_base,
@@ -4964,6 +4981,7 @@ mod tests {
             5.0,
         );
         assert_eq!(retained.selected_rows, 16);
+        let _ = directory.take_construction_inventory_written_center_indices();
         let quiet = settle_construction_download_pair(
             &state,
             &mut active_base,
@@ -4975,6 +4993,11 @@ mod tests {
             5.0,
         );
         assert_eq!(quiet.selected_rows, 0, "satisfied centers must sleep");
+        assert!(
+            directory
+                .take_construction_inventory_written_center_indices()
+                .is_empty()
+        );
 
         set_construction_quantum_item(&mut active_base, "center-00003", "iron_ore", 0.0);
         set_construction_quantum_item(&mut oracle_base, "center-00003", "iron_ore", 0.0);
@@ -4992,6 +5015,10 @@ mod tests {
         );
         assert_eq!(inventory_wake.selected_rows, 1);
         assert!(!inventory_wake.dense_fallback);
+        assert_eq!(
+            directory.take_construction_inventory_written_center_indices(),
+            vec![center_entity_index]
+        );
 
         // A demand with no network inventory stays active. Refilling the
         // inventory therefore needs no global construction rescan and still

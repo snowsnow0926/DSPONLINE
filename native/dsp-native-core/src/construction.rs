@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value};
@@ -41,6 +42,748 @@ pub(crate) struct QuantumDemand {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ConstructionQuantumWake {
     pub center_indices: Vec<usize>,
+}
+
+const CONSTRUCTION_ACTIVE_DENSE_NUMERATOR: usize = 3;
+const CONSTRUCTION_ACTIVE_DENSE_DENOMINATOR: usize = 4;
+const POWER_GROUPS_PER_PLANET: usize = 9;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ConstructionActiveScan {
+    pub selected_rows: usize,
+    pub total_rows: usize,
+    pub dense_fallback: bool,
+    pub directory_fallback: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ConstructionRunOutcome {
+    pub quantum_wake: ConstructionQuantumWake,
+    pub scan: ConstructionActiveScan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PowerFactorSignature {
+    Missing,
+    Value(u64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConstructionDependencySignature {
+    enabled: bool,
+    mode_normal: bool,
+    orbital_station_locked: bool,
+    completed_tech_ids: Vec<String>,
+    target_limits: Vec<u64>,
+    active_targets: Vec<bool>,
+    has_work: bool,
+    cursor: usize,
+}
+
+impl ConstructionDependencySignature {
+    fn broad_dependencies_changed(&self, other: &Self) -> bool {
+        self.enabled != other.enabled
+            || self.mode_normal != other.mode_normal
+            || self.orbital_station_locked != other.orbital_station_locked
+            || self.completed_tech_ids != other.completed_tech_ids
+            || self.target_limits != other.target_limits
+            || self.active_targets != other.active_targets
+            || self.has_work != other.has_work
+    }
+}
+
+/// Runtime-only deterministic execution directory for construction centers.
+///
+/// Rows preserve the immutable entity order used by the historical full
+/// scan. Sleeping rows are revisited only when a dependency can make their
+/// result observably different: a planet inventory increases, their shared
+/// power allocation changes, direct quantum material arrives, or global
+/// planning/job state changes. The directory is never serialized or hashed.
+#[derive(Debug, Clone)]
+pub(crate) struct ConstructionRuntime {
+    topology: Arc<crate::state::FactoryTopology>,
+    catalog: Arc<RuntimeCatalog>,
+    entity_count: usize,
+    center_indices: Vec<usize>,
+    row_by_entity: Vec<(u32, u32)>,
+    row_planets: Vec<usize>,
+    row_power_groups: Vec<usize>,
+    target_ids: Vec<String>,
+    target_output_amounts: Vec<f64>,
+    target_by_id: BTreeMap<String, usize>,
+    row_job_targets: Vec<Option<usize>>,
+    pending_by_target: Vec<f64>,
+    job_count: usize,
+    power_group_rows: Vec<Vec<usize>>,
+    power_group_representatives: Vec<Option<usize>>,
+    observed_power: Vec<Option<PowerFactorSignature>>,
+    planet_wait_rows: Vec<BTreeSet<usize>>,
+    planner_wait_rows: BTreeSet<usize>,
+    observed_planet_inventory: Vec<Option<Vec<(String, u64)>>>,
+    observed_dependency: Option<ConstructionDependencySignature>,
+    pending: BTreeSet<usize>,
+    all_pending: bool,
+    fallback_full_scan: bool,
+}
+
+impl ConstructionRuntime {
+    pub(crate) fn build(state: &CoreState, base: &Map<String, Value>, entities: &[Value]) -> Self {
+        let planet_count = state.catalog.planets.len();
+        let targets = crate::construction_planner::targets(state);
+        let target_ids = targets
+            .iter()
+            .map(|target| target.id.clone())
+            .collect::<Vec<_>>();
+        let target_output_amounts = targets
+            .iter()
+            .map(|target| target.output_amount)
+            .collect::<Vec<_>>();
+        let target_by_id = target_ids
+            .iter()
+            .enumerate()
+            .map(|(index, target_id)| (target_id.clone(), index))
+            .collect::<BTreeMap<_, _>>();
+        let power_group_count = planet_count
+            .checked_mul(POWER_GROUPS_PER_PLANET)
+            .unwrap_or_default();
+        let mut runtime = Self {
+            topology: state.factory_topology.clone(),
+            catalog: state.catalog.clone(),
+            entity_count: entities.len(),
+            center_indices: state.factory_topology.construction_center_indices.clone(),
+            row_by_entity: Vec::new(),
+            row_planets: Vec::new(),
+            row_power_groups: Vec::new(),
+            target_ids,
+            target_output_amounts,
+            target_by_id,
+            row_job_targets: vec![None; state.factory_topology.construction_center_indices.len()],
+            pending_by_target: vec![0.0; targets.len()],
+            job_count: 0,
+            power_group_rows: vec![Vec::new(); power_group_count],
+            power_group_representatives: vec![None; power_group_count],
+            observed_power: vec![None; power_group_count],
+            planet_wait_rows: vec![BTreeSet::new(); planet_count],
+            planner_wait_rows: BTreeSet::new(),
+            observed_planet_inventory: vec![None; planet_count],
+            observed_dependency: None,
+            pending: BTreeSet::new(),
+            all_pending: true,
+            fallback_full_scan: power_group_count == 0
+                && !state
+                    .factory_topology
+                    .construction_center_indices
+                    .is_empty(),
+        };
+        let mut entity_ids = BTreeSet::new();
+        let mut entity_rows = BTreeSet::new();
+        for (row, &entity_index) in runtime.center_indices.iter().enumerate() {
+            let Some(entity) = entities.get(entity_index).and_then(Value::as_object) else {
+                runtime.fallback_full_scan = true;
+                continue;
+            };
+            let Some(entity_id) = string_at(entity, "id").filter(|id| !id.is_empty()) else {
+                runtime.fallback_full_scan = true;
+                continue;
+            };
+            let Some((&planet_index, &grid_index)) = state
+                .factory_topology
+                .entity_planet_indices
+                .get(entity_index)
+                .zip(state.factory_topology.entity_grid_indices.get(entity_index))
+            else {
+                runtime.fallback_full_scan = true;
+                continue;
+            };
+            if entity_index >= state.entities.ids.len() {
+                runtime.fallback_full_scan = true;
+                continue;
+            }
+            let indexed_id = &state.entities.ids[entity_index];
+            let Some(indexed_building) = state.entities.buildings.get(entity_index) else {
+                runtime.fallback_full_scan = true;
+                continue;
+            };
+            let priority = finite_number(entity.get("powerPriority"))
+                .floor()
+                .clamp(1.0, 3.0) as usize;
+            let canonical = string_at(entity, "buildingId") == Some("construction_center")
+                && state.symbols.resolve(*indexed_building) == Some("construction_center")
+                && entity_id == indexed_id
+                && entity_id.is_ascii()
+                && !entity_id.contains(':')
+                && planet_index < planet_count
+                && grid_index < 3
+                && state
+                    .catalog
+                    .planets
+                    .get(planet_index)
+                    .is_some_and(|planet| {
+                        string_at(entity, "planetId") == Some(planet.id.as_str())
+                    })
+                && entity_rows.insert(entity_index)
+                && entity_ids.insert(entity_id.to_owned());
+            if !canonical {
+                runtime.fallback_full_scan = true;
+                continue;
+            }
+            let Ok(entity_row) = u32::try_from(entity_index) else {
+                runtime.fallback_full_scan = true;
+                continue;
+            };
+            let Ok(runtime_row) = u32::try_from(row) else {
+                runtime.fallback_full_scan = true;
+                continue;
+            };
+            let group = planet_index * POWER_GROUPS_PER_PLANET + grid_index * 3 + priority - 1;
+            runtime.row_by_entity.push((entity_row, runtime_row));
+            runtime.row_planets.push(planet_index);
+            runtime.row_power_groups.push(group);
+            runtime.power_group_rows[group].push(row);
+            runtime.power_group_representatives[group].get_or_insert(entity_index);
+        }
+        if runtime.row_by_entity.len() != runtime.center_indices.len()
+            || runtime.row_planets.len() != runtime.center_indices.len()
+            || runtime.row_power_groups.len() != runtime.center_indices.len()
+        {
+            runtime.fallback_full_scan = true;
+        }
+        runtime
+            .row_by_entity
+            .sort_unstable_by_key(|&(entity_index, _)| entity_index);
+        if runtime
+            .target_ids
+            .iter()
+            .any(|target_id| !target_id.is_ascii() || target_id.contains(':'))
+            || automation(base)
+                .ok()
+                .and_then(|automation| automation.get("targetStock"))
+                .and_then(Value::as_object)
+                .is_some_and(|stock| {
+                    stock
+                        .keys()
+                        .any(|target_id| !runtime.target_by_id.contains_key(target_id))
+                })
+        {
+            runtime.fallback_full_scan = true;
+        }
+        let jobs = automation(base)
+            .ok()
+            .and_then(|automation| automation.get("jobs"))
+            .and_then(Value::as_object);
+        let Some(jobs) = jobs else {
+            runtime.fallback_full_scan = true;
+            return runtime;
+        };
+        for (entity_id, job) in jobs {
+            let Some(entity_index) = state.entity_index.get(entity_id) else {
+                runtime.fallback_full_scan = true;
+                continue;
+            };
+            let Some(row) = runtime.row_for_entity(*entity_index) else {
+                runtime.fallback_full_scan = true;
+                continue;
+            };
+            let Some(target_id) = job
+                .as_object()
+                .and_then(|job| string_at(job, "constructionId"))
+            else {
+                runtime.fallback_full_scan = true;
+                continue;
+            };
+            let Some(&target_index) = runtime.target_by_id.get(target_id) else {
+                runtime.fallback_full_scan = true;
+                continue;
+            };
+            runtime.row_job_targets[row] = Some(target_index);
+            runtime.pending_by_target[target_index] += runtime.target_output_amounts[target_index];
+            runtime.job_count += 1;
+        }
+        runtime.observed_dependency = runtime.dependency_signature(state, base).ok();
+        if runtime.observed_dependency.is_none() {
+            runtime.fallback_full_scan = true;
+        }
+        runtime.center_indices.shrink_to_fit();
+        runtime.row_by_entity.shrink_to_fit();
+        runtime.row_planets.shrink_to_fit();
+        runtime.row_power_groups.shrink_to_fit();
+        runtime.target_ids.shrink_to_fit();
+        runtime.target_output_amounts.shrink_to_fit();
+        runtime.row_job_targets.shrink_to_fit();
+        runtime.pending_by_target.shrink_to_fit();
+        for rows in &mut runtime.power_group_rows {
+            rows.shrink_to_fit();
+        }
+        runtime.power_group_rows.shrink_to_fit();
+        runtime.power_group_representatives.shrink_to_fit();
+        runtime.observed_power.shrink_to_fit();
+        runtime.planet_wait_rows.shrink_to_fit();
+        runtime.observed_planet_inventory.shrink_to_fit();
+        runtime
+    }
+
+    fn topology_matches(
+        &self,
+        state: &CoreState,
+        entities: &[Value],
+        center_indices: &[usize],
+    ) -> bool {
+        Arc::ptr_eq(&self.topology, &state.factory_topology)
+            && Arc::ptr_eq(&self.catalog, &state.catalog)
+            && self.entity_count == entities.len()
+            && self.center_indices.len() == center_indices.len()
+            && (center_indices.is_empty()
+                || std::ptr::eq(
+                    center_indices.as_ptr(),
+                    state.factory_topology.construction_center_indices.as_ptr(),
+                ))
+    }
+
+    fn row_for_entity(&self, entity_index: usize) -> Option<usize> {
+        let entity_index = u32::try_from(entity_index).ok()?;
+        self.row_by_entity
+            .binary_search_by_key(&entity_index, |&(candidate, _)| candidate)
+            .ok()
+            .and_then(|index| self.row_by_entity.get(index))
+            .map(|&(_, row)| row as usize)
+    }
+
+    fn dependency_signature(
+        &self,
+        state: &CoreState,
+        base: &Map<String, Value>,
+    ) -> anyhow::Result<ConstructionDependencySignature> {
+        construction_dependency_signature(self, state, base)
+    }
+
+    fn update_job_target(&mut self, entity_index: usize, target_id: Option<&str>) {
+        if self.fallback_full_scan {
+            return;
+        }
+        let Some(row) = self.row_for_entity(entity_index) else {
+            self.fallback_full_scan = true;
+            return;
+        };
+        let next = match target_id {
+            Some(target_id) => {
+                let Some(&target_index) = self.target_by_id.get(target_id) else {
+                    self.fallback_full_scan = true;
+                    return;
+                };
+                Some(target_index)
+            }
+            None => None,
+        };
+        let previous = self.row_job_targets[row];
+        if previous == next {
+            return;
+        }
+        if let Some(target_index) = previous {
+            self.pending_by_target[target_index] = (self.pending_by_target[target_index]
+                - self.target_output_amounts[target_index])
+                .max(0.0);
+            self.job_count = self.job_count.saturating_sub(1);
+        }
+        if let Some(target_index) = next {
+            self.pending_by_target[target_index] += self.target_output_amounts[target_index];
+            self.job_count += 1;
+        }
+        self.row_job_targets[row] = next;
+    }
+
+    fn row_matches(
+        &self,
+        state: &CoreState,
+        entities: &[Value],
+        power_factors: &HashMap<usize, f64>,
+        row: usize,
+    ) -> bool {
+        let Some(&entity_index) = self.center_indices.get(row) else {
+            return false;
+        };
+        let Some(entity) = entities.get(entity_index).and_then(Value::as_object) else {
+            return false;
+        };
+        if entity_index >= state.entities.ids.len() {
+            return false;
+        }
+        let indexed_id = &state.entities.ids[entity_index];
+        let Some(indexed_building) = state.entities.buildings.get(entity_index) else {
+            return false;
+        };
+        if string_at(entity, "id") != Some(indexed_id)
+            || string_at(entity, "buildingId") != Some("construction_center")
+            || state.symbols.resolve(*indexed_building) != Some("construction_center")
+        {
+            return false;
+        }
+        let Some(&group) = self.row_power_groups.get(row) else {
+            return false;
+        };
+        let Some(representative) = self
+            .power_group_representatives
+            .get(group)
+            .copied()
+            .flatten()
+        else {
+            return false;
+        };
+        matches!(
+            (
+                power_factor_signature(power_factors, entity_index),
+                power_factor_signature(power_factors, representative),
+            ),
+            (Some(left), Some(right)) if left == right
+        )
+    }
+
+    fn wake_dependency_changes(
+        &mut self,
+        state: &CoreState,
+        base: &Map<String, Value>,
+        power_factors: &HashMap<usize, f64>,
+    ) {
+        let Ok(signature) = self.dependency_signature(state, base) else {
+            self.fallback_full_scan = true;
+            return;
+        };
+        if let Some(previous) = self.observed_dependency.as_ref() {
+            if previous.broad_dependencies_changed(&signature) {
+                self.all_pending = true;
+                self.pending.clear();
+            } else if previous.cursor != signature.cursor && !self.all_pending {
+                self.pending.extend(self.planner_wait_rows.iter().copied());
+            }
+        }
+        self.observed_dependency = Some(signature);
+
+        for group in 0..self.power_group_rows.len() {
+            let Some(representative) = self.power_group_representatives[group] else {
+                continue;
+            };
+            let Some(signature) = power_factor_signature(power_factors, representative) else {
+                self.fallback_full_scan = true;
+                return;
+            };
+            if self.observed_power[group].is_some_and(|previous| previous != signature)
+                && !self.all_pending
+            {
+                self.pending
+                    .extend(self.power_group_rows[group].iter().copied());
+            }
+            self.observed_power[group] = Some(signature);
+        }
+        self.refresh_planet_inventory_wakes(base);
+    }
+
+    fn refresh_planet_inventory_wakes(&mut self, base: &Map<String, Value>) {
+        for planet_index in 0..self.planet_wait_rows.len() {
+            if self.planet_wait_rows[planet_index].is_empty() {
+                self.observed_planet_inventory[planet_index] = None;
+                continue;
+            }
+            let Some(planet_id) = self
+                .catalog
+                .planets
+                .get(planet_index)
+                .map(|planet| &planet.id)
+            else {
+                self.fallback_full_scan = true;
+                return;
+            };
+            let Some(current) = planet_inventory_fingerprint(base, planet_id) else {
+                self.fallback_full_scan = true;
+                return;
+            };
+            if self.observed_planet_inventory[planet_index]
+                .as_ref()
+                .is_some_and(|previous| planet_inventory_increased(previous, &current))
+                && !self.all_pending
+            {
+                self.pending
+                    .extend(self.planet_wait_rows[planet_index].iter().copied());
+            }
+            self.observed_planet_inventory[planet_index] = Some(current);
+        }
+    }
+
+    fn selected_rows(
+        &mut self,
+        state: &CoreState,
+        base: &Map<String, Value>,
+        entities: &[Value],
+        power_factors: &HashMap<usize, f64>,
+        center_indices: &[usize],
+    ) -> (Vec<usize>, ConstructionActiveScan) {
+        if !self.fallback_full_scan && self.topology_matches(state, entities, center_indices) {
+            self.wake_dependency_changes(state, base, power_factors);
+        }
+        let total_rows = center_indices.len();
+        if self.fallback_full_scan || !self.topology_matches(state, entities, center_indices) {
+            self.fallback_full_scan = true;
+            return (
+                center_indices.to_vec(),
+                ConstructionActiveScan {
+                    selected_rows: total_rows,
+                    total_rows,
+                    dense_fallback: true,
+                    directory_fallback: true,
+                },
+            );
+        }
+        let pending_rows = if self.all_pending {
+            total_rows
+        } else {
+            self.pending.len()
+        };
+        let dense_fallback = pending_rows > 0
+            && pending_rows.saturating_mul(CONSTRUCTION_ACTIVE_DENSE_DENOMINATOR)
+                >= total_rows.saturating_mul(CONSTRUCTION_ACTIVE_DENSE_NUMERATOR);
+        let rows = if self.all_pending || dense_fallback {
+            (0..total_rows).collect::<Vec<_>>()
+        } else {
+            self.pending.iter().copied().collect::<Vec<_>>()
+        };
+        if rows
+            .iter()
+            .any(|&row| !self.row_matches(state, entities, power_factors, row))
+        {
+            self.fallback_full_scan = true;
+            return (
+                center_indices.to_vec(),
+                ConstructionActiveScan {
+                    selected_rows: total_rows,
+                    total_rows,
+                    dense_fallback: true,
+                    directory_fallback: true,
+                },
+            );
+        }
+        self.all_pending = false;
+        for &row in &rows {
+            self.pending.remove(&row);
+            self.planner_wait_rows.remove(&row);
+            if let Some(&planet) = self.row_planets.get(row) {
+                self.planet_wait_rows[planet].remove(&row);
+            }
+        }
+        let selected = rows
+            .iter()
+            .filter_map(|&row| self.center_indices.get(row).copied())
+            .collect::<Vec<_>>();
+        (
+            selected,
+            ConstructionActiveScan {
+                selected_rows: rows.len(),
+                total_rows,
+                dense_fallback,
+                directory_fallback: false,
+            },
+        )
+    }
+
+    fn finish_center(
+        &mut self,
+        base: &Map<String, Value>,
+        entity_index: usize,
+        keep_active: bool,
+        wait_for_planet_inventory: bool,
+        wait_for_planner_cursor: bool,
+    ) {
+        if self.fallback_full_scan {
+            return;
+        }
+        let Some(row) = self.row_for_entity(entity_index) else {
+            self.fallback_full_scan = true;
+            return;
+        };
+        if keep_active {
+            self.pending.insert(row);
+            return;
+        }
+        if wait_for_planner_cursor {
+            self.planner_wait_rows.insert(row);
+        }
+        if wait_for_planet_inventory {
+            let planet_index = self.row_planets[row];
+            if self.observed_planet_inventory[planet_index].is_none() {
+                let Some(planet_id) = self
+                    .catalog
+                    .planets
+                    .get(planet_index)
+                    .map(|planet| &planet.id)
+                else {
+                    self.fallback_full_scan = true;
+                    return;
+                };
+                let Some(fingerprint) = planet_inventory_fingerprint(base, planet_id) else {
+                    self.fallback_full_scan = true;
+                    return;
+                };
+                self.observed_planet_inventory[planet_index] = Some(fingerprint);
+            }
+            self.planet_wait_rows[planet_index].insert(row);
+        }
+    }
+
+    fn commit_dependencies(&mut self, state: &CoreState, base: &Map<String, Value>) {
+        if self.fallback_full_scan {
+            return;
+        }
+        let Ok(signature) = self.dependency_signature(state, base) else {
+            self.fallback_full_scan = true;
+            return;
+        };
+        if let Some(previous) = self.observed_dependency.as_ref() {
+            if previous.broad_dependencies_changed(&signature) {
+                self.all_pending = true;
+                self.pending.clear();
+            } else if previous.cursor != signature.cursor && !self.all_pending {
+                self.pending.extend(self.planner_wait_rows.iter().copied());
+            }
+        }
+        self.observed_dependency = Some(signature);
+        self.refresh_planet_inventory_wakes(base);
+    }
+
+    pub(crate) fn wake_center_indices(&mut self, center_indices: &[usize]) {
+        if self.fallback_full_scan || self.all_pending {
+            return;
+        }
+        for &entity_index in center_indices {
+            let Some(row) = self.row_for_entity(entity_index) else {
+                self.fallback_full_scan = true;
+                self.pending.clear();
+                return;
+            };
+            self.pending.insert(row);
+        }
+    }
+
+    pub(crate) fn wake_all(&mut self) {
+        if !self.fallback_full_scan {
+            self.all_pending = true;
+            self.pending.clear();
+        }
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> u64 {
+        use std::mem::size_of;
+
+        let power_rows = self
+            .power_group_rows
+            .iter()
+            .map(|rows| rows.capacity())
+            .sum::<usize>();
+        let planet_wait_rows = self
+            .planet_wait_rows
+            .iter()
+            .map(BTreeSet::len)
+            .sum::<usize>();
+        let inventory_bytes = self
+            .observed_planet_inventory
+            .iter()
+            .flatten()
+            .flat_map(|entries| entries.iter())
+            .map(|(item_id, _)| item_id.capacity() + size_of::<u64>())
+            .sum::<usize>();
+        let target_lookup_bytes = self
+            .target_by_id
+            .keys()
+            .map(|target_id| target_id.capacity() + size_of::<String>() + size_of::<usize>() * 4)
+            .sum::<usize>();
+        let dependency_bytes = self
+            .observed_dependency
+            .as_ref()
+            .map(|signature| {
+                signature
+                    .completed_tech_ids
+                    .iter()
+                    .map(String::capacity)
+                    .sum::<usize>()
+                    + signature.completed_tech_ids.capacity() * size_of::<String>()
+                    + signature.target_limits.capacity() * size_of::<u64>()
+                    + signature.active_targets.capacity() * size_of::<bool>()
+            })
+            .unwrap_or(0);
+        (self.center_indices.capacity() * size_of::<usize>()
+            + self.row_by_entity.capacity() * size_of::<(u32, u32)>()
+            + self.row_planets.capacity() * size_of::<usize>()
+            + self.row_power_groups.capacity() * size_of::<usize>()
+            + self.target_ids.iter().map(String::capacity).sum::<usize>()
+            + self.target_ids.capacity() * size_of::<String>()
+            + self.target_output_amounts.capacity() * size_of::<f64>()
+            + target_lookup_bytes
+            + self.row_job_targets.capacity() * size_of::<Option<usize>>()
+            + self.pending_by_target.capacity() * size_of::<f64>()
+            + power_rows * size_of::<usize>()
+            + self.power_group_representatives.capacity() * size_of::<Option<usize>>()
+            + self.observed_power.capacity() * size_of::<Option<PowerFactorSignature>>()
+            + planet_wait_rows * size_of::<usize>()
+            + self.planner_wait_rows.len() * size_of::<usize>()
+            + self.pending.len() * size_of::<usize>()
+            + inventory_bytes
+            + dependency_bytes) as u64
+    }
+
+    #[cfg(test)]
+    fn force_full_scan(&mut self) {
+        self.fallback_full_scan = true;
+    }
+}
+
+fn power_factor_signature(
+    power_factors: &HashMap<usize, f64>,
+    entity_index: usize,
+) -> Option<PowerFactorSignature> {
+    let Some(factor) = power_factors.get(&entity_index).copied() else {
+        return Some(PowerFactorSignature::Missing);
+    };
+    if !factor.is_finite() {
+        return None;
+    }
+    let rounded = (factor * 10_000.0).round() / 10_000.0;
+    Some(PowerFactorSignature::Value(if rounded == 0.0 {
+        0.0_f64.to_bits()
+    } else {
+        rounded.to_bits()
+    }))
+}
+
+fn planet_inventory_fingerprint(
+    base: &Map<String, Value>,
+    planet_id: &str,
+) -> Option<Vec<(String, u64)>> {
+    let inventory = tray(base, planet_id)?;
+    let mut fingerprint = inventory
+        .iter()
+        .map(|(item_id, amount)| {
+            (
+                item_id.clone(),
+                floor_amount(finite_number(Some(amount))) as u64,
+            )
+        })
+        .collect::<Vec<_>>();
+    fingerprint.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    Some(fingerprint)
+}
+
+fn planet_inventory_increased(previous: &[(String, u64)], current: &[(String, u64)]) -> bool {
+    let mut previous_index = 0;
+    for (item_id, amount) in current {
+        while previous_index < previous.len() && previous[previous_index].0 < *item_id {
+            previous_index += 1;
+        }
+        let old = previous
+            .get(previous_index)
+            .filter(|(candidate, _)| candidate == item_id)
+            .map(|(_, amount)| *amount)
+            .unwrap_or(0);
+        if *amount > old {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -378,6 +1121,82 @@ fn pending_stock_in_jobs(
             }
         })
         .sum()
+}
+
+fn construction_dependency_signature(
+    runtime: &ConstructionRuntime,
+    state: &CoreState,
+    base: &Map<String, Value>,
+) -> anyhow::Result<ConstructionDependencySignature> {
+    let automation = automation(base)?;
+    let enabled = automation.get("enabled").and_then(Value::as_bool) == Some(true);
+    let targets = crate::construction_planner::targets(state);
+    if targets.len() != runtime.target_ids.len()
+        || targets
+            .iter()
+            .zip(&runtime.target_ids)
+            .any(|(target, target_id)| target.id != *target_id)
+    {
+        bail!("native construction target directory is stale");
+    }
+    let target_stock = automation.get("targetStock").and_then(Value::as_object);
+    let mut target_limits = Vec::with_capacity(targets.len());
+    let mut active_targets = Vec::with_capacity(targets.len());
+    let mut raw_target_deficit = false;
+    for (target_index, target) in targets.iter().enumerate() {
+        let desired = target_stock
+            .map(|stock| floor_amount(finite_number(stock.get(&target.id))))
+            .unwrap_or(0.0);
+        let pending = runtime.pending_by_target[target_index];
+        let deficit = desired > current_stock(base, &target.id) + pending;
+        raw_target_deficit |= deficit;
+        target_limits.push(desired as u64);
+        active_targets.push(
+            enabled && deficit && crate::construction_planner::target_is_unlocked(base, target),
+        );
+    }
+    let mut completed_tech_ids =
+        base.get("research")
+            .and_then(Value::as_object)
+            .and_then(|research| research.get("completedTechIds"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("native construction completed technology list is missing"))?
+            .iter()
+            .map(|value| {
+                value.as_str().map(str::to_owned).ok_or_else(|| {
+                    anyhow!("native construction completed technology ID is invalid")
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+    completed_tech_ids.sort_unstable();
+    completed_tech_ids.dedup();
+    let raw_cursor = finite_number(automation.get("cursor")).trunc();
+    let cursor = if targets.is_empty() || !raw_cursor.is_finite() {
+        0
+    } else {
+        raw_cursor.rem_euclid(targets.len() as f64) as usize
+    };
+    Ok(ConstructionDependencySignature {
+        enabled,
+        mode_normal: base.get("mode").and_then(Value::as_str) == Some("normal"),
+        orbital_station_locked: base
+            .get("orbitalStation")
+            .and_then(Value::as_object)
+            .and_then(|station| station.get("status"))
+            .and_then(Value::as_str)
+            == Some("locked"),
+        completed_tech_ids,
+        target_limits,
+        active_targets,
+        has_work: enabled
+            && (runtime.job_count > 0
+                || automation
+                    .get("quantumMaterialBuffer")
+                    .and_then(Value::as_object)
+                    .is_some_and(|buffers| !buffers.is_empty())
+                || raw_target_deficit),
+        cursor,
+    })
 }
 
 fn select_target(
@@ -1803,7 +2622,16 @@ pub(crate) fn run_centers(
     seconds: f64,
     power_factors: &HashMap<usize, f64>,
     center_indices: &[usize],
-) -> anyhow::Result<ConstructionQuantumWake> {
+    runtime: &mut ConstructionRuntime,
+) -> anyhow::Result<ConstructionRunOutcome> {
+    let (selected_center_indices, scan) =
+        runtime.selected_rows(state, base, entities, power_factors, center_indices);
+    if selected_center_indices.is_empty() {
+        return Ok(ConstructionRunOutcome {
+            quantum_wake: ConstructionQuantumWake::default(),
+            scan,
+        });
+    }
     let mut automation = base
         .remove("constructionAutomation")
         .and_then(|value| value.as_object().cloned())
@@ -1818,7 +2646,7 @@ pub(crate) fn run_centers(
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
     let mut wake_centers = BTreeSet::new();
-    for &entity_index in center_indices {
+    for &entity_index in &selected_center_indices {
         if entity_index >= entities.len() {
             bail!("native construction center index is outside the entity table");
         }
@@ -1861,11 +2689,14 @@ pub(crate) fn run_centers(
             set_number(center, "utilization", 0.0)?;
             set_number(center, "productionRate", 0.0)?;
             set_number(center, "progress", 0.0)?;
+            runtime.finish_center(base, entity_index, false, false, false);
             continue;
         }
         let mut job = jobs
             .remove(&entity_id)
             .and_then(|value| value.as_object().cloned());
+        let mut wait_for_planet_inventory = false;
+        let mut wait_for_planner_cursor = false;
         let machine_count = finite_number(center.get("machineCount")).max(1.0);
         let mut remaining_work = seconds.max(0.0) * machine_count * power_factor;
         let mut completed = 0.0;
@@ -1897,6 +2728,8 @@ pub(crate) fn run_centers(
                 let Some(plan) =
                     crate::construction_planner::build_plan(state, base, &target, inventory)
                 else {
+                    wait_for_planet_inventory = true;
+                    wait_for_planner_cursor = true;
                     break;
                 };
                 let target_count = crate::construction_planner::targets(state).len().max(1);
@@ -1967,6 +2800,7 @@ pub(crate) fn run_centers(
                 if repair_job(state, base, &buffers, &entity_id, &planet_id, current_job)? {
                     continue;
                 }
+                wait_for_planet_inventory = true;
                 break;
             }
             let reservation = reserve_requirements(
@@ -1979,6 +2813,7 @@ pub(crate) fn run_centers(
             )?;
             if !reservation.available {
                 wake_centers.insert(entity_index);
+                wait_for_planet_inventory = true;
                 break;
             }
             if reservation.changed {
@@ -2049,9 +2884,26 @@ pub(crate) fn run_centers(
                 0.0
             },
         )?;
+        let final_job_target = job
+            .as_ref()
+            .and_then(|job| string_at(job, "constructionId"))
+            .map(str::to_owned);
+        let final_job_present = job.is_some();
         if let Some(job) = job {
-            jobs.insert(entity_id, Value::Object(job));
+            jobs.insert(entity_id.clone(), Value::Object(job));
         }
+        runtime.update_job_target(entity_index, final_job_target.as_deref());
+        let keep_active = worked
+            || completed > 0.0
+            || remaining_work > EPSILON && remaining_iterations == 0
+            || (!wait_for_planet_inventory && final_job_present);
+        runtime.finish_center(
+            base,
+            entity_index,
+            keep_active,
+            wait_for_planet_inventory,
+            wait_for_planner_cursor,
+        );
     }
     automation.insert("jobs".to_owned(), Value::Object(jobs));
     normalize_quantum_buffers(&mut buffers);
@@ -2062,8 +2914,12 @@ pub(crate) fn run_centers(
         "constructionAutomation".to_owned(),
         Value::Object(automation),
     );
-    Ok(ConstructionQuantumWake {
-        center_indices: wake_centers.into_iter().collect(),
+    runtime.commit_dependencies(state, base);
+    Ok(ConstructionRunOutcome {
+        quantum_wake: ConstructionQuantumWake {
+            center_indices: wake_centers.into_iter().collect(),
+        },
+        scan,
     })
 }
 
@@ -2444,6 +3300,7 @@ mod tests {
     };
     use crate::construction_planner::TargetKind;
     use serde_json::json;
+    use std::sync::Arc;
 
     fn object(value: Value) -> Map<String, Value> {
         value.as_object().expect("test object").clone()
@@ -2610,6 +3467,346 @@ mod tests {
                 .collect::<Vec<_>>(),
         )
         .expect("serialize construction demands")
+    }
+
+    fn active_runtime_catalog() -> RuntimeCatalog {
+        RuntimeCatalog::validate(
+            CatalogSnapshot {
+                protocol_version: crate::CORE_PROTOCOL_VERSION,
+                registry_fingerprint: "construction-active-runtime".to_owned(),
+                planets: vec![PlanetDefinition {
+                    id: "home".to_owned(),
+                    name: "home".to_owned(),
+                    system_id: "helios".to_owned(),
+                    kind: "terrestrial".to_owned(),
+                    orbit_index: 1,
+                    simulation_order: 0,
+                    orbital_yields: HashMap::new(),
+                }],
+                items: vec![ItemDefinition {
+                    id: "iron".to_owned(),
+                    name: "iron".to_owned(),
+                    kind: "solid".to_owned(),
+                    fuel_energy_mj: 0.0,
+                }],
+                buildings: Vec::new(),
+                recipes: Vec::new(),
+                constructions: vec![ConstructionDefinition {
+                    id: "widget".to_owned(),
+                    output_amount: 1.0,
+                    automation_order: 0,
+                    required_tech_id: None,
+                    costs: vec![ItemAmount {
+                        item_id: "iron".to_owned(),
+                        amount: 1.0,
+                    }],
+                }],
+                belts: Vec::new(),
+                proliferators: Vec::new(),
+                technologies: Vec::new(),
+            },
+            "construction-active-runtime",
+        )
+        .expect("construction active runtime catalog")
+    }
+
+    fn active_runtime_entities(center_count: usize, extension_id: bool) -> Vec<Value> {
+        (0..center_count)
+            .map(|index| {
+                json!({
+                    "id": if extension_id && index == 0 {
+                        "mod:center-00000".to_owned()
+                    } else {
+                        format!("center-{index:05}")
+                    },
+                    "kind": "machine",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "powerPriority": 2,
+                    "buildingId": "construction_center",
+                    "recipeId": null,
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "utilization": 0,
+                    "productionRate": 0,
+                    "routingCursor": 0,
+                })
+            })
+            .collect()
+    }
+
+    fn active_runtime_base(target: u64, iron: u64) -> Map<String, Value> {
+        object(json!({
+            "mode": "normal",
+            "activePlanetId": "home",
+            "tray": { "iron": iron },
+            "planetTrays": {},
+            "planetTrayItemLimits": { "home": 1_000_000 },
+            "construction": { "widget": 0 },
+            "portableFleet": { "logistics_drone": 0, "logistics_vessel": 0 },
+            "totalProduced": {},
+            "research": { "completedTechIds": [] },
+            "orbitalStation": { "status": "eligible" },
+            "quantumLogisticsNetwork": { "inventory": {} },
+            "constructionAutomation": {
+                "enabled": true,
+                "quantumSourceEnabled": true,
+                "targetStock": { "widget": target },
+                "jobs": {},
+                "destroyedByproducts": {},
+                "cursor": 0,
+                "totalCrafted": 0
+            }
+        }))
+    }
+
+    type ActiveRuntimeFixture = (
+        CoreState,
+        Map<String, Value>,
+        Vec<Value>,
+        HashMap<usize, f64>,
+        ConstructionRuntime,
+    );
+
+    fn active_runtime_fixture(
+        center_count: usize,
+        target: u64,
+        iron: u64,
+        extension_id: bool,
+    ) -> ActiveRuntimeFixture {
+        let entities = active_runtime_entities(center_count, extension_id);
+        let mut state = crate::simple_factory::tests::fixture_state(&entities);
+        state.catalog = Arc::new(active_runtime_catalog());
+        let base = active_runtime_base(target, iron);
+        let runtime = ConstructionRuntime::build(&state, &base, &entities);
+        let power_factors = (0..center_count).map(|index| (index, 1.0)).collect();
+        (state, base, entities, power_factors, runtime)
+    }
+
+    fn run_active_fixture(
+        state: &CoreState,
+        base: &mut Map<String, Value>,
+        entities: &mut [Value],
+        power_factors: &HashMap<usize, f64>,
+        runtime: &mut ConstructionRuntime,
+        seconds: f64,
+    ) -> ConstructionRunOutcome {
+        run_centers(
+            state,
+            base,
+            entities,
+            seconds,
+            power_factors,
+            &state.factory_topology.construction_center_indices,
+            runtime,
+        )
+        .expect("run active construction fixture")
+    }
+
+    #[test]
+    fn active_center_runtime_matches_full_scan_oracle_and_serializes_identically_when_quiet() {
+        let (state, mut active_base, mut active_entities, power, mut active_runtime) =
+            active_runtime_fixture(4, 1, 1, false);
+        let mut oracle_base = active_base.clone();
+        let mut oracle_entities = active_entities.clone();
+        let mut oracle_runtime = ConstructionRuntime::build(&state, &oracle_base, &oracle_entities);
+        oracle_runtime.force_full_scan();
+        let mut selected = Vec::new();
+        for _ in 0..3 {
+            let active = run_active_fixture(
+                &state,
+                &mut active_base,
+                &mut active_entities,
+                &power,
+                &mut active_runtime,
+                5.0,
+            );
+            let oracle = run_active_fixture(
+                &state,
+                &mut oracle_base,
+                &mut oracle_entities,
+                &power,
+                &mut oracle_runtime,
+                5.0,
+            );
+            selected.push(active.scan.selected_rows);
+            assert_eq!(oracle.scan.selected_rows, 4);
+            assert!(oracle.scan.directory_fallback);
+            assert_eq!(active_base, oracle_base);
+            assert_eq!(active_entities, oracle_entities);
+            assert_eq!(
+                serde_json::to_vec(&(&active_base, &active_entities)).expect("active bytes"),
+                serde_json::to_vec(&(&oracle_base, &oracle_entities)).expect("oracle bytes")
+            );
+        }
+        assert_eq!(selected, vec![4, 4, 0]);
+        assert_eq!(
+            inventory_amount(active_base["construction"].as_object().unwrap(), "widget"),
+            1.0
+        );
+    }
+
+    #[test]
+    fn sleeping_centers_wake_on_planet_inventory_increase_and_power_group_change() {
+        let (state, mut base, mut entities, power, mut runtime) =
+            active_runtime_fixture(4, 1, 0, false);
+        assert_eq!(
+            run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 5.0)
+                .scan
+                .selected_rows,
+            4
+        );
+        assert_eq!(
+            run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 5.0)
+                .scan
+                .selected_rows,
+            0
+        );
+        set_inventory_amount(tray_mut(&mut base, "home").expect("home tray"), "iron", 1.0)
+            .expect("supply construction material");
+        let inventory_wake =
+            run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 5.0);
+        assert_eq!(inventory_wake.scan.selected_rows, 4);
+        assert!(inventory_wake.scan.dense_fallback);
+        assert_eq!(
+            inventory_amount(base["construction"].as_object().unwrap(), "widget"),
+            1.0
+        );
+
+        let (state, mut base, mut entities, mut power, mut runtime) =
+            active_runtime_fixture(4, 1, 1, false);
+        power.values_mut().for_each(|factor| *factor = 0.0);
+        assert_eq!(
+            run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 5.0)
+                .scan
+                .selected_rows,
+            4
+        );
+        assert_eq!(
+            run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 5.0)
+                .scan
+                .selected_rows,
+            0
+        );
+        power.values_mut().for_each(|factor| *factor = 1.0);
+        let power_wake =
+            run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 5.0);
+        assert_eq!(power_wake.scan.selected_rows, 4);
+        assert!(power_wake.scan.dense_fallback);
+        assert_eq!(
+            inventory_amount(base["construction"].as_object().unwrap(), "widget"),
+            1.0
+        );
+    }
+
+    #[test]
+    fn exact_quantum_delivery_wakes_only_its_sleeping_center() {
+        let (state, mut base, mut entities, power, _) = active_runtime_fixture(4, 1, 0, false);
+        let center_id = state.entities.ids[2].to_string();
+        base["constructionAutomation"]["jobs"][&center_id] = json!({
+            "constructionId": "widget",
+            "steps": [{ "kind": "building", "constructionId": "widget" }],
+            "stepIndex": 0,
+            "elapsedSeconds": 0,
+            "inventory": {}
+        });
+        let mut runtime = ConstructionRuntime::build(&state, &base, &entities);
+        let first = run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 5.0);
+        assert_eq!(first.scan.selected_rows, 4);
+        assert_eq!(first.quantum_wake.center_indices, vec![2]);
+        assert_eq!(
+            run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 5.0)
+                .scan
+                .selected_rows,
+            0
+        );
+        let demand = QuantumDemand {
+            key: format!("construction-direct:{center_id}:iron"),
+            entity_id: center_id,
+            item_id: "iron".to_owned(),
+            amount: 1,
+        };
+        assert_eq!(
+            apply_quantum_delivery(&mut base, &demand, 1).expect("direct quantum delivery"),
+            1
+        );
+        runtime.wake_center_indices(&[2]);
+        let wake = run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 5.0);
+        assert_eq!(wake.scan.selected_rows, 1);
+        assert!(!wake.scan.dense_fallback);
+        assert_eq!(
+            inventory_amount(base["construction"].as_object().unwrap(), "widget"),
+            1.0
+        );
+    }
+
+    #[test]
+    fn active_queue_is_stable_and_uses_exact_three_quarters_dense_fallback() {
+        let (state, mut base, mut entities, power, mut runtime) =
+            active_runtime_fixture(4, 0, 0, false);
+        run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 1.0);
+        runtime.wake_center_indices(&[3, 1]);
+        let (selected, sparse) = runtime.selected_rows(
+            &state,
+            &base,
+            &entities,
+            &power,
+            &state.factory_topology.construction_center_indices,
+        );
+        assert_eq!(selected, vec![1, 3]);
+        assert_eq!(sparse.selected_rows, 2);
+        assert!(!sparse.dense_fallback);
+
+        let (state, mut base, mut entities, power, mut runtime) =
+            active_runtime_fixture(4, 0, 0, false);
+        run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 1.0);
+        runtime.wake_center_indices(&[3, 1, 2]);
+        let (selected, dense) = runtime.selected_rows(
+            &state,
+            &base,
+            &entities,
+            &power,
+            &state.factory_topology.construction_center_indices,
+        );
+        assert_eq!(selected, vec![0, 1, 2, 3]);
+        assert_eq!(dense.selected_rows, 4);
+        assert!(dense.dense_fallback);
+        assert!(!dense.directory_fallback);
+    }
+
+    #[test]
+    fn extension_center_id_fails_closed_to_repeatable_full_scan() {
+        let (state, mut base, mut entities, power, mut runtime) =
+            active_runtime_fixture(3, 0, 0, true);
+        for _ in 0..2 {
+            let outcome =
+                run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 1.0);
+            assert_eq!(outcome.scan.selected_rows, 3);
+            assert!(outcome.scan.dense_fallback);
+            assert!(outcome.scan.directory_fallback);
+        }
+    }
+
+    #[test]
+    fn construction_runtime_is_excluded_from_public_serialization() {
+        let mut state = crate::simple_factory::tests::fixture_state(&[]);
+        let entities = state
+            .take_entities_for_simulation()
+            .expect("materialize serialization fixture");
+        let mut before = Vec::new();
+        state
+            .write_v47_envelope(42, &mut before)
+            .expect("serialize before construction runtime replacement");
+        let runtime = ConstructionRuntime::build(&state, state.base_value(), &entities);
+        state.install_prepared_construction_runtime(Arc::new(runtime));
+        let mut after = Vec::new();
+        state
+            .write_v47_envelope(42, &mut after)
+            .expect("serialize after construction runtime replacement");
+        assert_eq!(after, before);
     }
 
     #[test]

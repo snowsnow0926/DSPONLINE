@@ -4,6 +4,9 @@ const {
   createRendererNativeError,
   createRendererNativeRejection,
 } = require("./native-renderer-boundary.cjs");
+const {
+  subscribeRendererToNativePlayerAuthorityHandoff,
+} = require("./native-player-authority-handoff-ipc.cjs");
 
 const MAX_NATIVE_PROJECTION_TRANSFER_BYTES = 1024 * 1024;
 const MAX_STELLAR_PROJECTION_REQUEST_BYTES = 32_768;
@@ -139,6 +142,11 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   // and never accepts a session, run, checkpoint, lease or operation ID.
   getNativePlayerAuthorityState: () => invokeNative("desktop:native-player-authority-state", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_STATE_FAILED", message: "无法读取 Windows 原生玩家权威时钟" }),
   onNativePlayerAuthorityState: subscribeNativePlayerAuthorityState,
+  // Response-only internal handshake. The listener cannot start a handoff,
+  // select an owner, or invoke transferOwner; it can only answer a currently
+  // pending challenge generated and bound by main.
+  onNativePlayerAuthorityHandoffRequest: (listener) =>
+    subscribeRendererToNativePlayerAuthorityHandoff(ipcRenderer, listener),
   startNativePlayerAuthorityMacro: (request) => invokeNative("desktop:native-player-authority-macro-start", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算启动失败" }, request),
   advanceNativePlayerAuthorityMacro: (request) => invokeNative("desktop:native-player-authority-macro-advance", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算推进失败" }, request),
   finishNativePlayerAuthorityMacro: () => invokeNative("desktop:native-player-authority-macro-finish", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算结束失败" }, {}),

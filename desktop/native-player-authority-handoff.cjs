@@ -3,9 +3,9 @@
 /*
  * Main-process-only, fail-closed owner handoff coordinator.
  *
- * This module deliberately has no Electron IPC and is not wired into main.cjs.
- * A future App/Worker bridge must provide requestQuiescence; until then there
- * is no player-facing path that can invoke this state machine.
+ * This module deliberately has no Electron dependency. The main-process IPC
+ * bridge supplies requestQuiescence and an explicit pre-transfer hand-back;
+ * neither callback is exposed as a renderer-owned transfer capability.
  */
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
@@ -211,6 +211,7 @@ class NativePlayerAuthorityHandoffCoordinator {
         typeof options.registry.transferOwner !== "function" ||
         !options.runtime || typeof options.runtime.activate !== "function" ||
         typeof options.requestQuiescence !== "function" ||
+        options.releaseQuiescence !== undefined && typeof options.releaseQuiescence !== "function" ||
         options.schedule !== undefined && typeof options.schedule !== "function" ||
         options.cancel !== undefined && typeof options.cancel !== "function" ||
         options.onTransition !== undefined && typeof options.onTransition !== "function") {
@@ -219,6 +220,7 @@ class NativePlayerAuthorityHandoffCoordinator {
     this.registry = options.registry;
     this.runtime = options.runtime;
     this.requestQuiescence = options.requestQuiescence;
+    this.releaseQuiescence = options.releaseQuiescence ?? null;
     this.mainOwnerId = requireLogicalId(options.mainOwnerId ?? "main-player-authority", "mainOwnerId");
     if (options.runtime.ownerId !== undefined && options.runtime.ownerId !== this.mainOwnerId) {
       throw new TypeError("native player-authority handoff runtime owner is invalid");
@@ -315,9 +317,11 @@ class NativePlayerAuthorityHandoffCoordinator {
   async performHandoff(request) {
     let ownershipTransferred = false;
     let transferOutcomeUncertain = false;
+    let quiescenceAcknowledged = false;
     try {
       const ack = await this.waitForQuiescence(request);
       validateQuiescenceAck(ack, request);
+      quiescenceAcknowledged = true;
 
       const status = await this.registry.status(request.rendererOwnerId, request.sessionId);
       // Coverage is checked while the renderer still owns the session.  A
@@ -360,13 +364,47 @@ class NativePlayerAuthorityHandoffCoordinator {
       validateActiveSnapshot(active, request);
       this.transition("active");
     } catch (cause) {
-      const faulted = ownershipTransferred || transferOutcomeUncertain;
+      let releaseFailure = null;
+      if (!ownershipTransferred && !transferOutcomeUncertain && quiescenceAcknowledged) {
+        if (!this.releaseQuiescence) {
+          releaseFailure = handoffError(
+            "browser-fence release callback is unavailable",
+            "NATIVE_PLAYER_AUTHORITY_HANDOFF_RELEASE_UNCERTAIN",
+          );
+        } else {
+          try {
+            await this.releaseQuiescence(Object.freeze({
+              kind: "native-player-authority-browser-fence-release-v1",
+              handoffId: request.handoffId,
+              sessionId: request.sessionId,
+              runId: request.runId,
+              checkpoint: request.expectedCheckpoint,
+              releaseAuthorized: true,
+            }));
+          } catch (error) {
+            // A missing/uncertain hand-back ACK must retain the browser fence.
+            // It is never safe to assume that the IndexedDB CAS did not commit.
+            releaseFailure = error;
+          }
+        }
+      }
+      // Before a validated ACK, main cannot distinguish a rejected request
+      // from "IndexedDB committed but the renderer response was lost". Keep
+      // the old Rust owner and browser state fenced instead of claiming a
+      // reversible block. Only a validated browser-fence ACK plus an explicit
+      // releaseAuthorized hand-back can return to the blocked state.
+      const faulted = ownershipTransferred || transferOutcomeUncertain ||
+        !quiescenceAcknowledged || releaseFailure !== null;
       const error = handoffError(
         faulted
-          ? "native player-authority handoff failed after owner transfer; main ownership is retained"
+          ? ownershipTransferred || transferOutcomeUncertain
+            ? "native player-authority handoff failed after owner transfer; main ownership is retained"
+            : !quiescenceAcknowledged
+              ? "native player-authority quiescence outcome is uncertain; browser state remains fenced"
+              : "native player-authority handoff was blocked but the browser-fence release is uncertain"
           : "native player-authority handoff was blocked before owner transfer",
         faulted ? "NATIVE_PLAYER_AUTHORITY_HANDOFF_FAULTED" : "NATIVE_PLAYER_AUTHORITY_HANDOFF_BLOCKED",
-        cause,
+        releaseFailure ?? cause,
       );
       this.transition(faulted ? "faulted" : "blocked", error);
       throw error;

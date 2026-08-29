@@ -148,7 +148,7 @@ test("handoff binds exact quiescence state, transfers once, and rejects the old 
   assert.equal((await registry.status("main-player-authority", "core-1")).revision, 17);
 });
 
-test("stale or incomplete quiescence ACKs block before status, transfer, or activation", async () => {
+test("stale or incomplete quiescence ACKs fault closed before status, transfer, or activation", async () => {
   const invalidAcks = [
     quiescenceAck(handoffRequest(), { runId: "old-run" }),
     quiescenceAck(handoffRequest(), { revision: 16 }),
@@ -169,9 +169,9 @@ test("stale or incomplete quiescence ACKs block before status, transfer, or acti
     });
     await assert.rejects(
       coordinator.handoff(handoffRequest()),
-      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_HANDOFF_BLOCKED",
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_HANDOFF_FAULTED",
     );
-    assert.equal(coordinator.snapshot().phase, "blocked");
+    assert.equal(coordinator.snapshot().phase, "faulted");
     assert.equal(registry.inspectSession(7, "core-1").ownerEpoch, 1);
     assert.equal(calls.length, 0);
     assert.equal(activated, false);
@@ -181,10 +181,12 @@ test("stale or incomplete quiescence ACKs block before status, transfer, or acti
 test("revision drift and owner closure block without transferring the renderer session", async (t) => {
   await t.test("revision drift", async () => {
     const { registry } = registryWithStatus(() => completeStatus({ revision: 18 }));
+    const releases = [];
     const coordinator = new NativePlayerAuthorityHandoffCoordinator({
       registry,
       runtime: { activate: async () => assert.fail("must not activate") },
       requestQuiescence: async () => quiescenceAck(),
+      releaseQuiescence: async (request) => { releases.push(request); },
     });
     await assert.rejects(coordinator.handoff(handoffRequest()), (error) => {
       assert.equal(error.code, "NATIVE_PLAYER_AUTHORITY_HANDOFF_BLOCKED");
@@ -192,6 +194,14 @@ test("revision drift and owner closure block without transferring the renderer s
       return true;
     });
     assert.equal(registry.inspectSession(7, "core-1").ownerEpoch, 1);
+    assert.deepEqual(releases, [{
+      kind: "native-player-authority-browser-fence-release-v1",
+      handoffId: "handoff-1",
+      sessionId: "core-1",
+      runId: "player-run-1",
+      checkpoint: CHECKPOINT,
+      releaseAuthorized: true,
+    }]);
   });
 
   await t.test("owner closes while quiescing", async () => {
@@ -202,6 +212,7 @@ test("revision drift and owner closure block without transferring the renderer s
       registry,
       runtime: { activate: async () => assert.fail("must not activate") },
       requestQuiescence: () => gate.promise,
+      releaseQuiescence: async () => undefined,
     });
     const operation = coordinator.handoff(handoffRequest());
     await registry.closeOwner(7);
@@ -211,7 +222,7 @@ test("revision drift and owner closure block without transferring the renderer s
   });
 });
 
-test("quiescence timeout is terminal, ignores a late ACK, and duplicate calls cannot retry", async () => {
+test("quiescence timeout is an unknown outcome that faults closed and ignores a late ACK", async () => {
   const gate = deferred();
   let timeoutCallback;
   let cancelled = false;
@@ -237,14 +248,14 @@ test("quiescence timeout is terminal, ignores a late ACK, and duplicate calls ca
   );
   timeoutCallback();
   await assert.rejects(operation, (error) => {
-    assert.equal(error.code, "NATIVE_PLAYER_AUTHORITY_HANDOFF_BLOCKED");
+    assert.equal(error.code, "NATIVE_PLAYER_AUTHORITY_HANDOFF_FAULTED");
     assert.equal(error.cause.code, "NATIVE_PLAYER_AUTHORITY_HANDOFF_QUIESCENCE_TIMEOUT");
     return true;
   });
   gate.resolve(quiescenceAck());
   await Promise.resolve();
   await Promise.resolve();
-  assert.equal(coordinator.snapshot().phase, "blocked");
+  assert.equal(coordinator.snapshot().phase, "faulted");
   assert.equal(calls.length, 0);
   assert.equal(activated, false);
   assert.equal(cancelled, false);
@@ -266,6 +277,7 @@ test("an already in-flight renderer operation prevents handoff until it settles"
     registry,
     runtime: { activate: async () => assert.fail("must not activate") },
     requestQuiescence: async () => quiescenceAck(),
+    releaseQuiescence: async () => undefined,
   });
   await assert.rejects(coordinator.handoff(handoffRequest()), (error) => {
     assert.equal(error.code, "NATIVE_PLAYER_AUTHORITY_HANDOFF_BLOCKED");
@@ -280,10 +292,12 @@ test("an already in-flight renderer operation prevents handoff until it settles"
 
 test("post-transfer activation failure is faulted and never returns ownership to the renderer", async () => {
   const { registry } = registryWithStatus();
+  let released = false;
   const coordinator = new NativePlayerAuthorityHandoffCoordinator({
     registry,
     runtime: { activate: async () => { throw new Error("prepare receipt lost"); } },
     requestQuiescence: async () => quiescenceAck(),
+    releaseQuiescence: async () => { released = true; },
   });
   await assert.rejects(coordinator.handoff(handoffRequest()), (error) => {
     assert.equal(error.code, "NATIVE_PLAYER_AUTHORITY_HANDOFF_FAULTED");
@@ -292,6 +306,7 @@ test("post-transfer activation failure is faulted and never returns ownership to
   assert.equal(coordinator.snapshot().phase, "faulted");
   assert.throws(() => registry.inspectSession(7, "core-1"), /not owned/);
   assert.equal(registry.inspectSession("main-player-authority", "core-1").ownerEpoch, 2);
+  assert.equal(released, false);
 });
 
 test("handoff rejects incomplete authority coverage before transferring ownership", async () => {
@@ -341,6 +356,7 @@ test("handoff rejects incomplete authority coverage before transferring ownershi
     registry,
     runtime,
     requestQuiescence: async () => quiescenceAck(),
+    releaseQuiescence: async () => undefined,
   });
   await assert.rejects(
     coordinator.handoff(handoffRequest()),
@@ -354,6 +370,29 @@ test("handoff rejects incomplete authority coverage before transferring ownershi
   assert.equal(runtime.snapshot().lastErrorCode, null);
   assert.equal(registry.inspectSession(7, "core-1").ownerEpoch, 1);
   assert.throws(() => registry.inspectSession("main-player-authority", "core-1"), /not owned/);
+});
+
+test("a validated browser fence faults closed when explicit hand-back is missing or uncertain", async (t) => {
+  for (const scenario of ["missing-release", "lost-release-ack"]) {
+    await t.test(scenario, async () => {
+      const { registry } = registryWithStatus(() => completeStatus({ revision: 18 }));
+      const coordinator = new NativePlayerAuthorityHandoffCoordinator({
+        registry,
+        runtime: { activate: async () => assert.fail("must not activate") },
+        requestQuiescence: async () => quiescenceAck(),
+        ...(scenario === "lost-release-ack"
+          ? { releaseQuiescence: async () => { throw new Error("release response lost"); } }
+          : {}),
+      });
+      await assert.rejects(
+        coordinator.handoff(handoffRequest()),
+        (error) => error.code === "NATIVE_PLAYER_AUTHORITY_HANDOFF_FAULTED",
+      );
+      assert.equal(coordinator.snapshot().phase, "faulted");
+      assert.equal(registry.inspectSession(7, "core-1").ownerEpoch, 1);
+      assert.throws(() => registry.inspectSession("main-player-authority", "core-1"), /not owned/);
+    });
+  }
 });
 
 test("missing, paused, speedrun, and wrong-version summaries fail closed before transfer", async () => {
@@ -371,6 +410,7 @@ test("missing, paused, speedrun, and wrong-version summaries fail closed before 
       registry,
       runtime: { activate: async () => { activated = true; } },
       requestQuiescence: async () => quiescenceAck(),
+      releaseQuiescence: async () => undefined,
     });
     await assert.rejects(coordinator.handoff(handoffRequest()), (error) => {
       assert.equal(error.code, "NATIVE_PLAYER_AUTHORITY_HANDOFF_BLOCKED");
@@ -399,6 +439,7 @@ test("unknown transfer outcome and malformed post-transfer receipt both fault cl
         registry,
         runtime: { activate: async () => assert.fail("must not activate") },
         requestQuiescence: async () => quiescenceAck(),
+        releaseQuiescence: async () => assert.fail("post/unknown transfer must not release browser fence"),
       });
       await assert.rejects(
         coordinator.handoff(handoffRequest()),
@@ -410,9 +451,15 @@ test("unknown transfer outcome and malformed post-transfer receipt both fault cl
   }
 });
 
-test("handoff remains main-only infrastructure with no renderer control or startup wiring", () => {
+test("handoff wiring is main-initiated, coverage-gated, and exposes no renderer start/transfer invoke", () => {
   const main = readFileSync("desktop/main.cjs", "utf8");
   const preload = readFileSync("desktop/preload.cjs", "utf8");
-  assert.doesNotMatch(main, /native-player-authority-handoff/);
-  assert.doesNotMatch(preload, /playerAuthorityHandoff|player-authority-handoff|requestQuiescence/);
+  assert.match(main, /DSP_NATIVE_PLAYER_AUTHORITY_HANDOFF === "1"/);
+  assert.match(main, /summary\?\.coverage\?\.authorityEligible === true/);
+  assert.match(main, /ipcMain\.on\(NATIVE_PLAYER_AUTHORITY_HANDOFF_RESPONSE_CHANNEL/);
+  assert.doesNotMatch(main, /ipcMain\.handle\([^\n]*native-player-authority-handoff/);
+  assert.match(main, /nativePlayerAuthorityDurableOwner\(rendererOwnerId, request\?\.sessionId\)/);
+  assert.match(preload, /onNativePlayerAuthorityHandoffRequest:/);
+  assert.match(preload, /subscribeRendererToNativePlayerAuthorityHandoff/);
+  assert.doesNotMatch(preload, /invokeNative\([^\n]*native-player-authority-handoff/);
 });

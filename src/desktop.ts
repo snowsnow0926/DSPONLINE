@@ -1,5 +1,12 @@
 import type { BeltConnection, FactoryEntity, ProductionHistorySample } from "./game/types";
 import type { FactoryReadModelBundle } from "./game/factoryReadModels";
+import type {
+  LocalSaveNativeAuthorityCheckpoint,
+  LocalSaveNativeAuthorityHandoffJournal,
+  LocalSaveNativeAuthorityHandoffReconcileDecision,
+  LocalSaveNativeAuthorityLeaseReceipt,
+  LocalSaveWriterFence,
+} from "./game/localSaveAuthorityLease";
 
 export type DesktopUpdateState = "development" | "idle" | "checking" | "available" | "up-to-date" | "downloading" | "downloaded" | "error";
 
@@ -109,6 +116,77 @@ export type DesktopNativePlayerAuthorityState =
   | DesktopNativePlayerAuthorityClockState
   | DesktopNativePlayerAuthorityMacroState;
 
+export interface DesktopNativePlayerAuthorityHandoffPrepareRequest {
+  readonly kind: "native-player-authority-quiescence-prepare-v1";
+  readonly handoffId: string;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly initialRevision: number;
+  readonly timeoutMs: number;
+}
+
+export interface DesktopNativePlayerAuthorityHandoffCommitRequest {
+  readonly kind: "native-player-authority-quiescence-request-v1";
+  readonly handoffId: string;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly checkpoint: LocalSaveNativeAuthorityCheckpoint;
+  readonly publicWriterFence: LocalSaveWriterFence;
+  readonly settledDeadlineMs: number;
+}
+
+export interface DesktopNativePlayerAuthorityHandoffCancelRequest {
+  readonly kind: "native-player-authority-quiescence-cancel-v1";
+  readonly handoffId: string;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly releaseAuthorized: true;
+  readonly browserFenceAcquired: false;
+}
+
+export interface DesktopNativePlayerAuthorityHandoffReleaseRequest {
+  readonly kind: "native-player-authority-browser-fence-release-v1";
+  readonly handoffId: string;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly checkpoint: LocalSaveNativeAuthorityCheckpoint;
+  readonly receipt: LocalSaveNativeAuthorityLeaseReceipt;
+  readonly releaseAuthorized: true;
+  readonly decision: LocalSaveNativeAuthorityHandoffReconcileDecision;
+}
+
+export type DesktopNativePlayerAuthorityHandoffRequest =
+  | DesktopNativePlayerAuthorityHandoffPrepareRequest
+  | DesktopNativePlayerAuthorityHandoffCommitRequest
+  | DesktopNativePlayerAuthorityHandoffCancelRequest
+  | DesktopNativePlayerAuthorityHandoffReleaseRequest;
+
+export type DesktopNativePlayerAuthorityHandoffResult =
+  | {
+      readonly kind: "native-player-authority-quiescence-prepared-v1";
+      readonly publicWriterFence: LocalSaveWriterFence;
+      readonly rendererInFlightCoreOperations: 0;
+      readonly workerInFlightCoreOperations: 0;
+      readonly settledDeadlineMs: number;
+    }
+  | {
+      readonly kind: "native-player-authority-browser-fenced-v1";
+      readonly leaseReceipt: LocalSaveNativeAuthorityLeaseReceipt;
+      readonly journal: Extract<LocalSaveNativeAuthorityHandoffJournal, { phase: "browser-fenced" }>;
+      readonly rendererInFlightCoreOperations: 0;
+      readonly workerInFlightCoreOperations: 0;
+    }
+  | {
+      readonly kind: "native-player-authority-quiescence-cancelled-v1";
+      readonly resumedJavaScript: true;
+    }
+  | {
+      readonly kind: "native-player-authority-browser-fence-released-v1";
+      readonly released: true;
+      readonly returnedWriterFence: LocalSaveWriterFence;
+    };
+
 export interface DesktopNativePlayerAuthorityMacroBudgetRequest {
   readonly simulationMilliseconds: number;
   readonly wallMilliseconds: number;
@@ -135,6 +213,12 @@ export interface DesktopBridge {
   /** Read-only transition notifications; unsubscribe removes only this listener. */
   onNativePlayerAuthorityState?: (
     listener: (state: DesktopNativePlayerAuthorityState) => void,
+  ) => () => void;
+  /** Main-generated response-only challenge; it cannot initiate or transfer ownership. */
+  onNativePlayerAuthorityHandoffRequest?: (
+    listener: (
+      request: DesktopNativePlayerAuthorityHandoffRequest,
+    ) => Promise<DesktopNativePlayerAuthorityHandoffResult>,
   ) => () => void;
   /** Budget-only request; session/run/operation IDs cannot be supplied by the renderer. */
   startNativePlayerAuthorityMacro?: (

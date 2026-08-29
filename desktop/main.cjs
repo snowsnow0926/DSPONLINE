@@ -1,5 +1,5 @@
 const { app, BrowserWindow, dialog, ipcMain, Menu, screen, shell } = require("electron");
-const { createHash } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const nodeOs = require("node:os");
 const path = require("node:path");
@@ -38,6 +38,18 @@ const {
   NativeCoreExactRealtimeRustLeaseStore,
 } = require("./native-core-exact-realtime-experiment.cjs");
 const { NativePlayerAuthorityRuntime } = require("./native-player-authority-runtime.cjs");
+const {
+  NativePlayerAuthorityHandoffCoordinator,
+  QUIESCENCE_ACK_KIND,
+} = require("./native-player-authority-handoff.cjs");
+const {
+  CANCEL_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_CANCEL_REQUEST_KIND,
+  COMMIT_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_COMMIT_REQUEST_KIND,
+  NativePlayerAuthorityHandoffIpcBridge,
+  PREPARE_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_PREPARE_REQUEST_KIND,
+  RELEASE_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_RELEASE_REQUEST_KIND,
+  RESPONSE_CHANNEL: NATIVE_PLAYER_AUTHORITY_HANDOFF_RESPONSE_CHANNEL,
+} = require("./native-player-authority-handoff-ipc.cjs");
 const {
   NativePlayerAuthorityCommandBroker,
 } = require("./native-player-authority-command-broker.cjs");
@@ -115,6 +127,11 @@ const maximumResponseBytes = cloudTransferContract.singleSaveResponseLimitBytes;
 const DESKTOP_BASE_SCALE = 0.8;
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 const MAX_NATIVE_V47_IMPORT_BYTES = 256 * 1024 * 1024;
+// Main-owned development gate. Domain coverage remains an independent hard
+// gate inside Rust and the coordinator; setting this flag can never bypass it.
+const nativePlayerAuthorityHandoffFeatureEnabled =
+  process.env.DSP_NATIVE_PLAYER_AUTHORITY_HANDOFF === "1";
+const NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS = 15_000;
 
 function sha256File(filePath) {
   return new Promise((resolve, reject) => {
@@ -148,6 +165,9 @@ let nativePlayerAuthorityCommandBroker = null;
 let nativePlayerAuthorityMacroBroker = null;
 let nativePlayerAuthorityProjectionBroker = null;
 let nativePlayerAuthorityStateBroker = null;
+let nativePlayerAuthorityHandoffIpcBridge = null;
+let nativePlayerAuthorityHandoffCoordinator = null;
+let nativePlayerAuthorityHandoffAttempt = null;
 let nativeHostQuitDrainPromise = null;
 let nativeHostQuitDrainComplete = false;
 let nativeExactRealtimeStartupStatus = unavailableStartupStatus(process.env);
@@ -308,6 +328,187 @@ function validNativeLogicalId(value, maximumLength = 128) {
   return typeof value === "string" && value.length > 0 && value.length <= maximumLength && /^[A-Za-z0-9_.:-]+$/.test(value);
 }
 
+function trustedRendererForNativePlayerAuthority(ownerId) {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed() ||
+      mainWindow.webContents.id !== ownerId) return null;
+  return mainWindow.webContents;
+}
+
+function nativePlayerAuthoritySummaryEligible(summary) {
+  return summary?.revision >= 0 && summary?.stateVersion === 47 && summary?.mode === "normal" &&
+    summary?.paused === false && summary?.coverage?.authorityEligible === true;
+}
+
+function nativePlayerAuthorityDurableOwner(rendererOwnerId, sessionId) {
+  if (!nativeCoreSessions || !validNativeLogicalId(sessionId)) return rendererOwnerId;
+  const runtimeSessionId = nativePlayerAuthorityRuntime?.snapshot()?.sessionId ?? null;
+  const handoffSessionId = nativePlayerAuthorityHandoffCoordinator?.snapshot()?.sessionId ?? null;
+  if (sessionId !== runtimeSessionId && sessionId !== handoffSessionId) return rendererOwnerId;
+  try {
+    const owned = nativeCoreSessions.inspectSession("main-player-authority", sessionId);
+    return owned.ownerId === "main-player-authority" && owned.slot === "normal-main" && owned.state === "owned"
+      ? "main-player-authority"
+      : rendererOwnerId;
+  } catch {
+    return rendererOwnerId;
+  }
+}
+
+async function cancelPreparedNativePlayerAuthorityHandoff(rendererOwnerId, identity) {
+  if (!nativePlayerAuthorityHandoffIpcBridge) return;
+  await nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
+    kind: NATIVE_PLAYER_AUTHORITY_HANDOFF_CANCEL_REQUEST_KIND,
+    handoffId: identity.handoffId,
+    sessionId: identity.sessionId,
+    runId: identity.runId,
+    releaseAuthorized: true,
+    browserFenceAcquired: false,
+  }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
+}
+
+async function performNativePlayerAuthorityHandoff(rendererOwnerId, opened) {
+  if (!nativePlayerAuthorityHandoffFeatureEnabled || nativePlayerAuthorityHandoffAttempt ||
+      !nativePlayerAuthorityHandoffIpcBridge || !nativeCoreSessions || !nativePlayerAuthorityRuntime ||
+      !nativePlayerAuthoritySummaryEligible(opened?.summary) ||
+      nativePlayerAuthorityRuntime.snapshot().phase !== "idle") return null;
+  const identity = Object.freeze({
+    handoffId: `handoff-${randomUUID()}`,
+    runId: `player-run-${randomUUID()}`,
+    sessionId: opened.sessionId,
+  });
+  let prepared = false;
+  let coordinatorStarted = false;
+  const operation = (async () => {
+    try {
+      const preparedResult = await nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
+        kind: NATIVE_PLAYER_AUTHORITY_HANDOFF_PREPARE_REQUEST_KIND,
+        ...identity,
+        initialRevision: opened.summary.revision,
+        timeoutMs: NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS,
+      }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
+      prepared = true;
+
+      // The renderer has invalidated its legacy async generation and drained
+      // all JS/Worker/save/cloud work. Only now is the final Rust checkpoint
+      // generated, so it cannot race a queued shadow replay.
+      const preCheckpointStatus = normalizeRendererNativeResult(
+        "coreSummary",
+        await nativeCoreSessions.status(rendererOwnerId, identity.sessionId),
+      );
+      if (!nativePlayerAuthoritySummaryEligible(preCheckpointStatus)) {
+        throw Object.assign(new Error("native player-authority coverage is incomplete"), {
+          code: "NATIVE_PLAYER_AUTHORITY_HANDOFF_COVERAGE_INCOMPLETE",
+        });
+      }
+      const savedAtMs = Date.now();
+      const checkpointResult = normalizeRendererNativeResult(
+        "coreCheckpoint",
+        await nativeCoreSessions.checkpoint(rendererOwnerId, {
+          sessionId: identity.sessionId,
+          savedAtMs,
+        }),
+      );
+      if (!nativePlayerAuthoritySummaryEligible(checkpointResult.summary)) {
+        throw Object.assign(new Error("native player-authority checkpoint coverage is incomplete"), {
+          code: "NATIVE_PLAYER_AUTHORITY_HANDOFF_COVERAGE_INCOMPLETE",
+        });
+      }
+      const expectedCheckpoint = Object.freeze({
+        generation: checkpointResult.checkpoint.generation,
+        rootHash: checkpointResult.checkpoint.rootHash,
+        revision: checkpointResult.checkpoint.revision,
+      });
+      let browserFence = null;
+      const coordinator = new NativePlayerAuthorityHandoffCoordinator({
+        registry: nativeCoreSessions,
+        runtime: nativePlayerAuthorityRuntime,
+        mainOwnerId: "main-player-authority",
+        requestQuiescence: async (request) => {
+          const fenced = await nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
+            kind: NATIVE_PLAYER_AUTHORITY_HANDOFF_COMMIT_REQUEST_KIND,
+            handoffId: request.handoffId,
+            sessionId: request.sessionId,
+            runId: request.runId,
+            revision: request.expectedRevision,
+            checkpoint: request.expectedCheckpoint,
+            publicWriterFence: request.publicWriterFence,
+            settledDeadlineMs: request.settledDeadlineMs,
+          }, request.timeoutMs);
+          browserFence = fenced;
+          return Object.freeze({
+            kind: QUIESCENCE_ACK_KIND,
+            handoffId: request.handoffId,
+            sessionId: request.sessionId,
+            runId: request.runId,
+            ownerId: request.rendererOwnerId,
+            revision: request.expectedRevision,
+            checkpoint: request.expectedCheckpoint,
+            publicWriterFence: request.publicWriterFence,
+            settledDeadlineMs: request.settledDeadlineMs,
+            rendererInFlightCoreOperations: fenced.rendererInFlightCoreOperations,
+            workerInFlightCoreOperations: fenced.workerInFlightCoreOperations,
+          });
+        },
+        releaseQuiescence: async (request) => {
+          if (!browserFence || request.releaseAuthorized !== true) {
+            throw Object.assign(new Error("browser-fence release identity is unavailable"), {
+              code: "NATIVE_PLAYER_AUTHORITY_HANDOFF_RELEASE_UNCERTAIN",
+            });
+          }
+          await nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
+            kind: NATIVE_PLAYER_AUTHORITY_HANDOFF_RELEASE_REQUEST_KIND,
+            handoffId: request.handoffId,
+            sessionId: request.sessionId,
+            runId: request.runId,
+            checkpoint: request.checkpoint,
+            receipt: browserFence.leaseReceipt,
+            releaseAuthorized: true,
+            decision: {
+              action: "release-browser-fence",
+              reason: "rust-lease-absent-release-authorized",
+              runId: request.runId,
+              sessionId: request.sessionId,
+              checkpoint: request.checkpoint,
+            },
+          }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
+        },
+      });
+      nativePlayerAuthorityHandoffCoordinator = coordinator;
+      coordinatorStarted = true;
+      return await coordinator.handoff({
+        ...identity,
+        rendererOwnerId,
+        expectedRevision: expectedCheckpoint.revision,
+        expectedCheckpoint,
+        publicWriterFence: preparedResult.publicWriterFence,
+        settledDeadlineMs: preparedResult.settledDeadlineMs,
+        timeoutMs: NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS,
+      });
+    } catch (error) {
+      if (prepared && !coordinatorStarted) {
+        await cancelPreparedNativePlayerAuthorityHandoff(rendererOwnerId, identity).catch(() => undefined);
+      }
+      throw error;
+    }
+  })();
+  nativePlayerAuthorityHandoffAttempt = operation;
+  try {
+    return await operation;
+  } finally {
+    if (nativePlayerAuthorityHandoffAttempt === operation) nativePlayerAuthorityHandoffAttempt = null;
+    if (nativePlayerAuthorityHandoffCoordinator?.snapshot().phase === "blocked") {
+      nativePlayerAuthorityHandoffCoordinator = null;
+    }
+  }
+}
+
+function scheduleNativePlayerAuthorityHandoff(rendererOwnerId, opened) {
+  if (!nativePlayerAuthorityHandoffFeatureEnabled || !nativePlayerAuthoritySummaryEligible(opened?.summary)) return;
+  setImmediate(() => {
+    void performNativePlayerAuthorityHandoff(rendererOwnerId, opened).catch(() => undefined);
+  });
+}
+
 function initializeNativePerformancePolicy() {
   nativePerformancePolicyStore = new NativePerformancePolicyStore({
     userDataPath: app.getPath("userData"),
@@ -351,9 +552,12 @@ async function initializeNativeHost() {
       diskBudgetTargetPath: path.join(rootPath, ".native-save-space-probe"),
     });
     nativeCoreSessions = new NativeCoreSessionRegistry(nativeHostClient);
+    nativePlayerAuthorityHandoffIpcBridge = new NativePlayerAuthorityHandoffIpcBridge({
+      getRenderer: trustedRendererForNativePlayerAuthority,
+    });
     // Main-owned only. There is deliberately no renderer IPC that can call
-    // activate/tick; player cutover remains blocked by Rust domain coverage
-    // and by the future public-primary handoff coordinator.
+    // activate/tick. The internal challenge below can cut over only after the
+    // Rust coverage gate and the public-primary browser fence both succeed.
     const playerAuthorityOwnerId = "main-player-authority";
     nativePlayerAuthorityRuntime = new NativePlayerAuthorityRuntime({
       registry: nativeCoreSessions,
@@ -455,6 +659,9 @@ async function initializeNativeHost() {
     nativePlayerAuthorityMacroBroker = null;
     nativePlayerAuthorityProjectionBroker = null;
     nativePlayerAuthorityStateBroker = null;
+    nativePlayerAuthorityHandoffIpcBridge = null;
+    nativePlayerAuthorityHandoffCoordinator = null;
+    nativePlayerAuthorityHandoffAttempt = null;
   }
   return nativeHostState;
 }
@@ -882,6 +1089,7 @@ function createWindow() {
       if (nativeSaveSessions) void nativeSaveSessions.abortOwner(ownerId);
     },
     closeNativeCoreOwner: (ownerId) => {
+      nativePlayerAuthorityHandoffIpcBridge?.cancelOwner(ownerId);
       if (nativeCoreSessions) void nativeCoreSessions.closeOwner(ownerId);
     },
     cancelApiRequests: cancelAllApiRequests,
@@ -931,6 +1139,13 @@ function configureAutoUpdater() {
     publishUpdateState({ state: "error", message: `自动更新不可用：${error instanceof Error ? error.message : "初始化失败"}` });
   }
 }
+
+// Response-only channel: a renderer cannot start a handoff through IPC. The
+// bridge accepts a reply only while main holds the matching one-shot challenge
+// for that exact WebContents ID.
+ipcMain.on(NATIVE_PLAYER_AUTHORITY_HANDOFF_RESPONSE_CHANNEL, (event, response) => {
+  nativePlayerAuthorityHandoffIpcBridge?.accept(event, response);
+});
 
 ipcMain.handle("desktop:release-info", () => ({
   isDesktop: true,
@@ -1133,7 +1348,10 @@ ipcMain.handle("desktop:native-core-open", async (event, request) => {
     },
   }, async () => {
     ownerId = requireTrustedNativeSender(event);
-    return nativeCoreSessions.open(ownerId, request);
+    const opened = await nativeCoreSessions.open(ownerId, request);
+    const normalized = normalizeRendererNativeResult("coreOpen", opened);
+    scheduleNativePlayerAuthorityHandoff(ownerId, normalized);
+    return opened;
   });
 });
 
@@ -1553,14 +1771,16 @@ ipcMain.handle("desktop:native-core-checkpoint", async (event, request) => {
     fallbackCode: "NATIVE_CORE_CHECKPOINT_FAILED",
     message: "原生影子检查点生成失败，请重试",
   }, async () => {
-    const ownerId = requireTrustedNativeSender(event);
+    const rendererOwnerId = requireTrustedNativeSender(event);
+    const ownerId = nativePlayerAuthorityDurableOwner(rendererOwnerId, request?.sessionId);
     return nativeCoreSessions.checkpoint(ownerId, request);
   });
 });
 
 ipcMain.handle("desktop:native-core-export-v47", async (event, request) => {
   try {
-    const ownerId = requireTrustedNativeSender(event);
+    const rendererOwnerId = requireTrustedNativeSender(event);
+    const ownerId = nativePlayerAuthorityDurableOwner(rendererOwnerId, request?.sessionId);
     const suggestedName = typeof request?.suggestedName === "string" && /^[A-Za-z0-9._\-\u4e00-\u9fff]{1,160}\.json$/.test(request.suggestedName)
       ? request.suggestedName
       : `dsp-idle-native-${Date.now()}.json`;

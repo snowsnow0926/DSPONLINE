@@ -116,6 +116,49 @@ impl DeterministicRuntime {
             })
     }
 
+    /// Maps fixed-size ascending row chunks into an ordered output buffer.
+    ///
+    /// Parallel eligibility is intentionally based on the original row count,
+    /// not the much smaller chunk count. The chunk boundaries therefore stay
+    /// identical at every worker limit while large, expensive row probes can
+    /// still use the process-lifetime pool. Indexed collection preserves chunk
+    /// order; callers may replay floating-point contributions serially without
+    /// making scheduling observable in authoritative state.
+    pub(crate) fn ordered_chunk_map<R, F>(
+        &self,
+        item_count: usize,
+        rows_per_chunk: usize,
+        map: F,
+    ) -> Vec<R>
+    where
+        R: Send,
+        F: Fn(usize, Range<usize>) -> R + Send + Sync,
+    {
+        assert!(
+            rows_per_chunk > 0,
+            "deterministic chunk size must be positive"
+        );
+        let chunk_count = item_count.div_ceil(rows_per_chunk);
+        let range_for_chunk = |chunk_index: usize| {
+            let start = chunk_index * rows_per_chunk;
+            start..start.saturating_add(rows_per_chunk).min(item_count)
+        };
+        if self.worker_count_for_items(item_count) == 1 {
+            return (0..chunk_count)
+                .map(|chunk_index| map(chunk_index, range_for_chunk(chunk_index)))
+                .collect();
+        }
+        self.pool
+            .as_ref()
+            .expect("parallel deterministic runtime lost its worker pool")
+            .install(|| {
+                (0..chunk_count)
+                    .into_par_iter()
+                    .map(|chunk_index| map(chunk_index, range_for_chunk(chunk_index)))
+                    .collect()
+            })
+    }
+
     pub(crate) fn indexed_try_map<T, R, F>(&self, values: &[T], map: F) -> Result<Vec<R>>
     where
         T: Sync,
@@ -689,6 +732,52 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(error.to_string(), "failure-at-17");
+    }
+
+    #[test]
+    fn ordered_chunks_keep_fixed_boundaries_and_output_order_at_every_worker_limit() {
+        const ROWS_PER_CHUNK: usize = 2_048;
+        let item_count = PARALLEL_MIN_ITEMS + 2_117;
+        let expected = vec![
+            (0, 0..2_048),
+            (1, 2_048..4_096),
+            (2, 4_096..6_144),
+            (3, 6_144..item_count),
+        ];
+
+        for worker_limit in [1, 2, 4, 8] {
+            let runtime = DeterministicRuntime::for_test(worker_limit);
+            let observed =
+                runtime.ordered_chunk_map(item_count, ROWS_PER_CHUNK, |chunk_index, range| {
+                    if chunk_index.is_multiple_of(2) {
+                        std::thread::yield_now();
+                    }
+                    (chunk_index, range)
+                });
+            assert_eq!(observed, expected, "worker count {worker_limit}");
+        }
+    }
+
+    #[test]
+    fn ordered_chunks_choose_parallelism_from_rows_not_chunk_descriptors() {
+        const ROWS_PER_CHUNK: usize = 2_048;
+        let runtime = DeterministicRuntime::for_test(8);
+        let observed =
+            runtime.ordered_chunk_map(PARALLEL_MIN_ITEMS + 1, ROWS_PER_CHUNK, |_, range| {
+                (range, rayon::current_thread_index())
+            });
+
+        assert_eq!(observed.len(), 3);
+        assert!(
+            observed.iter().all(|(_, worker)| worker.is_some()),
+            "three descriptors must still execute in the worker pool because the source has over 4,096 rows"
+        );
+
+        let small =
+            runtime.ordered_chunk_map(PARALLEL_MIN_ITEMS - 1, ROWS_PER_CHUNK, |_, range| {
+                (range, rayon::current_thread_index())
+            });
+        assert!(small.iter().all(|(_, worker)| worker.is_none()));
     }
 
     #[test]

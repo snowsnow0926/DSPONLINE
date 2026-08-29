@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Range;
 
 use anyhow::{anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,7 @@ const TIERED_HOUR_SECONDS: f64 = 3_600.0;
 const TIERED_HISTORY_RETENTION_SECONDS: f64 = 24.0 * TIERED_HOUR_SECONDS;
 const TIERED_HISTORY_SIDECAR_FORMAT_VERSION: u16 = 1;
 const MAX_TIERED_HISTORY_SIDECAR_SAMPLES: usize = 32;
+const HISTORY_PROBE_CHUNK_ROWS: usize = 2_048;
 
 #[derive(Debug, Clone, Copy)]
 struct ProductionHistoryBoundary {
@@ -106,32 +108,29 @@ fn add_planet_rate(target: &mut PlanetRateAccumulator, planet: &str, item: &str,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn add_history_entity_rates<'a>(
+fn visit_history_entity_rates<'a, F>(
     state: &'a CoreState,
     index: usize,
     entity: &Map<String, Value>,
     kind: &str,
-    planet: &str,
+    planet: &'a str,
     building: &str,
     recipe_cache: &mut HashMap<u32, Option<&'a crate::catalog::RecipeDefinition>>,
-    production: &mut RateAccumulator,
-    consumption: &mut RateAccumulator,
-    planet_production: &mut PlanetRateAccumulator,
-    planet_consumption: &mut PlanetRateAccumulator,
-) {
+    mut visit: F,
+) where
+    F: FnMut(HistoryRateTarget, &'a str, &'a str, f64),
+{
     let rate = finite_number(entity.get("productionRate")).unwrap_or(0.0);
     if kind == "vein" {
         let Some(resource) = state.symbols.resolve(state.entities.resources[index]) else {
             return;
         };
-        add_rate(production, resource, rate);
-        add_planet_rate(planet_production, planet, resource, rate);
+        visit(HistoryRateTarget::Production, planet, resource, rate);
     } else if building == "orbital_collector" {
         let Some(item_id) = state.symbols.resolve(state.entities.stored_items[index]) else {
             return;
         };
-        add_rate(production, item_id, rate);
-        add_planet_rate(planet_production, planet, item_id, rate);
+        visit(HistoryRateTarget::Production, planet, item_id, rate);
     } else if kind == "machine" {
         let recipe_symbol = state.entities.recipes[index];
         let Some(recipe) = *recipe_cache.entry(recipe_symbol).or_insert_with(|| {
@@ -144,15 +143,216 @@ fn add_history_entity_rates<'a>(
         };
         for input in &recipe.inputs {
             let amount = rate * input.amount;
-            add_rate(consumption, &input.item_id, amount);
-            add_planet_rate(planet_consumption, planet, &input.item_id, amount);
+            visit(
+                HistoryRateTarget::Consumption,
+                planet,
+                &input.item_id,
+                amount,
+            );
         }
         for output in &recipe.outputs {
             let amount = rate * output.amount;
-            add_rate(production, &output.item_id, amount);
-            add_planet_rate(planet_production, planet, &output.item_id, amount);
+            visit(
+                HistoryRateTarget::Production,
+                planet,
+                &output.item_id,
+                amount,
+            );
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HistoryRateTarget {
+    Production,
+    Consumption,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HistoryInventoryContribution<'a> {
+    item: &'a str,
+    amount: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HistoryRateContribution<'a> {
+    target: HistoryRateTarget,
+    planet: &'a str,
+    item: &'a str,
+    amount: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HistoryUnitContribution {
+    count: f64,
+    utilization: f64,
+}
+
+struct HistoryProbeChunk<'a> {
+    start: usize,
+    end: usize,
+    inventory: Vec<HistoryInventoryContribution<'a>>,
+    rates: Vec<HistoryRateContribution<'a>>,
+    units: Vec<HistoryUnitContribution>,
+}
+
+fn inspect_history_probe_chunk<'a>(
+    state: &'a CoreState,
+    entities: &'a [Value],
+    range: Range<usize>,
+    refresh: bool,
+) -> HistoryProbeChunk<'a> {
+    let start = range.start;
+    let end = range.end;
+    let row_count = range.len();
+    let mut inventory = Vec::with_capacity(if refresh {
+        row_count.saturating_mul(2)
+    } else {
+        0
+    });
+    let mut rates = Vec::with_capacity(row_count.saturating_mul(2));
+    let mut units = Vec::with_capacity(if refresh { row_count } else { 0 });
+    let mut recipe_cache = HashMap::<u32, Option<&crate::catalog::RecipeDefinition>>::new();
+
+    for index in range {
+        let Some(entity) = entities[index].as_object() else {
+            continue;
+        };
+        let kind = state
+            .symbols
+            .resolve(state.entities.kinds[index])
+            .unwrap_or_default();
+        let planet = state
+            .symbols
+            .resolve(state.entities.planets[index])
+            .unwrap_or_default();
+        let building = state
+            .symbols
+            .resolve(state.entities.buildings[index])
+            .unwrap_or_default();
+
+        if refresh {
+            for record in [entity.get("inputs"), entity.get("outputs")] {
+                let Some(record) = record.and_then(Value::as_object) else {
+                    continue;
+                };
+                for (item, amount) in record {
+                    if let Some(amount) = finite_number(Some(amount)) {
+                        inventory.push(HistoryInventoryContribution {
+                            item,
+                            amount: amount.floor(),
+                        });
+                    }
+                }
+            }
+            if kind == "machine" || kind == "vein" && state.entities.miner_counts[index] > 0.0 {
+                let count = if kind == "vein" {
+                    state.entities.miner_counts[index]
+                } else {
+                    state.entities.machine_counts[index]
+                };
+                units.push(HistoryUnitContribution {
+                    count,
+                    utilization: finite_number(entity.get("utilization")).unwrap_or(0.0),
+                });
+            }
+        }
+
+        visit_history_entity_rates(
+            state,
+            index,
+            entity,
+            kind,
+            planet,
+            building,
+            &mut recipe_cache,
+            |target, planet, item, amount| {
+                rates.push(HistoryRateContribution {
+                    target,
+                    planet,
+                    item,
+                    amount,
+                });
+            },
+        );
+    }
+
+    HistoryProbeChunk {
+        start,
+        end,
+        inventory,
+        rates,
+        units,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_history_rate_contribution(
+    contribution: HistoryRateContribution<'_>,
+    production: &mut RateAccumulator,
+    consumption: &mut RateAccumulator,
+    planet_production: &mut PlanetRateAccumulator,
+    planet_consumption: &mut PlanetRateAccumulator,
+) {
+    match contribution.target {
+        HistoryRateTarget::Production => {
+            add_rate(production, contribution.item, contribution.amount);
+            add_planet_rate(
+                planet_production,
+                contribution.planet,
+                contribution.item,
+                contribution.amount,
+            );
+        }
+        HistoryRateTarget::Consumption => {
+            add_rate(consumption, contribution.item, contribution.amount);
+            add_planet_rate(
+                planet_consumption,
+                contribution.planet,
+                contribution.item,
+                contribution.amount,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_history_entity_rates<'a>(
+    state: &'a CoreState,
+    index: usize,
+    entity: &Map<String, Value>,
+    kind: &str,
+    planet: &'a str,
+    building: &str,
+    recipe_cache: &mut HashMap<u32, Option<&'a crate::catalog::RecipeDefinition>>,
+    production: &mut RateAccumulator,
+    consumption: &mut RateAccumulator,
+    planet_production: &mut PlanetRateAccumulator,
+    planet_consumption: &mut PlanetRateAccumulator,
+) {
+    visit_history_entity_rates(
+        state,
+        index,
+        entity,
+        kind,
+        planet,
+        building,
+        recipe_cache,
+        |target, planet, item, amount| {
+            apply_history_rate_contribution(
+                HistoryRateContribution {
+                    target,
+                    planet,
+                    item,
+                    amount,
+                },
+                production,
+                consumption,
+                planet_production,
+                planet_consumption,
+            );
+        },
+    );
 }
 
 fn rates_to_value(values: RateAccumulator) -> Value {
@@ -952,69 +1152,150 @@ impl CoreState {
             );
         }
         if full_entity_scan {
-            for (index, entity) in entities.iter().enumerate() {
-                let Some(entity) = entity.as_object() else {
-                    continue;
-                };
-                if let Some(metrics) = &mut campaign_factory_metrics {
-                    metrics.observe_indexed_entity(self, index, entity);
-                }
-                // Kind, planet, building, recipe and resource are topology
-                // fields. They already live in compact columns and do not
-                // change during an ordinary simulation revision.
-                let kind = self
-                    .symbols
-                    .resolve(self.entities.kinds[index])
-                    .unwrap_or_default();
-                let planet = self
-                    .symbols
-                    .resolve(self.entities.planets[index])
-                    .unwrap_or_default();
-                let building = self
-                    .symbols
-                    .resolve(self.entities.buildings[index])
-                    .unwrap_or_default();
-                if let Some(inventory) = &mut inventory_values {
-                    for record in [entity.get("inputs"), entity.get("outputs")] {
-                        let Some(record) = record.and_then(Value::as_object) else {
-                            continue;
-                        };
-                        for (item, amount) in record {
-                            if let Some(amount) = finite_number(Some(amount)) {
-                                add_rate(inventory, item, amount.floor());
+            if runtime.worker_count_for_items(entities.len()) == 1 {
+                // Keep the legacy loop intact for small saves and explicit
+                // one-worker operation. This avoids allocating contribution
+                // buffers where parallel inspection cannot pay for them.
+                for (index, entity) in entities.iter().enumerate() {
+                    let Some(entity) = entity.as_object() else {
+                        continue;
+                    };
+                    if let Some(metrics) = &mut campaign_factory_metrics {
+                        metrics.observe_indexed_entity(self, index, entity);
+                    }
+                    // Kind, planet, building, recipe and resource are topology
+                    // fields. They already live in compact columns and do not
+                    // change during an ordinary simulation revision.
+                    let kind = self
+                        .symbols
+                        .resolve(self.entities.kinds[index])
+                        .unwrap_or_default();
+                    let planet = self
+                        .symbols
+                        .resolve(self.entities.planets[index])
+                        .unwrap_or_default();
+                    let building = self
+                        .symbols
+                        .resolve(self.entities.buildings[index])
+                        .unwrap_or_default();
+                    if let Some(inventory) = &mut inventory_values {
+                        for record in [entity.get("inputs"), entity.get("outputs")] {
+                            let Some(record) = record.and_then(Value::as_object) else {
+                                continue;
+                            };
+                            for (item, amount) in record {
+                                if let Some(amount) = finite_number(Some(amount)) {
+                                    add_rate(inventory, item, amount.floor());
+                                }
                             }
                         }
                     }
+                    if refresh
+                        && (kind == "machine"
+                            || kind == "vein" && self.entities.miner_counts[index] > 0.0)
+                    {
+                        let count = if kind == "vein" {
+                            self.entities.miner_counts[index]
+                        } else {
+                            self.entities.machine_counts[index]
+                        };
+                        let utilization = finite_number(entity.get("utilization")).unwrap_or(0.0);
+                        productive_units += count;
+                        utilized_units += count * utilization;
+                        if utilization > EPSILON {
+                            active += count;
+                        }
+                    }
+                    add_history_entity_rates(
+                        self,
+                        index,
+                        entity,
+                        kind,
+                        planet,
+                        building,
+                        &mut recipe_cache,
+                        &mut production,
+                        &mut consumption,
+                        &mut planet_production,
+                        &mut planet_consumption,
+                    );
                 }
-                if refresh
-                    && (kind == "machine"
-                        || kind == "vein" && self.entities.miner_counts[index] > 0.0)
-                {
-                    let count = if kind == "vein" {
-                        self.entities.miner_counts[index]
-                    } else {
-                        self.entities.machine_counts[index]
-                    };
-                    let utilization = finite_number(entity.get("utilization")).unwrap_or(0.0);
-                    productive_units += count;
-                    utilized_units += count * utilization;
-                    if utilization > EPSILON {
-                        active += count;
+            } else {
+                let inspect_started = std::time::Instant::now();
+                let probe_chunks = runtime.ordered_chunk_map(
+                    entities.len(),
+                    HISTORY_PROBE_CHUNK_ROWS,
+                    |_, range| inspect_history_probe_chunk(self, entities, range, refresh),
+                );
+                let inspect_millis = inspect_started.elapsed().as_secs_f64() * 1_000.0;
+                let inventory_contributions = probe_chunks
+                    .iter()
+                    .map(|chunk| chunk.inventory.len())
+                    .sum::<usize>();
+                let rate_contributions = probe_chunks
+                    .iter()
+                    .map(|chunk| chunk.rates.len())
+                    .sum::<usize>();
+                let unit_contributions = probe_chunks
+                    .iter()
+                    .map(|chunk| chunk.units.len())
+                    .sum::<usize>();
+                let replay_started = std::time::Instant::now();
+                for chunk in probe_chunks {
+                    let HistoryProbeChunk {
+                        start,
+                        end,
+                        inventory,
+                        rates,
+                        units,
+                    } = chunk;
+                    if let Some(metrics) = &mut campaign_factory_metrics {
+                        for (index, entity) in entities[start..end].iter().enumerate() {
+                            if let Some(entity) = entity.as_object() {
+                                metrics.observe_indexed_entity(self, start + index, entity);
+                            }
+                        }
+                    }
+                    if let Some(target) = &mut inventory_values {
+                        for contribution in inventory {
+                            add_rate(target, contribution.item, contribution.amount);
+                        }
+                    }
+                    for contribution in units {
+                        productive_units += contribution.count;
+                        utilized_units += contribution.count * contribution.utilization;
+                        if contribution.utilization > EPSILON {
+                            active += contribution.count;
+                        }
+                    }
+                    for contribution in rates {
+                        apply_history_rate_contribution(
+                            contribution,
+                            &mut production,
+                            &mut consumption,
+                            &mut planet_production,
+                            &mut planet_consumption,
+                        );
                     }
                 }
-                add_history_entity_rates(
-                    self,
-                    index,
-                    entity,
-                    kind,
-                    planet,
-                    building,
-                    &mut recipe_cache,
-                    &mut production,
-                    &mut consumption,
-                    &mut planet_production,
-                    &mut planet_consumption,
-                );
+                if profile_enabled {
+                    eprintln!(
+                        "DSP_NATIVE_CORE_PROFILE\thistory-probe-counters\tworkers={}\tchunks={}\trows={}\tinventory={}\trates={}\tunits={}",
+                        runtime.worker_count_for_items(entities.len()),
+                        entities.len().div_ceil(HISTORY_PROBE_CHUNK_ROWS),
+                        entities.len(),
+                        inventory_contributions,
+                        rate_contributions,
+                        unit_contributions,
+                    );
+                    eprintln!(
+                        "DSP_NATIVE_CORE_PROFILE\thistory-probe-inspect\t{inspect_millis:.3}"
+                    );
+                    eprintln!(
+                        "DSP_NATIVE_CORE_PROFILE\thistory-probe-replay\t{:.3}",
+                        replay_started.elapsed().as_secs_f64() * 1_000.0,
+                    );
+                }
             }
         } else {
             for &index in rate_indices {
@@ -1478,7 +1759,7 @@ mod tests {
                     simulation_order: 0,
                     orbital_yields: HashMap::new(),
                 }],
-                items: ["iron_ore", "iron_ingot"]
+                items: ["iron_ore", "iron_ingot", "hydrogen", "mod_item_beta"]
                     .into_iter()
                     .map(|id| ItemDefinition {
                         id: id.to_owned(),
@@ -1490,24 +1771,58 @@ mod tests {
                 buildings: vec![
                     history_fixture_building("arc_smelter", "machine", 0.0),
                     history_fixture_building("solar_panel", "power", 1_000.0),
+                    history_fixture_building("mining_machine", "machine", 0.0),
+                    history_fixture_building("orbital_collector", "station", 0.0),
+                    history_fixture_building("mod_assembler_beta", "machine", 0.0),
                 ],
-                recipes: vec![RecipeDefinition {
-                    id: "iron_ingot".to_owned(),
-                    name: "iron_ingot".to_owned(),
-                    building_id: "arc_smelter".to_owned(),
-                    duration: 1.0,
-                    required_tech_id: None,
-                    recursive_priority: 0.0,
-                    recursive_manufacturing: false,
-                    inputs: vec![ItemAmount {
-                        item_id: "iron_ore".to_owned(),
-                        amount: 1.0,
-                    }],
-                    outputs: vec![ItemAmount {
-                        item_id: "iron_ingot".to_owned(),
-                        amount: 1.0,
-                    }],
-                }],
+                recipes: vec![
+                    RecipeDefinition {
+                        id: "iron_ingot".to_owned(),
+                        name: "iron_ingot".to_owned(),
+                        building_id: "arc_smelter".to_owned(),
+                        duration: 1.0,
+                        required_tech_id: None,
+                        recursive_priority: 0.0,
+                        recursive_manufacturing: false,
+                        inputs: vec![ItemAmount {
+                            item_id: "iron_ore".to_owned(),
+                            amount: 1.0,
+                        }],
+                        outputs: vec![ItemAmount {
+                            item_id: "iron_ingot".to_owned(),
+                            amount: 1.0,
+                        }],
+                    },
+                    RecipeDefinition {
+                        id: "mod_recipe_beta".to_owned(),
+                        name: "mod_recipe_beta".to_owned(),
+                        building_id: "mod_assembler_beta".to_owned(),
+                        duration: 0.5,
+                        required_tech_id: None,
+                        recursive_priority: 0.0,
+                        recursive_manufacturing: false,
+                        inputs: vec![
+                            ItemAmount {
+                                item_id: "iron_ingot".to_owned(),
+                                amount: 0.125,
+                            },
+                            ItemAmount {
+                                item_id: "hydrogen".to_owned(),
+                                amount: 1.005,
+                            },
+                        ],
+                        outputs: vec![
+                            ItemAmount {
+                                item_id: "mod_item_beta".to_owned(),
+                                amount: 0.335,
+                            },
+                            ItemAmount {
+                                item_id: "hydrogen".to_owned(),
+                                amount: 0.005,
+                            },
+                        ],
+                    },
+                ],
                 constructions: Vec::new(),
                 belts: vec![BeltDefinition {
                     tier: 1,
@@ -1517,6 +1832,84 @@ mod tests {
                 technologies: Vec::new(),
             },
             "history-parallel-v1",
+        )
+        .unwrap()
+    }
+
+    fn history_fixture_state(base: &Map<String, Value>, entities: &[Value]) -> CoreState {
+        let base_bytes = serde_json::to_vec(&Value::Object(base.clone())).unwrap();
+        let entity_bytes = serde_json::to_vec(entities).unwrap();
+        let belt_bytes = serde_json::to_vec(&Vec::<Value>::new()).unwrap();
+        let chunks = [
+            ("base", "base", &base_bytes, 0, 1),
+            (
+                "entities:00000000",
+                "entities",
+                &entity_bytes,
+                0,
+                entities.len(),
+            ),
+            ("belts:00000000", "belts", &belt_bytes, 0, 0),
+        ]
+        .into_iter()
+        .map(|(id, kind, bytes, offset, count)| {
+            json!({
+                "id": id,
+                "kind": kind,
+                "offset": offset,
+                "count": count,
+                "checksum": fixture_checksum(bytes),
+                "bytes": bytes.len()
+            })
+        })
+        .collect::<Vec<_>>();
+        let manifest = serde_json::to_vec(&json!({
+            "formatVersion": 1,
+            "envelopeFormatVersion": 2,
+            "mode": "normal",
+            "slot": "main",
+            "stateVersion": 47,
+            "savedAt": 1,
+            "basePrimaryChecksum": "12345678",
+            "chunkRootChecksum": "12345678",
+            "totalBytes": base_bytes.len() + entity_bytes.len() + belt_bytes.len(),
+            "entityCount": entities.len(),
+            "beltCount": 0,
+            "chunks": chunks
+        }))
+        .unwrap();
+        let records = BTreeMap::from([
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.manifest".to_owned(),
+                manifest,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.base".to_owned(),
+                base_bytes,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.entities%3A00000000"
+                    .to_owned(),
+                entity_bytes,
+            ),
+            (
+                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.belts%3A00000000".to_owned(),
+                belt_bytes,
+            ),
+        ]);
+        CoreState::from_internal_records(
+            CoreCheckpointIdentity {
+                slot: "normal-main".to_owned(),
+                generation: 1,
+                root_hash: "a".repeat(64),
+                revision: 7,
+                state_version: 47,
+                mode: "normal".to_owned(),
+                registry_fingerprint: "history-parallel-v1".to_owned(),
+                base_primary_checksum: "12345678".to_owned(),
+            },
+            &records,
+            history_fixture_catalog(),
         )
         .unwrap()
     }
@@ -1593,87 +1986,107 @@ mod tests {
             "galaxy": { "profiles": { "home": { "oceanType": "none" } } },
             "totalProduced": {}
         });
-        let base_bytes = serde_json::to_vec(&base).unwrap();
-        let entity_bytes = serde_json::to_vec(&entities).unwrap();
-        let belt_bytes = serde_json::to_vec(&Vec::<Value>::new()).unwrap();
-        let chunks = [
-            ("base", "base", &base_bytes, 0, 1),
-            (
-                "entities:00000000",
-                "entities",
-                &entity_bytes,
-                0,
-                entities.len(),
-            ),
-            ("belts:00000000", "belts", &belt_bytes, 0, 0),
-        ]
-        .into_iter()
-        .map(|(id, kind, bytes, offset, count)| {
+        let base = base.as_object().unwrap().clone();
+        let state = history_fixture_state(&base, &entities);
+        (state, base, entities, expected_blocked)
+    }
+
+    fn mixed_history_parallel_fixture() -> (CoreState, Map<String, Value>, Vec<Value>) {
+        let (_, mut base, mut entities, _) = history_parallel_fixture();
+        for source_index in 0_usize..4_096 {
+            let entity_index = source_index + 1;
+            let count = 1.0 + (source_index % 3) as f64;
+            let utilization = if source_index % 2 == 0 { 0.0 } else { 1.0 };
+            let rate = match source_index % 11 {
+                0 => -0.0,
+                1 => 0.005,
+                2 => 0.014,
+                _ => 0.01 + source_index as f64 / 10_000.0,
+            };
+            let mut replacement = if source_index.is_multiple_of(41) {
+                json!({
+                    "id": format!("orbital-{source_index:05}"),
+                    "kind": "station",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "orbital_collector",
+                    "storedItemId": "hydrogen",
+                    "machineCount": 0,
+                    "minerCount": 0,
+                    "inputs": { "hydrogen": 0.75 },
+                    "outputs": { "hydrogen": 3.25 },
+                    "progress": 0,
+                    "utilization": utilization,
+                    "productionRate": rate,
+                    "powerFactor": utilization,
+                    "routingCursor": 0,
+                    "stationTrips": 0.005
+                })
+            } else if source_index.is_multiple_of(37) {
+                json!({
+                    "id": format!("vein-{source_index:05}"),
+                    "kind": "vein",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "mining_machine",
+                    "resourceId": "iron_ore",
+                    "machineCount": 0,
+                    "minerCount": count,
+                    "inputs": { "mod_item_beta": 0.75 },
+                    "outputs": { "iron_ore": 7.99 },
+                    "progress": 0.125,
+                    "utilization": utilization,
+                    "productionRate": rate,
+                    "powerFactor": utilization,
+                    "routingCursor": 0
+                })
+            } else if source_index.is_multiple_of(29) {
+                json!({
+                    "id": format!("mod-machine-{source_index:05}"),
+                    "kind": "machine",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "mod_assembler_beta",
+                    "recipeId": "mod_recipe_beta",
+                    "machineCount": count,
+                    "minerCount": 0,
+                    "inputs": { "hydrogen": 8.875, "iron_ingot": 2.125 },
+                    "outputs": { "mod_item_beta": 0.995 },
+                    "progress": 0.375,
+                    "utilization": utilization,
+                    "productionRate": rate,
+                    "powerFactor": utilization,
+                    "routingCursor": 0,
+                    "stationTrips": 0.014,
+                    "sprayCoaterInstalled": source_index.is_multiple_of(58),
+                    "proliferatorBonusProgress": {}
+                })
+            } else {
+                continue;
+            };
+            if source_index == 0 {
+                replacement
+                    .get_mut("inputs")
+                    .and_then(Value::as_object_mut)
+                    .expect("mixed fixture inputs")
+                    .insert("mod:negative-zero".to_owned(), Value::from(-0.0));
+            }
+            entities[entity_index] = replacement;
+        }
+
+        let state = history_fixture_state(&base, &entities);
+        base.insert("manualMined".to_owned(), Value::from(7));
+        base.insert("totalProduced".to_owned(), json!({ "iron_ingot": 40 }));
+        base.insert(
+            "campaign".to_owned(),
             json!({
-                "id": id,
-                "kind": kind,
-                "offset": offset,
-                "count": count,
-                "checksum": fixture_checksum(bytes),
-                "bytes": bytes.len()
-            })
-        })
-        .collect::<Vec<_>>();
-        let manifest = serde_json::to_vec(&json!({
-            "formatVersion": 1,
-            "envelopeFormatVersion": 2,
-            "mode": "normal",
-            "slot": "main",
-            "stateVersion": 47,
-            "savedAt": 1,
-            "basePrimaryChecksum": "12345678",
-            "chunkRootChecksum": "12345678",
-            "totalBytes": base_bytes.len() + entity_bytes.len() + belt_bytes.len(),
-            "entityCount": entities.len(),
-            "beltCount": 0,
-            "chunks": chunks
-        }))
-        .unwrap();
-        let records = BTreeMap::from([
-            (
-                "dsp-idle-network.internal.v1.chunked.v1.normal.manifest".to_owned(),
-                manifest,
-            ),
-            (
-                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.base".to_owned(),
-                base_bytes,
-            ),
-            (
-                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.entities%3A00000000"
-                    .to_owned(),
-                entity_bytes,
-            ),
-            (
-                "dsp-idle-network.internal.v1.chunked.v1.normal.chunk.belts%3A00000000".to_owned(),
-                belt_bytes,
-            ),
-        ]);
-        let state = CoreState::from_internal_records(
-            CoreCheckpointIdentity {
-                slot: "normal-main".to_owned(),
-                generation: 1,
-                root_hash: "a".repeat(64),
-                revision: 7,
-                state_version: 47,
-                mode: "normal".to_owned(),
-                registry_fingerprint: "history-parallel-v1".to_owned(),
-                base_primary_checksum: "12345678".to_owned(),
-            },
-            &records,
-            history_fixture_catalog(),
-        )
-        .unwrap();
-        (
-            state,
-            base.as_object().unwrap().clone(),
-            entities,
-            expected_blocked,
-        )
+                "activeChapterId": "foundation",
+                "activeTaskId": "mine_first_ore",
+                "completedTaskIds": [],
+                "rewardedTaskIds": []
+            }),
+        );
+        (state, base, entities)
     }
 
     fn history_sample(elapsed_seconds: f64, rate: f64, duration: f64) -> Value {
@@ -1795,6 +2208,78 @@ mod tests {
         for candidate in &encoded[1..] {
             assert_eq!(candidate, &encoded[0]);
         }
+    }
+
+    #[test]
+    fn mixed_refresh_probe_preserves_full_json_and_canonical_hash_at_all_worker_limits() {
+        let (state, base, entities) = mixed_history_parallel_fixture();
+        assert!(entities.len() > 4_096);
+        let source_bytes = serde_json::to_vec(&base).unwrap();
+        let source_hash = crate::canonical::canonical_sha256(&Value::Object(base.clone()));
+        let mut oracle_bytes = None;
+        let mut oracle_hash = None;
+        let mut oracle_metrics = None;
+
+        for workers in [1, 2, 4, 8] {
+            let runtime = DeterministicRuntime::for_test(workers);
+            let mut candidate = base.clone();
+            let metrics = state
+                .record_production_history_with_records_and_runtime(
+                    &mut candidate,
+                    &entities,
+                    Some(PreparedBeltFlow::Exact(
+                        crate::belts::BeltFlowAggregate::default(),
+                    )),
+                    &runtime,
+                )
+                .unwrap()
+                .expect("mixed pending campaign should produce a shared probe");
+
+            let bytes = serde_json::to_vec(&candidate).unwrap();
+            let hash = crate::canonical::canonical_sha256(&Value::Object(candidate.clone()));
+            if let Some(oracle) = &oracle_bytes {
+                assert_eq!(&bytes, oracle, "full JSON differs at {workers} workers");
+                assert_eq!(
+                    Some(&hash),
+                    oracle_hash.as_ref(),
+                    "canonical hash differs at {workers} workers"
+                );
+            } else {
+                oracle_bytes = Some(bytes);
+                oracle_hash = Some(hash);
+            }
+            if let Some(oracle) = &oracle_metrics {
+                assert_eq!(
+                    &metrics, oracle,
+                    "campaign probe differs at {workers} workers"
+                );
+            } else {
+                oracle_metrics = Some(metrics);
+            }
+            assert_eq!(serde_json::to_vec(&base).unwrap(), source_bytes);
+            assert_eq!(
+                crate::canonical::canonical_sha256(&Value::Object(base.clone())),
+                source_hash
+            );
+        }
+
+        let oracle: Value = serde_json::from_slice(oracle_bytes.as_ref().unwrap()).unwrap();
+        let sample = oracle
+            .get("productionHistory")
+            .and_then(Value::as_array)
+            .and_then(|history| history.last())
+            .expect("mixed fixture history sample");
+        assert!(sample["productionPerMinute"].get("mod_item_beta").is_some());
+        assert!(sample["productionPerMinute"].get("hydrogen").is_some());
+        assert!(sample["consumptionPerMinute"].get("hydrogen").is_some());
+        assert_eq!(
+            sample["inventory"]["mod:negative-zero"]
+                .as_f64()
+                .unwrap()
+                .to_bits(),
+            0.0_f64.to_bits(),
+            "legacy first-add semantics must turn a negative-zero inventory contribution into positive zero"
+        );
     }
 
     #[test]

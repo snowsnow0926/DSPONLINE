@@ -61,6 +61,12 @@ describe("SelectionToolbar bounded read model", () => {
     expect(host.textContent).toContain("2 节点 · 3 线路");
     expect((host.querySelector("[aria-label='锁定所选建筑']") as HTMLButtonElement).disabled).toBe(false);
     expect((host.querySelector("[aria-label='解锁所选建筑']") as HTMLButtonElement).disabled).toBe(true);
+    expect((host.querySelector("[aria-label='自动整理所选设备']") as HTMLButtonElement).disabled).toBe(false);
+    expect((host.querySelector("[aria-label='复制所选为蓝图']") as HTMLButtonElement).disabled).toBe(false);
+    expect((host.querySelector("[aria-label='批量升级所选设备']") as HTMLButtonElement).disabled).toBe(false);
+    expect((host.querySelector("[aria-label='一键升级所选传送带']") as HTMLButtonElement).disabled).toBe(false);
+    expect((host.querySelector("[title='批量增加 1']") as HTMLButtonElement).disabled).toBe(false);
+    expect((host.querySelector("[aria-label='批量回收所选设备与线路']") as HTMLButtonElement).disabled).toBe(false);
     expect(host.firstElementChild?.getAttribute("data-factory-read-model-source")).toBe("native-core");
     expect(host.firstElementChild?.getAttribute("data-factory-read-model-revision")).toBe("31");
   });
@@ -98,5 +104,71 @@ describe("SelectionToolbar bounded read model", () => {
     expect(onLock).toHaveBeenCalledTimes(1);
     expect((host.querySelector("[aria-label='复制所选为蓝图']") as HTMLButtonElement).disabled).toBe(true);
     expect(host.firstElementChild?.getAttribute("data-factory-read-model-source")).toBe("web-game-state");
+  });
+
+  it("can disable unsafe mutation controls while retaining interaction locks and local actions", () => {
+    const onAutoLayout = vi.fn();
+    const onCopy = vi.fn();
+    const onUpgrade = vi.fn();
+    const onUpgradeBelts = vi.fn();
+    const onBatchIncrease = vi.fn();
+    const onLock = vi.fn();
+    const onRemove = vi.fn();
+    act(() => root.render(<SelectionToolbar
+      model={{
+        schema: "factory-read-model-v1",
+        source: "native-core",
+        revision: 32,
+        activePlanetId: "home",
+        selectedCount: 2,
+        selectedBeltCount: 1,
+        canLock: true,
+        canUnlock: false,
+      }}
+      eligibleCount={2}
+      canUpgrade
+      canUpgradeBelts
+      unsafeActionsEnabled={false}
+      onFocus={noop}
+      onAutoLayout={onAutoLayout}
+      onCopy={onCopy}
+      onUpgrade={onUpgrade}
+      onUpgradeBelts={onUpgradeBelts}
+      onBatchIncrease={onBatchIncrease}
+      onLock={onLock}
+      onUnlock={noop}
+      onRemove={onRemove}
+      onClear={noop}
+      onDone={noop}
+    />));
+
+    const disabledControls = [
+      "[aria-label='自动整理所选设备']",
+      "[aria-label='复制所选为蓝图']",
+      "[aria-label='批量升级所选设备']",
+      "[aria-label='一键升级所选传送带']",
+      "[title='批量增加 1']",
+      "[aria-label='自定义批量增加量']",
+      "[aria-label='应用自定义增加量']",
+      "[aria-label='批量回收所选设备与线路']",
+    ];
+    for (const selector of disabledControls) {
+      expect((host.querySelector(selector) as HTMLButtonElement | HTMLInputElement).disabled).toBe(true);
+      act(() => (host.querySelector(selector) as HTMLButtonElement | HTMLInputElement).click());
+    }
+    expect(onAutoLayout).not.toHaveBeenCalled();
+    expect(onCopy).not.toHaveBeenCalled();
+    expect(onUpgrade).not.toHaveBeenCalled();
+    expect(onUpgradeBelts).not.toHaveBeenCalled();
+    expect(onBatchIncrease).not.toHaveBeenCalled();
+    expect(onRemove).not.toHaveBeenCalled();
+
+    const lock = host.querySelector("[aria-label='锁定所选建筑']") as HTMLButtonElement;
+    expect(lock.disabled).toBe(false);
+    act(() => lock.click());
+    expect(onLock).toHaveBeenCalledTimes(1);
+    expect((host.querySelector("[aria-label='定位到所选设备']") as HTMLButtonElement).disabled).toBe(false);
+    expect((host.querySelector("[aria-label='清空选择']") as HTMLButtonElement).disabled).toBe(false);
+    expect((host.querySelector("[aria-label='完成多选']") as HTMLButtonElement).disabled).toBe(false);
   });
 });

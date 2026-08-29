@@ -1,5 +1,10 @@
 import { MAX_BUILDING_BUFFER_LIMIT, STATION_SLOT_COUNT } from "./engine";
 import {
+  FACTORY_READ_MODEL_LIMITS,
+  type BoundedReadModelRows,
+  type SelectedEntityReadModel,
+} from "./factoryReadModels";
+import {
   SIMULATION_RUNTIME_PROTOCOL_VERSION,
   type SimulationCommandPatch,
   type SimulationValuePatch,
@@ -42,6 +47,17 @@ export interface NativeProjectedStationLimitsCommandInput {
   readonly currentMaxStock: number;
   readonly requestedMinStock: number;
   readonly requestedMaxStock: number;
+}
+
+export type NativeProjectedInteractionLockEntityRow = Pick<
+  SelectedEntityReadModel,
+  "entityId" | "interactionLocked"
+>;
+
+export interface NativeProjectedInteractionLockCommandInput {
+  readonly baseRevision: number;
+  readonly entityRows: BoundedReadModelRows<NativeProjectedInteractionLockEntityRow>;
+  readonly targetInteractionLocked: boolean;
 }
 
 function validateBaseRevision(baseRevision: number): void {
@@ -95,6 +111,61 @@ function normalizeRequestedStockLimit(value: number): number {
     0,
     Math.min(MAX_BUILDING_BUFFER_LIMIT, Math.floor(Number.isFinite(value) ? value : 0)),
   );
+}
+
+function validateInteractionLockEntityRows(
+  entityRows: BoundedReadModelRows<NativeProjectedInteractionLockEntityRow>,
+): readonly NativeProjectedInteractionLockEntityRow[] {
+  if (!entityRows || !Array.isArray(entityRows.rows) || entityRows.truncated !== false ||
+      !Number.isSafeInteger(entityRows.totalCount) || entityRows.totalCount < 0 ||
+      entityRows.totalCount !== entityRows.rows.length ||
+      entityRows.rows.length > FACTORY_READ_MODEL_LIMITS.selectedEntityRows) {
+    throw new TypeError("原生投影命令所选建筑行必须完整且未截断");
+  }
+  const entityIds = new Set<string>();
+  for (const row of entityRows.rows) {
+    if (!row || typeof row !== "object") {
+      throw new TypeError("原生投影命令所选建筑行无效");
+    }
+    validateLogicalId(row.entityId, "原生投影命令建筑 ID");
+    if (entityIds.has(row.entityId)) {
+      throw new TypeError("原生投影命令建筑 ID 重复");
+    }
+    entityIds.add(row.entityId);
+    if (typeof row.interactionLocked !== "boolean") {
+      throw new TypeError("原生投影命令当前交互锁无效");
+    }
+  }
+  return entityRows.rows;
+}
+
+/**
+ * Builds the Rust interaction-lock batch from one complete bounded selection.
+ * Rows already at the target are omitted, while changed rows retain the exact
+ * projection order. Rust rechecks the revision, IDs, current leaves and shared
+ * boolean target before the command reaches durable staging.
+ */
+export function createNativeProjectedInteractionLockCommand(
+  input: NativeProjectedInteractionLockCommandInput,
+): SimulationCommandPatch | null {
+  validateBaseRevision(input.baseRevision);
+  if (typeof input.targetInteractionLocked !== "boolean") {
+    throw new TypeError("原生投影命令目标交互锁无效");
+  }
+  const rows = validateInteractionLockEntityRows(input.entityRows);
+  const command = emptyCommand(input.baseRevision);
+  for (const row of rows) {
+    if (row.interactionLocked === input.targetInteractionLocked) continue;
+    command.changedEntities.push({
+      id: row.entityId,
+      changes: [{
+        path: ["interactionLocked"],
+        operation: "set",
+        value: input.targetInteractionLocked,
+      }],
+    });
+  }
+  return command.changedEntities.length === 0 ? null : command;
 }
 
 /**

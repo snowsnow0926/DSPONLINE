@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  createNativeProjectedInteractionLockCommand,
   createNativeProjectedPlanetRoleCommand,
   createNativeProjectedStationLimitsCommand,
   createNativeProjectedStationPriorityCommand,
+  type NativeProjectedInteractionLockCommandInput,
 } from "./nativeProjectedPlayerCommands";
 
 function expectEmptyDomains(command: NonNullable<ReturnType<typeof createNativeProjectedPlanetRoleCommand>>): void {
@@ -14,6 +16,15 @@ function expectEmptyDomains(command: NonNullable<ReturnType<typeof createNativeP
 }
 
 describe("native projected player command builders", () => {
+  const interactionRows = (
+    rows: Array<{ entityId: string; interactionLocked: boolean }>,
+    options: { totalCount?: number; truncated?: boolean } = {},
+  ): NativeProjectedInteractionLockCommandInput["entityRows"] => ({
+    rows,
+    totalCount: options.totalCount ?? rows.length,
+    truncated: options.truncated ?? false,
+  });
+
   it("builds a planet-role leaf against the exact projected revision", () => {
     const command = createNativeProjectedPlanetRoleCommand({
       baseRevision: 41,
@@ -117,6 +128,122 @@ describe("native projected player command builders", () => {
       currentRole: "research",
       targetRole: "research",
     })).toBeNull();
+  });
+
+  it("builds one shared interaction-lock batch in bounded projection order", () => {
+    const command = createNativeProjectedInteractionLockCommand({
+      baseRevision: 44,
+      entityRows: interactionRows([
+        { entityId: "selected-z", interactionLocked: false },
+        { entityId: "selected-a", interactionLocked: true },
+        { entityId: "selected-m", interactionLocked: false },
+      ]),
+      targetInteractionLocked: true,
+    })!;
+
+    expect(command.baseRevision).toBe(44);
+    expect(command.changedEntities).toEqual([
+      {
+        id: "selected-z",
+        changes: [{ path: ["interactionLocked"], operation: "set", value: true }],
+      },
+      {
+        id: "selected-m",
+        changes: [{ path: ["interactionLocked"], operation: "set", value: true }],
+      },
+    ]);
+    expect(command.topLevelChanges).toEqual([]);
+    expectEmptyDomains(command);
+  });
+
+  it("emits only changed unlock rows and returns null for empty or unchanged selections", () => {
+    const command = createNativeProjectedInteractionLockCommand({
+      baseRevision: 45,
+      entityRows: interactionRows([
+        { entityId: "already-unlocked", interactionLocked: false },
+        { entityId: "locked-second", interactionLocked: true },
+        { entityId: "locked-third", interactionLocked: true },
+      ]),
+      targetInteractionLocked: false,
+    })!;
+    expect(command.changedEntities.map((row) => row.id)).toEqual(["locked-second", "locked-third"]);
+    expect(command.changedEntities.every((row) => row.changes[0]?.value === false)).toBe(true);
+
+    expect(createNativeProjectedInteractionLockCommand({
+      baseRevision: 46,
+      entityRows: interactionRows([]),
+      targetInteractionLocked: true,
+    })).toBeNull();
+    expect(createNativeProjectedInteractionLockCommand({
+      baseRevision: 46,
+      entityRows: interactionRows([
+        { entityId: "locked-a", interactionLocked: true },
+        { entityId: "locked-b", interactionLocked: true },
+      ]),
+      targetInteractionLocked: true,
+    })).toBeNull();
+  });
+
+  it("fails closed for stale, truncated, duplicate, oversized, or non-boolean lock rows", () => {
+    const oversized = Array.from({ length: 65 }, (_, index) => ({
+      entityId: `selected-${index}`,
+      interactionLocked: false,
+    }));
+    const cases: NativeProjectedInteractionLockCommandInput[] = [
+      {
+        baseRevision: 1,
+        entityRows: interactionRows([{ entityId: "selected-a", interactionLocked: false }], {
+          truncated: true,
+        }),
+        targetInteractionLocked: true,
+      },
+      {
+        baseRevision: 1,
+        entityRows: interactionRows([{ entityId: "selected-a", interactionLocked: false }], {
+          totalCount: 2,
+        }),
+        targetInteractionLocked: true,
+      },
+      {
+        baseRevision: 1,
+        entityRows: interactionRows([
+          { entityId: "duplicate", interactionLocked: false },
+          { entityId: "duplicate", interactionLocked: true },
+        ]),
+        targetInteractionLocked: true,
+      },
+      {
+        baseRevision: 1,
+        entityRows: interactionRows(oversized),
+        targetInteractionLocked: true,
+      },
+      {
+        baseRevision: 1,
+        entityRows: interactionRows([{ entityId: "bad entity", interactionLocked: false }]),
+        targetInteractionLocked: true,
+      },
+      {
+        baseRevision: 1,
+        entityRows: interactionRows([{
+          entityId: "selected-a",
+          interactionLocked: 0 as unknown as boolean,
+        }]),
+        targetInteractionLocked: true,
+      },
+      {
+        baseRevision: 1,
+        entityRows: interactionRows([{ entityId: "selected-a", interactionLocked: false }]),
+        targetInteractionLocked: "true" as unknown as boolean,
+      },
+    ];
+    for (const input of cases) {
+      expect(() => createNativeProjectedInteractionLockCommand(input)).toThrow(TypeError);
+    }
+    expect(() => createNativeProjectedInteractionLockCommand({
+      baseRevision: -1,
+      entityRows: interactionRows([{ entityId: "selected-a", interactionLocked: false }]),
+      targetInteractionLocked: true,
+    })).toThrow(/revision/);
   });
 
   it("rejects invalid projection identities and malformed current limits", () => {

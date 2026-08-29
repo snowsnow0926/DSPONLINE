@@ -172,11 +172,13 @@ export function CanvasRegionEditor({ region, onChange, onRemove, onClose }: {
   );
 }
 
-export function SelectionToolbar({ model, eligibleCount, canUpgrade, canUpgradeBelts, onFocus, onAutoLayout, onCopy, onUpgrade, onUpgradeBelts, onBatchIncrease, onLock, onUnlock, onRemove, onClear, onDone }: {
+export function SelectionToolbar({ model, eligibleCount, canUpgrade, canUpgradeBelts, unsafeActionsEnabled = true, onFocus, onAutoLayout, onCopy, onUpgrade, onUpgradeBelts, onBatchIncrease, onLock, onUnlock, onRemove, onClear, onDone }: {
   model: FactorySelectionToolbarReadModel;
   eligibleCount: number;
   canUpgrade: boolean;
   canUpgradeBelts: boolean;
+  /** Defaults to the historical full toolbar; native authority can opt into lock-only mutations. */
+  unsafeActionsEnabled?: boolean;
   onFocus: () => void;
   onAutoLayout: () => void;
   onCopy: () => void;
@@ -192,6 +194,7 @@ export function SelectionToolbar({ model, eligibleCount, canUpgrade, canUpgradeB
   const { selectedCount, selectedBeltCount, canLock, canUnlock } = model;
   const [customIncrease, setCustomIncrease] = useState("");
   const applyCustomIncrease = () => {
+    if (!unsafeActionsEnabled) return;
     if (!/^\d+$/.test(customIncrease.trim())) return;
     const amount = Number(customIncrease.trim());
     if (Number.isSafeInteger(amount) && amount >= 1 && amount <= 1_000_000) onBatchIncrease(amount);
@@ -207,18 +210,18 @@ export function SelectionToolbar({ model, eligibleCount, canUpgrade, canUpgradeB
     >
       <span><BoxSelect size={14} /><strong>{selectedCount}</strong> 节点 · <strong>{selectedBeltCount}</strong> 线路</span>
       <button type="button" disabled={selectedCount === 0} onClick={onFocus} title="定位到所选设备" aria-label="定位到所选设备"><Focus size={16} /></button>
-      <button type="button" disabled={selectedCount === 0} onClick={onAutoLayout} title="按物流上下游整理所选设备" aria-label="自动整理所选设备"><WandSparkles size={16} /></button>
-      <button type="button" disabled={eligibleCount === 0} onClick={onCopy} title="复制所选设备为蓝图并进入粘贴" aria-label="复制所选为蓝图"><Copy size={16} /></button>
-      <button type="button" disabled={!canUpgrade} onClick={onUpgrade} title="批量升级所有可升级设备" aria-label="批量升级所选设备"><ArrowUp size={16} /></button>
-      <button type="button" disabled={!canUpgradeBelts} onClick={onUpgradeBelts} title="一键升级所有选中传送带并保持连接" aria-label="一键升级所选传送带"><Route size={16} /><ArrowUp size={12} /></button>
-      <div className="selection-toolbar__batch" role="group" aria-label="批量增加建筑或传送带数量">
-        {[1, 10, 100].map((amount) => <button type="button" key={amount} onClick={() => onBatchIncrease(amount)} title={`批量增加 ${amount}`}><Plus size={13} />{amount}</button>)}
-        <input value={customIncrease} onChange={(event) => setCustomIncrease(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); applyCustomIncrease(); } }} inputMode="numeric" pattern="[0-9]*" min={1} max={1_000_000} placeholder="自定义" aria-label="自定义批量增加量" />
-        <button type="button" onClick={applyCustomIncrease} title="应用自定义增加量" aria-label="应用自定义增加量"><Check size={13} /></button>
+      <button type="button" disabled={!unsafeActionsEnabled || selectedCount === 0} onClick={onAutoLayout} title="按物流上下游整理所选设备" aria-label="自动整理所选设备"><WandSparkles size={16} /></button>
+      <button type="button" disabled={!unsafeActionsEnabled || eligibleCount === 0} onClick={onCopy} title="复制所选设备为蓝图并进入粘贴" aria-label="复制所选为蓝图"><Copy size={16} /></button>
+      <button type="button" disabled={!unsafeActionsEnabled || !canUpgrade} onClick={onUpgrade} title="批量升级所有可升级设备" aria-label="批量升级所选设备"><ArrowUp size={16} /></button>
+      <button type="button" disabled={!unsafeActionsEnabled || !canUpgradeBelts} onClick={onUpgradeBelts} title="一键升级所有选中传送带并保持连接" aria-label="一键升级所选传送带"><Route size={16} /><ArrowUp size={12} /></button>
+      <div className="selection-toolbar__batch" role="group" aria-label="批量增加建筑或传送带数量" aria-disabled={!unsafeActionsEnabled}>
+        {[1, 10, 100].map((amount) => <button type="button" key={amount} disabled={!unsafeActionsEnabled} onClick={() => onBatchIncrease(amount)} title={`批量增加 ${amount}`}><Plus size={13} />{amount}</button>)}
+        <input disabled={!unsafeActionsEnabled} value={customIncrease} onChange={(event) => setCustomIncrease(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); applyCustomIncrease(); } }} inputMode="numeric" pattern="[0-9]*" min={1} max={1_000_000} placeholder="自定义" aria-label="自定义批量增加量" />
+        <button type="button" disabled={!unsafeActionsEnabled} onClick={applyCustomIncrease} title="应用自定义增加量" aria-label="应用自定义增加量"><Check size={13} /></button>
       </div>
       <button type="button" disabled={!canLock} onClick={onLock} title="锁定所选建筑" aria-label="锁定所选建筑"><Lock size={16} /></button>
       <button type="button" disabled={!canUnlock} onClick={onUnlock} title="解锁所选建筑" aria-label="解锁所选建筑"><Unlock size={16} /></button>
-      <button className="danger" type="button" onClick={onRemove} title="批量回收所选设备与线路" aria-label="批量回收所选设备与线路"><Trash2 size={16} /></button>
+      <button className="danger" type="button" disabled={!unsafeActionsEnabled} onClick={onRemove} title="批量回收所选设备与线路" aria-label="批量回收所选设备与线路"><Trash2 size={16} /></button>
       <button type="button" onClick={onClear} title="清空当前选择" aria-label="清空选择"><X size={16} /></button>
       <button className="confirm" type="button" onClick={onDone} title="完成多选并返回指针模式" aria-label="完成多选"><Check size={16} /></button>
     </div>

@@ -33,8 +33,9 @@ describe("native stellar workspace App integration", () => {
     expect(app).toMatch(/nativeAuthorityRequired=\{Boolean\(nativePlayerAuthorityBoundFrame\)\}/);
     expect(app).toMatch(/industryReadRequest=\{starMapIndustryReadRequest\}/);
     expect(workspace).toMatch(/nativeAuthorityRequired\s*\? <NativeIndustryConsole/);
-    expect(workspace).toMatch(/玩家权威模式不会回退 JavaScript 存档/);
-    expect(workspace).toMatch(/nativeAuthorityRequired && !nativeReadModel/);
+    expect(workspace).toMatch(/当前不会显示或使用 JavaScript 存档数据/);
+    expect(workspace).toMatch(/view === "map" \? nativeAuthorityRequired \? nativeMapUnavailableBoundary/);
+    expect(workspace).toMatch(/nativeAuthorityRequired \? nativeQuantumUnavailableBoundary : <QuantumInventoryConsole/);
   });
 
   it("renders native routes and indexes without reconstructing authority routes from GameState", () => {
@@ -48,7 +49,17 @@ describe("native stellar workspace App integration", () => {
     expect(workspace).toMatch(/function IndustryConsole[\s\S]*?getStellarRouteSnapshots\(game\)/);
   });
 
-  it("keeps stellar edits on the existing commitGame command path", () => {
+  it("keeps native configuration read-only while legacy edits retain the commitGame path", () => {
+    const industryBranch = workspace.match(/const industryConsole = nativeAuthorityRequired[\s\S]*?;\n/)?.[0] ?? "";
+    const nativeIndustryTag = industryBranch.match(/<NativeIndustryConsole[^>]*\/>/)?.[0] ?? "";
+    expect(nativeIndustryTag).toContain("<NativeIndustryConsole");
+    expect(nativeIndustryTag).not.toContain("onRoleChange={onRoleChange}");
+    expect(nativeIndustryTag).not.toContain("onStationPriorityChange={onStationPriorityChange}");
+    expect(nativeIndustryTag).not.toContain("onStationMinimumLoadChange={onStationMinimumLoadChange}");
+    expect(nativeIndustryTag).not.toContain("onStationLimitsChange={onStationLimitsChange}");
+    expect(industryBranch).toMatch(/: <IndustryConsole game=\{game\}[\s\S]*?onRoleChange=\{onRoleChange\}[\s\S]*?onStationLimitsChange=\{onStationLimitsChange\}/);
+    expect(workspace).toMatch(/原生权威工业配置只读：尚无绑定当前权威版本的直接命令/);
+    expect(workspace).toMatch(/aria-label=\{`\$\{route\.itemLabel\}航线优先级`\}[\s\S]*?value=\{route\.priority\} disabled/);
     expect(app).toMatch(/onRoleChange=\{\(planetId: PlanetId, role: PlanetIndustryRole\) => commitGame/);
     expect(app).toMatch(/onStationPriorityChange=\{[\s\S]*?=> commitGame/);
     expect(app).toMatch(/onStationMinimumLoadChange=\{[\s\S]*?=> commitGame/);

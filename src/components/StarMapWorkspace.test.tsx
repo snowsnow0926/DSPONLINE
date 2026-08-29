@@ -1,12 +1,16 @@
 /** @vitest-environment jsdom */
 
-import { act } from "react";
+import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createInitialState } from "../game/engine";
 import type { NativeStarMapWorkspaceReadModel } from "../game/nativeStellarWorkspaceStore";
+import type { GameState, PlanetIndustryRole } from "../game/types";
+import { AppLocaleProvider } from "../i18n/locale";
 import { clearStableTextDraft } from "./CompositionSafeInput";
 import {
   NativeIndustryConsole,
+  StarMapWorkspace,
   type StarMapIndustryReadRequest,
   type StarMapNativeReadStatus,
 } from "./StarMapWorkspace";
@@ -164,18 +168,70 @@ function renderConsole({
     selector={selector}
     onSelectorChange={onSelectorChange}
     onTravel={vi.fn(() => true)}
-    onRoleChange={vi.fn()}
-    onStationPriorityChange={vi.fn()}
-    onStationMinimumLoadChange={vi.fn()}
-    onStationLimitsChange={vi.fn()}
     onFocusStation={vi.fn()}
   />));
 }
 
+type WorkspaceProps = ComponentProps<typeof StarMapWorkspace>;
+
+function createWorkspaceProps(overrides: Partial<WorkspaceProps> = {}): WorkspaceProps {
+  return {
+    open: true,
+    game: createInitialState(),
+    nativeReadModel: null,
+    nativeReadStatus: "ready",
+    nativeAuthorityRequired: false,
+    industryReadRequest: SELECTOR,
+    onIndustryReadRequest: vi.fn(),
+    onClose: vi.fn(),
+    onExplore: vi.fn(),
+    onColonize: vi.fn(),
+    onTravel: vi.fn(() => true),
+    onRoleChange: vi.fn(),
+    onPlanetMetadataChange: vi.fn(),
+    onSystemNameChange: vi.fn(),
+    onStationPriorityChange: vi.fn(),
+    onStationMinimumLoadChange: vi.fn(),
+    onStationLimitsChange: vi.fn(),
+    onFocusStation: vi.fn(),
+    onUpgradeAllStations: vi.fn(async () => null),
+    onAttachAllQuantumStations: vi.fn(async () => null),
+    onCollectorQuantumModeChange: vi.fn(async () => null),
+    onQuantumItemCapacityChange: vi.fn(),
+    ...overrides,
+  };
+}
+
+function renderWorkspace(overrides: Partial<WorkspaceProps> = {}): WorkspaceProps {
+  const props = createWorkspaceProps(overrides);
+  act(() => root.render(<AppLocaleProvider><StarMapWorkspace {...props} /></AppLocaleProvider>));
+  return props;
+}
+
+function clickButton(label: string): void {
+  const button = Array.from(host.querySelectorAll<HTMLButtonElement>("button"))
+    .find((candidate) => candidate.textContent?.includes(label));
+  if (!button) throw new Error(`missing button: ${label}`);
+  act(() => button.click());
+}
+
+function playerAuthorityPoisonGame(): GameState {
+  const game = createInitialState();
+  return new Proxy(game, {
+    get(_target, property) {
+      throw new Error(`player-authority workspace read GameState.${String(property)}`);
+    },
+  });
+}
+
 beforeEach(() => {
+  window.localStorage.clear();
   clearStableTextDraft("stellar-route-search");
+  clearStableTextDraft("star-map-search");
+  clearStableTextDraft("quantum-inventory-search");
   document.body.innerHTML = "";
   host = document.createElement("div");
+  host.dataset.testAppRoot = "true";
   document.body.append(host);
   root = createRoot(host);
 });
@@ -230,5 +286,139 @@ describe("NativeIndustryConsole", () => {
     const queryRequest = onSelectorChange.mock.calls.find(([request]) => request.query)?.[0] as StarMapIndustryReadRequest;
     expect(new TextEncoder().encode(queryRequest.query).byteLength).toBeLessThanOrEqual(512);
     expect(queryRequest.query.length).toBeGreaterThan(0);
+  });
+
+  it("keeps native authority configuration read-only across 2→0→2 and native-only station IDs", () => {
+    const game = createInitialState();
+    expect(game.entities.some((entity) => entity.id === TARGET_STATION.stationId)).toBe(false);
+    const onRoleChange = vi.fn();
+    const onStationPriorityChange = vi.fn();
+    const onStationMinimumLoadChange = vi.fn();
+    const onStationLimitsChange = vi.fn();
+    renderWorkspace({
+      game,
+      nativeReadModel: READ_MODEL,
+      nativeAuthorityRequired: true,
+      onRoleChange,
+      onStationPriorityChange,
+      onStationMinimumLoadChange,
+      onStationLimitsChange,
+    });
+    clickButton("星际工业");
+
+    const role = host.querySelector<HTMLSelectElement>("[aria-label='原生家园工业角色']")!;
+    const priority = host.querySelector<HTMLSelectElement>("[aria-label='原生铁矿航线航线优先级']")!;
+    const minimumLoad = host.querySelector<HTMLSelectElement>("[aria-label='原生铁矿航线最低装载率']")!;
+    const sourceLimit = host.querySelector<HTMLInputElement>("[aria-label='原生铁矿航线出口保底库存']")!;
+    const targetLimit = host.querySelector<HTMLInputElement>("[aria-label='原生铁矿航线进口库存上限']")!;
+    expect(host.textContent).toContain("配置只读");
+    expect(host.textContent).toContain("未绑定权威命令");
+    for (const control of [role, priority, minimumLoad, sourceLimit, targetLimit]) {
+      expect(control.disabled).toBe(true);
+      expect(control.getAttribute("aria-describedby")).toBe("native-stellar-command-boundary");
+    }
+
+    act(() => {
+      priority.value = "0";
+      priority.dispatchEvent(new Event("change", { bubbles: true }));
+      priority.value = "2";
+      priority.dispatchEvent(new Event("change", { bubbles: true }));
+      role.value = "mining" satisfies PlanetIndustryRole;
+      role.dispatchEvent(new Event("change", { bubbles: true }));
+      minimumLoad.value = "0.1";
+      minimumLoad.dispatchEvent(new Event("change", { bubbles: true }));
+      inputValue(sourceLimit, "0");
+      inputValue(targetLimit, "0");
+    });
+
+    expect(onRoleChange).not.toHaveBeenCalled();
+    expect(onStationPriorityChange).not.toHaveBeenCalled();
+    expect(onStationMinimumLoadChange).not.toHaveBeenCalled();
+    expect(onStationLimitsChange).not.toHaveBeenCalled();
+  });
+});
+
+describe("StarMapWorkspace authority boundaries", () => {
+  it("fails closed when a scoped industry model returns to the map", () => {
+    renderWorkspace({
+      game: playerAuthorityPoisonGame(),
+      nativeReadModel: READ_MODEL,
+      nativeAuthorityRequired: true,
+      industryReadRequest: { systemId: "helios", planetId: "home", routeFilter: "issues", query: "铁" },
+    });
+
+    expect(host.textContent).toContain("原生权威星图探索暂不可用");
+    clickButton("星际工业");
+    expect(host.textContent).toContain("原生铁矿航线");
+    clickButton("星图探索");
+
+    expect(host.textContent).toContain("为避免把当前筛选范围外的行星缺失解释成未殖民或 0");
+    expect(host.querySelector(".star-system-card")).toBeNull();
+    expect(host.querySelector(".star-planet-list")).toBeNull();
+    expect(host.querySelector("[aria-label='搜索星球资料']")).toBeNull();
+    expect(host.querySelector(".stellar-metadata-manager")).toBeNull();
+    expect(host.querySelector("[aria-label='星图批量物流操作']")).toBeNull();
+  });
+
+  it("keeps quantum inventory and all GameState-backed actions unavailable in player authority", () => {
+    const onCollectorQuantumModeChange = vi.fn(async () => null);
+    const onQuantumItemCapacityChange = vi.fn();
+    renderWorkspace({
+      game: playerAuthorityPoisonGame(),
+      nativeReadModel: READ_MODEL,
+      nativeAuthorityRequired: true,
+      onCollectorQuantumModeChange,
+      onQuantumItemCapacityChange,
+    });
+    clickButton("量子库存");
+
+    expect(host.textContent).toContain("原生权威量子库存暂不可用");
+    expect(host.querySelector(".quantum-inventory-console")).toBeNull();
+    expect(host.querySelector("[aria-label='搜索量子库存物品']")).toBeNull();
+    expect(onCollectorQuantumModeChange).not.toHaveBeenCalled();
+    expect(onQuantumItemCapacityChange).not.toHaveBeenCalled();
+  });
+
+  it("keeps the mobile authority tabs navigable without opening GameState-backed details", () => {
+    const props = renderWorkspace({
+      game: playerAuthorityPoisonGame(),
+      nativeReadModel: READ_MODEL,
+      nativeAuthorityRequired: true,
+      industryReadRequest: { systemId: "helios", planetId: "home", routeFilter: "all", query: "" },
+      mobile: true,
+    });
+
+    expect(host.textContent).toContain("原生权威星图探索暂不可用");
+    clickButton("星际工业");
+    expect(host.textContent).toContain("原生铁矿航线");
+    clickButton("量子库存");
+    expect(host.textContent).toContain("原生权威量子库存暂不可用");
+
+    act(() => root.render(<AppLocaleProvider><StarMapWorkspace {...props} mobileSubview="planet:frost" /></AppLocaleProvider>));
+    expect(host.textContent).toContain("原生权威星图探索暂不可用");
+    expect(host.querySelector(".mobile-planet-detail")).toBeNull();
+    expect(host.querySelector(".mobile-star-system-detail")).toBeNull();
+  });
+
+  it("preserves editable map, quantum, and industry surfaces for web/legacy mode", () => {
+    const onRoleChange = vi.fn();
+    renderWorkspace({ onRoleChange });
+
+    expect(host.querySelector("[aria-label='搜索星球资料']")).not.toBeNull();
+    expect(host.querySelector(".stellar-metadata-manager")).not.toBeNull();
+    expect(host.textContent).not.toContain("原生权威星图探索暂不可用");
+    clickButton("量子库存");
+    expect(host.querySelector(".quantum-inventory-console")).not.toBeNull();
+    expect(host.querySelector("[aria-label='搜索量子库存物品']")).not.toBeNull();
+    clickButton("星际工业");
+
+    const role = host.querySelector<HTMLSelectElement>("select[aria-label$='工业角色']")!;
+    expect(role.disabled).toBe(false);
+    const nextRole: PlanetIndustryRole = role.value === "mining" ? "manufacturing" : "mining";
+    act(() => {
+      role.value = nextRole;
+      role.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(onRoleChange).toHaveBeenCalledWith(expect.any(String), nextRole);
   });
 });

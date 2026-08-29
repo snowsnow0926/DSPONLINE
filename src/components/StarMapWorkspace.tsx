@@ -270,10 +270,6 @@ export function NativeIndustryConsole({
   selector,
   onSelectorChange,
   onTravel,
-  onRoleChange,
-  onStationPriorityChange,
-  onStationMinimumLoadChange,
-  onStationLimitsChange,
   onFocusStation,
 }: {
   readModel: NativeStarMapWorkspaceReadModel | null;
@@ -281,10 +277,6 @@ export function NativeIndustryConsole({
   selector: StarMapIndustryReadRequest;
   onSelectorChange: (selector: StarMapIndustryReadRequest) => void;
   onTravel: (planetId: PlanetId) => boolean;
-  onRoleChange: (planetId: PlanetId, role: PlanetIndustryRole) => void;
-  onStationPriorityChange: (entityId: string, slotIndex: number, priority: LogisticsPriority) => void;
-  onStationMinimumLoadChange: (entityId: string, slotIndex: number, minimumLoad: StationMinimumLoad) => void;
-  onStationLimitsChange: (entityId: string, slotIndex: number, minStock: number, maxStock: number) => void;
   onFocusStation: (entityId: string, planetId: PlanetId) => void;
 }) {
   const scopedCatalogPlanets = selector.systemId
@@ -311,7 +303,7 @@ export function NativeIndustryConsole({
         <div><Factory size={15} /><span>工业设备<strong>{readModel ? readModel.planets.reduce((sum, planet) => sum + planet.deviceCount, 0) : "--"}</strong></span></div>
         <div><Route size={15} /><span>航线运行<strong>{readModel ? `${readModel.routeSummary.activeCount}/${readModel.routeSummary.scopeTotalCount}` : "--"}</strong></span></div>
         <div className={(readModel?.routeSummary.blockedCount ?? 0) > 0 ? "warning" : ""}><AlertTriangle size={15} /><span>航线问题<strong>{readModel ? readModel.routeSummary.blockedCount : "--"}</strong></span></div>
-        <div><Search size={15} /><span>当前匹配<strong>{readModel ? readModel.routeSummary.filteredCount : "--"}</strong></span></div>
+        <div id="native-stellar-command-boundary" role="status" aria-label="原生权威工业配置只读：尚无绑定当前权威版本的直接命令" title="角色、优先级、最低装载率与库存上下限尚无绑定当前权威版本的直接命令；不会把原生 ID 交给旧版 JavaScript 存档修改。"><LockKeyhole size={15} /><span>配置只读<strong>未绑定权威命令</strong></span></div>
       </div>
 
       <section className="stellar-system-overview" aria-label="原生权威星系统计与行星工业标签">
@@ -335,7 +327,7 @@ export function NativeIndustryConsole({
                 <button type="button" disabled={!planet.colonized} onClick={() => onTravel(planet.planetId as PlanetId)} title={planet.colonized ? `进入${planet.displayName}` : `${planet.displayName}尚未殖民`}>
                   <i><Orbit size={15} /></i><span><strong>{planet.displayName}</strong><small>{planet.profile.climateName} · {planet.stationCount} 物流站</small></span>
                 </button>
-                <label><span>工业角色</span><select aria-label={`${planet.displayName}工业角色`} value={planet.industryRole} onChange={(event) => onRoleChange(planet.planetId as PlanetId, event.target.value as PlanetIndustryRole)}>{PLANET_ROLES.map((role) => <option value={role} key={role}>{PLANET_INDUSTRY_ROLE_LABELS[role]}</option>)}</select></label>
+                <label><span>工业角色</span><select aria-label={`${planet.displayName}工业角色`} aria-describedby="native-stellar-command-boundary" title="原生权威模式只读：等待绑定当前投影版本的直接命令" value={planet.industryRole} disabled>{PLANET_ROLES.map((role) => <option value={role} key={role}>{PLANET_INDUSTRY_ROLE_LABELS[role]}</option>)}</select></label>
                 <div className="stellar-planet-metrics"><span><Zap size={11} />{Math.round(planet.power.powerFactor * 100)}%</span><span>设备 {planet.deviceCount}</span><span>进 {planet.configuredImportSlotCount}</span><span>出 {planet.configuredExportSlotCount}</span><span>匹配 {matchedRouteCount}</span></div>
                 {congestedStation ? <button className="stellar-problem-jump" type="button" onClick={() => onFocusStation(congestedStation.stationId, congestedStation.planetId as PlanetId)}><LocateFixed size={12} />物流拥堵 {Math.round(congestedStation.congestion * 100)}%</button> : <small className="stellar-depletion"><Timer size={11} />吞吐 {compactNumber(planet.power.totalItemsPerMinute)}/min</small>}
               </div>;
@@ -347,7 +339,7 @@ export function NativeIndustryConsole({
 
       <section className="stellar-route-console" aria-label="原生权威全局物流航线表">
         <header>
-          <div><span>{scopeLabel}调度</span><strong>全局航线表</strong></div>
+          <div><span>{scopeLabel}调度 · 匹配 {readModel?.routeSummary.filteredCount ?? "--"}</span><strong>全局航线表</strong></div>
           <label className="stellar-route-search"><Search size={14} /><StableTextInput draftId="stellar-route-search" value={selector.query} onValueChange={(query) => onSelectorChange({ ...selector, query: clampNativeRouteQuery(query) })} placeholder="搜索物品、行星或物流站" aria-label="搜索全局航线" /></label>
           <div className="stellar-route-filters" role="group" aria-label="航线范围与筛选">
             <select aria-label="星际工业恒星系筛选" value={selector.systemId ?? ""} onChange={(event) => onSelectorChange({ ...selector, systemId: event.target.value ? event.target.value as StarSystemId : null, planetId: null })}>
@@ -371,10 +363,10 @@ export function NativeIndustryConsole({
               <div className="stellar-route-endpoints"><button type="button" disabled={!route.sourceStationId || !route.sourcePlanetId} onClick={() => route.sourceStationId && route.sourcePlanetId && onFocusStation(route.sourceStationId, route.sourcePlanetId as PlanetId)} title={sourceStation?.buildingLabel ?? route.sourceBuildingLabel ?? undefined}>{route.sourceStationLabel}</button><ArrowRight size={14} /><button type="button" onClick={() => onFocusStation(route.targetStationId, route.targetPlanetId as PlanetId)} title={targetStation?.buildingLabel ?? route.targetBuildingLabel ?? undefined}>{route.targetStationLabel}</button></div>
               <div className="stellar-route-metrics"><span>航程 <strong>{formatDistance(route.distanceLy)}</strong></span><span>路径 <strong title={route.routePathLabel}>{route.routePathLabel}</strong></span><span>派遣 <strong>{route.dispatchDirection === "supply-delivery" ? "供应端送货" : route.dispatchDirection === "demand-pickup" ? "需求端取货" : "待定"}</strong></span><span>最长段 <strong>{route.maxLegDistanceLy > 0 ? `${route.maxLegDistanceLy.toFixed(1)} ly` : "-"}</strong></span><span>周期 <strong>{route.durationSeconds.toFixed(1)}s</strong></span><span>吞吐 <strong>{compactNumber(route.throughputPerMinute)}/min</strong></span><span>能耗 <strong>{route.energyMjPerTrip.toFixed(1)} MJ</strong></span><span>翘曲 <strong>{route.warpersPerTrip > 0 ? `${route.warpersPerTrip}/航次` : "无需"}</strong></span><span>策略 <strong>{{ direct: "直达", "relay-preferred": "优先中转", "relay-required": "强制中转" }[route.routePolicy]} · {route.warperBudget}</strong></span></div>
               <div className="stellar-route-policy">
-                <label><span>优先</span><select aria-label={`${route.itemLabel}航线优先级`} value={route.priority} onChange={(event) => onStationPriorityChange(route.targetStationId, route.targetSlotIndex, Number(event.target.value) as LogisticsPriority)}><option value={2}>高</option><option value={1}>中</option><option value={0}>低</option></select></label>
-                <label><span>装载</span><select aria-label={`${route.itemLabel}最低装载率`} value={route.minimumLoad} onChange={(event) => onStationMinimumLoadChange(route.targetStationId, route.targetSlotIndex, Number(event.target.value) as StationMinimumLoad)}><option value={0.1}>10%</option><option value={0.25}>25%</option><option value={0.5}>50%</option><option value={1}>100%</option></select></label>
-                <label><span>出口保底</span><input type="number" min={0} step={10} disabled={!route.sourceStationId || route.sourceSlotIndex == null} value={route.sourceSlotMinStock} aria-label={`${route.itemLabel}出口保底库存`} onChange={(event) => route.sourceStationId && route.sourceSlotIndex != null && onStationLimitsChange(route.sourceStationId, route.sourceSlotIndex, Number(event.target.value), route.sourceSlotMaxStock)} /></label>
-                <label><span>进口上限</span><input type="number" min={0} step={10} value={route.targetSlotMaxStock} aria-label={`${route.itemLabel}进口库存上限`} onChange={(event) => onStationLimitsChange(route.targetStationId, route.targetSlotIndex, route.targetSlotMinStock, Number(event.target.value))} /></label>
+                <label><span>优先</span><select aria-label={`${route.itemLabel}航线优先级`} aria-describedby="native-stellar-command-boundary" title="原生权威模式只读：等待绑定当前投影版本的直接命令" value={route.priority} disabled><option value={2}>高</option><option value={1}>中</option><option value={0}>低</option></select></label>
+                <label><span>装载</span><select aria-label={`${route.itemLabel}最低装载率`} aria-describedby="native-stellar-command-boundary" title="原生权威模式只读：等待绑定当前投影版本的直接命令" value={route.minimumLoad} disabled><option value={0.1}>10%</option><option value={0.25}>25%</option><option value={0.5}>50%</option><option value={1}>100%</option></select></label>
+                <label><span>出口保底</span><input type="number" min={0} step={10} value={route.sourceSlotMinStock} aria-label={`${route.itemLabel}出口保底库存`} aria-describedby="native-stellar-command-boundary" title="原生权威模式只读：等待绑定当前投影版本的直接命令" disabled /></label>
+                <label><span>进口上限</span><input type="number" min={0} step={10} value={route.targetSlotMaxStock} aria-label={`${route.itemLabel}进口库存上限`} aria-describedby="native-stellar-command-boundary" title="原生权威模式只读：等待绑定当前投影版本的直接命令" disabled /></label>
               </div>
               <button className="stellar-route-locate" type="button" onClick={() => onFocusStation(route.targetStationId, route.targetPlanetId as PlanetId)} title={`${nativeRouteRecommendation(route.status)}；定位需求站`} aria-label={`定位${route.itemLabel}需求站`}><LocateFixed size={14} /></button>
             </article>;
@@ -576,7 +568,7 @@ export function StarMapWorkspace({
   ) ? nativeReadModel.activeSystemId as StarSystemId : null;
   const activeSystemId = nativeActiveSystemId ?? (nativeAuthorityRequired ? null : getPlanet(game.activePlanetId).systemId);
   const unlockedCount = nativeAuthorityRequired
-    ? nativeReadModel?.summary.unlockedSystemCount ?? 0
+    ? nativeReadModel?.summary.unlockedSystemCount ?? null
     : STAR_SYSTEM_LIST.filter((system) => isStarSystemUnlocked(game, system.id)).length;
   const pendingUpgradeCount = nativeAuthorityRequired
     ? nativeReadModel?.systems.reduce((sum, system) => sum + system.legacyStationCount, 0) ?? 0
@@ -630,10 +622,22 @@ export function StarMapWorkspace({
     <button className="star-map-batch-actions__collectors" type="button" disabled={batchBusy !== null || pendingCollectorCount === 0} onClick={() => void runBatchAction("collectors", () => onCollectorQuantumModeChange(true))}><ArrowUpFromLine size={14} /><span>量子网络一键接入所有轨道收集器{pendingCollectorCount > 0 ? `（${pendingCollectorCount}）` : ""}</span></button>
     {batchReport ? <div className="star-map-batch-report" role="status" aria-live="polite"><strong>{batchReport.scopeLabel} · {batchReport.actionLabel}</strong><span>成功 {batchReport.successCount} · 跳过 {batchReport.skippedCount}</span>{batchReport.skipReasons.length > 0 ? <small>跳过原因：{batchReport.skipReasons.join("；")}</small> : <small>全部符合条件的目标均已提交</small>}<button type="button" onClick={() => setBatchReport(null)} aria-label="关闭批量操作结果"><X size={12} /></button></div> : null}
   </div>;
-  const nativeReadBoundary = <div className="stellar-route-empty" data-native-stellar-read-status={nativeReadStatus}><Database size={22} /><strong>{nativeReadStatus === "loading" ? "正在同步原生权威星图…" : "原生权威星图暂不可用"}</strong><span>为避免显示旧 revision 或旧 selector，玩家权威模式不会回退 JavaScript 存档。</span></div>;
+  const nativeMapUnavailableBoundary = <div className="stellar-route-empty" data-native-stellar-panel="map-unavailable"><Database size={22} /><strong>原生权威星图探索暂不可用</strong><span>当前薄投影没有提供全局行星搜索、元数据、勘探、殖民与批量动作；为避免把当前筛选范围外的行星缺失解释成未殖民或 0，当前不会显示或使用 JavaScript 存档数据。</span></div>;
+  const nativeQuantumUnavailableBoundary = <div className="stellar-route-empty" data-native-stellar-panel="quantum-unavailable"><Database size={22} /><strong>原生权威量子库存暂不可用</strong><span>量子库存、带宽、容量与收集器切换的原生权威投影尚未接入此界面；当前不会显示或使用 JavaScript 存档数据。</span></div>;
   const industryConsole = nativeAuthorityRequired
-    ? <NativeIndustryConsole readModel={nativeReadModel ?? null} status={nativeReadStatus} selector={industryReadRequest} onSelectorChange={onIndustryReadRequest} onTravel={onTravel} onRoleChange={onRoleChange} onStationPriorityChange={onStationPriorityChange} onStationMinimumLoadChange={onStationMinimumLoadChange} onStationLimitsChange={onStationLimitsChange} onFocusStation={onFocusStation} />
+    ? <NativeIndustryConsole readModel={nativeReadModel ?? null} status={nativeReadStatus} selector={industryReadRequest} onSelectorChange={onIndustryReadRequest} onTravel={onTravel} onFocusStation={onFocusStation} />
     : <IndustryConsole game={game} onTravel={onTravel} onRoleChange={onRoleChange} onStationPriorityChange={onStationPriorityChange} onStationMinimumLoadChange={onStationMinimumLoadChange} onStationLimitsChange={onStationLimitsChange} onFocusStation={onFocusStation} />;
+
+  if (mobile && nativeAuthorityRequired) {
+    return <WorkspaceFrame className={`star-map-workspace star-map-workspace--${view} mobile-workspace mobile-star-map${mobileSubview ? " mobile-workspace--detail" : ""}`} ariaLabel="星图" onRequestClose={onClose}>
+      {!mobileSubview ? <nav className="star-map-tabs mobile-workspace-sticky" role="tablist" aria-label="星图视图"><button type="button" role="tab" aria-selected={view === "map"} className={view === "map" ? "active" : ""} onClick={() => setView("map")}><Telescope size={14} />星图探索</button><button type="button" role="tab" aria-selected={view === "industry"} className={view === "industry" ? "active" : ""} onClick={() => setView("industry")}><Factory size={14} />星际工业</button><button type="button" role="tab" aria-selected={view === "quantum"} className={view === "quantum" ? "active" : ""} onClick={() => setView("quantum")}><Atom size={14} />量子库存</button></nav> : null}
+      <div className="mobile-workspace-scroll">{mobileSubview || view === "map"
+        ? nativeMapUnavailableBoundary
+        : view === "industry"
+          ? industryConsole
+          : nativeQuantumUnavailableBoundary}</div>
+    </WorkspaceFrame>;
+  }
 
   if (mobile) {
     const detailSystemId = mobileSubview?.startsWith("system:") ? mobileSubview.slice(7) as StarSystemId : null;
@@ -647,11 +651,8 @@ export function StarMapWorkspace({
       ? nativePlanetRows?.get(detailPlanet.id)?.colonized ?? (nativeAuthorityRequired ? false : isPlanetColonized(game, detailPlanet.id))
       : false;
     const colonyRequirements = detailPlanet ? getColonizationRequirements(game, detailPlanet.id) : null;
-    if (nativeAuthorityRequired && !nativeReadModel && (mobileSubview || view !== "industry")) {
-      return <WorkspaceFrame className={`star-map-workspace star-map-workspace--${view} mobile-workspace mobile-star-map`} ariaLabel="星图" onRequestClose={onClose}>{nativeReadBoundary}</WorkspaceFrame>;
-    }
     return <WorkspaceFrame className={`star-map-workspace star-map-workspace--${view} mobile-workspace mobile-star-map${mobileSubview ? " mobile-workspace--detail" : ""}`} ariaLabel="星图" onRequestClose={onClose}>
-      {!mobileSubview ? <><nav className="star-map-tabs mobile-workspace-sticky" role="tablist" aria-label="星图视图"><button type="button" role="tab" aria-selected={view === "map"} className={view === "map" ? "active" : ""} onClick={() => setView("map")}><Telescope size={14} />星图探索</button><button type="button" role="tab" aria-selected={view === "industry"} className={view === "industry" ? "active" : ""} onClick={() => setView("industry")}><Factory size={14} />星际工业</button><button type="button" role="tab" aria-selected={view === "quantum"} className={view === "quantum" ? "active" : ""} onClick={() => setView("quantum")}><Atom size={14} />量子库存</button></nav>{view === "industry" ? <div className="mobile-workspace-scroll">{industryConsole}</div> : view === "quantum" ? <div className="mobile-workspace-scroll"><QuantumInventoryConsole game={game} onCollectorModeChange={onCollectorQuantumModeChange} onItemCapacityChange={onQuantumItemCapacityChange} /></div> : <div className="mobile-workspace-scroll mobile-star-system-list"><header><span>已勘探 {unlockedCount}/{STAR_SYSTEM_LIST.length}</span><strong>星区种子 #{nativeAuthorityRequired ? nativeReadModel?.galaxySeed ?? "--" : game.galaxy.seed}</strong></header><label className="star-map-search"><Search size={15} /><StableTextInput draftId="star-map-search" value={mapQuery} onValueChange={setMapQuery} placeholder="搜索名称、备注或标签" aria-label="搜索星球资料" />{mapQuery ? <button type="button" onClick={() => setMapQuery("")} aria-label="清除星图搜索"><X size={14} /></button> : null}</label>{bulkActions}<StellarMetadataManager game={game} compact onPlanetMetadataChange={onPlanetMetadataChange} onSystemNameChange={onSystemNameChange} />{visibleSystems.map((system) => {
+      {!mobileSubview ? <><nav className="star-map-tabs mobile-workspace-sticky" role="tablist" aria-label="星图视图"><button type="button" role="tab" aria-selected={view === "map"} className={view === "map" ? "active" : ""} onClick={() => setView("map")}><Telescope size={14} />星图探索</button><button type="button" role="tab" aria-selected={view === "industry"} className={view === "industry" ? "active" : ""} onClick={() => setView("industry")}><Factory size={14} />星际工业</button><button type="button" role="tab" aria-selected={view === "quantum"} className={view === "quantum" ? "active" : ""} onClick={() => setView("quantum")}><Atom size={14} />量子库存</button></nav>{view === "industry" ? <div className="mobile-workspace-scroll">{industryConsole}</div> : view === "quantum" ? <div className="mobile-workspace-scroll"><QuantumInventoryConsole game={game} onCollectorModeChange={onCollectorQuantumModeChange} onItemCapacityChange={onQuantumItemCapacityChange} /></div> : <div className="mobile-workspace-scroll mobile-star-system-list"><header><span>已勘探 {unlockedCount === null ? "--" : unlockedCount}/{STAR_SYSTEM_LIST.length}</span><strong>星区种子 #{nativeAuthorityRequired ? nativeReadModel?.galaxySeed ?? "--" : game.galaxy.seed}</strong></header><label className="star-map-search"><Search size={15} /><StableTextInput draftId="star-map-search" value={mapQuery} onValueChange={setMapQuery} placeholder="搜索名称、备注或标签" aria-label="搜索星球资料" />{mapQuery ? <button type="button" onClick={() => setMapQuery("")} aria-label="清除星图搜索"><X size={14} /></button> : null}</label>{bulkActions}<StellarMetadataManager game={game} compact onPlanetMetadataChange={onPlanetMetadataChange} onSystemNameChange={onSystemNameChange} />{visibleSystems.map((system) => {
         const nativeSystem = nativeSystemRows?.get(system.id);
         const profile = getStarSystemProfile(game, system.id);
         const unlocked = nativeSystem?.unlocked ?? isStarSystemUnlocked(game, system.id);
@@ -694,7 +695,7 @@ export function StarMapWorkspace({
           <div><span>恒星级导航阵列</span><strong>{view === "map" ? "星图与行星探索" : view === "industry" ? "星际工业调度" : "量子空间库存"}</strong></div>
         </div>
         <div className="star-map-headline">
-          <span>已勘探 <strong>{unlockedCount}/{STAR_SYSTEM_LIST.length}</strong></span>
+          <span>已勘探 <strong>{unlockedCount === null ? "--" : unlockedCount}/{STAR_SYSTEM_LIST.length}</strong></span>
           <span>当前坐标 <strong>{activeSystemLabel}</strong></span>
           <span>最远航标 <strong>{farthestBeaconDistance === null ? "--" : `${farthestBeaconDistance.toFixed(1)} ly`}</strong></span>
           <span>星区种子 <strong>#{nativeAuthorityRequired ? nativeReadModel?.galaxySeed ?? "--" : game.galaxy.seed}</strong></span>
@@ -708,13 +709,13 @@ export function StarMapWorkspace({
         <button type="button" role="tab" aria-selected={view === "quantum"} className={view === "quantum" ? "active" : ""} onClick={() => setView("quantum")}><Atom size={14} />量子库存</button>
       </nav>
 
-      {view === "map" && (!nativeAuthorityRequired || nativeReadModel) ? <div className="star-map-controls">
+      {view === "map" && !nativeAuthorityRequired ? <div className="star-map-controls">
         <div className="star-map-controls__search"><label className="star-map-search"><Search size={15} /><StableTextInput draftId="star-map-search" value={mapQuery} onValueChange={setMapQuery} placeholder="搜索名称、备注或标签" aria-label="搜索星球资料" />{mapQuery ? <button type="button" onClick={() => setMapQuery("")} aria-label="清除星图搜索"><X size={14} /></button> : null}</label><small>{normalizedMapQuery ? `${visibleSystems.length} 个匹配星系` : "可按名称、备注或标签搜索"}</small></div>
         {bulkActions}
         <StellarMetadataManager game={game} onPlanetMetadataChange={onPlanetMetadataChange} onSystemNameChange={onSystemNameChange} />
       </div> : null}
 
-      {view === "map" ? nativeAuthorityRequired && !nativeReadModel ? nativeReadBoundary : <div className="star-map-route" aria-label="恒星系航线">
+      {view === "map" ? nativeAuthorityRequired ? nativeMapUnavailableBoundary : <div className="star-map-route" aria-label="恒星系航线">
         {visibleSystems.map((system, index) => {
           const nativeSystem = nativeSystemRows?.get(system.id);
           const systemProfile = getStarSystemProfile(game, system.id);
@@ -836,7 +837,7 @@ export function StarMapWorkspace({
             </div>
           );
         })}
-      </div> : view === "industry" ? industryConsole : <QuantumInventoryConsole game={game} onCollectorModeChange={onCollectorQuantumModeChange} onItemCapacityChange={onQuantumItemCapacityChange} />}
+      </div> : view === "industry" ? industryConsole : nativeAuthorityRequired ? nativeQuantumUnavailableBoundary : <QuantumInventoryConsole game={game} onCollectorModeChange={onCollectorQuantumModeChange} onItemCapacityChange={onQuantumItemCapacityChange} />}
     </WorkspaceFrame>
   );
 }

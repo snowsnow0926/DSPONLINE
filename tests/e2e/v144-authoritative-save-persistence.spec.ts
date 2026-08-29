@@ -252,6 +252,102 @@ test("proof-bound persistence rejects cross-seed and stale-fence writes without 
   expect(result.crossPayload.result).toMatchObject({ ok: false, reason: "invalid" });
 });
 
+test("native authority lease fences prepared JS primary writes and hand-back does not revive the old fence", async ({ page }) => {
+  await openBarePage(page);
+  const primary = primaryFixture(1_786_377_701_500, 1, "authority-lease-base");
+  await seedPrimary(page, primary);
+  const result = await page.evaluate(async () => {
+    const engine: any = await import(/* @vite-ignore */ "/src/game/engine.ts");
+    const protocol: any = await import(/* @vite-ignore */ "/src/game/simulationRuntimeProtocol.ts");
+    const serializer: any = await import(/* @vite-ignore */ "/src/game/authoritativeSaveSerializationClient.ts");
+    const persistence: any = await import(/* @vite-ignore */ "/src/game/authoritativeSavePersistenceClient.ts");
+    const localStore: any = await import(/* @vite-ignore */ "/src/game/localSaveStore.ts");
+    const coordination: any = await import(/* @vite-ignore */ "/src/game/localSaveCoordination.ts");
+    await localStore.initializeLocalSaveStore();
+    const writer = localStore.getLocalSaveWriterStatus();
+    const state = engine.createInitialState();
+    state.elapsedSeconds = 321;
+    const transfer = protocol.serializeSimulationStateForTransfer(state);
+    const serialized = await serializer.serializeAuthoritativeSaveStateTransferInWorker(transfer, {
+      savedAt: 1_786_377_701_600,
+    });
+    const prepared = {
+      key: "dsp-idle-network.save.v1",
+      bytes: serialized.bytes,
+      proof: serialized.proof,
+      seed: serialized.catalogSeed,
+      expectedRevision: 1,
+      fence: { ownerId: writer.writerId, fencingToken: writer.fencingToken },
+    };
+
+    const nativeReceipt = await localStore.acquireLocalSaveNativeAuthorityLease({
+      leaseId: "handoff-proof-worker-1",
+      writerFence: prepared.fence,
+    });
+    const afterAcquire = localStore.getLocalSaveWriterStatus();
+    const whileNative = await persistence.commitAuthoritativeSavePayloadInPersistenceWorker(prepared);
+    const afterRelease = await localStore.releaseLocalSaveNativeAuthorityLease(nativeReceipt);
+    // The persistence client returns ArrayBuffer ownership on controlled
+    // failures, so the exact pre-handoff request can be replayed to prove that
+    // hand-back did not recreate its old fencing token (ABA).
+    const afterHandBack = await persistence.commitAuthoritativeSavePayloadInPersistenceWorker(prepared);
+
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("dsp-idle-network.local-saves", 2);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const read = (key: string) => new Promise<any>((resolve, reject) => {
+      const request = db.transaction("records", "readonly").objectStore("records").get(key);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const persistedPrimary = await read("dsp-idle-network.save.v1");
+    const persistedRevision = await read(coordination.localSaveRevisionKey("dsp-idle-network.save.v1"));
+    const persistedLease = await read(coordination.LOCAL_SAVE_WRITER_LEASE_KEY);
+    db.close();
+    persistence.terminateAuthoritativeSavePersistenceWorker();
+    return {
+      writer,
+      nativeReceipt,
+      afterAcquire,
+      whileNative: whileNative.result,
+      afterRelease,
+      afterHandBack: afterHandBack.result,
+      primary: JSON.parse(persistedPrimary.value),
+      revision: JSON.parse(persistedRevision.value),
+      lease: JSON.parse(persistedLease.value),
+    };
+  });
+
+  expect(result.writer).toMatchObject({ role: "primary" });
+  expect(result.nativeReceipt).toMatchObject({
+    kind: "local-save-native-authority-lease-v1",
+    previousWriterFence: {
+      ownerId: result.writer.writerId,
+      fencingToken: result.writer.fencingToken,
+    },
+    nativeWriterFence: {
+      ownerId: "native_authority:handoff-proof-worker-1",
+      fencingToken: result.writer.fencingToken + 1,
+    },
+  });
+  expect(result.afterAcquire).toMatchObject({ role: "secondary" });
+  expect(result.whileNative).toMatchObject({ ok: false, reason: "lease-lost" });
+  expect(result.afterRelease).toMatchObject({
+    role: "primary",
+    writerId: result.writer.writerId,
+    fencingToken: result.writer.fencingToken + 2,
+  });
+  expect(result.afterHandBack).toMatchObject({ ok: false, reason: "lease-lost" });
+  expect(result.primary.state.marker).toBe("authority-lease-base");
+  expect(result.revision.revision).toBe(1);
+  expect(result.lease).toMatchObject({
+    ownerId: result.writer.writerId,
+    fencingToken: result.writer.fencingToken + 2,
+  });
+});
+
 test("checkpoint overlays are proof-bound and invalid overlay input never creates a primary revision", async ({ page }) => {
   await openBarePage(page);
   const primary = primaryFixture(1_786_377_702_000, 1, "overlay-base");

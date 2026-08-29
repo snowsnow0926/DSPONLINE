@@ -34,6 +34,13 @@ import {
   type LocalSaveWriterLease,
   type LocalSaveWriterStatus,
 } from "./localSaveCoordination";
+import {
+  acquireLocalSaveNativeAuthorityLease as prepareLocalSaveNativeAuthorityLease,
+  isLocalSaveNativeAuthorityLease,
+  releaseLocalSaveNativeAuthorityLease as prepareLocalSaveNativeAuthorityRelease,
+  type LocalSaveNativeAuthorityLeaseReceipt,
+  type LocalSaveWriterFence,
+} from "./localSaveAuthorityLease";
 import { inspectSaveEnvelopeChecksum } from "./saveEnvelopeIntegrity";
 import {
   LOCAL_SAVE_CATALOG_RECORD_PREFIX,
@@ -100,6 +107,7 @@ interface StoredSaveRecord {
 }
 
 export type LocalSaveBackend = "indexeddb" | "local-storage" | "memory";
+export type { LocalSaveNativeAuthorityLeaseReceipt } from "./localSaveAuthorityLease";
 
 export interface LocalSaveStorageEntry {
   key: string;
@@ -864,6 +872,133 @@ async function writeLease(db: IDBDatabase, lease: LocalSaveWriterLease): Promise
   await done;
 }
 
+function nativeAuthorityLeaseFailureMessage(reason: string): string {
+  if (reason === "native-held") return "另一个 Windows 原生权威会话已持有本地主存档发布租约";
+  if (reason === "token-exhausted") return "本地主存档 fencing token 已耗尽，已阻止权威切换";
+  if (reason === "invalid") return "Windows 原生权威存档租约请求无效";
+  return "本地主存档 writer fence 已变化，已阻止过期的原生权威切换";
+}
+
+/**
+ * Atomically fence every existing JavaScript save transaction before Rust
+ * takes gameplay ownership. Both this CAS and all coordinated save commits use
+ * the same IndexedDB object store, so the returned receipt is the linearized
+ * publication boundary: an older transaction either completed before it or
+ * must observe the reserved native owner and abort.
+ *
+ * The caller must await this receipt before transferring the native session
+ * owner. If handoff is blocked before that transfer, pass the exact receipt to
+ * releaseLocalSaveNativeAuthorityLease; never release it after Rust ownership
+ * became certain or uncertain.
+ */
+export async function acquireLocalSaveNativeAuthorityLease(input: {
+  leaseId: string;
+  writerFence: LocalSaveWriterFence;
+}): Promise<LocalSaveNativeAuthorityLeaseReceipt> {
+  await initializeLocalSaveStore();
+  if (backend !== "indexeddb" || !database) {
+    throw new LocalSaveReadOnlyError("Windows 原生权威切换需要可事务化的 IndexedDB 本地存储");
+  }
+  if (input.writerFence.ownerId !== writerId) {
+    throw new LocalSaveReadOnlyError("Windows 原生权威切换没有绑定当前页面 writer");
+  }
+  const transaction = database.transaction(RECORD_STORE, "readwrite");
+  const done = transactionDone(transaction);
+  const store = transaction.objectStore(RECORD_STORE);
+  const current = parseLocalSaveWriterLease(
+    (await requestResult(store.get(LOCAL_SAVE_WRITER_LEASE_KEY) as IDBRequest<StoredSaveRecord | undefined>))?.value,
+  );
+  const prepared = prepareLocalSaveNativeAuthorityLease({
+    current,
+    expectedWriterFence: input.writerFence,
+    leaseId: input.leaseId,
+    now: Date.now(),
+  });
+  if (!prepared.ok) {
+    try { transaction.abort(); } catch { /* transaction may already be inactive */ }
+    await done.catch(() => undefined);
+    throw new LocalSaveReadOnlyError(nativeAuthorityLeaseFailureMessage(prepared.reason));
+  }
+  if (prepared.changed) {
+    putStoredValue(
+      store,
+      LOCAL_SAVE_WRITER_LEASE_KEY,
+      JSON.stringify(prepared.lease),
+      prepared.lease.heartbeatAt,
+    );
+  }
+  await done;
+  legacyCatalogIndexQueue = [];
+  publishWriterStatus({
+    role: "secondary",
+    writerId,
+    fencingToken: prepared.lease.fencingToken,
+    leaseExpiresAt: prepared.lease.expiresAt,
+    reason: "Windows 原生权威已取得本地主存档发布租约，JavaScript 保存保持只读",
+  });
+  postCoordinationMessage({
+    schemaVersion: 1,
+    type: "lease",
+    writerId: prepared.lease.ownerId,
+    sentAt: Date.now(),
+    fencingToken: prepared.lease.fencingToken,
+    leaseExpiresAt: prepared.lease.expiresAt,
+  });
+  return prepared.receipt;
+}
+
+/** Explicit hand-back for a handoff that was proven not to transfer Rust ownership. */
+export async function releaseLocalSaveNativeAuthorityLease(
+  receipt: LocalSaveNativeAuthorityLeaseReceipt,
+): Promise<LocalSaveWriterStatus> {
+  await initializeLocalSaveStore();
+  if (backend !== "indexeddb" || !database) {
+    throw new LocalSaveReadOnlyError("Windows 原生权威存档租约无法从非事务存储交还");
+  }
+  const transaction = database.transaction(RECORD_STORE, "readwrite");
+  const done = transactionDone(transaction);
+  const store = transaction.objectStore(RECORD_STORE);
+  const current = parseLocalSaveWriterLease(
+    (await requestResult(store.get(LOCAL_SAVE_WRITER_LEASE_KEY) as IDBRequest<StoredSaveRecord | undefined>))?.value,
+  );
+  const prepared = prepareLocalSaveNativeAuthorityRelease({
+    current,
+    receipt,
+    targetWriterId: writerId,
+    now: Date.now(),
+  });
+  if (!prepared.ok) {
+    try { transaction.abort(); } catch { /* transaction may already be inactive */ }
+    await done.catch(() => undefined);
+    throw new LocalSaveReadOnlyError(nativeAuthorityLeaseFailureMessage(prepared.reason));
+  }
+  if (prepared.changed) {
+    putStoredValue(
+      store,
+      LOCAL_SAVE_WRITER_LEASE_KEY,
+      JSON.stringify(prepared.lease),
+      prepared.lease.heartbeatAt,
+    );
+  }
+  await done;
+  publishWriterStatus({
+    role: "primary",
+    writerId,
+    fencingToken: prepared.lease.fencingToken,
+    leaseExpiresAt: prepared.lease.expiresAt,
+    reason: "Windows 原生权威切换已安全取消，当前标签页重新负责本地存档",
+  });
+  postCoordinationMessage({
+    schemaVersion: 1,
+    type: "lease",
+    writerId,
+    sentAt: Date.now(),
+    fencingToken: prepared.lease.fencingToken,
+    leaseExpiresAt: prepared.lease.expiresAt,
+  });
+  return getLocalSaveWriterStatus();
+}
+
 async function claimWriterLease(): Promise<boolean> {
   const now = Date.now();
   if (backend !== "indexeddb" || !database) {
@@ -1314,9 +1449,18 @@ async function initializeIndexedDb(): Promise<void> {
     // permanently ambiguous on every large-save checkpoint.
     return !catalog || catalog.modeExplicit === undefined;
   });
+  const durableLease = parseLocalSaveWriterLease(await readCoordinationValue(db, LOCAL_SAVE_WRITER_LEASE_KEY));
+  if (isLocalSaveNativeAuthorityLease(durableLease)) {
+    // Startup/reload under a durable Rust owner must not import an old
+    // pagehide mirror, rebuild a legacy catalog, or let localStorage wall time
+    // select a public primary. The native lease remains visible to
+    // claimWriterLease(), which will keep this renderer read-only.
+    legacyCatalogIndexQueue = [];
+    for (const key of [...cache.keys()]) if (isCatalogedSaveKey(key)) cache.delete(key);
+    return;
+  }
   scheduleLegacyCatalogIndex();
 
-  const durableLease = parseLocalSaveWriterLease(await readCoordinationValue(db, LOCAL_SAVE_WRITER_LEASE_KEY));
   for (const mode of ["normal", "speedrun"] as const) {
     const mirror = readEmergencyMirror(mode);
     if (!mirror) continue;

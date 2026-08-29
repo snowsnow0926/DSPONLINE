@@ -6,6 +6,16 @@ import {
 import type { DysonLaunchMode, DysonLaunchThrottle } from "./types";
 
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
+const textEncoder = new TextEncoder();
+
+function validOpaqueId(value: string): boolean {
+  return value.length > 0 && textEncoder.encode(value).byteLength <= 1_024 &&
+    !/[\u0000-\u001f\u007f-\u009f]/u.test(value) &&
+    !Array.from(value).some((character) => {
+      const unit = character.charCodeAt(0);
+      return character.length === 1 && unit >= 0xd800 && unit <= 0xdfff;
+    });
+}
 
 function validFrame(frame: NativeDysonWorkspaceFrame): boolean {
   return frame.source === "native-core" && frame.sourceMode === "player-authority" &&
@@ -27,6 +37,23 @@ function launchCommand(
     protocolVersion: SIMULATION_RUNTIME_PROTOCOL_VERSION,
     baseRevision: frame.revision,
     topLevelChanges: [{ path: ["dysonEngineering", field], operation: "set", value }],
+    changedEntities: [],
+    addedEntities: [],
+    removedEntityIds: [],
+    changedBelts: [],
+    addedBelts: [],
+    removedBeltIds: [],
+  };
+}
+
+function topLevelCommand(
+  frame: NativeDysonWorkspaceFrame,
+  topLevelChanges: SimulationCommandPatch["topLevelChanges"],
+): SimulationCommandPatch {
+  return {
+    protocolVersion: SIMULATION_RUNTIME_PROTOCOL_VERSION,
+    baseRevision: frame.revision,
+    topLevelChanges,
     changedEntities: [],
     addedEntities: [],
     removedEntityIds: [],
@@ -67,4 +94,80 @@ export function createNativeProjectedDysonLaunchEnabledCommand(
   }
   const current = frame.systemsById.get(frame.selectedSystemId)!.engineering.launchEnabled;
   return current === target ? null : launchCommand(frame, "launchEnabled", target);
+}
+
+export function createNativeProjectedDysonActiveLayerCommand(
+  frame: NativeDysonWorkspaceFrame,
+  targetLayerId: string,
+): SimulationCommandPatch | null {
+  if (!validFrame(frame) || !validOpaqueId(targetLayerId) || !frame.layersById.has(targetLayerId)) {
+    throw new TypeError("原生戴森活动壳层投影或目标无效");
+  }
+  const current = frame.systemsById.get(frame.selectedSystemId)!.activeLayerId;
+  return current === targetLayerId ? null : topLevelCommand(frame, [{
+    path: ["dysonPlans", frame.selectedSystemId, "activeLayerId"],
+    operation: "set",
+    value: targetLayerId,
+  }]);
+}
+
+export function createNativeProjectedDysonActiveOrbitCommand(
+  frame: NativeDysonWorkspaceFrame,
+  targetOrbitId: string,
+): SimulationCommandPatch | null {
+  if (!validFrame(frame) || !validOpaqueId(targetOrbitId) || !frame.orbitsById.has(targetOrbitId)) {
+    throw new TypeError("原生戴森活动太阳帆轨道投影或目标无效");
+  }
+  const current = frame.systemsById.get(frame.selectedSystemId)!.activeOrbitId;
+  return current === targetOrbitId ? null : topLevelCommand(frame, [{
+    path: ["dysonEngineering", "activeOrbitBySystem", frame.selectedSystemId],
+    operation: "set",
+    value: targetOrbitId,
+  }]);
+}
+
+export interface NativeProjectedDysonOrbitGeometry {
+  readonly radius?: number;
+  readonly inclination?: number;
+  readonly longitude?: number;
+}
+
+function validOrbitGeometry(field: keyof NativeProjectedDysonOrbitGeometry, value: number): boolean {
+  if (!Number.isFinite(value)) return false;
+  if (field === "radius") return Number.isInteger(value) && value >= 5_000 && value <= 50_000;
+  if (field === "inclination") return Number.isInteger(value) && value >= -90 && value <= 90;
+  return value >= 0 && value < 360 && Math.abs(value * 10 - Math.round(value * 10)) < 1e-9;
+}
+
+export function createNativeProjectedDysonOrbitGeometryCommand(
+  frame: NativeDysonWorkspaceFrame,
+  orbitId: string,
+  target: NativeProjectedDysonOrbitGeometry,
+): SimulationCommandPatch | null {
+  const requestedKeys = Object.keys(target);
+  if (!validFrame(frame) || !validOpaqueId(orbitId) || requestedKeys.length === 0 ||
+      requestedKeys.length > 3 || requestedKeys.some((key) => !["radius", "inclination", "longitude"].includes(key))) {
+    throw new TypeError("原生戴森太阳帆轨道几何命令无效");
+  }
+  const orbitIndex = frame.orbits.findIndex((orbit) => orbit.orbitId === orbitId);
+  const orbit = orbitIndex >= 0 ? frame.orbits[orbitIndex] : null;
+  if (!orbit || frame.orbitsById.get(orbitId) !== orbit) {
+    throw new TypeError("原生戴森太阳帆轨道不属于当前恒星系");
+  }
+  const changes: SimulationCommandPatch["topLevelChanges"] = [];
+  for (const field of ["radius", "inclination", "longitude"] as const) {
+    const value = target[field];
+    if (value === undefined) continue;
+    if (!validOrbitGeometry(field, value) || !validOrbitGeometry(field, orbit[field])) {
+      throw new TypeError("原生戴森太阳帆轨道几何值无效");
+    }
+    if (value !== orbit[field]) {
+      changes.push({
+        path: ["dysonEngineering", "orbitsBySystem", frame.selectedSystemId, orbitIndex, field],
+        operation: "set",
+        value,
+      });
+    }
+  }
+  return changes.length === 0 ? null : topLevelCommand(frame, changes);
 }

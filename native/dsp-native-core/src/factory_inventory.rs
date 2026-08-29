@@ -1,10 +1,8 @@
 //! Revision-bound, bounded inventory read model and player command gate.
 //!
 //! The public v47 state remains the persisted source of truth. This module only
-//! exposes a pageable thin-renderer projection and proves the three inventory
-//! transitions that the native player-authority UI can currently originate:
-//! fill the held stack from the active tray, return it without loss, and change
-//! the active planet's per-item tray limit.
+//! exposes a pageable thin-renderer projection and proves the bounded inventory
+//! transitions that the native player-authority UI can currently originate.
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Value, json};
@@ -23,6 +21,39 @@ const PICKUP_TARGET_AMOUNT: u64 = 100;
 const MIN_TRAY_ITEM_LIMIT: u64 = 1_000;
 const DEFAULT_TRAY_ITEM_LIMIT: u64 = 1_000_000;
 const MAX_TRAY_ITEM_LIMIT: u64 = 100_000_000;
+const MIN_PRODUCTION_BUFFER_LIMIT: u64 = 1_000;
+const DEFAULT_PRODUCTION_BUFFER_LIMIT: u64 = 1_000_000;
+const MAX_PRODUCTION_BUFFER_LIMIT: u64 = 100_000_000;
+const EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT: &str = "7df8cf3a";
+
+/// Deliberately excludes storage, splitters, power/fuel buildings, stations,
+/// construction megastructures and every opaque/MOD building. These are the
+/// built-in recipe machines whose ordinary input semantics are fully described
+/// by the v47 catalog without another domain ledger.
+const BUILTIN_ORDINARY_RECIPE_BUILDINGS: &[&str] = &[
+    "arc_smelter",
+    "assembling_machine_mk1",
+    "assembling_machine_mk2",
+    "assembling_machine_mk3",
+    "chemical_plant",
+    "em_rail_ejector",
+    "fractionator",
+    "matrix_lab",
+    "miniature_particle_collider",
+    "oil_refinery",
+    "plane_smelter",
+    "quantum_chemical_plant",
+    "vertical_launching_silo",
+];
+
+const BUILTIN_MATRIX_ITEMS: &[&str] = &[
+    "electromagnetic_matrix",
+    "energy_matrix",
+    "structure_matrix",
+    "information_matrix",
+    "gravity_matrix",
+    "universe_matrix",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct HeldCargo {
@@ -104,6 +135,21 @@ fn effective_tray_item_limit(
         Some(value) => safe_nonnegative_integer(Some(value), "active tray item limit")?,
     };
     Ok(raw.clamp(MIN_TRAY_ITEM_LIMIT, MAX_TRAY_ITEM_LIMIT))
+}
+
+fn effective_production_buffer_limit(base: &Map<String, Value>) -> u64 {
+    base.get("settings")
+        .and_then(Value::as_object)
+        .and_then(|settings| settings.get("productionBufferLimit"))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .map(|value| {
+            value.floor().clamp(
+                MIN_PRODUCTION_BUFFER_LIMIT as f64,
+                MAX_PRODUCTION_BUFFER_LIMIT as f64,
+            ) as u64
+        })
+        .unwrap_or(DEFAULT_PRODUCTION_BUFFER_LIMIT)
 }
 
 fn validate_cargo_origin(value: Option<&Value>) -> anyhow::Result<Option<CargoOrigin>> {
@@ -430,6 +476,136 @@ struct EntityInventorySource<'a> {
     available: u64,
 }
 
+#[derive(Debug)]
+struct EntityInventoryTarget {
+    item_id: String,
+    current: u64,
+    capacity: u64,
+}
+
+fn canonical_recipe_building_id(building_id: &str) -> Option<&str> {
+    if !BUILTIN_ORDINARY_RECIPE_BUILDINGS.contains(&building_id) {
+        return None;
+    }
+    Some(match building_id {
+        "assembling_machine_mk2" | "assembling_machine_mk3" => "assembling_machine_mk1",
+        "plane_smelter" => "arc_smelter",
+        "quantum_chemical_plant" => "chemical_plant",
+        other => other,
+    })
+}
+
+fn recipe_accepts_ordinary_input(recipe: &crate::catalog::RecipeDefinition, item_id: &str) -> bool {
+    recipe.inputs.iter().any(|input| input.item_id == item_id)
+        || recipe.id == "matrix_research" && BUILTIN_MATRIX_ITEMS.contains(&item_id)
+}
+
+fn entity_inventory_target(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<Option<EntityInventoryTarget>> {
+    let [record] = command.changed_entities.as_slice() else {
+        return Ok(None);
+    };
+    let [change] = record.changes.as_slice() else {
+        return Ok(None);
+    };
+    let [PathSegment::Key(field), PathSegment::Key(item_id)] = change.path.as_slice() else {
+        return Ok(None);
+    };
+    if field != "inputs" || change.operation != "set" {
+        return Ok(None);
+    }
+    let target = safe_nonnegative_integer(change.value.as_ref(), "entity input target")?;
+    let entity_index = state
+        .entity_index
+        .get(&record.id)
+        .copied()
+        .ok_or_else(|| anyhow!("native factory entity input target is missing"))?;
+    let entity = state.parse_entity(entity_index)?;
+    let entity = entity
+        .as_object()
+        .ok_or_else(|| anyhow!("native factory entity input target is malformed"))?;
+    let current = optional_safe_nonnegative_integer(
+        entity
+            .get("inputs")
+            .and_then(Value::as_object)
+            .and_then(|inputs| inputs.get(item_id)),
+        "entity input current amount",
+    )?;
+    if target <= current {
+        return Ok(None);
+    }
+    if command.changed_entities.len() != 1
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native factory entity input command shape is invalid")
+    }
+    if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    {
+        bail!("native factory entity input requires the built-in content registry")
+    }
+    known_item_id(state, item_id)?;
+    let active_planet_id = active_planet_id(state, state.base_value())?;
+    if entity.get("planetId").and_then(Value::as_str) != Some(active_planet_id) {
+        bail!("native factory entity input target is not on the active planet")
+    }
+    if entity.get("kind").and_then(Value::as_str) != Some("machine") {
+        bail!("native factory entity input target is not an ordinary recipe machine")
+    }
+    let building_id = entity
+        .get("buildingId")
+        .and_then(Value::as_str)
+        .and_then(canonical_recipe_building_id)
+        .ok_or_else(|| anyhow!("native factory entity input building is not supported"))?;
+    let building = entity
+        .get("buildingId")
+        .and_then(Value::as_str)
+        .and_then(|id| state.catalog.buildings.get(id))
+        .ok_or_else(|| anyhow!("native factory entity input building is missing"))?;
+    if building.kind != "machine" {
+        bail!("native factory entity input catalog kind is not supported")
+    }
+    let recipe = entity
+        .get("recipeId")
+        .and_then(Value::as_str)
+        .and_then(|id| state.catalog.recipes.get(id))
+        .ok_or_else(|| anyhow!("native factory entity input recipe is missing"))?;
+    if recipe.building_id != building_id || !recipe_accepts_ordinary_input(recipe, item_id) {
+        bail!("native factory entity input item is not consumed by the active recipe")
+    }
+    let machine_count = safe_nonnegative_integer(entity.get("machineCount"), "machine count")?;
+    if machine_count == 0 {
+        bail!("native factory entity input machine count is empty")
+    }
+    if !building.input_capacity.is_finite()
+        || building.input_capacity <= 0.0
+        || building.input_capacity.fract() != 0.0
+        || building.input_capacity > MAX_JAVASCRIPT_SAFE_INTEGER as f64
+    {
+        bail!("native factory entity input capacity is not a safe integer")
+    }
+    let base_capacity = building.input_capacity as u64;
+    let capacity = base_capacity
+        .checked_mul(machine_count)
+        .unwrap_or(MAX_JAVASCRIPT_SAFE_INTEGER)
+        .min(effective_production_buffer_limit(state.base_value()))
+        .min(MAX_JAVASCRIPT_SAFE_INTEGER);
+    if current >= capacity {
+        bail!("native factory entity input target has no free capacity")
+    }
+    Ok(Some(EntityInventoryTarget {
+        item_id: item_id.clone(),
+        current,
+        capacity,
+    }))
+}
+
 fn entity_inventory_source<'a>(
     state: &CoreState,
     command: &'a SimulationCommandPatch,
@@ -612,6 +788,121 @@ fn validate_stow_entity_inventory(
     )
 }
 
+fn canonical_partial_cargo(cargo: &HeldCargo, remaining: u64) -> Value {
+    let origin = cargo.origin.as_ref().map_or(
+        Value::Null,
+        |origin| json!({ "kind": origin.kind, "id": origin.id }),
+    );
+    json!({ "itemId": cargo.item_id, "amount": remaining, "origin": origin })
+}
+
+fn require_nonopaque_held_cargo(base: &Map<String, Value>) -> anyhow::Result<()> {
+    let cargo = base
+        .get("cargo")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native factory entity input held cargo is invalid"))?;
+    if cargo
+        .keys()
+        .any(|key| !matches!(key.as_str(), "itemId" | "amount" | "origin"))
+    {
+        bail!("native factory entity input held cargo has opaque fields")
+    }
+    if let Some(origin) = cargo.get("origin").filter(|origin| !origin.is_null()) {
+        let origin = origin
+            .as_object()
+            .ok_or_else(|| anyhow!("native factory entity input cargo origin is invalid"))?;
+        if origin
+            .keys()
+            .any(|key| !matches!(key.as_str(), "kind" | "id"))
+        {
+            bail!("native factory entity input cargo origin has opaque fields")
+        }
+    }
+    Ok(())
+}
+
+fn validate_deposit_to_entity(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+    target: &EntityInventoryTarget,
+) -> anyhow::Result<()> {
+    if command.top_level_changes.len() != 1 {
+        bail!("native factory entity input source patch set is incomplete or mixed")
+    }
+    let base = state.base_value();
+    let free_capacity = target.capacity - target.current;
+    let source_change = &command.top_level_changes[0];
+    let (available, expected_source) = if path_equals(&source_change.path, &["cargo"])
+        && source_change.operation == "set"
+    {
+        let cargo = held_cargo(state, base)?
+            .ok_or_else(|| anyhow!("native factory entity input held cargo is empty"))?;
+        if cargo.item_id != target.item_id {
+            bail!("native factory entity input held item is incompatible")
+        }
+        require_nonopaque_held_cargo(base)?;
+        let moved = cargo.amount.min(free_capacity);
+        if moved == 0 {
+            bail!("native factory entity input held transfer is empty")
+        }
+        let remaining = cargo.amount - moved;
+        let value = if remaining == 0 {
+            Value::Null
+        } else {
+            canonical_partial_cargo(&cargo, remaining)
+        };
+        (
+            cargo.amount,
+            ValuePatch {
+                path: vec![PathSegment::Key("cargo".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(value),
+            },
+        )
+    } else if path_equals(&source_change.path, &["tray", target.item_id.as_str()])
+        && source_change.operation == "set"
+    {
+        let tray = active_tray(base)?;
+        let available =
+            safe_nonnegative_integer(tray.get(&target.item_id), "entity input tray source amount")?;
+        if available == 0 {
+            bail!("native factory entity input tray source is empty")
+        }
+        let moved = available.min(free_capacity);
+        (
+            available,
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("tray".to_owned()),
+                    PathSegment::Key(target.item_id.clone()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::from(available - moved)),
+            },
+        )
+    } else {
+        bail!("native factory entity input source is not held cargo or active tray")
+    };
+    let moved = available.min(free_capacity);
+    let next_input = target
+        .current
+        .checked_add(moved)
+        .filter(|value| *value <= target.capacity)
+        .ok_or_else(|| anyhow!("native factory entity input target overflows"))?;
+    exact_patch_sets_match(&command.top_level_changes, &[expected_source])?;
+    exact_patch_sets_match(
+        &command.changed_entities[0].changes,
+        &[ValuePatch {
+            path: vec![
+                PathSegment::Key("inputs".to_owned()),
+                PathSegment::Key(target.item_id.clone()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(Value::from(next_input)),
+        }],
+    )
+}
+
 pub(crate) fn validate_factory_inventory_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
@@ -625,6 +916,9 @@ pub(crate) fn validate_factory_inventory_command(
         bail!("native factory inventory command shape is invalid")
     }
     if !command.changed_entities.is_empty() {
+        if let Some(target) = entity_inventory_target(state, command)? {
+            return validate_deposit_to_entity(state, command, &target);
+        }
         let source = entity_inventory_source(state, command)?;
         let takes_to_cursor = command.top_level_changes.iter().any(|change| {
             path_equals(&change.path, &["cargo"])
@@ -676,6 +970,7 @@ impl CoreState {
         let base = self.base_value();
         let active_planet_id = active_planet_id(self, base)?;
         let tray_item_limit = effective_tray_item_limit(base, active_planet_id)?;
+        let production_buffer_limit = effective_production_buffer_limit(base);
         let tray = active_tray(base)?;
         let mut inventory = Vec::<(&str, u64)>::with_capacity(tray.len());
         for (item_id, amount) in tray {
@@ -740,6 +1035,7 @@ impl CoreState {
                 "logistics_drone": logistics_drone,
                 "logistics_vessel": logistics_vessel,
             },
+            "productionBufferLimit": production_buffer_limit,
             "trayItemLimit": tray_item_limit,
             "trayItemLimitBounds": {
                 "minimum": MIN_TRAY_ITEM_LIMIT,
@@ -772,29 +1068,55 @@ mod tests {
 
     const REGISTRY: &str = "factory-inventory-test";
 
-    fn catalog() -> RuntimeCatalog {
+    fn catalog_for_registry(registry_fingerprint: &str) -> RuntimeCatalog {
         let snapshot: CatalogSnapshot = serde_json::from_value(json!({
             "protocolVersion": crate::CORE_PROTOCOL_VERSION,
-            "registryFingerprint": REGISTRY,
+            "registryFingerprint": registry_fingerprint,
             "planets": [
                 { "id": "home", "systemId": "helios", "kind": "terrestrial", "orbitIndex": 1 },
                 { "id": "ashen", "systemId": "sigma", "kind": "terrestrial", "orbitIndex": 1 }
             ],
             "items": [
                 { "id": "iron_ore", "kind": "solid" },
+                { "id": "iron_ingot", "kind": "solid" },
+                { "id": "gear", "kind": "solid" },
                 { "id": "MOD/item-beta", "kind": "solid" },
                 { "id": "zeta_ore", "kind": "solid" },
                 { "id": "logistics_drone", "kind": "solid" },
                 { "id": "logistics_vessel", "kind": "solid" }
             ],
-            "buildings": [],
-            "recipes": [],
+            "buildings": [
+                {
+                    "id": "assembling_machine_mk1", "kind": "machine", "speed": 1,
+                    "inputCapacity": 120, "outputCapacity": 120
+                },
+                {
+                    "id": "MOD/opaque-machine", "kind": "machine", "speed": 1,
+                    "inputCapacity": 120, "outputCapacity": 120
+                },
+                {
+                    "id": "interstellar_logistics_station", "kind": "station", "speed": 1,
+                    "inputCapacity": 1000, "outputCapacity": 1000
+                }
+            ],
+            "recipes": [
+                {
+                    "id": "gear", "buildingId": "assembling_machine_mk1", "duration": 1,
+                    "inputs": [{ "itemId": "iron_ingot", "amount": 1 }],
+                    "outputs": [{ "itemId": "gear", "amount": 1 }]
+                },
+                {
+                    "id": "MOD/opaque-recipe", "buildingId": "MOD/opaque-machine", "duration": 1,
+                    "inputs": [{ "itemId": "iron_ingot", "amount": 1 }],
+                    "outputs": [{ "itemId": "gear", "amount": 1 }]
+                }
+            ],
             "constructions": [],
             "belts": [],
             "technologies": []
         }))
         .unwrap();
-        RuntimeCatalog::validate(snapshot, REGISTRY).unwrap()
+        RuntimeCatalog::validate(snapshot, registry_fingerprint).unwrap()
     }
 
     fn fixture_base() -> Map<String, Value> {
@@ -814,7 +1136,7 @@ mod tests {
             "planetTrays": { "home": {}, "ashen": {} },
             "planetTrayItemLimits": { "home": 1000, "ashen": 2000 },
             "portableFleet": { "logistics_drone": 3, "logistics_vessel": 4 },
-            "settings": { "simulationSpeed": 1 },
+            "settings": { "simulationSpeed": 1, "productionBufferLimit": 1000 },
             "exploration": { "colonizedPlanetIds": ["home", "ashen"], "unlockedSystemIds": ["helios", "sigma"] }
         })
         .as_object()
@@ -822,7 +1144,10 @@ mod tests {
         .clone()
     }
 
-    fn state_with_entities(entities: Vec<Value>) -> CoreState {
+    fn state_with_entities_for_registry(
+        entities: Vec<Value>,
+        registry_fingerprint: &str,
+    ) -> CoreState {
         CoreState::from_public_v47_parts(
             CoreCheckpointIdentity {
                 slot: "normal-main".to_owned(),
@@ -831,7 +1156,7 @@ mod tests {
                 revision: 7,
                 state_version: 47,
                 mode: "normal".to_owned(),
-                registry_fingerprint: REGISTRY.to_owned(),
+                registry_fingerprint: registry_fingerprint.to_owned(),
                 base_primary_checksum: "12345678".to_owned(),
             },
             fixture_base(),
@@ -840,9 +1165,13 @@ mod tests {
                 .map(|entity| serde_json::to_string(&entity).unwrap())
                 .collect(),
             Vec::new(),
-            catalog(),
+            catalog_for_registry(registry_fingerprint),
         )
         .unwrap()
+    }
+
+    fn state_with_entities(entities: Vec<Value>) -> CoreState {
+        state_with_entities_for_registry(entities, REGISTRY)
     }
 
     fn state() -> CoreState {
@@ -861,6 +1190,26 @@ mod tests {
             "minerCount": 0,
             "inputs": inputs,
             "outputs": outputs,
+            "progress": 0,
+            "routingCursor": 0,
+            "utilization": 0,
+            "productionRate": 0
+        })
+    }
+
+    fn ordinary_recipe_entity(id: &str, inputs: Value) -> Value {
+        json!({
+            "id": id,
+            "kind": "machine",
+            "planetId": "home",
+            "position": { "x": 0, "y": 0 },
+            "interactionLocked": false,
+            "buildingId": "assembling_machine_mk1",
+            "recipeId": "gear",
+            "machineCount": 2,
+            "minerCount": 0,
+            "inputs": inputs,
+            "outputs": {},
             "progress": 0,
             "routingCursor": 0,
             "utilization": 0,
@@ -919,6 +1268,7 @@ mod tests {
         assert_eq!(first["activePlanetId"], "home");
         assert_eq!(first["registryFingerprint"], REGISTRY);
         assert_eq!(first["trayItemLimit"], 1_000);
+        assert_eq!(first["productionBufferLimit"], 1_000);
         assert_eq!(first["pickupTargetAmount"], 100);
         assert_eq!(first["portableFleet"]["logistics_drone"], 3);
         assert_eq!(first["portableFleet"]["logistics_vessel"], 4);
@@ -1309,6 +1659,184 @@ mod tests {
             portable.parse_entity(0).unwrap()["inputs"]["logistics_drone"],
             0
         );
+    }
+
+    #[test]
+    fn player_authority_feeds_held_or_tray_material_into_bounded_builtin_inputs() {
+        let mut held = state_with_entities_for_registry(
+            vec![ordinary_recipe_entity(
+                "machine-a",
+                json!({ "iron_ingot": 200 }),
+            )],
+            EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        );
+        held.base_value_mut()["cargo"] = json!({
+            "itemId": "iron_ingot",
+            "amount": 100,
+            "origin": { "kind": "tray" }
+        });
+        let feed_held = entity_inventory_command(
+            7,
+            "machine-a",
+            "inputs",
+            "iron_ingot",
+            240,
+            vec![set(
+                &["cargo"],
+                json!({
+                    "itemId": "iron_ingot",
+                    "amount": 60,
+                    "origin": { "kind": "tray", "id": null }
+                }),
+            )],
+        );
+        held.apply_player_authority_command(&feed_held).unwrap();
+        assert_eq!(held.parse_entity(0).unwrap()["inputs"]["iron_ingot"], 240);
+        assert_eq!(held.base_value()["cargo"]["amount"], 60);
+        assert_eq!(held.revision, 8);
+
+        let mut tray = state_with_entities_for_registry(
+            vec![ordinary_recipe_entity(
+                "machine-b",
+                json!({ "iron_ingot": 230 }),
+            )],
+            EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        );
+        tray.base_value_mut()["tray"]["iron_ingot"] = json!(150);
+        let feed_tray = entity_inventory_command(
+            7,
+            "machine-b",
+            "inputs",
+            "iron_ingot",
+            240,
+            vec![set(&["tray", "iron_ingot"], json!(140))],
+        );
+        tray.apply_player_authority_command(&feed_tray).unwrap();
+        assert_eq!(tray.parse_entity(0).unwrap()["inputs"]["iron_ingot"], 240);
+        assert_eq!(tray.base_value()["tray"]["iron_ingot"], 140);
+    }
+
+    #[test]
+    fn player_authority_entity_feed_is_conservative_and_failure_atomic() {
+        let cases = [
+            ordinary_recipe_entity("wrong-planet", json!({ "iron_ingot": 0 })),
+            {
+                let mut entity = ordinary_recipe_entity("station", json!({ "iron_ingot": 0 }));
+                entity["kind"] = json!("station");
+                entity["buildingId"] = json!("interstellar_logistics_station");
+                entity
+            },
+            {
+                let mut entity = ordinary_recipe_entity("opaque", json!({ "iron_ingot": 0 }));
+                entity["buildingId"] = json!("MOD/opaque-machine");
+                entity["recipeId"] = json!("MOD/opaque-recipe");
+                entity
+            },
+            ordinary_recipe_entity("fractional", json!({ "iron_ingot": 0.5 })),
+        ];
+        for (index, mut entity) in cases.into_iter().enumerate() {
+            if index == 0 {
+                entity["planetId"] = json!("ashen");
+            }
+            let entity_id = entity["id"].as_str().unwrap().to_owned();
+            let mut state = state_with_entities_for_registry(
+                vec![entity],
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+            );
+            state.base_value_mut()["cargo"] = json!({
+                "itemId": "iron_ingot", "amount": 1, "origin": { "kind": "tray" }
+            });
+            let command = entity_inventory_command(
+                7,
+                &entity_id,
+                "inputs",
+                "iron_ingot",
+                1,
+                vec![set(&["cargo"], Value::Null)],
+            );
+            let before_hash = state.canonical_sha256().unwrap();
+            let before_revision = state.revision;
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.canonical_sha256().unwrap(), before_hash);
+            assert_eq!(state.revision, before_revision);
+        }
+
+        let mut modified_registry = state_with_entities(vec![ordinary_recipe_entity(
+            "machine-a",
+            json!({ "iron_ingot": 0 }),
+        )]);
+        modified_registry.base_value_mut()["cargo"] = json!({
+            "itemId": "iron_ingot", "amount": 1, "origin": { "kind": "tray" }
+        });
+        let command = entity_inventory_command(
+            7,
+            "machine-a",
+            "inputs",
+            "iron_ingot",
+            1,
+            vec![set(&["cargo"], Value::Null)],
+        );
+        let before_hash = modified_registry.canonical_sha256().unwrap();
+        assert!(
+            modified_registry
+                .apply_player_authority_command(&command)
+                .is_err()
+        );
+        assert_eq!(modified_registry.canonical_sha256().unwrap(), before_hash);
+        assert_eq!(modified_registry.revision, 7);
+    }
+
+    #[test]
+    fn player_authority_entity_feed_rejects_forged_capacity_item_and_opaque_cargo() {
+        let mut state = state_with_entities_for_registry(
+            vec![ordinary_recipe_entity(
+                "machine-a",
+                json!({ "iron_ingot": 239 }),
+            )],
+            EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        );
+        state.base_value_mut()["cargo"] = json!({
+            "itemId": "iron_ingot",
+            "amount": 5,
+            "origin": { "kind": "tray" },
+            "opaqueModPayload": { "owner": "MOD/test" }
+        });
+        let forged = entity_inventory_command(
+            7,
+            "machine-a",
+            "inputs",
+            "iron_ingot",
+            244,
+            vec![set(&["cargo"], Value::Null)],
+        );
+        let before_hash = state.canonical_sha256().unwrap();
+        assert!(state.apply_player_authority_command(&forged).is_err());
+        assert_eq!(state.canonical_sha256().unwrap(), before_hash);
+
+        let mut wrong_item = state_with_entities_for_registry(
+            vec![ordinary_recipe_entity(
+                "machine-b",
+                json!({ "iron_ore": 0 }),
+            )],
+            EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        );
+        wrong_item.base_value_mut()["tray"]["iron_ore"] = json!(150);
+        let wrong_item_command = entity_inventory_command(
+            7,
+            "machine-b",
+            "inputs",
+            "iron_ore",
+            120,
+            vec![set(&["tray", "iron_ore"], json!(30))],
+        );
+        let before_hash = wrong_item.canonical_sha256().unwrap();
+        assert!(
+            wrong_item
+                .apply_player_authority_command(&wrong_item_command)
+                .is_err()
+        );
+        assert_eq!(wrong_item.canonical_sha256().unwrap(), before_hash);
+        assert_eq!(wrong_item.revision, 7);
     }
 
     #[test]

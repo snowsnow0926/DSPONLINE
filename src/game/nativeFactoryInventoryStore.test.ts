@@ -43,6 +43,7 @@ function page(
     },
     pickupTargetAmount: 100,
     portableFleet: { logistics_drone: 3, logistics_vessel: 4 },
+    productionBufferLimit: 1_000_000,
     trayItemLimit: 1_000_000,
     trayItemLimitBounds: { minimum: 1_000, default: 1_000_000, maximum: 100_000_000 },
     request: { expectedRevision: IDENTITY.revision, cursor, limit: NATIVE_FACTORY_INVENTORY_PAGE_ROWS },
@@ -126,6 +127,7 @@ describe("NativeFactoryInventoryStore", () => {
       [page(0, itemIds.slice(0, 256), itemIds.length, { nextCursor: 0, truncated: true })],
       [page(0, itemIds.slice(0, 256), itemIds.length), page(256, [itemIds[0]], itemIds.length)],
       [page(0, ["a"], 1, { rows: [{ itemId: "a", amount: 1, freeCapacity: 7, overLimit: false }] })],
+      [page(0, [], 0, { productionBufferLimit: 999 })],
     ];
     for (const pages of cases) {
       const store = new NativeFactoryInventoryStore();

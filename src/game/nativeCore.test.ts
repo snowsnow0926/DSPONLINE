@@ -231,6 +231,7 @@ describe("native core transferable projections", () => {
       cargo: null,
       pickupTargetAmount: 100,
       portableFleet: { logistics_drone: 0, logistics_vessel: 0 },
+      productionBufferLimit: 1_000_000,
       trayItemLimit: 1_000,
       trayItemLimitBounds: { minimum: 1_000, default: 1_000_000, maximum: 100_000_000 },
       request: { expectedRevision: 14, cursor: 0, limit: 32 },

@@ -4,10 +4,35 @@ import {
   type SimulationValuePatch,
 } from "./simulationRuntimeProtocol";
 import type { NativeFactoryInventoryFrame } from "./nativeFactoryInventoryStore";
+import { buildingSupportsRecipe, getBuilding, getRecipe } from "./content";
 import type { FactoryEntity, ItemId } from "./types";
 
 const MAX_SAFE_QUANTITY = Number.MAX_SAFE_INTEGER;
 const PORTABLE_FLEET_ITEMS = new Set(["logistics_drone", "logistics_vessel"]);
+const EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT = "7df8cf3a";
+const BUILTIN_ORDINARY_RECIPE_BUILDINGS = new Set([
+  "arc_smelter",
+  "assembling_machine_mk1",
+  "assembling_machine_mk2",
+  "assembling_machine_mk3",
+  "chemical_plant",
+  "em_rail_ejector",
+  "fractionator",
+  "matrix_lab",
+  "miniature_particle_collider",
+  "oil_refinery",
+  "plane_smelter",
+  "quantum_chemical_plant",
+  "vertical_launching_silo",
+]);
+const BUILTIN_MATRIX_ITEMS = new Set([
+  "electromagnetic_matrix",
+  "energy_matrix",
+  "structure_matrix",
+  "information_matrix",
+  "gravity_matrix",
+  "universe_matrix",
+]);
 
 export type NativeEntityInventorySourceField = "inputs" | "outputs";
 
@@ -31,10 +56,105 @@ function emptyCommand(baseRevision: number): SimulationCommandPatch {
 function validateFrame(frame: NativeFactoryInventoryFrame): void {
   if (frame.source !== "native-core" || !Number.isSafeInteger(frame.revision) || frame.revision < 0 ||
       frame.pickupTargetAmount !== 100 || !Number.isSafeInteger(frame.trayItemLimit) ||
+      !Number.isSafeInteger(frame.productionBufferLimit) || frame.productionBufferLimit < 1_000 ||
+      frame.productionBufferLimit > 100_000_000 ||
       frame.trayItemLimit < frame.trayItemLimitBounds.minimum ||
       frame.trayItemLimit > frame.trayItemLimitBounds.maximum) {
     throw new TypeError("原生物资投影无效");
   }
+}
+
+function projectedOrdinaryInputRoom(
+  frame: NativeFactoryInventoryFrame,
+  entity: FactoryEntity,
+  itemId: ItemId,
+): { current: number; freeCapacity: number } {
+  validateFrame(frame);
+  if (frame.registryFingerprint !== EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT ||
+      entity.planetId !== frame.activePlanetId || entity.kind !== "machine" || !entity.id ||
+      !entity.buildingId || !BUILTIN_ORDINARY_RECIPE_BUILDINGS.has(entity.buildingId)) {
+    throw new TypeError("原生普通建筑投料目标无效");
+  }
+  const recipe = getRecipe(entity.recipeId);
+  if (!recipe || !buildingSupportsRecipe(entity.buildingId, recipe) ||
+      !recipe.inputs.some((input) => input.itemId === itemId) &&
+        !(recipe.id === "matrix_research" && BUILTIN_MATRIX_ITEMS.has(itemId))) {
+    throw new TypeError("原生普通建筑当前配方不消耗该物料");
+  }
+  const building = getBuilding(entity.buildingId);
+  const baseCapacity = safeQuantity(building.inputCapacity, "原生建筑基础输入容量", 1);
+  const machineCount = safeQuantity(entity.machineCount, "原生建筑数量", 1);
+  const ratedCapacity = baseCapacity > frame.productionBufferLimit / machineCount
+    ? frame.productionBufferLimit
+    : Math.min(frame.productionBufferLimit, baseCapacity * machineCount);
+  if (!Number.isSafeInteger(ratedCapacity)) throw new RangeError("原生建筑输入容量超出安全整数范围");
+  const current = safeQuantity(entity.inputs[itemId] ?? 0, "原生建筑当前输入库存");
+  const freeCapacity = Math.max(0, ratedCapacity - current);
+  if (freeCapacity < 1) throw new RangeError("原生建筑输入已满");
+  return { current, freeCapacity };
+}
+
+function createNativeProjectedEntityInputDepositCommand(
+  frame: NativeFactoryInventoryFrame,
+  entity: FactoryEntity,
+  itemId: ItemId,
+  source: "cargo" | "tray",
+): SimulationCommandPatch | null {
+  const { current, freeCapacity } = projectedOrdinaryInputRoom(frame, entity, itemId);
+  const command = emptyCommand(frame.revision);
+  let available: number;
+  if (source === "cargo") {
+    const cargo = frame.cargo;
+    if (!cargo || cargo.itemId !== itemId) return null;
+    available = safeQuantity(cargo.amount, "原生手持库存", 1);
+    const moved = Math.min(available, freeCapacity);
+    const remaining = available - moved;
+    command.topLevelChanges.push({
+      path: ["cargo"],
+      operation: "set",
+      value: remaining === 0 ? null : {
+        itemId,
+        amount: remaining,
+        origin: cargo.origin ? { kind: cargo.origin.kind, id: cargo.origin.id } : null,
+      },
+    });
+  } else {
+    const row = frame.rowsByItemId.get(itemId);
+    if (!row) return null;
+    available = safeQuantity(row.amount, "原生托盘库存", 1);
+    const moved = Math.min(available, freeCapacity);
+    command.topLevelChanges.push({
+      path: ["tray", itemId],
+      operation: "set",
+      value: available - moved,
+    });
+  }
+  const moved = Math.min(available, freeCapacity);
+  if (moved < 1) return null;
+  command.changedEntities.push({
+    id: entity.id,
+    changes: [{ path: ["inputs", itemId], operation: "set", value: current + moved }],
+  });
+  return command;
+}
+
+/** Deposits the held stack into one built-in ordinary recipe input. */
+export function createNativeProjectedCargoToEntityInputCommand(
+  frame: NativeFactoryInventoryFrame,
+  entity: FactoryEntity,
+): SimulationCommandPatch | null {
+  return frame.cargo
+    ? createNativeProjectedEntityInputDepositCommand(frame, entity, frame.cargo.itemId as ItemId, "cargo")
+    : null;
+}
+
+/** Deposits one active-tray row into one built-in ordinary recipe input. */
+export function createNativeProjectedTrayToEntityInputCommand(
+  frame: NativeFactoryInventoryFrame,
+  entity: FactoryEntity,
+  itemId: ItemId,
+): SimulationCommandPatch | null {
+  return createNativeProjectedEntityInputDepositCommand(frame, entity, itemId, "tray");
 }
 
 function safeQuantity(value: number, label: string, minimum = 0): number {

@@ -32,9 +32,13 @@ describe("native factory inventory App integration", () => {
     expect(app).toMatch(/createNativeProjectedEntityInventoryTakeCommand\(binding\.inventory, entity, "outputs", itemId\)/);
     expect(app).toMatch(/createNativeProjectedEntityInventoryTakeCommand\(binding\.inventory, entity, "inputs", itemId\)/);
     expect(app).toMatch(/createNativeProjectedEntityInventoryStowCommand\([\s\S]*?binding\.inventory,[\s\S]*?entity,[\s\S]*?sourceKind === "node" \? "outputs" : "inputs"/);
+    expect(app).toMatch(/createNativeProjectedCargoToEntityInputCommand\(binding\.inventory, entity\)/);
+    expect(app).toMatch(/sourceKind !== "tray" \|\| sourceId[\s\S]*?createNativeProjectedTrayToEntityInputCommand\(binding\.inventory, entity, itemId\)/);
     expect(app).toMatch(/onStowEntityInventory=\{handleDraggedItemToTray\}/);
+    expect(app).toMatch(/entityDepositEnabled=\{nativeEntityInventoryDepositEnabled\}/);
     expect(app).toMatch(/Never install or predict the projected edit locally[\s\S]*?nativePlayerAuthorityClockRef\.current\?\.refresh\(\)/);
     expect(rail).toMatch(/data-native-entity-stow="same-revision-v1"/);
+    expect(rail).toMatch(/application\/factory-source-kind", "tray"/);
   });
 
   it("makes the rail read-only while a command or projection is unsettled", () => {
@@ -43,6 +47,7 @@ describe("native factory inventory App integration", () => {
     expect(app).toMatch(/pending=\{nativePlayerAuthorityCommandPending \|\| !nativePlayerAuthorityCommandSource\}/);
     expect(app).toMatch(/nativeEntityInventoryProjectionBinding !== null[\s\S]*?!nativePlayerAuthorityCommandPending/);
     expect(rail).toMatch(/const disabled = pending \|\| !frame/);
-    expect(rail).toMatch(/disabled=\{disabled \|\| mixedCargo \|\| fullCargo\}/);
+    expect(rail).toMatch(/disabled=\{disabled \|\| pickDisabled && !canDragToEntity\}/);
+    expect(rail).toMatch(/const canDragToEntity = entityDepositEnabled && !disabled/);
   });
 });

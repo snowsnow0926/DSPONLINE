@@ -982,6 +982,7 @@ export interface DesktopNativeCoreFactoryInventoryResult {
     logistics_drone: number;
     logistics_vessel: number;
   };
+  productionBufferLimit: number;
   trayItemLimit: number;
   trayItemLimitBounds: {
     minimum: 1000;

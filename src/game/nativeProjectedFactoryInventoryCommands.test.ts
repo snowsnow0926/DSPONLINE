@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   createNativeProjectedCargoReturnCommand,
+  createNativeProjectedCargoToEntityInputCommand,
   createNativeProjectedEntityInventoryStowCommand,
   createNativeProjectedEntityInventoryTakeCommand,
   createNativeProjectedTrayItemLimitCommand,
   createNativeProjectedTrayTakeCommand,
+  createNativeProjectedTrayToEntityInputCommand,
 } from "./nativeProjectedFactoryInventoryCommands";
 import type {
   NativeFactoryInventoryCargo,
@@ -25,11 +27,12 @@ function frame(options: {
     sessionId: "session-a",
     runId: "run-a",
     revision: 41,
-    registryFingerprint: "builtin:test",
+    registryFingerprint: "7df8cf3a",
     activePlanetId: "home",
     cargo: options.cargo ?? null,
     pickupTargetAmount: 100,
     portableFleet: options.portableFleet ?? { logistics_drone: 3, logistics_vessel: 4 },
+    productionBufferLimit: 1_000_000,
     trayItemLimit: options.trayItemLimit ?? 1_000_000,
     trayItemLimitBounds: { minimum: 1_000, default: 1_000_000, maximum: 100_000_000 },
     rows,
@@ -45,6 +48,7 @@ function entity(overrides: Partial<FactoryEntity> = {}): FactoryEntity {
     position: { x: 0, y: 0 },
     interactionLocked: false,
     buildingId: "assembling_machine_mk1",
+    recipeId: "gear",
     machineCount: 1,
     minerCount: 0,
     inputs: { iron_ore: 12 },
@@ -227,5 +231,60 @@ describe("native projected factory inventory commands", () => {
       "outputs",
       "iron_ingot",
     )).toThrow(/预留证明/);
+  });
+
+  it("deposits held or tray material into a bounded built-in recipe input", () => {
+    const held = frame({
+      cargo: { itemId: "iron_ingot", amount: 100, origin: { kind: "tray", id: null } },
+    });
+    expect(createNativeProjectedCargoToEntityInputCommand(
+      held,
+      entity({ inputs: { iron_ingot: 0 } }),
+    )).toMatchObject({
+      baseRevision: 41,
+      topLevelChanges: [{ path: ["cargo"], operation: "set", value: null }],
+      changedEntities: [{
+        id: "machine-a",
+        changes: [{ path: ["inputs", "iron_ingot"], operation: "set", value: 100 }],
+      }],
+    });
+
+    const tray = frame({
+      rows: [{ itemId: "iron_ingot", amount: 100, freeCapacity: 999_900, overLimit: false }],
+    });
+    expect(createNativeProjectedTrayToEntityInputCommand(
+      tray,
+      entity({ inputs: { iron_ingot: 119 } }),
+      "iron_ingot",
+    )).toMatchObject({
+      topLevelChanges: [{ path: ["tray", "iron_ingot"], operation: "set", value: 99 }],
+      changedEntities: [{
+        id: "machine-a",
+        changes: [{ path: ["inputs", "iron_ingot"], operation: "set", value: 120 }],
+      }],
+    });
+  });
+
+  it("keeps stations, opaque registries, outputs, non-recipe items and unsafe quantities closed", () => {
+    const held = frame({
+      cargo: { itemId: "iron_ingot", amount: 1, origin: { kind: "tray", id: null } },
+    });
+    expect(() => createNativeProjectedCargoToEntityInputCommand(
+      held,
+      entity({ kind: "station" }),
+    )).toThrow(/投料目标/);
+    expect(() => createNativeProjectedCargoToEntityInputCommand(
+      { ...held, registryFingerprint: "modded:opaque" },
+      entity(),
+    )).toThrow(/投料目标/);
+    expect(() => createNativeProjectedTrayToEntityInputCommand(
+      frame(),
+      entity(),
+      "iron_ore",
+    )).toThrow(/不消耗/);
+    expect(() => createNativeProjectedCargoToEntityInputCommand(
+      held,
+      entity({ inputs: { iron_ingot: 1.5 } }),
+    )).toThrow(/当前输入库存/);
   });
 });

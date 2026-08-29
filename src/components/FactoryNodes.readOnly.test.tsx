@@ -308,13 +308,46 @@ describe("FactoryNodes native-authority read-only boundary", () => {
     expect(spies.onRecipeChange).not.toHaveBeenCalled();
   });
 
+  it("opens held and tray deposits only on projected ordinary recipe inputs", () => {
+    const spies = callbacks();
+    const data = dataFixture(machineFixture(), spies, {
+      cargo: { itemId: "iron_ingot", amount: 5, origin: { kind: "tray" } },
+      inventoryPickupEnabled: true,
+      inventoryDepositEnabled: true,
+    });
+    render(<MachineNode {...nodeProps(data)} />);
+    const input = host.querySelector<HTMLButtonElement>(".node-port--input .node-slot")!;
+    expect(input.disabled).toBe(false);
+    act(() => input.click());
+    expect(spies.onDropCargo).toHaveBeenCalledWith(data.entity.id);
+    expect(spies.onPickInput).not.toHaveBeenCalled();
+
+    dispatchDrag(input, "drop", dataTransfer({
+      "application/factory-item": "iron_ingot",
+      "application/factory-source-kind": "tray",
+    }));
+    expect(spies.onDropDraggedItem).toHaveBeenCalledWith(
+      data.entity.id,
+      "iron_ingot",
+      "tray",
+      undefined,
+    );
+    dispatchDrag(input, "drop", dataTransfer({
+      "application/factory-item": "iron_ingot",
+      "application/factory-source-kind": "node",
+      "application/factory-source-id": "machine-b",
+    }));
+    expect(spies.onDropDraggedItem).toHaveBeenCalledTimes(1);
+    expect(spies.onRecipeChange).not.toHaveBeenCalled();
+  });
+
   it("disables manual mining, miner installation, output pickup and unlock", () => {
     const spies = callbacks();
     const entity = entityFixture("vein", undefined, {
       interactionLocked: true,
       outputs: { iron_ore: 9 },
     });
-    const data = dataFixture(entity, spies);
+    const data = dataFixture(entity, spies, { inventoryDepositEnabled: true });
     render(<VeinNode {...nodeProps(data)} />);
 
     expect(host.querySelector(".factory-node__lock")).toBeNull();
@@ -342,7 +375,7 @@ describe("FactoryNodes native-authority read-only boundary", () => {
       inputs: { iron_ingot: 6 },
       outputs: { iron_ingot: 7 },
     });
-    const data = dataFixture(entity, spies);
+    const data = dataFixture(entity, spies, { inventoryDepositEnabled: true });
     render(<LogisticsNode {...nodeProps(data)} />);
 
     expect(host.querySelector(".factory-node__lock")).toBeNull();
@@ -373,7 +406,7 @@ describe("FactoryNodes native-authority read-only boundary", () => {
     })],
   ])("does not mount the power %s and keeps its cargo ports inert", (_label, entity) => {
     const spies = callbacks();
-    const data = dataFixture(entity, spies);
+    const data = dataFixture(entity, spies, { inventoryDepositEnabled: true });
     render(<PowerNode {...nodeProps(data)} />);
 
     expect(host.querySelector(".node-inline-select")).toBeNull();

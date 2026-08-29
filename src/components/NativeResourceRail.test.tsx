@@ -23,6 +23,7 @@ function frame(): NativeFactoryInventoryFrame {
     cargo: { itemId: "iron_ore", amount: 125, origin: { kind: "tray", id: null } },
     pickupTargetAmount: 100,
     portableFleet: { logistics_drone: 2, logistics_vessel: 3 },
+    productionBufferLimit: 1_000_000,
     trayItemLimit: 1_000,
     trayItemLimitBounds: { minimum: 1_000, default: 1_000_000, maximum: 100_000_000 },
     rows,
@@ -49,6 +50,7 @@ describe("NativeResourceRail", () => {
     act(() => root.render(<NativeResourceRail
       frame={null}
       pending={false}
+      entityDepositEnabled={false}
       onPickTray={vi.fn()}
       onDropCargo={vi.fn()}
       onStowEntityInventory={vi.fn()}
@@ -63,6 +65,7 @@ describe("NativeResourceRail", () => {
     act(() => root.render(<NativeResourceRail
       frame={frame()}
       pending={false}
+      entityDepositEnabled={false}
       onPickTray={vi.fn()}
       onDropCargo={onDropCargo}
       onStowEntityInventory={vi.fn()}
@@ -79,6 +82,7 @@ describe("NativeResourceRail", () => {
     act(() => root.render(<NativeResourceRail
       frame={{ ...frame(), cargo: null }}
       pending
+      entityDepositEnabled={false}
       onPickTray={vi.fn()}
       onDropCargo={vi.fn()}
       onStowEntityInventory={vi.fn()}
@@ -93,6 +97,7 @@ describe("NativeResourceRail", () => {
     act(() => root.render(<NativeResourceRail
       frame={frame()}
       pending={false}
+      entityDepositEnabled={false}
       onPickTray={vi.fn()}
       onDropCargo={vi.fn()}
       onStowEntityInventory={vi.fn()}
@@ -109,6 +114,7 @@ describe("NativeResourceRail", () => {
     act(() => root.render(<NativeResourceRail
       frame={{ ...frame(), cargo: null }}
       pending={false}
+      entityDepositEnabled={false}
       onPickTray={vi.fn()}
       onDropCargo={vi.fn()}
       onStowEntityInventory={onStowEntityInventory}
@@ -138,5 +144,34 @@ describe("NativeResourceRail", () => {
     } });
     act(() => tray.dispatchEvent(accepted));
     expect(onStowEntityInventory).toHaveBeenCalledWith("iron_ore", "node", "machine-a");
+  });
+
+  it("originates only same-revision tray drags when ordinary entity deposit is enabled", () => {
+    const onPickTray = vi.fn();
+    act(() => root.render(<NativeResourceRail
+      frame={frame()}
+      pending={false}
+      entityDepositEnabled
+      onPickTray={onPickTray}
+      onDropCargo={vi.fn()}
+      onStowEntityInventory={vi.fn()}
+      onSetTrayItemLimit={vi.fn()}
+    />));
+    const row = host.querySelector<HTMLButtonElement>(".tray-row")!;
+    expect(row.disabled).toBe(false);
+    expect(row.draggable).toBe(true);
+    act(() => row.click());
+    expect(onPickTray).not.toHaveBeenCalled();
+    const payload: Record<string, string> = {};
+    const drag = new Event("dragstart", { bubbles: true, cancelable: true });
+    Object.defineProperty(drag, "dataTransfer", { value: {
+      setData: (type: string, value: string) => { payload[type] = value; },
+      effectAllowed: "none",
+    } });
+    act(() => row.dispatchEvent(drag));
+    expect(payload).toEqual({
+      "application/factory-item": "iron_ore",
+      "application/factory-source-kind": "tray",
+    });
   });
 });

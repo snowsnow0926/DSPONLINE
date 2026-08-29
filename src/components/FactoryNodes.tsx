@@ -63,6 +63,8 @@ export interface FactoryNodeData extends Record<string, unknown> {
   beltConnectionsEnabled?: boolean;
   /** Same-revision Rust inventory projections may remove material from a card, while configuration stays read-only. */
   inventoryPickupEnabled?: boolean;
+  /** Same-revision Rust projections may deposit held/tray material into ordinary recipe inputs. */
+  inventoryDepositEnabled?: boolean;
   visualSignature: string;
   presentationSignature: string;
   entity: FactoryEntity;
@@ -137,6 +139,22 @@ const SPECIAL_BELT_ENDPOINT_BUILDINGS = new Set([
   "interstellar_logistics_station",
   "space_station_construction_launcher",
   "time_warp_device",
+]);
+
+const NATIVE_ORDINARY_INPUT_BUILDINGS = new Set([
+  "arc_smelter",
+  "assembling_machine_mk1",
+  "assembling_machine_mk2",
+  "assembling_machine_mk3",
+  "chemical_plant",
+  "em_rail_ejector",
+  "fractionator",
+  "matrix_lab",
+  "miniature_particle_collider",
+  "oil_refinery",
+  "plane_smelter",
+  "quantum_chemical_plant",
+  "vertical_launching_silo",
 ]);
 
 function ordinaryBeltHandlesEnabled(data: FactoryNodeData): boolean {
@@ -341,15 +359,17 @@ interface InputSlotProps {
   handleId?: string;
   readOnly?: boolean;
   inventoryPickupEnabled?: boolean;
+  inventoryDepositEnabled?: boolean;
   connectionsEnabled?: boolean;
 }
 
-function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, onDropDraggedItem, connectionDraft, connectionCount = 0, missing = false, handleId, readOnly = false, inventoryPickupEnabled = false, connectionsEnabled = false }: InputSlotProps) {
+function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, onDropDraggedItem, connectionDraft, connectionCount = 0, missing = false, handleId, readOnly = false, inventoryPickupEnabled = false, inventoryDepositEnabled = false, connectionsEnabled = false }: InputSlotProps) {
   const compatible = cargo?.itemId === itemId;
   const nativeSourceIntegral = Number.isSafeInteger(amount) && amount >= 1;
   const pickupEnabled = amount >= 1 && !cargo && (!readOnly || inventoryPickupEnabled && nativeSourceIntegral);
   const nativeStowEnabled = readOnly && inventoryPickupEnabled && nativeSourceIntegral;
-  const interactionEnabled = !readOnly || pickupEnabled || nativeStowEnabled;
+  const nativeDepositEnabled = readOnly && inventoryDepositEnabled;
+  const interactionEnabled = !readOnly || pickupEnabled || nativeStowEnabled || nativeDepositEnabled;
   const previousAmountRef = useRef(Math.floor(amount));
   const [arrivalPulse, setArrivalPulse] = useState(0);
   useEffect(() => {
@@ -360,17 +380,17 @@ function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, 
   const dropCargo = (event: React.MouseEvent) => {
     event.stopPropagation();
     if (!interactionEnabled) return;
-    if (!readOnly && compatible) onDropCargo(entityId);
+    if ((!readOnly || nativeDepositEnabled) && compatible) onDropCargo(entityId);
     else if (pickupEnabled) onPickInput(entityId, itemId);
   };
   const dropDragged = (event: React.DragEvent) => {
-    if (readOnly) return;
     const draggedItem = event.dataTransfer.getData("application/factory-item") as ItemId;
     if (draggedItem !== itemId) return;
-    event.preventDefault();
-    event.stopPropagation();
     const sourceKind = event.dataTransfer.getData("application/factory-source-kind") as DraggedItemSourceKind;
     const sourceId = event.dataTransfer.getData("application/factory-source-id") || undefined;
+    if (readOnly && (!nativeDepositEnabled || sourceKind !== "tray" || sourceId)) return;
+    event.preventDefault();
+    event.stopPropagation();
     onDropDraggedItem(entityId, draggedItem, sourceKind, sourceId);
   };
   return (
@@ -391,11 +411,13 @@ function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, 
           event.dataTransfer.effectAllowed = "move";
         }}
         onDragOver={(event) => {
-          if (!readOnly && event.dataTransfer.types.includes("application/factory-item")) event.preventDefault();
+          if ((!readOnly || nativeDepositEnabled) && event.dataTransfer.types.includes("application/factory-item")) event.preventDefault();
         }}
         onDrop={dropDragged}
-        title={readOnly && !inventoryPickupEnabled
+        title={readOnly && !inventoryPickupEnabled && !nativeDepositEnabled
           ? `${ITEMS[itemId].name}（只读）`
+          : readOnly && nativeDepositEnabled && compatible
+            ? `投入手持的${ITEMS[itemId].name}`
           : readOnly && cargo
             ? `可拖回托盘；需先放下手持物才能取出${ITEMS[itemId].name}`
             : !readOnly && compatible
@@ -726,6 +748,8 @@ function MachineFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
   const inputs = proliferatorItemId && !recipeInputs.some((input) => input.itemId === proliferatorItemId)
     ? [...recipeInputs, { itemId: proliferatorItemId, amount: 1 }]
     : recipeInputs;
+  const nativeOrdinaryInputDepositEnabled = Boolean(data.inventoryDepositEnabled && entity.buildingId &&
+    NATIVE_ORDINARY_INPUT_BUILDINGS.has(entity.buildingId));
   const outputIds = recipe?.outputs.map((output) => output.itemId) ?? [];
   useDynamicHandles(entity.id, blackHoleConnector
     ? `black-hole:${([0, 1, 2] as const).map((index) => data.blackHolePortConnections[index] ?? "empty").join(",")}`
@@ -886,6 +910,8 @@ function MachineFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
               missing={(data.status.code === "missing-input" || data.status.code === "missing-proliferator") && (entity.inputs[input.itemId] ?? 0) < input.amount}
               readOnly={data.readOnly}
               inventoryPickupEnabled={data.inventoryPickupEnabled}
+              inventoryDepositEnabled={nativeOrdinaryInputDepositEnabled &&
+                recipeInputs.some((candidate) => candidate.itemId === input.itemId)}
               connectionsEnabled={ordinaryBeltHandlesEnabled(data)}
             />
           )) : rayReceiver ? (
@@ -1237,6 +1263,7 @@ function areNodeVisualPropsEqual(previous: NodeProps<FactoryFlowNode>, next: Nod
     previous.data.readOnly === next.data.readOnly &&
     previous.data.beltConnectionsEnabled === next.data.beltConnectionsEnabled &&
     previous.data.inventoryPickupEnabled === next.data.inventoryPickupEnabled &&
+    previous.data.inventoryDepositEnabled === next.data.inventoryDepositEnabled &&
     previous.data.visualSignature === next.data.visualSignature &&
     previous.data.presentationSignature === next.data.presentationSignature &&
     previous.data.entity.position.x === next.data.entity.position.x &&

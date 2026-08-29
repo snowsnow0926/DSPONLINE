@@ -16,6 +16,7 @@ interface NativeResourceRailProps {
     sourceKind: Extract<DraggedItemSourceKind, "node" | "node-input">,
     sourceId: string,
   ) => void;
+  entityDepositEnabled: boolean;
   onSetTrayItemLimit: (value: number) => void;
 }
 
@@ -51,6 +52,7 @@ export function NativeResourceRail({
   onPickTray,
   onDropCargo,
   onStowEntityInventory,
+  entityDepositEnabled,
   onSetTrayItemLimit,
 }: NativeResourceRailProps) {
   const [trayLimitDraft, setTrayLimitDraft] = useState(frame ? String(frame.trayItemLimit) : "1000000");
@@ -177,15 +179,32 @@ export function NativeResourceRail({
             const mixedCargo = Boolean(frame.cargo && frame.cargo.itemId !== row.itemId);
             const fullCargo = Boolean(frame.cargo && frame.cargo.itemId === row.itemId &&
               frame.cargo.amount >= frame.pickupTargetAmount);
+            const canDragToEntity = entityDepositEnabled && !disabled && Number.isSafeInteger(row.amount) && row.amount >= 1;
+            const pickDisabled = mixedCargo || fullCargo;
             return <button
               className="tray-row"
               type="button"
               key={row.itemId}
-              disabled={disabled || mixedCargo || fullCargo}
-              onClick={() => onPickTray(row.itemId)}
+              disabled={disabled || pickDisabled && !canDragToEntity}
+              aria-disabled={disabled || pickDisabled}
+              draggable={canDragToEntity}
+              onClick={() => {
+                if (!pickDisabled) onPickTray(row.itemId);
+              }}
+              onDragStart={(event) => {
+                if (!canDragToEntity) {
+                  event.preventDefault();
+                  return;
+                }
+                event.dataTransfer.setData("application/factory-item", row.itemId);
+                event.dataTransfer.setData("application/factory-source-kind", "tray");
+                event.dataTransfer.effectAllowed = "move";
+              }}
               title={row.overLimit
                 ? `${itemLabel(row.itemId)}超过当前自动写入上限；现有库存不会删除`
-                : `拿取${itemLabel(row.itemId)}`}
+                : canDragToEntity
+                  ? `拿取${itemLabel(row.itemId)}，或拖入普通建筑输入`
+                  : `拿取${itemLabel(row.itemId)}`}
             >
               <NativeItemMark itemId={row.itemId} />
               <span>{itemLabel(row.itemId)}</span>
@@ -193,7 +212,7 @@ export function NativeResourceRail({
             </button>;
           })}
         </div>
-        <p className="native-resource-rail__notice">可将普通建筑输入/输出拖回托盘；站点输出、向建筑投料与永久丢弃仍保持关闭。</p>
+        <p className="native-resource-rail__notice">可将普通建筑输入/输出拖回托盘，也可把托盘物资拖入内置普通配方建筑；站点、量子物流、建筑间直拖与永久丢弃仍保持关闭。</p>
       </section>
     </>}
   </aside>;

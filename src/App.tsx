@@ -519,10 +519,12 @@ import { createNativeProjectedBeltPriorityCommand } from "./game/nativeProjected
 import { createNativeProjectedQuantumItemCapacityCommand } from "./game/nativeProjectedQuantumCommands";
 import {
   createNativeProjectedCargoReturnCommand,
+  createNativeProjectedCargoToEntityInputCommand,
   createNativeProjectedEntityInventoryStowCommand,
   createNativeProjectedEntityInventoryTakeCommand,
   createNativeProjectedTrayItemLimitCommand,
   createNativeProjectedTrayTakeCommand,
+  createNativeProjectedTrayToEntityInputCommand,
 } from "./game/nativeProjectedFactoryInventoryCommands";
 import {
   createNativeProjectedInfiniteResearchAutomationCommand,
@@ -11128,9 +11130,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [commitGame, commitNativeProjectedCommand, nativeEntityInventoryProjectionBinding, rejectLegacyFactoryInteractionWhileNative]);
 
   const onDropCargo = useCallback((entityId: string) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const binding = nativeEntityInventoryProjectionBinding;
+      const entity = binding?.canvas.entityById.get(entityId);
+      if (!binding || !entity) {
+        setNotice("没有取得同一 revision 的 Rust 建筑库存；本次投料未应用");
+        return;
+      }
+      commitNativeProjectedCommand(binding.inventory.revision, () =>
+        createNativeProjectedCargoToEntityInputCommand(binding.inventory, entity));
+      return;
+    }
     if (rejectLegacyFactoryInteractionWhileNative("建筑物资交互")) return;
     commitGame((current) => dropCargoToEntity(current, entityId));
-  }, [commitGame, rejectLegacyFactoryInteractionWhileNative]);
+  }, [commitGame, commitNativeProjectedCommand, nativeEntityInventoryProjectionBinding, rejectLegacyFactoryInteractionWhileNative]);
 
   const onDropDraggedItem = useCallback((
     targetEntityId: string,
@@ -11138,13 +11151,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     sourceKind: DraggedItemSourceKind,
     sourceId?: string,
   ) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      if (sourceKind !== "tray" || sourceId) return;
+      const binding = nativeEntityInventoryProjectionBinding;
+      const entity = binding?.canvas.entityById.get(targetEntityId);
+      if (!binding || !entity) {
+        setNotice("没有取得同一 revision 的 Rust 建筑库存；本次托盘投料未应用");
+        return;
+      }
+      commitNativeProjectedCommand(binding.inventory.revision, () =>
+        createNativeProjectedTrayToEntityInputCommand(binding.inventory, entity, itemId));
+      return;
+    }
     if (rejectLegacyFactoryInteractionWhileNative("建筑物资交互")) return;
     commitGame((current) => sourceKind === "node" && sourceId
       ? moveEntityOutputToEntity(current, sourceId, targetEntityId, itemId)
       : sourceKind === "node-input" && sourceId
         ? moveEntityInputToEntity(current, sourceId, targetEntityId, itemId)
         : moveTrayItemToEntity(current, targetEntityId, itemId));
-  }, [commitGame, rejectLegacyFactoryInteractionWhileNative]);
+  }, [commitGame, commitNativeProjectedCommand, nativeEntityInventoryProjectionBinding, rejectLegacyFactoryInteractionWhileNative]);
 
   const handleStowCargo = useCallback(() => {
     if (rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
@@ -13906,6 +13931,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const nativeEntityInventoryPickupEnabled = nativePlayerAuthorityOwnsRuntime &&
     nativeEntityInventoryProjectionBinding !== null &&
     !nativePlayerAuthorityCommandPending && Boolean(nativePlayerAuthorityCommandSource);
+  const nativeEntityInventoryDepositEnabled = nativeEntityInventoryPickupEnabled &&
+    nativeEntityInventoryProjectionBinding?.inventory.registryFingerprint === "7df8cf3a";
 
   const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "presentationSignature" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "acceptedInputItemIds" | "producedOutputItemIds" | "connectionDraft" | "connectionViewportFull" | "dynamicEffects" | "presentationVisible" | "alertActive" | "stackHidden" | "stackMarker" | "stackHalo" | "stackCount" | "stackGroupId" | "stackMembershipToken" | "stackMemberIds" | "stackAlertCount" | "stackCriticalAlertCount" | "stackGeometryHandlesRequired">>(() => {
     const technology = getTechnology(canvasGame.research.selectedTechId);
@@ -13915,6 +13942,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       readOnly: nativePlayerAuthorityOwnsRuntime,
       beltConnectionsEnabled: nativeOrdinaryBeltConnectionEnabled,
       inventoryPickupEnabled: nativeEntityInventoryPickupEnabled,
+      inventoryDepositEnabled: nativeEntityInventoryDepositEnabled,
       cargo: nativePlayerAuthorityOwnsRuntime
         ? nativeEntityInventoryProjectionBinding?.inventory.cargo ?? null
         : canvasGame.cargo,
@@ -13949,7 +13977,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       simulationMultiplier: getEffectiveSimulationMultiplier(canvasGame),
       extremeVisuals: extremeVisualsActive,
     };
-  }, [beltNodeIndex.activeEntityIds, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, extremeVisualsActive, factoryCanvasPlanetId, factoryRunStatusReadModel.paused, miningEntityId, nativeEntityInventoryPickupEnabled, nativeEntityInventoryProjectionBinding, nativeOrdinaryBeltConnectionEnabled, nativePlayerAuthorityOwnsRuntime, placement, placementCount, stableOnAddBuilding, stableOnDropCargo, stableOnDropDraggedItem, stableOnEnergyModeChange, stableOnFuelChange, stableOnInstallMiner, stableOnInteractionLockChange, stableOnMiningStart, stableOnMiningStop, stableOnPickInput, stableOnPickOutput, stableOnRecipeChange, stableOnStackActivate]);
+  }, [beltNodeIndex.activeEntityIds, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, extremeVisualsActive, factoryCanvasPlanetId, factoryRunStatusReadModel.paused, miningEntityId, nativeEntityInventoryDepositEnabled, nativeEntityInventoryPickupEnabled, nativeEntityInventoryProjectionBinding, nativeOrdinaryBeltConnectionEnabled, nativePlayerAuthorityOwnsRuntime, placement, placementCount, stableOnAddBuilding, stableOnDropCargo, stableOnDropDraggedItem, stableOnEnergyModeChange, stableOnFuelChange, stableOnInstallMiner, stableOnInteractionLockChange, stableOnMiningStart, stableOnMiningStop, stableOnPickInput, stableOnPickOutput, stableOnRecipeChange, stableOnStackActivate]);
 
   const canvasNodeSemanticRevisionToken = createCanvasNodeSemanticRevisionToken([
     factoryCanvasPlanetId,
@@ -17890,6 +17918,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           onPickTray={takeNativeTrayItem}
           onDropCargo={returnNativeCargo}
           onStowEntityInventory={handleDraggedItemToTray}
+          entityDepositEnabled={nativeEntityInventoryDepositEnabled}
           onSetTrayItemLimit={setNativeTrayItemLimit}
         /> : <StableResourceRail
           game={panelGame}

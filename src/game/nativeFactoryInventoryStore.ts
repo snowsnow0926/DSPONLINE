@@ -37,6 +37,7 @@ export interface NativeFactoryInventoryProjection {
   readonly cargo: NativeFactoryInventoryCargo | null;
   readonly pickupTargetAmount: number;
   readonly portableFleet: Readonly<Record<(typeof PORTABLE_FLEET_ITEM_IDS)[number], number>>;
+  readonly productionBufferLimit: number;
   readonly trayItemLimit: number;
   readonly trayItemLimitBounds: {
     readonly minimum: number;
@@ -77,6 +78,7 @@ export interface NativeFactoryInventoryFrame extends NativeFactoryInventoryIdent
   readonly cargo: NativeFactoryInventoryCargo | null;
   readonly pickupTargetAmount: number;
   readonly portableFleet: NativeFactoryInventoryProjection["portableFleet"];
+  readonly productionBufferLimit: number;
   readonly trayItemLimit: number;
   readonly trayItemLimitBounds: NativeFactoryInventoryProjection["trayItemLimitBounds"];
   readonly rows: readonly NativeFactoryInventoryRow[];
@@ -152,6 +154,8 @@ function validProjectionPage(
       !Array.isArray(page.rows) || page.rows.length > NATIVE_FACTORY_INVENTORY_PAGE_ROWS ||
       page.truncated !== (page.nextCursor !== null) ||
       !safeNonnegativeInteger(page.trayItemLimit) ||
+      !safeNonnegativeInteger(page.productionBufferLimit) ||
+      page.productionBufferLimit < 1_000 || page.productionBufferLimit > 100_000_000 ||
       page.trayItemLimitBounds.minimum !== 1_000 || page.trayItemLimitBounds.default !== 1_000_000 ||
       page.trayItemLimitBounds.maximum !== 100_000_000 ||
       page.trayItemLimit < page.trayItemLimitBounds.minimum ||
@@ -182,6 +186,7 @@ function validProjectionPage(
 function sameHeader(left: NativeFactoryInventoryProjection, right: NativeFactoryInventoryProjection): boolean {
   return left.revision === right.revision && left.registryFingerprint === right.registryFingerprint &&
     left.activePlanetId === right.activePlanetId && left.pickupTargetAmount === right.pickupTargetAmount &&
+    left.productionBufferLimit === right.productionBufferLimit &&
     left.trayItemLimit === right.trayItemLimit && left.totalCount === right.totalCount &&
     JSON.stringify(left.cargo) === JSON.stringify(right.cargo) &&
     JSON.stringify(left.portableFleet) === JSON.stringify(right.portableFleet) &&
@@ -327,6 +332,7 @@ export class NativeFactoryInventoryStore {
           cargo: first.cargo,
           pickupTargetAmount: first.pickupTargetAmount,
           portableFleet: Object.freeze({ ...first.portableFleet }),
+          productionBufferLimit: first.productionBufferLimit,
           trayItemLimit: first.trayItemLimit,
           trayItemLimitBounds: Object.freeze({ ...first.trayItemLimitBounds }),
           rows: Object.freeze([...rows]),

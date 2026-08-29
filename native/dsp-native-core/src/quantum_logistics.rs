@@ -66,6 +66,13 @@ pub(crate) struct QuantumActiveScan {
     /// These counters are runtime-only diagnostics and never enter GameState.
     pub linear_order_rows: usize,
     pub full_sort_rows: usize,
+    /// Network record rows inspected by the boundary parser. The sparse path
+    /// probes only the exact inventory/capacity/cursor keys that the selected
+    /// endpoint items can read or mutate; the compatibility oracle reports
+    /// every persisted row here.
+    pub network_parse_selected_rows: usize,
+    pub network_parse_total_rows: usize,
+    pub network_parse_full_scan_fallback: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,6 +261,13 @@ pub(crate) struct QuantumLogisticsDirectory {
     collector_stacks: f64,
     cached_legacy_level_bits: Option<u64>,
     cached_legacy_bandwidth: RuntimeBandwidth,
+    /// A runtime-only proof established by one complete parse of the exact
+    /// network record owned by this directory revision. Retained simulation
+    /// revisions only mutate that record through canonical encoders in this
+    /// module (pure-idle additions are canonical too); commands and topology
+    /// changes discard the directory. Record-length drift is checked in O(1)
+    /// and re-enters the full oracle before any partial Network is mutated.
+    network_sparse_proof: Option<NetworkSparseProof>,
     fallback_full_scan: bool,
     construction_fallback_full_scan: bool,
 }
@@ -299,6 +313,7 @@ impl Default for QuantumLogisticsDirectory {
                 tower_stacks: 0.0,
                 collector_stacks: 0.0,
             },
+            network_sparse_proof: None,
             fallback_full_scan: true,
             construction_fallback_full_scan: true,
         }
@@ -326,6 +341,122 @@ struct Network {
     dirty_routing_cursors: BTreeSet<String>,
     dirty_upload_routing_cursors: BTreeSet<String>,
     runtime_flow_dirty: bool,
+    /// Partial sessions contain only keys selected by a topology-proven
+    /// active boundary (plus every known zero key required by legacy deposit
+    /// normalization). Such a session may only use the in-place patch writer.
+    partial: bool,
+    /// Fractional permissive route cargo deliberately retains the historical
+    /// complete rewrite even when the parsed record was canonical.
+    force_full_write: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct NetworkSparseProof {
+    inventory_rows: usize,
+    item_capacity_rows: usize,
+    routing_cursor_rows: usize,
+    upload_routing_cursor_rows: usize,
+    zero_inventory: HashSet<String>,
+}
+
+impl NetworkSparseProof {
+    fn mutable_rows(&self) -> usize {
+        self.inventory_rows
+            .saturating_add(self.routing_cursor_rows)
+            .saturating_add(self.upload_routing_cursor_rows)
+    }
+
+    fn total_rows(&self) -> usize {
+        self.mutable_rows().saturating_add(self.item_capacity_rows)
+    }
+
+    fn from_complete(network: &Network) -> Option<Self> {
+        (!network.partial && network.sparse_write_compatible).then(|| Self {
+            inventory_rows: network.inventory.len(),
+            item_capacity_rows: network.item_capacities.len(),
+            routing_cursor_rows: network.routing_cursors.len(),
+            upload_routing_cursor_rows: network.upload_routing_cursors.len(),
+            zero_inventory: network
+                .inventory
+                .iter()
+                .filter_map(|(item_id, amount)| amount.is_zero().then_some(item_id.clone()))
+                .collect(),
+        })
+    }
+
+    fn from_complete_write(network: &Network) -> Option<Self> {
+        (!network.partial).then(|| Self {
+            inventory_rows: network.inventory.len(),
+            item_capacity_rows: network.item_capacities.len(),
+            routing_cursor_rows: network.routing_cursors.len(),
+            upload_routing_cursor_rows: network.upload_routing_cursors.len(),
+            zero_inventory: network
+                .inventory
+                .iter()
+                .filter_map(|(item_id, amount)| amount.is_zero().then_some(item_id.clone()))
+                .collect(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct NetworkItemSelection {
+    inventory: HashSet<String>,
+    item_capacities: HashSet<String>,
+    routing_cursors: HashSet<String>,
+    upload_routing_cursors: HashSet<String>,
+    remove_zero_inventory: bool,
+}
+
+impl NetworkItemSelection {
+    fn select_flush(&mut self, item_id: &str) {
+        self.inventory.insert(item_id.to_owned());
+        self.item_capacities.insert(item_id.to_owned());
+        self.remove_zero_inventory = true;
+    }
+
+    fn select_download(&mut self, item_id: &str) {
+        self.inventory.insert(item_id.to_owned());
+        self.routing_cursors.insert(item_id.to_owned());
+    }
+
+    fn select_upload(&mut self, item_id: &str) {
+        self.inventory.insert(item_id.to_owned());
+        self.item_capacities.insert(item_id.to_owned());
+        self.upload_routing_cursors.insert(item_id.to_owned());
+    }
+
+    fn with_known_zeros(&self, proof: &NetworkSparseProof) -> Self {
+        let mut selected = self.clone();
+        if selected.remove_zero_inventory {
+            selected
+                .inventory
+                .extend(proof.zero_inventory.iter().cloned());
+        }
+        selected
+    }
+
+    fn selected_rows(&self) -> usize {
+        self.inventory
+            .len()
+            .saturating_add(self.item_capacities.len())
+            .saturating_add(self.routing_cursors.len())
+            .saturating_add(self.upload_routing_cursors.len())
+    }
+
+    fn potential_dirty_rows(&self) -> usize {
+        self.inventory
+            .len()
+            .saturating_add(self.routing_cursors.len())
+            .saturating_add(self.upload_routing_cursors.len())
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct NetworkParseScan {
+    selected_rows: usize,
+    total_rows: usize,
+    full_scan_fallback: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -818,6 +949,187 @@ fn canonical_network_record_matches(raw: &Map<String, Value>, network: &Network)
         }
 }
 
+fn network_enabled(base: &Map<String, Value>) -> anyhow::Result<bool> {
+    base.get("quantumLogisticsNetwork")
+        .and_then(Value::as_object)
+        .map(|raw| raw.get("enabled").and_then(Value::as_bool) == Some(true))
+        .ok_or_else(|| anyhow!("native quantum logistics network is missing"))
+}
+
+fn raw_network_record_rows(base: &Map<String, Value>) -> usize {
+    base.get("quantumLogisticsNetwork")
+        .and_then(Value::as_object)
+        .map(|raw| {
+            [
+                "inventory",
+                "itemCapacities",
+                "routingCursors",
+                "uploadRoutingCursors",
+            ]
+            .into_iter()
+            .filter_map(|field| raw.get(field).and_then(Value::as_object))
+            .map(Map::len)
+            .fold(0_usize, usize::saturating_add)
+        })
+        .unwrap_or(0)
+}
+
+fn canonical_selected_quantity_record(
+    raw: &Map<String, Value>,
+    selected: &HashSet<String>,
+    capacities: bool,
+) -> Option<BTreeMap<String, BigUint>> {
+    let mut parsed = BTreeMap::new();
+    for item_id in selected {
+        let Some(value) = raw.get(item_id) else {
+            continue;
+        };
+        let text = value.as_str()?;
+        let canonical = if capacities {
+            canonical_capacity_text(text)
+        } else {
+            canonical_decimal_text(text)
+        };
+        if !canonical {
+            return None;
+        }
+        parsed.insert(item_id.clone(), BigUint::parse_bytes(text.as_bytes(), 10)?);
+    }
+    Some(parsed)
+}
+
+fn canonical_selected_cursor_record(
+    raw: &Map<String, Value>,
+    selected: &HashSet<String>,
+) -> Option<BTreeMap<String, u64>> {
+    let mut parsed = BTreeMap::new();
+    for item_id in selected {
+        let Some(value) = raw.get(item_id) else {
+            continue;
+        };
+        let cursor = value
+            .as_u64()
+            .filter(|cursor| *cursor <= MAX_SAFE_INTEGER)?;
+        if value != &Value::from(cursor) {
+            return None;
+        }
+        parsed.insert(item_id.clone(), cursor);
+    }
+    Some(parsed)
+}
+
+fn sparse_network_header(
+    raw: &Map<String, Value>,
+    proof: &NetworkSparseProof,
+) -> Option<(bool, Option<BoundaryFlow>)> {
+    let inventory = raw.get("inventory")?.as_object()?;
+    let item_capacities = raw.get("itemCapacities")?.as_object()?;
+    let routing_cursors = raw.get("routingCursors")?.as_object()?;
+    let upload_routing_cursors = raw.get("uploadRoutingCursors")?.as_object()?;
+    if inventory.len() != proof.inventory_rows
+        || item_capacities.len() != proof.item_capacity_rows
+        || routing_cursors.len() != proof.routing_cursor_rows
+        || upload_routing_cursors.len() != proof.upload_routing_cursor_rows
+    {
+        return None;
+    }
+    let enabled = raw.get("enabled")?.as_bool()?;
+    let runtime_flow = match raw.get("runtimeFlow") {
+        Some(raw_flow) => {
+            let flow = parse_flow(Some(raw_flow))?;
+            Some(canonical_flow_matches(Some(raw_flow), &flow).then_some(flow)?)
+        }
+        None => None,
+    };
+    (raw.len() == 5 + usize::from(runtime_flow.is_some())).then_some((enabled, runtime_flow))
+}
+
+fn parse_sparse_network(
+    base: &Map<String, Value>,
+    selection: &NetworkItemSelection,
+    proof: &NetworkSparseProof,
+) -> Option<Network> {
+    let raw = base.get("quantumLogisticsNetwork")?.as_object()?;
+    let (enabled, runtime_flow) = sparse_network_header(raw, proof)?;
+    let inventory = canonical_selected_quantity_record(
+        raw.get("inventory")?.as_object()?,
+        &selection.inventory,
+        false,
+    )?;
+    let item_capacities = canonical_selected_quantity_record(
+        raw.get("itemCapacities")?.as_object()?,
+        &selection.item_capacities,
+        true,
+    )?;
+    let routing_cursors = canonical_selected_cursor_record(
+        raw.get("routingCursors")?.as_object()?,
+        &selection.routing_cursors,
+    )?;
+    let upload_routing_cursors = canonical_selected_cursor_record(
+        raw.get("uploadRoutingCursors")?.as_object()?,
+        &selection.upload_routing_cursors,
+    )?;
+    Some(Network {
+        enabled,
+        inventory,
+        item_capacities,
+        routing_cursors,
+        upload_routing_cursors,
+        runtime_flow,
+        sparse_write_compatible: true,
+        mutable_record_rows: proof.mutable_rows(),
+        partial: true,
+        ..Network::default()
+    })
+}
+
+fn parse_active_network(
+    base: &Map<String, Value>,
+    selection: &NetworkItemSelection,
+    directory: &mut QuantumLogisticsDirectory,
+    force_full_scan: bool,
+    force_full_write: bool,
+) -> anyhow::Result<(Network, NetworkParseScan)> {
+    if !force_full_scan && let Some(proof) = directory.network_sparse_proof.as_ref() {
+        let selection = selection.with_known_zeros(proof);
+        let potential_dirty_rows = selection.potential_dirty_rows();
+        let mutable_rows = proof.mutable_rows();
+        let dense = potential_dirty_rows > 0
+            && (mutable_rows == 0
+                || potential_dirty_rows.saturating_mul(QUANTUM_ACTIVE_DENSE_DENOMINATOR)
+                    >= mutable_rows.saturating_mul(QUANTUM_ACTIVE_DENSE_NUMERATOR));
+        if !dense && let Some(network) = parse_sparse_network(base, &selection, proof) {
+            return Ok((
+                network,
+                NetworkParseScan {
+                    selected_rows: selection.selected_rows(),
+                    total_rows: proof.total_rows(),
+                    full_scan_fallback: false,
+                },
+            ));
+        }
+    }
+
+    let mut network = parse_network(base)?;
+    network.force_full_write = force_full_write;
+    let total_rows = raw_network_record_rows(base);
+    directory.network_sparse_proof = NetworkSparseProof::from_complete(&network);
+    Ok((
+        network,
+        NetworkParseScan {
+            selected_rows: total_rows,
+            total_rows,
+            full_scan_fallback: true,
+        },
+    ))
+}
+
+fn apply_network_parse_scan(scan: &mut QuantumActiveScan, network_scan: NetworkParseScan) {
+    scan.network_parse_selected_rows = network_scan.selected_rows;
+    scan.network_parse_total_rows = network_scan.total_rows;
+    scan.network_parse_full_scan_fallback = network_scan.full_scan_fallback;
+}
+
 fn parse_network(base: &Map<String, Value>) -> anyhow::Result<Network> {
     let raw = base
         .get("quantumLogisticsNetwork")
@@ -900,6 +1212,11 @@ fn flow_value(flow: &BoundaryFlow) -> anyhow::Result<Value> {
 }
 
 fn write_network_full(base: &mut Map<String, Value>, network: &Network) -> anyhow::Result<()> {
+    if network.partial {
+        return Err(anyhow!(
+            "native partial quantum network cannot use the full writer"
+        ));
+    }
     let mut value = Map::new();
     value.insert("enabled".to_owned(), Value::Bool(network.enabled));
     value.insert("inventory".to_owned(), quantity_record(&network.inventory));
@@ -969,11 +1286,12 @@ fn write_network_with_scan(
         .len()
         .saturating_add(network.dirty_routing_cursors.len())
         .saturating_add(network.dirty_upload_routing_cursors.len());
-    let dense_fallback = dirty_rows > 0
-        && dirty_rows.saturating_mul(QUANTUM_ACTIVE_DENSE_DENOMINATOR)
-            >= network
-                .mutable_record_rows
-                .saturating_mul(QUANTUM_ACTIVE_DENSE_NUMERATOR);
+    let dense_fallback = network.force_full_write
+        || (dirty_rows > 0
+            && dirty_rows.saturating_mul(QUANTUM_ACTIVE_DENSE_DENOMINATOR)
+                >= network
+                    .mutable_record_rows
+                    .saturating_mul(QUANTUM_ACTIVE_DENSE_NUMERATOR));
     let sparse_shape_present = base
         .get("quantumLogisticsNetwork")
         .and_then(Value::as_object)
@@ -996,6 +1314,11 @@ fn write_network_with_scan(
         signature_fallback,
     };
     if dense_fallback || signature_fallback {
+        if network.partial {
+            return Err(anyhow!(
+                "native partial quantum network lost its sparse-write proof"
+            ));
+        }
         write_network_full(base, network)?;
         return Ok(scan);
     }
@@ -1047,6 +1370,80 @@ fn write_network_with_scan(
 
 fn write_network(base: &mut Map<String, Value>, network: &Network) -> anyhow::Result<()> {
     write_network_with_scan(base, network).map(|_| ())
+}
+
+fn update_network_sparse_proof_after_write(
+    base: &Map<String, Value>,
+    network: &Network,
+    directory: &mut QuantumLogisticsDirectory,
+) {
+    if !network.partial {
+        directory.network_sparse_proof = NetworkSparseProof::from_complete_write(network);
+        return;
+    }
+    let Some(mut proof) = directory.network_sparse_proof.clone() else {
+        return;
+    };
+    let Some(raw) = base
+        .get("quantumLogisticsNetwork")
+        .and_then(Value::as_object)
+    else {
+        directory.network_sparse_proof = None;
+        return;
+    };
+    let Some(inventory) = raw.get("inventory").and_then(Value::as_object) else {
+        directory.network_sparse_proof = None;
+        return;
+    };
+    let Some(item_capacities) = raw.get("itemCapacities").and_then(Value::as_object) else {
+        directory.network_sparse_proof = None;
+        return;
+    };
+    let Some(routing_cursors) = raw.get("routingCursors").and_then(Value::as_object) else {
+        directory.network_sparse_proof = None;
+        return;
+    };
+    let Some(upload_routing_cursors) = raw.get("uploadRoutingCursors").and_then(Value::as_object)
+    else {
+        directory.network_sparse_proof = None;
+        return;
+    };
+    proof.inventory_rows = inventory.len();
+    proof.item_capacity_rows = item_capacities.len();
+    proof.routing_cursor_rows = routing_cursors.len();
+    proof.upload_routing_cursor_rows = upload_routing_cursors.len();
+    for (item_id, amount) in &network.inventory {
+        if amount.is_zero() {
+            proof.zero_inventory.insert(item_id.clone());
+        } else {
+            proof.zero_inventory.remove(item_id);
+        }
+    }
+    for item_id in &network.dirty_inventory {
+        if !network.inventory.contains_key(item_id) {
+            proof.zero_inventory.remove(item_id);
+        }
+    }
+    directory.network_sparse_proof = sparse_network_header(raw, &proof).map(|_| proof);
+}
+
+fn refresh_network_sparse_proof(
+    base: &Map<String, Value>,
+    directory: &mut QuantumLogisticsDirectory,
+) -> anyhow::Result<()> {
+    let network = parse_network(base)?;
+    directory.network_sparse_proof = NetworkSparseProof::from_complete(&network);
+    Ok(())
+}
+
+fn write_active_network(
+    base: &mut Map<String, Value>,
+    network: &Network,
+    directory: &mut QuantumLogisticsDirectory,
+) -> anyhow::Result<NetworkWriteScan> {
+    let scan = write_network_with_scan(base, network)?;
+    update_network_sparse_proof_after_write(base, network, directory);
+    Ok(scan)
 }
 
 fn slots(entity: &Map<String, Value>) -> anyhow::Result<Vec<Slot>> {
@@ -2078,6 +2475,18 @@ impl QuantumLogisticsDirectory {
             + self.inventory_written_station_indices.len()
             + self.construction_inventory_written_center_indices.len())
             * (size_of::<usize>() * 4);
+        let network_proof_bytes = self
+            .network_sparse_proof
+            .as_ref()
+            .map(|proof| {
+                proof.zero_inventory.capacity() * (size_of::<String>() + size_of::<u8>())
+                    + proof
+                        .zero_inventory
+                        .iter()
+                        .map(String::capacity)
+                        .sum::<usize>()
+            })
+            .unwrap_or(0);
         (self.endpoint_indices.capacity() * size_of::<usize>()
             + self.item_ids.capacity() * size_of::<Arc<str>>()
             + item_text_bytes
@@ -2095,7 +2504,8 @@ impl QuantumLogisticsDirectory {
             + self.collector_by_item.estimated_bytes() as usize
             + self.download_by_station.estimated_bytes() as usize
             + self.tower_stack_terms.capacity() * size_of::<f64>()
-            + pending_tree_bytes) as u64
+            + pending_tree_bytes
+            + network_proof_bytes) as u64
     }
 }
 
@@ -2109,6 +2519,14 @@ fn combined_active_scan(left: QuantumActiveScan, right: QuantumActiveScan) -> Qu
             .linear_order_rows
             .saturating_add(right.linear_order_rows),
         full_sort_rows: left.full_sort_rows.saturating_add(right.full_sort_rows),
+        network_parse_selected_rows: left
+            .network_parse_selected_rows
+            .saturating_add(right.network_parse_selected_rows),
+        network_parse_total_rows: left
+            .network_parse_total_rows
+            .saturating_add(right.network_parse_total_rows),
+        network_parse_full_scan_fallback: left.network_parse_full_scan_fallback
+            || right.network_parse_full_scan_fallback,
     }
 }
 
@@ -2798,35 +3216,18 @@ fn flush_supply_buffers_for_index(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn flush_active_supply_buffers_with_network(
-    state: &CoreState,
+fn flush_selected_supply_buffers_with_network(
+    _state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
     directory: &mut QuantumLogisticsDirectory,
     route_ledger: &crate::station_route_ledger::StationRouteLedger,
     runtime_bandwidth: RuntimeBandwidth,
-    frozen_mode: bool,
+    selected: &[usize],
     network: &mut Network,
-) -> anyhow::Result<QuantumActiveScan> {
-    if !network.enabled {
-        return Ok(QuantumActiveScan {
-            total_rows: directory.upload_plans.len(),
-            ..QuantumActiveScan::default()
-        });
-    }
-    let (selected, scan) = directory.selected_flush_plans(state, entities, frozen_mode);
-    let Some(selected) = selected else {
-        // The permissive oracle owns its own parse/write cycle. Publish the
-        // caller's current boundary flow first, then refresh the local session
-        // from the oracle result before later upload allocation continues.
-        write_network(base, network)?;
-        flush_supply_buffers_for_index(base, entities, None)?;
-        *network = parse_network(base)?;
-        directory.mark_fallback_flush_runtime_rows();
-        return Ok(scan);
-    };
+) -> anyhow::Result<()> {
     let mut normalized_for_deposit = false;
-    for &plan_index in &selected {
+    for &plan_index in selected {
         let plan = directory.upload_plans[plan_index];
         let entity_index = plan.entity_index as usize;
         let item_id = directory
@@ -2869,8 +3270,86 @@ fn flush_active_supply_buffers_with_network(
         record_immediate_upload(base, runtime_bandwidth, network, item_id, &accepted);
         directory.mark_inventory_written(entity_index);
     }
-    directory.commit_flush(&selected);
-    Ok(scan)
+    directory.commit_flush(selected);
+    Ok(())
+}
+
+fn select_flush_network_items(
+    directory: &QuantumLogisticsDirectory,
+    selected: &[usize],
+) -> anyhow::Result<NetworkItemSelection> {
+    let mut selection = NetworkItemSelection::default();
+    for &plan_index in selected {
+        let plan = directory
+            .upload_plans
+            .get(plan_index)
+            .ok_or_else(|| anyhow!("native quantum upload plan index is invalid"))?;
+        let item_id = directory
+            .item_id(plan.item_index)
+            .ok_or_else(|| anyhow!("native quantum upload item index is invalid"))?;
+        selection.select_flush(item_id);
+    }
+    Ok(selection)
+}
+
+fn fractional_cargo(value: f64) -> bool {
+    value.is_finite() && value.fract().abs() > f64::EPSILON
+}
+
+fn selected_flush_has_fractional_cargo(
+    directory: &QuantumLogisticsDirectory,
+    selected: &[usize],
+    route_ledger: &crate::station_route_ledger::StationRouteLedger,
+) -> bool {
+    selected.iter().any(|&plan_index| {
+        let Some(plan) = directory.upload_plans.get(plan_index) else {
+            return true;
+        };
+        let Some(item_id) = directory.item_id(plan.item_index) else {
+            return true;
+        };
+        fractional_cargo(
+            route_ledger.quantum_reserved_outgoing(plan.entity_index as usize, item_id),
+        )
+    })
+}
+
+fn selected_download_has_fractional_cargo(
+    directory: &QuantumLogisticsDirectory,
+    selected: &[usize],
+    route_ledger: &crate::station_route_ledger::StationRouteLedger,
+) -> bool {
+    selected.iter().any(|&plan_index| {
+        let Some(plan) = directory.download_plans.get(plan_index) else {
+            return true;
+        };
+        let Some(item_id) = directory.item_id(plan.item_index) else {
+            return true;
+        };
+        fractional_cargo(route_ledger.quantum_in_flight(plan.entity_index as usize, item_id))
+    })
+}
+
+fn selected_boundary_upload_has_fractional_cargo(
+    directory: &QuantumLogisticsDirectory,
+    selected: &[usize],
+    route_ledger: &crate::station_route_ledger::StationRouteLedger,
+) -> bool {
+    let collector_rows = directory.collector_plans.len();
+    selected.iter().any(|&row| {
+        if row < collector_rows {
+            return false;
+        }
+        let Some(plan) = directory.upload_plans.get(row - collector_rows) else {
+            return true;
+        };
+        let Some(item_id) = directory.item_id(plan.item_index) else {
+            return true;
+        };
+        fractional_cargo(
+            route_ledger.quantum_reserved_outgoing(plan.entity_index as usize, item_id),
+        )
+    })
 }
 
 pub(crate) fn flush_active_supply_buffers(
@@ -2882,24 +3361,47 @@ pub(crate) fn flush_active_supply_buffers(
     runtime_bandwidth: RuntimeBandwidth,
     frozen_mode: bool,
 ) -> anyhow::Result<QuantumActiveScan> {
-    let mut network = parse_network(base)?;
-    if !network.enabled {
+    if !network_enabled(base)? {
         return Ok(QuantumActiveScan {
             total_rows: directory.upload_plans.len(),
+            network_parse_total_rows: raw_network_record_rows(base),
             ..QuantumActiveScan::default()
         });
     }
-    let scan = flush_active_supply_buffers_with_network(
+    let (selected, mut scan) = directory.selected_flush_plans(state, entities, frozen_mode);
+    let Some(selected) = selected else {
+        let total_rows = raw_network_record_rows(base);
+        flush_supply_buffers_for_index(base, entities, None)?;
+        refresh_network_sparse_proof(base, directory)?;
+        directory.mark_fallback_flush_runtime_rows();
+        scan.network_parse_selected_rows = total_rows;
+        scan.network_parse_total_rows = total_rows;
+        scan.network_parse_full_scan_fallback = true;
+        return Ok(scan);
+    };
+    let selection = select_flush_network_items(directory, &selected)?;
+    let force_full_write = selected_flush_has_fractional_cargo(directory, &selected, route_ledger);
+    let force_full_scan =
+        scan.dense_fallback || route_ledger.scan().active_order_fallback || force_full_write;
+    let (mut network, network_scan) = parse_active_network(
+        base,
+        &selection,
+        directory,
+        force_full_scan,
+        force_full_write,
+    )?;
+    apply_network_parse_scan(&mut scan, network_scan);
+    flush_selected_supply_buffers_with_network(
         state,
         base,
         entities,
         directory,
         route_ledger,
         runtime_bandwidth,
-        frozen_mode,
+        &selected,
         &mut network,
     )?;
-    write_network(base, &network)?;
+    write_active_network(base, &network, directory)?;
     Ok(scan)
 }
 
@@ -3129,12 +3631,12 @@ pub(crate) fn settle_active_downloads(
     directory: &mut QuantumLogisticsDirectory,
     route_ledger: &crate::station_route_ledger::StationRouteLedger,
 ) -> anyhow::Result<(Option<BoundaryFlow>, QuantumActiveScan)> {
-    let mut network = parse_network(base)?;
-    if !network.enabled {
+    if !network_enabled(base)? {
         return Ok((
             None,
             QuantumActiveScan {
                 total_rows: directory.download_rows(),
+                network_parse_total_rows: raw_network_record_rows(base),
                 ..QuantumActiveScan::default()
             },
         ));
@@ -3146,6 +3648,7 @@ pub(crate) fn settle_active_downloads(
     let mut scan = combined_active_scan(station_scan, construction_scan);
     let (Some(selected), Some(indexed_construction_rows)) = (selected, selected_construction_rows)
     else {
+        let total_rows = raw_network_record_rows(base);
         let (flow, full_sort_rows) = settle_downloads_with_request_count(
             state,
             base,
@@ -3155,9 +3658,83 @@ pub(crate) fn settle_active_downloads(
             seconds,
         )?;
         scan.full_sort_rows = full_sort_rows;
+        scan.network_parse_selected_rows = total_rows;
+        scan.network_parse_total_rows = total_rows;
+        scan.network_parse_full_scan_fallback = true;
+        refresh_network_sparse_proof(base, directory)?;
         directory.mark_fallback_download_runtime_rows();
         return Ok((flow, scan));
     };
+    let center_indices = directory
+        .construction_center_indices_for_rows(&indexed_construction_rows)
+        .ok_or_else(|| anyhow!("native construction quantum row index is invalid"))?;
+    let construction_demands = crate::construction::quantum_demands_for_center_indices(
+        state,
+        base,
+        entities,
+        &center_indices,
+    )?;
+    let selected_construction_rows_by_id = indexed_construction_rows
+        .iter()
+        .filter_map(|&row| {
+            let entity_index = directory.construction_center_indices.get(row).copied()?;
+            Some((state.entities.ids[entity_index].to_string(), row))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if construction_demands.iter().any(|demand| {
+        !directory.construction_demand_is_indexable(state, demand)
+            || !selected_construction_rows_by_id.contains_key(&demand.entity_id)
+    }) {
+        // A valid extension can still be simulated by the permissive oracle,
+        // but bandwidth, request order and network normalization must all come
+        // from that same oracle.
+        scan.selected_rows = directory.download_rows();
+        scan.total_rows = directory.download_rows();
+        scan.dense_fallback = true;
+        scan.directory_fallback = true;
+        let total_rows = raw_network_record_rows(base);
+        let (flow, full_sort_rows) = settle_downloads_with_request_count(
+            state,
+            base,
+            entities,
+            credits,
+            boundary_second,
+            seconds,
+        )?;
+        scan.full_sort_rows = full_sort_rows;
+        scan.network_parse_selected_rows = total_rows;
+        scan.network_parse_total_rows = total_rows;
+        scan.network_parse_full_scan_fallback = true;
+        refresh_network_sparse_proof(base, directory)?;
+        directory.mark_fallback_download_runtime_rows();
+        return Ok((flow, scan));
+    }
+    let mut network_selection = NetworkItemSelection::default();
+    for &plan_index in &selected {
+        let plan = directory
+            .download_plans
+            .get(plan_index)
+            .ok_or_else(|| anyhow!("native quantum download plan index is invalid"))?;
+        let item_id = directory
+            .item_id(plan.item_index)
+            .ok_or_else(|| anyhow!("native quantum download item index is invalid"))?;
+        network_selection.select_download(item_id);
+    }
+    for demand in &construction_demands {
+        network_selection.select_download(&demand.item_id);
+    }
+    let force_full_write =
+        selected_download_has_fractional_cargo(directory, &selected, route_ledger);
+    let force_full_scan =
+        scan.dense_fallback || route_ledger.scan().active_order_fallback || force_full_write;
+    let (mut network, network_scan) = parse_active_network(
+        base,
+        &network_selection,
+        directory,
+        force_full_scan,
+        force_full_write,
+    )?;
+    apply_network_parse_scan(&mut scan, network_scan);
     let bandwidth = directory.indexed_runtime_bandwidth(base);
     let mut flow = create_flow_with_bandwidth(&network, boundary_second, bandwidth);
     let mut requests = Vec::new();
@@ -3213,45 +3790,6 @@ pub(crate) fn settle_active_downloads(
         } else {
             linear_order_eligible = false;
         }
-    }
-    let center_indices = directory
-        .construction_center_indices_for_rows(&indexed_construction_rows)
-        .ok_or_else(|| anyhow!("native construction quantum row index is invalid"))?;
-    let construction_demands = crate::construction::quantum_demands_for_center_indices(
-        state,
-        base,
-        entities,
-        &center_indices,
-    )?;
-    let selected_construction_rows_by_id = indexed_construction_rows
-        .iter()
-        .filter_map(|&row| {
-            let entity_index = directory.construction_center_indices.get(row).copied()?;
-            Some((state.entities.ids[entity_index].to_string(), row))
-        })
-        .collect::<BTreeMap<_, _>>();
-    if construction_demands.iter().any(|demand| {
-        !directory.construction_demand_is_indexable(state, demand)
-            || !selected_construction_rows_by_id.contains_key(&demand.entity_id)
-    }) {
-        // A valid extension can still be simulated by the permissive oracle,
-        // but bandwidth and request order must also come from that oracle.
-        // Fall back before mutating either the network or an endpoint.
-        scan.selected_rows = directory.download_rows();
-        scan.total_rows = directory.download_rows();
-        scan.dense_fallback = true;
-        scan.directory_fallback = true;
-        let (flow, full_sort_rows) = settle_downloads_with_request_count(
-            state,
-            base,
-            entities,
-            credits,
-            boundary_second,
-            seconds,
-        )?;
-        scan.full_sort_rows = full_sort_rows;
-        directory.mark_fallback_download_runtime_rows();
-        return Ok((flow, scan));
     }
     let mut construction_retain = BTreeSet::new();
     for demand in &construction_demands {
@@ -3346,7 +3884,7 @@ pub(crate) fn settle_active_downloads(
         add_flow(&mut flow.downloaded, &request.item_id, &amount);
     }
     network.set_runtime_flow(flow.clone());
-    write_network(base, &network)?;
+    write_active_network(base, &network, directory)?;
     directory.commit_download(&selected, retain);
     directory.commit_construction_download(&indexed_construction_rows, construction_retain);
     Ok((Some(flow), scan))
@@ -3365,10 +3903,10 @@ pub(crate) fn settle_uploads(
     route_ledger: &crate::station_route_ledger::StationRouteLedger,
     runtime_bandwidth: RuntimeBandwidth,
 ) -> anyhow::Result<QuantumActiveScan> {
-    let mut network = parse_network(base)?;
-    if !network.enabled {
+    if !network_enabled(base)? {
         return Ok(QuantumActiveScan {
             total_rows: directory.boundary_upload_rows(),
+            network_parse_total_rows: raw_network_record_rows(base),
             ..QuantumActiveScan::default()
         });
     }
@@ -3388,6 +3926,58 @@ pub(crate) fn settle_uploads(
             collector_stacks,
         }
     };
+    let (selected_flush_rows, flush_scan) = directory.selected_flush_plans(state, entities, true);
+    if flush_scan.directory_fallback {
+        directory.fallback_full_scan = true;
+    }
+    let (selected_rows, mut upload_scan) = directory.selected_boundary_upload_rows(state, entities);
+    if upload_scan.directory_fallback {
+        directory.fallback_full_scan = true;
+    }
+    let mut network_selection = NetworkItemSelection::default();
+    if let Some(selected_flush_rows) = selected_flush_rows.as_ref() {
+        network_selection = select_flush_network_items(directory, selected_flush_rows)?;
+    }
+    if let Some(selected_rows) = selected_rows.as_ref() {
+        let collector_rows = directory.collector_plans.len();
+        for &row in selected_rows {
+            let item_index = if row < collector_rows {
+                directory
+                    .collector_plans
+                    .get(row)
+                    .map(|plan| plan.item_index)
+            } else {
+                directory
+                    .upload_plans
+                    .get(row - collector_rows)
+                    .map(|plan| plan.item_index)
+            }
+            .ok_or_else(|| anyhow!("native quantum boundary upload row is invalid"))?;
+            let item_id = directory
+                .item_id(item_index)
+                .ok_or_else(|| anyhow!("native quantum boundary upload item is invalid"))?;
+            network_selection.select_upload(item_id);
+        }
+    }
+    let force_full_write = selected_flush_rows.as_ref().is_some_and(|selected| {
+        selected_flush_has_fractional_cargo(directory, selected, route_ledger)
+    }) || selected_rows.as_ref().is_some_and(|selected| {
+        selected_boundary_upload_has_fractional_cargo(directory, selected, route_ledger)
+    });
+    let force_full_scan = selected_flush_rows.is_none()
+        || selected_rows.is_none()
+        || flush_scan.dense_fallback
+        || upload_scan.dense_fallback
+        || route_ledger.scan().active_order_fallback
+        || force_full_write;
+    let (mut network, network_scan) = parse_active_network(
+        base,
+        &network_selection,
+        directory,
+        force_full_scan,
+        force_full_write,
+    )?;
+    apply_network_parse_scan(&mut upload_scan, network_scan);
     let existing_flow = network.runtime_flow.clone();
     let mut flow = previous_flow.clone().unwrap_or_else(|| {
         if indexed_before_flush {
@@ -3403,22 +3993,25 @@ pub(crate) fn settle_uploads(
     flow.quantum_collector_stacks = bandwidth.collector_stacks;
     network.set_runtime_flow(flow.clone());
 
-    let flush_scan = flush_active_supply_buffers_with_network(
-        state,
-        base,
-        entities,
-        directory,
-        route_ledger,
-        runtime_bandwidth,
-        true,
-        &mut network,
-    )?;
-    if flush_scan.directory_fallback {
-        directory.fallback_full_scan = true;
-    }
-    let (selected_rows, mut upload_scan) = directory.selected_boundary_upload_rows(state, entities);
-    if upload_scan.directory_fallback {
-        directory.fallback_full_scan = true;
+    if let Some(selected_flush_rows) = selected_flush_rows.as_ref() {
+        flush_selected_supply_buffers_with_network(
+            state,
+            base,
+            entities,
+            directory,
+            route_ledger,
+            runtime_bandwidth,
+            selected_flush_rows,
+            &mut network,
+        )?;
+    } else {
+        // The permissive oracle owns its parse/write cycle. Publish this
+        // boundary's flow first, then refresh the complete local session so
+        // the following permissive upload allocation sees the oracle result.
+        write_network(base, &network)?;
+        flush_supply_buffers_for_index(base, entities, None)?;
+        network = parse_network(base)?;
+        directory.mark_fallback_flush_runtime_rows();
     }
     let use_index = selected_rows.is_some();
     let reserved = (!use_index).then(|| reserved_outgoing(entities));
@@ -3637,7 +4230,7 @@ pub(crate) fn settle_uploads(
         add_flow(&mut flow.uploaded, &request.item_id, &amount);
     }
     network.set_runtime_flow(flow);
-    write_network(base, &network)?;
+    write_active_network(base, &network, directory)?;
     if let Some(selected_rows) = selected_rows.as_ref() {
         directory.commit_boundary_upload(selected_rows, retain_rows);
     }
@@ -5466,6 +6059,214 @@ mod tests {
     }
 
     #[test]
+    fn sparse_network_parse_matches_full_oracle_at_1_5_and_60_seconds() {
+        let source = (0..16)
+            .map(|index| {
+                quantum_station(
+                    format!("demand-{index:02}"),
+                    "iron_ore",
+                    "demand",
+                    0.0,
+                    if index == 0 { 0.0 } else { 1_000_000.0 },
+                    vec![],
+                )
+            })
+            .collect::<Vec<_>>();
+        let state = crate::simple_factory::tests::fixture_state(&source);
+        let credits = crate::belts::OutputCredits::default();
+        let route_ledger = crate::station_route_ledger::StationRouteLedger::default();
+
+        for seconds in [1.0, 5.0, 60.0] {
+            let mut active_base = active_quantum_base(0);
+            set_test_network_item(&mut active_base, "iron_ore", "10000");
+            let inventory = active_base["quantumLogisticsNetwork"]["inventory"]
+                .as_object_mut()
+                .expect("network inventory");
+            for index in 0..128 {
+                inventory.insert(
+                    format!("dormant-{index:03}"),
+                    Value::from((index + 1).to_string()),
+                );
+            }
+            let mut oracle_base = active_base.clone();
+            let mut active_entities = source.clone();
+            let mut oracle_entities = source.clone();
+            let mut directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+            let complete = parse_network(&active_base).expect("canonical network proof");
+            directory.network_sparse_proof = NetworkSparseProof::from_complete(&complete);
+            directory.download_all_pending = false;
+            directory.construction_download_all_pending = false;
+            directory.pending_download.insert(0);
+
+            let (_, scan) = settle_active_downloads(
+                &state,
+                &mut active_base,
+                &mut active_entities,
+                &credits,
+                seconds,
+                seconds,
+                &mut directory,
+                &route_ledger,
+            )
+            .expect("sparse network download");
+            settle_downloads(
+                &state,
+                &mut oracle_base,
+                &mut oracle_entities,
+                &credits,
+                seconds,
+                seconds,
+            )
+            .expect("full network download oracle");
+
+            assert!(!scan.network_parse_full_scan_fallback, "{seconds}s");
+            assert!(
+                scan.network_parse_selected_rows < scan.network_parse_total_rows,
+                "{seconds}s selected {}/{}",
+                scan.network_parse_selected_rows,
+                scan.network_parse_total_rows
+            );
+            assert_eq!(scan.network_parse_selected_rows, 2, "{seconds}s");
+            assert_eq!(
+                quantum_oracle_bytes(&active_base, &active_entities),
+                quantum_oracle_bytes(&oracle_base, &oracle_entities),
+                "sparse network parse/full oracle at {seconds}s"
+            );
+        }
+    }
+
+    #[test]
+    fn noncanonical_selected_network_row_fails_closed_before_mutation() {
+        let source = (0..16)
+            .map(|index| {
+                quantum_station(
+                    format!("demand-{index:02}"),
+                    "iron_ore",
+                    "demand",
+                    0.0,
+                    if index == 0 { 0.0 } else { 1_000_000.0 },
+                    vec![],
+                )
+            })
+            .collect::<Vec<_>>();
+        let state = crate::simple_factory::tests::fixture_state(&source);
+        let mut active_base = active_quantum_base(0);
+        set_test_network_item(&mut active_base, "iron_ore", "10000");
+        for index in 0..128 {
+            set_test_network_item(
+                &mut active_base,
+                &format!("dormant-{index:03}"),
+                &(index + 1).to_string(),
+            );
+        }
+        let mut active_entities = source.clone();
+        let mut directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+        let complete = parse_network(&active_base).expect("canonical network proof");
+        directory.network_sparse_proof = NetworkSparseProof::from_complete(&complete);
+        directory.download_all_pending = false;
+        directory.construction_download_all_pending = false;
+        directory.pending_download.insert(0);
+        active_base["quantumLogisticsNetwork"]["inventory"]["iron_ore"] = Value::from(1.25);
+        let mut oracle_base = active_base.clone();
+        let mut oracle_entities = source;
+        let credits = crate::belts::OutputCredits::default();
+        let route_ledger = crate::station_route_ledger::StationRouteLedger::default();
+
+        let (_, scan) = settle_active_downloads(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &credits,
+            5.0,
+            5.0,
+            &mut directory,
+            &route_ledger,
+        )
+        .expect("fallback network download");
+        settle_downloads(
+            &state,
+            &mut oracle_base,
+            &mut oracle_entities,
+            &credits,
+            5.0,
+            5.0,
+        )
+        .expect("noncanonical full oracle");
+
+        assert!(scan.network_parse_full_scan_fallback);
+        assert_eq!(
+            scan.network_parse_selected_rows,
+            scan.network_parse_total_rows
+        );
+        assert_eq!(
+            quantum_oracle_bytes(&active_base, &active_entities),
+            quantum_oracle_bytes(&oracle_base, &oracle_entities)
+        );
+    }
+
+    #[test]
+    fn sparse_network_parse_removes_every_proven_zero_before_active_deposit() {
+        let source = (0..16)
+            .map(|index| {
+                quantum_station(
+                    format!("supply-{index:02}"),
+                    "iron_ore",
+                    "supply",
+                    if index == 0 { 17.0 } else { 0.0 },
+                    0.0,
+                    vec![],
+                )
+            })
+            .collect::<Vec<_>>();
+        let state = crate::simple_factory::tests::fixture_state(&source);
+        let mut active_base = active_quantum_base(0);
+        set_test_network_item(&mut active_base, "iron_ore", "0");
+        set_test_network_item(&mut active_base, "mod:dormant-zero/Ω", "0");
+        for index in 0..128 {
+            set_test_network_item(
+                &mut active_base,
+                &format!("dormant-{index:03}"),
+                &(index + 1).to_string(),
+            );
+        }
+        let mut oracle_base = active_base.clone();
+        let mut active_entities = source.clone();
+        let mut oracle_entities = source;
+        let mut directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+        let complete = parse_network(&active_base).expect("canonical network proof");
+        directory.network_sparse_proof = NetworkSparseProof::from_complete(&complete);
+        directory.flush_all_pending = false;
+        directory.pending_flush.insert(0);
+        let route_ledger = crate::station_route_ledger::StationRouteLedger::default();
+        let bandwidth = directory.legacy_runtime_bandwidth(&state, &active_base, &active_entities);
+
+        let scan = flush_active_supply_buffers(
+            &state,
+            &mut active_base,
+            &mut active_entities,
+            &mut directory,
+            &route_ledger,
+            bandwidth,
+            false,
+        )
+        .expect("sparse zero-normalizing deposit");
+        flush_supply_buffers_for_index(&mut oracle_base, &mut oracle_entities, None)
+            .expect("full zero-normalizing deposit oracle");
+
+        assert!(!scan.network_parse_full_scan_fallback);
+        assert!(scan.network_parse_selected_rows < scan.network_parse_total_rows);
+        assert!(
+            active_base["quantumLogisticsNetwork"]["inventory"]
+                .get("mod:dormant-zero/Ω")
+                .is_none()
+        );
+        assert_eq!(
+            quantum_oracle_bytes(&active_base, &active_entities),
+            quantum_oracle_bytes(&oracle_base, &oracle_entities)
+        );
+    }
+
+    #[test]
     fn construction_active_downloads_match_full_scan_bytes_at_1_5_and_60_seconds() {
         for seconds in [1.0, 5.0, 60.0] {
             let (state, source_base, source_entities) = construction_quantum_fixture(8);
@@ -6173,6 +6974,13 @@ mod tests {
         source.push(quantum_collector("collector-b", "iron_ore", 0.0, 5_000.0));
         let state = crate::simple_factory::tests::fixture_state(&source);
         let mut persistent_base = active_quantum_base(0);
+        for index in 0..128 {
+            set_test_network_item(
+                &mut persistent_base,
+                &format!("dormant-{index:03}"),
+                &(index + 1).to_string(),
+            );
+        }
         let mut segmented_base = persistent_base.clone();
         let mut persistent_entities = source.clone();
         let mut segmented_entities = source;
@@ -6195,7 +7003,7 @@ mod tests {
             );
             let mut segmented_directory =
                 QuantumLogisticsDirectory::build(&state, &segmented_entities);
-            settle_upload_boundary(
+            let rebuilt_scan = settle_upload_boundary(
                 &state,
                 &mut segmented_base,
                 &mut segmented_entities,
@@ -6203,6 +7011,20 @@ mod tests {
                 boundary,
             );
             saw_sparse |= scan.selected_rows < scan.total_rows;
+            if boundary > 5.0 {
+                assert!(
+                    !scan.network_parse_full_scan_fallback,
+                    "persistent boundary {boundary} should retain its network proof"
+                );
+                assert!(
+                    scan.network_parse_selected_rows < scan.network_parse_total_rows,
+                    "persistent boundary {boundary}"
+                );
+            }
+            assert!(
+                rebuilt_scan.network_parse_full_scan_fallback,
+                "directory rebuild boundary {boundary} must re-establish the proof"
+            );
             assert_eq!(
                 quantum_oracle_bytes(&persistent_base, &persistent_entities),
                 quantum_oracle_bytes(&segmented_base, &segmented_entities),
@@ -6264,8 +7086,26 @@ mod tests {
         let mut active_entities = source.clone();
         let mut full_entities = source;
         let mut directory = QuantumLogisticsDirectory::build(&state, &active_entities);
+        let fractional_flush_rows = directory
+            .selected_flush_plans(&state, &active_entities, false)
+            .0
+            .expect("fractional flush directory");
+        assert!(selected_flush_has_fractional_cargo(
+            &directory,
+            &fractional_flush_rows,
+            &route_ledger
+        ));
+        let fractional_download_rows = directory
+            .selected_download_plans(&state, &active_entities)
+            .0
+            .expect("fractional download directory");
+        assert!(selected_download_has_fractional_cargo(
+            &directory,
+            &fractional_download_rows,
+            &route_ledger
+        ));
         let bandwidth = directory.legacy_runtime_bandwidth(&state, &active_base, &active_entities);
-        flush_active_supply_buffers(
+        let flush_scan = flush_active_supply_buffers(
             &state,
             &mut active_base,
             &mut active_entities,
@@ -6275,6 +7115,7 @@ mod tests {
             false,
         )
         .unwrap();
+        assert!(flush_scan.network_parse_full_scan_fallback);
         flush_supply_buffers_for_index(&mut full_base, &mut full_entities, None).unwrap();
         assert_eq!(
             quantum_oracle_bytes(&active_base, &active_entities),
@@ -6282,7 +7123,7 @@ mod tests {
         );
 
         let credits = crate::belts::OutputCredits::default();
-        settle_active_downloads(
+        let (_, download_scan) = settle_active_downloads(
             &state,
             &mut active_base,
             &mut active_entities,
@@ -6293,6 +7134,7 @@ mod tests {
             &route_ledger,
         )
         .unwrap();
+        assert!(download_scan.network_parse_full_scan_fallback);
         settle_downloads(
             &state,
             &mut full_base,

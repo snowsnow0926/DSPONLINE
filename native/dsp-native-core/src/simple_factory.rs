@@ -4734,7 +4734,7 @@ fn simulate_step(
             scan.selected_demands, scan.total_candidate_rows, scan.dense_fallback
         );
     }
-    crate::local_logistics::dispatch(
+    let local_dispatch_scan = crate::local_logistics::dispatch(
         state,
         base,
         entities,
@@ -4742,6 +4742,17 @@ fn simulate_step(
         local_step_runtime,
         &mut step_route_ledger,
     )?;
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tlocal-dispatch-active\t{}/{}\tdemands={}/{}\tdense={}\tdirectory-fallback={}",
+            local_dispatch_scan.selected_station_rows,
+            local_dispatch_scan.total_station_rows,
+            local_dispatch_scan.selected_demand_rows,
+            local_dispatch_scan.total_demand_rows,
+            local_dispatch_scan.dense_fallback,
+            local_dispatch_scan.directory_fallback,
+        );
+    }
     profile_mark!("local-dispatch");
     let interstellar_step_runtime = std::sync::Arc::make_mut(interstellar_route_activity);
     let interstellar_dispatch_scan = crate::interstellar_logistics::dispatch(

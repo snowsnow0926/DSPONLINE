@@ -17,6 +17,7 @@ use crate::disk_budget::{
 use crate::exact_realtime_lease::{
     ExactRealtimeCheckpoint, ExactRealtimeLease, ExactRealtimeLeasePhase,
     ExactRealtimeLeasePurpose, player_authority_command_request_sha256,
+    player_authority_pause_target,
 };
 
 const MAX_SLOT_BYTES: usize = 64;
@@ -891,8 +892,10 @@ impl SaveStore {
         published: &PublishedCheckpointIdentity,
     ) -> anyhow::Result<Value> {
         let resumable_phase = lease.phase == ExactRealtimeLeasePhase::Prepared
-            || lease.phase == ExactRealtimeLeasePhase::Active
-                && (lease.pending_command.is_some() || lease.startup_resume_enabled);
+            || matches!(
+                lease.phase,
+                ExactRealtimeLeasePhase::Active | ExactRealtimeLeasePhase::Paused
+            ) && (lease.pending_command.is_some() || lease.startup_resume_enabled);
         if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
             || lease.pending_tick.is_some()
             || !resumable_phase
@@ -904,8 +907,12 @@ impl SaveStore {
             && published.root_hash == lease.acknowledged.checkpoint.root_hash
             && published.revision == lease.acknowledged.checkpoint.revision;
         let published_is_pending_command = lease.pending_command.as_ref().is_some_and(|pending| {
-            lease.phase == ExactRealtimeLeasePhase::Active
-                && published.revision == pending.expected_revision
+            let phase_is_authorized = match player_authority_pause_target(&pending.command) {
+                Some(true) => lease.phase == ExactRealtimeLeasePhase::Active,
+                Some(false) => lease.phase == ExactRealtimeLeasePhase::Paused,
+                None => lease.phase == ExactRealtimeLeasePhase::Active,
+            };
+            phase_is_authorized && published.revision == pending.expected_revision
         });
         let published_is_pending_advance = lease.pending_advance.as_ref().is_some_and(|pending| {
             lease.phase == ExactRealtimeLeasePhase::Active
@@ -993,9 +1000,15 @@ impl SaveStore {
         let pending = current.pending_command.as_ref().ok_or_else(|| {
             anyhow!("native player-authority command receipt has no pending command")
         })?;
+        let pause_target = player_authority_pause_target(&pending.command);
+        let phase_is_authorized = match pause_target {
+            Some(true) => current.phase == ExactRealtimeLeasePhase::Active,
+            Some(false) => current.phase == ExactRealtimeLeasePhase::Paused,
+            None => current.phase == ExactRealtimeLeasePhase::Active,
+        };
         validate_player_authority_command_change_receipt(receipt)?;
         if current.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
-            || current.phase != ExactRealtimeLeasePhase::Active
+            || !phase_is_authorized
             || !current.startup_resume_enabled
             || current.pending_tick.is_some()
             || pending.command_id != receipt.command_id
@@ -1065,7 +1078,10 @@ impl SaveStore {
             bail!("native player-authority acknowledged receipt lease changed")
         }
         if current.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
-            || current.phase != ExactRealtimeLeasePhase::Active
+            || !matches!(
+                current.phase,
+                ExactRealtimeLeasePhase::Active | ExactRealtimeLeasePhase::Paused
+            )
             || !current.startup_resume_enabled
             || current.pending_tick.is_some()
             || current.pending_command.is_some()

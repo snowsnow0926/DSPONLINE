@@ -15,7 +15,9 @@ use serde_json::{Value, json};
 use crate::exact_realtime_lease::{
     ExactRealtimeCheckpoint, ExactRealtimeLease, ExactRealtimeLeasePurpose,
     ExactRealtimePendingAdvance, ExactRealtimeStateProof, decode_player_authority_command_payload,
-    player_authority_command_request_sha256, player_authority_macro_request_sha256,
+    derive_player_authority_pause_command_id, player_authority_command_request_sha256,
+    player_authority_macro_request_sha256, player_authority_pause_command,
+    player_authority_pause_target,
 };
 use crate::save_store::{
     PlayerAuthorityCommandChangeReceipt, SaveCommitResult, SaveStore, WalEntry,
@@ -56,6 +58,8 @@ fn command_palette_search_request_bytes(
 pub const PLAYER_AUTHORITY_GATE_CAPABILITY: &str = "native-core-player-authority-gate-v1";
 pub const PLAYER_AUTHORITY_TICK_CAPABILITY: &str = "native-core-player-authority-tick-v1";
 pub const PLAYER_AUTHORITY_COMMAND_CAPABILITY: &str = "native-core-player-authority-command-v1";
+pub const PLAYER_AUTHORITY_PAUSE_CAPABILITY: &str =
+    "native-core-player-authority-pause-lifecycle-v1";
 pub const PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY: &str =
     "native-core-player-authority-pure-idle-macro-v1";
 pub const PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY: &str =
@@ -67,6 +71,7 @@ enum CoreLeaseAuthorization {
     PlayerAuthority {
         lease: ExactRealtimeLease,
         authority_session_id: String,
+        pause_lifecycle: bool,
     },
 }
 
@@ -548,6 +553,17 @@ pub struct CoreCommitPlayerAuthorityCommandRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreCommitPlayerAuthorityPauseRequest {
+    pub run_id: String,
+    pub base_revision: u64,
+    pub target_paused: bool,
+    /// Pausing must preserve the already-settled deadline. Resuming supplies
+    /// a fresh main-process wall-clock anchor so paused time is not replayed.
+    pub settled_deadline_ms: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CoreCommitPlayerAuthorityMacroAdvanceRequest {
     pub run_id: String,
     pub macro_session_id: String,
@@ -608,6 +624,19 @@ pub struct CoreCommitPlayerAuthorityCommandResult {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CoreCommitPlayerAuthorityPauseResult {
+    pub sequence: u64,
+    pub base_revision: u64,
+    pub revision: u64,
+    pub target_paused: bool,
+    pub settled_deadline_ms: u64,
+    pub checkpoint: ExactRealtimeCheckpoint,
+    pub summary: CoreStateSummary,
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CoreCommitPlayerAuthorityMacroAdvanceResult {
     pub acknowledged_sequence: u64,
     pub macro_session_id: String,
@@ -660,6 +689,10 @@ pub struct CorePlayerAuthorityStartupRecoveryReceipt {
     pub next_sequence: u64,
     pub settled_deadline_ms: u64,
     pub next_deadline_ms: u64,
+    /// The durable scheduler/GameState lifecycle at this exact checkpoint.
+    /// Main uses this to keep a recovered paused lease clock-stopped; it is
+    /// never inferred from renderer state.
+    pub paused: bool,
     pub command_id: Option<String>,
     pub command_base_revision: Option<u64>,
     pub changed_entity_ids: Vec<String>,
@@ -705,6 +738,21 @@ enum PlayerAuthorityCommandFault {
     AfterCheckpoint,
     AfterReceipt,
     AfterLeaseAcknowledge,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PlayerAuthorityCommandKind {
+    Gameplay,
+    PauseLifecycle {
+        target_paused: bool,
+        settled_deadline_ms: u64,
+    },
+}
+
+impl PlayerAuthorityCommandKind {
+    fn is_pause_lifecycle(self) -> bool {
+        matches!(self, Self::PauseLifecycle { .. })
+    }
 }
 
 #[cfg(test)]
@@ -1305,6 +1353,7 @@ impl CoreRegistry {
                 Some(CoreLeaseAuthorization::PlayerAuthority {
                     lease: staged.clone(),
                     authority_session_id: authority_session_id.clone(),
+                    pause_lifecycle: false,
                 }),
             )?;
             if committed.revision != pending.expected_revision
@@ -1355,6 +1404,7 @@ impl CoreRegistry {
             let authorization = CoreLeaseAuthorization::PlayerAuthority {
                 lease: staged.clone(),
                 authority_session_id: authority_session_id.clone(),
+                pause_lifecycle: false,
             };
             let published = self.checkpoint_internal(
                 store,
@@ -1672,6 +1722,7 @@ impl CoreRegistry {
                 Some(CoreLeaseAuthorization::PlayerAuthority {
                     lease: staged.clone(),
                     authority_session_id: authority_session_id.clone(),
+                    pause_lifecycle: false,
                 }),
                 prepared_candidate,
             )?;
@@ -1725,6 +1776,7 @@ impl CoreRegistry {
             let authorization = CoreLeaseAuthorization::PlayerAuthority {
                 lease: staged.clone(),
                 authority_session_id: authority_session_id.clone(),
+                pause_lifecycle: false,
             };
             let published = self.checkpoint_internal(
                 store,
@@ -1846,9 +1898,61 @@ impl CoreRegistry {
             store,
             session_id,
             request,
+            PlayerAuthorityCommandKind::Gameplay,
             #[cfg(test)]
             PlayerAuthorityCommandFault::None,
         )
+    }
+
+    pub fn commit_player_authority_pause_transition(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitPlayerAuthorityPauseRequest,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityPauseResult> {
+        if request.base_revision > MAX_SAFE_INTEGER
+            || request.settled_deadline_ms > MAX_SAFE_INTEGER
+        {
+            bail!("native player-authority pause lifecycle bounds are invalid")
+        }
+        let command_value =
+            player_authority_pause_command(request.base_revision, request.target_paused);
+        let command = decode_player_authority_command_payload(&command_value)?;
+        let command_id = derive_player_authority_pause_command_id(
+            &request.run_id,
+            request.base_revision,
+            request.target_paused,
+            request.settled_deadline_ms,
+        )?;
+        let committed = self.commit_player_authority_command_internal(
+            store,
+            session_id,
+            CoreCommitPlayerAuthorityCommandRequest {
+                run_id: request.run_id,
+                command_id,
+                base_revision: request.base_revision,
+                command,
+            },
+            PlayerAuthorityCommandKind::PauseLifecycle {
+                target_paused: request.target_paused,
+                settled_deadline_ms: request.settled_deadline_ms,
+            },
+            #[cfg(test)]
+            PlayerAuthorityCommandFault::None,
+        )?;
+        if committed.summary.paused != request.target_paused {
+            bail!("native player-authority pause lifecycle result state differs")
+        }
+        Ok(CoreCommitPlayerAuthorityPauseResult {
+            sequence: committed.sequence,
+            base_revision: committed.base_revision,
+            revision: committed.revision,
+            target_paused: request.target_paused,
+            settled_deadline_ms: committed.settled_deadline_ms,
+            checkpoint: committed.checkpoint,
+            summary: committed.summary,
+            duplicate: committed.duplicate,
+        })
     }
 
     /// Reopens a durable player-authority session and recovers either a staged
@@ -1865,7 +1969,11 @@ impl CoreRegistry {
             return Ok(None);
         };
         if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
-            || lease.phase != crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
+            || !matches!(
+                lease.phase,
+                crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
+                    | crate::exact_realtime_lease::ExactRealtimeLeasePhase::Paused
+            )
         {
             return Ok(None);
         }
@@ -1918,10 +2026,12 @@ impl CoreRegistry {
                 .context("recover durable player-authority macro advance during host startup")?;
         } else {
             let summary = self.status(&opened.session_id)?;
+            let lease_paused =
+                lease.phase == crate::exact_realtime_lease::ExactRealtimeLeasePhase::Paused;
             if summary.revision != lease.acknowledged.revision
                 || summary.state_version != 47
                 || summary.mode != "normal"
-                || summary.paused
+                || summary.paused != lease_paused
                 || summary.registry_fingerprint != lease.registry_fingerprint
                 || summary.canonical_sha256 != lease.acknowledged.proof.canonical_sha256
                 || summary.domain_sha256 != lease.acknowledged.proof.domain_sha256
@@ -1938,8 +2048,14 @@ impl CoreRegistry {
             .latest_published_checkpoint_identity("normal-main")?
             .ok_or_else(|| anyhow!("normal-main published checkpoint is missing"))?;
         let authority_session_id = store.player_authority_session_binding(&opened.session_id)?;
+        let acknowledged_paused =
+            acknowledged.phase == crate::exact_realtime_lease::ExactRealtimeLeasePhase::Paused;
         if acknowledged.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
-            || acknowledged.phase != crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
+            || !matches!(
+                acknowledged.phase,
+                crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
+                    | crate::exact_realtime_lease::ExactRealtimeLeasePhase::Paused
+            )
             || !acknowledged.startup_resume_enabled
             || acknowledged.authority_session_id.as_deref() != Some(authority_session_id.as_str())
             || acknowledged.pending_tick.is_some()
@@ -1950,7 +2066,7 @@ impl CoreRegistry {
             || summary.domain_sha256 != acknowledged.acknowledged.proof.domain_sha256
             || summary.state_version != 47
             || summary.mode != "normal"
-            || summary.paused
+            || summary.paused != acknowledged_paused
             || !self.player_authority_coverage_eligible(&summary)
             || summary.registry_fingerprint != acknowledged.registry_fingerprint
             || latest.generation != acknowledged.acknowledged.checkpoint.generation
@@ -2017,6 +2133,7 @@ impl CoreRegistry {
             next_sequence,
             settled_deadline_ms: acknowledged.acknowledged.settled_deadline_ms,
             next_deadline_ms,
+            paused: acknowledged_paused,
             command_id: command_changes
                 .as_ref()
                 .map(|changes| changes.command_id.clone()),
@@ -2158,18 +2275,25 @@ impl CoreRegistry {
         validate_session_id(session_id)?;
         self.reconcile_uncertain_checkpoint_publication(store, session_id)?;
         let lease = store.require_exact_realtime_lease()?;
-        if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
-            || lease.phase != crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
-            || lease.pending_tick.is_some()
-            || lease.pending_advance.is_some()
-        {
-            bail!("native player-authority recovery requires one active pending command")
-        }
         let pending = lease
             .pending_command
             .as_ref()
             .ok_or_else(|| anyhow!("native player-authority recovery has no pending command"))?
             .clone();
+        let pause_target = player_authority_pause_target(&pending.command);
+        let expected_source_phase = match pause_target {
+            Some(true) | None => crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active,
+            Some(false) => crate::exact_realtime_lease::ExactRealtimeLeasePhase::Paused,
+        };
+        if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+            || lease.phase != expected_source_phase
+            || lease.pending_tick.is_some()
+            || lease.pending_advance.is_some()
+        {
+            bail!(
+                "native player-authority recovery requires one lifecycle-consistent pending command"
+            )
+        }
         let command = decode_player_authority_command_payload(&pending.command)?;
         let summary = self.status(session_id)?;
         let state = self.session(session_id)?;
@@ -2183,7 +2307,16 @@ impl CoreRegistry {
             || summary.mode != "normal"
             || summary.state_version != 47
             || summary.registry_fingerprint != lease.registry_fingerprint
-            || summary.paused
+            || match (summary.revision, pause_target) {
+                (revision, Some(target)) if revision == pending.base_revision => {
+                    summary.paused == target
+                }
+                (revision, Some(target)) if revision == pending.expected_revision => {
+                    summary.paused != target
+                }
+                (_, Some(_)) => true,
+                (_, None) => summary.paused,
+            }
             || !matches!(summary.revision, revision if revision == pending.base_revision || revision == pending.expected_revision)
             || latest.mode != "normal"
             || latest.state_version != 47
@@ -2211,7 +2344,14 @@ impl CoreRegistry {
         let authority_session_id = store.player_authority_session_binding(session_id)?;
         store.rebind_pending_player_authority_command(&lease, &authority_session_id)?;
         let run_id = lease.run_id;
-        let committed = self.commit_player_authority_command(
+        let kind = match pause_target {
+            Some(target_paused) => PlayerAuthorityCommandKind::PauseLifecycle {
+                target_paused,
+                settled_deadline_ms: pending.settled_deadline_ms,
+            },
+            None => PlayerAuthorityCommandKind::Gameplay,
+        };
+        let committed = self.commit_player_authority_command_internal(
             store,
             session_id,
             CoreCommitPlayerAuthorityCommandRequest {
@@ -2220,6 +2360,9 @@ impl CoreRegistry {
                 base_revision: pending.base_revision,
                 command,
             },
+            kind,
+            #[cfg(test)]
+            PlayerAuthorityCommandFault::None,
         )?;
         Ok(CoreRecoverPlayerAuthorityCommandResult { run_id, committed })
     }
@@ -2230,8 +2373,9 @@ impl CoreRegistry {
         store: &mut SaveStore,
         session_id: &str,
         request: CoreCommitPlayerAuthorityCommandRequest,
+        kind: PlayerAuthorityCommandKind,
     ) -> anyhow::Result<CoreCommitPlayerAuthorityCommandResult> {
-        self.commit_player_authority_command_impl(store, session_id, request, || Ok(()))
+        self.commit_player_authority_command_impl(store, session_id, request, kind, || Ok(()))
     }
 
     #[cfg(test)]
@@ -2240,10 +2384,11 @@ impl CoreRegistry {
         store: &mut SaveStore,
         session_id: &str,
         request: CoreCommitPlayerAuthorityCommandRequest,
+        kind: PlayerAuthorityCommandKind,
         fault: PlayerAuthorityCommandFault,
     ) -> anyhow::Result<CoreCommitPlayerAuthorityCommandResult> {
         let reached = std::cell::Cell::new(PlayerAuthorityCommandFault::None);
-        self.commit_player_authority_command_impl(store, session_id, request, || {
+        self.commit_player_authority_command_impl(store, session_id, request, kind, || {
             let next = match reached.get() {
                 PlayerAuthorityCommandFault::None => PlayerAuthorityCommandFault::AfterStage,
                 PlayerAuthorityCommandFault::AfterStage => PlayerAuthorityCommandFault::AfterWal,
@@ -2273,6 +2418,7 @@ impl CoreRegistry {
         store: &mut SaveStore,
         session_id: &str,
         request: CoreCommitPlayerAuthorityCommandRequest,
+        kind: PlayerAuthorityCommandKind,
         mut after_durable_boundary: impl FnMut() -> anyhow::Result<()>,
     ) -> anyhow::Result<CoreCommitPlayerAuthorityCommandResult> {
         validate_session_id(session_id)?;
@@ -2282,6 +2428,18 @@ impl CoreRegistry {
             bail!("native player-authority command base revision is invalid");
         }
         let command_value = serde_json::to_value(&request.command)?;
+        match kind {
+            PlayerAuthorityCommandKind::Gameplay => {
+                if player_authority_pause_target(&command_value).is_some() {
+                    bail!("native player-authority pause transition requires the lifecycle path")
+                }
+            }
+            PlayerAuthorityCommandKind::PauseLifecycle { target_paused, .. } => {
+                if player_authority_pause_target(&command_value) != Some(target_paused) {
+                    bail!("native player-authority pause lifecycle command identity conflicts")
+                }
+            }
+        }
         let request_sha256 = player_authority_command_request_sha256(
             &request.run_id,
             &request.command_id,
@@ -2291,10 +2449,39 @@ impl CoreRegistry {
         self.reconcile_uncertain_checkpoint_publication(store, session_id)?;
         let authority_session_id = store.player_authority_session_binding(session_id)?;
         let initial = store.require_exact_realtime_lease()?;
+        let expected_source_phase = match kind {
+            PlayerAuthorityCommandKind::Gameplay
+            | PlayerAuthorityCommandKind::PauseLifecycle {
+                target_paused: true,
+                ..
+            } => crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active,
+            PlayerAuthorityCommandKind::PauseLifecycle {
+                target_paused: false,
+                ..
+            } => crate::exact_realtime_lease::ExactRealtimeLeasePhase::Paused,
+        };
+        let expected_target_paused = match kind {
+            PlayerAuthorityCommandKind::Gameplay => false,
+            PlayerAuthorityCommandKind::PauseLifecycle { target_paused, .. } => target_paused,
+        };
+        let expected_source_paused = match kind {
+            PlayerAuthorityCommandKind::Gameplay => false,
+            PlayerAuthorityCommandKind::PauseLifecycle { target_paused, .. } => !target_paused,
+        };
+        let duplicate_lifecycle_ack = kind.is_pause_lifecycle()
+            && initial.pending_command.is_none()
+            && initial.acknowledged.last_player_command_id.as_deref()
+                == Some(request.command_id.as_str())
+            && initial.phase
+                == if expected_target_paused {
+                    crate::exact_realtime_lease::ExactRealtimeLeasePhase::Paused
+                } else {
+                    crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
+                };
         if initial.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
             || initial.authority_session_id.as_deref() != Some(authority_session_id.as_str())
             || initial.run_id != request.run_id
-            || initial.phase != crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
+            || (!duplicate_lifecycle_ack && initial.phase != expected_source_phase)
         {
             bail!("native player-authority command lease session/run identity conflicts");
         }
@@ -2308,9 +2495,16 @@ impl CoreRegistry {
             || initial_summary.mode != "normal"
             || initial_summary.state_version != 47
             || initial_summary.registry_fingerprint != initial.registry_fingerprint
-            || initial_summary.paused
+            || if duplicate_lifecycle_ack {
+                initial_summary.paused != expected_target_paused
+            } else if initial.pending_command.is_some() {
+                initial_summary.paused != expected_source_paused
+                    && initial_summary.paused != expected_target_paused
+            } else {
+                initial_summary.paused != expected_source_paused
+            }
         {
-            bail!("native player-authority command requires a running v47 normal-main session");
+            bail!("native player-authority command state/lease lifecycle conflicts");
         }
 
         if initial.pending_tick.is_some() {
@@ -2390,7 +2584,14 @@ impl CoreRegistry {
 
         let command_changes = if initial.pending_command.is_none() {
             let mut preflight = self.session(session_id)?.clone();
-            let applied = preflight.apply_player_authority_command(&request.command)?;
+            let applied = match kind {
+                PlayerAuthorityCommandKind::Gameplay => {
+                    preflight.apply_player_authority_command(&request.command)?
+                }
+                PlayerAuthorityCommandKind::PauseLifecycle { .. } => {
+                    preflight.apply_player_authority_pause_transition(&request.command)?
+                }
+            };
             if applied.previous_revision != request.base_revision
                 || applied.revision != request.base_revision + 1
             {
@@ -2406,13 +2607,25 @@ impl CoreRegistry {
             )?
         };
 
-        let staged = store.stage_player_authority_command(
-            &authority_session_id,
-            &request.run_id,
-            &request.command_id,
-            request.base_revision,
-            command_value,
-        )?;
+        let staged = match kind {
+            PlayerAuthorityCommandKind::Gameplay => store.stage_player_authority_command(
+                &authority_session_id,
+                &request.run_id,
+                &request.command_id,
+                request.base_revision,
+                command_value,
+            )?,
+            PlayerAuthorityCommandKind::PauseLifecycle {
+                target_paused,
+                settled_deadline_ms,
+            } => store.stage_player_authority_pause_transition(
+                &authority_session_id,
+                &request.run_id,
+                request.base_revision,
+                target_paused,
+                settled_deadline_ms,
+            )?,
+        };
         after_durable_boundary()?;
         let pending = staged
             .pending_command
@@ -2448,6 +2661,7 @@ impl CoreRegistry {
                 Some(CoreLeaseAuthorization::PlayerAuthority {
                     lease: staged.clone(),
                     authority_session_id: authority_session_id.clone(),
+                    pause_lifecycle: kind.is_pause_lifecycle(),
                 }),
             )?;
             if committed.revision != pending.expected_revision
@@ -2500,6 +2714,7 @@ impl CoreRegistry {
             let authorization = CoreLeaseAuthorization::PlayerAuthority {
                 lease: staged.clone(),
                 authority_session_id: authority_session_id.clone(),
+                pause_lifecycle: kind.is_pause_lifecycle(),
             };
             let published = self.checkpoint_internal(
                 store,
@@ -2545,12 +2760,21 @@ impl CoreRegistry {
             canonical_sha256: summary.canonical_sha256.clone(),
             domain_sha256: summary.domain_sha256.clone(),
         };
-        let lease = store.acknowledge_player_authority_command(
-            &authority_session_id,
-            &request.run_id,
-            proof,
-            checkpoint.clone(),
-        )?;
+        let lease = match kind {
+            PlayerAuthorityCommandKind::Gameplay => store.acknowledge_player_authority_command(
+                &authority_session_id,
+                &request.run_id,
+                proof,
+                checkpoint.clone(),
+            )?,
+            PlayerAuthorityCommandKind::PauseLifecycle { .. } => store
+                .acknowledge_player_authority_pause_transition(
+                    &authority_session_id,
+                    &request.run_id,
+                    proof,
+                    checkpoint.clone(),
+                )?,
+        };
         after_durable_boundary()?;
         if lease.acknowledged.sequence != pending.sequence
             || lease.acknowledged.command_id.as_deref() != Some(pending.command_id.as_str())
@@ -2564,6 +2788,16 @@ impl CoreRegistry {
             || lease.pending_advance.is_some()
         {
             bail!("native player-authority lease ACK did not close the command");
+        }
+        if kind.is_pause_lifecycle()
+            && lease.phase
+                != if expected_target_paused {
+                    crate::exact_realtime_lease::ExactRealtimeLeasePhase::Paused
+                } else {
+                    crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
+                }
+        {
+            bail!("native player-authority pause lifecycle ACK phase differs")
         }
         Ok(CoreCommitPlayerAuthorityCommandResult {
             sequence: pending.sequence,
@@ -3225,12 +3459,17 @@ impl CoreRegistry {
                     bail!("native authoritative retry cannot prove revision continuity");
                 }
                 let state = self.session_mut(session_id)?;
-                if matches!(
-                    lease_authorization.as_ref(),
-                    Some(CoreLeaseAuthorization::PlayerAuthority { .. })
-                ) && let Some(command) = operation.command.as_ref()
+                if let Some(CoreLeaseAuthorization::PlayerAuthority {
+                    pause_lifecycle, ..
+                }) = lease_authorization.as_ref()
+                    && let Some(command) = operation.command.as_ref()
                 {
-                    state.validate_player_authority_command(command)?;
+                    if *pause_lifecycle {
+                        let mut probe = state.clone();
+                        probe.apply_player_authority_pause_transition(command)?;
+                    } else {
+                        state.validate_player_authority_command(command)?;
+                    }
                 }
                 state.replay_operation(
                     operation.base_revision,
@@ -3258,6 +3497,7 @@ impl CoreRegistry {
                 Some(CoreLeaseAuthorization::PlayerAuthority {
                     lease,
                     authority_session_id,
+                    ..
                 }) => store.append_wal_idempotent_player_authority(
                     lease,
                     authority_session_id,
@@ -3307,13 +3547,19 @@ impl CoreRegistry {
             None => {
                 let mut prepared = self.session(session_id)?.clone();
                 if let Some(command) = request.command.as_ref() {
-                    if matches!(
-                        lease_authorization.as_ref(),
-                        Some(CoreLeaseAuthorization::PlayerAuthority { .. })
-                    ) {
-                        prepared.apply_player_authority_command(command)?;
-                    } else {
-                        prepared.apply_command(command)?;
+                    match lease_authorization.as_ref() {
+                        Some(CoreLeaseAuthorization::PlayerAuthority {
+                            pause_lifecycle: true,
+                            ..
+                        }) => {
+                            prepared.apply_player_authority_pause_transition(command)?;
+                        }
+                        Some(CoreLeaseAuthorization::PlayerAuthority { .. }) => {
+                            prepared.apply_player_authority_command(command)?;
+                        }
+                        _ => {
+                            prepared.apply_command(command)?;
+                        }
                     }
                 }
                 let advanced = prepared.advance(&CoreAdvanceRequest {
@@ -3366,6 +3612,7 @@ impl CoreRegistry {
             Some(CoreLeaseAuthorization::PlayerAuthority {
                 lease,
                 authority_session_id,
+                ..
             }) => store.append_wal_idempotent_player_authority(
                 lease,
                 authority_session_id,
@@ -3507,6 +3754,7 @@ impl CoreRegistry {
             Some(CoreLeaseAuthorization::PlayerAuthority {
                 lease,
                 authority_session_id,
+                ..
             }) => store.begin_player_authority_checkpoint(
                 &slot,
                 &mode,
@@ -4828,6 +5076,40 @@ mod tests {
         }
     }
 
+    fn player_authority_pause_request(
+        base_revision: u64,
+        target_paused: bool,
+        settled_deadline_ms: u64,
+    ) -> CoreCommitPlayerAuthorityPauseRequest {
+        CoreCommitPlayerAuthorityPauseRequest {
+            run_id: "player-authority-run".to_owned(),
+            base_revision,
+            target_paused,
+            settled_deadline_ms,
+        }
+    }
+
+    fn player_authority_pause_command_request(
+        base_revision: u64,
+        target_paused: bool,
+        settled_deadline_ms: u64,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        let run_id = "player-authority-run";
+        let command = player_authority_pause_command(base_revision, target_paused);
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: run_id.to_owned(),
+            command_id: derive_player_authority_pause_command_id(
+                run_id,
+                base_revision,
+                target_paused,
+                settled_deadline_ms,
+            )
+            .unwrap(),
+            base_revision,
+            command: decode_player_authority_command_payload(&command).unwrap(),
+        }
+    }
+
     fn player_authority_time_warp_disable_command(
         base_revision: u64,
         command_id: &str,
@@ -5742,6 +6024,7 @@ mod tests {
                 &mut store,
                 &session_id,
                 request(),
+                PlayerAuthorityCommandKind::Gameplay,
                 PlayerAuthorityCommandFault::AfterStage,
             )
             .unwrap_err();
@@ -5868,6 +6151,7 @@ mod tests {
                 &mut store,
                 &session_id,
                 request(),
+                PlayerAuthorityCommandKind::Gameplay,
                 PlayerAuthorityCommandFault::AfterStage,
             )
             .unwrap_err();
@@ -6005,6 +6289,7 @@ mod tests {
                 &mut store,
                 &session_id,
                 request(),
+                PlayerAuthorityCommandKind::Gameplay,
                 PlayerAuthorityCommandFault::AfterStage,
             )
             .unwrap_err();
@@ -6142,6 +6427,7 @@ mod tests {
                 &mut store,
                 &session_id,
                 request(),
+                PlayerAuthorityCommandKind::Gameplay,
                 PlayerAuthorityCommandFault::AfterStage,
             )
             .unwrap_err();
@@ -6243,6 +6529,7 @@ mod tests {
                 &mut store,
                 &session_id,
                 request(),
+                PlayerAuthorityCommandKind::Gameplay,
                 PlayerAuthorityCommandFault::AfterStage,
             )
             .unwrap_err();
@@ -6391,6 +6678,7 @@ mod tests {
                 &mut store,
                 &session_id,
                 request(),
+                PlayerAuthorityCommandKind::Gameplay,
                 PlayerAuthorityCommandFault::AfterStage,
             )
             .unwrap_err();
@@ -6566,6 +6854,7 @@ mod tests {
                 &mut store,
                 &session_id,
                 request(),
+                PlayerAuthorityCommandKind::Gameplay,
                 PlayerAuthorityCommandFault::AfterStage,
             )
             .unwrap_err();
@@ -6734,6 +7023,7 @@ mod tests {
                 &mut store,
                 &session_id,
                 request(),
+                PlayerAuthorityCommandKind::Gameplay,
                 PlayerAuthorityCommandFault::AfterStage,
             )
             .unwrap_err();
@@ -7007,6 +7297,7 @@ mod tests {
                 &mut store,
                 &session_id,
                 request,
+                PlayerAuthorityCommandKind::Gameplay,
                 PlayerAuthorityCommandFault::AfterStage,
             )
             .unwrap_err();
@@ -7020,6 +7311,339 @@ mod tests {
             checkpoint_before
         );
         assert_eq!(store.require_exact_realtime_lease().unwrap(), lease_before);
+    }
+
+    #[test]
+    fn player_authority_pause_resume_is_durable_idempotent_and_clock_stopping() {
+        let (_root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture();
+        let initial_summary = registry.status(&session_id).unwrap();
+        let initial_elapsed = initial_summary.elapsed_seconds;
+        let initial_summary_value = serde_json::to_value(&initial_summary).unwrap();
+        let initial_lease = store.require_exact_realtime_lease().unwrap();
+        let initial_publication =
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap();
+
+        // Even an exact pause-shaped command cannot use the renderer gameplay
+        // path. The paired GameState/clock transition is main/Host-owned.
+        let generic_error = registry
+            .commit_player_authority_command(
+                &mut store,
+                &session_id,
+                player_authority_pause_command_request(entry_checkpoint.revision, true, 42_000),
+            )
+            .unwrap_err();
+        assert!(format!("{generic_error:#}").contains("requires the lifecycle path"));
+        assert_eq!(
+            serde_json::to_value(registry.status(&session_id).unwrap()).unwrap(),
+            initial_summary_value
+        );
+        assert_eq!(store.require_exact_realtime_lease().unwrap(), initial_lease);
+        assert_eq!(
+            serde_json::to_value(store.recover("normal-main").unwrap().unwrap()).unwrap(),
+            initial_publication
+        );
+
+        let moved_pause_deadline = registry
+            .commit_player_authority_pause_transition(
+                &mut store,
+                &session_id,
+                player_authority_pause_request(entry_checkpoint.revision, true, 42_001),
+            )
+            .unwrap_err();
+        assert!(format!("{moved_pause_deadline:#}").contains("cannot move"));
+        assert_eq!(
+            serde_json::to_value(registry.status(&session_id).unwrap()).unwrap(),
+            initial_summary_value
+        );
+        assert_eq!(store.require_exact_realtime_lease().unwrap(), initial_lease);
+
+        let pause = || player_authority_pause_request(entry_checkpoint.revision, true, 42_000);
+        let paused = registry
+            .commit_player_authority_pause_transition(&mut store, &session_id, pause())
+            .unwrap();
+        assert_eq!(paused.sequence, 1);
+        assert_eq!(paused.base_revision, entry_checkpoint.revision);
+        assert_eq!(paused.revision, entry_checkpoint.revision + 1);
+        assert_eq!(paused.settled_deadline_ms, 42_000);
+        assert!(paused.target_paused);
+        assert!(paused.summary.paused);
+        assert!(!paused.duplicate);
+        assert_eq!(
+            registry.status(&session_id).unwrap().elapsed_seconds,
+            initial_elapsed
+        );
+        let paused_lease = store.require_exact_realtime_lease().unwrap();
+        assert_eq!(
+            paused_lease.phase,
+            crate::exact_realtime_lease::ExactRealtimeLeasePhase::Paused
+        );
+        assert_eq!(
+            paused_lease
+                .pause
+                .as_ref()
+                .map(|pause| pause.reason_code.as_str()),
+            Some("player-request")
+        );
+        assert!(paused_lease.pending_command.is_none());
+        assert_eq!(paused_lease.acknowledged.revision, paused.revision);
+        assert_eq!(paused_lease.acknowledged.settled_deadline_ms, 42_000);
+
+        let backward_resume = registry
+            .commit_player_authority_pause_transition(
+                &mut store,
+                &session_id,
+                player_authority_pause_request(paused.revision, false, 41_999),
+            )
+            .unwrap_err();
+        assert!(format!("{backward_resume:#}").contains("moves backwards"));
+        assert_eq!(store.require_exact_realtime_lease().unwrap(), paused_lease);
+        assert_eq!(
+            registry.status(&session_id).unwrap().canonical_sha256,
+            paused.summary.canonical_sha256
+        );
+
+        let repeated_pause = registry
+            .commit_player_authority_pause_transition(&mut store, &session_id, pause())
+            .unwrap();
+        assert!(repeated_pause.duplicate);
+        assert_eq!(repeated_pause.revision, paused.revision);
+        assert_eq!(repeated_pause.checkpoint, paused.checkpoint);
+        assert_eq!(
+            repeated_pause.summary.canonical_sha256,
+            paused.summary.canonical_sha256
+        );
+
+        // A stopped lease cannot stage exact simulation ticks.
+        let paused_before_tick = store.require_exact_realtime_lease().unwrap();
+        let paused_hash = registry.status(&session_id).unwrap().canonical_sha256;
+        let tick_error = registry
+            .commit_player_authority_tick(
+                &mut store,
+                &session_id,
+                CoreCommitPlayerAuthorityTickRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    sequence: 2,
+                },
+            )
+            .unwrap_err();
+        let tick_error = format!("{tick_error:#}");
+        assert!(
+            tick_error.contains("active") || tick_error.contains("identity conflicts"),
+            "{tick_error}"
+        );
+        assert_eq!(
+            store.require_exact_realtime_lease().unwrap(),
+            paused_before_tick
+        );
+        assert_eq!(
+            registry.status(&session_id).unwrap().canonical_sha256,
+            paused_hash
+        );
+
+        // Resume uses a fresh main-owned deadline. The 57 seconds spent paused
+        // change no simulation field and can never become tick backlog.
+        let resume = || player_authority_pause_request(paused.revision, false, 99_000);
+        let resumed = registry
+            .commit_player_authority_pause_transition(&mut store, &session_id, resume())
+            .unwrap();
+        assert_eq!(resumed.sequence, 2);
+        assert_eq!(resumed.base_revision, paused.revision);
+        assert_eq!(resumed.revision, paused.revision + 1);
+        assert_eq!(resumed.settled_deadline_ms, 99_000);
+        assert!(!resumed.target_paused);
+        assert!(!resumed.summary.paused);
+        assert!(!resumed.duplicate);
+        assert_eq!(
+            registry.status(&session_id).unwrap().elapsed_seconds,
+            initial_elapsed
+        );
+        let resumed_lease = store.require_exact_realtime_lease().unwrap();
+        assert_eq!(
+            resumed_lease.phase,
+            crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
+        );
+        assert!(resumed_lease.pause.is_none());
+        assert!(resumed_lease.pending_command.is_none());
+        assert_eq!(resumed_lease.acknowledged.sequence, 2);
+        assert_eq!(resumed_lease.acknowledged.settled_deadline_ms, 99_000);
+
+        let repeated_resume = registry
+            .commit_player_authority_pause_transition(&mut store, &session_id, resume())
+            .unwrap();
+        assert!(repeated_resume.duplicate);
+        assert_eq!(repeated_resume.revision, resumed.revision);
+        assert_eq!(repeated_resume.checkpoint, resumed.checkpoint);
+    }
+
+    #[test]
+    fn player_authority_pause_resume_recovers_after_every_durable_boundary() {
+        let (_clean_root, mut clean_store, mut clean_registry, clean_session, clean_entry) =
+            player_authority_fixture();
+        let clean_paused = clean_registry
+            .commit_player_authority_pause_transition(
+                &mut clean_store,
+                &clean_session,
+                player_authority_pause_request(clean_entry.revision, true, 42_000),
+            )
+            .unwrap();
+        let clean_resumed = clean_registry
+            .commit_player_authority_pause_transition(
+                &mut clean_store,
+                &clean_session,
+                player_authority_pause_request(clean_paused.revision, false, 99_000),
+            )
+            .unwrap();
+
+        for fault in [
+            PlayerAuthorityCommandFault::AfterStage,
+            PlayerAuthorityCommandFault::AfterWal,
+            PlayerAuthorityCommandFault::AfterCheckpoint,
+            PlayerAuthorityCommandFault::AfterReceipt,
+            PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
+        ] {
+            let (root, mut store, mut registry, session_id, entry_checkpoint) =
+                player_authority_fixture();
+            let initial_elapsed = registry.status(&session_id).unwrap().elapsed_seconds;
+            let pause_error = registry
+                .commit_player_authority_command_internal(
+                    &mut store,
+                    &session_id,
+                    player_authority_pause_command_request(entry_checkpoint.revision, true, 42_000),
+                    PlayerAuthorityCommandKind::PauseLifecycle {
+                        target_paused: true,
+                        settled_deadline_ms: 42_000,
+                    },
+                    fault,
+                )
+                .unwrap_err();
+            assert!(
+                format!("{pause_error:#}").contains("lost response"),
+                "pause {fault:?}: {pause_error:#}"
+            );
+            drop(registry);
+            drop(store);
+
+            let mut paused_store = SaveStore::open(root.path()).unwrap();
+            let mut paused_registry = resumable_player_authority_registry_for_test();
+            let paused_receipt = paused_registry
+                .recover_player_authority_pending_command_on_startup(&mut paused_store)
+                .unwrap_or_else(|error| panic!("pause {fault:?}: {error:#}"))
+                .expect("paused authority must be resumable");
+            assert!(paused_receipt.paused, "pause {fault:?}");
+            assert_eq!(
+                paused_receipt.revision, clean_paused.revision,
+                "pause {fault:?}"
+            );
+            assert_eq!(paused_receipt.acknowledged_sequence, 1, "pause {fault:?}");
+            assert_eq!(paused_receipt.next_sequence, 2, "pause {fault:?}");
+            assert_eq!(
+                paused_receipt.settled_deadline_ms, 42_000,
+                "pause {fault:?}"
+            );
+            assert_eq!(paused_receipt.next_deadline_ms, 43_000, "pause {fault:?}");
+            assert_eq!(
+                paused_receipt.checkpoint, clean_paused.checkpoint,
+                "pause {fault:?}"
+            );
+            assert_eq!(
+                paused_receipt.summary.canonical_sha256, clean_paused.summary.canonical_sha256,
+                "pause {fault:?}"
+            );
+            assert_eq!(
+                paused_registry
+                    .status(&paused_receipt.session_id)
+                    .unwrap()
+                    .elapsed_seconds,
+                initial_elapsed,
+                "pause {fault:?}"
+            );
+            let paused_lease = paused_store.require_exact_realtime_lease().unwrap();
+            assert_eq!(
+                paused_lease.phase,
+                crate::exact_realtime_lease::ExactRealtimeLeasePhase::Paused,
+                "pause {fault:?}"
+            );
+            assert!(paused_lease.pending_command.is_none(), "pause {fault:?}");
+
+            let resume_error = paused_registry
+                .commit_player_authority_command_internal(
+                    &mut paused_store,
+                    &paused_receipt.session_id,
+                    player_authority_pause_command_request(paused_receipt.revision, false, 99_000),
+                    PlayerAuthorityCommandKind::PauseLifecycle {
+                        target_paused: false,
+                        settled_deadline_ms: 99_000,
+                    },
+                    fault,
+                )
+                .unwrap_err();
+            assert!(
+                format!("{resume_error:#}").contains("lost response"),
+                "resume {fault:?}: {resume_error:#}"
+            );
+            drop(paused_registry);
+            drop(paused_store);
+
+            let mut resumed_store = SaveStore::open(root.path()).unwrap();
+            let mut resumed_registry = resumable_player_authority_registry_for_test();
+            let resumed_receipt = resumed_registry
+                .recover_player_authority_pending_command_on_startup(&mut resumed_store)
+                .unwrap_or_else(|error| panic!("resume {fault:?}: {error:#}"))
+                .expect("resumed authority must be recoverable");
+            assert!(!resumed_receipt.paused, "resume {fault:?}");
+            assert_eq!(
+                resumed_receipt.revision, clean_resumed.revision,
+                "resume {fault:?}"
+            );
+            assert_eq!(resumed_receipt.acknowledged_sequence, 2, "resume {fault:?}");
+            assert_eq!(resumed_receipt.next_sequence, 3, "resume {fault:?}");
+            assert_eq!(
+                resumed_receipt.settled_deadline_ms, 99_000,
+                "resume {fault:?}"
+            );
+            assert_eq!(
+                resumed_receipt.next_deadline_ms, 100_000,
+                "resume {fault:?}"
+            );
+            assert_eq!(
+                resumed_receipt.checkpoint, clean_resumed.checkpoint,
+                "resume {fault:?}"
+            );
+            assert_eq!(
+                resumed_receipt.summary.canonical_sha256, clean_resumed.summary.canonical_sha256,
+                "resume {fault:?}"
+            );
+            assert_eq!(
+                resumed_registry
+                    .status(&resumed_receipt.session_id)
+                    .unwrap()
+                    .elapsed_seconds,
+                initial_elapsed,
+                "resume {fault:?}"
+            );
+            let resumed_lease = resumed_store.require_exact_realtime_lease().unwrap();
+            assert_eq!(
+                resumed_lease.phase,
+                crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active,
+                "resume {fault:?}"
+            );
+            assert!(resumed_lease.pause.is_none(), "resume {fault:?}");
+            assert!(resumed_lease.pending_command.is_none(), "resume {fault:?}");
+
+            let duplicate = resumed_registry
+                .commit_player_authority_pause_transition(
+                    &mut resumed_store,
+                    &resumed_receipt.session_id,
+                    player_authority_pause_request(clean_paused.revision, false, 99_000),
+                )
+                .unwrap_or_else(|error| panic!("duplicate resume {fault:?}: {error:#}"));
+            assert!(duplicate.duplicate, "resume {fault:?}");
+            assert_eq!(
+                duplicate.revision, clean_resumed.revision,
+                "resume {fault:?}"
+            );
+        }
     }
 
     #[test]
@@ -7041,7 +7665,13 @@ mod tests {
                 )
             };
             let error = registry
-                .commit_player_authority_command_internal(&mut store, &session_id, request(), fault)
+                .commit_player_authority_command_internal(
+                    &mut store,
+                    &session_id,
+                    request(),
+                    PlayerAuthorityCommandKind::Gameplay,
+                    fault,
+                )
                 .unwrap_err();
             assert!(
                 format!("{error:#}").contains("lost response"),
@@ -7091,6 +7721,7 @@ mod tests {
                     "process-restart-command",
                     json!({ "persisted": true }),
                 ),
+                PlayerAuthorityCommandKind::Gameplay,
                 PlayerAuthorityCommandFault::AfterStage,
             )
             .unwrap_err();
@@ -7374,6 +8005,7 @@ mod tests {
                     "catalog-integrity-command",
                     json!({ "mustRemainPending": true }),
                 ),
+                PlayerAuthorityCommandKind::Gameplay,
                 PlayerAuthorityCommandFault::AfterStage,
             )
             .unwrap_err();
@@ -7472,6 +8104,7 @@ mod tests {
                 &mut store,
                 &session_id,
                 player_authority_command(entry_checkpoint.revision, "low-space-command", json!(1)),
+                PlayerAuthorityCommandKind::Gameplay,
                 || {
                     let next = boundaries.get() + 1;
                     boundaries.set(next);
@@ -7531,14 +8164,20 @@ mod tests {
             )
         };
         let error = registry
-            .commit_player_authority_command_impl(&mut store, &session_id, request(), || {
-                let next = boundaries.get() + 1;
-                boundaries.set(next);
-                if next == 3 {
-                    probe.set(0);
-                }
-                Ok(())
-            })
+            .commit_player_authority_command_impl(
+                &mut store,
+                &session_id,
+                request(),
+                PlayerAuthorityCommandKind::Gameplay,
+                || {
+                    let next = boundaries.get() + 1;
+                    boundaries.set(next);
+                    if next == 3 {
+                        probe.set(0);
+                    }
+                    Ok(())
+                },
+            )
             .unwrap_err();
         assert!(
             format!("{error:#}").contains(crate::disk_budget::LOW_SPACE_ERROR),
@@ -8764,6 +9403,7 @@ mod tests {
                     advanced_receipt.revision,
                     "disable-time-warp-after-finish",
                 ),
+                PlayerAuthorityCommandKind::Gameplay,
                 PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
             )
             .unwrap_err();

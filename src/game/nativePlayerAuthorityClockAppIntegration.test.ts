@@ -69,7 +69,6 @@ describe("main-owned authority clock App wiring", () => {
     for (const sourceName of [
       "createNativePlayerAuthorityTechnologyProjectionSource(",
       "createNativePlayerAuthorityRecipeWorkspaceProjectionSource(",
-      "createNativePlayerAuthorityStellarProjectionSource(",
       "createNativePlayerAuthorityCommandPaletteEntitySearchSource(",
     ]) {
       const sourceIndex = refreshEffects.indexOf(sourceName);
@@ -77,6 +76,13 @@ describe("main-owned authority clock App wiring", () => {
       expect(refreshEffects.lastIndexOf("!nativePlayerAuthorityActiveFrame", sourceIndex))
         .toBeGreaterThanOrEqual(0);
     }
+    const stellarBinding = app.slice(
+      app.indexOf("const nativeStellarProjectionIdentity"),
+      app.indexOf("const nativeStarMapWorkspaceReadModel"),
+    );
+    expect(stellarBinding).toMatch(/nativePlayerAuthorityActiveFrame\?\.sessionId[\s\S]*?: null/);
+    expect(stellarBinding).toMatch(/nativeStellarProjectionIdentity[\s\S]*?createNativePlayerAuthorityStellarProjectionSource[\s\S]*?: null/);
+    expect(refreshEffects).toMatch(/!nativeStellarProjectionIdentity \|\|[\s\S]*?!nativeStellarProjectionSource\) return/);
 
     const simulationLoop = app.slice(
       app.indexOf("let previous = performance.now();"),

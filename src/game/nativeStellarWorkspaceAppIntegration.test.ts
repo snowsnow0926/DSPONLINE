@@ -39,7 +39,9 @@ describe("native stellar workspace App integration", () => {
     expect(workspace).toMatch(/view === "map" \? nativeAuthorityRequired \? nativeMapUnavailableBoundary/);
     expect(app).toMatch(/nativeQuantumReadModel=\{nativeStellarQuantumReadModel\}/);
     expect(app).toMatch(/nativeQuantumReadStatus=\{nativeStellarQuantumReadStatus\}/);
+    expect(app).toMatch(/onNativeQuantumItemCapacityChange=\{[\s\S]*?commitNativeProjectedCommand[\s\S]*?createNativeProjectedQuantumItemCapacityCommand/);
     expect(workspace).toMatch(/const nativeQuantumConsole = <NativeQuantumInventoryConsole/);
+    expect(workspace).toMatch(/onNativeItemCapacityChange=\{onNativeQuantumItemCapacityChange\}/);
     expect(workspace).toMatch(/nativeAuthorityRequired \? nativeQuantumConsole : <QuantumInventoryConsole/);
     const nativeQuantum = workspace.slice(
       workspace.indexOf("export function NativeQuantumInventoryConsole"),

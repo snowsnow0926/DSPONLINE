@@ -413,6 +413,7 @@ import {
   createNativeProjectedStationLimitsCommand,
   createNativeProjectedStationPriorityCommand,
 } from "./game/nativeProjectedPlayerCommands";
+import { createNativeProjectedQuantumItemCapacityCommand } from "./game/nativeProjectedQuantumCommands";
 import {
   RECIPE_WORKSPACE_PROJECTION_LIMITS,
   createWebRecipeWorkspaceReadModel,
@@ -14975,6 +14976,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onUpgradeAllStations={handleUpgradeAllInterstellarStations}
             onAttachAllQuantumStations={handleAttachAllQuantumStations}
             onCollectorQuantumModeChange={handleAllOrbitalCollectorsQuantumMode}
+            onNativeQuantumItemCapacityChange={(itemId, currentCapacity, targetCapacity) => commitNativeProjectedCommand((baseRevision) =>
+              createNativeProjectedQuantumItemCapacityCommand({ baseRevision, itemId, currentCapacity, targetCapacity }))}
             onQuantumItemCapacityChange={(itemId, value) => commitGame((current) => setQuantumLogisticsItemCapacity(current, itemId, value))}
             onNativeStationPriorityChange={(stationId, slotIndex, currentPriority, targetPriority) => commitNativeProjectedCommand((baseRevision) =>
               createNativeProjectedStationPriorityCommand({ baseRevision, stationId, slotIndex, currentPriority, targetPriority }))}

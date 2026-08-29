@@ -27,10 +27,21 @@ describe("native factory inventory App integration", () => {
     expect(rail).toMatch(/frame\?\.rows/);
   });
 
+  it("moves entity inventory only from the atomic canvas/inventory revision and rereads after ACK", () => {
+    expect(app).toMatch(/canvas\.sessionId !== inventory\.sessionId[\s\S]*?canvas\.runId !== inventory\.runId[\s\S]*?canvas\.revision !== inventory\.revision[\s\S]*?canvas\.planetId !== inventory\.activePlanetId/);
+    expect(app).toMatch(/createNativeProjectedEntityInventoryTakeCommand\(binding\.inventory, entity, "outputs", itemId\)/);
+    expect(app).toMatch(/createNativeProjectedEntityInventoryTakeCommand\(binding\.inventory, entity, "inputs", itemId\)/);
+    expect(app).toMatch(/createNativeProjectedEntityInventoryStowCommand\([\s\S]*?binding\.inventory,[\s\S]*?entity,[\s\S]*?sourceKind === "node" \? "outputs" : "inputs"/);
+    expect(app).toMatch(/onStowEntityInventory=\{handleDraggedItemToTray\}/);
+    expect(app).toMatch(/Never install or predict the projected edit locally[\s\S]*?nativePlayerAuthorityClockRef\.current\?\.refresh\(\)/);
+    expect(rail).toMatch(/data-native-entity-stow="same-revision-v1"/);
+  });
+
   it("makes the rail read-only while a command or projection is unsettled", () => {
     expect(app).toMatch(/nativePlayerAuthorityCommandInFlightRef\.current = true;[\s\S]*?setNativePlayerAuthorityCommandPending\(true\)/);
     expect(app).toMatch(/nativePlayerAuthorityCommandInFlightRef\.current = false;[\s\S]*?setNativePlayerAuthorityCommandPending\(false\)/);
     expect(app).toMatch(/pending=\{nativePlayerAuthorityCommandPending \|\| !nativePlayerAuthorityCommandSource\}/);
+    expect(app).toMatch(/nativeEntityInventoryProjectionBinding !== null[\s\S]*?!nativePlayerAuthorityCommandPending/);
     expect(rail).toMatch(/const disabled = pending \|\| !frame/);
     expect(rail).toMatch(/disabled=\{disabled \|\| mixedCargo \|\| fullCargo\}/);
   });

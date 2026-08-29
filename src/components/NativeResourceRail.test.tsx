@@ -51,6 +51,7 @@ describe("NativeResourceRail", () => {
       pending={false}
       onPickTray={vi.fn()}
       onDropCargo={vi.fn()}
+      onStowEntityInventory={vi.fn()}
       onSetTrayItemLimit={vi.fn()}
     />));
     expect(host.querySelector("[data-native-authority-unavailable='tray-cargo-v1']")).not.toBeNull();
@@ -64,6 +65,7 @@ describe("NativeResourceRail", () => {
       pending={false}
       onPickTray={vi.fn()}
       onDropCargo={onDropCargo}
+      onStowEntityInventory={vi.fn()}
       onSetTrayItemLimit={vi.fn()}
     />));
     expect(host.textContent).toContain("125");
@@ -79,6 +81,7 @@ describe("NativeResourceRail", () => {
       pending
       onPickTray={vi.fn()}
       onDropCargo={vi.fn()}
+      onStowEntityInventory={vi.fn()}
       onSetTrayItemLimit={vi.fn()}
     />));
     expect([...host.querySelectorAll<HTMLButtonElement>("button")].every((button) => button.disabled)).toBe(true);
@@ -92,11 +95,48 @@ describe("NativeResourceRail", () => {
       pending={false}
       onPickTray={vi.fn()}
       onDropCargo={vi.fn()}
+      onStowEntityInventory={vi.fn()}
       onSetTrayItemLimit={vi.fn()}
     />));
     const rows = [...host.querySelectorAll<HTMLButtonElement>(".tray-row")];
     expect(rows).toHaveLength(2);
     expect(rows.every((row) => row.disabled)).toBe(true);
     expect(rows[1].title).toContain("超过当前自动写入上限");
+  });
+
+  it("accepts only entity input/output drags while the exact frame is ready", () => {
+    const onStowEntityInventory = vi.fn();
+    act(() => root.render(<NativeResourceRail
+      frame={{ ...frame(), cargo: null }}
+      pending={false}
+      onPickTray={vi.fn()}
+      onDropCargo={vi.fn()}
+      onStowEntityInventory={onStowEntityInventory}
+      onSetTrayItemLimit={vi.fn()}
+    />));
+    const tray = host.querySelector<HTMLElement>("[data-native-entity-stow='same-revision-v1']")!;
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", { value: {
+      types: ["application/factory-item"],
+      getData: (type: string) => ({
+        "application/factory-item": "iron_ore",
+        "application/factory-source-kind": "node-output",
+        "application/factory-source-id": "machine-a",
+      } as Record<string, string>)[type] ?? "",
+    } });
+    act(() => tray.dispatchEvent(drop));
+    expect(onStowEntityInventory).not.toHaveBeenCalled();
+
+    const accepted = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(accepted, "dataTransfer", { value: {
+      types: ["application/factory-item"],
+      getData: (type: string) => ({
+        "application/factory-item": "iron_ore",
+        "application/factory-source-kind": "node",
+        "application/factory-source-id": "machine-a",
+      } as Record<string, string>)[type] ?? "",
+    } });
+    act(() => tray.dispatchEvent(accepted));
+    expect(onStowEntityInventory).toHaveBeenCalledWith("iron_ore", "node", "machine-a");
   });
 });

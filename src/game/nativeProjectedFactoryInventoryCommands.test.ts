@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   createNativeProjectedCargoReturnCommand,
+  createNativeProjectedEntityInventoryStowCommand,
+  createNativeProjectedEntityInventoryTakeCommand,
   createNativeProjectedTrayItemLimitCommand,
   createNativeProjectedTrayTakeCommand,
 } from "./nativeProjectedFactoryInventoryCommands";
@@ -9,6 +11,7 @@ import type {
   NativeFactoryInventoryFrame,
   NativeFactoryInventoryRow,
 } from "./nativeFactoryInventoryStore";
+import type { FactoryEntity } from "./types";
 
 function frame(options: {
   rows?: NativeFactoryInventoryRow[];
@@ -31,6 +34,26 @@ function frame(options: {
     trayItemLimitBounds: { minimum: 1_000, default: 1_000_000, maximum: 100_000_000 },
     rows,
     rowsByItemId: new Map(rows.map((row) => [row.itemId, row])),
+  };
+}
+
+function entity(overrides: Partial<FactoryEntity> = {}): FactoryEntity {
+  return {
+    id: "machine-a",
+    kind: "machine",
+    planetId: "home",
+    position: { x: 0, y: 0 },
+    interactionLocked: false,
+    buildingId: "assembling_machine_mk1",
+    machineCount: 1,
+    minerCount: 0,
+    inputs: { iron_ore: 12 },
+    outputs: { iron_ingot: 130 },
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+    ...overrides,
   };
 }
 
@@ -120,5 +143,89 @@ describe("native projected factory inventory commands", () => {
       }],
       cargo: { itemId: "iron_ore", amount: 1, origin: null },
     }))).toThrow(/安全整数/);
+  });
+
+  it("takes entity input/output through one exact entity leaf and one canonical cargo leaf", () => {
+    expect(createNativeProjectedEntityInventoryTakeCommand(
+      frame(),
+      entity(),
+      "outputs",
+      "iron_ingot",
+    )).toMatchObject({
+      baseRevision: 41,
+      topLevelChanges: [{
+        path: ["cargo"],
+        operation: "set",
+        value: {
+          itemId: "iron_ingot",
+          amount: 100,
+          origin: { kind: "node-output", id: "machine-a" },
+        },
+      }],
+      changedEntities: [{
+        id: "machine-a",
+        changes: [{ path: ["outputs", "iron_ingot"], operation: "set", value: 30 }],
+      }],
+    });
+
+    const toppingUp = frame({
+      cargo: { itemId: "iron_ore", amount: 95, origin: { kind: "tray", id: null } },
+    });
+    expect(createNativeProjectedEntityInventoryTakeCommand(
+      toppingUp,
+      entity(),
+      "inputs",
+      "iron_ore",
+    )?.changedEntities[0].changes[0].value).toBe(7);
+  });
+
+  it("stows entity material into bounded tray or portable fleet without predicting state", () => {
+    const regular = frame({
+      rows: [{ itemId: "iron_ingot", amount: 990, freeCapacity: 10, overLimit: false }],
+      trayItemLimit: 1_000,
+    });
+    expect(createNativeProjectedEntityInventoryStowCommand(
+      regular,
+      entity(),
+      "outputs",
+      "iron_ingot",
+    )).toMatchObject({
+      topLevelChanges: [{ path: ["tray", "iron_ingot"], operation: "set", value: 1_000 }],
+      changedEntities: [{
+        id: "machine-a",
+        changes: [{ path: ["outputs", "iron_ingot"], operation: "set", value: 120 }],
+      }],
+    });
+
+    const portableSource = entity({ inputs: { logistics_drone: 7 } });
+    expect(createNativeProjectedEntityInventoryStowCommand(
+      frame(),
+      portableSource,
+      "inputs",
+      "logistics_drone",
+    )?.topLevelChanges).toEqual([
+      { path: ["portableFleet", "logistics_drone"], operation: "set", value: 10 },
+    ]);
+  });
+
+  it("fails closed for stale planet, fractional source and station output", () => {
+    expect(() => createNativeProjectedEntityInventoryTakeCommand(
+      frame(),
+      entity({ planetId: "ashen" }),
+      "outputs",
+      "iron_ingot",
+    )).toThrow(/投影无效/);
+    expect(() => createNativeProjectedEntityInventoryTakeCommand(
+      frame(),
+      entity({ outputs: { iron_ingot: 1.5 } }),
+      "outputs",
+      "iron_ingot",
+    )).toThrow(/建筑库存/);
+    expect(() => createNativeProjectedEntityInventoryTakeCommand(
+      frame(),
+      entity({ kind: "station" }),
+      "outputs",
+      "iron_ingot",
+    )).toThrow(/预留证明/);
   });
 });

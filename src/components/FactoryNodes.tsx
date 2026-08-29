@@ -61,6 +61,8 @@ export interface FactoryNodeData extends Record<string, unknown> {
   readOnly?: boolean;
   /** Exact item handles may create one Rust-validated ordinary belt while every other card control stays read-only. */
   beltConnectionsEnabled?: boolean;
+  /** Same-revision Rust inventory projections may remove material from a card, while configuration stays read-only. */
+  inventoryPickupEnabled?: boolean;
   visualSignature: string;
   presentationSignature: string;
   entity: FactoryEntity;
@@ -263,10 +265,12 @@ interface OutputSlotProps {
   entityId: string;
   itemId: ItemId;
   amount: number;
+  cargo: CargoStack | null;
   onPick: (entityId: string, itemId: ItemId) => void;
   connectionDraft: FactoryNodeData["connectionDraft"];
   connectionCount?: number;
   readOnly?: boolean;
+  inventoryPickupEnabled?: boolean;
   connectionsEnabled?: boolean;
 }
 
@@ -277,9 +281,13 @@ function connectionHandleClass(entityId: string, itemId: ItemId, handleType: "so
   return draft.itemId === null || draft.itemId === itemId ? " factory-handle--compatible" : " factory-handle--incompatible";
 }
 
-function OutputSlot({ entityId, itemId, amount, onPick, connectionDraft, connectionCount = 0, readOnly = false, connectionsEnabled = false }: OutputSlotProps) {
+function OutputSlot({ entityId, itemId, amount, cargo, onPick, connectionDraft, connectionCount = 0, readOnly = false, inventoryPickupEnabled = false, connectionsEnabled = false }: OutputSlotProps) {
   const hasAmount = amount > 0.001;
-  const enabled = !readOnly && hasAmount;
+  const nativeSourceIntegral = Number.isSafeInteger(amount) && amount >= 1;
+  const nativeCargoCompatible = !cargo || cargo.itemId === itemId && cargo.amount < 100;
+  const cursorPickupEnabled = !readOnly && hasAmount || readOnly && inventoryPickupEnabled && nativeSourceIntegral && nativeCargoCompatible;
+  const nativeStowEnabled = readOnly && inventoryPickupEnabled && nativeSourceIntegral;
+  const enabled = cursorPickupEnabled || nativeStowEnabled;
   const previousAmountRef = useRef(Math.floor(amount));
   const [outputPulse, setOutputPulse] = useState(0);
   useEffect(() => {
@@ -287,24 +295,28 @@ function OutputSlot({ entityId, itemId, amount, onPick, connectionDraft, connect
     if (current > previousAmountRef.current) setOutputPulse((pulse) => pulse + 1);
     previousAmountRef.current = current;
   }, [amount]);
-  const pick = () => enabled && onPick(entityId, itemId);
+  const pick = () => cursorPickupEnabled && onPick(entityId, itemId);
   return (
     <div className={`node-port node-port--output${outputPulse > 0 ? " node-port--output-pulse" : ""}`}>
       <button
         className="node-slot nodrag nopan"
         type="button"
         disabled={!enabled}
-        draggable={enabled}
+        draggable={!readOnly ? enabled : nativeStowEnabled}
         onClick={(event) => { event.stopPropagation(); pick(); }}
         onDragStart={(event) => {
-          if (readOnly) return;
+          if (readOnly ? !nativeStowEnabled : !enabled) return;
           event.stopPropagation();
           event.dataTransfer.setData("application/factory-item", itemId);
           event.dataTransfer.setData("application/factory-source-kind", "node");
           event.dataTransfer.setData("application/factory-source-id", entityId);
           event.dataTransfer.effectAllowed = "move";
         }}
-        title={readOnly ? `${ITEMS[itemId].name}（只读）` : `拿取${ITEMS[itemId].name}`}
+        title={readOnly && !inventoryPickupEnabled
+          ? `${ITEMS[itemId].name}（只读）`
+          : readOnly && !nativeCargoCompatible
+            ? `可拖回托盘；需先放下手持物才能拿取${ITEMS[itemId].name}`
+            : `拿取${ITEMS[itemId].name}`}
       >
         <ItemBadge itemId={itemId} amount={amount} muted={!hasAmount} />
       </button>
@@ -328,11 +340,16 @@ interface InputSlotProps {
   missing?: boolean;
   handleId?: string;
   readOnly?: boolean;
+  inventoryPickupEnabled?: boolean;
   connectionsEnabled?: boolean;
 }
 
-function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, onDropDraggedItem, connectionDraft, connectionCount = 0, missing = false, handleId, readOnly = false, connectionsEnabled = false }: InputSlotProps) {
+function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, onDropDraggedItem, connectionDraft, connectionCount = 0, missing = false, handleId, readOnly = false, inventoryPickupEnabled = false, connectionsEnabled = false }: InputSlotProps) {
   const compatible = cargo?.itemId === itemId;
+  const nativeSourceIntegral = Number.isSafeInteger(amount) && amount >= 1;
+  const pickupEnabled = amount >= 1 && !cargo && (!readOnly || inventoryPickupEnabled && nativeSourceIntegral);
+  const nativeStowEnabled = readOnly && inventoryPickupEnabled && nativeSourceIntegral;
+  const interactionEnabled = !readOnly || pickupEnabled || nativeStowEnabled;
   const previousAmountRef = useRef(Math.floor(amount));
   const [arrivalPulse, setArrivalPulse] = useState(0);
   useEffect(() => {
@@ -342,9 +359,9 @@ function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, 
   }, [amount]);
   const dropCargo = (event: React.MouseEvent) => {
     event.stopPropagation();
-    if (readOnly) return;
-    if (compatible) onDropCargo(entityId);
-    else if (!cargo && amount >= 1) onPickInput(entityId, itemId);
+    if (!interactionEnabled) return;
+    if (!readOnly && compatible) onDropCargo(entityId);
+    else if (pickupEnabled) onPickInput(entityId, itemId);
   };
   const dropDragged = (event: React.DragEvent) => {
     if (readOnly) return;
@@ -362,11 +379,11 @@ function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, 
       <button
         className="node-slot nodrag nopan"
         type="button"
-        disabled={readOnly}
-        draggable={!readOnly && amount >= 1}
+        disabled={!interactionEnabled}
+        draggable={!readOnly ? amount >= 1 : nativeStowEnabled}
         onClick={dropCargo}
         onDragStart={(event) => {
-          if (readOnly) return;
+          if (readOnly ? !nativeStowEnabled : amount < 1) return;
           event.stopPropagation();
           event.dataTransfer.setData("application/factory-item", itemId);
           event.dataTransfer.setData("application/factory-source-kind", "node-input");
@@ -377,7 +394,13 @@ function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, 
           if (!readOnly && event.dataTransfer.types.includes("application/factory-item")) event.preventDefault();
         }}
         onDrop={dropDragged}
-        title={readOnly ? `${ITEMS[itemId].name}（只读）` : compatible ? `投入${ITEMS[itemId].name}` : amount >= 1 && !cargo ? `取出${ITEMS[itemId].name}` : `投入${ITEMS[itemId].name}`}
+        title={readOnly && !inventoryPickupEnabled
+          ? `${ITEMS[itemId].name}（只读）`
+          : readOnly && cargo
+            ? `可拖回托盘；需先放下手持物才能取出${ITEMS[itemId].name}`
+            : !readOnly && compatible
+              ? `投入${ITEMS[itemId].name}`
+              : pickupEnabled ? `取出${ITEMS[itemId].name}` : `投入${ITEMS[itemId].name}`}
       >
         <ItemBadge itemId={itemId} amount={amount} muted={amount <= 0.001} />
       </button>
@@ -677,7 +700,7 @@ function VeinFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
           <i />
         </button>
       )}
-      <OutputSlot entityId={entity.id} itemId={resourceId} amount={output} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[resourceId] ?? 0} readOnly={data.readOnly} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />
+      <OutputSlot entityId={entity.id} itemId={resourceId} amount={output} cargo={data.cargo} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[resourceId] ?? 0} readOnly={data.readOnly} inventoryPickupEnabled={data.inventoryPickupEnabled} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />
       {cargo?.itemId === resourceId ? <span className="node-cargo-match">同类物资已拿起</span> : null}
     </article>
   );
@@ -862,6 +885,7 @@ function MachineFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
               connectionCount={data.inputBeltCounts[input.itemId] ?? 0}
               missing={(data.status.code === "missing-input" || data.status.code === "missing-proliferator") && (entity.inputs[input.itemId] ?? 0) < input.amount}
               readOnly={data.readOnly}
+              inventoryPickupEnabled={data.inventoryPickupEnabled}
               connectionsEnabled={ordinaryBeltHandlesEnabled(data)}
             />
           )) : rayReceiver ? (
@@ -884,10 +908,12 @@ function MachineFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
               entityId={entity.id}
               itemId={output.itemId}
               amount={entity.outputs[output.itemId] ?? 0}
+              cargo={cargo}
               onPick={data.onPickOutput}
               connectionDraft={data.connectionDraft}
               connectionCount={data.outputBeltCounts[output.itemId] ?? 0}
               readOnly={data.readOnly}
+              inventoryPickupEnabled={data.inventoryPickupEnabled}
               connectionsEnabled={ordinaryBeltHandlesEnabled(data)}
             />
           )) : railEjector ? (
@@ -1006,14 +1032,14 @@ function LogisticsFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
       {elevatorStation ? (
         <div className="node-io logistics-io elevator-logistics-io">
           <div className="logistics-slot-row"><div className="node-io__column"><span className="node-io__label">通用输入</span><AutoInputPort connectionDraft={data.connectionDraft} label="任意物资" handleId="in:auto" readOnly={data.readOnly} /></div><div className="delivery-hub-target"><Database size={14} /><span>进入系统共享仓库</span></div></div>
-          {(entity.elevatorOutputItems ?? []).map((outputItemId, index) => outputItemId ? <div className="logistics-slot-row" key={`${outputItemId}:${index}`}><div className="node-io__column node-io__column--output"><span className="node-io__label">输出 {index + 1}</span><OutputSlot entityId={entity.id} itemId={outputItemId} amount={entity.outputs[outputItemId] ?? 0} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[outputItemId] ?? 0} readOnly={data.readOnly} /></div><div className="delivery-hub-target"><Route size={14} /><span>{ITEMS[outputItemId].name}</span></div></div> : <div className="logistics-slot-row" key={`empty-output:${index}`}><div className="node-io__column node-io__column--output"><span className="node-io__label">输出 {index + 1}</span><span className="logistics-empty">未配置</span></div></div>)}
+          {(entity.elevatorOutputItems ?? []).map((outputItemId, index) => outputItemId ? <div className="logistics-slot-row" key={`${outputItemId}:${index}`}><div className="node-io__column node-io__column--output"><span className="node-io__label">输出 {index + 1}</span><OutputSlot entityId={entity.id} itemId={outputItemId} amount={entity.outputs[outputItemId] ?? 0} cargo={cargo} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[outputItemId] ?? 0} readOnly={data.readOnly} inventoryPickupEnabled={false} /></div><div className="delivery-hub-target"><Route size={14} /><span>{ITEMS[outputItemId].name}</span></div></div> : <div className="logistics-slot-row" key={`empty-output:${index}`}><div className="node-io__column node-io__column--output"><span className="node-io__label">输出 {index + 1}</span><span className="logistics-empty">未配置</span></div></div>)}
         </div>
       ) : cargoTerminal ? (
         <div className="node-io logistics-io orbital-cargo-io">
           {cargoPorts.map((portItemId, index) => <div className="logistics-slot-row orbital-cargo-slot-row" key={`orbital-${index}`}>
             <div className="node-io__column">
               <span className="node-io__label">上传口 {index + 1}</span>
-              {portItemId ? <InputSlot entityId={entity.id} itemId={portItemId} amount={entity.inputs[portItemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[portItemId] ?? 0} handleId={`in:orbital:${index}`} readOnly={data.readOnly} />
+              {portItemId ? <InputSlot entityId={entity.id} itemId={portItemId} amount={entity.inputs[portItemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[portItemId] ?? 0} handleId={`in:orbital:${index}`} readOnly={data.readOnly} inventoryPickupEnabled={data.inventoryPickupEnabled} />
                 : <AutoInputPort connectionDraft={data.connectionDraft} label="按绑定目标识别" handleId={`in:orbital:${index}`} readOnly={data.readOnly} />}
             </div>
             <div className="delivery-hub-target"><Satellite size={14} /><span>{portItemId ? "等待上传" : "目标物资"}</span></div>
@@ -1024,7 +1050,7 @@ function LogisticsFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
           {deliverySlots.map((slot, index) => <div className={`logistics-slot-row delivery-hub-slot-row delivery-hub-slot-row--${slot.mode}`} key={`delivery-${index}`}>
             <div className="node-io__column">
               <span className="node-io__label">接口 {index + 1}</span>
-              {slot.itemId ? <InputSlot entityId={entity.id} itemId={slot.itemId} amount={entity.inputs[slot.itemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[slot.itemId] ?? 0} handleId={`in:delivery:${index}`} readOnly={data.readOnly} />
+              {slot.itemId ? <InputSlot entityId={entity.id} itemId={slot.itemId} amount={entity.inputs[slot.itemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[slot.itemId] ?? 0} handleId={`in:delivery:${index}`} readOnly={data.readOnly} inventoryPickupEnabled={data.inventoryPickupEnabled} />
                 : slot.mode === "disabled" ? <div className="delivery-hub-port-disabled">接口已清空</div>
                   : <AutoInputPort connectionDraft={data.connectionDraft} label="自动识别" handleId={`in:delivery:${index}`} readOnly={data.readOnly} />}
             </div>
@@ -1036,11 +1062,11 @@ function LogisticsFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
           {configuredItems.map((configuredItemId, index) => <div className={`logistics-slot-row${warehouseStorage ? " logistics-slot-row--warehouse" : ""}`} key={configuredItemId}>
             {!orbitalCollector ? <div className="node-io__column">
               {index === 0 ? <span className="node-io__label">输入</span> : null}
-              <InputSlot entityId={entity.id} itemId={configuredItemId} amount={entity.inputs[configuredItemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[configuredItemId] ?? 0} readOnly={data.readOnly} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />
+              <InputSlot entityId={entity.id} itemId={configuredItemId} amount={entity.inputs[configuredItemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[configuredItemId] ?? 0} readOnly={data.readOnly} inventoryPickupEnabled={data.inventoryPickupEnabled} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />
             </div> : null}
             {!deliveryHub ? <div className="node-io__column node-io__column--output">
               {index === 0 ? <span className="node-io__label">输出</span> : null}
-              <OutputSlot entityId={entity.id} itemId={configuredItemId} amount={entity.outputs[configuredItemId] ?? 0} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[configuredItemId] ?? 0} readOnly={data.readOnly} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />
+              <OutputSlot entityId={entity.id} itemId={configuredItemId} amount={entity.outputs[configuredItemId] ?? 0} cargo={cargo} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[configuredItemId] ?? 0} readOnly={data.readOnly} inventoryPickupEnabled={data.inventoryPickupEnabled && !isStation} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />
             </div> : <div className="delivery-hub-target"><Database size={14} /><span>进入物资托盘</span></div>}
           </div>)}
         </div>
@@ -1161,7 +1187,7 @@ function PowerFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
       </div>
       {fuelGenerator && fuelId ? (
         <div className="thermal-fuel">
-          <InputSlot entityId={entity.id} itemId={fuelId} amount={entity.inputs[fuelId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[fuelId] ?? 0} missing={data.status.code === "missing-fuel"} readOnly={data.readOnly} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />
+          <InputSlot entityId={entity.id} itemId={fuelId} amount={entity.inputs[fuelId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[fuelId] ?? 0} missing={data.status.code === "missing-fuel"} readOnly={data.readOnly} inventoryPickupEnabled={data.inventoryPickupEnabled} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />
           <span>炉膛余热 <strong>{(entity.fuelRemainingMj ?? 0).toFixed(2)} MJ</strong></span>
         </div>
       ) : fuelGenerator ? <div className="thermal-empty">未配置燃料</div> : null}
@@ -1169,11 +1195,11 @@ function PowerFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
         <div className="node-io energy-exchange-io">
           <div className="node-io__column">
             <span className="node-io__label">输入</span>
-            {recipe.inputs.map((input) => <InputSlot key={input.itemId} entityId={entity.id} itemId={input.itemId} amount={entity.inputs[input.itemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[input.itemId] ?? 0} missing={data.status.code === "missing-input" && (entity.inputs[input.itemId] ?? 0) < input.amount} readOnly={data.readOnly} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />)}
+            {recipe.inputs.map((input) => <InputSlot key={input.itemId} entityId={entity.id} itemId={input.itemId} amount={entity.inputs[input.itemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[input.itemId] ?? 0} missing={data.status.code === "missing-input" && (entity.inputs[input.itemId] ?? 0) < input.amount} readOnly={data.readOnly} inventoryPickupEnabled={data.inventoryPickupEnabled} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />)}
           </div>
           <div className="node-io__column node-io__column--output">
             <span className="node-io__label">输出</span>
-            {recipe.outputs.map((output) => <OutputSlot key={output.itemId} entityId={entity.id} itemId={output.itemId} amount={entity.outputs[output.itemId] ?? 0} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[output.itemId] ?? 0} readOnly={data.readOnly} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />)}
+            {recipe.outputs.map((output) => <OutputSlot key={output.itemId} entityId={entity.id} itemId={output.itemId} amount={entity.outputs[output.itemId] ?? 0} cargo={cargo} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[output.itemId] ?? 0} readOnly={data.readOnly} inventoryPickupEnabled={data.inventoryPickupEnabled} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />)}
           </div>
         </div>
       ) : null}
@@ -1210,6 +1236,7 @@ function areNodeVisualPropsEqual(previous: NodeProps<FactoryFlowNode>, next: Nod
     previous.selected === next.selected &&
     previous.data.readOnly === next.data.readOnly &&
     previous.data.beltConnectionsEnabled === next.data.beltConnectionsEnabled &&
+    previous.data.inventoryPickupEnabled === next.data.inventoryPickupEnabled &&
     previous.data.visualSignature === next.data.visualSignature &&
     previous.data.presentationSignature === next.data.presentationSignature &&
     previous.data.entity.position.x === next.data.entity.position.x &&

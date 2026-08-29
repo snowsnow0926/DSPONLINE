@@ -401,17 +401,243 @@ fn validate_active_tray_item_limit(
     )
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EntityInventorySourceField {
+    Inputs,
+    Outputs,
+}
+
+impl EntityInventorySourceField {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Inputs => "inputs",
+            Self::Outputs => "outputs",
+        }
+    }
+
+    fn cargo_origin_kind(self) -> &'static str {
+        match self {
+            Self::Inputs => "node-input",
+            Self::Outputs => "node-output",
+        }
+    }
+}
+
+struct EntityInventorySource<'a> {
+    entity_id: &'a str,
+    item_id: &'a str,
+    field: EntityInventorySourceField,
+    available: u64,
+}
+
+fn entity_inventory_source<'a>(
+    state: &CoreState,
+    command: &'a SimulationCommandPatch,
+) -> anyhow::Result<EntityInventorySource<'a>> {
+    if command.changed_entities.len() != 1
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native factory entity inventory command shape is invalid")
+    }
+    let record = &command.changed_entities[0];
+    if !valid_opaque_id(&record.id) || record.changes.len() != 1 {
+        bail!("native factory entity inventory source is invalid")
+    }
+    let change = &record.changes[0];
+    let [PathSegment::Key(field), PathSegment::Key(item_id)] = change.path.as_slice() else {
+        bail!("native factory entity inventory source path is invalid")
+    };
+    let field = match field.as_str() {
+        "inputs" => EntityInventorySourceField::Inputs,
+        "outputs" => EntityInventorySourceField::Outputs,
+        _ => bail!("native factory entity inventory source field is invalid"),
+    };
+    known_item_id(state, item_id)?;
+    if change.operation != "set" {
+        bail!("native factory entity inventory source operation is invalid")
+    }
+    let remaining =
+        safe_nonnegative_integer(change.value.as_ref(), "entity inventory source remainder")?;
+    let entity_index = state
+        .entity_index
+        .get(&record.id)
+        .copied()
+        .ok_or_else(|| anyhow!("native factory entity inventory source is missing"))?;
+    let entity = state.parse_entity(entity_index)?;
+    let entity = entity
+        .as_object()
+        .ok_or_else(|| anyhow!("native factory entity inventory source is malformed"))?;
+    let active_planet_id = active_planet_id(state, state.base_value())?;
+    if entity.get("planetId").and_then(Value::as_str) != Some(active_planet_id) {
+        bail!("native factory entity inventory source is not on the active planet")
+    }
+    // Station outputs may already back local/interstellar/quantum routes. A
+    // bounded UI projection does not carry the complete route-reservation
+    // ledger, so keep that case closed until a dedicated receipt is supplied.
+    if field == EntityInventorySourceField::Outputs
+        && entity.get("kind").and_then(Value::as_str) == Some("station")
+    {
+        bail!("native factory station output requires a route reservation proof")
+    }
+    let available = entity
+        .get(field.key())
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native factory entity inventory directory is invalid"))?
+        .get(item_id);
+    let available = safe_nonnegative_integer(available, "entity inventory source amount")?;
+    if available == 0 || remaining > available {
+        bail!("native factory entity inventory source amount is empty or reversed")
+    }
+    Ok(EntityInventorySource {
+        entity_id: &record.id,
+        item_id,
+        field,
+        available,
+    })
+}
+
+fn source_remainder_patch(source: &EntityInventorySource<'_>, remaining: u64) -> ValuePatch {
+    ValuePatch {
+        path: vec![
+            PathSegment::Key(source.field.key().to_owned()),
+            PathSegment::Key(source.item_id.to_owned()),
+        ],
+        operation: "set".to_owned(),
+        value: Some(Value::from(remaining)),
+    }
+}
+
+fn validate_take_from_entity(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+    source: &EntityInventorySource<'_>,
+) -> anyhow::Result<()> {
+    if command.top_level_changes.len() != 1 {
+        bail!("native factory entity take patch set is incomplete or mixed")
+    }
+    let current_cargo = held_cargo(state, state.base_value())?;
+    let held_amount = match current_cargo.as_ref() {
+        None => 0,
+        Some(cargo) if cargo.item_id == source.item_id => cargo.amount,
+        Some(_) => bail!("native factory entity take would mix held item types"),
+    };
+    let take = source
+        .available
+        .min(PICKUP_TARGET_AMOUNT.saturating_sub(held_amount));
+    if take == 0 {
+        bail!("native factory entity take has no cursor capacity")
+    }
+    let next_held = held_amount
+        .checked_add(take)
+        .filter(|amount| *amount <= PICKUP_TARGET_AMOUNT)
+        .ok_or_else(|| anyhow!("native factory entity take overflows the cursor"))?;
+    exact_patch_sets_match(
+        &command.top_level_changes,
+        &[ValuePatch {
+            path: vec![PathSegment::Key("cargo".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(json!({
+                "itemId": source.item_id,
+                "amount": next_held,
+                "origin": {
+                    "kind": source.field.cargo_origin_kind(),
+                    "id": source.entity_id,
+                },
+            })),
+        }],
+    )?;
+    exact_patch_sets_match(
+        &command.changed_entities[0].changes,
+        &[source_remainder_patch(source, source.available - take)],
+    )
+}
+
+fn validate_stow_entity_inventory(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+    source: &EntityInventorySource<'_>,
+) -> anyhow::Result<()> {
+    if command.top_level_changes.len() != 1 {
+        bail!("native factory entity stow patch set is incomplete or mixed")
+    }
+    let base = state.base_value();
+    let active_planet_id = active_planet_id(state, base)?;
+    let (root, current, free_capacity) = if is_portable_fleet_item(source.item_id) {
+        let portable = base
+            .get("portableFleet")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native factory inventory portable fleet is invalid"))?;
+        let current = optional_safe_nonnegative_integer(
+            portable.get(source.item_id),
+            "portable fleet stow target",
+        )?;
+        (
+            "portableFleet",
+            current,
+            MAX_JAVASCRIPT_SAFE_INTEGER.saturating_sub(current),
+        )
+    } else {
+        let tray = active_tray(base)?;
+        let current =
+            optional_safe_nonnegative_integer(tray.get(source.item_id), "entity stow tray target")?;
+        let limit = effective_tray_item_limit(base, active_planet_id)?;
+        ("tray", current, limit.saturating_sub(current))
+    };
+    let moved = source.available.min(free_capacity);
+    if moved == 0 {
+        bail!("native factory entity stow has no destination capacity")
+    }
+    let target = current
+        .checked_add(moved)
+        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        .ok_or_else(|| anyhow!("native factory entity stow destination overflows"))?;
+    exact_patch_sets_match(
+        &command.top_level_changes,
+        &[ValuePatch {
+            path: vec![
+                PathSegment::Key(root.to_owned()),
+                PathSegment::Key(source.item_id.to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(Value::from(target)),
+        }],
+    )?;
+    exact_patch_sets_match(
+        &command.changed_entities[0].changes,
+        &[source_remainder_patch(source, source.available - moved)],
+    )
+}
+
 pub(crate) fn validate_factory_inventory_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
 ) -> anyhow::Result<()> {
-    if !patches_have_only_top_level_changes(command)
-        || command.top_level_changes.is_empty()
+    if command.top_level_changes.is_empty()
         || command
             .top_level_changes
             .iter()
             .any(|change| !inventory_root(&change.path))
     {
+        bail!("native factory inventory command shape is invalid")
+    }
+    if !command.changed_entities.is_empty() {
+        let source = entity_inventory_source(state, command)?;
+        let takes_to_cursor = command.top_level_changes.iter().any(|change| {
+            path_equals(&change.path, &["cargo"])
+                && change.operation == "set"
+                && change.value.as_ref().is_some_and(|value| !value.is_null())
+        });
+        return if takes_to_cursor {
+            validate_take_from_entity(state, command, &source)
+        } else {
+            validate_stow_entity_inventory(state, command, &source)
+        };
+    }
+    if !patches_have_only_top_level_changes(command) {
         bail!("native factory inventory command shape is invalid")
     }
     if command.top_level_changes.iter().any(|change| {
@@ -571,8 +797,8 @@ mod tests {
         RuntimeCatalog::validate(snapshot, REGISTRY).unwrap()
     }
 
-    fn state() -> CoreState {
-        let base = json!({
+    fn fixture_base() -> Map<String, Value> {
+        json!({
             "version": 47,
             "mode": "normal",
             "activePlanetId": "home",
@@ -593,7 +819,10 @@ mod tests {
         })
         .as_object()
         .unwrap()
-        .clone();
+        .clone()
+    }
+
+    fn state_with_entities(entities: Vec<Value>) -> CoreState {
         CoreState::from_public_v47_parts(
             CoreCheckpointIdentity {
                 slot: "normal-main".to_owned(),
@@ -605,12 +834,38 @@ mod tests {
                 registry_fingerprint: REGISTRY.to_owned(),
                 base_primary_checksum: "12345678".to_owned(),
             },
-            base,
-            Vec::new(),
+            fixture_base(),
+            entities
+                .into_iter()
+                .map(|entity| serde_json::to_string(&entity).unwrap())
+                .collect(),
             Vec::new(),
             catalog(),
         )
         .unwrap()
+    }
+
+    fn state() -> CoreState {
+        state_with_entities(Vec::new())
+    }
+
+    fn inventory_entity(id: &str, kind: &str, inputs: Value, outputs: Value) -> Value {
+        json!({
+            "id": id,
+            "kind": kind,
+            "planetId": "home",
+            "position": { "x": 0, "y": 0 },
+            "interactionLocked": false,
+            "buildingId": "fixture-machine",
+            "machineCount": 1,
+            "minerCount": 0,
+            "inputs": inputs,
+            "outputs": outputs,
+            "progress": 0,
+            "routingCursor": 0,
+            "utilization": 0,
+            "productionRate": 0
+        })
     }
 
     fn command(revision: u64, changes: Vec<ValuePatch>) -> SimulationCommandPatch {
@@ -636,6 +891,22 @@ mod tests {
             operation: "set".to_owned(),
             value: Some(value),
         }
+    }
+
+    fn entity_inventory_command(
+        revision: u64,
+        entity_id: &str,
+        field: &str,
+        item_id: &str,
+        remaining: u64,
+        top_level_changes: Vec<ValuePatch>,
+    ) -> SimulationCommandPatch {
+        let mut command = command(revision, top_level_changes);
+        command.changed_entities.push(crate::command::RecordPatch {
+            id: entity_id.to_owned(),
+            changes: vec![set(&[field, item_id], Value::from(remaining))],
+        });
+        command
     }
 
     #[test]
@@ -935,5 +1206,184 @@ mod tests {
             );
             assert_eq!(state.summary().unwrap().canonical_sha256, before);
         }
+    }
+
+    #[test]
+    fn player_authority_takes_entity_inputs_and_outputs_with_exact_cursor_accounting() {
+        let entity = inventory_entity(
+            "machine-a",
+            "machine",
+            json!({ "iron_ore": 12 }),
+            json!({ "iron_ore": 130 }),
+        );
+        let mut output = state_with_entities(vec![entity.clone()]);
+        let take_output = entity_inventory_command(
+            7,
+            "machine-a",
+            "outputs",
+            "iron_ore",
+            30,
+            vec![set(
+                &["cargo"],
+                json!({
+                    "itemId": "iron_ore",
+                    "amount": 100,
+                    "origin": { "kind": "node-output", "id": "machine-a" }
+                }),
+            )],
+        );
+        output.apply_player_authority_command(&take_output).unwrap();
+        assert_eq!(output.parse_entity(0).unwrap()["outputs"]["iron_ore"], 30);
+        assert_eq!(output.base_value()["cargo"]["amount"], 100);
+        assert_eq!(output.revision, 8);
+
+        let mut input = state_with_entities(vec![entity]);
+        input.base_value_mut()["cargo"] = json!({
+            "itemId": "iron_ore",
+            "amount": 95,
+            "origin": { "kind": "tray" }
+        });
+        let take_input = entity_inventory_command(
+            7,
+            "machine-a",
+            "inputs",
+            "iron_ore",
+            7,
+            vec![set(
+                &["cargo"],
+                json!({
+                    "itemId": "iron_ore",
+                    "amount": 100,
+                    "origin": { "kind": "node-input", "id": "machine-a" }
+                }),
+            )],
+        );
+        input.apply_player_authority_command(&take_input).unwrap();
+        assert_eq!(input.parse_entity(0).unwrap()["inputs"]["iron_ore"], 7);
+        assert_eq!(input.base_value()["cargo"]["amount"], 100);
+    }
+
+    #[test]
+    fn player_authority_stows_entity_inventory_with_tray_cap_and_portable_redirect() {
+        let mut regular = state_with_entities(vec![inventory_entity(
+            "machine-a",
+            "machine",
+            json!({}),
+            json!({ "iron_ore": 130 }),
+        )]);
+        regular.base_value_mut()["tray"]["iron_ore"] = json!(990);
+        let stow = entity_inventory_command(
+            7,
+            "machine-a",
+            "outputs",
+            "iron_ore",
+            120,
+            vec![set(&["tray", "iron_ore"], json!(1_000))],
+        );
+        regular.apply_player_authority_command(&stow).unwrap();
+        assert_eq!(regular.base_value()["tray"]["iron_ore"], 1_000);
+        assert_eq!(regular.parse_entity(0).unwrap()["outputs"]["iron_ore"], 120);
+
+        let mut portable = state_with_entities(vec![inventory_entity(
+            "machine-b",
+            "machine",
+            json!({ "logistics_drone": 7 }),
+            json!({}),
+        )]);
+        let stow_portable = entity_inventory_command(
+            7,
+            "machine-b",
+            "inputs",
+            "logistics_drone",
+            0,
+            vec![set(&["portableFleet", "logistics_drone"], json!(10))],
+        );
+        portable
+            .apply_player_authority_command(&stow_portable)
+            .unwrap();
+        assert_eq!(
+            portable.base_value()["portableFleet"]["logistics_drone"],
+            10
+        );
+        assert_eq!(
+            portable.parse_entity(0).unwrap()["inputs"]["logistics_drone"],
+            0
+        );
+    }
+
+    #[test]
+    fn entity_inventory_failures_leave_hash_and_revision_unchanged() {
+        let mut station = state_with_entities(vec![inventory_entity(
+            "station-a",
+            "station",
+            json!({}),
+            json!({ "iron_ore": 130 }),
+        )]);
+        let forged = entity_inventory_command(
+            7,
+            "station-a",
+            "outputs",
+            "iron_ore",
+            30,
+            vec![set(
+                &["cargo"],
+                json!({
+                    "itemId": "iron_ore",
+                    "amount": 100,
+                    "origin": { "kind": "node-output", "id": "station-a" }
+                }),
+            )],
+        );
+        let before_hash = station.canonical_sha256().unwrap();
+        let before_revision = station.revision;
+        assert!(station.apply_player_authority_command(&forged).is_err());
+        assert_eq!(station.canonical_sha256().unwrap(), before_hash);
+        assert_eq!(station.revision, before_revision);
+
+        let mut fractional = state_with_entities(vec![inventory_entity(
+            "machine-a",
+            "machine",
+            json!({ "iron_ore": 1.5 }),
+            json!({}),
+        )]);
+        let fractional_command = entity_inventory_command(
+            7,
+            "machine-a",
+            "inputs",
+            "iron_ore",
+            0,
+            vec![set(
+                &["cargo"],
+                json!({
+                    "itemId": "iron_ore",
+                    "amount": 1,
+                    "origin": { "kind": "node-input", "id": "machine-a" }
+                }),
+            )],
+        );
+        let before_hash = fractional.canonical_sha256().unwrap();
+        assert!(
+            fractional
+                .apply_player_authority_command(&fractional_command)
+                .is_err()
+        );
+        assert_eq!(fractional.canonical_sha256().unwrap(), before_hash);
+
+        let mut stale = state_with_entities(vec![inventory_entity(
+            "machine-a",
+            "machine",
+            json!({ "iron_ore": 1 }),
+            json!({}),
+        )]);
+        let mut stale_command = fractional_command;
+        stale_command.base_revision = 6;
+        let before_hash = stale.canonical_sha256().unwrap();
+        assert!(
+            stale
+                .apply_player_authority_command(&stale_command)
+                .is_err()
+        );
+        assert_eq!(stale.canonical_sha256().unwrap(), before_hash);
+        assert_eq!(stale.revision, 7);
     }
 }

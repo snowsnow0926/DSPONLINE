@@ -2,7 +2,7 @@ import { Box, PackageOpen } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ITEMS, PLANETS } from "../game/content";
 import type { NativeFactoryInventoryFrame } from "../game/nativeFactoryInventoryStore";
-import type { ItemDefinition, ItemId, PlanetDefinition } from "../game/types";
+import type { DraggedItemSourceKind, ItemDefinition, ItemId, PlanetDefinition } from "../game/types";
 import { getAccessibleItemGlyphTextColor, ItemGlyph, ItemHoverCard } from "./ItemReference";
 import { QuantityValue } from "./QuantityValue";
 
@@ -11,6 +11,11 @@ interface NativeResourceRailProps {
   pending: boolean;
   onPickTray: (itemId: string) => void;
   onDropCargo: () => void;
+  onStowEntityInventory: (
+    itemId: ItemId,
+    sourceKind: Extract<DraggedItemSourceKind, "node" | "node-input">,
+    sourceId: string,
+  ) => void;
   onSetTrayItemLimit: (value: number) => void;
 }
 
@@ -45,6 +50,7 @@ export function NativeResourceRail({
   pending,
   onPickTray,
   onDropCargo,
+  onStowEntityInventory,
   onSetTrayItemLimit,
 }: NativeResourceRailProps) {
   const [trayLimitDraft, setTrayLimitDraft] = useState(frame ? String(frame.trayItemLimit) : "1000000");
@@ -106,7 +112,25 @@ export function NativeResourceRail({
           : null}
       </section>
 
-      <section className="rail-block tray-block">
+      <section
+        className="rail-block tray-block"
+        data-native-entity-stow="same-revision-v1"
+        onDragOver={(event) => {
+          if (!disabled && event.dataTransfer.types.includes("application/factory-item")) {
+            event.preventDefault();
+          }
+        }}
+        onDrop={(event) => {
+          if (disabled) return;
+          const itemId = event.dataTransfer.getData("application/factory-item") as ItemId;
+          const sourceKind = event.dataTransfer.getData("application/factory-source-kind");
+          const sourceId = event.dataTransfer.getData("application/factory-source-id");
+          if (!itemId || !sourceId || (sourceKind !== "node" && sourceKind !== "node-input")) return;
+          event.preventDefault();
+          event.stopPropagation();
+          onStowEntityInventory(itemId, sourceKind, sourceId);
+        }}
+      >
         <div className="rail-heading">
           <span>{planet?.code ?? frame.activePlanetId}物资托盘</span>
           <strong>{pending ? "命令确认中" : "Rust 权威"}</strong>
@@ -169,7 +193,7 @@ export function NativeResourceRail({
             </button>;
           })}
         </div>
-        <p className="native-resource-rail__notice">丢弃与建筑拖放仍保持关闭；后续由 Rust 语义命令接入，避免分页库存误删物料。</p>
+        <p className="native-resource-rail__notice">可将普通建筑输入/输出拖回托盘；站点输出、向建筑投料与永久丢弃仍保持关闭。</p>
       </section>
     </>}
   </aside>;

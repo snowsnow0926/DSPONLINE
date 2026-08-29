@@ -4,9 +4,12 @@ import {
   type SimulationValuePatch,
 } from "./simulationRuntimeProtocol";
 import type { NativeFactoryInventoryFrame } from "./nativeFactoryInventoryStore";
+import type { FactoryEntity, ItemId } from "./types";
 
 const MAX_SAFE_QUANTITY = Number.MAX_SAFE_INTEGER;
 const PORTABLE_FLEET_ITEMS = new Set(["logistics_drone", "logistics_vessel"]);
+
+export type NativeEntityInventorySourceField = "inputs" | "outputs";
 
 function emptyCommand(baseRevision: number): SimulationCommandPatch {
   if (!Number.isSafeInteger(baseRevision) || baseRevision < 0) {
@@ -116,6 +119,97 @@ export function createNativeProjectedTrayItemLimitCommand(
     path: ["planetTrayItemLimits", frame.activePlanetId],
     operation: "set",
     value: target,
+  });
+  return command;
+}
+
+function validateProjectedEntity(
+  frame: NativeFactoryInventoryFrame,
+  entity: FactoryEntity,
+  itemId: ItemId,
+  sourceField: NativeEntityInventorySourceField,
+): number {
+  validateFrame(frame);
+  if (!entity || entity.planetId !== frame.activePlanetId || typeof entity.id !== "string" || !entity.id ||
+      !Object.prototype.hasOwnProperty.call(entity[sourceField], itemId)) {
+    throw new TypeError("原生建筑库存投影无效");
+  }
+  if (sourceField === "outputs" && entity.kind === "station") {
+    throw new TypeError("原生站点输出仍需在途预留证明");
+  }
+  return safeQuantity(entity[sourceField][itemId] ?? 0, "原生建筑库存", 1);
+}
+
+/**
+ * Takes up to the canonical 100-item cursor limit from one projected entity
+ * input/output. Rust re-reads the entity and reconstructs the same two-leaf
+ * accounting transition before it accepts the command.
+ */
+export function createNativeProjectedEntityInventoryTakeCommand(
+  frame: NativeFactoryInventoryFrame,
+  entity: FactoryEntity,
+  sourceField: NativeEntityInventorySourceField,
+  itemId: ItemId,
+): SimulationCommandPatch | null {
+  const available = validateProjectedEntity(frame, entity, itemId, sourceField);
+  const cargo = frame.cargo;
+  if (cargo && cargo.itemId !== itemId) return null;
+  const heldAmount = cargo ? safeQuantity(cargo.amount, "原生手持库存", 1) : 0;
+  const take = Math.min(available, Math.max(0, frame.pickupTargetAmount - heldAmount));
+  if (take < 1) return null;
+  const command = emptyCommand(frame.revision);
+  command.topLevelChanges.push({
+    path: ["cargo"],
+    operation: "set",
+    value: {
+      itemId,
+      amount: heldAmount + take,
+      origin: { kind: sourceField === "outputs" ? "node-output" : "node-input", id: entity.id },
+    },
+  });
+  command.changedEntities.push({
+    id: entity.id,
+    changes: [{ path: [sourceField, itemId], operation: "set", value: available - take }],
+  });
+  return command;
+}
+
+/**
+ * Moves one complete integral entity stack into the active tray (or portable
+ * fleet) without materializing a GameState. Automatic tray capacity remains
+ * enforced; station outputs stay fail-closed until their route ledger is part
+ * of the command proof.
+ */
+export function createNativeProjectedEntityInventoryStowCommand(
+  frame: NativeFactoryInventoryFrame,
+  entity: FactoryEntity,
+  sourceField: NativeEntityInventorySourceField,
+  itemId: ItemId,
+): SimulationCommandPatch | null {
+  const available = validateProjectedEntity(frame, entity, itemId, sourceField);
+  const portable = PORTABLE_FLEET_ITEMS.has(itemId);
+  const row = frame.rowsByItemId.get(itemId);
+  const current = portable
+    ? safeQuantity(frame.portableFleet[itemId as keyof typeof frame.portableFleet], "原生随身舰队库存")
+    : row ? safeQuantity(row.amount, "原生托盘库存", 1) : 0;
+  const freeCapacity = portable
+    ? MAX_SAFE_QUANTITY - current
+    : row ? safeQuantity(row.freeCapacity, "原生托盘剩余容量") : frame.trayItemLimit;
+  const moved = Math.min(available, freeCapacity);
+  if (moved < 1) return null;
+  const target = current + moved;
+  if (!Number.isSafeInteger(target) || target > MAX_SAFE_QUANTITY) {
+    throw new RangeError("原生建筑物资返还后将超过安全整数范围");
+  }
+  const command = emptyCommand(frame.revision);
+  command.topLevelChanges.push({
+    path: [portable ? "portableFleet" : "tray", itemId],
+    operation: "set",
+    value: target,
+  });
+  command.changedEntities.push({
+    id: entity.id,
+    changes: [{ path: [sourceField, itemId], operation: "set", value: available - moved }],
   });
   return command;
 }

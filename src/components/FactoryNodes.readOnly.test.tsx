@@ -277,6 +277,37 @@ describe("FactoryNodes native-authority read-only boundary", () => {
     expectNoGameplayWrites(spies);
   });
 
+  it("opens only projected inventory pickup while native configuration and deposits stay closed", () => {
+    const spies = callbacks();
+    const data = dataFixture(machineFixture(), spies, {
+      cargo: null,
+      inventoryPickupEnabled: true,
+    });
+    const MemoMachineNode = NODE_TYPES.machine;
+    render(<MemoMachineNode {...nodeProps({ ...data, inventoryPickupEnabled: false })} />);
+    expect([...host.querySelectorAll<HTMLButtonElement>(".node-slot")].every((button) => button.disabled)).toBe(true);
+    render(<MemoMachineNode {...nodeProps(data)} />);
+
+    expect(host.querySelector(".catalog-picker-trigger")).toBeNull();
+    expectHandlesReadOnly();
+    const input = host.querySelector<HTMLButtonElement>(".node-port--input .node-slot")!;
+    const output = host.querySelector<HTMLButtonElement>(".node-port--output .node-slot")!;
+    expect(input.disabled).toBe(false);
+    expect(output.disabled).toBe(false);
+    act(() => input.click());
+    act(() => output.click());
+    expect(spies.onPickInput).toHaveBeenCalledWith(data.entity.id, "iron_ingot");
+    expect(spies.onPickOutput).toHaveBeenCalledWith(data.entity.id, "gear");
+
+    dispatchDrag(input, "drop", dataTransfer({
+      "application/factory-item": "iron_ingot",
+      "application/factory-source-kind": "tray",
+    }));
+    expect(spies.onDropCargo).not.toHaveBeenCalled();
+    expect(spies.onDropDraggedItem).not.toHaveBeenCalled();
+    expect(spies.onRecipeChange).not.toHaveBeenCalled();
+  });
+
   it("disables manual mining, miner installation, output pickup and unlock", () => {
     const spies = callbacks();
     const entity = entityFixture("vein", undefined, {

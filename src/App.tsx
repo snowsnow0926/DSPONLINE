@@ -3928,6 +3928,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setGalaxyOpen(false);
     setConstructionCenterOpen(false);
   }, []);
+  useLayoutEffect(() => {
+    if (!nativePlayerAuthorityOwnsRuntime) return;
+    // Close legacy-only surfaces before paint if Rust ownership changes while
+    // one is open. Native-capable workspaces intentionally remain untouched.
+    setSystemSpaceStationOpen(false);
+    setSystemSpaceStationId(null);
+    setOrbitalStationOpen(false);
+    setBlueprintsOpen(false);
+    setOperationsOpen(false);
+    setCampaignOpen(false);
+    setGalaxyOpen(false);
+    setConstructionCenterOpen(false);
+  }, [nativePlayerAuthorityOwnsRuntime]);
   useEffect(() => {
     if (statisticsOpen) return;
     authorityWorkspaceSyncIdRef.current += 1;
@@ -11228,6 +11241,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const openCommandWorkspace = useCallback(async (workspace: CommandWorkspace) => {
     if (workspace === "blueprints" && rejectLegacyFactoryInteractionWhileNative("蓝图管理")) return;
     if (workspace === "resources" && rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
+    if (workspace === "operations" && rejectLegacyFactoryInteractionWhileNative("旧版运营中心")) return;
+    if (workspace === "campaign" && rejectLegacyFactoryInteractionWhileNative("旧版主线任务")) return;
+    if (workspace === "galaxy" && rejectLegacyFactoryInteractionWhileNative("旧版银河账户页")) return;
     closeAllWorkspaces();
     const authoritySyncId = authorityWorkspaceSyncIdRef.current + 1;
     authorityWorkspaceSyncIdRef.current = authoritySyncId;
@@ -11903,6 +11919,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [ensureFactoryPlanetVisible, focusEntityIds]);
 
   const openCampaign = useCallback(() => {
+    if (rejectLegacyFactoryInteractionWhileNative("旧版主线任务")) return;
     closeAllWorkspaces();
     setCampaignOpen(true);
     setMobilePanel(null);
@@ -11914,7 +11931,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setSelectedBeltIds([]);
     setNotice(null);
     mobileNavigation.openWorkspace("campaign");
-  }, [closeAllWorkspaces, mobileNavigation.openWorkspace]);
+  }, [closeAllWorkspaces, mobileNavigation.openWorkspace, rejectLegacyFactoryInteractionWhileNative]);
 
   const navigateFromCampaign = useCallback((navigation: CampaignNavigation, taskId?: CampaignTaskId) => {
     if (taskId) {
@@ -17616,7 +17633,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             }}
           />
         ) : null}
-        {galaxyOpen ? (
+        {galaxyOpen && !nativePlayerAuthorityOwnsRuntime ? (
           <GalaxyWorkspace
             open
             accountState={accountState}
@@ -17809,7 +17826,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onRemoveCanvasBookmark={(bookmarkId) => commitGame((current) => removeCanvasBookmark(current, bookmarkId))}
         />) : null}
         {recipesOpen ? <RecipeWorkspace open readOnly={nativePlayerAuthorityOwnsRuntime} readModel={recipeWorkspaceReadModel} onReadRequest={updateRecipeWorkspaceSelector} mobile={nextMobileShell} mobileSubview={mobileWorkspaceSubview} onMobileOpenDetail={mobileNavigation.openWorkspaceSubview} onMobileReplaceDetail={(subview) => mobileNavigation.replaceWorkspaceSubview(subview)} focusItemId={campaignFocusItemId} onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setRecipesOpen(false)} onFocus={onRecipeFocusChange} onLocateProductionLine={locateRecipeWorkspaceProduction} /> : null}
-        {campaignOpen ? (
+        {campaignOpen && !nativePlayerAuthorityOwnsRuntime ? (
           <CampaignWorkspace
             open
             game={game}
@@ -17942,7 +17959,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onRemoveSwarmOrbit={(systemId, orbitId) => commitGame((current) => removeDysonSwarmOrbit(current, systemId, orbitId))}
           />
         ) : null}
-        {operationsOpen ? (
+        {operationsOpen && !nativePlayerAuthorityOwnsRuntime ? (
           <OperationsWorkspace
             open
             tab={operationsTab}

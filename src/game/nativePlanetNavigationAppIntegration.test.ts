@@ -133,6 +133,12 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/systemSpaceStationOpen && systemSpaceStationId && !nativePlayerAuthorityOwnsRuntime/);
     expect(app).toMatch(/orbitalStationOpen && isSpaceStationFeatureEnabled\(\) && !nativePlayerAuthorityOwnsRuntime/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime && game\.mode === "normal" && isSpaceStationFeatureEnabled\(\) \? <div className="canvas-global-navigation/);
+    for (const workspace of ["galaxyOpen", "campaignOpen", "operationsOpen"]) {
+      expect(app).toContain(`${workspace} && !nativePlayerAuthorityOwnsRuntime`);
+    }
+    for (const label of ["旧版运营中心", "旧版主线任务", "旧版银河账户页"]) {
+      expect(app).toContain(`rejectLegacyFactoryInteractionWhileNative("${label}")`);
+    }
   });
 
   it("shows an inert native loading state instead of stale Web models between revisions", () => {

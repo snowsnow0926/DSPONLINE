@@ -18,6 +18,7 @@ const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_PLAYER_ORBIT_ID_BYTES: usize = 160;
 const PLAYER_QUANTUM_CAPACITY_MIN: &str = "10000";
 const PLAYER_QUANTUM_CAPACITY_MAX: &str = "10000000000";
+const MAX_PLAYER_TECHNOLOGY_ROWS: usize = 512;
 const BELT_ROUTE_MODES: &[&str] = &["bezier", "auto", "upper", "lower", "manual"];
 /// FNV-1a fingerprint produced by `createContentPackRegistry()` with no packs.
 /// The current CORE catalog omits the optional MOD `stackLimit`, so positive
@@ -25,6 +26,16 @@ const BELT_ROUTE_MODES: &[&str] = &["bezier", "auto", "upper", "lower", "manual"
 /// core building's limit.  Non-empty registries remain fail-closed until that
 /// bound is carried by a future, explicitly versioned catalog protocol.
 const EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT: &str = "7df8cf3a";
+
+const DEPRECATED_PLAYER_TECHNOLOGIES: &[&str] = &[
+    "orbital_elevator_engineering",
+    "orbital_multi_cargo_bus",
+    "orbital_energy_recovery",
+    "system_space_station_engineering",
+    "orbital_modular_assembly",
+    "autonomous_station_construction",
+    "unified_system_logistics_protocol",
+];
 
 const BUILTIN_ORDINARY_STACK_BUILDINGS: &[&str] = &[
     "accumulator",
@@ -3899,6 +3910,396 @@ fn validate_time_warp_command(
     require_exact_set_patch_values(&command.top_level_changes, &expected)
 }
 
+#[derive(Debug)]
+struct PlayerResearchCommandState {
+    completed: HashSet<String>,
+    selected: Option<String>,
+    paused: Option<String>,
+    queue: Vec<String>,
+    planned: HashSet<String>,
+    selected_completion_due: bool,
+    active_infinite: Option<String>,
+    auto_research: bool,
+}
+
+fn player_research_id(value: &Value, label: &str) -> anyhow::Result<String> {
+    value
+        .as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 1_024)
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("native player-authority {label} is invalid"))
+}
+
+fn player_optional_research_id(
+    record: &Map<String, Value>,
+    key: &str,
+) -> anyhow::Result<Option<String>> {
+    match record.get(key) {
+        Some(Value::Null) => Ok(None),
+        Some(value) => player_research_id(value, key).map(Some),
+        None => bail!("native player-authority research {key} is missing"),
+    }
+}
+
+fn player_research_id_array(value: &Value, label: &str) -> anyhow::Result<Vec<String>> {
+    let values = value
+        .as_array()
+        .filter(|values| values.len() <= MAX_PLAYER_TECHNOLOGY_ROWS)
+        .ok_or_else(|| anyhow!("native player-authority {label} is invalid"))?;
+    let mut unique = HashSet::with_capacity(values.len());
+    let mut result = Vec::with_capacity(values.len());
+    for value in values {
+        let id = player_research_id(value, label)?;
+        if !unique.insert(id.clone()) {
+            bail!("native player-authority {label} repeats a technology")
+        }
+        result.push(id);
+    }
+    Ok(result)
+}
+
+fn player_active_technology<'a>(
+    state: &'a CoreState,
+    technology_id: &str,
+) -> anyhow::Result<&'a crate::catalog::TechnologyDefinition> {
+    let technology = state
+        .catalog
+        .technologies
+        .get(technology_id)
+        .ok_or_else(|| anyhow!("native player-authority research technology is unknown"))?;
+    if DEPRECATED_PLAYER_TECHNOLOGIES.contains(&technology_id) {
+        bail!("native player-authority research technology is deprecated")
+    }
+    Ok(technology)
+}
+
+fn validate_player_research_progress(
+    state: &CoreState,
+    research: &Map<String, Value>,
+) -> anyhow::Result<()> {
+    let progress = research
+        .get("progressByTech")
+        .and_then(Value::as_object)
+        .filter(|rows| rows.len() <= MAX_PLAYER_TECHNOLOGY_ROWS)
+        .ok_or_else(|| anyhow!("native player-authority research progress is invalid"))?;
+    for (technology_id, row) in progress {
+        if !state.catalog.technologies.contains_key(technology_id) {
+            bail!("native player-authority research progress technology is unknown")
+        }
+        let row = row
+            .as_object()
+            .filter(|row| row.len() <= 16)
+            .ok_or_else(|| anyhow!("native player-authority research progress row is invalid"))?;
+        for (item_id, amount) in row {
+            if !state.catalog.items.contains_key(item_id) {
+                bail!("native player-authority research progress item is unknown")
+            }
+            safe_json_integer(Some(amount), "research progress amount")?;
+        }
+    }
+    Ok(())
+}
+
+fn player_technology_cost(amount: f64) -> anyhow::Result<u64> {
+    if !amount.is_finite()
+        || amount <= 0.0
+        || amount.fract() != 0.0
+        || amount > MAX_JAVASCRIPT_SAFE_INTEGER as f64
+    {
+        bail!("native player-authority research technology cost is invalid")
+    }
+    Ok(amount as u64)
+}
+
+fn selected_player_research_completion_due(
+    state: &CoreState,
+    research: &Map<String, Value>,
+    technology_id: &str,
+) -> anyhow::Result<bool> {
+    let technology = player_active_technology(state, technology_id)?;
+    let progress = research
+        .get("progressByTech")
+        .and_then(Value::as_object)
+        .and_then(|rows| rows.get(technology_id))
+        .and_then(Value::as_object);
+    for cost in &technology.costs {
+        let required = player_technology_cost(cost.amount)?;
+        let invested = match progress.and_then(|row| row.get(&cost.item_id)) {
+            Some(value) => safe_json_integer(Some(value), "research progress amount")?,
+            None => 0,
+        };
+        if invested < required {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn validate_player_infinite_research_state(
+    endgame: &Map<String, Value>,
+) -> anyhow::Result<(Option<String>, bool)> {
+    let active = player_optional_research_id(endgame, "activeInfiniteResearchId")?;
+    if active
+        .as_deref()
+        .is_some_and(|research_id| !crate::infinite_research::valid_id(research_id))
+    {
+        bail!("native player-authority infinite research target is unknown")
+    }
+    let auto_research = endgame
+        .get("autoResearch")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            anyhow!("native player-authority infinite research automation is invalid")
+        })?;
+    let progress = endgame
+        .get("infiniteResearch")
+        .and_then(Value::as_object)
+        .filter(|rows| rows.len() == 5)
+        .ok_or_else(|| anyhow!("native player-authority infinite research directory is invalid"))?;
+    for (research_id, row) in progress {
+        if !crate::infinite_research::valid_id(research_id) {
+            bail!("native player-authority infinite research directory contains an unknown ID")
+        }
+        let row = row
+            .as_object()
+            .ok_or_else(|| anyhow!("native player-authority infinite research row is invalid"))?;
+        safe_json_integer(row.get("level"), "infinite research level")?;
+        if let Some(historical_level) = row.get("historicalLevel").filter(|value| !value.is_null())
+        {
+            safe_json_integer(Some(historical_level), "infinite research historical level")?;
+        }
+        let progress = row
+            .get("progress")
+            .and_then(Value::as_str)
+            .filter(|value| {
+                !value.is_empty()
+                    && value.len() <= 1_024
+                    && value.bytes().all(|byte| byte.is_ascii_digit())
+                    && (value.len() == 1 || !value.starts_with('0'))
+            })
+            .ok_or_else(|| {
+                anyhow!("native player-authority infinite research progress is invalid")
+            })?;
+        progress.parse::<u128>().map_err(|_| {
+            anyhow!("native player-authority infinite research progress is too large")
+        })?;
+    }
+    Ok((active, auto_research))
+}
+
+fn validated_player_research_state(
+    state: &CoreState,
+) -> anyhow::Result<PlayerResearchCommandState> {
+    if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    {
+        bail!("native player-authority research commands require the built-in catalog")
+    }
+    let research = state
+        .base_value()
+        .get("research")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority research state is invalid"))?;
+    validate_player_research_progress(state, research)?;
+    let completed_rows = player_research_id_array(
+        research
+            .get("completedTechIds")
+            .ok_or_else(|| anyhow!("native player-authority completed research is missing"))?,
+        "completed research",
+    )?;
+    let completed = completed_rows.iter().cloned().collect::<HashSet<_>>();
+    for technology_id in &completed_rows {
+        if !state.catalog.technologies.contains_key(technology_id) {
+            bail!("native player-authority completed research technology is unknown")
+        }
+    }
+    let selected = player_optional_research_id(research, "selectedTechId")?;
+    let paused = player_optional_research_id(research, "pausedTechId")?;
+    if selected.is_some() && selected == paused {
+        bail!("native player-authority selected and paused research overlap")
+    }
+    for technology_id in [selected.as_deref(), paused.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        let technology = player_active_technology(state, technology_id)?;
+        if completed.contains(technology_id)
+            || !technology
+                .prerequisites
+                .iter()
+                .all(|prerequisite| completed.contains(prerequisite))
+        {
+            bail!("native player-authority current research prerequisites are invalid")
+        }
+    }
+
+    let queue = player_research_id_array(
+        research
+            .get("queuedTechIds")
+            .ok_or_else(|| anyhow!("native player-authority research queue is missing"))?,
+        "research queue",
+    )?;
+    let mut planned = completed.clone();
+    if let Some(technology_id) = &paused {
+        planned.insert(technology_id.clone());
+    }
+    if let Some(technology_id) = &selected {
+        planned.insert(technology_id.clone());
+    }
+    for technology_id in &queue {
+        let technology = player_active_technology(state, technology_id)?;
+        if planned.contains(technology_id)
+            || !technology
+                .prerequisites
+                .iter()
+                .all(|prerequisite| planned.contains(prerequisite))
+        {
+            bail!("native player-authority research queue dependencies are invalid")
+        }
+        planned.insert(technology_id.clone());
+    }
+
+    let selected_completion_due = selected
+        .as_deref()
+        .map(|technology_id| {
+            selected_player_research_completion_due(state, research, technology_id)
+        })
+        .transpose()?
+        .unwrap_or(false);
+    let endgame = state
+        .base_value()
+        .get("endgame")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority endgame state is invalid"))?;
+    let (active_infinite, auto_research) = validate_player_infinite_research_state(endgame)?;
+    Ok(PlayerResearchCommandState {
+        completed,
+        selected,
+        paused,
+        queue,
+        planned,
+        selected_completion_due,
+        active_infinite,
+        auto_research,
+    })
+}
+
+fn player_queue_after_removal(
+    state: &CoreState,
+    current: &PlayerResearchCommandState,
+    removed_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut planned = current.completed.clone();
+    if let Some(technology_id) = &current.paused {
+        planned.insert(technology_id.clone());
+    }
+    if let Some(technology_id) = &current.selected {
+        planned.insert(technology_id.clone());
+    }
+    let mut result = Vec::with_capacity(current.queue.len().saturating_sub(1));
+    for technology_id in &current.queue {
+        if technology_id == removed_id {
+            continue;
+        }
+        let technology = player_active_technology(state, technology_id)?;
+        if !technology
+            .prerequisites
+            .iter()
+            .all(|prerequisite| planned.contains(prerequisite))
+        {
+            continue;
+        }
+        result.push(technology_id.clone());
+        planned.insert(technology_id.clone());
+    }
+    Ok(result)
+}
+
+/// technology-v1 currently omits matrix-lab entity IDs and cycle progress.
+/// Therefore this command boundary deliberately accepts only the three
+/// player-visible transitions that never reset a lab: append to an already
+/// active finite queue, remove/cascade a queue row, and toggle infinite
+/// automation. Start/pause/cancel/resume/infinite-target selection stay
+/// fail-closed until a versioned lab projection or semantic opcode can carry
+/// every changed entity through the durable command receipt.
+fn validate_player_research_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.top_level_changes.len() != 1
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority research command shape is invalid")
+    }
+    let current = validated_player_research_state(state)?;
+    let change = &command.top_level_changes[0];
+    if change.operation != "set" {
+        bail!("native player-authority research command operation is invalid")
+    }
+    let target = change
+        .value
+        .as_ref()
+        .ok_or_else(|| anyhow!("native player-authority research command target is missing"))?;
+    if path_matches(&change.path, &["research", "queuedTechIds"]) {
+        let target_queue = player_research_id_array(target, "research queue target")?;
+        if target_queue == current.queue {
+            bail!("native player-authority research queue target is unchanged")
+        }
+
+        if target_queue.len() == current.queue.len() + 1
+            && target_queue[..current.queue.len()] == current.queue
+        {
+            let target_id = target_queue
+                .last()
+                .expect("one research queue row was appended");
+            let technology = player_active_technology(state, target_id)?;
+            if current.selected.is_none()
+                || current.active_infinite.is_some()
+                || current.selected_completion_due
+                || current.completed.contains(target_id)
+                || current.paused.as_deref() == Some(target_id)
+                || current.planned.contains(target_id)
+                || !technology
+                    .prerequisites
+                    .iter()
+                    .all(|prerequisite| current.planned.contains(prerequisite))
+            {
+                bail!("native player-authority research queue append is not currently legal")
+            }
+            return Ok(());
+        }
+
+        let matches_removal = current.queue.iter().any(|removed_id| {
+            player_queue_after_removal(state, &current, removed_id)
+                .is_ok_and(|expected| expected == target_queue)
+        });
+        if !matches_removal {
+            bail!("native player-authority research queue removal is not canonical")
+        }
+        return Ok(());
+    }
+
+    if path_matches(&change.path, &["endgame", "autoResearch"]) {
+        let enabled = target.as_bool().ok_or_else(|| {
+            anyhow!("native player-authority infinite automation target is invalid")
+        })?;
+        if !current.completed.contains("universe_matrix") {
+            bail!("native player-authority infinite automation technology is locked")
+        }
+        if enabled == current.auto_research {
+            bail!("native player-authority infinite automation target is unchanged")
+        }
+        return Ok(());
+    }
+
+    bail!("native player-authority research transition needs a lab-aware protocol")
+}
+
 fn validate_player_pause_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
@@ -5264,6 +5665,19 @@ impl CoreState {
             return validate_active_planet_command(self, command);
         }
         if command.top_level_changes.iter().any(|change| {
+            matches!(
+                change.path.as_slice(),
+                [PathSegment::Key(root), ..] if root == "research"
+            ) || matches!(
+                change.path.as_slice(),
+                [PathSegment::Key(root), PathSegment::Key(field), ..]
+                    if root == "endgame"
+                        && matches!(field.as_str(), "activeInfiniteResearchId" | "autoResearch")
+            )
+        }) {
+            return validate_player_research_command(self, command);
+        }
+        if command.top_level_changes.iter().any(|change| {
             matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "recipeFocus")
         }) {
             return validate_recipe_focus_command(self, command);
@@ -5763,7 +6177,10 @@ mod tests {
                 { "id": "solar_sail", "kind": "solid" },
                 { "id": "logistics_drone", "kind": "solid" },
                 { "id": "logistics_vessel", "kind": "solid" },
-                { "id": "space_warper", "kind": "solid" }
+                { "id": "space_warper", "kind": "solid" },
+                { "id": "electromagnetic_matrix", "kind": "solid" },
+                { "id": "gravity_matrix", "kind": "solid" },
+                { "id": "universe_matrix", "kind": "solid" }
             ],
             "buildings": [
                 {
@@ -5826,7 +6243,59 @@ mod tests {
                     "costs": [{ "itemId": "iron_ingot", "amount": 2 }]
                 }
             ],
-            "belts": [{ "tier": 1, "speed": 6 }]
+            "belts": [{ "tier": 1, "speed": 6 }],
+            "technologies": [
+                {
+                    "id": "electromagnetic_matrix",
+                    "costs": [{ "itemId": "electromagnetic_matrix", "amount": 3 }],
+                    "prerequisites": []
+                },
+                {
+                    "id": "electromagnetism",
+                    "costs": [{ "itemId": "electromagnetic_matrix", "amount": 5 }],
+                    "prerequisites": ["electromagnetic_matrix"]
+                },
+                {
+                    "id": "basic_logistics",
+                    "costs": [{ "itemId": "electromagnetic_matrix", "amount": 8 }],
+                    "prerequisites": ["electromagnetism"]
+                },
+                {
+                    "id": "thermal_power",
+                    "costs": [{ "itemId": "electromagnetic_matrix", "amount": 8 }],
+                    "prerequisites": ["electromagnetism"]
+                },
+                {
+                    "id": "high_efficiency_plasma_control",
+                    "costs": [{ "itemId": "electromagnetic_matrix", "amount": 12 }],
+                    "prerequisites": ["basic_logistics", "thermal_power"]
+                },
+                {
+                    "id": "gravity_matrix",
+                    "costs": [{ "itemId": "gravity_matrix", "amount": 5 }],
+                    "prerequisites": []
+                },
+                {
+                    "id": "research_speed_1",
+                    "costs": [{ "itemId": "electromagnetic_matrix", "amount": 20 }],
+                    "prerequisites": ["gravity_matrix"]
+                },
+                {
+                    "id": "research_speed_2",
+                    "costs": [{ "itemId": "gravity_matrix", "amount": 20 }],
+                    "prerequisites": ["gravity_matrix", "research_speed_1"]
+                },
+                {
+                    "id": "universe_matrix",
+                    "costs": [{ "itemId": "universe_matrix", "amount": 5 }],
+                    "prerequisites": []
+                },
+                {
+                    "id": "research_speed_3",
+                    "costs": [{ "itemId": "universe_matrix", "amount": 30 }],
+                    "prerequisites": ["universe_matrix", "research_speed_2"]
+                }
+            ]
         }))
         .unwrap();
         RuntimeCatalog::validate(snapshot, registry_fingerprint).unwrap()
@@ -5994,6 +6463,41 @@ mod tests {
 
     fn player_command_state() -> CoreState {
         player_command_state_for_registry(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT)
+    }
+
+    fn player_research_state() -> CoreState {
+        let mut state = player_command_state();
+        state.base_value_mut().insert(
+            "research".to_owned(),
+            serde_json::json!({
+                "selectedTechId": "research_speed_2",
+                "pausedTechId": null,
+                "queuedTechIds": [],
+                "progressByTech": {
+                    "research_speed_2": { "gravity_matrix": 9 }
+                },
+                "completedTechIds": [
+                    "gravity_matrix",
+                    "research_speed_1",
+                    "universe_matrix"
+                ]
+            }),
+        );
+        state.base_value_mut().insert(
+            "endgame".to_owned(),
+            serde_json::json!({
+                "activeInfiniteResearchId": null,
+                "autoResearch": false,
+                "infiniteResearch": {
+                    "matrix_compression": { "level": 2, "progress": "17" },
+                    "vein_utilization": { "level": 1, "progress": "0" },
+                    "galactic_logistics": { "level": 3, "progress": "0" },
+                    "stellar_harnessing": { "level": 4, "progress": "0" },
+                    "continuum_simulation": { "level": 0, "progress": "0" }
+                }
+            }),
+        );
+        state
     }
 
     fn player_quantum_capacity_state() -> CoreState {
@@ -7035,6 +7539,19 @@ mod tests {
         command
     }
 
+    fn research_queue_command(revision: u64, technology_ids: &[&str]) -> SimulationCommandPatch {
+        top_level_leaf_command(
+            revision,
+            &["research", "queuedTechIds"],
+            Value::Array(
+                technology_ids
+                    .iter()
+                    .map(|technology_id| Value::from(*technology_id))
+                    .collect(),
+            ),
+        )
+    }
+
     fn active_planet_to_ashen_command(revision: u64) -> SimulationCommandPatch {
         let mut command = empty_player_command(revision);
         command.top_level_changes = vec![
@@ -7332,6 +7849,215 @@ mod tests {
         assert!(format!("{error:#}").contains("stack limit is not provable"));
         assert_eq!(modded.revision, 9);
         assert_eq!(modded.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_research_appends_only_one_provable_finite_queue_row() {
+        let mut state = player_research_state();
+        let before_entities = (0..3)
+            .map(|index| state.parse_entity(index).unwrap())
+            .collect::<Vec<_>>();
+        let before_belt = state.parse_belt(0).unwrap();
+        let before_total_produced = state.base_value()["totalProduced"].clone();
+        let before_tray = state.base_value()["tray"].clone();
+        let command = research_queue_command(state.revision, &["research_speed_3"]);
+
+        let applied = state.apply_player_authority_command(&command).unwrap();
+
+        assert_eq!(applied.previous_revision, 9);
+        assert_eq!(applied.revision, 10);
+        assert!(applied.changed_entity_ids.is_empty());
+        assert!(applied.changed_belt_ids.is_empty());
+        assert!(applied.topology_dirty);
+        assert_eq!(
+            state.base_value()["research"]["queuedTechIds"],
+            serde_json::json!(["research_speed_3"])
+        );
+        assert_eq!(state.base_value()["totalProduced"], before_total_produced);
+        assert_eq!(state.base_value()["tray"], before_tray);
+        assert_eq!(
+            (0..3)
+                .map(|index| state.parse_entity(index).unwrap())
+                .collect::<Vec<_>>(),
+            before_entities
+        );
+        assert_eq!(state.parse_belt(0).unwrap(), before_belt);
+    }
+
+    #[test]
+    fn player_authority_research_removes_queue_row_with_canonical_dependency_cascade() {
+        let mut state = player_research_state();
+        state.base_value_mut().insert(
+            "research".to_owned(),
+            serde_json::json!({
+                "selectedTechId": "electromagnetism",
+                "pausedTechId": null,
+                "queuedTechIds": [
+                    "basic_logistics",
+                    "thermal_power",
+                    "high_efficiency_plasma_control"
+                ],
+                "progressByTech": {},
+                "completedTechIds": ["electromagnetic_matrix"]
+            }),
+        );
+        let command = research_queue_command(state.revision, &["thermal_power"]);
+
+        let applied = state.apply_player_authority_command(&command).unwrap();
+
+        assert_eq!(applied.revision, 10);
+        assert_eq!(
+            state.base_value()["research"]["queuedTechIds"],
+            serde_json::json!(["thermal_power"])
+        );
+        assert_eq!(
+            state.base_value()["research"]["selectedTechId"],
+            "electromagnetism"
+        );
+        assert_eq!(
+            state.base_value()["research"]["completedTechIds"],
+            serde_json::json!(["electromagnetic_matrix"])
+        );
+    }
+
+    #[test]
+    fn player_authority_research_toggles_only_unlocked_infinite_automation() {
+        let mut state = player_research_state();
+        let before_research = state.base_value()["research"].clone();
+        let command = top_level_leaf_command(
+            state.revision,
+            &["endgame", "autoResearch"],
+            Value::from(true),
+        );
+
+        let applied = state.apply_player_authority_command(&command).unwrap();
+
+        assert_eq!(applied.revision, 10);
+        assert!(applied.topology_dirty);
+        assert_eq!(state.base_value()["endgame"]["autoResearch"], true);
+        assert_eq!(state.base_value()["research"], before_research);
+        assert_eq!(
+            state.base_value()["endgame"]["activeInfiniteResearchId"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn player_authority_research_rejects_stale_unknown_modded_and_completion_boundary_atomically() {
+        let baseline = player_research_state();
+        let revision = baseline.revision;
+
+        let stale = research_queue_command(revision - 1, &["research_speed_3"]);
+        let unknown = research_queue_command(revision, &["missing_mod_technology"]);
+        for command in [stale, unknown] {
+            let mut state = player_research_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, revision);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut completion_due = player_research_state();
+        completion_due.base_value_mut()["research"]["progressByTech"]["research_speed_2"]["gravity_matrix"] =
+            Value::from(20);
+        let before = completion_due.canonical_sha256().unwrap();
+        let command = research_queue_command(completion_due.revision, &["research_speed_3"]);
+        assert!(
+            completion_due
+                .apply_player_authority_command(&command)
+                .is_err()
+        );
+        assert_eq!(completion_due.revision, revision);
+        assert_eq!(completion_due.canonical_sha256().unwrap(), before);
+
+        let canonical = player_research_state();
+        let mut modded = player_command_state_for_registry("modded-player-research-test");
+        for root in ["research", "endgame"] {
+            modded.base_value_mut().insert(
+                root.to_owned(),
+                canonical
+                    .base_value()
+                    .get(root)
+                    .expect("canonical research fixture root")
+                    .clone(),
+            );
+        }
+        let before = modded.canonical_sha256().unwrap();
+        let command = research_queue_command(modded.revision, &["research_speed_3"]);
+        assert!(modded.apply_player_authority_command(&command).is_err());
+        assert_eq!(modded.revision, revision);
+        assert_eq!(modded.canonical_sha256().unwrap(), before);
+
+        let mut locked_automation = player_research_state();
+        locked_automation.base_value_mut()["research"]["completedTechIds"] =
+            serde_json::json!(["gravity_matrix", "research_speed_1"]);
+        let before = locked_automation.canonical_sha256().unwrap();
+        let command = top_level_leaf_command(
+            locked_automation.revision,
+            &["endgame", "autoResearch"],
+            Value::from(true),
+        );
+        assert!(
+            locked_automation
+                .apply_player_authority_command(&command)
+                .is_err()
+        );
+        assert_eq!(locked_automation.revision, revision);
+        assert_eq!(locked_automation.canonical_sha256().unwrap(), before);
+
+        let mut unchanged_automation = player_research_state();
+        let before = unchanged_automation.canonical_sha256().unwrap();
+        let command = top_level_leaf_command(
+            unchanged_automation.revision,
+            &["endgame", "autoResearch"],
+            Value::from(false),
+        );
+        assert!(
+            unchanged_automation
+                .apply_player_authority_command(&command)
+                .is_err()
+        );
+        assert_eq!(unchanged_automation.revision, revision);
+        assert_eq!(unchanged_automation.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_research_rejects_cross_domain_and_unsupported_cancel_atomically() {
+        let mut cross_domain = research_queue_command(9, &["research_speed_3"]);
+        cross_domain.top_level_changes.push(ValuePatch {
+            path: vec![
+                PathSegment::Key("totalProduced".to_owned()),
+                PathSegment::Key("iron_ingot".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(Value::from(999_999)),
+        });
+        let unsupported_cancel =
+            top_level_leaf_command(9, &["research", "selectedTechId"], Value::Null);
+
+        for command in [cross_domain, unsupported_cancel] {
+            let mut state = player_research_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn player_authority_research_apply_is_deterministic() {
+        let mut left = player_research_state();
+        let mut right = left.clone();
+        let command = research_queue_command(left.revision, &["research_speed_3"]);
+
+        let left_receipt = left.apply_player_authority_command(&command).unwrap();
+        let right_receipt = right.apply_player_authority_command(&command).unwrap();
+
+        assert_eq!(left_receipt, right_receipt);
+        assert_eq!(
+            left.canonical_sha256().unwrap(),
+            right.canonical_sha256().unwrap()
+        );
     }
 
     #[test]

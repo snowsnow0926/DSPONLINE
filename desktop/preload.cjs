@@ -9,7 +9,7 @@ const MAX_NATIVE_PROJECTION_TRANSFER_BYTES = 1024 * 1024;
 const MAX_STELLAR_PROJECTION_REQUEST_BYTES = 32_768;
 const NATIVE_CORE_TRANSFER_PROJECTION_TYPES = Object.freeze([
   "viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1",
-  "recipe-workspace-v1", "star-map-overview-v1", "stellar-industry-v1", "stellar-industry-v2",
+  "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2",
   "stellar-quantum-v1",
 ]);
 let nativeProjectionSequence = 0;
@@ -48,7 +48,7 @@ function requestNativeCoreProjectionTransfer(request) {
       reject(localNativeError({ fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生投影请求无效" }));
       return;
     }
-    if (["star-map-overview-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1"].includes(request.projectionType)) {
+    if (["star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1"].includes(request.projectionType)) {
       let requestBytes;
       try {
         requestBytes = Buffer.byteLength(JSON.stringify({
@@ -164,6 +164,7 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   getNativeCoreTechnologyProjection: (request) => invokeNative("desktop:native-core-technology-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生科研投影请求失败，请重试" }, request),
   getNativeCoreRecipeWorkspaceProjection: (request) => invokeNative("desktop:native-core-recipe-workspace-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生生产资料库投影请求失败，请重试" }, request),
   getNativeCoreStarMapOverviewProjection: (request) => invokeNative("desktop:native-core-star-map-overview-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生星图总览投影请求失败，请重试" }, request),
+  getNativeCoreStarMapCatalogProjection: (request) => invokeNative("desktop:native-core-star-map-catalog-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生星图目录投影请求失败，请重试" }, request),
   getNativeCoreStellarIndustryProjection: (request) => invokeNative("desktop:native-core-stellar-industry-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生恒星工业投影请求失败，请重试" }, request),
   getNativeCoreStellarIndustryV2Projection: (request) => invokeNative("desktop:native-core-stellar-industry-v2-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生恒星工业 v2 投影请求失败，请重试" }, request),
   getNativeCoreStellarQuantumProjection: (request) => invokeNative("desktop:native-core-stellar-quantum-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生量子库存投影请求失败，请重试" }, request),

@@ -18,6 +18,7 @@ const PROJECTION_METHODS = Object.freeze({
   "recipe-workspace-v1": "recipeWorkspaceProjection",
   "command-palette-entity-search-v1": "commandPaletteEntitySearchProjection",
   "star-map-overview-v1": "starMapOverviewProjection",
+  "star-map-catalog-v1": "starMapCatalogProjection",
   "stellar-industry-v1": "stellarIndustryProjection",
   "stellar-industry-v2": "stellarIndustryProjectionV2",
   "stellar-quantum-v1": "stellarQuantumProjection",

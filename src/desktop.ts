@@ -170,6 +170,8 @@ export interface DesktopBridge {
   getNativeCoreRecipeWorkspaceProjection?: (request: DesktopNativeCoreRecipeWorkspaceProjectionRequest) => Promise<DesktopNativeCoreRecipeWorkspaceProjectionResult>;
   /** Bounded star-system page tied to one exact native revision and catalog. */
   getNativeCoreStarMapOverviewProjection?: (request: DesktopNativeCoreStarMapOverviewProjectionRequest) => Promise<DesktopNativeCoreStarMapOverviewProjectionResult>;
+  /** Complete, independently paged system/planet directory for the native star map. */
+  getNativeCoreStarMapCatalogProjection?: (request: DesktopNativeCoreStarMapCatalogProjectionRequest) => Promise<DesktopNativeCoreStarMapCatalogProjectionResult>;
   /** Independently bounded planet/station pages; never falls back to the Web GameState. */
   getNativeCoreStellarIndustryProjection?: (request: DesktopNativeCoreStellarIndustryProjectionRequest) => Promise<DesktopNativeCoreStellarIndustryProjectionResult>;
   /** Adds an independently paged, filtered native route table to the v1 industry model. */
@@ -1010,6 +1012,120 @@ export interface DesktopNativeCoreStarMapOverviewProjectionResult {
   systems: DesktopNativeCoreStellarPage<DesktopNativeCoreStarMapSystemRow>;
 }
 
+export interface DesktopNativeCoreStarMapCatalogProjectionRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  systemCursor: number;
+  systemLimit: number;
+  planetCursor: number;
+  planetLimit: number;
+}
+
+export interface DesktopNativeCoreStarMapCatalogSystemRow {
+  systemId: string;
+  displayName: string;
+  displayNameTruncated: boolean;
+  starClassId: string | null;
+  starTypeName: string;
+  starTypeNameTruncated: boolean;
+  positionX: number;
+  positionY: number;
+  distanceFromOriginLy: number;
+  luminosity: number;
+  massMultiplier: number;
+  radiusMultiplier: number;
+  active: boolean;
+  discovered: boolean;
+  missionActive: boolean;
+  missionElapsedSeconds: number;
+  missionDurationSeconds: number;
+  surveyProgress: number;
+  firstPlanetId: string;
+  planetCount: number;
+  colonizedPlanetCount: number;
+}
+
+export interface DesktopNativeCoreStarMapCatalogList<T> {
+  totalCount: number;
+  truncated: boolean;
+  rows: T[];
+}
+
+export interface DesktopNativeCoreStarMapCatalogPlanetRow {
+  planetId: string;
+  displayName: string;
+  displayNameTruncated: boolean;
+  systemId: string;
+  systemDisplayName: string;
+  systemDisplayNameTruncated: boolean;
+  kind: string;
+  orbitIndex: number;
+  simulationOrder: number;
+  systemPositionX: number;
+  systemPositionY: number;
+  active: boolean;
+  discovered: boolean;
+  colonized: boolean;
+  industryRole: "auto" | "mining" | "smelting" | "manufacturing" | "chemical" | "research" | "logistics" | "power";
+  entityCount: number;
+  deviceCount: number;
+  beltCount: number;
+  metadata: {
+    note: string;
+    noteTruncated: boolean;
+    /** Added by star-map-catalog-v1 hosts; absent on older typed fixtures/bridges. */
+    tagTextTruncated?: boolean;
+    tags: DesktopNativeCoreStarMapCatalogList<string>;
+  };
+  profile: {
+    climateName: string;
+    climateNameTruncated: boolean;
+    oceanType: string;
+    specialization: string;
+    specializationName: string;
+    specializationNameTruncated: boolean;
+    tidalLocked: boolean;
+    sulfuricOcean: boolean;
+    windMultiplier: number;
+    solarMultiplier: number;
+    geothermalMultiplier: number;
+    miningMultiplier: number;
+    orbitalYieldMultiplier: number;
+    reserveScale: number;
+    travelTimeMultiplier: number;
+    productionSpeedMultiplier: number;
+    surveyDurationSeconds: number;
+    resourceIds: DesktopNativeCoreStarMapCatalogList<string>;
+    rareResourceIds: DesktopNativeCoreStarMapCatalogList<string>;
+    orbitalYields: DesktopNativeCoreStarMapCatalogList<{ itemId: string; rate: number }>;
+  };
+}
+
+export interface DesktopNativeCoreStarMapCatalogProjectionResult {
+  schemaVersion: 1;
+  projectionType: "star-map-catalog-v1";
+  revision: number;
+  registryFingerprint: string;
+  stateVersion: 47;
+  limits: DesktopNativeCoreStellarProjectionLimits & {
+    nestedRows: 64;
+    tagRows: 32;
+  };
+  request: Omit<DesktopNativeCoreStarMapCatalogProjectionRequest, "sessionId">;
+  activePlanetId: string;
+  activeSystemId: string;
+  galaxySeed: number;
+  summary: {
+    systemCount: number;
+    unlockedSystemCount: number;
+    planetCount: number;
+    colonizedPlanetCount: number;
+  };
+  truncated: boolean;
+  systems: DesktopNativeCoreStellarPage<DesktopNativeCoreStarMapCatalogSystemRow>;
+  planets: DesktopNativeCoreStellarPage<DesktopNativeCoreStarMapCatalogPlanetRow>;
+}
+
 export interface DesktopNativeCoreStellarIndustryProjectionRequest extends DesktopNativeCoreSessionRequest {
   expectedRevision: number;
   expectedRegistryFingerprint: string;
@@ -1387,6 +1503,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
     }
   | {
       sessionId: string;
+      projectionType: "star-map-catalog-v1";
+      payload: Omit<DesktopNativeCoreStarMapCatalogProjectionRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
       projectionType: "stellar-industry-v1";
       payload: Omit<DesktopNativeCoreStellarIndustryProjectionRequest, "sessionId">;
     }
@@ -1406,7 +1527,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1";
   payloadLength: number;
   sha256: string;
 }

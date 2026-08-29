@@ -91,6 +91,131 @@ function starMapProjection() {
   };
 }
 
+const catalogLimits = Object.freeze({ ...limits, nestedRows: 64, tagRows: 32 });
+
+function catalogContext() {
+  return {
+    sessionId: "authority-1",
+    expectedRevision: 7,
+    expectedRegistryFingerprint: "builtin:test",
+    systemCursor: 0,
+    systemLimit: 64,
+    planetCursor: 0,
+    planetLimit: 64,
+  };
+}
+
+function catalogProjection() {
+  return {
+    schemaVersion: 1,
+    projectionType: "star-map-catalog-v1",
+    revision: 7,
+    registryFingerprint: "builtin:test",
+    stateVersion: 47,
+    limits: catalogLimits,
+    request: {
+      expectedRevision: 7,
+      expectedRegistryFingerprint: "builtin:test",
+      systemCursor: 0,
+      systemLimit: 64,
+      planetCursor: 0,
+      planetLimit: 64,
+    },
+    activePlanetId: "mod:planet-星球",
+    activeSystemId: "mod:system-alpha",
+    galaxySeed: 42,
+    summary: { systemCount: 1, unlockedSystemCount: 1, planetCount: 1, colonizedPlanetCount: 1 },
+    truncated: false,
+    systems: {
+      cursor: 0,
+      limit: 64,
+      totalCount: 1,
+      nextCursor: null,
+      rows: [{
+        systemId: "mod:system-alpha",
+        displayName: "模组星系🚀",
+        displayNameTruncated: false,
+        starClassId: "mod:g-star",
+        starTypeName: "G 型恒星",
+        starTypeNameTruncated: false,
+        positionX: -12,
+        positionY: 18,
+        distanceFromOriginLy: 3,
+        luminosity: 1.25,
+        massMultiplier: 1,
+        radiusMultiplier: 1,
+        active: true,
+        discovered: true,
+        missionActive: false,
+        missionElapsedSeconds: 0,
+        missionDurationSeconds: 0,
+        surveyProgress: 1,
+        firstPlanetId: "mod:planet-星球",
+        planetCount: 1,
+        colonizedPlanetCount: 1,
+      }],
+    },
+    planets: {
+      cursor: 0,
+      limit: 64,
+      totalCount: 1,
+      nextCursor: null,
+      rows: [{
+        planetId: "mod:planet-星球",
+        displayName: "行星🚀",
+        displayNameTruncated: false,
+        systemId: "mod:system-alpha",
+        systemDisplayName: "模组星系🚀",
+        systemDisplayNameTruncated: false,
+        kind: "terrestrial",
+        orbitIndex: 1,
+        simulationOrder: 0,
+        systemPositionX: -12,
+        systemPositionY: 18,
+        active: true,
+        discovered: true,
+        colonized: true,
+        industryRole: "manufacturing",
+        entityCount: 4,
+        deviceCount: 4,
+        beltCount: 3,
+        metadata: {
+          note: "MOD 主基地",
+          noteTruncated: false,
+          tagTextTruncated: false,
+          tags: { totalCount: 1, truncated: false, rows: ["模组"] },
+        },
+        profile: {
+          climateName: "温带",
+          climateNameTruncated: false,
+          oceanType: "water",
+          specialization: "balanced",
+          specializationName: "均衡工业",
+          specializationNameTruncated: false,
+          tidalLocked: false,
+          sulfuricOcean: false,
+          windMultiplier: 1,
+          solarMultiplier: 1,
+          geothermalMultiplier: 1,
+          miningMultiplier: 1,
+          orbitalYieldMultiplier: 1,
+          reserveScale: 1,
+          travelTimeMultiplier: 1,
+          productionSpeedMultiplier: 1,
+          surveyDurationSeconds: 60,
+          resourceIds: { totalCount: 2, truncated: false, rows: ["iron_ore", "mod:crystal-ore"] },
+          rareResourceIds: { totalCount: 1, truncated: false, rows: ["mod:crystal-ore"] },
+          orbitalYields: {
+            totalCount: 1,
+            truncated: false,
+            rows: [{ itemId: "mod:gas", rate: 0.25 }],
+          },
+        },
+      }],
+    },
+  };
+}
+
 function industryContext() {
   return {
     sessionId: "authority-1",
@@ -600,6 +725,53 @@ test("stellar quantum projection preserves big integer strings and rejects malfo
   }
 });
 
+test("star-map catalog projection preserves bounded UTF-8 MOD rows and rejects mixed pages", () => {
+  const projection = catalogProjection();
+  const normalized = normalizeRendererNativeResult(
+    "coreStarMapCatalogProjection",
+    projection,
+    catalogContext(),
+  );
+  assert.equal(normalized.systems.rows[0].displayName, "模组星系🚀");
+  assert.equal(normalized.planets.rows[0].planetId, "mod:planet-星球");
+  assert.deepEqual(normalized.planets.rows[0].profile.resourceIds.rows, [
+    "iron_ore",
+    "mod:crystal-ore",
+  ]);
+
+  for (const invalid of [
+    { ...projection, revision: 8 },
+    { ...projection, limits: { ...catalogLimits, nestedRows: 65 } },
+    { ...projection, unexpected: true },
+    {
+      ...projection,
+      planets: {
+        ...projection.planets,
+        rows: [{ ...projection.planets.rows[0], planetId: "mod:planet-\ud800" }],
+      },
+    },
+    {
+      ...projection,
+      planets: {
+        ...projection.planets,
+        rows: [{
+          ...projection.planets.rows[0],
+          profile: {
+            ...projection.planets.rows[0].profile,
+            resourceIds: { totalCount: 2, truncated: false, rows: ["iron_ore", "iron_ore"] },
+          },
+        }],
+      },
+    },
+    { ...projection, truncated: true },
+  ]) {
+    assert.throws(
+      () => normalizeRendererNativeResult("coreStarMapCatalogProjection", invalid, catalogContext()),
+      { code: "NATIVE_PROTOCOL_INVALID" },
+    );
+  }
+});
+
 test("stellar workspace projections use trusted direct IPC and checksummed bounded transfer only", () => {
   const main = readFileSync(path.join(root, "desktop", "main.cjs"), "utf8");
   const preload = readFileSync(path.join(root, "desktop", "preload.cjs"), "utf8");
@@ -608,29 +780,36 @@ test("stellar workspace projections use trusted direct IPC and checksummed bound
   const nativeCore = readFileSync(path.join(root, "src", "game", "nativeCore.ts"), "utf8");
 
   assert.match(main, /desktop:native-core-star-map-overview-projection"[\s\S]*?coreStarMapOverviewProjection[\s\S]*?starMapOverviewProjection\(ownerId, request\)/);
+  assert.match(main, /desktop:native-core-star-map-catalog-projection"[\s\S]*?coreStarMapCatalogProjection[\s\S]*?starMapCatalogProjection\(ownerId, request\)/);
   assert.match(main, /desktop:native-core-stellar-industry-projection"[\s\S]*?coreStellarIndustryProjection[\s\S]*?stellarIndustryProjection\(ownerId, request\)/);
   assert.match(main, /desktop:native-core-stellar-industry-v2-projection"[\s\S]*?coreStellarIndustryProjectionV2[\s\S]*?stellarIndustryProjectionV2\(ownerId, request\)/);
   assert.match(main, /desktop:native-core-stellar-quantum-projection"[\s\S]*?coreStellarQuantumProjection[\s\S]*?stellarQuantumProjection\(ownerId, request\)/);
   assert.match(main, /"star-map-overview-v1"[\s\S]*?nativeStarMapOverviewProjectionResultContext/);
+  assert.match(main, /"star-map-catalog-v1"[\s\S]*?nativeStarMapCatalogProjectionResultContext/);
   assert.match(main, /"stellar-industry-v1"[\s\S]*?nativeStellarIndustryProjectionResultContext/);
   assert.match(main, /"stellar-quantum-v1"[\s\S]*?nativeStellarQuantumProjectionResultContext/);
   assert.match(preload, /MAX_STELLAR_PROJECTION_REQUEST_BYTES = 32_768/);
   assert.match(preload, /getNativeCoreStarMapOverviewProjection:[\s\S]*?desktop:native-core-star-map-overview-projection/);
+  assert.match(preload, /getNativeCoreStarMapCatalogProjection:[\s\S]*?desktop:native-core-star-map-catalog-projection/);
   assert.match(preload, /getNativeCoreStellarIndustryProjection:[\s\S]*?desktop:native-core-stellar-industry-projection/);
   assert.match(preload, /getNativeCoreStellarIndustryV2Projection:[\s\S]*?desktop:native-core-stellar-industry-v2-projection/);
   assert.match(preload, /getNativeCoreStellarQuantumProjection:[\s\S]*?desktop:native-core-stellar-quantum-projection/);
   assert.match(host, /MAX_STELLAR_PROJECTION_PAGE_ROWS = 64[\s\S]*?starMapOverviewProjection\(ownerId, request\)/);
+  assert.match(host, /starMapCatalogProjection\(ownerId, request\)[\s\S]*?coreStarMapCatalogProjection/);
   assert.match(host, /stellarIndustryProjection\(ownerId, request\)[\s\S]*?bounded IPC limit/);
   assert.match(host, /stellarIndustryProjectionV2\(ownerId, request\)[\s\S]*?coreStellarIndustryProjectionV2/);
   assert.match(host, /stellarQuantumProjection\(ownerId, request\)[\s\S]*?coreStellarQuantumProjection/);
   assert.match(desktop, /projectionType:\s*"star-map-overview-v1"/);
+  assert.match(desktop, /projectionType:\s*"star-map-catalog-v1"/);
   assert.match(desktop, /projectionType:\s*"stellar-industry-v1"/);
   assert.match(desktop, /projectionType:\s*"stellar-industry-v2"/);
   assert.match(desktop, /projectionType:\s*"stellar-quantum-v1"/);
   assert.match(nativeCore, /starMapOverviewProjection\([\s\S]*?decodeNativeCoreProjectionTransfer/);
+  assert.match(nativeCore, /starMapCatalogProjection\([\s\S]*?decodeNativeCoreProjectionTransfer/);
   assert.match(nativeCore, /stellarIndustryProjection\([\s\S]*?decodeNativeCoreProjectionTransfer/);
   assert.match(nativeCore, /stellarQuantumProjection\([\s\S]*?decodeNativeCoreProjectionTransfer/);
   assert.doesNotMatch(nativeCore, /starMapOverviewProjection\([\s\S]{0,2500}?getNativeCoreProjection\(/);
+  assert.doesNotMatch(nativeCore, /starMapCatalogProjection\([\s\S]{0,2500}?getNativeCoreProjection\(/);
   assert.doesNotMatch(nativeCore, /stellarIndustryProjection\([\s\S]{0,2500}?getNativeCoreProjection\(/);
   assert.doesNotMatch(nativeCore, /stellarQuantumProjection\([\s\S]{0,2500}?getNativeCoreProjection\(/);
 });

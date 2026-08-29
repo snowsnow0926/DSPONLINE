@@ -387,6 +387,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.ok(hello.capabilities.includes("native-core-star-map-overview-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-stellar-industry-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-stellar-industry-projection-v2"));
+  assert.ok(hello.capabilities.includes("native-core-star-map-catalog-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-stellar-quantum-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-v47-stream-export-v1"));
   assert.ok(hello.capabilities.includes("native-core-player-authority-tick-v1"));
@@ -618,6 +619,34 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.equal(starMapOverview.systems.rows[0].systemId, "helios");
   assert.deepEqual(starMapOverview.systems.rows.map((row) => row.firstPlanetId), ["home"]);
 
+  const starMapCatalogRequest = {
+    operation: "coreStarMapCatalogProjection",
+    sessionId: opened.sessionId,
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    systemCursor: 0,
+    systemLimit: 64,
+    planetCursor: 0,
+    planetLimit: 64,
+  };
+  const starMapCatalog = await client.request(starMapCatalogRequest);
+  assert.doesNotThrow(() => normalizeRendererNativeResult(
+    "coreStarMapCatalogProjection",
+    starMapCatalog,
+    {
+      sessionId: opened.sessionId,
+      expectedRevision: 2,
+      expectedRegistryFingerprint: "builtin:test",
+      systemCursor: 0,
+      systemLimit: 64,
+      planetCursor: 0,
+      planetLimit: 64,
+    },
+  ));
+  assert.equal(starMapCatalog.projectionType, "star-map-catalog-v1");
+  assert.deepEqual(starMapCatalog.planets.rows.map((row) => row.planetId), ["home"]);
+  assert.deepEqual(starMapCatalog.planets.rows[0].profile.resourceIds.rows, []);
+
   const stellarIndustryRequest = {
     operation: "coreStellarIndustryProjection",
     sessionId: opened.sessionId,
@@ -713,6 +742,10 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   await assert.rejects(
     client.request({ ...starMapRequest, expectedRevision: 1 }),
     /identity is stale/i,
+  );
+  await assert.rejects(
+    client.request({ ...starMapCatalogRequest, planetLimit: 65 }),
+    /page limit is invalid/i,
   );
   await assert.rejects(
     client.request({ ...stellarIndustryRequest, expectedRegistryFingerprint: "builtin:other" }),

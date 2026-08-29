@@ -495,6 +495,27 @@ function normalizeStarMapOverviewProjectionContext(value, label) {
   };
 }
 
+function normalizeStarMapCatalogProjectionContext(value, label) {
+  const source = exactObject(value, [
+    "sessionId", "expectedRevision", "expectedRegistryFingerprint", "systemCursor",
+    "systemLimit", "planetCursor", "planetLimit",
+  ], label);
+  requireStellarRequestByteBudget(source, label);
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} registry fingerprint`,
+      256,
+    ),
+    systemCursor: stellarCursor(source.systemCursor, `${label} system cursor`),
+    systemLimit: stellarPageLimit(source.systemLimit, `${label} system limit`),
+    planetCursor: stellarCursor(source.planetCursor, `${label} planet cursor`),
+    planetLimit: stellarPageLimit(source.planetLimit, `${label} planet limit`),
+  };
+}
+
 function normalizeStellarIndustryProjectionContext(value, label) {
   const source = exactObject(value, [
     "sessionId", "expectedRevision", "expectedRegistryFingerprint", "systemId", "planetId",
@@ -2068,6 +2089,22 @@ function normalizeStellarProjectionLimits(value, label) {
   return limits;
 }
 
+function normalizeStarMapCatalogProjectionLimits(value, label) {
+  const source = exactObject(value, [
+    "requestBytes", "projectionBytes", "pageRows", "labelBytes", "nestedRows", "tagRows",
+  ], label);
+  const base = normalizeStellarProjectionLimits({
+    requestBytes: source.requestBytes,
+    projectionBytes: source.projectionBytes,
+    pageRows: source.pageRows,
+    labelBytes: source.labelBytes,
+  }, label);
+  const nestedRows = safeInteger(source.nestedRows, `${label}.nestedRows`, 1);
+  const tagRows = safeInteger(source.tagRows, `${label}.tagRows`, 1);
+  if (nestedRows !== 64 || tagRows !== 32) throw protocolError(`${label} binding`);
+  return { ...base, nestedRows, tagRows };
+}
+
 function stellarLabel(value, label, minimumBytes = 0) {
   const result = boundedReadModelText(value, label, 512, minimumBytes);
   if (/\p{Cc}/u.test(result)) throw protocolError(label);
@@ -2297,6 +2334,339 @@ function normalizeCoreStarMapOverviewProjection(value, context) {
     galaxySeed: safeInteger(source.galaxySeed, "native star-map overview galaxy seed"),
     summary,
     systems,
+  };
+}
+
+function normalizeStarMapCatalogList(value, maximumRows, label, normalizeRow, rowKey) {
+  const source = exactObject(value, ["totalCount", "truncated", "rows"], label);
+  const totalCount = safeInteger(source.totalCount, `${label}.totalCount`);
+  if (totalCount > 65_536 || !Array.isArray(source.rows) ||
+      source.rows.length !== Math.min(totalCount, maximumRows)) {
+    throw protocolError(`${label} cardinality`);
+  }
+  const truncated = boolean(source.truncated, `${label}.truncated`);
+  if (truncated !== (totalCount > source.rows.length)) throw protocolError(`${label} truncation`);
+  const rows = source.rows.map((row, index) => normalizeRow(row, `${label}.rows[${index}]`));
+  if (rowKey) {
+    const seen = new Set();
+    for (let index = 0; index < rows.length; index += 1) {
+      const key = rowKey(rows[index]);
+      if (seen.has(key)) throw protocolError(`${label}.rows[${index}]`);
+      seen.add(key);
+    }
+  }
+  return { totalCount, truncated, rows };
+}
+
+function normalizeCoreStarMapCatalogProjection(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "revision", "registryFingerprint", "stateVersion",
+    "limits", "request", "activePlanetId", "activeSystemId", "galaxySeed", "summary",
+    "truncated", "systems", "planets",
+  ], "native star-map catalog projection");
+  if (source.schemaVersion !== 1 || source.projectionType !== "star-map-catalog-v1") {
+    throw protocolError("native star-map catalog projection identity");
+  }
+  requireProjectionByteBudget(source, "native star-map catalog projection");
+  const projectionContext = normalizeStarMapCatalogProjectionContext(
+    context,
+    "native star-map catalog projection context",
+  );
+  const revision = safeInteger(source.revision, "native star-map catalog revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native star-map catalog registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint || source.stateVersion !== 47) {
+    throw protocolError("native star-map catalog identity binding");
+  }
+  const limits = normalizeStarMapCatalogProjectionLimits(
+    source.limits,
+    "native star-map catalog limits",
+  );
+  const requestSource = exactObject(source.request, [
+    "expectedRevision", "expectedRegistryFingerprint", "systemCursor", "systemLimit",
+    "planetCursor", "planetLimit",
+  ], "native star-map catalog echoed request");
+  const echoed = normalizeStarMapCatalogProjectionContext({
+    sessionId: projectionContext.sessionId,
+    ...requestSource,
+  }, "native star-map catalog echoed request");
+  for (const key of [
+    "expectedRevision", "expectedRegistryFingerprint", "systemCursor", "systemLimit",
+    "planetCursor", "planetLimit",
+  ]) {
+    if (echoed[key] !== projectionContext[key]) {
+      throw protocolError("native star-map catalog request binding");
+    }
+  }
+
+  const activePlanetId = opaqueId(source.activePlanetId, "native star-map catalog active planet");
+  const activeSystemId = opaqueId(source.activeSystemId, "native star-map catalog active system");
+  const systemIds = new Set();
+  const systems = normalizeStellarPage(
+    source.systems,
+    echoed.systemCursor,
+    echoed.systemLimit,
+    "native star-map catalog systems",
+    (row, label) => {
+      const entry = exactObject(row, [
+        "systemId", "displayName", "displayNameTruncated", "starClassId", "starTypeName",
+        "starTypeNameTruncated", "positionX", "positionY", "distanceFromOriginLy",
+        "luminosity", "massMultiplier", "radiusMultiplier", "active", "discovered",
+        "missionActive", "missionElapsedSeconds", "missionDurationSeconds", "surveyProgress",
+        "firstPlanetId", "planetCount", "colonizedPlanetCount",
+      ], label);
+      const systemId = opaqueId(entry.systemId, `${label}.systemId`);
+      if (systemIds.has(systemId)) throw protocolError(`${label}.systemId`);
+      systemIds.add(systemId);
+      const active = boolean(entry.active, `${label}.active`);
+      const discovered = boolean(entry.discovered, `${label}.discovered`);
+      const planetCount = safeInteger(entry.planetCount, `${label}.planetCount`, 1);
+      const colonizedPlanetCount = safeInteger(
+        entry.colonizedPlanetCount,
+        `${label}.colonizedPlanetCount`,
+      );
+      if (colonizedPlanetCount > planetCount || active && (!discovered || systemId !== activeSystemId)) {
+        throw protocolError(`${label} cardinality binding`);
+      }
+      return {
+        systemId,
+        displayName: stellarLabel(entry.displayName, `${label}.displayName`, 1),
+        displayNameTruncated: boolean(entry.displayNameTruncated, `${label}.displayNameTruncated`),
+        starClassId: stellarNullableToken(entry.starClassId, `${label}.starClassId`),
+        starTypeName: stellarLabel(entry.starTypeName, `${label}.starTypeName`, 1),
+        starTypeNameTruncated: boolean(entry.starTypeNameTruncated, `${label}.starTypeNameTruncated`),
+        positionX: finiteNumber(entry.positionX, `${label}.positionX`, -Number.MAX_VALUE),
+        positionY: finiteNumber(entry.positionY, `${label}.positionY`, -Number.MAX_VALUE),
+        distanceFromOriginLy: finiteNumber(entry.distanceFromOriginLy, `${label}.distanceFromOriginLy`),
+        luminosity: finiteNumber(entry.luminosity, `${label}.luminosity`),
+        massMultiplier: finiteNumber(entry.massMultiplier, `${label}.massMultiplier`),
+        radiusMultiplier: finiteNumber(entry.radiusMultiplier, `${label}.radiusMultiplier`),
+        active,
+        discovered,
+        missionActive: boolean(entry.missionActive, `${label}.missionActive`),
+        missionElapsedSeconds: finiteNumber(entry.missionElapsedSeconds, `${label}.missionElapsedSeconds`),
+        missionDurationSeconds: finiteNumber(entry.missionDurationSeconds, `${label}.missionDurationSeconds`),
+        surveyProgress: stellarUnitNumber(entry.surveyProgress, `${label}.surveyProgress`),
+        firstPlanetId: opaqueId(entry.firstPlanetId, `${label}.firstPlanetId`),
+        planetCount,
+        colonizedPlanetCount,
+      };
+    },
+  );
+
+  const planetIds = new Set();
+  let nestedTruncated = false;
+  const planets = normalizeStellarPage(
+    source.planets,
+    echoed.planetCursor,
+    echoed.planetLimit,
+    "native star-map catalog planets",
+    (row, label) => {
+      const entry = exactObject(row, [
+        "planetId", "displayName", "displayNameTruncated", "systemId", "systemDisplayName",
+        "systemDisplayNameTruncated", "kind", "orbitIndex", "simulationOrder", "systemPositionX",
+        "systemPositionY", "active", "discovered", "colonized", "industryRole", "entityCount",
+        "deviceCount", "beltCount", "metadata", "profile",
+      ], label);
+      const planetId = opaqueId(entry.planetId, `${label}.planetId`);
+      if (planetIds.has(planetId)) throw protocolError(`${label}.planetId`);
+      planetIds.add(planetId);
+      const systemId = opaqueId(entry.systemId, `${label}.systemId`);
+      const active = boolean(entry.active, `${label}.active`);
+      const discovered = boolean(entry.discovered, `${label}.discovered`);
+      const colonized = boolean(entry.colonized, `${label}.colonized`);
+      if (active && (planetId !== activePlanetId || systemId !== activeSystemId || !colonized) ||
+          colonized && !discovered) {
+        throw protocolError(`${label} authority binding`);
+      }
+      const metadataSource = exactObject(entry.metadata, [
+        "note", "noteTruncated", "tagTextTruncated", "tags",
+      ], `${label}.metadata`);
+      const tags = normalizeStarMapCatalogList(
+        metadataSource.tags,
+        limits.tagRows,
+        `${label}.metadata.tags`,
+        (tag, tagLabel) => stellarLabel(tag, tagLabel, 1),
+        (tag) => tag,
+      );
+      const metadata = {
+        note: stellarLabel(metadataSource.note, `${label}.metadata.note`),
+        noteTruncated: boolean(metadataSource.noteTruncated, `${label}.metadata.noteTruncated`),
+        tagTextTruncated: boolean(
+          metadataSource.tagTextTruncated,
+          `${label}.metadata.tagTextTruncated`,
+        ),
+        tags,
+      };
+      const profileSource = exactObject(entry.profile, [
+        "climateName", "climateNameTruncated", "oceanType", "specialization",
+        "specializationName", "specializationNameTruncated", "tidalLocked", "sulfuricOcean",
+        "windMultiplier", "solarMultiplier", "geothermalMultiplier", "miningMultiplier",
+        "orbitalYieldMultiplier", "reserveScale", "travelTimeMultiplier",
+        "productionSpeedMultiplier", "surveyDurationSeconds", "resourceIds", "rareResourceIds",
+        "orbitalYields",
+      ], `${label}.profile`);
+      const normalizeItems = (value, listLabel) => normalizeStarMapCatalogList(
+        value,
+        limits.nestedRows,
+        listLabel,
+        (itemId, itemLabel) => opaqueId(itemId, itemLabel),
+        (itemId) => itemId,
+      );
+      const resourceIds = normalizeItems(profileSource.resourceIds, `${label}.profile.resourceIds`);
+      const rareResourceIds = normalizeItems(
+        profileSource.rareResourceIds,
+        `${label}.profile.rareResourceIds`,
+      );
+      const orbitalYields = normalizeStarMapCatalogList(
+        profileSource.orbitalYields,
+        limits.nestedRows,
+        `${label}.profile.orbitalYields`,
+        (value, yieldLabel) => {
+          const yieldSource = exactObject(value, ["itemId", "rate"], yieldLabel);
+          return {
+            itemId: opaqueId(yieldSource.itemId, `${yieldLabel}.itemId`),
+            rate: finiteNumber(yieldSource.rate, `${yieldLabel}.rate`),
+          };
+        },
+        (value) => value.itemId,
+      );
+      for (let index = 1; index < orbitalYields.rows.length; index += 1) {
+        if (orbitalYields.rows[index - 1].itemId >= orbitalYields.rows[index].itemId) {
+          throw protocolError(`${label}.profile.orbitalYields order`);
+        }
+      }
+      nestedTruncated ||= metadata.noteTruncated || metadata.tagTextTruncated || tags.truncated || resourceIds.truncated ||
+        rareResourceIds.truncated || orbitalYields.truncated;
+      return {
+        planetId,
+        displayName: stellarLabel(entry.displayName, `${label}.displayName`, 1),
+        displayNameTruncated: boolean(entry.displayNameTruncated, `${label}.displayNameTruncated`),
+        systemId,
+        systemDisplayName: stellarLabel(entry.systemDisplayName, `${label}.systemDisplayName`, 1),
+        systemDisplayNameTruncated: boolean(
+          entry.systemDisplayNameTruncated,
+          `${label}.systemDisplayNameTruncated`,
+        ),
+        kind: stellarLabel(entry.kind, `${label}.kind`, 1),
+        orbitIndex: safeInteger(entry.orbitIndex, `${label}.orbitIndex`),
+        simulationOrder: safeInteger(entry.simulationOrder, `${label}.simulationOrder`),
+        systemPositionX: finiteNumber(entry.systemPositionX, `${label}.systemPositionX`, -Number.MAX_VALUE),
+        systemPositionY: finiteNumber(entry.systemPositionY, `${label}.systemPositionY`, -Number.MAX_VALUE),
+        active,
+        discovered,
+        colonized,
+        industryRole: oneOf(
+          entry.industryRole,
+          ["auto", "mining", "smelting", "manufacturing", "chemical", "research", "logistics", "power"],
+          `${label}.industryRole`,
+        ),
+        entityCount: safeInteger(entry.entityCount, `${label}.entityCount`),
+        deviceCount: finiteNumber(entry.deviceCount, `${label}.deviceCount`),
+        beltCount: safeInteger(entry.beltCount, `${label}.beltCount`),
+        metadata,
+        profile: {
+          climateName: stellarLabel(profileSource.climateName, `${label}.profile.climateName`, 1),
+          climateNameTruncated: boolean(
+            profileSource.climateNameTruncated,
+            `${label}.profile.climateNameTruncated`,
+          ),
+          oceanType: stellarLabel(profileSource.oceanType, `${label}.profile.oceanType`, 1),
+          specialization: stellarLabel(profileSource.specialization, `${label}.profile.specialization`, 1),
+          specializationName: stellarLabel(
+            profileSource.specializationName,
+            `${label}.profile.specializationName`,
+          ),
+          specializationNameTruncated: boolean(
+            profileSource.specializationNameTruncated,
+            `${label}.profile.specializationNameTruncated`,
+          ),
+          tidalLocked: boolean(profileSource.tidalLocked, `${label}.profile.tidalLocked`),
+          sulfuricOcean: boolean(profileSource.sulfuricOcean, `${label}.profile.sulfuricOcean`),
+          windMultiplier: finiteNumber(profileSource.windMultiplier, `${label}.profile.windMultiplier`),
+          solarMultiplier: finiteNumber(profileSource.solarMultiplier, `${label}.profile.solarMultiplier`),
+          geothermalMultiplier: finiteNumber(
+            profileSource.geothermalMultiplier,
+            `${label}.profile.geothermalMultiplier`,
+          ),
+          miningMultiplier: finiteNumber(profileSource.miningMultiplier, `${label}.profile.miningMultiplier`),
+          orbitalYieldMultiplier: finiteNumber(
+            profileSource.orbitalYieldMultiplier,
+            `${label}.profile.orbitalYieldMultiplier`,
+          ),
+          reserveScale: finiteNumber(profileSource.reserveScale, `${label}.profile.reserveScale`),
+          travelTimeMultiplier: finiteNumber(
+            profileSource.travelTimeMultiplier,
+            `${label}.profile.travelTimeMultiplier`,
+          ),
+          productionSpeedMultiplier: finiteNumber(
+            profileSource.productionSpeedMultiplier,
+            `${label}.profile.productionSpeedMultiplier`,
+          ),
+          surveyDurationSeconds: finiteNumber(
+            profileSource.surveyDurationSeconds,
+            `${label}.profile.surveyDurationSeconds`,
+          ),
+          resourceIds,
+          rareResourceIds,
+          orbitalYields,
+        },
+      };
+    },
+  );
+
+  const summarySource = exactObject(source.summary, [
+    "systemCount", "unlockedSystemCount", "planetCount", "colonizedPlanetCount",
+  ], "native star-map catalog summary");
+  const summary = {
+    systemCount: safeInteger(summarySource.systemCount, "native star-map catalog system count", 1),
+    unlockedSystemCount: safeInteger(
+      summarySource.unlockedSystemCount,
+      "native star-map catalog unlocked system count",
+      1,
+    ),
+    planetCount: safeInteger(summarySource.planetCount, "native star-map catalog planet count", 1),
+    colonizedPlanetCount: safeInteger(
+      summarySource.colonizedPlanetCount,
+      "native star-map catalog colonized planet count",
+      1,
+    ),
+  };
+  if (systems.totalCount !== summary.systemCount || planets.totalCount !== summary.planetCount ||
+      summary.unlockedSystemCount > summary.systemCount ||
+      summary.colonizedPlanetCount > summary.planetCount) {
+    throw protocolError("native star-map catalog summary binding");
+  }
+  const truncated = boolean(source.truncated, "native star-map catalog truncated");
+  if (truncated !== (systems.nextCursor !== null || planets.nextCursor !== null || nestedTruncated)) {
+    throw protocolError("native star-map catalog truncation binding");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "star-map-catalog-v1",
+    revision,
+    registryFingerprint,
+    stateVersion: 47,
+    limits,
+    request: {
+      expectedRevision: echoed.expectedRevision,
+      expectedRegistryFingerprint: echoed.expectedRegistryFingerprint,
+      systemCursor: echoed.systemCursor,
+      systemLimit: echoed.systemLimit,
+      planetCursor: echoed.planetCursor,
+      planetLimit: echoed.planetLimit,
+    },
+    activePlanetId,
+    activeSystemId,
+    galaxySeed: safeInteger(source.galaxySeed, "native star-map catalog galaxy seed"),
+    summary,
+    truncated,
+    systems,
+    planets,
   };
 }
 
@@ -3668,6 +4038,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreTechnologyProjection: normalizeCoreTechnologyProjection,
   coreRecipeWorkspaceProjection: normalizeCoreRecipeWorkspaceProjection,
   coreStarMapOverviewProjection: normalizeCoreStarMapOverviewProjection,
+  coreStarMapCatalogProjection: normalizeCoreStarMapCatalogProjection,
   coreStellarIndustryProjection: normalizeCoreStellarIndustryProjection,
   coreStellarIndustryProjectionV2: normalizeCoreStellarIndustryV2Projection,
   coreStellarQuantumProjection: normalizeCoreStellarQuantumProjection,

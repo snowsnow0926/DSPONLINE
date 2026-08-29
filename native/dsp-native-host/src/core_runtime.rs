@@ -2789,6 +2789,27 @@ impl CoreRegistry {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn star_map_catalog_projection(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        system_cursor: usize,
+        system_limit: usize,
+        planet_cursor: usize,
+        planet_limit: usize,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?.star_map_catalog_projection(
+            expected_revision,
+            expected_registry_fingerprint,
+            system_cursor,
+            system_limit,
+            planet_cursor,
+            planet_limit,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn stellar_industry_projection(
         &self,
         session_id: &str,

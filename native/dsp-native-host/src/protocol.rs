@@ -248,6 +248,17 @@ pub enum ControlRequest {
         cursor: usize,
         limit: usize,
     },
+    CoreStarMapCatalogProjection {
+        session_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        #[serde(default)]
+        system_cursor: usize,
+        system_limit: usize,
+        #[serde(default)]
+        planet_cursor: usize,
+        planet_limit: usize,
+    },
     CoreStellarIndustryProjection {
         session_id: String,
         expected_revision: u64,
@@ -816,6 +827,38 @@ mod tests {
                 assert_eq!(limit, 16);
             }
             _ => panic!("star-map overview decoded as the wrong variant"),
+        }
+
+        let catalog = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreStarMapCatalogProjection",
+            "sessionId": "core-1",
+            "expectedRevision": 42,
+            "expectedRegistryFingerprint": "builtin:test",
+            "systemCursor": 8,
+            "systemLimit": 16,
+            "planetCursor": 24,
+            "planetLimit": 32
+        }))
+        .unwrap();
+        match catalog {
+            ControlRequest::CoreStarMapCatalogProjection {
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                system_cursor,
+                system_limit,
+                planet_cursor,
+                planet_limit,
+            } => {
+                assert_eq!(session_id, "core-1");
+                assert_eq!(expected_revision, 42);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(system_cursor, 8);
+                assert_eq!(system_limit, 16);
+                assert_eq!(planet_cursor, 24);
+                assert_eq!(planet_limit, 32);
+            }
+            _ => panic!("star-map catalog decoded as the wrong variant"),
         }
 
         let industry = serde_json::from_value::<ControlRequest>(json!({

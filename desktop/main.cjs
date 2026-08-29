@@ -631,6 +631,18 @@ function nativeStarMapOverviewProjectionResultContext(request) {
   };
 }
 
+function nativeStarMapCatalogProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    systemCursor: request?.systemCursor,
+    systemLimit: request?.systemLimit,
+    planetCursor: request?.planetCursor,
+    planetLimit: request?.planetLimit,
+  };
+}
+
 function nativeStellarIndustryProjectionResultContext(request) {
   return {
     sessionId: request?.sessionId,
@@ -1270,6 +1282,20 @@ ipcMain.handle("desktop:native-core-star-map-overview-projection", async (event,
   });
 });
 
+ipcMain.handle("desktop:native-core-star-map-catalog-projection", async (event, request) => {
+  return runRendererNativeOperation("coreStarMapCatalogProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生星图目录投影请求失败，请重试",
+    resultContext: nativeStarMapCatalogProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "star-map-catalog-v1", request);
+    }
+    return await nativeCoreSessions.starMapCatalogProjection(ownerId, request);
+  });
+});
+
 ipcMain.handle("desktop:native-core-stellar-industry-projection", async (event, request) => {
   return runRendererNativeOperation("coreStellarIndustryProjection", {
     fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
@@ -1338,7 +1364,7 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
     if (!request || typeof request !== "object" ||
       !validNativeLogicalId(request.sessionId, 128) ||
       !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
-      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1"].includes(request.projectionType) ||
+      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object" ||
       Object.prototype.hasOwnProperty.call(request.payload, "sessionId")) {
       throw new Error("原生投影二进制请求无效");
@@ -1363,6 +1389,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       rawResult = await nativeCoreSessions.recipeWorkspaceProjection(ownerId, normalizedRequest);
     } else if (request.projectionType === "star-map-overview-v1") {
       rawResult = await nativeCoreSessions.starMapOverviewProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "star-map-catalog-v1") {
+      rawResult = await nativeCoreSessions.starMapCatalogProjection(ownerId, normalizedRequest);
     } else if (request.projectionType === "stellar-industry-v1") {
       rawResult = await nativeCoreSessions.stellarIndustryProjection(ownerId, normalizedRequest);
     } else if (request.projectionType === "stellar-industry-v2") {
@@ -1385,7 +1413,9 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                 ? "coreRecipeWorkspaceProjection"
                 : request.projectionType === "star-map-overview-v1"
                   ? "coreStarMapOverviewProjection"
-                  : request.projectionType === "stellar-industry-v1"
+                  : request.projectionType === "star-map-catalog-v1"
+                    ? "coreStarMapCatalogProjection"
+                    : request.projectionType === "stellar-industry-v1"
                     ? "coreStellarIndustryProjection"
                   : request.projectionType === "stellar-industry-v2"
                     ? "coreStellarIndustryProjectionV2"
@@ -1405,7 +1435,9 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                 ? nativeRecipeWorkspaceProjectionResultContext(normalizedRequest)
                 : request.projectionType === "star-map-overview-v1"
                   ? nativeStarMapOverviewProjectionResultContext(normalizedRequest)
-                  : request.projectionType === "stellar-industry-v1"
+                  : request.projectionType === "star-map-catalog-v1"
+                    ? nativeStarMapCatalogProjectionResultContext(normalizedRequest)
+                    : request.projectionType === "stellar-industry-v1"
                     ? nativeStellarIndustryProjectionResultContext(normalizedRequest)
                   : request.projectionType === "stellar-industry-v2"
                     ? nativeStellarIndustryV2ProjectionResultContext(normalizedRequest)

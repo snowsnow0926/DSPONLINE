@@ -22,6 +22,8 @@ import {
   type DesktopNativeCoreRecipeWorkspaceProjectionResult,
   type DesktopNativeCoreStarMapOverviewProjectionRequest,
   type DesktopNativeCoreStarMapOverviewProjectionResult,
+  type DesktopNativeCoreStarMapCatalogProjectionRequest,
+  type DesktopNativeCoreStarMapCatalogProjectionResult,
   type DesktopNativeCoreStellarIndustryProjectionRequest,
   type DesktopNativeCoreStellarIndustryProjectionResult,
   type DesktopNativeCoreStellarIndustryV2ProjectionRequest,
@@ -47,6 +49,7 @@ type NativeCoreTransferProjection =
   | DesktopNativeCoreTechnologyProjectionResult
   | DesktopNativeCoreRecipeWorkspaceProjectionResult
   | DesktopNativeCoreStarMapOverviewProjectionResult
+  | DesktopNativeCoreStarMapCatalogProjectionResult
   | DesktopNativeCoreStellarIndustryProjectionResult
   | DesktopNativeCoreStellarIndustryV2ProjectionResult
   | DesktopNativeCoreStellarQuantumProjectionResult;
@@ -98,6 +101,7 @@ export interface WindowsNativeCoreShadow {
   technologyProjection(request: Omit<DesktopNativeCoreTechnologyProjectionRequest, "sessionId">): Promise<DesktopNativeCoreTechnologyProjectionResult>;
   recipeWorkspaceProjection(request: Omit<DesktopNativeCoreRecipeWorkspaceProjectionRequest, "sessionId">): Promise<DesktopNativeCoreRecipeWorkspaceProjectionResult>;
   starMapOverviewProjection(request: Omit<DesktopNativeCoreStarMapOverviewProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStarMapOverviewProjectionResult>;
+  starMapCatalogProjection?(request: Omit<DesktopNativeCoreStarMapCatalogProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStarMapCatalogProjectionResult>;
   stellarIndustryProjection(request: Omit<DesktopNativeCoreStellarIndustryProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStellarIndustryProjectionResult>;
   stellarIndustryV2Projection(request: Omit<DesktopNativeCoreStellarIndustryV2ProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStellarIndustryV2ProjectionResult>;
   stellarQuantumProjection?(request: Omit<DesktopNativeCoreStellarQuantumProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStellarQuantumProjectionResult>;
@@ -421,6 +425,29 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
       throw new Error("Windows 原生星图总览投影不可用");
     }
     return desktop.getNativeCoreStarMapOverviewProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async starMapCatalogProjection(
+    request: Omit<DesktopNativeCoreStarMapCatalogProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreStarMapCatalogProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "star-map-catalog-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreStarMapCatalogProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "star-map-catalog-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreStarMapCatalogProjection !== "function") {
+      throw new Error("Windows 原生星图目录投影不可用");
+    }
+    return desktop.getNativeCoreStarMapCatalogProjection({ sessionId: this.sessionId, ...request });
   }
 
   async stellarIndustryProjection(

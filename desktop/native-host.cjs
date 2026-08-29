@@ -65,7 +65,7 @@ function normalizeNativeHostSpawnEnvironment(value = {}) {
 
 function encodeNativeProjectionTransfer({ sessionId, sequence, projectionType, result }) {
   if (!validLogicalId(sessionId, 128) || !Number.isSafeInteger(sequence) || sequence < 1 ||
-    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1"].includes(projectionType) || !result || typeof result !== "object" ||
+    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1"].includes(projectionType) || !result || typeof result !== "object" ||
     result.schemaVersion !== (["viewport-v2", "stellar-industry-v2"].includes(projectionType) ? 2 : 1) || result.projectionType !== projectionType ||
     !Number.isSafeInteger(result.revision) || result.revision < 0) {
     throw new TypeError("native core projection transfer is invalid");
@@ -1085,6 +1085,42 @@ class NativeCoreSessionRegistry {
     };
     if (Buffer.byteLength(JSON.stringify(hostRequest), "utf8") > MAX_STELLAR_PROJECTION_REQUEST_BYTES) {
       throw new RangeError("native star-map overview projection request exceeds the bounded IPC limit");
+    }
+    return this.requestOwned(ownerId, request.sessionId, hostRequest);
+  }
+
+  starMapCatalogProjection(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    const allowedKeys = new Set([
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "systemCursor",
+      "systemLimit", "planetCursor", "planetLimit",
+    ]);
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+      Reflect.ownKeys(request).some((key) => typeof key !== "string" || !allowedKeys.has(key)) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256) ||
+      !Number.isSafeInteger(request.systemCursor) || request.systemCursor < 0 ||
+      request.systemCursor > 0xffff_ffff ||
+      !Number.isSafeInteger(request.systemLimit) || request.systemLimit < 1 ||
+      request.systemLimit > MAX_STELLAR_PROJECTION_PAGE_ROWS ||
+      !Number.isSafeInteger(request.planetCursor) || request.planetCursor < 0 ||
+      request.planetCursor > 0xffff_ffff ||
+      !Number.isSafeInteger(request.planetLimit) || request.planetLimit < 1 ||
+      request.planetLimit > MAX_STELLAR_PROJECTION_PAGE_ROWS) {
+      throw new TypeError("native star-map catalog projection request is invalid");
+    }
+    const hostRequest = {
+      operation: "coreStarMapCatalogProjection",
+      sessionId: request.sessionId,
+      expectedRevision: request.expectedRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      systemCursor: request.systemCursor,
+      systemLimit: request.systemLimit,
+      planetCursor: request.planetCursor,
+      planetLimit: request.planetLimit,
+    };
+    if (Buffer.byteLength(JSON.stringify(hostRequest), "utf8") > MAX_STELLAR_PROJECTION_REQUEST_BYTES) {
+      throw new RangeError("native star-map catalog projection request exceeds the bounded IPC limit");
     }
     return this.requestOwned(ownerId, request.sessionId, hostRequest);
   }

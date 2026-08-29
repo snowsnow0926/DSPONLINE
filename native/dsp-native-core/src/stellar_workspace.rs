@@ -15,6 +15,7 @@ use serde_json::{Map, Value, json};
 use crate::state::CoreState;
 
 const STAR_MAP_SCHEMA: &str = "star-map-overview-v1";
+const STAR_MAP_CATALOG_SCHEMA: &str = "star-map-catalog-v1";
 const STELLAR_INDUSTRY_SCHEMA: &str = "stellar-industry-v1";
 const STELLAR_INDUSTRY_V2_SCHEMA: &str = "stellar-industry-v2";
 const STELLAR_QUANTUM_SCHEMA: &str = "stellar-quantum-v1";
@@ -22,6 +23,8 @@ const MAX_PAGE_ROWS: usize = 64;
 const MAX_REQUEST_BYTES: usize = 32_768;
 const MAX_PROJECTION_BYTES: usize = 1_048_576;
 const MAX_LABEL_BYTES: usize = 512;
+const MAX_CATALOG_NESTED_ROWS: usize = 64;
+const MAX_CATALOG_TAG_ROWS: usize = 32;
 const MAX_QUERY_BYTES: usize = 512;
 const MAX_PATH_VISITS: usize = 200_000;
 const MAX_QUANTUM_ITEM_ROWS: usize = 4_096;
@@ -245,6 +248,138 @@ fn bounded_token(value: Option<&Value>) -> Option<&str> {
     value
         .and_then(Value::as_str)
         .filter(|value| value.len() <= 64 && !value.chars().any(char::is_control))
+}
+
+fn bounded_catalog_item_ids(
+    state: &CoreState,
+    value: Option<&Value>,
+    label: &'static str,
+) -> anyhow::Result<Value> {
+    let values = match value {
+        Some(Value::Array(values)) => values,
+        Some(Value::Null) | None => {
+            return Ok(json!({
+                "totalCount": 0,
+                "truncated": false,
+                "rows": [],
+            }));
+        }
+        Some(_) => bail!("native star-map catalog {label} is invalid"),
+    };
+    let mut seen = HashSet::with_capacity(values.len().min(MAX_CATALOG_NESTED_ROWS));
+    let mut rows = Vec::with_capacity(values.len().min(MAX_CATALOG_NESTED_ROWS));
+    for value in values {
+        let item_id = value
+            .as_str()
+            .filter(|item_id| state.catalog.items.contains_key(*item_id))
+            .ok_or_else(|| anyhow!("native star-map catalog {label} contains an unknown item"))?;
+        if !seen.insert(item_id) {
+            bail!("native star-map catalog {label} contains a duplicate item");
+        }
+        if rows.len() < MAX_CATALOG_NESTED_ROWS {
+            rows.push(item_id);
+        }
+    }
+    Ok(json!({
+        "totalCount": values.len(),
+        "truncated": values.len() > rows.len(),
+        "rows": rows,
+    }))
+}
+
+fn bounded_catalog_orbital_yields(
+    state: &CoreState,
+    value: Option<&Value>,
+    fallback: &HashMap<String, f64>,
+) -> anyhow::Result<Value> {
+    let mut entries = match value {
+        Some(Value::Object(values)) => values
+            .iter()
+            .map(|(item_id, rate)| {
+                if !state.catalog.items.contains_key(item_id) {
+                    bail!("native star-map catalog orbital yield contains an unknown item");
+                }
+                let rate = rate
+                    .as_f64()
+                    .filter(|rate| rate.is_finite() && *rate >= 0.0)
+                    .ok_or_else(|| anyhow!("native star-map catalog orbital yield is invalid"))?;
+                Ok((item_id.as_str(), rate))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?,
+        Some(Value::Null) | None => fallback
+            .iter()
+            .map(|(item_id, rate)| {
+                if !state.catalog.items.contains_key(item_id) || !rate.is_finite() || *rate < 0.0 {
+                    bail!("native star-map catalog fallback orbital yield is invalid");
+                }
+                Ok((item_id.as_str(), *rate))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?,
+        Some(_) => bail!("native star-map catalog orbital yields are invalid"),
+    };
+    entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    let total_count = entries.len();
+    let rows = entries
+        .into_iter()
+        .take(MAX_CATALOG_NESTED_ROWS)
+        .map(|(item_id, rate)| json!({ "itemId": item_id, "rate": rate }))
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "totalCount": total_count,
+        "truncated": total_count > rows.len(),
+        "rows": rows,
+    }))
+}
+
+fn bounded_catalog_metadata(base: &Map<String, Value>, planet_id: &str) -> anyhow::Result<Value> {
+    let metadata = nested_object(object_at(base, "galaxy"), "planetMetadata")
+        .and_then(|directory| directory.get(planet_id))
+        .and_then(Value::as_object);
+    let (note, note_truncated) = bounded_label(
+        metadata
+            .and_then(|value| value.get("note"))
+            .and_then(Value::as_str),
+        "",
+    );
+    let tags = match metadata.and_then(|value| value.get("tags")) {
+        Some(Value::Array(tags)) => tags,
+        Some(Value::Null) | None => {
+            return Ok(json!({
+                "note": note,
+                "noteTruncated": note_truncated,
+                "tagTextTruncated": false,
+                "tags": { "totalCount": 0, "truncated": false, "rows": [] },
+            }));
+        }
+        Some(_) => bail!("native star-map catalog metadata tags are invalid"),
+    };
+    let mut seen = HashSet::with_capacity(tags.len().min(MAX_CATALOG_TAG_ROWS));
+    let mut rows = Vec::with_capacity(tags.len().min(MAX_CATALOG_TAG_ROWS));
+    let mut tag_text_truncated = false;
+    for tag in tags {
+        let tag = tag
+            .as_str()
+            .filter(|tag| !tag.is_empty() && !tag.chars().any(char::is_control))
+            .ok_or_else(|| anyhow!("native star-map catalog metadata tag is invalid"))?;
+        if !seen.insert(tag) {
+            bail!("native star-map catalog metadata contains a duplicate tag");
+        }
+        if rows.len() < MAX_CATALOG_TAG_ROWS {
+            let (bounded, truncated) = bounded_label(Some(tag), "");
+            tag_text_truncated |= truncated;
+            rows.push(bounded);
+        }
+    }
+    Ok(json!({
+        "note": note,
+        "noteTruncated": note_truncated,
+        "tagTextTruncated": tag_text_truncated,
+        "tags": {
+            "totalCount": tags.len(),
+            "truncated": tags.len() > rows.len(),
+            "rows": rows,
+        },
+    }))
 }
 
 fn object_at<'a>(base: &'a Map<String, Value>, key: &str) -> Option<&'a Map<String, Value>> {
@@ -2409,6 +2544,292 @@ fn scan_quantum_collectors(state: &CoreState) -> anyhow::Result<QuantumCollector
 }
 
 impl CoreState {
+    /// Returns the complete star-system and planet directory through two
+    /// independently pageable lanes. The projection is intentionally free of
+    /// industry selectors so a renderer cannot mistake a scoped logistics
+    /// page for the global map catalog.
+    #[allow(clippy::too_many_arguments)]
+    pub fn star_map_catalog_projection(
+        &self,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        system_cursor: usize,
+        system_limit: usize,
+        planet_cursor: usize,
+        planet_limit: usize,
+    ) -> anyhow::Result<Value> {
+        validate_identity(self, expected_revision, expected_registry_fingerprint)?;
+        validate_page(system_cursor, system_limit)?;
+        validate_page(planet_cursor, planet_limit)?;
+        let request = json!({
+            "expectedRevision": expected_revision,
+            "expectedRegistryFingerprint": expected_registry_fingerprint,
+            "systemCursor": system_cursor,
+            "systemLimit": system_limit,
+            "planetCursor": planet_cursor,
+            "planetLimit": planet_limit,
+        });
+        validate_request(&request)?;
+
+        let base = self.base_value();
+        let active_planet_id = base
+            .get("activePlanetId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("native star-map catalog active planet is invalid"))?;
+        let active_planet = self
+            .catalog
+            .planets
+            .iter()
+            .find(|planet| planet.id == active_planet_id)
+            .ok_or_else(|| anyhow!("native star-map catalog active planet is missing"))?;
+        let exploration = object_at(base, "exploration");
+        let unlocked_systems =
+            known_members(exploration.and_then(|value| value.get("unlockedSystemIds")));
+        let colonized_planets =
+            known_members(exploration.and_then(|value| value.get("colonizedPlanetIds")));
+        let systems = system_directory(self);
+        if system_cursor > systems.len() {
+            bail!("native star-map catalog system cursor is invalid");
+        }
+        let planet_indices = systems
+            .iter()
+            .flat_map(|system| system.planet_indices.iter().copied())
+            .collect::<Vec<_>>();
+        if planet_cursor > planet_indices.len() {
+            bail!("native star-map catalog planet cursor is invalid");
+        }
+
+        let system_rows = systems
+            .iter()
+            .skip(system_cursor)
+            .take(system_limit)
+            .map(|system| {
+                let (display_name, display_name_truncated) =
+                    system_label(self, system.system_id);
+                let profile = system_profile(base, system.system_id);
+                let (star_type_name, star_type_name_truncated) = bounded_label(
+                    profile
+                        .and_then(|value| value.get("starTypeName"))
+                        .and_then(Value::as_str),
+                    system.system_id,
+                );
+                let mission = exploration
+                    .and_then(|value| value.get("missions"))
+                    .and_then(Value::as_array)
+                    .and_then(|missions| {
+                        missions.iter().find(|mission| {
+                            mission.get("systemId").and_then(Value::as_str)
+                                == Some(system.system_id)
+                        })
+                    });
+                let unlocked = system.system_id == active_planet.system_id
+                    || unlocked_systems.contains(system.system_id);
+                let survey_progress = exploration
+                    .and_then(|value| value.get("surveyProgressBySystem"))
+                    .and_then(Value::as_object)
+                    .and_then(|value| value.get(system.system_id))
+                    .and_then(Value::as_f64)
+                    .filter(|value| value.is_finite())
+                    .unwrap_or(if unlocked { 1.0 } else { 0.0 })
+                    .clamp(0.0, 1.0);
+                let colonized_planet_count = system
+                    .planet_indices
+                    .iter()
+                    .filter(|index| {
+                        let planet = &self.catalog.planets[**index];
+                        planet.id == active_planet_id
+                            || colonized_planets.contains(planet.id.as_str())
+                    })
+                    .count();
+                Ok::<Value, anyhow::Error>(json!({
+                    "systemId": system.system_id,
+                    "displayName": display_name,
+                    "displayNameTruncated": display_name_truncated,
+                    "starClassId": bounded_token(profile.and_then(|value| value.get("starClassId"))),
+                    "starTypeName": star_type_name,
+                    "starTypeNameTruncated": star_type_name_truncated,
+                    "positionX": finite_number(profile.and_then(|value| value.get("positionX"))),
+                    "positionY": finite_number(profile.and_then(|value| value.get("positionY"))),
+                    "distanceFromOriginLy": non_negative_number(profile.and_then(|value| value.get("distanceFromOriginLy"))),
+                    "luminosity": non_negative_number(profile.and_then(|value| value.get("luminosity"))),
+                    "massMultiplier": non_negative_number(profile.and_then(|value| value.get("massMultiplier"))),
+                    "radiusMultiplier": non_negative_number(profile.and_then(|value| value.get("radiusMultiplier"))),
+                    "active": system.system_id == active_planet.system_id,
+                    "discovered": unlocked,
+                    "missionActive": mission.is_some(),
+                    "missionElapsedSeconds": non_negative_number(mission.and_then(|value| value.get("elapsedSeconds"))),
+                    "missionDurationSeconds": non_negative_number(mission.and_then(|value| value.get("durationSeconds"))),
+                    "surveyProgress": survey_progress,
+                    "firstPlanetId": system.planet_indices.first().map(|index| self.catalog.planets[*index].id.as_str()),
+                    "planetCount": system.planet_indices.len(),
+                    "colonizedPlanetCount": colonized_planet_count,
+                }))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let mut nested_truncated = false;
+        let planet_rows = planet_indices
+            .iter()
+            .skip(planet_cursor)
+            .take(planet_limit)
+            .map(|&planet_index| {
+                let planet = &self.catalog.planets[planet_index];
+                let profile = planet_profile(base, &planet.id);
+                let star_profile = system_profile(base, &planet.system_id);
+                let (display_name, display_name_truncated) = planet_label(self, planet_index);
+                let (system_display_name, system_display_name_truncated) =
+                    system_label(self, &planet.system_id);
+                let (climate_name, climate_name_truncated) = bounded_label(
+                    profile
+                        .and_then(|value| value.get("climateName"))
+                        .and_then(Value::as_str),
+                    &planet.kind,
+                );
+                let (specialization_name, specialization_name_truncated) = bounded_label(
+                    profile
+                        .and_then(|value| value.get("specializationName"))
+                        .and_then(Value::as_str),
+                    "",
+                );
+                let resources = bounded_catalog_item_ids(
+                    self,
+                    profile.and_then(|value| value.get("resourceIds")),
+                    "resource IDs",
+                )?;
+                let rare_resources = bounded_catalog_item_ids(
+                    self,
+                    profile.and_then(|value| value.get("rareResourceIds")),
+                    "rare resource IDs",
+                )?;
+                let orbital_yields = bounded_catalog_orbital_yields(
+                    self,
+                    profile.and_then(|value| value.get("orbitalYields")),
+                    &planet.orbital_yields,
+                )?;
+                let metadata = bounded_catalog_metadata(base, &planet.id)?;
+                let row_truncated = [
+                    &resources,
+                    &rare_resources,
+                    &orbital_yields,
+                    &metadata["tags"],
+                ]
+                .into_iter()
+                .any(|value| value.get("truncated").and_then(Value::as_bool) == Some(true))
+                    || metadata
+                        .get("noteTruncated")
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                    || metadata
+                        .get("tagTextTruncated")
+                        .and_then(Value::as_bool)
+                        == Some(true);
+                nested_truncated |= row_truncated;
+                let role = nested_object(object_at(base, "galaxy"), "planetRoles")
+                    .and_then(|roles| roles.get(&planet.id))
+                    .and_then(Value::as_str)
+                    .filter(|role| matches!(*role, "auto" | "mining" | "smelting" | "manufacturing" | "chemical" | "research" | "logistics" | "power"))
+                    .unwrap_or("auto");
+                Ok::<Value, anyhow::Error>(json!({
+                    "planetId": planet.id,
+                    "displayName": display_name,
+                    "displayNameTruncated": display_name_truncated,
+                    "systemId": planet.system_id,
+                    "systemDisplayName": system_display_name,
+                    "systemDisplayNameTruncated": system_display_name_truncated,
+                    "kind": planet.kind,
+                    "orbitIndex": planet.orbit_index,
+                    "simulationOrder": planet.simulation_order,
+                    "systemPositionX": finite_number(star_profile.and_then(|value| value.get("positionX"))),
+                    "systemPositionY": finite_number(star_profile.and_then(|value| value.get("positionY"))),
+                    "active": planet.id == active_planet_id,
+                    "discovered": planet.system_id == active_planet.system_id || unlocked_systems.contains(planet.system_id.as_str()),
+                    "colonized": planet.id == active_planet_id || colonized_planets.contains(planet.id.as_str()),
+                    "industryRole": role,
+                    "entityCount": self.factory_topology.entities_by_planet[planet_index].len(),
+                    "deviceCount": self.factory_topology.device_counts_by_planet[planet_index].max(0.0),
+                    "beltCount": self.factory_topology.belt_counts_by_planet[planet_index],
+                    "metadata": metadata,
+                    "profile": {
+                        "climateName": climate_name,
+                        "climateNameTruncated": climate_name_truncated,
+                        "oceanType": bounded_token(profile.and_then(|value| value.get("oceanType"))).unwrap_or("none"),
+                        "specialization": bounded_token(profile.and_then(|value| value.get("specialization"))).unwrap_or("balanced"),
+                        "specializationName": specialization_name,
+                        "specializationNameTruncated": specialization_name_truncated,
+                        "tidalLocked": profile.and_then(|value| value.get("tidalLocked")).and_then(Value::as_bool).unwrap_or(false),
+                        "sulfuricOcean": profile.and_then(|value| value.get("sulfuricOcean")).and_then(Value::as_bool).unwrap_or(false),
+                        "windMultiplier": non_negative_number(profile.and_then(|value| value.get("windMultiplier"))),
+                        "solarMultiplier": non_negative_number(profile.and_then(|value| value.get("solarMultiplier"))),
+                        "geothermalMultiplier": non_negative_number(profile.and_then(|value| value.get("geothermalMultiplier"))),
+                        "miningMultiplier": non_negative_number(profile.and_then(|value| value.get("miningMultiplier"))),
+                        "orbitalYieldMultiplier": non_negative_number(profile.and_then(|value| value.get("orbitalYieldMultiplier"))),
+                        "reserveScale": non_negative_number(profile.and_then(|value| value.get("reserveScale"))),
+                        "travelTimeMultiplier": non_negative_number(profile.and_then(|value| value.get("travelTimeMultiplier"))),
+                        "productionSpeedMultiplier": non_negative_number(profile.and_then(|value| value.get("productionSpeedMultiplier"))),
+                        "surveyDurationSeconds": non_negative_number(profile.and_then(|value| value.get("surveyDurationSeconds"))),
+                        "resourceIds": resources,
+                        "rareResourceIds": rare_resources,
+                        "orbitalYields": orbital_yields,
+                    },
+                }))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let total_systems = systems.len();
+        let total_planets = planet_indices.len();
+        let unlocked_system_count = systems
+            .iter()
+            .filter(|system| {
+                system.system_id == active_planet.system_id
+                    || unlocked_systems.contains(system.system_id)
+            })
+            .count();
+        let colonized_planet_count = self
+            .catalog
+            .planets
+            .iter()
+            .filter(|planet| {
+                planet.id == active_planet_id || colonized_planets.contains(planet.id.as_str())
+            })
+            .count();
+        let system_page = page_value(system_cursor, system_limit, total_systems, system_rows)?;
+        let planet_page = page_value(planet_cursor, planet_limit, total_planets, planet_rows)?;
+        let truncated = nested_truncated
+            || system_page["nextCursor"].is_number()
+            || planet_page["nextCursor"].is_number();
+        finish_projection(json!({
+            "schemaVersion": 1,
+            "projectionType": STAR_MAP_CATALOG_SCHEMA,
+            "revision": self.revision,
+            "registryFingerprint": self.catalog.snapshot.registry_fingerprint,
+            "stateVersion": self.identity.state_version,
+            "limits": {
+                "requestBytes": MAX_REQUEST_BYTES,
+                "projectionBytes": MAX_PROJECTION_BYTES,
+                "pageRows": MAX_PAGE_ROWS,
+                "labelBytes": MAX_LABEL_BYTES,
+                "nestedRows": MAX_CATALOG_NESTED_ROWS,
+                "tagRows": MAX_CATALOG_TAG_ROWS,
+            },
+            "request": request,
+            "activePlanetId": active_planet_id,
+            "activeSystemId": active_planet.system_id,
+            "galaxySeed": object_at(base, "galaxy")
+                .and_then(|value| value.get("seed"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            "summary": {
+                "systemCount": total_systems,
+                "unlockedSystemCount": unlocked_system_count,
+                "planetCount": total_planets,
+                "colonizedPlanetCount": colonized_planet_count,
+            },
+            "truncated": truncated,
+            "systems": system_page,
+            "planets": planet_page,
+        }))
+    }
+
     /// Returns a stable page of star systems with direct display labels,
     /// generated galaxy coordinates, exploration state, and aggregated
     /// industry/logistics counters. No entity or route record is exported.
@@ -3428,12 +3849,12 @@ mod tests {
                     "tau": { "starTypeName": "红矮星", "luminosity": 0.7, "positionX": 30, "positionY": 40, "distanceFromOriginLy": 50 }
                 },
                 "profiles": {
-                    "home": { "climateName": "温带", "oceanType": "water", "specialization": "balanced", "specializationName": "均衡工业", "tidalLocked": false, "windMultiplier": 1.1, "solarMultiplier": 1.2, "geothermalMultiplier": 0.8, "miningMultiplier": 1, "orbitalYieldMultiplier": 1, "reserveScale": 1.5, "travelTimeMultiplier": 1 },
+                    "home": { "climateName": "温带", "oceanType": "water", "specialization": "balanced", "specializationName": "均衡工业", "tidalLocked": false, "windMultiplier": 1.1, "solarMultiplier": 1.2, "geothermalMultiplier": 0.8, "miningMultiplier": 1, "orbitalYieldMultiplier": 1, "reserveScale": 1.5, "travelTimeMultiplier": 1, "productionSpeedMultiplier": 1.05, "surveyDurationSeconds": 60, "resourceIds": ["iron_ore", "copper_ore"], "rareResourceIds": ["copper_ore"], "orbitalYields": { "copper_ore": 0.25 } },
                     "ashen": { "climateName": "荒漠", "oceanType": "none", "specialization": "smelting", "specializationName": "冶炼", "tidalLocked": true },
                     "tau-one": { "climateName": "冰原", "oceanType": "ice", "specialization": "logistics", "specializationName": "物流" }
                 },
                 "planetRoles": { "home": "manufacturing", "ashen": "smelting", "tau-one": "auto" },
-                "planetMetadata": { "ashen": { "customName": "灰烬前哨" } },
+                "planetMetadata": { "home": { "note": "主生产基地", "tags": ["白糖", "科研"] }, "ashen": { "customName": "灰烬前哨" } },
                 "systemMetadata": { "helios": { "customName": "太阳系" } }
             },
             "planetMetrics": {
@@ -3834,6 +4255,98 @@ mod tests {
         assert_eq!(second["systems"]["nextCursor"], Value::Null);
         assert!(serde_json::to_vec(&first).unwrap().len() <= MAX_PROJECTION_BYTES);
         assert_eq!(state.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn star_map_catalog_pages_all_systems_and_planets_without_industry_scope() {
+        let state = state();
+        let before = state.canonical_sha256().unwrap();
+        let first = state
+            .star_map_catalog_projection(41, "stellar-test", 0, 1, 0, 1)
+            .unwrap();
+        assert_eq!(first["projectionType"], STAR_MAP_CATALOG_SCHEMA);
+        assert_eq!(first["revision"], 41);
+        assert_eq!(first["systems"]["totalCount"], 2);
+        assert_eq!(first["systems"]["nextCursor"], 1);
+        assert_eq!(first["systems"]["rows"][0]["systemId"], "helios");
+        assert_eq!(first["systems"]["rows"][0]["displayName"], "太阳系");
+        assert_eq!(first["planets"]["totalCount"], 3);
+        assert_eq!(first["planets"]["nextCursor"], 1);
+        assert_eq!(first["planets"]["rows"][0]["planetId"], "home");
+        assert_eq!(first["planets"]["rows"][0]["industryRole"], "manufacturing");
+        assert_eq!(
+            first["planets"]["rows"][0]["profile"]["resourceIds"]["rows"][1],
+            "copper_ore"
+        );
+        assert_eq!(
+            first["planets"]["rows"][0]["profile"]["rareResourceIds"]["rows"][0],
+            "copper_ore"
+        );
+        assert_eq!(
+            first["planets"]["rows"][0]["profile"]["orbitalYields"]["rows"][0]["itemId"],
+            "copper_ore"
+        );
+        assert_eq!(
+            first["planets"]["rows"][0]["metadata"]["note"],
+            "主生产基地"
+        );
+        assert_eq!(
+            first["planets"]["rows"][0]["metadata"]["tags"]["rows"][1],
+            "科研"
+        );
+
+        let repeated = state
+            .star_map_catalog_projection(41, "stellar-test", 0, 1, 0, 1)
+            .unwrap();
+        assert_eq!(first, repeated);
+        let last = state
+            .star_map_catalog_projection(41, "stellar-test", 1, 1, 2, 1)
+            .unwrap();
+        assert_eq!(last["systems"]["rows"][0]["systemId"], "tau");
+        assert_eq!(last["systems"]["nextCursor"], Value::Null);
+        assert_eq!(last["planets"]["rows"][0]["planetId"], "tau-one");
+        assert_eq!(last["planets"]["nextCursor"], Value::Null);
+        assert!(serde_json::to_vec(&first).unwrap().len() <= MAX_PROJECTION_BYTES);
+        assert_eq!(state.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn star_map_catalog_rejects_stale_identity_and_invalid_mod_resources() {
+        let mut state = state();
+        assert!(
+            state
+                .star_map_catalog_projection(40, "stellar-test", 0, 64, 0, 64)
+                .is_err()
+        );
+        assert!(
+            state
+                .star_map_catalog_projection(41, "other", 0, 64, 0, 64)
+                .is_err()
+        );
+        state
+            .base_value_mut()
+            .get_mut("galaxy")
+            .and_then(Value::as_object_mut)
+            .and_then(|galaxy| galaxy.get_mut("profiles"))
+            .and_then(Value::as_object_mut)
+            .and_then(|profiles| profiles.get_mut("home"))
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert("resourceIds".to_owned(), json!(["missing-mod:item"]));
+        assert!(
+            state
+                .star_map_catalog_projection(41, "stellar-test", 0, 64, 0, 64)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn bounded_catalog_labels_never_split_utf8_scalars() {
+        let long = "星".repeat(MAX_LABEL_BYTES);
+        let (bounded, truncated) = bounded_label(Some(&long), "fallback");
+        assert!(truncated);
+        assert!(bounded.len() <= MAX_LABEL_BYTES);
+        assert!(bounded.chars().all(|character| character == '星'));
     }
 
     #[test]

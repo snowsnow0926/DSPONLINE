@@ -306,6 +306,30 @@ pub enum ControlRequest {
         collector_cursor: usize,
         collector_limit: usize,
     },
+    CoreDysonWorkspaceProjection {
+        session_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        selected_system_id: String,
+        #[serde(default)]
+        system_cursor: usize,
+        system_limit: usize,
+        #[serde(default)]
+        layer_cursor: usize,
+        layer_limit: usize,
+        #[serde(default)]
+        orbit_cursor: usize,
+        orbit_limit: usize,
+        #[serde(default)]
+        node_cursor: usize,
+        node_limit: usize,
+        #[serde(default)]
+        frame_cursor: usize,
+        frame_limit: usize,
+        #[serde(default)]
+        shell_cursor: usize,
+        shell_limit: usize,
+    },
     CoreApplyCommand {
         session_id: String,
         command: SimulationCommandPatch,
@@ -1004,6 +1028,73 @@ mod tests {
                 assert_eq!(collector_limit, 16);
             }
             _ => panic!("stellar-quantum projection decoded as the wrong variant"),
+        }
+    }
+
+    #[test]
+    fn dyson_workspace_protocol_preserves_exact_identity_and_all_page_selectors() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreDysonWorkspaceProjection",
+            "sessionId": "core-dyson",
+            "expectedRevision": 47,
+            "expectedRegistryFingerprint": "builtin:test",
+            "selectedSystemId": "mod:星系/Ω🚀",
+            "systemCursor": 1,
+            "systemLimit": 2,
+            "layerCursor": 3,
+            "layerLimit": 4,
+            "orbitCursor": 5,
+            "orbitLimit": 6,
+            "nodeCursor": 7,
+            "nodeLimit": 8,
+            "frameCursor": 9,
+            "frameLimit": 10,
+            "shellCursor": 11,
+            "shellLimit": 12
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreDysonWorkspaceProjection {
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                selected_system_id,
+                system_cursor,
+                system_limit,
+                layer_cursor,
+                layer_limit,
+                orbit_cursor,
+                orbit_limit,
+                node_cursor,
+                node_limit,
+                frame_cursor,
+                frame_limit,
+                shell_cursor,
+                shell_limit,
+            } => {
+                assert_eq!(session_id, "core-dyson");
+                assert_eq!(expected_revision, 47);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(selected_system_id, "mod:星系/Ω🚀");
+                assert_eq!(
+                    [
+                        system_cursor,
+                        system_limit,
+                        layer_cursor,
+                        layer_limit,
+                        orbit_cursor,
+                        orbit_limit,
+                        node_cursor,
+                        node_limit,
+                        frame_cursor,
+                        frame_limit,
+                        shell_cursor,
+                        shell_limit,
+                    ],
+                    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+                );
+            }
+            _ => panic!("Dyson workspace decoded as the wrong variant"),
         }
     }
 }

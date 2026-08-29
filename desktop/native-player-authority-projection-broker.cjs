@@ -22,6 +22,7 @@ const PROJECTION_METHODS = Object.freeze({
   "stellar-industry-v1": "stellarIndustryProjection",
   "stellar-industry-v2": "stellarIndustryProjectionV2",
   "stellar-quantum-v1": "stellarQuantumProjection",
+  "dyson-workspace-v1": "dysonWorkspaceProjection",
 });
 
 class NativePlayerAuthorityProjectionBrokerError extends Error {

@@ -17,6 +17,7 @@ const MAX_COMMAND_PALETTE_ROWS = 16;
 const MAX_STELLAR_PROJECTION_REQUEST_BYTES = 32_768;
 const MAX_STELLAR_PROJECTION_PAGE_ROWS = 64;
 const MAX_STELLAR_ROUTE_QUERY_BYTES = 512;
+const MAX_DYSON_WORKSPACE_ID_BYTES = 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
 const NATIVE_EXACT_REALTIME_LEASE_CAPABILITY = "native-core-exact-realtime-lease-v2";
 const NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY =
@@ -65,7 +66,7 @@ function normalizeNativeHostSpawnEnvironment(value = {}) {
 
 function encodeNativeProjectionTransfer({ sessionId, sequence, projectionType, result }) {
   if (!validLogicalId(sessionId, 128) || !Number.isSafeInteger(sequence) || sequence < 1 ||
-    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1"].includes(projectionType) || !result || typeof result !== "object" ||
+    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(projectionType) || !result || typeof result !== "object" ||
     result.schemaVersion !== (["viewport-v2", "stellar-industry-v2"].includes(projectionType) ? 2 : 1) || result.projectionType !== projectionType ||
     !Number.isSafeInteger(result.revision) || result.revision < 0) {
     throw new TypeError("native core projection transfer is invalid");
@@ -293,6 +294,15 @@ function validLogicalId(value, maximumLength) {
 function validOpaqueId(value, maximumBytes = 512) {
   return typeof value === "string" && value.length > 0 && !value.includes("\0") &&
     Buffer.byteLength(value, "utf8") <= maximumBytes;
+}
+
+function validDysonWorkspaceId(value) {
+  return validOpaqueId(value, MAX_DYSON_WORKSPACE_ID_BYTES) &&
+    !/[\u0000-\u001f\u007f-\u009f]/u.test(value) &&
+    !Array.from(value).some((character) => {
+      const code = character.charCodeAt(0);
+      return character.length === 1 && code >= 0xd800 && code <= 0xdfff;
+    });
 }
 
 function exactObjectKeys(value, keys, label) {
@@ -1249,6 +1259,58 @@ class NativeCoreSessionRegistry {
     };
     if (Buffer.byteLength(JSON.stringify(hostRequest), "utf8") > MAX_STELLAR_PROJECTION_REQUEST_BYTES) {
       throw new RangeError("native stellar quantum projection request exceeds the bounded IPC limit");
+    }
+    return this.requestOwned(ownerId, request.sessionId, hostRequest);
+  }
+
+  dysonWorkspaceProjection(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    const allowedKeys = new Set([
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "selectedSystemId",
+      "systemCursor", "systemLimit", "layerCursor", "layerLimit", "orbitCursor",
+      "orbitLimit", "nodeCursor", "nodeLimit", "frameCursor", "frameLimit",
+      "shellCursor", "shellLimit",
+    ]);
+    const pages = [
+      [request?.systemCursor, request?.systemLimit],
+      [request?.layerCursor, request?.layerLimit],
+      [request?.orbitCursor, request?.orbitLimit],
+      [request?.nodeCursor, request?.nodeLimit],
+      [request?.frameCursor, request?.frameLimit],
+      [request?.shellCursor, request?.shellLimit],
+    ];
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+      Reflect.ownKeys(request).some((key) => typeof key !== "string" || !allowedKeys.has(key)) ||
+      allowedKeys.size !== Reflect.ownKeys(request).length ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256) ||
+      !validDysonWorkspaceId(request.selectedSystemId) ||
+      pages.some(([cursor, limit]) => !Number.isSafeInteger(cursor) || cursor < 0 ||
+        cursor > 0xffff_ffff || !Number.isSafeInteger(limit) || limit < 1 ||
+        limit > MAX_STELLAR_PROJECTION_PAGE_ROWS)) {
+      throw new TypeError("native Dyson workspace projection request is invalid");
+    }
+    const hostRequest = {
+      operation: "coreDysonWorkspaceProjection",
+      sessionId: request.sessionId,
+      expectedRevision: request.expectedRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      selectedSystemId: request.selectedSystemId,
+      systemCursor: request.systemCursor,
+      systemLimit: request.systemLimit,
+      layerCursor: request.layerCursor,
+      layerLimit: request.layerLimit,
+      orbitCursor: request.orbitCursor,
+      orbitLimit: request.orbitLimit,
+      nodeCursor: request.nodeCursor,
+      nodeLimit: request.nodeLimit,
+      frameCursor: request.frameCursor,
+      frameLimit: request.frameLimit,
+      shellCursor: request.shellCursor,
+      shellLimit: request.shellLimit,
+    };
+    if (Buffer.byteLength(JSON.stringify(hostRequest), "utf8") > MAX_STELLAR_PROJECTION_REQUEST_BYTES) {
+      throw new RangeError("native Dyson workspace projection request exceeds the bounded IPC limit");
     }
     return this.requestOwned(ownerId, request.sessionId, hostRequest);
   }

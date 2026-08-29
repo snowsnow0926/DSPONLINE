@@ -2888,6 +2888,45 @@ impl CoreRegistry {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn dyson_workspace_projection(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        selected_system_id: &str,
+        system_cursor: usize,
+        system_limit: usize,
+        layer_cursor: usize,
+        layer_limit: usize,
+        orbit_cursor: usize,
+        orbit_limit: usize,
+        node_cursor: usize,
+        node_limit: usize,
+        frame_cursor: usize,
+        frame_limit: usize,
+        shell_cursor: usize,
+        shell_limit: usize,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?.dyson_workspace_projection(
+            expected_revision,
+            expected_registry_fingerprint,
+            selected_system_id,
+            system_cursor,
+            system_limit,
+            layer_cursor,
+            layer_limit,
+            orbit_cursor,
+            orbit_limit,
+            node_cursor,
+            node_limit,
+            frame_cursor,
+            frame_limit,
+            shell_cursor,
+            shell_limit,
+        )
+    }
+
     pub fn apply_command(
         &mut self,
         session_id: &str,

@@ -592,6 +592,38 @@ function normalizeStellarQuantumProjectionContext(value, label) {
   };
 }
 
+function normalizeDysonWorkspaceProjectionContext(value, label) {
+  const source = exactObject(value, [
+    "sessionId", "expectedRevision", "expectedRegistryFingerprint", "selectedSystemId",
+    "systemCursor", "systemLimit", "layerCursor", "layerLimit", "orbitCursor",
+    "orbitLimit", "nodeCursor", "nodeLimit", "frameCursor", "frameLimit",
+    "shellCursor", "shellLimit",
+  ], label);
+  requireStellarRequestByteBudget(source, label);
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} registry fingerprint`,
+      256,
+    ),
+    selectedSystemId: dysonId(source.selectedSystemId, `${label} selected system`),
+    systemCursor: stellarCursor(source.systemCursor, `${label} system cursor`),
+    systemLimit: stellarPageLimit(source.systemLimit, `${label} system limit`),
+    layerCursor: stellarCursor(source.layerCursor, `${label} layer cursor`),
+    layerLimit: stellarPageLimit(source.layerLimit, `${label} layer limit`),
+    orbitCursor: stellarCursor(source.orbitCursor, `${label} orbit cursor`),
+    orbitLimit: stellarPageLimit(source.orbitLimit, `${label} orbit limit`),
+    nodeCursor: stellarCursor(source.nodeCursor, `${label} node cursor`),
+    nodeLimit: stellarPageLimit(source.nodeLimit, `${label} node limit`),
+    frameCursor: stellarCursor(source.frameCursor, `${label} frame cursor`),
+    frameLimit: stellarPageLimit(source.frameLimit, `${label} frame limit`),
+    shellCursor: stellarCursor(source.shellCursor, `${label} shell cursor`),
+    shellLimit: stellarPageLimit(source.shellLimit, `${label} shell limit`),
+  };
+}
+
 function normalizeProjectionBase(value, allowedFields, label, budget) {
   const source = jsonObject(value, label);
   const keys = Reflect.ownKeys(source);
@@ -2111,6 +2143,32 @@ function stellarLabel(value, label, minimumBytes = 0) {
   return result;
 }
 
+function dysonId(value, label) {
+  const result = opaqueId(value, label, 1_024);
+  if (/\p{Cc}/u.test(result)) throw protocolError(label);
+  return result;
+}
+
+function dysonOptionalId(value, label) {
+  return value === null ? null : dysonId(value, label);
+}
+
+function dysonLabel(value, label) {
+  const result = opaqueId(value, label, 512);
+  if (/\p{Cc}/u.test(result)) throw protocolError(label);
+  return result;
+}
+
+function dysonInteger(value, label) {
+  return safeInteger(value, label);
+}
+
+function dysonUnitNumber(value, label) {
+  const result = finiteNumber(value, label);
+  if (result > 1) throw protocolError(label);
+  return result;
+}
+
 function stellarNullableToken(value, label) {
   if (value === null) return null;
   const result = boundedReadModelText(value, label, 64);
@@ -3538,6 +3596,465 @@ function normalizeCoreStellarQuantumProjection(value, context) {
   };
 }
 
+function normalizeDysonEngineering(value, label) {
+  const source = exactObject(value, [
+    "launchMode", "launchThrottle", "launchEnabled", "orbitCount", "orbitSails",
+    "queuedSails", "queuedRockets", "sailLaunchesPerMinute", "rocketLaunchesPerMinute",
+    "launchEnergyPerSailMj", "launchEnergyPerRocketMj", "launchEnergyPerMinuteMj",
+    "rayGenerationKw", "receiverCapacityKw", "operationalReceiverCapacityKw",
+    "receiverLoadKw", "theoreticalReceptionRate", "receiverUtilization",
+    "dysonPowerUtilization", "configuredReceiverCount", "blockedReceiverCount",
+    "criticalPhotonPerMinute", "antimatterPerMinute", "feedbackGenerationKw",
+    "plannedStructurePoints", "completedStructurePoints", "remainingStructurePoints",
+    "shellCapacity", "shellSails", "projectedGenerationKw",
+  ], label);
+  const result = {
+    launchMode: oneOf(source.launchMode, ["balanced", "swarm", "sphere"], `${label}.launchMode`),
+    launchThrottle: oneOf(source.launchThrottle, [0.25, 0.5, 0.75, 1], `${label}.launchThrottle`),
+    launchEnabled: boolean(source.launchEnabled, `${label}.launchEnabled`),
+    orbitCount: dysonInteger(source.orbitCount, `${label}.orbitCount`),
+    orbitSails: dysonInteger(source.orbitSails, `${label}.orbitSails`),
+    queuedSails: dysonInteger(source.queuedSails, `${label}.queuedSails`),
+    queuedRockets: dysonInteger(source.queuedRockets, `${label}.queuedRockets`),
+    sailLaunchesPerMinute: finiteNumber(source.sailLaunchesPerMinute, `${label}.sailLaunchesPerMinute`),
+    rocketLaunchesPerMinute: finiteNumber(source.rocketLaunchesPerMinute, `${label}.rocketLaunchesPerMinute`),
+    launchEnergyPerSailMj: finiteNumber(source.launchEnergyPerSailMj, `${label}.launchEnergyPerSailMj`),
+    launchEnergyPerRocketMj: finiteNumber(source.launchEnergyPerRocketMj, `${label}.launchEnergyPerRocketMj`),
+    launchEnergyPerMinuteMj: finiteNumber(source.launchEnergyPerMinuteMj, `${label}.launchEnergyPerMinuteMj`),
+    rayGenerationKw: finiteNumber(source.rayGenerationKw, `${label}.rayGenerationKw`),
+    receiverCapacityKw: finiteNumber(source.receiverCapacityKw, `${label}.receiverCapacityKw`),
+    operationalReceiverCapacityKw: finiteNumber(source.operationalReceiverCapacityKw, `${label}.operationalReceiverCapacityKw`),
+    receiverLoadKw: finiteNumber(source.receiverLoadKw, `${label}.receiverLoadKw`),
+    theoreticalReceptionRate: dysonUnitNumber(source.theoreticalReceptionRate, `${label}.theoreticalReceptionRate`),
+    receiverUtilization: dysonUnitNumber(source.receiverUtilization, `${label}.receiverUtilization`),
+    dysonPowerUtilization: dysonUnitNumber(source.dysonPowerUtilization, `${label}.dysonPowerUtilization`),
+    configuredReceiverCount: dysonInteger(source.configuredReceiverCount, `${label}.configuredReceiverCount`),
+    blockedReceiverCount: dysonInteger(source.blockedReceiverCount, `${label}.blockedReceiverCount`),
+    criticalPhotonPerMinute: finiteNumber(source.criticalPhotonPerMinute, `${label}.criticalPhotonPerMinute`),
+    antimatterPerMinute: finiteNumber(source.antimatterPerMinute, `${label}.antimatterPerMinute`),
+    feedbackGenerationKw: finiteNumber(source.feedbackGenerationKw, `${label}.feedbackGenerationKw`),
+    plannedStructurePoints: dysonInteger(source.plannedStructurePoints, `${label}.plannedStructurePoints`),
+    completedStructurePoints: dysonInteger(source.completedStructurePoints, `${label}.completedStructurePoints`),
+    remainingStructurePoints: dysonInteger(source.remainingStructurePoints, `${label}.remainingStructurePoints`),
+    shellCapacity: dysonInteger(source.shellCapacity, `${label}.shellCapacity`),
+    shellSails: dysonInteger(source.shellSails, `${label}.shellSails`),
+    projectedGenerationKw: dysonInteger(source.projectedGenerationKw, `${label}.projectedGenerationKw`),
+  };
+  if (result.launchEnergyPerSailMj !== 21.6 || result.launchEnergyPerRocketMj !== 108 ||
+      result.operationalReceiverCapacityKw > result.receiverCapacityKw ||
+      result.blockedReceiverCount > result.configuredReceiverCount ||
+      result.completedStructurePoints > result.plannedStructurePoints ||
+      result.remainingStructurePoints !== result.plannedStructurePoints - result.completedStructurePoints) {
+    throw protocolError(`${label} binding`);
+  }
+  return result;
+}
+
+function normalizeDysonSystemRow(value, label, seenIds = null) {
+  const source = exactObject(value, [
+    "systemId", "displayName", "displayNameTruncated", "starProfile", "unlocked",
+    "active", "activeLayerId", "activeOrbitId", "structurePoints", "shellSails",
+    "totals", "orbitCount", "orbitSails", "projectedGenerationKw", "engineering",
+  ], label);
+  const systemId = dysonId(source.systemId, `${label}.systemId`);
+  if (seenIds?.has(systemId)) throw protocolError(`${label}.systemId`);
+  seenIds?.add(systemId);
+  const profileSource = exactObject(source.starProfile, [
+    "available", "starTypeName", "starTypeNameTruncated", "luminosity", "radiusMultiplier",
+  ], `${label}.starProfile`);
+  const starProfile = {
+    available: boolean(profileSource.available, `${label}.starProfile.available`),
+    starTypeName: dysonLabel(profileSource.starTypeName, `${label}.starProfile.starTypeName`),
+    starTypeNameTruncated: boolean(profileSource.starTypeNameTruncated, `${label}.starProfile.starTypeNameTruncated`),
+    luminosity: finiteNumber(profileSource.luminosity, `${label}.starProfile.luminosity`, Number.MIN_VALUE),
+    radiusMultiplier: finiteNumber(profileSource.radiusMultiplier, `${label}.starProfile.radiusMultiplier`, Number.MIN_VALUE),
+  };
+  const totalsSource = exactObject(source.totals, [
+    "layerCount", "nodeCount", "frameCount", "shellCount", "plannedStructurePoints",
+    "completedStructurePoints", "sailCapacity", "absorbedSails",
+  ], `${label}.totals`);
+  const totals = {
+    layerCount: dysonInteger(totalsSource.layerCount, `${label}.totals.layerCount`),
+    nodeCount: dysonInteger(totalsSource.nodeCount, `${label}.totals.nodeCount`),
+    frameCount: dysonInteger(totalsSource.frameCount, `${label}.totals.frameCount`),
+    shellCount: dysonInteger(totalsSource.shellCount, `${label}.totals.shellCount`),
+    plannedStructurePoints: dysonInteger(totalsSource.plannedStructurePoints, `${label}.totals.plannedStructurePoints`),
+    completedStructurePoints: dysonInteger(totalsSource.completedStructurePoints, `${label}.totals.completedStructurePoints`),
+    sailCapacity: dysonInteger(totalsSource.sailCapacity, `${label}.totals.sailCapacity`),
+    absorbedSails: dysonInteger(totalsSource.absorbedSails, `${label}.totals.absorbedSails`),
+  };
+  const engineering = normalizeDysonEngineering(source.engineering, `${label}.engineering`);
+  const result = {
+    systemId,
+    displayName: dysonLabel(source.displayName, `${label}.displayName`),
+    displayNameTruncated: boolean(source.displayNameTruncated, `${label}.displayNameTruncated`),
+    starProfile,
+    unlocked: boolean(source.unlocked, `${label}.unlocked`),
+    active: boolean(source.active, `${label}.active`),
+    activeLayerId: dysonOptionalId(source.activeLayerId, `${label}.activeLayerId`),
+    activeOrbitId: dysonOptionalId(source.activeOrbitId, `${label}.activeOrbitId`),
+    structurePoints: dysonInteger(source.structurePoints, `${label}.structurePoints`),
+    shellSails: dysonInteger(source.shellSails, `${label}.shellSails`),
+    totals,
+    orbitCount: dysonInteger(source.orbitCount, `${label}.orbitCount`),
+    orbitSails: dysonInteger(source.orbitSails, `${label}.orbitSails`),
+    projectedGenerationKw: dysonInteger(source.projectedGenerationKw, `${label}.projectedGenerationKw`),
+    engineering,
+  };
+  if ([totals.layerCount, totals.nodeCount, totals.frameCount, totals.shellCount, result.orbitCount]
+      .some((count) => count > 65_536) || totals.completedStructurePoints > totals.plannedStructurePoints ||
+      totals.absorbedSails !== result.shellSails ||
+      engineering.orbitCount !== result.orbitCount || engineering.orbitSails !== result.orbitSails ||
+      engineering.plannedStructurePoints !== totals.plannedStructurePoints ||
+      engineering.completedStructurePoints !== totals.completedStructurePoints ||
+      engineering.shellCapacity !== totals.sailCapacity || engineering.shellSails !== result.shellSails ||
+      engineering.projectedGenerationKw !== result.projectedGenerationKw) {
+    throw protocolError(`${label} binding`);
+  }
+  return result;
+}
+
+function normalizeCoreDysonWorkspaceProjection(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "revision", "registryFingerprint", "stateVersion",
+    "limits", "request", "activePlanetId", "activeSystemId", "selectedSystemId",
+    "technology", "global", "summary", "selectedSystem", "systems", "layers",
+    "orbits", "nodes", "frames", "shells",
+  ], "native Dyson workspace projection");
+  if (source.schemaVersion !== 1 || source.projectionType !== "dyson-workspace-v1") {
+    throw protocolError("native Dyson workspace projection identity");
+  }
+  requireProjectionByteBudget(source, "native Dyson workspace projection");
+  const projectionContext = normalizeDysonWorkspaceProjectionContext(
+    context,
+    "native Dyson workspace projection context",
+  );
+  const revision = safeInteger(source.revision, "native Dyson workspace revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native Dyson workspace registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint || source.stateVersion !== 47) {
+    throw protocolError("native Dyson workspace identity binding");
+  }
+  const limitsSource = exactObject(source.limits, [
+    "requestBytes", "projectionBytes", "pageRows", "totalRows", "idBytes", "labelBytes",
+  ], "native Dyson workspace limits");
+  const limits = Object.fromEntries(Object.entries(limitsSource).map(([key, entry]) => [
+    key,
+    safeInteger(entry, `native Dyson workspace limits.${key}`, 1),
+  ]));
+  if (limits.requestBytes !== 32_768 || limits.projectionBytes !== 1_048_576 ||
+      limits.pageRows !== 64 || limits.totalRows !== 65_536 || limits.idBytes !== 1_024 ||
+      limits.labelBytes !== 512) {
+    throw protocolError("native Dyson workspace limit binding");
+  }
+  const requestSource = exactObject(source.request, [
+    "expectedRevision", "expectedRegistryFingerprint", "selectedSystemId", "systemCursor",
+    "systemLimit", "layerCursor", "layerLimit", "orbitCursor", "orbitLimit", "nodeCursor",
+    "nodeLimit", "frameCursor", "frameLimit", "shellCursor", "shellLimit",
+  ], "native Dyson workspace echoed request");
+  const echoed = normalizeDysonWorkspaceProjectionContext({
+    sessionId: projectionContext.sessionId,
+    ...requestSource,
+  }, "native Dyson workspace echoed request");
+  for (const key of [
+    "expectedRevision", "expectedRegistryFingerprint", "selectedSystemId", "systemCursor",
+    "systemLimit", "layerCursor", "layerLimit", "orbitCursor", "orbitLimit", "nodeCursor",
+    "nodeLimit", "frameCursor", "frameLimit", "shellCursor", "shellLimit",
+  ]) {
+    if (echoed[key] !== projectionContext[key]) throw protocolError("native Dyson workspace request binding");
+  }
+  const activePlanetId = dysonId(source.activePlanetId, "native Dyson workspace active planet");
+  const activeSystemId = dysonId(source.activeSystemId, "native Dyson workspace active system");
+  const selectedSystemId = dysonId(source.selectedSystemId, "native Dyson workspace selected system");
+  if (selectedSystemId !== echoed.selectedSystemId) {
+    throw protocolError("native Dyson workspace selected system binding");
+  }
+  const technologySource = exactObject(source.technology, [
+    "programReady", "shellReady", "swarmReady",
+  ], "native Dyson workspace technology");
+  const technology = {
+    programReady: boolean(technologySource.programReady, "native Dyson workspace program readiness"),
+    shellReady: boolean(technologySource.shellReady, "native Dyson workspace shell readiness"),
+    swarmReady: boolean(technologySource.swarmReady, "native Dyson workspace swarm readiness"),
+  };
+  const globalSource = exactObject(source.global, ["sphere", "swarm", "launch"], "native Dyson workspace global");
+  const sphereSource = exactObject(globalSource.sphere, [
+    "structurePoints", "totalRocketsLaunched", "shellSails", "totalSailsAbsorbed", "generationKw",
+  ], "native Dyson workspace global sphere");
+  const swarmSource = exactObject(globalSource.swarm, [
+    "sailsInOrbit", "totalLaunched", "totalExpired", "generationKw", "receiverLoadKw",
+  ], "native Dyson workspace global swarm");
+  const launchSource = exactObject(globalSource.launch, [
+    "mode", "throttle", "enabled", "energySpentMj",
+  ], "native Dyson workspace global launch");
+  const global = {
+    sphere: {
+      structurePoints: dysonInteger(sphereSource.structurePoints, "native Dyson workspace global structure"),
+      totalRocketsLaunched: dysonInteger(sphereSource.totalRocketsLaunched, "native Dyson workspace global rockets"),
+      shellSails: dysonInteger(sphereSource.shellSails, "native Dyson workspace global shell sails"),
+      totalSailsAbsorbed: dysonInteger(sphereSource.totalSailsAbsorbed, "native Dyson workspace global absorbed sails"),
+      generationKw: dysonInteger(sphereSource.generationKw, "native Dyson workspace sphere generation"),
+    },
+    swarm: {
+      sailsInOrbit: dysonInteger(swarmSource.sailsInOrbit, "native Dyson workspace global orbit sails"),
+      totalLaunched: dysonInteger(swarmSource.totalLaunched, "native Dyson workspace global launched sails"),
+      totalExpired: dysonInteger(swarmSource.totalExpired, "native Dyson workspace global expired sails"),
+      generationKw: finiteNumber(swarmSource.generationKw, "native Dyson workspace swarm generation"),
+      receiverLoadKw: finiteNumber(swarmSource.receiverLoadKw, "native Dyson workspace receiver load"),
+    },
+    launch: {
+      mode: oneOf(launchSource.mode, ["balanced", "swarm", "sphere"], "native Dyson workspace launch mode"),
+      throttle: oneOf(launchSource.throttle, [0.25, 0.5, 0.75, 1], "native Dyson workspace launch throttle"),
+      enabled: boolean(launchSource.enabled, "native Dyson workspace launch enabled"),
+      energySpentMj: finiteNumber(launchSource.energySpentMj, "native Dyson workspace launch energy"),
+    },
+  };
+  if (global.sphere.structurePoints > global.sphere.totalRocketsLaunched ||
+      global.sphere.shellSails > global.sphere.totalSailsAbsorbed ||
+      global.swarm.totalLaunched < global.swarm.sailsInOrbit + global.swarm.totalExpired +
+        global.sphere.totalSailsAbsorbed) {
+    throw protocolError("native Dyson workspace global conservation");
+  }
+  const summarySource = exactObject(source.summary, [
+    "systemCount", "unlockedSystemCount", "layerCount", "orbitCount", "nodeCount",
+    "frameCount", "shellCount",
+  ], "native Dyson workspace summary");
+  const summary = Object.fromEntries(Object.entries(summarySource).map(([key, entry]) => [
+    key,
+    dysonInteger(entry, `native Dyson workspace summary.${key}`),
+  ]));
+  if (Object.values(summary).some((count) => count > 65_536) ||
+      summary.unlockedSystemCount > summary.systemCount) {
+    throw protocolError("native Dyson workspace summary binding");
+  }
+  const selectedSystem = normalizeDysonSystemRow(
+    source.selectedSystem,
+    "native Dyson workspace selected system",
+  );
+  if (selectedSystem.systemId !== selectedSystemId || selectedSystem.active !== (selectedSystemId === activeSystemId) ||
+      selectedSystem.structurePoints > global.sphere.structurePoints ||
+      selectedSystem.shellSails > global.sphere.shellSails) {
+    throw protocolError("native Dyson workspace selected summary binding");
+  }
+  const systemIds = new Set();
+  const systems = normalizeStellarPage(
+    source.systems,
+    echoed.systemCursor,
+    echoed.systemLimit,
+    "native Dyson workspace systems",
+    (row, label) => normalizeDysonSystemRow(row, label, systemIds),
+  );
+  if (systems.totalCount !== summary.systemCount ||
+      systems.rows.some((row) => row.active !== (row.systemId === activeSystemId))) {
+    throw protocolError("native Dyson workspace systems binding");
+  }
+  const pagedSelected = systems.rows.find((row) => row.systemId === selectedSystemId);
+  if (pagedSelected && JSON.stringify(pagedSelected) !== JSON.stringify(selectedSystem)) {
+    throw protocolError("native Dyson workspace selected page binding");
+  }
+
+  const layerIds = new Set();
+  const layers = normalizeStellarPage(
+    source.layers,
+    echoed.layerCursor,
+    echoed.layerLimit,
+    "native Dyson workspace layers",
+    (row, label) => {
+      const entry = exactObject(row, [
+        "layerId", "name", "nameTruncated", "radius", "inclination", "longitude",
+        "structureAllocationFloor", "shellAllocationFloor", "nodeCount", "frameCount",
+        "shellCount", "plannedStructurePoints", "completedStructurePoints", "sailCapacity",
+        "absorbedSails",
+      ], label);
+      const layerId = dysonId(entry.layerId, `${label}.layerId`);
+      if (layerIds.has(layerId)) throw protocolError(`${label}.layerId`);
+      layerIds.add(layerId);
+      const radius = finiteNumber(entry.radius, `${label}.radius`, 5_000);
+      const inclination = finiteNumber(entry.inclination, `${label}.inclination`, -90);
+      const longitude = finiteNumber(entry.longitude, `${label}.longitude`);
+      const result = {
+        layerId,
+        name: dysonLabel(entry.name, `${label}.name`),
+        nameTruncated: boolean(entry.nameTruncated, `${label}.nameTruncated`),
+        radius,
+        inclination,
+        longitude,
+        structureAllocationFloor: dysonInteger(entry.structureAllocationFloor, `${label}.structureAllocationFloor`),
+        shellAllocationFloor: dysonInteger(entry.shellAllocationFloor, `${label}.shellAllocationFloor`),
+        nodeCount: dysonInteger(entry.nodeCount, `${label}.nodeCount`),
+        frameCount: dysonInteger(entry.frameCount, `${label}.frameCount`),
+        shellCount: dysonInteger(entry.shellCount, `${label}.shellCount`),
+        plannedStructurePoints: dysonInteger(entry.plannedStructurePoints, `${label}.plannedStructurePoints`),
+        completedStructurePoints: dysonInteger(entry.completedStructurePoints, `${label}.completedStructurePoints`),
+        sailCapacity: dysonInteger(entry.sailCapacity, `${label}.sailCapacity`),
+        absorbedSails: dysonInteger(entry.absorbedSails, `${label}.absorbedSails`),
+      };
+      if (radius > 50_000 || inclination > 90 || longitude >= 360 ||
+          result.completedStructurePoints > result.plannedStructurePoints ||
+          result.absorbedSails > result.sailCapacity) throw protocolError(`${label} binding`);
+      return result;
+    },
+  );
+  const orbitIds = new Set();
+  const orbits = normalizeStellarPage(
+    source.orbits,
+    echoed.orbitCursor,
+    echoed.orbitLimit,
+    "native Dyson workspace orbits",
+    (row, label) => {
+      const entry = exactObject(row, [
+        "orbitId", "name", "nameTruncated", "radius", "inclination", "longitude",
+        "sailsInOrbit", "totalLaunched", "totalExpired", "decayProgress", "generationKw",
+      ], label);
+      const orbitId = dysonId(entry.orbitId, `${label}.orbitId`);
+      if (orbitIds.has(orbitId)) throw protocolError(`${label}.orbitId`);
+      orbitIds.add(orbitId);
+      const radius = finiteNumber(entry.radius, `${label}.radius`, 5_000);
+      const inclination = finiteNumber(entry.inclination, `${label}.inclination`, -90);
+      const longitude = finiteNumber(entry.longitude, `${label}.longitude`);
+      const sailsInOrbit = dysonInteger(entry.sailsInOrbit, `${label}.sailsInOrbit`);
+      const totalLaunched = dysonInteger(entry.totalLaunched, `${label}.totalLaunched`);
+      const totalExpired = dysonInteger(entry.totalExpired, `${label}.totalExpired`);
+      const result = {
+        orbitId,
+        name: dysonLabel(entry.name, `${label}.name`),
+        nameTruncated: boolean(entry.nameTruncated, `${label}.nameTruncated`),
+        radius,
+        inclination,
+        longitude,
+        sailsInOrbit,
+        totalLaunched,
+        totalExpired,
+        decayProgress: dysonUnitNumber(entry.decayProgress, `${label}.decayProgress`),
+        generationKw: finiteNumber(entry.generationKw, `${label}.generationKw`),
+      };
+      if (radius > 50_000 || inclination > 90 || longitude >= 360 ||
+          totalLaunched < sailsInOrbit + totalExpired) throw protocolError(`${label} binding`);
+      return result;
+    },
+  );
+  const nodeIds = new Set();
+  const nodes = normalizeStellarPage(
+    source.nodes,
+    echoed.nodeCursor,
+    echoed.nodeLimit,
+    "native Dyson workspace nodes",
+    (row, label) => {
+      const entry = exactObject(row, [
+        "layerId", "nodeId", "angle", "requiredStructurePoints", "completedStructurePoints",
+      ], label);
+      const layerId = dysonId(entry.layerId, `${label}.layerId`);
+      const nodeId = dysonId(entry.nodeId, `${label}.nodeId`);
+      const key = `${layerId}\0${nodeId}`;
+      if (nodeIds.has(key)) throw protocolError(`${label}.nodeId`);
+      nodeIds.add(key);
+      const angle = finiteNumber(entry.angle, `${label}.angle`);
+      const requiredStructurePoints = dysonInteger(entry.requiredStructurePoints, `${label}.requiredStructurePoints`);
+      const completedStructurePoints = dysonInteger(entry.completedStructurePoints, `${label}.completedStructurePoints`);
+      if (angle >= 360 || requiredStructurePoints < 1 || completedStructurePoints > requiredStructurePoints) {
+        throw protocolError(`${label} binding`);
+      }
+      return { layerId, nodeId, angle, requiredStructurePoints, completedStructurePoints };
+    },
+  );
+  const frameIds = new Set();
+  const frames = normalizeStellarPage(
+    source.frames,
+    echoed.frameCursor,
+    echoed.frameLimit,
+    "native Dyson workspace frames",
+    (row, label) => {
+      const entry = exactObject(row, [
+        "layerId", "frameId", "sourceNodeId", "targetNodeId", "requiredStructurePoints",
+        "completedStructurePoints",
+      ], label);
+      const layerId = dysonId(entry.layerId, `${label}.layerId`);
+      const frameId = dysonId(entry.frameId, `${label}.frameId`);
+      const key = `${layerId}\0${frameId}`;
+      if (frameIds.has(key)) throw protocolError(`${label}.frameId`);
+      frameIds.add(key);
+      const sourceNodeId = dysonId(entry.sourceNodeId, `${label}.sourceNodeId`);
+      const targetNodeId = dysonId(entry.targetNodeId, `${label}.targetNodeId`);
+      const requiredStructurePoints = dysonInteger(entry.requiredStructurePoints, `${label}.requiredStructurePoints`);
+      const completedStructurePoints = dysonInteger(entry.completedStructurePoints, `${label}.completedStructurePoints`);
+      if (sourceNodeId === targetNodeId || requiredStructurePoints < 1 ||
+          completedStructurePoints > requiredStructurePoints) throw protocolError(`${label} binding`);
+      return { layerId, frameId, sourceNodeId, targetNodeId, requiredStructurePoints, completedStructurePoints };
+    },
+  );
+  const shellIds = new Set();
+  const shells = normalizeStellarPage(
+    source.shells,
+    echoed.shellCursor,
+    echoed.shellLimit,
+    "native Dyson workspace shells",
+    (row, label) => {
+      const entry = exactObject(row, [
+        "layerId", "shellId", "sourceNodeId", "targetNodeId", "boundaryFrameCount", "active",
+        "sailCapacity", "absorbedSails",
+      ], label);
+      const layerId = dysonId(entry.layerId, `${label}.layerId`);
+      const shellId = dysonId(entry.shellId, `${label}.shellId`);
+      const key = `${layerId}\0${shellId}`;
+      if (shellIds.has(key)) throw protocolError(`${label}.shellId`);
+      shellIds.add(key);
+      const sourceNodeId = dysonId(entry.sourceNodeId, `${label}.sourceNodeId`);
+      const targetNodeId = dysonId(entry.targetNodeId, `${label}.targetNodeId`);
+      const boundaryFrameCount = dysonInteger(entry.boundaryFrameCount, `${label}.boundaryFrameCount`);
+      const sailCapacity = dysonInteger(entry.sailCapacity, `${label}.sailCapacity`);
+      const absorbedSails = dysonInteger(entry.absorbedSails, `${label}.absorbedSails`);
+      if (sourceNodeId === targetNodeId || boundaryFrameCount < 1 || sailCapacity < 1 ||
+          absorbedSails > sailCapacity) throw protocolError(`${label} binding`);
+      return {
+        layerId,
+        shellId,
+        sourceNodeId,
+        targetNodeId,
+        boundaryFrameCount,
+        active: boolean(entry.active, `${label}.active`),
+        sailCapacity,
+        absorbedSails,
+      };
+    },
+  );
+  if (layers.totalCount !== selectedSystem.totals.layerCount ||
+      orbits.totalCount !== selectedSystem.orbitCount ||
+      nodes.totalCount !== selectedSystem.totals.nodeCount ||
+      frames.totalCount !== selectedSystem.totals.frameCount ||
+      shells.totalCount !== selectedSystem.totals.shellCount ||
+      summary.layerCount < layers.totalCount || summary.orbitCount < orbits.totalCount ||
+      summary.nodeCount < nodes.totalCount || summary.frameCount < frames.totalCount ||
+      summary.shellCount < shells.totalCount) {
+    throw protocolError("native Dyson workspace page summary binding");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "dyson-workspace-v1",
+    revision,
+    registryFingerprint,
+    stateVersion: 47,
+    limits,
+    request: Object.fromEntries(Object.entries(echoed).filter(([key]) => key !== "sessionId")),
+    activePlanetId,
+    activeSystemId,
+    selectedSystemId,
+    technology,
+    global,
+    summary,
+    selectedSystem,
+    systems,
+    layers,
+    orbits,
+    nodes,
+    frames,
+    shells,
+  };
+}
+
 function normalizeCoreCommandPaletteEntitySearchProjection(value, context) {
   const source = exactObject(value, [
     "schemaVersion", "projectionType", "revision", "registryFingerprint", "limits",
@@ -4042,6 +4559,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreStellarIndustryProjection: normalizeCoreStellarIndustryProjection,
   coreStellarIndustryProjectionV2: normalizeCoreStellarIndustryV2Projection,
   coreStellarQuantumProjection: normalizeCoreStellarQuantumProjection,
+  coreDysonWorkspaceProjection: normalizeCoreDysonWorkspaceProjection,
   coreCommandPaletteEntitySearchProjection: normalizeCoreCommandPaletteEntitySearchProjection,
   coreCommand: normalizeCoreCommand,
   coreAdvance: normalizeCoreAdvance,

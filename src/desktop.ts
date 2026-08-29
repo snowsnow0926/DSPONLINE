@@ -178,6 +178,8 @@ export interface DesktopBridge {
   getNativeCoreStellarIndustryV2Projection?: (request: DesktopNativeCoreStellarIndustryV2ProjectionRequest) => Promise<DesktopNativeCoreStellarIndustryV2ProjectionResult>;
   /** Bounded shared quantum inventory and orbital-collector attachment pages. */
   getNativeCoreStellarQuantumProjection?: (request: DesktopNativeCoreStellarQuantumProjectionRequest) => Promise<DesktopNativeCoreStellarQuantumProjectionResult>;
+  /** Read-only Dyson planner pages bound to one native session revision and catalog. */
+  getNativeCoreDysonWorkspaceProjection?: (request: DesktopNativeCoreDysonWorkspaceProjectionRequest) => Promise<DesktopNativeCoreDysonWorkspaceProjectionResult>;
   /** Current Windows thin-UI host only; native authority never falls back to a renderer entity scan. */
   getNativeCoreCommandPaletteEntitySearch?: (request: DesktopNativeCoreCommandPaletteEntitySearchRequest) => Promise<DesktopNativeCoreCommandPaletteEntitySearchResult>;
   requestNativeCoreProjectionTransfer?: (request: DesktopNativeCoreProjectionTransferRequest) => Promise<DesktopNativeCoreProjectionTransferResult>;
@@ -1419,6 +1421,184 @@ export interface DesktopNativeCoreStellarQuantumProjectionResult {
   collectors: DesktopNativeCoreStellarPage<DesktopNativeCoreStellarQuantumCollectorRow>;
 }
 
+export interface DesktopNativeCoreDysonWorkspaceProjectionRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  selectedSystemId: string;
+  systemCursor: number;
+  systemLimit: number;
+  layerCursor: number;
+  layerLimit: number;
+  orbitCursor: number;
+  orbitLimit: number;
+  nodeCursor: number;
+  nodeLimit: number;
+  frameCursor: number;
+  frameLimit: number;
+  shellCursor: number;
+  shellLimit: number;
+}
+
+export interface DesktopNativeCoreDysonEngineeringSummary {
+  launchMode: "balanced" | "swarm" | "sphere";
+  launchThrottle: 0.25 | 0.5 | 0.75 | 1;
+  launchEnabled: boolean;
+  orbitCount: number;
+  orbitSails: number;
+  queuedSails: number;
+  queuedRockets: number;
+  sailLaunchesPerMinute: number;
+  rocketLaunchesPerMinute: number;
+  launchEnergyPerSailMj: number;
+  launchEnergyPerRocketMj: number;
+  launchEnergyPerMinuteMj: number;
+  rayGenerationKw: number;
+  receiverCapacityKw: number;
+  operationalReceiverCapacityKw: number;
+  receiverLoadKw: number;
+  theoreticalReceptionRate: number;
+  receiverUtilization: number;
+  dysonPowerUtilization: number;
+  configuredReceiverCount: number;
+  blockedReceiverCount: number;
+  criticalPhotonPerMinute: number;
+  antimatterPerMinute: number;
+  feedbackGenerationKw: number;
+  plannedStructurePoints: number;
+  completedStructurePoints: number;
+  remainingStructurePoints: number;
+  shellCapacity: number;
+  shellSails: number;
+  projectedGenerationKw: number;
+}
+
+export interface DesktopNativeCoreDysonSystemRow {
+  systemId: string;
+  displayName: string;
+  displayNameTruncated: boolean;
+  starProfile: {
+    available: boolean;
+    starTypeName: string;
+    starTypeNameTruncated: boolean;
+    luminosity: number;
+    radiusMultiplier: number;
+  };
+  unlocked: boolean;
+  active: boolean;
+  activeLayerId: string | null;
+  activeOrbitId: string | null;
+  structurePoints: number;
+  shellSails: number;
+  totals: {
+    layerCount: number;
+    nodeCount: number;
+    frameCount: number;
+    shellCount: number;
+    plannedStructurePoints: number;
+    completedStructurePoints: number;
+    sailCapacity: number;
+    absorbedSails: number;
+  };
+  orbitCount: number;
+  orbitSails: number;
+  projectedGenerationKw: number;
+  engineering: DesktopNativeCoreDysonEngineeringSummary;
+}
+
+export interface DesktopNativeCoreDysonLayerRow {
+  layerId: string;
+  name: string;
+  nameTruncated: boolean;
+  radius: number;
+  inclination: number;
+  longitude: number;
+  structureAllocationFloor: number;
+  shellAllocationFloor: number;
+  nodeCount: number;
+  frameCount: number;
+  shellCount: number;
+  plannedStructurePoints: number;
+  completedStructurePoints: number;
+  sailCapacity: number;
+  absorbedSails: number;
+}
+
+export interface DesktopNativeCoreDysonOrbitRow {
+  orbitId: string;
+  name: string;
+  nameTruncated: boolean;
+  radius: number;
+  inclination: number;
+  longitude: number;
+  sailsInOrbit: number;
+  totalLaunched: number;
+  totalExpired: number;
+  decayProgress: number;
+  generationKw: number;
+}
+
+export interface DesktopNativeCoreDysonNodeRow {
+  layerId: string;
+  nodeId: string;
+  angle: number;
+  requiredStructurePoints: number;
+  completedStructurePoints: number;
+}
+
+export interface DesktopNativeCoreDysonFrameRow {
+  layerId: string;
+  frameId: string;
+  sourceNodeId: string;
+  targetNodeId: string;
+  requiredStructurePoints: number;
+  completedStructurePoints: number;
+}
+
+export interface DesktopNativeCoreDysonShellRow {
+  layerId: string;
+  shellId: string;
+  sourceNodeId: string;
+  targetNodeId: string;
+  boundaryFrameCount: number;
+  active: boolean;
+  sailCapacity: number;
+  absorbedSails: number;
+}
+
+export interface DesktopNativeCoreDysonWorkspaceProjectionResult {
+  schemaVersion: 1;
+  projectionType: "dyson-workspace-v1";
+  revision: number;
+  registryFingerprint: string;
+  stateVersion: 47;
+  limits: {
+    requestBytes: 32768;
+    projectionBytes: 1048576;
+    pageRows: 64;
+    totalRows: 65536;
+    idBytes: 1024;
+    labelBytes: 512;
+  };
+  request: Omit<DesktopNativeCoreDysonWorkspaceProjectionRequest, "sessionId">;
+  activePlanetId: string;
+  activeSystemId: string;
+  selectedSystemId: string;
+  technology: { programReady: boolean; shellReady: boolean; swarmReady: boolean };
+  global: {
+    sphere: { structurePoints: number; totalRocketsLaunched: number; shellSails: number; totalSailsAbsorbed: number; generationKw: number };
+    swarm: { sailsInOrbit: number; totalLaunched: number; totalExpired: number; generationKw: number; receiverLoadKw: number };
+    launch: { mode: "balanced" | "swarm" | "sphere"; throttle: 0.25 | 0.5 | 0.75 | 1; enabled: boolean; energySpentMj: number };
+  };
+  summary: { systemCount: number; unlockedSystemCount: number; layerCount: number; orbitCount: number; nodeCount: number; frameCount: number; shellCount: number };
+  selectedSystem: DesktopNativeCoreDysonSystemRow;
+  systems: DesktopNativeCoreStellarPage<DesktopNativeCoreDysonSystemRow>;
+  layers: DesktopNativeCoreStellarPage<DesktopNativeCoreDysonLayerRow>;
+  orbits: DesktopNativeCoreStellarPage<DesktopNativeCoreDysonOrbitRow>;
+  nodes: DesktopNativeCoreStellarPage<DesktopNativeCoreDysonNodeRow>;
+  frames: DesktopNativeCoreStellarPage<DesktopNativeCoreDysonFrameRow>;
+  shells: DesktopNativeCoreStellarPage<DesktopNativeCoreDysonShellRow>;
+}
+
 export interface DesktopNativeCoreCommandPaletteEntitySearchRequest extends DesktopNativeCoreSessionRequest {
   expectedRevision: number;
   expectedRegistryFingerprint: string;
@@ -1520,6 +1700,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
       sessionId: string;
       projectionType: "stellar-quantum-v1";
       payload: Omit<DesktopNativeCoreStellarQuantumProjectionRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      projectionType: "dyson-workspace-v1";
+      payload: Omit<DesktopNativeCoreDysonWorkspaceProjectionRequest, "sessionId">;
     };
 
 export interface DesktopNativeCoreProjectionTransferHeader {
@@ -1527,7 +1712,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
   payloadLength: number;
   sha256: string;
 }

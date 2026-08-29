@@ -97,6 +97,7 @@ test("native projection transfer carries bounded identity and SHA-256 metadata",
   assert.equal(JSON.parse(factoryReadModelTransfer.payload).schemaVersion, 1);
   for (const projectionType of [
     "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1",
+    "dyson-workspace-v1",
   ]) {
     const stellarTransfer = encodeNativeProjectionTransfer({
       sessionId: "core-1",
@@ -662,6 +663,55 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     resourceIds: [],
     planetIds: ["home"],
   });
+});
+
+test("core registry forwards exact bounded Dyson workspace page selectors and rejects malformed UTF-8 IDs", async () => {
+  const calls = [];
+  const registry = new NativeCoreSessionRegistry({
+    request(request) {
+      calls.push(request);
+      return Promise.resolve({ schemaVersion: 1, projectionType: "dyson-workspace-v1", revision: 8 });
+    },
+  });
+  registry.sessions.set("core-dyson", {
+    ownerId: 7, slot: "normal-main", ownerEpoch: 1, state: "owned", inFlight: 0,
+  });
+  const request = {
+    sessionId: "core-dyson",
+    expectedRevision: 8,
+    expectedRegistryFingerprint: "builtin:test",
+    selectedSystemId: "mod:星系/Ω🚀",
+    systemCursor: 1,
+    systemLimit: 2,
+    layerCursor: 3,
+    layerLimit: 4,
+    orbitCursor: 5,
+    orbitLimit: 6,
+    nodeCursor: 7,
+    nodeLimit: 8,
+    frameCursor: 9,
+    frameLimit: 10,
+    shellCursor: 11,
+    shellLimit: 12,
+  };
+  await registry.dysonWorkspaceProjection(7, request);
+  assert.deepEqual(calls, [{ operation: "coreDysonWorkspaceProjection", ...request }]);
+  assert.throws(
+    () => registry.dysonWorkspaceProjection(7, { ...request, selectedSystemId: "bad\nidentifier" }),
+    /Dyson workspace projection request is invalid/,
+  );
+  assert.throws(
+    () => registry.dysonWorkspaceProjection(7, { ...request, selectedSystemId: "\ud800" }),
+    /Dyson workspace projection request is invalid/,
+  );
+  assert.throws(
+    () => registry.dysonWorkspaceProjection(7, { ...request, shellLimit: 65 }),
+    /Dyson workspace projection request is invalid/,
+  );
+  assert.throws(
+    () => registry.dysonWorkspaceProjection(7, { ...request, unexpected: true }),
+    /Dyson workspace projection request is invalid/,
+  );
 });
 
 test("core owner transfer is atomic against in-flight requests and epoch-protected against ABA", async () => {

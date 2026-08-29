@@ -1084,10 +1084,12 @@ test("Electron main uses the dedicated native renderer boundary", () => {
     .map((match) => match[1]);
   const preloadChannels = [...preload.matchAll(/invokeNative\("(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  assert.equal(mainChannels.length, 39);
+  assert.equal(mainChannels.length, 40);
   assert.ok(mainChannels.includes("desktop:native-core-star-map-catalog-projection"));
   assert.ok(preloadChannels.includes("desktop:native-core-star-map-catalog-projection"));
   assert.ok(mainChannels.includes("desktop:native-core-stellar-quantum-projection"));
   assert.ok(preloadChannels.includes("desktop:native-core-stellar-quantum-projection"));
+  assert.ok(mainChannels.includes("desktop:native-core-dyson-workspace-projection"));
+  assert.ok(preloadChannels.includes("desktop:native-core-dyson-workspace-projection"));
   assert.deepEqual(new Set(preloadChannels), new Set(mainChannels));
 });

@@ -219,7 +219,7 @@ describe("native core transferable projections", () => {
     })).resolves.toEqual(value);
   });
 
-  it.each(["star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1"] as const)(
+  it.each(["star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "dyson-workspace-v1"] as const)(
     "verifies and decodes the bounded %s block",
     async (projectionType) => {
       const value = {

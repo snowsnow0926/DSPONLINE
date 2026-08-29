@@ -679,6 +679,27 @@ function nativeStellarQuantumProjectionResultContext(request) {
   };
 }
 
+function nativeDysonWorkspaceProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    selectedSystemId: request?.selectedSystemId,
+    systemCursor: request?.systemCursor,
+    systemLimit: request?.systemLimit,
+    layerCursor: request?.layerCursor,
+    layerLimit: request?.layerLimit,
+    orbitCursor: request?.orbitCursor,
+    orbitLimit: request?.orbitLimit,
+    nodeCursor: request?.nodeCursor,
+    nodeLimit: request?.nodeLimit,
+    frameCursor: request?.frameCursor,
+    frameLimit: request?.frameLimit,
+    shellCursor: request?.shellCursor,
+    shellLimit: request?.shellLimit,
+  };
+}
+
 function nativeCommandPaletteEntitySearchResultContext(request) {
   return {
     sessionId: request?.sessionId,
@@ -1338,6 +1359,20 @@ ipcMain.handle("desktop:native-core-stellar-quantum-projection", async (event, r
   });
 });
 
+ipcMain.handle("desktop:native-core-dyson-workspace-projection", async (event, request) => {
+  return runRendererNativeOperation("coreDysonWorkspaceProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生戴森球工作区投影请求失败，请重试",
+    resultContext: nativeDysonWorkspaceProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "dyson-workspace-v1", request);
+    }
+    return await nativeCoreSessions.dysonWorkspaceProjection(ownerId, request);
+  });
+});
+
 ipcMain.handle("desktop:native-core-command-palette-entity-search", async (event, request) => {
   return runRendererNativeOperation("coreCommandPaletteEntitySearchProjection", {
     fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
@@ -1364,7 +1399,7 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
     if (!request || typeof request !== "object" ||
       !validNativeLogicalId(request.sessionId, 128) ||
       !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
-      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1"].includes(request.projectionType) ||
+      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object" ||
       Object.prototype.hasOwnProperty.call(request.payload, "sessionId")) {
       throw new Error("原生投影二进制请求无效");
@@ -1397,6 +1432,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       rawResult = await nativeCoreSessions.stellarIndustryProjectionV2(ownerId, normalizedRequest);
     } else if (request.projectionType === "stellar-quantum-v1") {
       rawResult = await nativeCoreSessions.stellarQuantumProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "dyson-workspace-v1") {
+      rawResult = await nativeCoreSessions.dysonWorkspaceProjection(ownerId, normalizedRequest);
     } else {
       rawResult = await nativeCoreSessions.technologyProjection(ownerId, normalizedRequest);
     }
@@ -1421,7 +1458,9 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                     ? "coreStellarIndustryProjectionV2"
                     : request.projectionType === "stellar-quantum-v1"
                       ? "coreStellarQuantumProjection"
-                      : "coreTechnologyProjection",
+                      : request.projectionType === "dyson-workspace-v1"
+                        ? "coreDysonWorkspaceProjection"
+                        : "coreTechnologyProjection",
       rawResult,
       request.projectionType === "viewport-v1"
         ? nativeViewportProjectionResultContext(request.payload)
@@ -1443,7 +1482,9 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                     ? nativeStellarIndustryV2ProjectionResultContext(normalizedRequest)
                     : request.projectionType === "stellar-quantum-v1"
                       ? nativeStellarQuantumProjectionResultContext(normalizedRequest)
-                      : nativeTechnologyProjectionResultContext(normalizedRequest),
+                      : request.projectionType === "dyson-workspace-v1"
+                        ? nativeDysonWorkspaceProjectionResultContext(normalizedRequest)
+                        : nativeTechnologyProjectionResultContext(normalizedRequest),
     );
     const transfer = encodeNativeProjectionTransfer({
       sessionId: request.sessionId,

@@ -13,6 +13,7 @@ const {
   NATIVE_CONSTRUCTION_STACK_CONTEXT_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,
+  NATIVE_PLAYER_AUTHORITY_PAUSE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY,
@@ -1103,6 +1104,65 @@ test("player authority commands are capability-gated, main-owned, and exact-revi
   }), (error) => error.code === "NATIVE_CORE_PLAYER_AUTHORITY_COMMAND_UNAVAILABLE");
 });
 
+test("player pause lifecycle is capability-gated, main-owned, and carries an exact clock anchor", async () => {
+  const calls = [];
+  const client = {
+    hello: { capabilities: [NATIVE_PLAYER_AUTHORITY_PAUSE_CAPABILITY] },
+    async request(request) {
+      calls.push(request);
+      return { targetPaused: request.request.targetPaused };
+    },
+  };
+  const registry = new NativeCoreSessionRegistry(client);
+  registry.sessions.set("core-pause-1", {
+    ownerId: "main-player-authority", slot: "normal-main", ownerEpoch: 1,
+    state: "owned", inFlight: 0,
+  });
+  await registry.commitPlayerAuthorityPause("main-player-authority", {
+    sessionId: "core-pause-1",
+    runId: "player-run-pause-1",
+    baseRevision: 17,
+    targetPaused: true,
+    settledDeadlineMs: 25_000,
+  });
+  assert.deepEqual(calls, [{
+    operation: "coreCommitPlayerAuthorityPause",
+    sessionId: "core-pause-1",
+    request: {
+      runId: "player-run-pause-1",
+      baseRevision: 17,
+      targetPaused: true,
+      settledDeadlineMs: 25_000,
+    },
+  }]);
+  assert.throws(() => registry.commitPlayerAuthorityPause("main-player-authority", {
+    sessionId: "core-pause-1", runId: "player-run-pause-1", baseRevision: 18,
+    targetPaused: false, settledDeadlineMs: 26_000, sequence: 9,
+  }), /invalid/);
+
+  const rendererOwned = new NativeCoreSessionRegistry(client);
+  rendererOwned.sessions.set("core-renderer", {
+    ownerId: "renderer-7", slot: "normal-main", ownerEpoch: 1, state: "owned", inFlight: 0,
+  });
+  assert.throws(() => rendererOwned.commitPlayerAuthorityPause("renderer-7", {
+    sessionId: "core-renderer", runId: "player-run-pause-1", baseRevision: 17,
+    targetPaused: true, settledDeadlineMs: 25_000,
+  }), (error) => error.code === "NATIVE_CORE_PLAYER_AUTHORITY_OWNER_REQUIRED");
+
+  const oldRegistry = new NativeCoreSessionRegistry({
+    hello: { capabilities: [] },
+    request() { throw new Error("must not call host"); },
+  });
+  oldRegistry.sessions.set("core-pause-1", {
+    ownerId: "main-player-authority", slot: "normal-main", ownerEpoch: 1,
+    state: "owned", inFlight: 0,
+  });
+  assert.throws(() => oldRegistry.commitPlayerAuthorityPause("main-player-authority", {
+    sessionId: "core-pause-1", runId: "player-run-pause-1", baseRevision: 17,
+    targetPaused: true, settledDeadlineMs: 25_000,
+  }), (error) => error.code === "NATIVE_CORE_PLAYER_AUTHORITY_PAUSE_UNAVAILABLE");
+});
+
 test("startup recovery receipt is strictly adopted once as a main-owned Rust session", () => {
   const receipt = {
     schemaVersion: 1,
@@ -1123,6 +1183,7 @@ test("startup recovery receipt is strictly adopted once as a main-owned Rust ses
     changedEntityIds: [],
     changedBeltIds: [],
     topologyDirty: false,
+    paused: false,
     summary: {
       revision: 11,
       stateVersion: 47,
@@ -1179,6 +1240,32 @@ test("startup recovery receipt is strictly adopted once as a main-owned Rust ses
   assert.deepEqual(adoptedCommand.changedEntityIds, ["entity-a", "entity-z"]);
   assert.deepEqual(adoptedCommand.changedBeltIds, ["belt-a"]);
   assert.equal(adoptedCommand.topologyDirty, false);
+  const pausedReceipt = {
+    ...receipt,
+    sessionId: "core-restarted-paused",
+    paused: true,
+    summary: { ...receipt.summary, paused: true },
+  };
+  const pausedRegistry = new NativeCoreSessionRegistry({
+    hello: {
+      capabilities: [NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY],
+      playerAuthorityStartupRecovery: pausedReceipt,
+    },
+    request() { throw new Error("paused startup adoption must not call the Host"); },
+  });
+  assert.equal(
+    pausedRegistry.takePlayerAuthorityStartupRecovery("main-player-authority").paused,
+    true,
+  );
+  assert.throws(() => new NativeCoreSessionRegistry({
+    hello: {
+      capabilities: [NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY],
+      playerAuthorityStartupRecovery: {
+        ...pausedReceipt,
+        summary: { ...pausedReceipt.summary, paused: false },
+      },
+    },
+  }), (error) => error.code === "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID");
   assert.throws(() => new NativeCoreSessionRegistry({
     hello: {
       capabilities: [NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY],

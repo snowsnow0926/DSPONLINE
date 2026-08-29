@@ -125,6 +125,8 @@ describe("renderer side of the native player-authority handoff", () => {
     expect(startup).toContain('decision.action === "release-browser-fence"');
     expect(startup).toContain('action: "fail-closed"');
     expect(startup).toContain('source: "startup-recovery"');
+    expect(startup).toContain('bound?.phase === "paused"');
+    expect(startup).toContain('request.rustLease.summary.paused !== (settled.phase === "paused")');
   });
 
   it("makes prepare and pre-transfer cancel idempotent without making post-transfer release implicit", () => {
@@ -144,5 +146,17 @@ describe("renderer side of the native player-authority handoff", () => {
         effect.indexOf("measureRuntimeTransitionPhase"),
       );
     }
+  });
+
+  it("distinguishes an uncertain due tick from a retryable pause or resume transaction", () => {
+    const togglePause = sourceBlock(
+      "const togglePause = useCallback(() => {",
+      "const handleTimeWarpEnabledChange = useCallback",
+    );
+    expect(togglePause).toContain('latest.phase === (targetPaused ? "pause-uncertain" : "resume-uncertain")');
+    expect(togglePause).toContain('latest.phase === "uncertain"');
+    expect(togglePause).toContain("请重启应用，让 Rust 从磁盘恢复后再操作");
+    expect(togglePause).toContain("不会切换到旧 JavaScript 状态，也不会主动回退进度");
+    expect(togglePause).not.toContain("暂停回执暂时无法确认；请再次点击");
   });
 });

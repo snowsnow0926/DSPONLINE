@@ -143,6 +143,12 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   // run, checkpoint, lease or operation ID.
   getNativePlayerAuthorityState: () => invokeNative("desktop:native-player-authority-state", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_STATE_FAILED", message: "无法读取 Windows 原生玩家权威时钟" }),
   onNativePlayerAuthorityState: subscribeNativePlayerAuthorityState,
+  // The renderer supplies only player intent. Main owns the current
+  // session/run/revision and chooses the durable wall-clock anchor.
+  setNativePlayerAuthorityPaused: (request) => invokeNative("desktop:native-player-authority-set-paused",
+    { fallbackCode: "NATIVE_PLAYER_AUTHORITY_PAUSE_FAILED", message: "Windows 原生暂停状态切换失败" },
+    request,
+  ),
   // Response-only internal handshake. The listener cannot start a handoff,
   // select an owner, or invoke transferOwner; it can only answer a currently
   // pending challenge generated and bound by main.

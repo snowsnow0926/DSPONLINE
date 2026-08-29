@@ -25,6 +25,8 @@ const NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY =
 const NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY = "native-core-player-authority-gate-v1";
 const NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY = "native-core-player-authority-tick-v1";
 const NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY = "native-core-player-authority-command-v1";
+const NATIVE_PLAYER_AUTHORITY_PAUSE_CAPABILITY =
+  "native-core-player-authority-pause-lifecycle-v1";
 const NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY =
   "native-core-player-authority-pure-idle-macro-v1";
 const NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY =
@@ -701,7 +703,7 @@ function normalizePlayerAuthorityStartupRecovery(value) {
     "schemaVersion", "kind", "ownerId", "sessionId", "runId", "registryFingerprint",
     "revision", "checkpoint", "acknowledgedSequence", "nextSequence",
     "settledDeadlineMs", "nextDeadlineMs", "commandId", "commandBaseRevision",
-    "changedEntityIds", "changedBeltIds", "topologyDirty", "summary",
+    "changedEntityIds", "changedBeltIds", "topologyDirty", "paused", "summary",
   ];
   const macroKeys = [
     "macroSessionId", "recoveredMacroOperationId", "macroAlgorithmVersion",
@@ -783,6 +785,7 @@ function normalizePlayerAuthorityStartupRecovery(value) {
     value.nextDeadlineMs !== value.settledDeadlineMs + 1_000 ||
     changedEntityIds.length + changedBeltIds.length > 65_536 ||
     typeof value.topologyDirty !== "boolean" ||
+    typeof value.paused !== "boolean" ||
     !validMacro ||
     !validCleanup ||
     hasCommand && (!validLogicalId(value.commandId, 128) ||
@@ -792,7 +795,7 @@ function normalizePlayerAuthorityStartupRecovery(value) {
       changedEntityIds.length !== 0 || changedBeltIds.length !== 0 || value.topologyDirty) ||
     !summary || typeof summary !== "object" || Array.isArray(summary) ||
     summary.revision !== value.revision || summary.stateVersion !== 47 ||
-    summary.mode !== "normal" || summary.paused !== false ||
+    summary.mode !== "normal" || summary.paused !== value.paused ||
     summary.registryFingerprint !== value.registryFingerprint ||
     !validSha256(summary.canonicalSha256) || !validSha256(summary.domainSha256) ||
     summary.coverage?.authorityEligible !== true) {
@@ -820,6 +823,7 @@ function normalizePlayerAuthorityStartupRecovery(value) {
     changedEntityIds,
     changedBeltIds,
     topologyDirty: value.topologyDirty,
+    paused: value.paused,
     ...(hasMacro ? {
       macroSessionId: value.macroSessionId,
       recoveredMacroOperationId: value.recoveredMacroOperationId,
@@ -1762,6 +1766,41 @@ class NativeCoreSessionRegistry {
     }, 300_000);
   }
 
+  commitPlayerAuthorityPause(ownerId, request) {
+    const session = this.assertOwner(ownerId, request?.sessionId);
+    if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID || session.slot !== "normal-main") {
+      throw new NativeHostError(
+        "player-authority pause lifecycle requires the main normal-main owner",
+        "NATIVE_CORE_PLAYER_AUTHORITY_OWNER_REQUIRED",
+      );
+    }
+    if (!this.client.hello?.capabilities?.includes(NATIVE_PLAYER_AUTHORITY_PAUSE_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide the durable player-authority pause lifecycle",
+        "NATIVE_CORE_PLAYER_AUTHORITY_PAUSE_UNAVAILABLE",
+      );
+    }
+    exactObjectKeys(request, [
+      "sessionId", "runId", "baseRevision", "targetPaused", "settledDeadlineMs",
+    ], "native player-authority pause lifecycle request");
+    if (!validLogicalId(request.runId, 128) ||
+      !Number.isSafeInteger(request.baseRevision) || request.baseRevision < 0 ||
+      typeof request.targetPaused !== "boolean" ||
+      !Number.isSafeInteger(request.settledDeadlineMs) || request.settledDeadlineMs < 0) {
+      throw new TypeError("native player-authority pause lifecycle request is invalid");
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreCommitPlayerAuthorityPause",
+      sessionId: request.sessionId,
+      request: {
+        runId: request.runId,
+        baseRevision: request.baseRevision,
+        targetPaused: request.targetPaused,
+        settledDeadlineMs: request.settledDeadlineMs,
+      },
+    }, 300_000);
+  }
+
   recoverPlayerAuthorityCommand(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID) {
@@ -2114,6 +2153,7 @@ module.exports = {
   NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY,
+  NATIVE_PLAYER_AUTHORITY_PAUSE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY,

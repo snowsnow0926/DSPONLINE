@@ -166,6 +166,17 @@ test("untrusted, stale, malformed and oversized requests fail before runtime mut
       (error) => error.code === "NATIVE_PLAYER_AUTHORITY_COMMAND_REQUEST_INVALID",
     );
   });
+  await t.test("pause lifecycle uses only the dedicated main-owned path", async () => {
+    await assert.rejects(
+      broker.commit(7, {
+        sessionId: "core-1",
+        command: command(17, {
+          topLevelChanges: [{ path: ["paused"], operation: "set", value: true }],
+        }),
+      }),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_COMMAND_REQUEST_INVALID",
+    );
+  });
   await t.test("oversized payload", async () => {
     const oversized = command(17, {
       topLevelChanges: [{ key: "tray", value: "x".repeat(1_750_000) }],

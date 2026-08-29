@@ -462,7 +462,9 @@ export class WindowsNativeCoreBetaController {
     source: "handoff" | "startup-recovery";
   }): NativeCoreBetaControllerSnapshot {
     if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(input.runId) ||
-      input.summary.stateVersion !== 47 || input.summary.mode !== "normal" || input.summary.paused ||
+      input.summary.stateVersion !== 47 || input.summary.mode !== "normal" ||
+      (input.source === "handoff" ? input.summary.paused !== false :
+        typeof input.summary.paused !== "boolean") ||
       input.summary.coverage.authorityEligible !== true ||
       input.summary.revision !== input.checkpoint.revision) {
       throw new Error("主进程原生权威完成回执无效");

@@ -35,6 +35,11 @@ export type DesktopNativePlayerAuthorityPhase =
   | "activating"
   | "recovering"
   | "active"
+  | "pausing"
+  | "paused"
+  | "resuming"
+  | "pause-uncertain"
+  | "resume-uncertain"
   | "uncertain"
   | "faulted"
   | "shutdown";
@@ -43,7 +48,9 @@ export type DesktopNativePlayerAuthorityOperation =
   | "activation"
   | "recovery"
   | "tick"
-  | "command";
+  | "command"
+  | "pause"
+  | "resume";
 
 export type DesktopNativePlayerAuthorityMacroPhase =
   | "macro-active"
@@ -277,6 +284,10 @@ export interface DesktopBridge {
   getNativePerformanceStatus: () => Promise<DesktopNativePerformanceStatus>;
   /** Current Windows authority host only; absent on Web and rollback shells. */
   getNativePlayerAuthorityState?: () => Promise<DesktopNativePlayerAuthorityState>;
+  /** Requests only pause intent; main owns authority identity and every wall-clock anchor. */
+  setNativePlayerAuthorityPaused?: (
+    request: { readonly paused: boolean },
+  ) => Promise<DesktopNativePlayerAuthorityClockState>;
   /** Read-only transition notifications; unsubscribe removes only this listener. */
   onNativePlayerAuthorityState?: (
     listener: (state: DesktopNativePlayerAuthorityState) => void,

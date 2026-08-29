@@ -497,7 +497,21 @@ class NativePlayerAuthorityStateBroker {
     if (!hasMacroInternals) {
       const normalized = normalizeNativePlayerAuthorityState(snapshot);
       if (common.hasCompleteIdentity) {
-        this.lastAuthorityIdentity = `${common.sessionId}\0${common.runId}`;
+        const identity = `${common.sessionId}\0${common.runId}`;
+        if (this.lastAuthorityIdentity !== null && this.lastAuthorityIdentity !== identity) {
+          throw stateError(
+            "native player-authority identity changed without a lifecycle boundary",
+            "NATIVE_PLAYER_AUTHORITY_STATE_STALE",
+          );
+        }
+        if (this.lastAuthorityIdentity === identity && this.lastAuthorityRevision !== null &&
+            common.revision < this.lastAuthorityRevision) {
+          throw stateError(
+            "native player-authority revision regressed",
+            "NATIVE_PLAYER_AUTHORITY_STATE_STALE",
+          );
+        }
+        this.lastAuthorityIdentity = identity;
         this.lastAuthorityRevision = common.revision;
       } else if (common.hasNoIdentity) {
         this.lastAuthorityIdentity = null;

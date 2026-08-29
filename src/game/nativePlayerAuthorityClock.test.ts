@@ -197,6 +197,104 @@ describe("native player-authority clock validation", () => {
 });
 
 describe("NativePlayerAuthorityClockController", () => {
+  it("adopts a startup-recovered v1 session only from the first trusted pull", async () => {
+    const value = clockFixture();
+    value.controller.start();
+    await settlePromises();
+
+    const snapshot = value.controller.getSnapshot();
+    expect(snapshot).toMatchObject({
+      availability: "ready",
+      expectedSessionId: "core-a",
+      currentFrame: { schemaVersion: 1, phase: "active", sessionId: "core-a", revision: 10 },
+      lastConfirmedFrame: { sessionId: "core-a", revision: 10 },
+    });
+    expect(selectBoundNativePlayerAuthorityFrame(snapshot, snapshot.expectedSessionId)?.revision).toBe(10);
+    expect(selectActiveNativePlayerAuthorityFrame(snapshot, snapshot.expectedSessionId)?.runId).toBe("run-a");
+  });
+
+  it("treats an unbound v1 push only as a pull wake-up and never binds from the event payload", async () => {
+    let resolvePull!: (frame: DesktopNativePlayerAuthorityState) => void;
+    const pull = new Promise<DesktopNativePlayerAuthorityState>((resolve) => { resolvePull = resolve; });
+    const listeners: Array<(state: DesktopNativePlayerAuthorityState) => void> = [];
+    const bridge = {
+      getNativePlayerAuthorityState: vi.fn(() => pull),
+      onNativePlayerAuthorityState: vi.fn((next: (state: DesktopNativePlayerAuthorityState) => void) => {
+        listeners.push(next);
+        return () => undefined;
+      }),
+    };
+    const controller = new NativePlayerAuthorityClockController(bridge);
+    controller.start();
+
+    listeners[0]!(activeFrame({ sessionId: "event-only", runId: "event-run" }));
+    expect(controller.getSnapshot()).toMatchObject({
+      availability: "loading",
+      expectedSessionId: null,
+      currentFrame: null,
+    });
+
+    await Promise.resolve();
+    expect(bridge.getNativePlayerAuthorityState).toHaveBeenCalledTimes(2);
+    resolvePull(activeFrame());
+    await settlePromises();
+    expect(controller.getSnapshot()).toMatchObject({
+      availability: "ready",
+      expectedSessionId: "core-a",
+      currentFrame: { sessionId: "core-a", runId: "run-a" },
+    });
+  });
+
+  it("recognizes a startup macro from pull, orders later pushes, then discovers its v1 session by pull", async () => {
+    const value = clockFixture(macroFrame());
+    value.controller.start();
+    await settlePromises();
+
+    let snapshot = value.controller.getSnapshot();
+    expect(snapshot.expectedSessionId).toBeNull();
+    expect(selectNativePlayerAuthorityMacroStatus(snapshot, null)).toMatchObject({
+      schemaVersion: 2,
+      phase: "macro-active",
+      revision: 12,
+    });
+    expect(JSON.stringify(snapshot.currentFrame)).not.toMatch(/session|runId|operationId|algorithm|error/i);
+
+    value.emit(macroFrame({
+      revision: 13,
+      acknowledgedSequence: 7,
+      nextSequence: 8,
+      nextDeadlineMs: 13_000,
+      simulationBudgetMilliseconds: 75_000,
+      wallBudgetMilliseconds: 5_000,
+      simulationProgressMilliseconds: 75_000,
+      wallProgressMilliseconds: 5_000,
+    }));
+    snapshot = value.controller.getSnapshot();
+    expect(selectNativePlayerAuthorityMacroStatus(snapshot, null)?.revision).toBe(13);
+    expect(selectNativePlayerAuthorityMacroStatus(snapshot, "guessed-session")).toBeNull();
+
+    const settled = activeFrame({
+      revision: 13,
+      acknowledgedSequence: 7,
+      nextSequence: 8,
+      nextDeadlineMs: 13_000,
+    });
+    value.setPulled(settled);
+    value.emit(settled);
+    expect(value.controller.getSnapshot().expectedSessionId).toBeNull();
+    expect(value.controller.getSnapshot().currentFrame?.schemaVersion).toBe(2);
+
+    await settlePromises();
+    snapshot = value.controller.getSnapshot();
+    expect(snapshot.expectedSessionId).toBe("core-a");
+    expect(selectNativePlayerAuthorityMacroStatus(snapshot, "core-a")).toBeNull();
+    expect(selectActiveNativePlayerAuthorityFrame(snapshot, "core-a")).toMatchObject({
+      sessionId: "core-a",
+      runId: "run-a",
+      revision: 13,
+    });
+  });
+
   it("subscribes before pulling and publishes one settled active frame for the bound session", async () => {
     const value = clockFixture();
     const notifications: number[] = [];

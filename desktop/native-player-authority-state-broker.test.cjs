@@ -426,6 +426,54 @@ test("same-session macro revisions may repeat or advance but cannot regress", ()
   );
 });
 
+test("startup macro status converges to the same real v1 session without exposing an identity early", () => {
+  let snapshot = macroSnapshot();
+  const runtime = {
+    context: {
+      sessionId: snapshot.sessionId,
+      runId: snapshot.runId,
+      revision: snapshot.revision,
+      nextSequence: snapshot.nextSequence,
+      nextDeadlineMs: snapshot.nextDeadlineMs,
+      macroSession: internalMacroSession(),
+    },
+    pendingMacroAction: null,
+    snapshot: () => ({ ...snapshot }),
+  };
+  const broker = new NativePlayerAuthorityStateBroker({
+    runtime,
+    isTrustedRendererOwner: () => true,
+  });
+
+  const macro = broker.read(7);
+  assert.equal(macro.schemaVersion, 2);
+  assert.equal(Object.hasOwn(macro, "sessionId"), false);
+  assert.doesNotMatch(JSON.stringify(macro), /core-1|run-1|secret|algorithm/i);
+
+  snapshot = active({
+    revision: 43,
+    acknowledgedSequence: 11,
+    nextSequence: 12,
+    nextDeadlineMs: 75_000,
+  });
+  runtime.context = null;
+  const settled = broker.read(7);
+  assert.deepEqual(settled, { schemaVersion: 1, ...snapshot });
+
+  snapshot = active({
+    sessionId: "core-other",
+    runId: "run-other",
+    revision: 44,
+    acknowledgedSequence: 12,
+    nextSequence: 13,
+    nextDeadlineMs: 76_000,
+  });
+  assert.throws(
+    () => broker.read(7),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_STATE_STALE",
+  );
+});
+
 test("maximum legal macro budgets are accepted and an untrusted renderer sees nothing", () => {
   const value = macroFixture({
     macroSession: internalMacroSession({

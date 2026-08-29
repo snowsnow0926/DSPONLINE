@@ -323,14 +323,20 @@ function identityFrameMatches(
  * External store for the read-only main-owned authority clock.
  *
  * A session must be explicitly bound from the renderer's already-open native
- * controller before any identity-bearing frame is accepted. Pushes cannot
- * switch sessions or runs, and a malformed/stale frame cannot erase the last
- * settled receipt. Identity-free macro v2 frames are accepted only after a v1
- * identity for the explicitly bound session, and are ordered against the same
- * revision/sequence/deadline clock. Macro transitional pushes trigger one pull
- * after the main microtask settles. The legacy v1 clock retains its existing
- * reconciliation behavior, including a repeated pull while an exact tick is
- * still reported in flight.
+ * controller before any identity-bearing push is accepted. A trusted pull may
+ * discover a main-owned startup-recovery session when no renderer session was
+ * available to bind: the pull is served by the main-process broker after it
+ * independently proves Rust ownership. Pushes remain wake-up signals only and
+ * can never establish or switch that binding.
+ *
+ * Startup-recovered macro v2 frames deliberately contain no session identity.
+ * The first such frame is therefore accepted only from a trusted pull while
+ * the binding is deferred. Later macro pushes are ordered against that pulled
+ * clock. When the macro finishes, an identity-bearing push again causes a pull;
+ * only that pull may reveal and bind the real v1 session. A malformed/stale
+ * frame cannot erase the last settled receipt. The legacy v1 clock retains its
+ * existing reconciliation behavior, including a repeated pull while an exact
+ * tick is still reported in flight.
  */
 export class NativePlayerAuthorityClockController {
   private snapshot: NativePlayerAuthorityClockSnapshot = EMPTY_CLOCK_SNAPSHOT;
@@ -340,6 +346,7 @@ export class NativePlayerAuthorityClockController {
   private lastIdentityFrame: DesktopNativePlayerAuthorityClockState | null = null;
   private lastOrderedFrame: DesktopNativePlayerAuthorityState | null = null;
   private lastConfirmedFrame: DesktopNativePlayerAuthorityClockState | null = null;
+  private deferredMacroAccepted = false;
   private unsubscribe: (() => void) | null = null;
   private started = false;
   private requestGeneration = 0;
@@ -364,6 +371,7 @@ export class NativePlayerAuthorityClockController {
     this.lastIdentityFrame = null;
     this.lastOrderedFrame = null;
     this.lastConfirmedFrame = null;
+    this.deferredMacroAccepted = false;
     this.requestGeneration += 1;
     this.publish(this.started ? "loading" : this.source ? "ready" : "unsupported");
     if (this.started) void this.refresh();
@@ -425,7 +433,19 @@ export class NativePlayerAuthorityClockController {
       return false;
     }
     if (candidate.schemaVersion === 2) {
-      if (this.expectedSessionId === null || !this.lastIdentityFrame ||
+      if (this.expectedSessionId === null) {
+        if (!this.deferredMacroAccepted) {
+          // An identity-free push cannot prove that Rust already owned the
+          // player save when this renderer started. Use it only to wake a
+          // brokered pull; the pull result is the first trusted observation.
+          if (pushed) {
+            this.scheduleSettledPull();
+            return false;
+          }
+          this.deferredMacroAccepted = true;
+        } else if (!this.lastOrderedFrame ||
+          !clockFrameIsOrderedAfter(this.lastOrderedFrame, candidate)) return false;
+      } else if (!this.lastIdentityFrame ||
         !hasCompleteIdentity(this.lastIdentityFrame) ||
         this.lastIdentityFrame.sessionId !== this.expectedSessionId ||
         !this.lastOrderedFrame || !clockFrameIsOrderedAfter(this.lastOrderedFrame, candidate)) return false;
@@ -441,11 +461,24 @@ export class NativePlayerAuthorityClockController {
     if (!hasCompleteIdentity(candidate)) {
       // Identity-free transitions cannot prove that they belong to an already
       // bound player session. Macro v2 uses the separately guarded branch.
-      if (this.expectedSessionId !== null) return false;
+      if (this.expectedSessionId !== null || this.deferredMacroAccepted) return false;
       this.lastIdentityFrame = null;
       this.lastOrderedFrame = null;
     } else {
-      if (candidate.sessionId !== this.expectedSessionId) return false;
+      if (this.expectedSessionId === null) {
+        // The renderer may start after Rust recovered a durable authority
+        // lease, so its shadow controller has no session to bind. Never trust
+        // the pushed identity directly: make the push trigger a brokered pull,
+        // and establish the binding only from that pull reply.
+        if (pushed) {
+          this.scheduleSettledPull();
+          return false;
+        }
+        if (this.lastOrderedFrame &&
+          !clockFrameIsOrderedAfter(this.lastOrderedFrame, candidate)) return false;
+        this.expectedSessionId = candidate.sessionId;
+        this.deferredMacroAccepted = false;
+      } else if (candidate.sessionId !== this.expectedSessionId) return false;
       if (this.lastIdentityFrame && !identityFrameMatches(this.lastIdentityFrame, candidate)) return false;
       if (this.lastOrderedFrame && !clockFrameIsOrderedAfter(this.lastOrderedFrame, candidate)) return false;
       this.lastIdentityFrame = candidate;
@@ -513,8 +546,14 @@ export function selectNativePlayerAuthorityMacroStatus(
   snapshot: NativePlayerAuthorityClockSnapshot,
   sessionId: string | null,
 ): DesktopNativePlayerAuthorityMacroState | null {
-  if (sessionId === null || snapshot.expectedSessionId !== sessionId) return null;
-  return snapshot.currentFrame?.schemaVersion === 2 ? snapshot.currentFrame : null;
+  const current = snapshot.currentFrame;
+  if (current?.schemaVersion !== 2) return null;
+  // A startup-recovered macro intentionally redacts its session identity. It
+  // is still an authoritative read-only ownership signal after the controller
+  // accepted it from a trusted pull. Once a v1 identity is known, callers must
+  // provide that exact binding as before.
+  if (snapshot.expectedSessionId === null) return sessionId === null ? current : null;
+  return sessionId === snapshot.expectedSessionId ? current : null;
 }
 
 /**

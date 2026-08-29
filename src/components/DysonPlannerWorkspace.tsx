@@ -407,8 +407,9 @@ function NativeDysonUnavailable({
 
 /**
  * Player-authority Dyson surface. This component intentionally consumes only
- * the complete, same-revision native projection. Its launch callbacks are
- * revision-bound Rust commands; structural editing stays unavailable here.
+ * the complete, same-revision native projection. Its launch and orbit
+ * selection callbacks are revision-bound Rust commands; structural editing
+ * stays unavailable here.
  */
 export function NativeDysonPlannerWorkspace({
   frame,
@@ -416,6 +417,9 @@ export function NativeDysonPlannerWorkspace({
   selectedSystemId,
   pending,
   onSelectSystem,
+  onSelectLayer,
+  onSelectOrbit,
+  onOrbitChange,
   onLaunchModeChange,
   onLaunchThrottleChange,
   onLaunchEnabledChange,
@@ -426,6 +430,9 @@ export function NativeDysonPlannerWorkspace({
   selectedSystemId: string | null;
   pending: boolean;
   onSelectSystem: (systemId: string) => void;
+  onSelectLayer: (layerId: string) => void;
+  onSelectOrbit: (orbitId: string) => void;
+  onOrbitChange: (orbitId: string, changes: { radius?: number; inclination?: number; longitude?: number }) => void;
   onLaunchModeChange: (mode: DysonLaunchMode) => void;
   onLaunchThrottleChange: (throttle: DysonLaunchThrottle) => void;
   onLaunchEnabledChange: (enabled: boolean) => void;
@@ -508,16 +515,17 @@ export function NativeDysonPlannerWorkspace({
               );
             })}
           </div>
-          <div className="dyson-layer-heading"><span>壳层（只读）</span><strong>{frame.layers.length}/8</strong></div>
+          <div className="dyson-layer-heading"><span>壳层</span><strong>{frame.layers.length}/8</strong></div>
           <div className="dyson-layer-list" aria-label="原生戴森壳层列表">
             {frame.layers.map((layer, index) => (
               <button
                 className={activeLayer?.layerId === layer.layerId ? "active" : ""}
                 type="button"
                 key={layer.layerId}
-                disabled
+                disabled={pending || activeLayer?.layerId === layer.layerId}
+                onClick={() => onSelectLayer(layer.layerId)}
                 data-native-dyson-action="select-layer"
-                title={`${nativeDysonLabel(layer.name, layer.layerId)}（${layer.layerId}）为原生只读资料`}
+                title={`切换到 ${nativeDysonLabel(layer.name, layer.layerId)}（${layer.layerId}）`}
               >
                 <b>{String(index + 1).padStart(2, "0")}</b>
                 <span><strong>{nativeDysonLabel(layer.name, layer.layerId)}</strong><small>{layer.radius.toLocaleString("zh-CN")} m · {layer.nodeCount} 节点</small></span>
@@ -530,16 +538,17 @@ export function NativeDysonPlannerWorkspace({
             <button type="button" disabled data-native-dyson-action="add-layer" title="原生戴森设计命令尚未接入"><Plus size={14} />空白层</button>
             <button type="button" disabled data-native-dyson-action="add-standard-layer" title="原生戴森设计命令尚未接入"><Layers3 size={14} />标准层</button>
           </div>
-          <div className="dyson-layer-heading dyson-swarm-heading"><span>太阳帆轨道（只读）</span><strong>{frame.orbits.length}/8</strong></div>
+          <div className="dyson-layer-heading dyson-swarm-heading"><span>太阳帆轨道</span><strong>{frame.orbits.length}/8</strong></div>
           <div className="dyson-swarm-orbit-list" aria-label="原生太阳帆轨道列表">
             {frame.orbits.map((orbit, index) => (
               <button
                 className={activeOrbit?.orbitId === orbit.orbitId ? "active" : ""}
                 type="button"
                 key={orbit.orbitId}
-                disabled
+                disabled={pending || activeOrbit?.orbitId === orbit.orbitId}
+                onClick={() => onSelectOrbit(orbit.orbitId)}
                 data-native-dyson-action="select-orbit"
-                title={`${nativeDysonLabel(orbit.name, orbit.orbitId)}（${orbit.orbitId}）为原生只读资料`}
+                title={`切换到 ${nativeDysonLabel(orbit.name, orbit.orbitId)}（${orbit.orbitId}）`}
               >
                 <b>{String(index + 1).padStart(2, "0")}</b>
                 <span><strong>{nativeDysonLabel(orbit.name, orbit.orbitId)}</strong><small>{orbit.radius.toLocaleString("zh-CN")} m · {orbit.inclination}°</small></span>
@@ -662,10 +671,10 @@ export function NativeDysonPlannerWorkspace({
           )}
           {activeOrbit ? (
             <section className="dyson-swarm-orbit-inspector" aria-label="原生太阳帆轨道参数">
-              <header><i><Sun size={15} /></i><span><small>太阳帆轨道 · 只读</small><strong>{nativeDysonLabel(activeOrbit.name, activeOrbit.orbitId)}</strong></span><em><QuantityValue value={activeOrbit.sailsInOrbit} unit="帆" /></em></header>
-              <label className="dyson-orbit-control"><span>轨道半径 <strong>{activeOrbit.radius.toLocaleString("zh-CN")} m</strong></span><input type="range" min={0} max={Math.max(1, activeOrbit.radius)} value={activeOrbit.radius} disabled data-native-dyson-action="orbit-radius" aria-label="原生太阳帆轨道半径（只读）" /></label>
-              <label className="dyson-orbit-control"><span>轨道倾角 <strong>{activeOrbit.inclination}°</strong></span><input type="range" min={-90} max={90} value={activeOrbit.inclination} disabled data-native-dyson-action="orbit-inclination" aria-label="原生太阳帆轨道倾角（只读）" /></label>
-              <label className="dyson-orbit-control"><span>升交点经度 <strong>{activeOrbit.longitude}°</strong></span><input type="range" min={0} max={359} value={activeOrbit.longitude} disabled data-native-dyson-action="orbit-longitude" aria-label="原生太阳帆轨道升交点经度（只读）" /></label>
+              <header><i><Sun size={15} /></i><span><small>太阳帆轨道 · Rust 权威</small><strong>{nativeDysonLabel(activeOrbit.name, activeOrbit.orbitId)}</strong></span><em><QuantityValue value={activeOrbit.sailsInOrbit} unit="帆" /></em></header>
+              <label className="dyson-orbit-control"><span>轨道半径 <strong>{activeOrbit.radius.toLocaleString("zh-CN")} m</strong></span><input type="range" min={5000} max={50000} step={500} value={activeOrbit.radius} disabled={pending} onChange={(event) => onOrbitChange(activeOrbit.orbitId, { radius: Number(event.target.value) })} data-native-dyson-action="orbit-radius" aria-label="调整原生太阳帆轨道半径" /></label>
+              <label className="dyson-orbit-control"><span>轨道倾角 <strong>{activeOrbit.inclination}°</strong></span><input type="range" min={-90} max={90} step={1} value={activeOrbit.inclination} disabled={pending} onChange={(event) => onOrbitChange(activeOrbit.orbitId, { inclination: Number(event.target.value) })} data-native-dyson-action="orbit-inclination" aria-label="调整原生太阳帆轨道倾角" /></label>
+              <label className="dyson-orbit-control"><span>升交点经度 <strong>{activeOrbit.longitude}°</strong></span><input type="range" min={0} max={359} step={1} value={activeOrbit.longitude} disabled={pending} onChange={(event) => onOrbitChange(activeOrbit.orbitId, { longitude: Number(event.target.value) })} data-native-dyson-action="orbit-longitude" aria-label="调整原生太阳帆轨道升交点经度" /></label>
               <div className="dyson-swarm-orbit-stats"><span>发射 <QuantityValue value={activeOrbit.totalLaunched} /></span><span>衰减 <QuantityValue value={activeOrbit.totalExpired} /></span><span><PowerValue valueKw={activeOrbit.generationKw} /></span></div>
               <button type="button" disabled data-native-dyson-action="remove-orbit"><Trash2 size={13} />删除轨道</button>
             </section>

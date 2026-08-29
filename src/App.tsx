@@ -541,9 +541,13 @@ import {
   selectNativePlanetViewportReadModel,
 } from "./game/nativePlanetViewportReadModel";
 import {
+  createNativeProjectedDysonActiveLayerCommand,
+  createNativeProjectedDysonActiveOrbitCommand,
   createNativeProjectedDysonLaunchEnabledCommand,
   createNativeProjectedDysonLaunchModeCommand,
   createNativeProjectedDysonLaunchThrottleCommand,
+  createNativeProjectedDysonOrbitGeometryCommand,
+  type NativeProjectedDysonOrbitGeometry,
 } from "./game/nativeProjectedDysonCommands";
 import {
   RECIPE_WORKSPACE_PROJECTION_LIMITS,
@@ -11353,6 +11357,48 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     else mobileNavigation.openWorkspace("recipes");
   }, [closeAllWorkspaces, mobileNavigation.openWorkspace, mobileNavigation.replaceModalWithWorkspace, nextMobileShell, recipeFocusReadModel?.itemId]);
 
+  const onNativeDysonSelectLayer = useCallback((layerId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次壳层切换未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonActiveLayerCommand(frame, layerId)
+        : null,
+      () => setNotice("已由 Rust 切换当前戴森壳层"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonSelectOrbit = useCallback((orbitId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次太阳帆轨道切换未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonActiveOrbitCommand(frame, orbitId)
+        : null,
+      () => setNotice("已由 Rust 切换当前太阳帆轨道"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonOrbitChange = useCallback((orbitId: string, changes: NativeProjectedDysonOrbitGeometry) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次太阳帆轨道调整未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonOrbitGeometryCommand(frame, orbitId, changes)
+        : null,
+      () => setNotice("已由 Rust 更新太阳帆轨道参数"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
   const onNativeDysonLaunchModeChange = useCallback((mode: DysonLaunchMode) => {
     const frame = nativeDysonWorkspaceFrame;
     if (!frame) {
@@ -19023,6 +19069,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             selectedSystemId={nativeDysonEffectiveSystemId}
             pending={nativePlayerAuthorityCommandPending}
             onSelectSystem={setNativeDysonSelectedSystemId}
+            onSelectLayer={onNativeDysonSelectLayer}
+            onSelectOrbit={onNativeDysonSelectOrbit}
+            onOrbitChange={onNativeDysonOrbitChange}
             onLaunchModeChange={onNativeDysonLaunchModeChange}
             onLaunchThrottleChange={onNativeDysonLaunchThrottleChange}
             onLaunchEnabledChange={onNativeDysonLaunchEnabledChange}

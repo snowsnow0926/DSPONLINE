@@ -229,6 +229,63 @@ const FRAME: NativeDysonWorkspaceFrame = Object.freeze({
   shellsByLayerId: new Map([[layer.layerId, shells]]),
 });
 
+function frameWithAlternativeTargets(): NativeDysonWorkspaceFrame {
+  const alternateLayer = {
+    ...layer,
+    layerId: "layer:secondary",
+    name: "原生第二壳层",
+    nodeCount: 0,
+    frameCount: 0,
+    shellCount: 0,
+    plannedStructurePoints: 0,
+    completedStructurePoints: 0,
+    sailCapacity: 0,
+    absorbedSails: 0,
+  } satisfies NativeDysonWorkspaceFrame["layers"][number];
+  const alternateOrbit = {
+    ...orbit,
+    orbitId: "orbit:secondary",
+    name: "原生第二太阳帆轨道",
+    radius: 30_000,
+    inclination: -10,
+    longitude: 90,
+    sailsInOrbit: 0,
+    totalLaunched: 0,
+    totalExpired: 0,
+    decayProgress: 0,
+    generationKw: 0,
+  } satisfies NativeDysonWorkspaceFrame["orbits"][number];
+  const selectedSystemWithAlternatives = {
+    ...selectedSystem,
+    totals: { ...selectedSystem.totals, layerCount: 2 },
+    orbitCount: 2,
+  } satisfies NativeDysonWorkspaceFrame["systems"][number];
+  const systemsWithAlternatives = Object.freeze([selectedSystemWithAlternatives, modSystem]);
+  const layersWithAlternatives = Object.freeze([layer, alternateLayer]);
+  const orbitsWithAlternatives = Object.freeze([orbit, alternateOrbit]);
+  const projectionWithAlternatives: NativeDysonWorkspaceFrame["projection"] = {
+    ...projection,
+    summary: { ...projection.summary, layerCount: 2, orbitCount: 2 },
+    selectedSystem: selectedSystemWithAlternatives,
+    systems: page(systemsWithAlternatives),
+    layers: page(layersWithAlternatives),
+    orbits: page(orbitsWithAlternatives),
+  };
+  return {
+    ...FRAME,
+    projection: projectionWithAlternatives,
+    systems: systemsWithAlternatives,
+    layers: layersWithAlternatives,
+    orbits: orbitsWithAlternatives,
+    systemsById: new Map(systemsWithAlternatives.map((system) => [system.systemId, system])),
+    layersById: new Map(layersWithAlternatives.map((candidate) => [candidate.layerId, candidate])),
+    orbitsById: new Map(orbitsWithAlternatives.map((candidate) => [candidate.orbitId, candidate])),
+    nodesByLayerId: new Map([[layer.layerId, nodes], [alternateLayer.layerId, Object.freeze([])]]),
+    framesByLayerId: new Map([[layer.layerId, frames], [alternateLayer.layerId, Object.freeze([])]]),
+    shellsByLayerId: new Map([[layer.layerId, shells], [alternateLayer.layerId, Object.freeze([])]]),
+  };
+}
+
 let host: HTMLDivElement;
 let root: Root;
 
@@ -252,6 +309,9 @@ function renderNative(overrides: Partial<Parameters<typeof NativeDysonPlannerWor
     selectedSystemId: "helios",
     pending: false,
     onSelectSystem: vi.fn(),
+    onSelectLayer: vi.fn(),
+    onSelectOrbit: vi.fn(),
+    onOrbitChange: vi.fn(),
     onLaunchModeChange: vi.fn(),
     onLaunchThrottleChange: vi.fn(),
     onLaunchEnabledChange: vi.fn(),
@@ -281,14 +341,21 @@ describe("NativeDysonPlannerWorkspace", () => {
     expect(host.querySelector("[data-native-dyson-shell-id='shell:alpha-beta']")).not.toBeNull();
   });
 
-  it("routes launch controls through native callbacks while structural edits stay disabled", () => {
+  it("routes safe launch and orbit controls through native callbacks while structural edits stay disabled", () => {
     const onSelectSystem = vi.fn();
+    const onSelectLayer = vi.fn();
+    const onSelectOrbit = vi.fn();
+    const onOrbitChange = vi.fn();
     const onLaunchModeChange = vi.fn();
     const onLaunchThrottleChange = vi.fn();
     const onLaunchEnabledChange = vi.fn();
     const onClose = vi.fn();
     renderNative({
+      frame: frameWithAlternativeTargets(),
       onSelectSystem,
+      onSelectLayer,
+      onSelectOrbit,
+      onOrbitChange,
       onLaunchModeChange,
       onLaunchThrottleChange,
       onLaunchEnabledChange,
@@ -316,9 +383,31 @@ describe("NativeDysonPlannerWorkspace", () => {
     expect(onLaunchModeChange).toHaveBeenCalledWith("sphere");
     expect(onLaunchThrottleChange).toHaveBeenCalledWith(0.25);
 
-    const structuralControls = host.querySelectorAll<HTMLButtonElement | HTMLInputElement>(
-      "[data-native-dyson-action]:not([data-native-dyson-action^='launch-'])",
-    );
+    const selectableLayer = Array.from(host.querySelectorAll<HTMLButtonElement>("[data-native-dyson-action='select-layer']"))
+      .find((button) => !button.disabled)!;
+    const selectableOrbit = Array.from(host.querySelectorAll<HTMLButtonElement>("[data-native-dyson-action='select-orbit']"))
+      .find((button) => !button.disabled)!;
+    expect(selectableLayer.textContent).toContain("原生第二壳层");
+    expect(selectableOrbit.textContent).toContain("原生第二太阳帆轨道");
+    act(() => selectableLayer.click());
+    act(() => selectableOrbit.click());
+    expect(onSelectLayer).toHaveBeenCalledWith("layer:secondary");
+    expect(onSelectOrbit).toHaveBeenCalledWith("orbit:secondary");
+
+    const radius = host.querySelector<HTMLInputElement>("[data-native-dyson-action='orbit-radius']")!;
+    const setInputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    act(() => {
+      setInputValue.call(radius, "30000");
+      radius.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(onOrbitChange).toHaveBeenCalledWith("orbit:primary", { radius: 30_000 });
+
+    const structuralControls = Array.from(host.querySelectorAll<HTMLButtonElement | HTMLInputElement>("[data-native-dyson-action]"))
+      .filter((control) => {
+        const action = control.dataset.nativeDysonAction ?? "";
+        return action !== "select-layer" && action !== "select-orbit" &&
+          !action.startsWith("launch-") && !action.startsWith("orbit-");
+      });
     expect(structuralControls.length).toBeGreaterThan(5);
     for (const control of structuralControls) expect(control.disabled).toBe(true);
 
@@ -326,12 +415,14 @@ describe("NativeDysonPlannerWorkspace", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("locks native launch controls while a command is pending", () => {
+  it("locks native projected controls while a command is pending", () => {
     renderNative({ pending: true });
 
-    const launchControls = host.querySelectorAll<HTMLButtonElement>("[data-native-dyson-action^='launch-']");
-    expect(launchControls.length).toBeGreaterThan(3);
-    for (const control of launchControls) expect(control.disabled).toBe(true);
+    const projectedControls = host.querySelectorAll<HTMLButtonElement | HTMLInputElement>(
+      "[data-native-dyson-action^='launch-'], [data-native-dyson-action='select-layer'], [data-native-dyson-action='select-orbit'], [data-native-dyson-action^='orbit-']",
+    );
+    expect(projectedControls.length).toBeGreaterThan(6);
+    for (const control of projectedControls) expect(control.disabled).toBe(true);
   });
 
   it("does not render the retained old frame while a new revision is loading", () => {
@@ -364,6 +455,7 @@ describe("NativeDysonPlannerWorkspace", () => {
     const nativeBoundary = source.slice(source.indexOf("export type NativeDysonWorkspaceReadStatus"));
 
     expect(nativeBoundary).not.toMatch(/\bGameState\b|\bgame\.|getDysonEngineeringSnapshot|isTechnologyCompleted|createDysonLayerTemplate|getDysonPlanTotals|getStarSystemProfile|getStarSystem\(/);
-    expect(nativeBoundary).not.toMatch(/onAddLayer|onSave|onOrbitChange|onAddSwarmOrbit|commitGame|publishRuntimeGame/);
+    expect(nativeBoundary).toMatch(/onOrbitChange/);
+    expect(nativeBoundary).not.toMatch(/onAddLayer|onSave|onAddSwarmOrbit|commitGame|publishRuntimeGame/);
   });
 });

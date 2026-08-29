@@ -3462,6 +3462,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       // state replacement or schedule a WAL command after lifecycle sealing.
       if (cancelled || lifecycleExitStartedRef.current || durablePrimarySaveInFlightRef.current || !response?.activity) return;
       setGalacticActivityStatus(response.activity);
+      if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+        // The public status remains useful to the shell, but Rust is the only
+        // player-state writer after authority handoff. Replaying contracts or
+        // galactic activity against the renderer's stale mirror would create
+        // an unversioned second writer and could later overwrite a newer
+        // native checkpoint.
+        return;
+      }
       // This callback resolves outside a React event. Publish the imperative
       // state before scheduling the WAL dispatcher, otherwise a deferred
       // functional updater can make that dispatcher observe the old activity

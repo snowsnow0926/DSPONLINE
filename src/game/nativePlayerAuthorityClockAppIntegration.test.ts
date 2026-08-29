@@ -106,6 +106,24 @@ describe("main-owned authority clock App wiring", () => {
     expect(editGuard).toMatch(/nativePlayerAuthorityMacroReadOnlyRef\.current[\s\S]*?本次操作未应用[\s\S]*?return true/);
   });
 
+  it("keeps cloud public-status refresh from becoming a second player-state writer", () => {
+    const app = readFileSync(resolve("src/App.tsx"), "utf8");
+    const refresh = app.slice(
+      app.indexOf("const response = await fetchCloudPublicStatus()"),
+      app.indexOf("const publishCanvasSnapshot"),
+    );
+    const guard = refresh.indexOf("if (nativePlayerAuthorityOwnsRuntimeRef.current)");
+    const stationMutation = refresh.indexOf("synchronizeStationContracts(");
+    const galacticMutation = refresh.indexOf("synchronizeGalacticActivity(");
+    const rendererInstall = refresh.indexOf("gameRef.current = next");
+
+    expect(guard).toBeGreaterThanOrEqual(0);
+    expect(refresh.indexOf("return;", guard)).toBeLessThan(stationMutation);
+    expect(guard).toBeLessThan(stationMutation);
+    expect(guard).toBeLessThan(galacticMutation);
+    expect(guard).toBeLessThan(rendererInstall);
+  });
+
   it("narrows every second authority pull to v1 before reading identity fields", () => {
     const app = readFileSync(resolve("src/App.tsx"), "utf8");
     const locateProduction = app.slice(

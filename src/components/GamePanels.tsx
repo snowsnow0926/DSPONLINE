@@ -61,7 +61,7 @@ import {
   Zap,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useHorizontalPan } from "../hooks/useHorizontalPan";
 import { ItemGlyph, ItemHoverCard } from "./ItemReference";
 import { ItemCatalogPicker, RecipeCatalogPicker } from "./CatalogPicker";
@@ -419,6 +419,7 @@ export function PlanetNavigator({ model, onPlanetChange }: { model: PlanetNaviga
 type InspectorTab = "inspect" | "fabricate";
 
 interface InspectorPanelProps {
+  readOnly?: boolean;
   game: GameState;
   inspectorReadModel: FactoryInspectorSummaryReadModel;
   multiSelectionReadModel: FactoryMultiSelectionSummaryReadModel;
@@ -2367,7 +2368,82 @@ function InspectorLayoutControls({ preference, onChange }: {
   </section>;
 }
 
-export function InspectorPanel(props: InspectorPanelProps) {
+function NativeReadOnlyInspectorPanel(props: InspectorPanelProps) {
+  const inspectorProjectionReady = props.inspectorReadModel.source === "native-core" &&
+    Number.isSafeInteger(props.inspectorReadModel.revision) && (props.inspectorReadModel.revision ?? -1) >= 0 &&
+    props.inspectorReadModel.schema === "factory-read-model-v1" && (
+      props.selectedEntity && !props.selectedBelt && props.inspectorReadModel.belt === null &&
+        props.inspectorReadModel.entity !== null &&
+        props.inspectorReadModel.activePlanetId === props.selectedEntity.planetId &&
+        desktopEntitySummaryMatches(props.selectedEntity, props.inspectorReadModel.entity) ||
+      props.selectedBelt && !props.selectedEntity && props.inspectorReadModel.entity === null &&
+        props.inspectorReadModel.belt !== null &&
+        props.inspectorReadModel.activePlanetId === props.selectedBelt.planetId &&
+        desktopBeltSummaryMatches(props.selectedBelt, props.inspectorReadModel.belt)
+    );
+  const multipleSelection = props.selectedEntities.length + props.multiSelectedBelts.length > 1;
+  // The legacy GameState mirror deliberately does not follow an active-planet
+  // command after Rust becomes authoritative. Bind only the display helper's
+  // route check to the already verified projection identity; no gameplay data
+  // is copied from or written back to that mirror.
+  const projectionGame = inspectorProjectionReady &&
+      props.game.activePlanetId !== props.inspectorReadModel.activePlanetId
+    ? { ...props.game, activePlanetId: props.inspectorReadModel.activePlanetId as PlanetId }
+    : props.game;
+  const multiSelectionProjectionGame = props.game.activePlanetId !== props.multiSelectionReadModel.activePlanetId
+    ? { ...props.game, activePlanetId: props.multiSelectionReadModel.activePlanetId as PlanetId }
+    : props.game;
+  const multiSelectionProjectionReady = multipleSelection && exactNativeMultiSelectionRows(
+    multiSelectionProjectionGame,
+    props.selectedEntities,
+    props.multiSelectedBelts,
+    props.multiSelectionReadModel,
+  );
+
+  let content: ReactNode;
+  if (multipleSelection) {
+    content = multiSelectionProjectionReady ? (
+      <section
+        className="inspector-content native-read-only-multi-selection"
+        aria-label="Windows 原生只读多选摘要"
+        data-factory-read-model-source="native-core"
+        data-factory-read-model-revision={props.multiSelectionReadModel.revision}
+      >
+        <div className="inspector-identity"><i className="building-mark"><Layers3 size={18} /></i><div><span>Windows 原生只读</span><strong>{props.multiSelectionReadModel.requestedEntityCount} 个建筑 · {props.multiSelectionReadModel.requestedBeltCount} 条线路</strong></div></div>
+        <p>多选内容已由同 revision 的 Rust 投影确认；批量修改尚未接入原生命令，因此当前只显示数量，不提供旧 JavaScript 状态操作。</p>
+      </section>
+    ) : (
+      <section className="inspector-content native-read-only-unavailable" aria-label="Windows 原生检查器等待同步" role="status">
+        <strong>正在核对原生多选摘要</strong>
+        <p>当前 revision 尚未形成完整 Rust 投影，旧 JavaScript 状态不会显示，也不能操作。</p>
+      </section>
+    );
+  } else if (props.selectedEntity && inspectorProjectionReady) {
+    content = <DesktopInspectorLiveSummary game={projectionGame} entity={props.selectedEntity} belt={null} readModel={props.inspectorReadModel} />;
+  } else if (props.selectedBelt && inspectorProjectionReady) {
+    content = <DesktopInspectorLiveSummary game={projectionGame} entity={null} belt={props.selectedBelt} readModel={props.inspectorReadModel} />;
+  } else {
+    content = (
+      <section className="inspector-content native-read-only-unavailable" aria-label="Windows 原生只读检查器" role="status">
+        <strong>{props.selectedEntity || props.selectedBelt ? "正在核对原生检查摘要" : "请选择一个建筑或传送带"}</strong>
+        <p>这里只显示同 revision 的 Rust 运行摘要；制造、配置、回收和其他旧状态操作均已停用。</p>
+      </section>
+    );
+  }
+
+  return (
+    <aside className="inspector-panel native-read-only-inspector" data-native-authority-read-only="true">
+      <div className="panel-tabs" role="tablist" aria-label="Windows 原生只读检查器">
+        <button role="tab" aria-selected="true" className="active" type="button" disabled>
+          <CircuitBoard size={15} /> 检查器
+        </button>
+      </div>
+      {content}
+    </aside>
+  );
+}
+
+function EditableInspectorPanel(props: InspectorPanelProps) {
   const [layoutPreference, setLayoutPreference] = useState(readInspectorLayoutPreference);
   const updateLayoutPreference = (next: InspectorLayoutPreferenceV1) => {
     setLayoutPreference(next);
@@ -2403,6 +2479,12 @@ export function InspectorPanel(props: InspectorPanelProps) {
       ) : <InspectorEmpty game={props.game} onOpenTutorial={props.onOpenTutorial} />}
     </aside>
   );
+}
+
+export function InspectorPanel(props: InspectorPanelProps) {
+  return props.readOnly
+    ? <NativeReadOnlyInspectorPanel {...props} />
+    : <EditableInspectorPanel {...props} />;
 }
 
 export const CONSTRUCTION_BUILD_ORDER: Array<BuildingId | ConveyorBeltId> = [

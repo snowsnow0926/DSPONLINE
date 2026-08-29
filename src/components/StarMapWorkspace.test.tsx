@@ -4,12 +4,13 @@ import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInitialState } from "../game/engine";
-import type { NativeStarMapWorkspaceReadModel } from "../game/nativeStellarWorkspaceStore";
+import type { NativeStarMapWorkspaceReadModel, NativeStellarQuantumReadModel } from "../game/nativeStellarWorkspaceStore";
 import type { GameState, PlanetIndustryRole } from "../game/types";
 import { AppLocaleProvider } from "../i18n/locale";
 import { clearStableTextDraft } from "./CompositionSafeInput";
 import {
   NativeIndustryConsole,
+  NativeQuantumInventoryConsole,
   StarMapWorkspace,
   type StarMapIndustryReadRequest,
   type StarMapNativeReadStatus,
@@ -140,6 +141,59 @@ const READ_MODEL: NativeStarMapWorkspaceReadModel = Object.freeze({
   ]),
   routeRowsById: new Map([[ROUTE.id, ROUTE]]),
   routeRowsByTargetStationId: new Map([[TARGET_STATION.stationId, Object.freeze([ROUTE])]]),
+});
+
+const QUANTUM_ITEM = Object.freeze({
+  itemId: "iron_ore",
+  inventory: "120000",
+  capacity: "100000",
+  uploaded: "300",
+  downloaded: "100",
+});
+
+const QUANTUM_COLLECTOR = Object.freeze({
+  collectorId: "native-collector",
+  planetId: "home",
+  systemId: "helios",
+  machineCount: 8,
+  quantumMode: "quantum",
+  quantumTransitionActive: false,
+  attachmentState: "connected",
+}) as NativeStellarQuantumReadModel["collectors"][number];
+
+const QUANTUM_READ_MODEL: NativeStellarQuantumReadModel = Object.freeze({
+  source: "native-core",
+  sourceMode: "player-authority",
+  sessionId: "authority-session",
+  revision: 9,
+  registryFingerprint: "registry-fingerprint",
+  enabled: true,
+  bandwidth: {
+    multiplier: 2,
+    globalUploadPerMinute: 1000,
+    globalDownloadPerMinute: 800,
+    activeTowerCount: 2,
+    activeTowerStacks: 20,
+  },
+  runtime: {
+    boundarySecond: 55,
+    globalUploadPerMinute: 300,
+    globalDownloadPerMinute: 100,
+    quantumTowerStacks: 20,
+    quantumCollectorStacks: 8,
+  },
+  collectorSummary: {
+    totalCount: 1,
+    connectedCount: 1,
+    pendingCount: 0,
+    availableCount: 0,
+    connectedStacks: 8,
+  },
+  items: Object.freeze([QUANTUM_ITEM]),
+  collectors: Object.freeze([QUANTUM_COLLECTOR]),
+  itemRowsById: new Map([[QUANTUM_ITEM.itemId, QUANTUM_ITEM]]),
+  collectorRowsById: new Map([[QUANTUM_COLLECTOR.collectorId, QUANTUM_COLLECTOR]]),
+  collectorRowsBySystemId: new Map([[QUANTUM_COLLECTOR.systemId, Object.freeze([QUANTUM_COLLECTOR])]]),
 });
 
 let host: HTMLDivElement;
@@ -380,6 +434,45 @@ describe("NativeIndustryConsole", () => {
   });
 });
 
+describe("NativeQuantumInventoryConsole", () => {
+  it("renders inventory, flow, bandwidth, and collector counts only from the native read model", () => {
+    act(() => root.render(<AppLocaleProvider><NativeQuantumInventoryConsole
+      readModel={QUANTUM_READ_MODEL}
+      status="ready"
+    /></AppLocaleProvider>));
+
+    expect(host.textContent).toContain("Rust 权威共享物资池");
+    expect(host.textContent).toContain("铁矿");
+    expect(host.textContent).toContain("精确 120,000");
+    expect(host.textContent).toContain("上传 300");
+    expect(host.textContent).toContain("下载 100");
+    expect(host.textContent).toContain("超出上限，仅允许下载");
+    expect(host.textContent).toContain("最近结算 55 秒");
+    expect(host.querySelector("[data-native-quantum-read-status='ready']")).not.toBeNull();
+    expect(host.querySelector<HTMLButtonElement>("[aria-label='铁矿石容量预设'] button")?.disabled).toBe(true);
+  });
+
+  it("binds capacity edits to the current projected capacity and fails closed without a frame", () => {
+    const onNativeItemCapacityChange = vi.fn(() => true);
+    act(() => root.render(<AppLocaleProvider><NativeQuantumInventoryConsole
+      readModel={QUANTUM_READ_MODEL}
+      status="ready"
+      onNativeItemCapacityChange={onNativeItemCapacityChange}
+    /></AppLocaleProvider>));
+    const preset = Array.from(host.querySelectorAll<HTMLButtonElement>("[aria-label='铁矿石容量预设'] button"))
+      .find((button) => button.textContent === "1亿")!;
+    act(() => preset.click());
+    expect(onNativeItemCapacityChange).toHaveBeenCalledWith("iron_ore", "100000", "100000000");
+
+    act(() => root.render(<AppLocaleProvider><NativeQuantumInventoryConsole
+      readModel={null}
+      status="loading"
+    /></AppLocaleProvider>));
+    expect(host.textContent).toContain("正在同步原生权威量子库存");
+    expect(host.textContent).not.toContain("精确 120000");
+  });
+});
+
 describe("StarMapWorkspace authority boundaries", () => {
   it("fails closed when a scoped industry model returns to the map", () => {
     renderWorkspace({
@@ -402,7 +495,21 @@ describe("StarMapWorkspace authority boundaries", () => {
     expect(host.querySelector("[aria-label='星图批量物流操作']")).toBeNull();
   });
 
-  it("keeps quantum inventory and all GameState-backed actions unavailable in player authority", () => {
+  it("shows the native Quantum projection without reading the renderer GameState", () => {
+    renderWorkspace({
+      game: playerAuthorityPoisonGame(),
+      nativeReadModel: READ_MODEL,
+      nativeQuantumReadModel: QUANTUM_READ_MODEL,
+      nativeAuthorityRequired: true,
+    });
+    clickButton("量子库存");
+
+    expect(host.textContent).toContain("Rust 权威共享物资池");
+    expect(host.textContent).toContain("精确 120,000");
+    expect(host.textContent).not.toContain("原生权威量子库存暂不可用");
+  });
+
+  it("fails the native Quantum console closed and keeps GameState-backed actions unavailable without a frame", () => {
     const onCollectorQuantumModeChange = vi.fn(async () => null);
     const onQuantumItemCapacityChange = vi.fn();
     renderWorkspace({
@@ -415,7 +522,7 @@ describe("StarMapWorkspace authority boundaries", () => {
     clickButton("量子库存");
 
     expect(host.textContent).toContain("原生权威量子库存暂不可用");
-    expect(host.querySelector(".quantum-inventory-console")).toBeNull();
+    expect(host.querySelector("[data-native-quantum-read-status='unavailable']")).not.toBeNull();
     expect(host.querySelector("[aria-label='搜索量子库存物品']")).toBeNull();
     expect(onCollectorQuantumModeChange).not.toHaveBeenCalled();
     expect(onQuantumItemCapacityChange).not.toHaveBeenCalled();

@@ -400,9 +400,11 @@ import {
   createNativePlayerAuthorityRecipeWorkspaceProjectionSource,
 } from "./game/nativeRecipeWorkspaceStore";
 import {
+  DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR,
   NATIVE_STELLAR_PAGE_ROWS,
   NativeStellarWorkspaceStore,
   createNativePlayerAuthorityStellarProjectionSource,
+  selectNativePlayerAuthorityStellarQuantumReadModel,
   selectNativeStarMapWorkspaceReadModel,
   type NativeStellarIndustrySelector,
 } from "./game/nativeStellarWorkspaceStore";
@@ -2203,6 +2205,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         nativeStellarWorkspaceSnapshot.industry.status === "unavailable"
       ? "unavailable"
       : "loading";
+  const nativeStellarQuantumReadModel = useMemo(() => nativeStellarProjectionIdentity
+    ? selectNativePlayerAuthorityStellarQuantumReadModel(
+        nativeStellarWorkspaceSnapshot,
+        nativeStellarProjectionIdentity,
+        DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR,
+      )
+    : null, [
+    nativeStellarProjectionIdentity,
+    nativeStellarWorkspaceSnapshot,
+  ]);
+  const nativeStellarQuantumReadStatus: StarMapNativeReadStatus = !nativePlayerAuthorityBoundFrame ||
+      nativeStellarQuantumReadModel
+    ? "ready"
+    : !nativeStellarProjectionIdentity || !nativeStellarProjectionSource ||
+        nativeStellarWorkspaceSnapshot.quantum.status === "unavailable"
+      ? "unavailable"
+      : "loading";
   const commandPaletteEntitySearchSelector = useMemo(
     () => createCommandPaletteEntitySearchSelector(
       commandPaletteEntitySearchRequest.query,
@@ -2757,6 +2776,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       nativeStellarProjectionSource,
       nativeStellarProjectionIdentity,
       { cursor: 0, limit: NATIVE_STELLAR_PAGE_ROWS },
+    ).catch(() => undefined);
+  }, [
+    nativePlayerAuthorityBoundFrame,
+    nativeStellarProjectionIdentity,
+    nativeStellarProjectionSource,
+    nativeStellarWorkspaceStore,
+    starMapOpen,
+  ]);
+  useEffect(() => {
+    if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity ||
+        !nativeStellarProjectionSource) return;
+    void nativeStellarWorkspaceStore.refreshQuantum(
+      nativeStellarProjectionSource,
+      nativeStellarProjectionIdentity,
+      DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR,
     ).catch(() => undefined);
   }, [
     nativePlayerAuthorityBoundFrame,
@@ -14917,6 +14951,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             game={game}
             nativeReadModel={nativeStarMapWorkspaceReadModel}
             nativeReadStatus={nativeStarMapWorkspaceReadStatus}
+            nativeQuantumReadModel={nativeStellarQuantumReadModel}
+            nativeQuantumReadStatus={nativeStellarQuantumReadStatus}
             nativeAuthorityRequired={Boolean(nativePlayerAuthorityBoundFrame)}
             industryReadRequest={starMapIndustryReadRequest}
             onIndustryReadRequest={updateStarMapIndustryReadRequest}

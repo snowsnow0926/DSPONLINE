@@ -15,6 +15,7 @@ describe("native stellar workspace App integration", () => {
     expect(app).toMatch(/createNativePlayerAuthorityStellarProjectionSource\(desktopBridge, nativeStellarProjectionIdentity\)/);
     expect(app).not.toMatch(/const nativeStarMapOverviewProjection = useMemo/);
     expect(app).not.toMatch(/const nativeStellarIndustryProjection = useMemo/);
+    expect(app).toMatch(/selectNativePlayerAuthorityStellarQuantumReadModel\([\s\S]*?nativeStellarWorkspaceSnapshot,[\s\S]*?nativeStellarProjectionIdentity,[\s\S]*?DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR/);
   });
 
   it("refreshes overview independently and makes scope, filter, and query latest-only through the store", () => {
@@ -25,6 +26,7 @@ describe("native stellar workspace App integration", () => {
     expect(workspace).toMatch(/星际工业行星筛选/);
     expect(workspace).toMatch(/routeFilter: "issues"/);
     expect(workspace).toMatch(/query: clampNativeRouteQuery\(query\)/);
+    expect(app).toMatch(/refreshQuantum\([\s\S]*?nativeStellarProjectionSource,[\s\S]*?nativeStellarProjectionIdentity,[\s\S]*?DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR/);
   });
 
   it("passes only the selector-checked read model and fails closed for player authority", () => {
@@ -35,7 +37,15 @@ describe("native stellar workspace App integration", () => {
     expect(workspace).toMatch(/nativeAuthorityRequired\s*\? <NativeIndustryConsole/);
     expect(workspace).toMatch(/当前不会显示或使用 JavaScript 存档数据/);
     expect(workspace).toMatch(/view === "map" \? nativeAuthorityRequired \? nativeMapUnavailableBoundary/);
-    expect(workspace).toMatch(/nativeAuthorityRequired \? nativeQuantumUnavailableBoundary : <QuantumInventoryConsole/);
+    expect(app).toMatch(/nativeQuantumReadModel=\{nativeStellarQuantumReadModel\}/);
+    expect(app).toMatch(/nativeQuantumReadStatus=\{nativeStellarQuantumReadStatus\}/);
+    expect(workspace).toMatch(/const nativeQuantumConsole = <NativeQuantumInventoryConsole/);
+    expect(workspace).toMatch(/nativeAuthorityRequired \? nativeQuantumConsole : <QuantumInventoryConsole/);
+    const nativeQuantum = workspace.slice(
+      workspace.indexOf("export function NativeQuantumInventoryConsole"),
+      workspace.indexOf("export function StarMapWorkspace"),
+    );
+    expect(nativeQuantum).not.toMatch(/\bgame\b|quantumLogisticsNetwork|getQuantumBandwidthSummary/);
   });
 
   it("renders native routes and indexes without reconstructing authority routes from GameState", () => {

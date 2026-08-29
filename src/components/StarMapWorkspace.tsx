@@ -15,6 +15,7 @@ import { WorkspaceFrame } from "./WorkspaceFrame";
 import type { DesktopNativeCoreStellarRouteFilter } from "../desktop";
 import {
   NATIVE_STELLAR_ROUTE_QUERY_BYTES,
+  type NativeStellarQuantumReadModel,
   type NativeStarMapWorkspaceReadModel,
 } from "../game/nativeStellarWorkspaceStore";
 
@@ -74,6 +75,11 @@ type NativeStationLimitsAction = (
   currentMaxStock: number,
   requestedMinStock: number,
   requestedMaxStock: number,
+) => boolean;
+type NativeQuantumItemCapacityAction = (
+  itemId: ItemId,
+  currentCapacity: string,
+  targetCapacity: string,
 ) => boolean;
 
 const OCEAN_LABELS = {
@@ -413,9 +419,11 @@ const QUANTUM_CAPACITY_LABELS: Record<(typeof QUANTUM_ITEM_CAPACITY_PRESETS)[num
   "10000000000": "100亿",
 };
 
-function QuantumCapacityEditor({ itemId, value, onChange }: {
+function QuantumCapacityEditor({ itemId, itemLabel = ITEMS[itemId]?.name ?? itemId, value, disabled = false, onChange }: {
   itemId: ItemId;
+  itemLabel?: string;
   value: string;
+  disabled?: boolean;
   onChange: (itemId: ItemId, value: string) => void;
 }) {
   const [draft, setDraft] = useState(value);
@@ -425,6 +433,7 @@ function QuantumCapacityEditor({ itemId, value, onChange }: {
     setError(null);
   }, [itemId, value]);
   const commit = (nextValue = draft) => {
+    if (disabled) return;
     const raw = nextValue.trim();
     if (!raw) {
       setError("请输入容量");
@@ -450,13 +459,13 @@ function QuantumCapacityEditor({ itemId, value, onChange }: {
   };
   const presetSelected = QUANTUM_ITEM_CAPACITY_PRESETS.includes(value as (typeof QUANTUM_ITEM_CAPACITY_PRESETS)[number]);
   return <div className="quantum-capacity-editor">
-    <div className="quantum-capacity-presets" aria-label={`${ITEMS[itemId].name}容量预设`}>
-      {QUANTUM_ITEM_CAPACITY_PRESETS.map((preset) => <button className={value === preset ? "active" : ""} type="button" key={preset} onClick={() => { setDraft(preset); setError(null); onChange(itemId, preset); }}>{QUANTUM_CAPACITY_LABELS[preset]}</button>)}
-      <button className={!presetSelected ? "active" : ""} type="button" onClick={() => setDraft(value)}>自定义</button>
+    <div className="quantum-capacity-presets" aria-label={`${itemLabel}容量预设`}>
+      {QUANTUM_ITEM_CAPACITY_PRESETS.map((preset) => <button className={value === preset ? "active" : ""} type="button" key={preset} disabled={disabled} onClick={() => { setDraft(preset); setError(null); onChange(itemId, preset); }}>{QUANTUM_CAPACITY_LABELS[preset]}</button>)}
+      <button className={!presetSelected ? "active" : ""} type="button" disabled={disabled} onClick={() => setDraft(value)}>自定义</button>
     </div>
     <div className="quantum-capacity-custom">
-      <input aria-label={`${ITEMS[itemId].name}自定义量子容量`} aria-invalid={Boolean(error)} inputMode="numeric" pattern="[0-9]*" value={draft} onChange={(event) => { setDraft(event.target.value); setError(null); }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } }} />
-      <button type="button" onClick={() => commit()}><Save size={13} />应用</button>
+      <input aria-label={`${itemLabel}自定义量子容量`} aria-invalid={Boolean(error)} inputMode="numeric" pattern="[0-9]*" value={draft} disabled={disabled} onChange={(event) => { setDraft(event.target.value); setError(null); }} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); commit(); } }} />
+      <button type="button" disabled={disabled} onClick={() => commit()}><Save size={13} />应用</button>
     </div>
     {error ? <small className="quantum-capacity-error" role="alert">{error}</small> : null}
   </div>;
@@ -517,11 +526,75 @@ function QuantumInventoryConsole({ game, onCollectorModeChange, onItemCapacityCh
   </section>;
 }
 
+export function NativeQuantumInventoryConsole({
+  readModel,
+  status,
+  onNativeItemCapacityChange,
+}: {
+  readModel: NativeStellarQuantumReadModel | null;
+  status: StarMapNativeReadStatus;
+  onNativeItemCapacityChange?: NativeQuantumItemCapacityAction;
+}) {
+  const { isEnglish } = useAppLocale();
+  const [query, setQuery] = useState("");
+  const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
+  const visibleItems = readModel?.items.filter((row) => {
+    const item = ITEMS[row.itemId as ItemId];
+    return !normalizedQuery || `${item?.name ?? ""} ${row.itemId}`.toLocaleLowerCase("zh-CN").includes(normalizedQuery);
+  }) ?? [];
+  if (!readModel) {
+    const emptyStatus = status === "ready" ? "unavailable" : status;
+    return <section className="quantum-inventory-console" aria-label="量子空间库存" data-native-quantum-read-status={emptyStatus}>
+      <div className="stellar-route-empty"><Database size={22} /><strong>{status === "loading" ? "正在同步原生权威量子库存" : "原生权威量子库存暂不可用"}</strong><span>{status === "loading" ? "等待同一 Rust revision 的全部物品与采集器分页完成。" : "当前不会读取或显示 JavaScript 存档中的旧量子数据。"}</span></div>
+    </section>;
+  }
+  const runtime = readModel.runtime;
+  return <section className="quantum-inventory-console" aria-label="量子空间库存" data-native-quantum-read-status="ready">
+    <header className="quantum-inventory-summary">
+      <div><Atom size={18} /><span><small>量子空间库存</small><strong>{readModel.enabled ? "Rust 权威共享物资池" : "量子网络尚未启用"}</strong></span></div>
+      <dl>
+        <div><dt>{isEnglish ? "Instant upload" : "即时上传"}</dt><dd>{isEnglish ? "Unlimited" : "不限"}</dd><small>{isEnglish ? "Native authority projection" : "原生权威投影"}</small></div>
+        <div><dt>下载额度</dt><dd>{formatQuantityCompact(Math.floor(readModel.bandwidth.globalDownloadPerMinute))}<small>/min</small></dd></div>
+        <div><dt>量子塔堆叠</dt><dd>{formatQuantityCompact(readModel.bandwidth.activeTowerStacks)}</dd></div>
+        <div><dt>量子采集器</dt><dd>{formatQuantityCompact(readModel.collectorSummary.connectedStacks)}</dd></div>
+      </dl>
+      <div className="quantum-collector-actions" aria-describedby="native-quantum-command-boundary">
+        <button type="button" disabled><ArrowUpFromLine size={15} />全部采集器接入{readModel.collectorSummary.availableCount ? `（${readModel.collectorSummary.availableCount}）` : ""}</button>
+        <button type="button" disabled><ArrowDownToLine size={15} />全部采集器关闭{readModel.collectorSummary.connectedCount ? `（${readModel.collectorSummary.connectedCount}）` : ""}</button>
+        {readModel.collectorSummary.pendingCount > 0 ? <small>{readModel.collectorSummary.pendingCount} 台正在等待五秒边界或传统航线尾货</small> : null}
+        <small id="native-quantum-command-boundary">采集器批量切换仍只读；不会回写旧 JavaScript 存档。</small>
+      </div>
+    </header>
+    <div className="quantum-inventory-toolbar">
+      <label className="star-map-search"><Search size={15} /><StableTextInput draftId="quantum-inventory-search" value={query} onValueChange={setQuery} placeholder="搜索量子库存物品" aria-label="搜索量子库存物品" />{query ? <button type="button" onClick={() => setQuery("")} aria-label="清除量子库存搜索"><X size={14} /></button> : null}</label>
+      <span>{runtime ? `最近结算 ${formatQuantityExact(runtime.boundarySecond)} 秒` : "等待首个五秒结算边界"}</span>
+    </div>
+    <div className="quantum-inventory-list">
+      {visibleItems.map((row) => {
+        const itemId = row.itemId as ItemId;
+        const item = ITEMS[itemId];
+        const itemLabel = item?.name ?? row.itemId;
+        const net = BigInt(row.uploaded) - BigInt(row.downloaded);
+        const overCapacity = BigInt(row.inventory) > BigInt(row.capacity);
+        return <article className={`quantum-inventory-row${overCapacity ? " quantum-inventory-row--over" : ""}`} key={row.itemId}>
+          <div className="quantum-inventory-item">{item ? <ItemHoverCard itemId={itemId}><ItemGlyph itemId={itemId} /></ItemHoverCard> : <Database size={18} />}<span><strong>{itemLabel}</strong><small>{row.itemId}</small></span></div>
+          <div className="quantum-inventory-amount"><span>当前库存</span><strong title={formatQuantityExact(row.inventory)}>{formatQuantityCompact(row.inventory)}</strong><small>{formatQuantityScientific(row.inventory)} · 精确 {formatQuantityExact(row.inventory)}</small>{overCapacity ? <em>超出上限，仅允许下载</em> : null}</div>
+          <div className="quantum-inventory-flow"><span><ArrowUpFromLine size={12} />上传 {formatQuantityCompact(row.uploaded)}</span><span><ArrowDownToLine size={12} />下载 {formatQuantityCompact(row.downloaded)}</span><strong className={net < 0n ? "negative" : net > 0n ? "positive" : ""}>净变化 {net > 0n ? "+" : ""}{formatQuantityExact(net)}</strong></div>
+          <QuantumCapacityEditor itemId={itemId} itemLabel={itemLabel} value={row.capacity} disabled={!onNativeItemCapacityChange} onChange={(_itemId, targetCapacity) => onNativeItemCapacityChange?.(itemId, row.capacity, targetCapacity)} />
+        </article>;
+      })}
+      {visibleItems.length === 0 ? <div className="stellar-route-empty"><Database size={22} /><strong>没有匹配的量子物品</strong><span>清除搜索后查看全部物品。</span></div> : null}
+    </div>
+  </section>;
+}
+
 export function StarMapWorkspace({
   open,
   game,
   nativeReadModel,
   nativeReadStatus = "ready",
+  nativeQuantumReadModel,
+  nativeQuantumReadStatus = "ready",
   nativeAuthorityRequired = false,
   industryReadRequest,
   onIndustryReadRequest,
@@ -543,6 +616,7 @@ export function StarMapWorkspace({
   onAttachAllQuantumStations,
   onCollectorQuantumModeChange,
   onQuantumItemCapacityChange,
+  onNativeQuantumItemCapacityChange,
   mobile = false,
   mobileSubview,
   onMobileOpenDetail,
@@ -551,6 +625,8 @@ export function StarMapWorkspace({
   game: GameState;
   nativeReadModel?: NativeStarMapWorkspaceReadModel | null;
   nativeReadStatus?: StarMapNativeReadStatus;
+  nativeQuantumReadModel?: NativeStellarQuantumReadModel | null;
+  nativeQuantumReadStatus?: StarMapNativeReadStatus;
   nativeAuthorityRequired?: boolean;
   industryReadRequest: StarMapIndustryReadRequest;
   onIndustryReadRequest: (request: StarMapIndustryReadRequest) => void;
@@ -572,6 +648,7 @@ export function StarMapWorkspace({
   onAttachAllQuantumStations: StarMapBatchAction;
   onCollectorQuantumModeChange: StarMapCollectorBatchAction;
   onQuantumItemCapacityChange: (itemId: ItemId, value: string) => void;
+  onNativeQuantumItemCapacityChange?: NativeQuantumItemCapacityAction;
   mobile?: boolean;
   mobileSubview?: string | null;
   onMobileOpenDetail?: (subview: string) => void;
@@ -654,7 +731,7 @@ export function StarMapWorkspace({
     {batchReport ? <div className="star-map-batch-report" role="status" aria-live="polite"><strong>{batchReport.scopeLabel} · {batchReport.actionLabel}</strong><span>成功 {batchReport.successCount} · 跳过 {batchReport.skippedCount}</span>{batchReport.skipReasons.length > 0 ? <small>跳过原因：{batchReport.skipReasons.join("；")}</small> : <small>全部符合条件的目标均已提交</small>}<button type="button" onClick={() => setBatchReport(null)} aria-label="关闭批量操作结果"><X size={12} /></button></div> : null}
   </div>;
   const nativeMapUnavailableBoundary = <div className="stellar-route-empty" data-native-stellar-panel="map-unavailable"><Database size={22} /><strong>原生权威星图探索暂不可用</strong><span>当前薄投影没有提供全局行星搜索、元数据、勘探、殖民与批量动作；为避免把当前筛选范围外的行星缺失解释成未殖民或 0，当前不会显示或使用 JavaScript 存档数据。</span></div>;
-  const nativeQuantumUnavailableBoundary = <div className="stellar-route-empty" data-native-stellar-panel="quantum-unavailable"><Database size={22} /><strong>原生权威量子库存暂不可用</strong><span>量子库存、带宽、容量与收集器切换的原生权威投影尚未接入此界面；当前不会显示或使用 JavaScript 存档数据。</span></div>;
+  const nativeQuantumConsole = <NativeQuantumInventoryConsole readModel={nativeQuantumReadModel ?? null} status={nativeQuantumReadStatus} onNativeItemCapacityChange={onNativeQuantumItemCapacityChange} />;
   const industryConsole = nativeAuthorityRequired
     ? <NativeIndustryConsole readModel={nativeReadModel ?? null} status={nativeReadStatus} selector={industryReadRequest} onSelectorChange={onIndustryReadRequest} onTravel={onTravel} onNativeRoleChange={onNativeRoleChange} onNativeStationPriorityChange={onNativeStationPriorityChange} onNativeStationLimitsChange={onNativeStationLimitsChange} onFocusStation={onFocusStation} />
     : <IndustryConsole game={game} onTravel={onTravel} onRoleChange={onRoleChange} onStationPriorityChange={onStationPriorityChange} onStationMinimumLoadChange={onStationMinimumLoadChange} onStationLimitsChange={onStationLimitsChange} onFocusStation={onFocusStation} />;
@@ -666,7 +743,7 @@ export function StarMapWorkspace({
         ? nativeMapUnavailableBoundary
         : view === "industry"
           ? industryConsole
-          : nativeQuantumUnavailableBoundary}</div>
+          : nativeQuantumConsole}</div>
     </WorkspaceFrame>;
   }
 
@@ -868,7 +945,7 @@ export function StarMapWorkspace({
             </div>
           );
         })}
-      </div> : view === "industry" ? industryConsole : nativeAuthorityRequired ? nativeQuantumUnavailableBoundary : <QuantumInventoryConsole game={game} onCollectorModeChange={onCollectorQuantumModeChange} onItemCapacityChange={onQuantumItemCapacityChange} />}
+      </div> : view === "industry" ? industryConsole : nativeAuthorityRequired ? nativeQuantumConsole : <QuantumInventoryConsole game={game} onCollectorModeChange={onCollectorQuantumModeChange} onItemCapacityChange={onQuantumItemCapacityChange} />}
     </WorkspaceFrame>
   );
 }

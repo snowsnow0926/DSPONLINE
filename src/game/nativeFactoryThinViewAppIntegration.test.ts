@@ -166,8 +166,8 @@ describe("factory thin-view App consumption", () => {
     expect(app).toMatch(/requestedEntityIds:\s*factoryThinViewSelectedEntityIds/);
     expect(app).toMatch(/requestedBeltIds:\s*factoryThinViewSelectedBeltIds/);
     expect(app).toMatch(/<StableInspectorPanel[\s\S]*?inspectorReadModel=\{factoryInspectorSummaryReadModel\}/);
-    expect(panels).toMatch(/<DesktopInspectorLiveSummary game=\{props\.game\} entity=\{props\.selectedEntity\} belt=\{null\} readModel=\{props\.inspectorReadModel\}/);
-    expect(panels).toMatch(/<DesktopInspectorLiveSummary game=\{props\.game\} entity=\{null\} belt=\{props\.selectedBelt\} readModel=\{props\.inspectorReadModel\}/);
+    expect(panels).toMatch(/<DesktopInspectorLiveSummary game=\{projectionGame\} entity=\{props\.selectedEntity\} belt=\{null\} readModel=\{props\.inspectorReadModel\}/);
+    expect(panels).toMatch(/<DesktopInspectorLiveSummary game=\{projectionGame\} entity=\{null\} belt=\{props\.selectedBelt\} readModel=\{props\.inspectorReadModel\}/);
     expect(summary).toMatch(/data-factory-read-model-source=\{source\}/);
     expect(panels).toMatch(/completeInspectorItemRowsMatch/);
     expect(summary).toMatch(/displayEntity\.inputItems\.rows/);

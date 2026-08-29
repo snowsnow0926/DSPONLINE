@@ -7,6 +7,7 @@ import { ITEMS, PLANET_LIST, getItem } from "../game/content";
 import { createInitialState } from "../game/engine";
 import { createWebRecipeWorkspaceReadModel, type RecipeWorkspaceReadModel } from "../game/recipeWorkspaceReadModel";
 import type { ItemId } from "../game/types";
+import { APP_LOCALE_PREFERENCE_KEY, AppLocaleProvider } from "../i18n/locale";
 import { clearStableTextDraft } from "./CompositionSafeInput";
 import { RecipeWorkspace } from "./RecipeWorkspace";
 
@@ -28,15 +29,17 @@ function model(selectedItemId: ItemId = "iron_ore"): RecipeWorkspaceReadModel {
 }
 
 function renderWorkspace(readModel: RecipeWorkspaceReadModel, onReadRequest = vi.fn(), focusItemId: ItemId | null = null) {
-  act(() => root.render(<RecipeWorkspace
-    open
-    readModel={readModel}
-    onReadRequest={onReadRequest}
-    onClose={vi.fn()}
-    focusItemId={focusItemId}
-    onFocus={vi.fn()}
-    onLocateProductionLine={vi.fn()}
-  />));
+  act(() => root.render(<AppLocaleProvider>
+    <RecipeWorkspace
+      open
+      readModel={readModel}
+      onReadRequest={onReadRequest}
+      onClose={vi.fn()}
+      focusItemId={focusItemId}
+      onFocus={vi.fn()}
+      onLocateProductionLine={vi.fn()}
+    />
+  </AppLocaleProvider>));
   return onReadRequest;
 }
 
@@ -48,6 +51,7 @@ function inputValue(input: HTMLInputElement, value: string): void {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  window.localStorage.setItem(APP_LOCALE_PREFERENCE_KEY, "zh-CN");
   clearStableTextDraft("recipe-workspace-search");
   document.body.innerHTML = "";
   host = document.createElement("div");

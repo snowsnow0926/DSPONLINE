@@ -65,8 +65,9 @@ function CompactLane({ itemId, direction, onOpen }: { itemId: ItemId; direction:
   );
 }
 
-export function RecipeFocusPanel({ model, onClear, onModeChange, onOpen, onPositionChange }: {
+export function RecipeFocusPanel({ model, readOnly = false, onClear, onModeChange, onOpen, onPositionChange }: {
   model: RecipeFocusReadModel | null;
+  readOnly?: boolean;
   onClear: () => void;
   onModeChange: (mode: RecipeFocusMode) => void;
   onOpen: (itemId?: ItemId) => void;
@@ -84,6 +85,7 @@ export function RecipeFocusPanel({ model, onClear, onModeChange, onOpen, onPosit
   if (!model || !itemId || !ITEMS[itemId]) return null;
   const maxDepth = model.mode === "full" ? 8 : 2;
   const onPointerDown = (event: ReactPointerEvent<HTMLElement>) => {
+    if (readOnly) return;
     if ((event.target as HTMLElement).closest("button")) return;
     const panel = event.currentTarget.closest(".recipe-focus-panel") as HTMLElement | null;
     const parent = panel?.parentElement;
@@ -95,6 +97,7 @@ export function RecipeFocusPanel({ model, onClear, onModeChange, onOpen, onPosit
     event.currentTarget.setPointerCapture(event.pointerId);
   };
   const onPointerMove = (event: ReactPointerEvent<HTMLElement>) => {
+    if (readOnly) return;
     const drag = dragRef.current;
     const panel = event.currentTarget.closest(".recipe-focus-panel") as HTMLElement | null;
     if (!drag || !panel) return;
@@ -108,13 +111,14 @@ export function RecipeFocusPanel({ model, onClear, onModeChange, onOpen, onPosit
     if (!dragRef.current) return;
     dragRef.current = null;
     event.currentTarget.releasePointerCapture?.(event.pointerId);
+    if (readOnly) return;
     onPositionChange(positionRef.current);
   };
   return (
-    <aside className="recipe-focus-panel nodrag nopan" style={{ left: position.x, top: position.y, right: "auto", bottom: "auto" }} aria-label="当前聚焦生产链" data-recipe-focus-source={model.source}>
+    <aside className="recipe-focus-panel nodrag nopan" style={{ left: position.x, top: position.y, right: "auto", bottom: "auto" }} aria-label="当前聚焦生产链" data-recipe-focus-source={model.source} data-read-only={readOnly || undefined}>
       <header className="recipe-focus-header" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp}>
-        <div><i><BookOpen size={14} /></i><span><small>聚焦材料 · 可拖动</small><strong>{getItem(itemId).name}</strong></span></div>
-        <div className="recipe-focus-actions"><div className="recipe-focus-mode" role="group" aria-label="生产链展开层级"><button type="button" className={model.mode === "two-level" ? "active" : ""} onClick={() => onModeChange("two-level")}><ChevronRight size={12} />两层</button><button type="button" className={model.mode === "full" ? "active" : ""} onClick={() => onModeChange("full")}><ChevronDown size={12} />完整</button></div><button type="button" onClick={() => onOpen(itemId)} title="打开生产资料库" aria-label="打开生产资料库"><BookOpen size={14} /></button><button type="button" onClick={onClear} title="取消聚焦材料" aria-label="取消聚焦材料"><X size={14} /></button></div>
+        <div><i><BookOpen size={14} /></i><span><small>{readOnly ? "聚焦材料 · 原生只读" : "聚焦材料 · 可拖动"}</small><strong>{getItem(itemId).name}</strong></span></div>
+        <div className="recipe-focus-actions"><div className="recipe-focus-mode" role="group" aria-label="生产链展开层级"><button type="button" disabled={readOnly} className={model.mode === "two-level" ? "active" : ""} onClick={() => onModeChange("two-level")}><ChevronRight size={12} />两层</button><button type="button" disabled={readOnly} className={model.mode === "full" ? "active" : ""} onClick={() => onModeChange("full")}><ChevronDown size={12} />完整</button></div><button type="button" onClick={() => onOpen(itemId)} title="打开生产资料库" aria-label="打开生产资料库"><BookOpen size={14} /></button><button type="button" disabled={readOnly} onClick={onClear} title={readOnly ? "Windows 原生模式下暂不可修改聚焦状态" : "取消聚焦材料"} aria-label="取消聚焦材料"><X size={14} /></button></div>
       </header>
       <div className="recipe-focus-strip"><CompactLane itemId={itemId} direction="up" onOpen={onOpen} /><section className="recipe-focus-center"><ItemBadge itemId={itemId} onOpen={onOpen} /><small>{getProducingRecipes(itemId).length + getResourceSources(itemId).length} 种来源</small></section><CompactLane itemId={itemId} direction="down" onOpen={onOpen} /></div>
       {model.mode === "full" ? <div className="recipe-focus-details"><section><header><ArrowUp size={12} /><span>完整上游链</span></header><ChainBranch itemId={itemId} direction="up" depth={0} maxDepth={maxDepth} path={new Set()} onOpen={onOpen} /></section><section><header><ArrowDown size={12} /><span>完整下游链</span></header><ChainBranch itemId={itemId} direction="down" depth={0} maxDepth={maxDepth} path={new Set()} onOpen={onOpen} /></section></div> : null}

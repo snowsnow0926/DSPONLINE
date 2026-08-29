@@ -393,6 +393,11 @@ import {
   type NativeAuthorityPersistenceBoundary,
   type NativeAuthorityRuntimeObservation,
 } from "./game/nativeAuthorityPersistenceBoundary";
+import {
+  canResumeLegacyInteractionAfterAwait,
+  createNativeAuthorityInteractionEpoch,
+  reconcileNativeAuthorityInteractionEpoch,
+} from "./game/nativeAuthorityInteractionEpoch";
 import { NativeFactoryThinViewStore } from "./game/nativeFactoryThinViewStore";
 import {
   NativeTechnologyWorkspaceStore,
@@ -2104,6 +2109,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativePlayerAuthorityMacroStatus !== null;
   const nativePlayerAuthorityOwnsRuntimeRef = useRef(false);
   nativePlayerAuthorityOwnsRuntimeRef.current = nativePlayerAuthorityOwnsRuntime;
+  const nativePlayerAuthorityOwnershipEpochRef = useRef(
+    createNativeAuthorityInteractionEpoch(nativePlayerAuthorityOwnsRuntime),
+  );
+  nativePlayerAuthorityOwnershipEpochRef.current = reconcileNativeAuthorityInteractionEpoch(
+    nativePlayerAuthorityOwnershipEpochRef.current,
+    nativePlayerAuthorityOwnsRuntime,
+  );
   const nativePlayerAuthorityMacroReadOnly = nativePlayerAuthorityMacroStatus !== null;
   nativePlayerAuthorityMacroReadOnlyRef.current = nativePlayerAuthorityMacroReadOnly;
   const readNativeAuthorityRuntimeObservation = useCallback((): NativeAuthorityRuntimeObservation => {
@@ -2501,8 +2513,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       nativePlanetNavigationDiscoveryFrame.revision === factoryThinViewExpectedRevision
     ? nativePlanetNavigationDiscoveryFrame
     : null;
-  const nativeFactoryProjectionRouteReady = nativeFactoryThinViewMode !== "native-authoritative" ||
-    nativeFactoryAuthoritativeRoute !== null;
+  const nativeFactoryProjectionRouteReady = !nativePlayerAuthorityOwnsRuntime ||
+    (nativeFactoryThinViewMode === "native-authoritative" && nativeFactoryAuthoritativeRoute !== null);
   const [nativeFactoryConfirmedProjectionRoute, setNativeFactoryConfirmedProjectionRoute] = useState<{
     readonly sessionId: string;
     readonly planetId: PlanetId;
@@ -2519,12 +2531,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   // separate `nativeFactoryProjectionRouteReady` proof below still requires the
   // current exact discovery atom.
   const nativeFactoryDiscoveredProjectionRoute = retainNativePlanetRouteIdentity(
-    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityBoundFrame?.sessionId,
     nativeFactoryExactProjectionRoute,
     nativeFactoryConfirmedProjectionRoute,
   );
   const nativeFactoryUnpinnedBootstrap = nativePlanetRouteRequiresBootstrap(
-    nativeFactoryThinViewMode === "native-authoritative",
+    nativePlayerAuthorityOwnsRuntime,
     nativeFactoryConfirmedProjectionRoute,
     nativeFactoryDiscoveredProjectionRoute,
   );
@@ -2532,11 +2544,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   // Every native read below is disabled until discovery proves the exact
   // session/revision/current-planet tuple, so this value can only appear in the
   // bounded loading shell and can never address authoritative gameplay data.
-  const nativeFactoryProjectionPlanetId = nativeFactoryThinViewMode === "native-authoritative"
+  const nativeFactoryProjectionPlanetId = nativePlayerAuthorityOwnsRuntime
     ? (nativeFactoryDiscoveredProjectionRoute?.planetId ?? "__native_route_unbound__" as PlanetId)
     : game.activePlanetId;
-  const factoryGestureRouteKey = nativeFactoryThinViewMode === "native-authoritative"
-    ? `${nativePlayerAuthorityActiveFrame?.sessionId ?? "unbound"}:${nativeFactoryProjectionPlanetId}`
+  const factoryGestureRouteKey = nativePlayerAuthorityOwnsRuntime
+    ? `${nativePlayerAuthorityBoundFrame?.sessionId ?? "unbound"}:${nativeFactoryProjectionPlanetId}`
     : `web:${game.activePlanetId}`;
   const factoryThinViewAllSelectedEntityIds = useMemo(
     () => nativeFactoryUnpinnedBootstrap ? [] : [...new Set(selectedEntityIds)],
@@ -2739,8 +2751,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     ],
   );
   const nativeFactoryRouteUnsafe = nativePlayerAuthorityOwnsRuntime &&
-    (nativeFactoryThinViewMode !== "native-authoritative" ||
-      nativeFactoryUnpinnedBootstrap || pendingNativePlanetChange !== null);
+    (nativeFactoryUnpinnedBootstrap || pendingNativePlanetChange !== null);
   const nativeFactoryProjectionPending = nativePlayerAuthorityOwnsRuntime &&
     (!nativeAuthoritativeFactoryWorkspaceFrame || !nativeAuthoritativeFactoryCanvasFrame ||
       nativeFactoryRouteUnsafe);
@@ -3528,8 +3539,35 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setRegionResizePreview(null);
   }, []);
   useLayoutEffect(() => {
-    if (nativeFactoryRouteUnsafe) abortCanvasGestureLifecycle();
-  }, [abortCanvasGestureLifecycle, nativeFactoryRouteUnsafe]);
+    if (!nativePlayerAuthorityOwnsRuntime) return;
+    abortCanvasGestureLifecycle();
+    flowStore.getState().cancelConnection();
+    flowStore.setState({ connectionClickStartHandle: null });
+    clickConnectionPreviewRef.current = null;
+    clickConnectionSucceededRef.current = false;
+    connectionDraftRef.current = null;
+    connectionCandidateNodeIdRef.current = null;
+    batchConnectionModeRef.current = false;
+    batchConnectionsRef.current = [];
+    batchConnectionDraftRef.current = null;
+    batchConnectionDraftBaseRef.current = null;
+    dragConnectionStartRef.current = null;
+    setClickConnectionPreview(null);
+    setClickConnectionTone("pending");
+    setClickConnectionSnapPoint(null);
+    setConnectionDraft(null);
+    setConnectionCandidateNodeId(null);
+    setConnectionHint(null);
+    setBatchConnectionMode(false);
+    setBatchConnections([]);
+    setBatchConnectionFailures([]);
+    setBatchConnectionFeedback(null);
+    setMobileBatchConnectionExpanded(false);
+    setMobileActionEntityId(null);
+    if (miningTimerRef.current != null) window.clearInterval(miningTimerRef.current);
+    miningTimerRef.current = null;
+    setMiningEntityId(null);
+  }, [abortCanvasGestureLifecycle, flowStore, nativeFactoryRouteUnsafe, nativePlayerAuthorityOwnsRuntime]);
   useEffect(() => {
     const resetAfterDialog = () => {
       abortCanvasGestureLifecycle();
@@ -6956,6 +6994,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     return true;
   }, []);
 
+  const captureLegacyFactoryInteractionEpoch = useCallback(
+    () => nativePlayerAuthorityOwnershipEpochRef.current.epoch,
+    [],
+  );
+  const rejectLegacyFactoryContinuationAfterAwait = useCallback((startedEpoch: number, label: string): boolean => {
+    const authority = nativePlayerAuthorityOwnershipEpochRef.current;
+    if (canResumeLegacyInteractionAfterAwait(startedEpoch, authority)) return false;
+    setNotice(`Windows 原生权威在${label}确认期间已接管或发生切换；旧操作已取消，存档未改变`);
+    return true;
+  }, []);
+
   useEffect(() => {
     const loopback = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost";
     if (!loopback || new URLSearchParams(window.location.search).get("dspPerformanceHarness") !== "1") return;
@@ -9135,6 +9184,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         redoGame();
       } else if (!editing && batchConnectionModeRef.current && event.key === "Enter") {
         event.preventDefault();
+        if (nativePlayerAuthorityOwnsRuntimeRef.current || nativeFactoryProjectionPendingRef.current) {
+          cancelBatchConnectionRef.current();
+          setNotice("Windows 原生权威未接入批量拉线命令；遗留预览已取消，存档未改变");
+          return;
+        }
         confirmBatchConnectionRef.current();
       } else if (event.key === "Escape") {
         cancelBatchConnectionRef.current();
@@ -9349,6 +9403,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const handleRemoveEntity = useCallback(async (entityId: string, count?: number) => {
     if (rejectLegacyFactoryInteractionWhileNative("建筑回收")) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const entity = gameRef.current.entities.find((candidate) => candidate.id === entityId);
     if (!entity) return;
     const availableCount = entity.kind === "vein" ? entity.minerCount : entity.machineCount;
@@ -9359,6 +9414,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         ? "回收微型黑洞连接装置会移除该实体的累计销毁统计。已经销毁的物资无法恢复，确认继续吗？"
         : `确认完整回收${getBuilding(entity.buildingId!).name} ×${entity.machineCount}？输入、输出、燃料和线路物资会按现有回收规则返还。`;
       if (!await gameDialog.confirm(warning, { danger: true, confirmLabel: "确认回收" })) return;
+      if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "建筑回收")) return;
     }
     const before = gameRef.current;
     const next = removeEntity(before, entityId, count);
@@ -9378,7 +9434,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       setNotice(`已完整回收${getBuilding(entity.buildingId).name} ×${entity.machineCount}`);
     }
     playTone("remove");
-  }, [commitGame, gameDialog, playTone, rejectLegacyFactoryInteractionWhileNative]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
 
   const onInstallMiner = useCallback((entityId: string, count: PlacementCount) => {
     expandPlacedEntity(entityId, count);
@@ -9393,8 +9449,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [commitGame]);
 
   const onRecipeFocusChange = useCallback((itemId: ItemId | null) => {
+    if (rejectLegacyFactoryInteractionWhileNative("生产链聚焦设置")) return;
     commitGame((current) => setRecipeFocus(current, itemId));
-  }, [commitGame]);
+  }, [commitGame, rejectLegacyFactoryInteractionWhileNative]);
 
   const openRecipeFocus = useCallback((itemId?: ItemId) => {
     const focused = itemId ?? gameRef.current.recipeFocus.itemId;
@@ -9466,6 +9523,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setPlacement(null);
     setBlueprintPlacementId(null);
     setBlueprintsOpen(false);
+    setConstructionCenterOpen(false);
+    setSystemSpaceStationOpen(false);
+    setSystemSpaceStationId(null);
+    setOrbitalStationOpen(false);
     setInspectorTab("inspect");
     setSelectionMode(false);
     setDeleteMode(false);
@@ -9703,13 +9764,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   const updateSettings = useCallback((settings: Partial<GameSettings>) => {
+    if (rejectLegacyFactoryInteractionWhileNative("旧版游戏规则设置")) return;
     commitGame((current) => ({ ...current, settings: { ...current.settings, ...settings } }));
     if (settings.theme) {
       setThemeMode(settings.theme);
       writeThemePreference(settings.theme);
     }
     if (settings.soundEnabled === true) playTone("confirm", true);
-  }, [commitGame, playTone]);
+  }, [commitGame, playTone, rejectLegacyFactoryInteractionWhileNative]);
 
   const updateRunLogPreference = useCallback((enabled: boolean) => {
     setShowRunLog(enabled);
@@ -9872,6 +9934,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, []);
 
   const handleUpgradeAllInterstellarStations = useCallback(async (systemId?: StarSystemId): Promise<StarMapBatchActionResult | null> => {
+    if (rejectLegacyFactoryInteractionWhileNative("批量升级星际物流站")) return null;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     let result = upgradeAllInterstellarStationsToMk2(gameRef.current, systemId);
     const scope = systemId ? `${getStarSystem(systemId).name}内` : "全星区";
     if (result.upgradedIds.length === 0) {
@@ -9883,10 +9947,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return report;
     }
     const previewReasons = summarizeBatchSkipReasons(result.skipped);
-    if (result.upgradedIds.length + result.skipped.length > 1 && !await gameDialog.confirm(
-      `${scope}批量升级预览：可成功 ${result.upgradedIds.length} 座，跳过 ${result.skipped.length} 座${previewReasons.length > 0 ? `。跳过原因：${previewReasons.join("；")}` : ""}。升级不可逆，是否继续？`,
-      { title: "确认批量升级物流站", confirmLabel: "确认升级" },
-    )) return null;
+    if (result.upgradedIds.length + result.skipped.length > 1) {
+      const confirmed = await gameDialog.confirm(
+        `${scope}批量升级预览：可成功 ${result.upgradedIds.length} 座，跳过 ${result.skipped.length} 座${previewReasons.length > 0 ? `。跳过原因：${previewReasons.join("；")}` : ""}。升级不可逆，是否继续？`,
+        { title: "确认批量升级物流站", confirmLabel: "确认升级" },
+      );
+      if (!confirmed || rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "批量升级星际物流站")) return null;
+    }
     result = upgradeAllInterstellarStationsToMk2(gameRef.current, systemId);
     if (result.upgradedIds.length > 0) commitGame((current) => upgradeAllInterstellarStationsToMk2(current, systemId).state);
     const skipReasons = summarizeBatchSkipReasons(result.skipped);
@@ -9894,9 +9961,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(`${scope}批量升级完成：成功 ${result.upgradedIds.length} 座${skippedText}`);
     playTone("upgrade");
     return { actionLabel: "升级星际物流站", scopeLabel: scope, successCount: result.upgradedIds.length, skippedCount: result.skipped.length, skipReasons };
-  }, [commitGame, gameDialog, playTone, summarizeBatchSkipReasons]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative, summarizeBatchSkipReasons]);
 
   const handleAttachAllQuantumStations = useCallback(async (systemId?: StarSystemId): Promise<StarMapBatchActionResult | null> => {
+    if (rejectLegacyFactoryInteractionWhileNative("批量接入量子物流")) return null;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     let result = attachAllInterstellarStationsToQuantumNetwork(gameRef.current, systemId);
     const scope = systemId ? `${getStarSystem(systemId).name}内` : "全星区";
     if (result.startedIds.length === 0) {
@@ -9907,10 +9976,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return { actionLabel: "接入量子物流站", scopeLabel: scope, successCount: 0, skippedCount: result.skipped.length, skipReasons: skipReasons.length > 0 ? skipReasons : [firstReason] };
     }
     const previewReasons = summarizeBatchSkipReasons(result.skipped);
-    if (result.startedIds.length + result.skipped.length > 1 && !await gameDialog.confirm(
-      `${scope}量子物流切换预览：可成功 ${result.startedIds.length} 座，跳过 ${result.skipped.length} 座${previewReasons.length > 0 ? `。跳过原因：${previewReasons.join("；")}` : ""}。接入会等待旧航线尾货和五秒边界，是否继续？`,
-      { title: "确认批量接入量子物流", confirmLabel: "确认接入" },
-    )) return null;
+    if (result.startedIds.length + result.skipped.length > 1) {
+      const confirmed = await gameDialog.confirm(
+        `${scope}量子物流切换预览：可成功 ${result.startedIds.length} 座，跳过 ${result.skipped.length} 座${previewReasons.length > 0 ? `。跳过原因：${previewReasons.join("；")}` : ""}。接入会等待旧航线尾货和五秒边界，是否继续？`,
+        { title: "确认批量接入量子物流", confirmLabel: "确认接入" },
+      );
+      if (!confirmed || rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "批量接入量子物流")) return null;
+    }
     result = attachAllInterstellarStationsToQuantumNetwork(gameRef.current, systemId);
     if (result.startedIds.length > 0) commitGame((current) => attachAllInterstellarStationsToQuantumNetwork(current, systemId).state);
     const skipReasons = summarizeBatchSkipReasons(result.skipped);
@@ -9918,9 +9990,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(`${scope}量子物流切换完成：成功 ${result.startedIds.length} 座${skippedText}；已等待旧星际航线和五秒边界，本地运输机继续运行`);
     playTone("confirm");
     return { actionLabel: "接入量子物流站", scopeLabel: scope, successCount: result.startedIds.length, skippedCount: result.skipped.length, skipReasons };
-  }, [commitGame, gameDialog, playTone, summarizeBatchSkipReasons]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative, summarizeBatchSkipReasons]);
 
   const handleAllOrbitalCollectorsQuantumMode = useCallback(async (enabled: boolean, systemId?: StarSystemId): Promise<StarMapBatchActionResult | null> => {
+    if (rejectLegacyFactoryInteractionWhileNative("批量切换轨道采集器量子模式")) return null;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     let result = setAllOrbitalCollectorsQuantumMode(gameRef.current, enabled, systemId);
     const scope = systemId ? `${getStarSystem(systemId).name}内` : "全星区";
     const actionLabel = enabled ? "轨道收集器接入量子网络" : "关闭轨道收集器量子网络";
@@ -9932,10 +10006,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return { actionLabel, scopeLabel: scope, successCount: 0, skippedCount: result.skipped.length, skipReasons: skipReasons.length > 0 ? skipReasons : [firstReason] };
     }
     const previewReasons = summarizeBatchSkipReasons(result.skipped);
-    if (result.startedIds.length + result.skipped.length > 1 && !await gameDialog.confirm(
-      `${scope}${enabled ? "接入" : "关闭"}量子采集预览：可成功 ${result.startedIds.length} 台，跳过 ${result.skipped.length} 台${previewReasons.length > 0 ? `。跳过原因：${previewReasons.join("；")}` : ""}。只会提交符合单采集器安全校验的目标，是否继续？`,
-      { title: enabled ? "确认批量接入轨道收集器" : "确认批量关闭量子采集", confirmLabel: enabled ? "确认接入" : "确认关闭" },
-    )) return null;
+    if (result.startedIds.length + result.skipped.length > 1) {
+      const confirmed = await gameDialog.confirm(
+        `${scope}${enabled ? "接入" : "关闭"}量子采集预览：可成功 ${result.startedIds.length} 台，跳过 ${result.skipped.length} 台${previewReasons.length > 0 ? `。跳过原因：${previewReasons.join("；")}` : ""}。只会提交符合单采集器安全校验的目标，是否继续？`,
+        { title: enabled ? "确认批量接入轨道收集器" : "确认批量关闭量子采集", confirmLabel: enabled ? "确认接入" : "确认关闭" },
+      );
+      if (!confirmed || rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "批量切换轨道采集器量子模式")) return null;
+    }
     result = setAllOrbitalCollectorsQuantumMode(gameRef.current, enabled, systemId);
     if (result.startedIds.length > 0) commitGame((current) => setAllOrbitalCollectorsQuantumMode(current, enabled, systemId).state);
     const skipReasons = summarizeBatchSkipReasons(result.skipped);
@@ -9943,7 +10020,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setNotice(`${scope}量子采集切换完成：成功 ${result.startedIds.length} 台${skippedText}`);
     playTone("confirm");
     return { actionLabel, scopeLabel: scope, successCount: result.startedIds.length, skippedCount: result.skipped.length, skipReasons };
-  }, [commitGame, gameDialog, playTone, summarizeBatchSkipReasons]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative, summarizeBatchSkipReasons]);
 
   const restoreGame = useCallback((state: GameState, report: OfflineReport | null = null): boolean => {
     if (readNativeAuthorityPersistenceBoundary().protected) {
@@ -10266,28 +10343,38 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [commitGame, playTone]);
 
   const updateMaterialDeliverySlot = useCallback(async (entityId: string, slotIndex: number, mode: import("./game/types").MaterialDeliverySlotMode, itemId: ItemId | null) => {
+    if (rejectLegacyFactoryInteractionWhileNative("物料配送接口设置")) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const check = getMaterialDeliverySlotChangeCheck(gameRef.current, entityId, slotIndex, mode, itemId);
     if (!check.ok) {
       setNotice(check.label);
       return;
     }
-    if (check.requiresDisconnect && !await gameDialog.confirm(`${check.label}。枢纽缓存会安全退回本行星物资托盘，是否继续？`, { danger: true, confirmLabel: "断开并重置" })) return;
+    if (check.requiresDisconnect) {
+      if (!await gameDialog.confirm(`${check.label}。枢纽缓存会安全退回本行星物资托盘，是否继续？`, { danger: true, confirmLabel: "断开并重置" })) return;
+      if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "物料配送接口设置")) return;
+    }
     commitGame((current) => setMaterialDeliverySlot(current, entityId, slotIndex, mode, itemId, check.requiresDisconnect));
     setNotice(mode === "manual" && itemId
       ? `接口 ${slotIndex + 1} 已指定为${ITEMS[itemId].name}`
       : mode === "auto" ? `接口 ${slotIndex + 1} 已恢复自动识别` : `接口 ${slotIndex + 1} 已清空`);
-  }, [commitGame, gameDialog]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
 
   const clearOrbitalCargoTerminalPort = useCallback(async (entityId: string, portIndex: 0 | 1 | 2 | 3) => {
+    if (rejectLegacyFactoryInteractionWhileNative("轨道货运接口清空")) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const check = getOrbitalCargoPortClearCheck(gameRef.current, entityId, portIndex);
     if (!check.ok) {
       setNotice(check.label);
       return;
     }
-    if (check.requiresConfirmation && !await gameDialog.confirm(`${check.label}。确认后缓存会退回本行星物资托盘，传送带会返还施工库存；已提交空间站物资不会退款。`, { danger: true, title: "清空轨道货运接口", confirmLabel: "安全清空" })) return;
+    if (check.requiresConfirmation) {
+      if (!await gameDialog.confirm(`${check.label}。确认后缓存会退回本行星物资托盘，传送带会返还施工库存；已提交空间站物资不会退款。`, { danger: true, title: "清空轨道货运接口", confirmLabel: "安全清空" })) return;
+      if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "轨道货运接口清空")) return;
+    }
     commitGame((current) => clearOrbitalCargoPort(current, entityId, portIndex, check.requiresConfirmation));
     setNotice(`轨道货运接口 ${portIndex + 1} 已释放`);
-  }, [commitGame, gameDialog]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
 
   const autoLayoutEntities = useCallback((entityIds?: readonly string[]) => {
     if (nativePlayerAuthorityOwnsRuntimeRef.current) {
@@ -10983,6 +11070,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return;
     }
     if (unipolarExpansionBusy) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const source = gameRef.current;
     if (!source.paused) {
       setNotice("请先暂停模拟，再执行单极磁石矿脉扩容");
@@ -11006,16 +11094,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       { title: "单极磁石矿脉扩容预览", confirmLabel: "继续确认" },
     );
     if (!firstConfirmed) return;
+    if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "单极磁石矿脉扩容")) return;
     const finalConfirmed = await gameDialog.confirm(
       `执行前将创建可回滚快照，并校验源存档 ${preview.sourceChecksum}。该操作仅限普通模式，副本不能计入速通排行榜。确认增加第二个矿脉？`,
       { title: "最终确认：增加到两个矿脉", confirmLabel: "创建快照并增加", danger: true },
     );
     if (!finalConfirmed) return;
+    if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "单极磁石矿脉扩容")) return;
     setUnipolarExpansionBusy(true);
     try {
       if (lifecycleExitStartedRef.current) throw new Error("页面正在退出，扩容未执行");
       const snapshot = await saveGameSnapshotVerified(source, "增加第二个单极磁石矿脉前");
       if (lifecycleExitStartedRef.current) throw new Error("页面正在退出，扩容未执行");
+      if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "单极磁石矿脉扩容")) return;
       if (!snapshot) throw new Error("无法创建扩容前快照，操作已取消；请先释放本地存储空间");
       const repairPackage = createSecondUnipolarVeinPackage(source, context, preview.confirmationToken);
       const saved = await persistPrimarySave(repairPackage.candidateState);
@@ -11031,7 +11122,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     } finally {
       setUnipolarExpansionBusy(false);
     }
-  }, [commitGame, gameDialog, persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, unipolarExpansionBusy]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, persistPrimarySave, playTone, readNativeAuthorityPersistenceBoundary, refreshSaveData, rejectLegacyFactoryContinuationAfterAwait, unipolarExpansionBusy]);
 
   const loadSnapshot = useCallback(async (snapshotId: string) => {
     if (readNativeAuthorityPersistenceBoundary().protected) {
@@ -11777,6 +11868,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const progress = technology ? canvasGame.research.progressByTech[technology.id] ?? {} : {};
     const planetProfile = getPlanetIndustrialProfile(canvasGame, factoryCanvasPlanetId);
     return {
+      readOnly: nativePlayerAuthorityOwnsRuntime,
       cargo: nativePlayerAuthorityOwnsRuntime ? null : canvasGame.cargo,
       placement,
       placementCount,
@@ -11852,6 +11944,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nextMobileShell,
     game.settings.fontScale,
     extremeVisualsActive,
+    nativePlayerAuthorityOwnsRuntime,
   ]);
   const appliedCanvasNodeSemanticRevisionTokenRef = useRef<string | null>(null);
 
@@ -11977,6 +12070,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             focusClassName,
           ].filter(Boolean).join(" ");
           const staticPresentationStable = Boolean(previous && topologyStable && previous.data.lod === "compact" &&
+            previous.data.readOnly === commonNodeData.readOnly &&
             previous.data.alertActive === staticAlertActive &&
             previous.draggable === nodeDraggable && previous.selectable === nodeSelectable &&
             previous.focusable === nodeFocusable && previous.connectable === nodeConnectable && previous.selected === selected &&
@@ -12181,6 +12275,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             stackPresentation.membershipToken,
           ].join("|");
           if (previous?.data.visualSignature === visualSignature && previous.data.presentationSignature === presentationSignature &&
+            previous.data.readOnly === commonNodeData.readOnly &&
             previous.position.x === entity.position.x && previous.position.y === entity.position.y &&
             previous.selected === selected && previous.className === className && previous.draggable === nodeDraggable &&
             previous.selectable === nodeSelectable && previous.focusable === nodeFocusable && previous.connectable === nodeConnectable &&
@@ -12521,6 +12616,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     return result;
   }, [factoryThinViewExpectedRevision, nativePlayerAuthorityActiveFrame?.sessionId]);
   const isValidConnection = useCallback((connection: Connection | Edge) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) return false;
     const sourceItem = parseHandleItem(connection.sourceHandle);
     const targetItem = parseHandleItem(connection.targetHandle);
     if (!connection.source || !connection.target || connection.source === connection.target ||
@@ -12542,6 +12638,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [beltTier, beltTierMode, getFactoryConnectionReadState]);
 
   const beginConnectionDraft = useCallback((params: OnConnectStartParams): ConnectionDraft | null => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) return null;
     const itemId = parseHandleItem(params.handleId);
     const universalPort = parseTargetPortIndex(params.handleId);
     if (!params.nodeId || !params.handleType || !params.handleId || (!itemId && universalPort === undefined)) return null;
@@ -12563,6 +12660,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [beltTier, beltTierMode, getFactoryConnectionReadState, updateConnectionDraft]);
 
   const onConnectStart = useCallback((event: MouseEvent | TouchEvent, params: OnConnectStartParams) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) return;
     if (clickConnectionPreviewRef.current) return;
     clickConnectionSucceededRef.current = false;
     dragConnectionStartRef.current = getEventPoint(event);
@@ -12637,6 +12735,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [removeBatchConnectionAt]);
 
   const onClickConnectStart = useCallback((event: MouseEvent | TouchEvent, params: OnConnectStartParams) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) return;
     const activePreview = clickConnectionPreviewRef.current;
     const selectedHandle = getConnectionHandleTarget(event.target);
     const modifierContinuous = event instanceof MouseEvent && (event.ctrlKey || event.shiftKey);
@@ -12655,11 +12754,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [activateBatchConnectionMode, beginConnectionDraft, startClickConnectionPreview]);
 
   const longPressBindings = useLongPress<HTMLElement>({
-    disabled: nativeFactoryRouteUnsafe,
+    disabled: nativePlayerAuthorityOwnsRuntime || nativeFactoryRouteUnsafe,
     // Simulation revisions may advance faster than the 520 ms gesture. Only a
     // route/session identity change or a genuinely unsafe transition cancels it.
     resetKey: factoryGestureRouteKey,
     getTarget: (event) => {
+      if (nativePlayerAuthorityOwnsRuntimeRef.current) return null;
       if (nativeFactoryProjectionPendingRef.current) return null;
       if (!coarsePointer || placement || blueprintPlacementId) return null;
       const handle = getConnectionHandleTarget(event.target);
@@ -12668,6 +12768,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return element?.dataset.id ?? null;
     },
     onLongPress: (targetId) => {
+      if (nativePlayerAuthorityOwnsRuntimeRef.current) return;
       if (nativeFactoryProjectionPendingRef.current) return;
       const connectionTarget = decodeLongPressConnectionTarget(targetId);
       if (connectionTarget) {
@@ -12724,6 +12825,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [clearConnectionPreview]);
 
   const confirmBatchConnection = useCallback(() => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current || nativeFactoryProjectionPendingRef.current) {
+      clearConnectionPreview(false);
+      rejectLegacyFactoryInteractionWhileNative("批量拉线");
+      return;
+    }
     const selections = batchConnectionsRef.current;
     if (selections.length < 1) {
       setBatchConnectionFeedback("尚未选择下游输入接口");
@@ -12760,7 +12866,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     trackAnalyticsEvent("belt_connect");
     setNotice(`连续拉线已原子提交：成功 ${result.created}，跳过 0，消耗传送带 ${consumed}`);
     playTone("connect");
-  }, [clearConnectionPreview, commitGame, playTone]);
+  }, [clearConnectionPreview, commitGame, playTone, rejectLegacyFactoryInteractionWhileNative]);
 
   useEffect(() => { confirmBatchConnectionRef.current = confirmBatchConnection; }, [confirmBatchConnection]);
   useEffect(() => { cancelBatchConnectionRef.current = cancelBatchConnection; }, [cancelBatchConnection]);
@@ -12900,6 +13006,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   }, [connectionHitRadius, getFactoryConnectionReadState, isValidConnection, updateConnectionCandidateNode]);
 
   const onConnectEnd = useCallback((event: MouseEvent | TouchEvent, state: FinalConnectionState) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      clearConnectionPreview(false);
+      return;
+    }
     const endPoint = getEventPoint(event);
     const draft = connectionDraftRef.current ?? connectionDraft;
     const releaseHandle = getConnectionHandleTarget(event.target) ?? (endPoint ? findConnectionHandleAtPoint(
@@ -12975,9 +13085,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setConnectionHint({ label, tone: "blocked" });
     spawnInteractionBurst(pointerRef.current.x, pointerRef.current.y, "连接失败", "warning");
     playTone("alert");
-  }, [beltTier, beltTierMode, coarsePointer, connectionDraft, getFactoryConnectionReadState, isValidConnection, playTone, spawnInteractionBurst, updateConnectionDraft]);
+  }, [beltTier, beltTierMode, clearConnectionPreview, coarsePointer, connectionDraft, getFactoryConnectionReadState, isValidConnection, playTone, spawnInteractionBurst, updateConnectionDraft]);
 
   const onClickConnectEnd = useCallback((event: MouseEvent | TouchEvent) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      clearConnectionPreview(false);
+      return;
+    }
     const preview = clickConnectionPreviewRef.current;
     if (!preview) return;
     const point = getEventPoint(event);
@@ -13061,9 +13175,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setConnectionHint({ label, tone: "blocked" });
     spawnInteractionBurst(pointerRef.current.x, pointerRef.current.y, "连接失败", "warning");
     playTone("alert");
-  }, [activateBatchConnectionMode, addBatchConnection, coarsePointer, getFactoryConnectionReadState, isValidConnection, playTone, spawnInteractionBurst, updateConnectionDraft]);
+  }, [activateBatchConnectionMode, addBatchConnection, clearConnectionPreview, coarsePointer, getFactoryConnectionReadState, isValidConnection, playTone, spawnInteractionBurst, updateConnectionDraft]);
 
   const onConnect = useCallback((connection: Connection, lockedTier?: BeltTier): boolean => {
+    if (rejectLegacyFactoryInteractionWhileNative("运输线创建")) return false;
     const sourceItem = parseHandleItem(connection.sourceHandle);
     const targetItem = parseHandleItem(connection.targetHandle);
     if (!connection.source || !connection.target || !sourceItem ||
@@ -13130,7 +13245,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     spawnInteractionBurst(pointerRef.current.x, pointerRef.current.y, "运输线已建立", "positive");
     playTone("connect");
     return true;
-  }, [beltTier, beltTierMode, coarsePointer, commitGame, flowStore, getFactoryConnectionReadState, mobileNavigation.openSheet, nextMobileShell, playTone, spawnInteractionBurst]);
+  }, [beltTier, beltTierMode, coarsePointer, commitGame, flowStore, getFactoryConnectionReadState, mobileNavigation.openSheet, nextMobileShell, playTone, rejectLegacyFactoryInteractionWhileNative, spawnInteractionBurst]);
 
   useEffect(() => { connectRequestRef.current = onConnect; }, [onConnect]);
 
@@ -13927,10 +14042,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     : getBlueprintEligibleEntityIds(game, selectedEntityIds),
   [game, selectedEntityIds]);
   const activeBlueprint = game.blueprints.find((blueprint) => blueprint.id === blueprintPlacementId) ?? null;
-  const mobileActionEntity = useMemo(() => mobileActionEntityId
+  const mobileActionEntity = useMemo(() => !nativePlayerAuthorityOwnsRuntime && mobileActionEntityId
     ? game.entities.find((entity) => entity.id === mobileActionEntityId) ?? null
     : null,
-  [game.entities, mobileActionEntityId]);
+  [game.entities, mobileActionEntityId, nativePlayerAuthorityOwnsRuntime]);
   const hasConstructionCenter = useMemo(
     () => game.entities.some((entity) => entity.buildingId === "construction_center"),
     [game.entities],
@@ -13945,6 +14060,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const confirmRemoveSelection = useCallback(async () => {
     if (rejectLegacyFactoryInteractionWhileNative("批量回收")) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const entityIds = [...selectedEntityIdsRef.current];
     const beltIds = [...new Set([
       ...selectedBeltIdsRef.current,
@@ -13971,6 +14087,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       { danger: true, confirmLabel: "确认回收" },
     );
     if (!confirmed) return;
+    if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "批量回收")) return;
     const current = gameRef.current;
     const next = beltIds.reduce((state, beltId) => removeBelt(state, beltId), removeEntities(current, entityIds));
     if (next === current) {
@@ -13984,9 +14101,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     setSelectedBeltId(null);
     setNotice(`已回收 ${preview.entityCount} 个建筑节点和 ${preview.relatedBeltCount} 条相关传送带`);
     playTone("remove");
-  }, [commitGame, gameDialog, playTone, rejectLegacyFactoryInteractionWhileNative]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
 
   const batchIncreaseSelected = useCallback(async (amount: number) => {
+    if (rejectLegacyFactoryInteractionWhileNative("批量增加建筑与线路")) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const entityIds = [...selectedEntityIdsRef.current];
     const beltIds = [...new Set([
       ...selectedBeltIdsRef.current,
@@ -14011,6 +14130,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       { confirmLabel: "批量增加" },
     );
     if (!confirmed) return;
+    if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "批量增加建筑与线路")) return;
     const result = batchIncreaseSelection(gameRef.current, entityIds, beltIds, amount);
     if (!result.ok) {
       setNotice(result.label ?? "批量增加失败，状态未改变");
@@ -14021,9 +14141,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const limitCount = result.buildingAtLimitCount + result.beltAtLimitCount;
     setNotice(`已批量增加 ${result.changedBuildingCount} 个建筑、${result.changedBeltCount} 条传送带${limitCount > 0 ? ` · ${limitCount} 项达到上限` : ""}${result.uniqueBuildingSkippedCount > 0 ? ` · ${result.uniqueBuildingSkippedCount} 座唯一巨构已跳过` : ""}`);
     playTone("confirm");
-  }, [commitGame, gameDialog, playTone]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
 
   const changeRemoteStationSlotItem = useCallback(async (entityId: string, slotIndex: number, itemId: ItemId | null) => {
+    if (rejectLegacyFactoryInteractionWhileNative("远程物流槽位设置")) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const station = gameRef.current.entities.find((entity) => entity.id === entityId);
     const previousItemId = station ? getStationSlots(station)[slotIndex]?.itemId : undefined;
     if (!station || previousItemId === itemId) return;
@@ -14034,6 +14156,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       { danger: Boolean(previousItemId), confirmLabel: "确认修改" },
     );
     if (!confirmed) return;
+    if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "远程物流槽位设置")) return;
     const before = gameRef.current;
     const next = setRemoteStationSlotItem(before, entityId, slotIndex, itemId);
     if (next === before) {
@@ -14043,9 +14166,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     commitGame(() => next);
     setNotice(`已远程修改${getPlanetDisplayName(next, station.planetId)}的物流槽位`);
-  }, [commitGame, gameDialog, playTone]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
 
   const changeRemoteCollectorItem = useCallback(async (entityId: string, itemId: ItemId) => {
+    if (rejectLegacyFactoryInteractionWhileNative("远程轨道采集物设置")) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const collector = gameRef.current.entities.find((entity) => entity.id === entityId && entity.buildingId === "orbital_collector");
     if (!collector || collector.storedItemId === itemId) return;
     const confirmed = await gameDialog.confirm(
@@ -14053,6 +14178,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       { confirmLabel: "确认切换" },
     );
     if (!confirmed) return;
+    if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "远程轨道采集物设置")) return;
     const before = gameRef.current;
     const next = setLogisticsItem(before, entityId, itemId);
     if (next === before) {
@@ -14062,7 +14188,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     }
     commitGame(() => next);
     setNotice(`轨道采集器已切换为${ITEMS[itemId].name}`);
-  }, [commitGame, gameDialog, playTone]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
 
   const changeRemoteFleetTarget = useCallback((entityId: string, kind: "drone" | "vessel", target: number) => {
     const result = setRemoteStationFleetTarget(gameRef.current, entityId, kind, target);
@@ -14161,6 +14287,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
 
   const handleDeleteConstructionInventory = async (constructionId: ConstructionId): Promise<boolean> => {
     if (rejectLegacyFactoryInteractionWhileNative("施工库存删除")) return false;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const current = gameRef.current;
     const amount = Math.max(0, Math.floor(current.construction[constructionId] ?? 0));
     if (amount < 1) {
@@ -14176,6 +14303,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       { confirmLabel: "永久删除" },
     );
     if (!confirmed) return false;
+    if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "施工库存删除")) return false;
     const latest = Math.max(0, Math.floor(gameRef.current.construction[constructionId] ?? 0));
     if (latest < 1) {
       setNotice("确认期间库存已变为 0，未执行删除");
@@ -14213,11 +14341,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   };
 
   const handleRemoveSprayCoater = async (entityId: string) => {
+    if (rejectLegacyFactoryInteractionWhileNative("喷涂模块拆卸")) return;
+    const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const refund = getSprayCoaterRemovalRefund(gameRef.current, entityId);
     const confirmation = isEnglish
       ? `Remove the spray module? The module and ${refund?.proliferatorItems ?? 0} remaining proliferator item(s) will be returned.`
       : `确认拆卸喷涂模块？将返还喷涂模块 ×${refund?.sprayCoaters ?? 1}${refund?.proliferatorItemId && refund.proliferatorItems > 0 ? `、${ITEMS[refund.proliferatorItemId].name} ×${refund.proliferatorItems}` : ""}。`;
     if (!refund || !await gameDialog.confirm(confirmation, { confirmLabel: isEnglish ? "Remove" : "确认拆卸" })) return;
+    if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "喷涂模块拆卸")) return;
     commitGame((current) => removeSprayCoater(current, entityId));
     setNotice(`喷涂模块已拆卸并返还${refund.proliferatorItems > 0 ? ` · 未消耗增产剂 ×${refund.proliferatorItems}` : ""}`);
     playTone("remove");
@@ -14271,6 +14402,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       return;
     }
     if (id === "construction-center") {
+      if (rejectLegacyFactoryInteractionWhileNative("建筑制造中心")) return;
       closeAllWorkspaces();
       setConstructionCenterOpen(true);
       setMobilePanel(null);
@@ -14734,6 +14866,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       <RuntimeRenderProfile id="header">
       <HeaderControls
         game={game}
+        constructionCenterUnavailable={nativePlayerAuthorityOwnsRuntime}
         activeWorkspace={headerActiveWorkspace}
         onReturnToMenu={returnToMenuSafely}
         onOpenCampaign={() => {
@@ -14747,6 +14880,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           setNotice("新版手机界面已启用，可在更多工作区切回经典界面");
         }}
         onOpenConstructionCenter={() => {
+          if (rejectLegacyFactoryInteractionWhileNative("建筑制造中心")) return;
           if (constructionCenterOpen) {
             closeAllWorkspaces();
             setNotice(null);
@@ -15275,13 +15409,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             minZoom={canvasMinimumZoom}
             maxZoom={1.8}
             connectionRadius={connectionFlowRadius}
+            nodesConnectable={!nativePlayerAuthorityOwnsRuntime}
             snapToGrid
             snapGrid={FACTORY_FLOW_SNAP_GRID}
-            autoPanOnConnect={!coarsePointer}
+            autoPanOnConnect={!nativePlayerAuthorityOwnsRuntime && !coarsePointer}
             autoPanOnNodeDrag={!coarsePointer}
             connectionLineStyle={{ stroke: "#62b5ae", strokeWidth: 2, strokeDasharray: "6 5" }}
             connectionLineComponent={FactoryConnectionLine}
-            connectOnClick
+            connectOnClick={!nativePlayerAuthorityOwnsRuntime}
             defaultViewport={initialViewport}
             onMove={handleFactoryFlowMove}
             onMoveEnd={handleFactoryFlowMoveEnd}
@@ -15293,7 +15428,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             selectionKeyCode={null}
             multiSelectionKeyCode="Shift"
             elementsSelectable={!(coarsePointer && selectionMode)}
-            nodesDraggable={nextMobileShell ? mobileCanvasMode === "layout" : !(coarsePointer && selectionMode)}
+            nodesDraggable={!nativePlayerAuthorityOwnsRuntime && (nextMobileShell ? mobileCanvasMode === "layout" : !(coarsePointer && selectionMode))}
             zoomOnDoubleClick={false}
             deleteKeyCode={null}
             fitViewOptions={factoryFlowFitViewOptions}
@@ -15606,10 +15741,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           </div>
           <RecipeFocusPanel
             model={recipeFocusReadModel}
+            readOnly={nativePlayerAuthorityOwnsRuntime}
             onClear={() => onRecipeFocusChange(null)}
-            onModeChange={(mode) => commitGame((current) => setRecipeFocusMode(current, mode))}
+            onModeChange={(mode) => {
+              if (rejectLegacyFactoryInteractionWhileNative("生产链聚焦层级")) return;
+              commitGame((current) => setRecipeFocusMode(current, mode));
+            }}
             onOpen={openRecipeFocus}
-            onPositionChange={(position) => commitGame((current) => setRecipeFocusPosition(current, position))}
+            onPositionChange={(position) => {
+              if (rejectLegacyFactoryInteractionWhileNative("生产链聚焦位置")) return;
+              commitGame((current) => setRecipeFocusPosition(current, position));
+            }}
           />
         </section>
         </RuntimeRenderProfile>
@@ -15632,6 +15774,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           tab={inspectorTab}
           onTabChange={setInspectorTab}
           onOpenConstructionCenter={() => {
+            if (rejectLegacyFactoryInteractionWhileNative("建筑制造中心")) return;
             if (constructionCenterOpen) closeAllWorkspaces();
             else {
               closeAllWorkspaces();
@@ -15692,7 +15835,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onOpenOrbitalStation={openOrbitalStation}
           onOrbitalCargoPortClear={(entityId, portIndex) => void clearOrbitalCargoTerminalPort(entityId, portIndex)}
           onGalacticExporterPausedChange={(entityId, paused) => commitGame((current) => setGalacticMaterialExporterPaused(current, entityId, paused))}
-          onBlackHolePausedChange={(entityId, paused, confirmActivation) => commitGame((current) => setBlackHolePaused(current, entityId, paused, confirmActivation))}
+          onBlackHolePausedChange={(entityId, paused, confirmActivation) => {
+            if (rejectLegacyFactoryInteractionWhileNative("微型黑洞启停")) return;
+            commitGame((current) => setBlackHolePaused(current, entityId, paused, confirmActivation));
+          }}
           onTimeWarpControllerChange={(entityId) => commitGame((current) => setTimeWarpController(current, entityId))}
           onTimeWarpEnabledChange={handleTimeWarpEnabledChange}
           onTimeWarpRequestedMultiplierChange={(multiplier) => commitGame((current) => setTimeWarpRequestedMultiplier(current, multiplier))}
@@ -15896,7 +16042,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         onRecipeOverride={(blueprintId, sourceRecipeId, targetRecipeId) => commitGame((current) => setBlueprintRecipeOverride(current, blueprintId, sourceRecipeId, targetRecipeId))}
         onFundQueue={(entryId, scope) => commitGame((current) => fundConstructionQueueEntry(current, entryId, scope))}
         onFundAllQueues={() => commitGame((current) => fundAllConstructionQueueEntries(current))}
-        onCancelQueue={(entryId) => commitGame((current) => cancelConstructionQueueEntry(current, entryId))}
+        onCancelQueue={(entryId) => {
+          if (rejectLegacyFactoryInteractionWhileNative("蓝图施工订单取消")) return;
+          commitGame((current) => cancelConstructionQueueEntry(current, entryId));
+        }}
         onExport={downloadBlueprint}
         onImport={importBlueprint}
       /> : null}
@@ -15917,7 +16066,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         onEntitySearchRequest={updateCommandPaletteEntitySearchRequest}
       />
       <Suspense fallback={<WorkspaceLoading />}>
-        {constructionCenterOpen ? (
+        {constructionCenterOpen && !nativePlayerAuthorityOwnsRuntime ? (
           <ConstructionCenterWorkspace
             open
             game={game}
@@ -15927,7 +16076,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onQuantumSourceChange={(enabled) => commitGame((current) => setConstructionAutomationQuantumSourceEnabled(current, enabled))}
             onTargetChange={(constructionId: ConstructionAutomationTargetId, target: number) => commitGame((current) => setConstructionAutomationTarget(current, constructionId, target))}
             onBatchTargetChange={async (target) => {
+              const authorityEpoch = captureLegacyFactoryInteractionEpoch();
               if (!await gameDialog.confirm(`将把所有已解锁建筑的自动补足目标统一设置为 ${target.toLocaleString("zh-CN")}。不会生成建筑，也不会取消现有制造任务。是否继续？`, { confirmLabel: "应用全部目标" })) return;
+              if (rejectLegacyFactoryContinuationAfterAwait(authorityEpoch, "建筑制造中心批量目标设置")) return;
               const result = setConstructionAutomationTargetsForBuildings(gameRef.current, target);
               if (!result.ok) {
                 setNotice(result.label ?? "批量目标设置失败");
@@ -16126,7 +16277,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onOpenCanvasBookmark={openCanvasBookmark}
           onRemoveCanvasBookmark={(bookmarkId) => commitGame((current) => removeCanvasBookmark(current, bookmarkId))}
         />) : null}
-        {recipesOpen ? <RecipeWorkspace open readModel={recipeWorkspaceReadModel} onReadRequest={updateRecipeWorkspaceSelector} mobile={nextMobileShell} mobileSubview={mobileWorkspaceSubview} onMobileOpenDetail={mobileNavigation.openWorkspaceSubview} onMobileReplaceDetail={(subview) => mobileNavigation.replaceWorkspaceSubview(subview)} focusItemId={campaignFocusItemId} onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setRecipesOpen(false)} onFocus={onRecipeFocusChange} onLocateProductionLine={locateRecipeWorkspaceProduction} /> : null}
+        {recipesOpen ? <RecipeWorkspace open readOnly={nativePlayerAuthorityOwnsRuntime} readModel={recipeWorkspaceReadModel} onReadRequest={updateRecipeWorkspaceSelector} mobile={nextMobileShell} mobileSubview={mobileWorkspaceSubview} onMobileOpenDetail={mobileNavigation.openWorkspaceSubview} onMobileReplaceDetail={(subview) => mobileNavigation.replaceWorkspaceSubview(subview)} focusItemId={campaignFocusItemId} onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setRecipesOpen(false)} onFocus={onRecipeFocusChange} onLocateProductionLine={locateRecipeWorkspaceProduction} /> : null}
         {campaignOpen ? (
           <CampaignWorkspace
             open
@@ -16181,7 +16332,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onFocusStation={focusStellarStation}
           />
         ) : null}
-        {systemSpaceStationOpen && systemSpaceStationId ? <SystemSpaceStationWorkspace
+        {systemSpaceStationOpen && systemSpaceStationId && !nativePlayerAuthorityOwnsRuntime ? <SystemSpaceStationWorkspace
           open
           game={game}
           systemId={systemSpaceStationId}
@@ -16192,17 +16343,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           onUpgradeStation={handleUpgradeInterstellarStation}
           onUpgradeAllStations={handleUpgradeAllInterstellarStations}
           onRequestMode={(entityId, mode) => commitGame((current) => requestStationOperationMode(current, entityId, mode))}
-          onSetOutput={(entityId, portIndex, itemId) => commitGame((current) => setElevatorOutputItem(current, entityId, portIndex, itemId, 2))}
+          onSetOutput={(entityId, portIndex, itemId) => {
+            if (rejectLegacyFactoryInteractionWhileNative("系统空间站输出口设置")) return;
+            commitGame((current) => setElevatorOutputItem(current, entityId, portIndex, itemId, 2));
+          }}
           onSetModuleCount={(systemId, module, count) => commitGame((current) => setSystemSpaceStationModuleCount(current, systemId, module, count))}
         /> : null}
-        {orbitalStationOpen && isSpaceStationFeatureEnabled() ? <OrbitalStationWorkspace
+        {orbitalStationOpen && isSpaceStationFeatureEnabled() && !nativePlayerAuthorityOwnsRuntime ? <OrbitalStationWorkspace
           game={game}
           mobile={compactLayout.isMobileShell}
           mobileSubview={mobileNavigation.route.kind === "workspace" && mobileNavigation.route.id === "orbital-station" ? mobileNavigation.route.subview : undefined}
           initialTab={orbitalStationInitialTab}
           onOpenMobileSubview={nextMobileShell ? mobileNavigation.openWorkspaceSubview : undefined}
           onMobileBack={nextMobileShell ? mobileNavigation.requestBack : undefined}
-          onGameChange={commitGame}
+          onGameChange={(updater) => {
+            if (rejectLegacyFactoryInteractionWhileNative("轨道空间站操作")) return false;
+            return commitGame(updater);
+          }}
           onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setOrbitalStationOpen(false)}
         /> : null}
         {dysonPlannerOpen ? nativePlayerAuthorityBoundFrame ? (
@@ -16391,7 +16548,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         }}
         {...mobilePanelSwipe.bindings}
       ><i /></button> : null}
-      {mobileActionEntity ? <div className="mobile-action-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setMobileActionEntityId(null); }}>
+      {mobileActionEntity && !nativePlayerAuthorityOwnsRuntime ? <div className="mobile-action-backdrop" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) setMobileActionEntityId(null); }}>
         <section className="mobile-action-sheet" role="dialog" aria-modal="true" aria-label="设备快捷操作">
           <header><span><small>长按快捷操作</small><strong>{mobileActionEntity.buildingId ? getBuilding(mobileActionEntity.buildingId).name : mobileActionEntity.resourceId ? ITEMS[mobileActionEntity.resourceId].name : mobileActionEntity.id}</strong></span><button type="button" onClick={() => setMobileActionEntityId(null)} aria-label="关闭快捷操作"><X size={16} /></button></header>
           <div>
@@ -16403,7 +16560,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             }} disabled={!mobileActionEntity.resourceId && !mobileActionEntity.recipeId && !Object.values(RECIPES).some((candidate) => candidate.buildingId === mobileActionEntity.buildingId)}><BookOpen size={17} /><span>查看配方</span></button>
             <button type="button" disabled={getBlueprintEligibleEntityIds(game, [mobileActionEntity.id]).length === 0} onClick={() => { copyEntitiesAsBlueprint([mobileActionEntity.id]); setMobileActionEntityId(null); }}><Copy size={17} /><span>{mobileActionEntity.kind === "vein" ? "收录采矿布局" : "复制设备"}</span></button>
             <button type="button" onClick={() => { focusPlacedEntity(mobileActionEntity.id); setMobileActionEntityId(null); }}><Focus size={17} /><span>定位检查</span></button>
-            <button type="button" disabled={!canUpgradeEntities(game, [mobileActionEntity.id])} onClick={() => { commitGame((current) => upgradeEntities(current, [mobileActionEntity.id])); setMobileActionEntityId(null); playTone("upgrade"); }}><ArrowUp size={17} /><span>升级设备</span></button>
+            <button type="button" disabled={!canUpgradeEntities(game, [mobileActionEntity.id])} onClick={() => { if (rejectLegacyFactoryInteractionWhileNative("建筑升级")) return; commitGame((current) => upgradeEntities(current, [mobileActionEntity.id])); setMobileActionEntityId(null); playTone("upgrade"); }}><ArrowUp size={17} /><span>升级设备</span></button>
             <button className="danger" type="button" disabled={mobileActionEntity.kind === "vein" && mobileActionEntity.minerCount < 1} onClick={() => { handleRemoveEntity(mobileActionEntity.id); setSelectedEntityIds([]); setMobileActionEntityId(null); }}><Trash2 size={17} /><span>{mobileActionEntity.kind === "vein" ? `回收采集设备 ×${mobileActionEntity.minerCount}` : "回收设备"}</span></button>
           </div>
         </section>

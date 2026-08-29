@@ -2830,6 +2830,7 @@ export function HeaderControls({
   onOpenGalaxy,
   onOpenCampaign,
   onOpenConstructionCenter,
+  constructionCenterUnavailable = false,
   onOpenDysonPlanner,
   onOpenCommandPalette,
   activeWorkspace,
@@ -2849,6 +2850,7 @@ export function HeaderControls({
   onOpenGalaxy: () => void;
   onOpenCampaign: () => void;
   onOpenConstructionCenter: () => void;
+  constructionCenterUnavailable?: boolean;
   onOpenDysonPlanner: () => void;
   onOpenCommandPalette: () => void;
   activeWorkspace?: "settings" | "galaxy" | "campaign" | "construction-center" | "star-map" | "statistics" | "recipes" | "technology" | "dyson" | null;
@@ -2880,7 +2882,7 @@ export function HeaderControls({
         </button>
         <button className={`header-action--overflowable${activeWorkspace === "galaxy" ? " active" : ""}`} type="button" onClick={onOpenGalaxy} title={activeWorkspace === "galaxy" ? "银河网络已打开，再次点击返回工厂" : "打开银河网络"} aria-label={activeWorkspace === "galaxy" ? "银河网络已打开，再次点击返回工厂" : "打开银河网络"} aria-pressed={activeWorkspace === "galaxy"}><Globe2 size={17} /></button>
         <button className={`header-action--overflowable${activeWorkspace === "campaign" ? " active" : ""}`} type="button" onClick={onOpenCampaign} title={activeWorkspace === "campaign" ? "主线任务已打开，再次点击返回工厂" : "打开主线任务中心"} aria-label={activeWorkspace === "campaign" ? "主线任务已打开，再次点击返回工厂" : "打开主线任务中心"} aria-pressed={activeWorkspace === "campaign"}><Flag size={17} /></button>
-        {game.entities.some((entity) => entity.buildingId === "construction_center") ? <button className={`header-action--overflowable${activeWorkspace === "construction-center" ? " active" : ""}`} type="button" onClick={onOpenConstructionCenter} title={activeWorkspace === "construction-center" ? "建筑制造中心已打开，再次点击返回工厂" : "打开建筑制造中心"} aria-label={activeWorkspace === "construction-center" ? "建筑制造中心已打开，再次点击返回工厂" : "打开建筑制造中心"} aria-pressed={activeWorkspace === "construction-center"}><Factory size={17} /></button> : null}
+        {game.entities.some((entity) => entity.buildingId === "construction_center") ? <button className={`header-action--overflowable${activeWorkspace === "construction-center" ? " active" : ""}`} type="button" onClick={onOpenConstructionCenter} disabled={constructionCenterUnavailable} title={constructionCenterUnavailable ? "Windows 原生模式尚未接入建筑制造中心" : activeWorkspace === "construction-center" ? "建筑制造中心已打开，再次点击返回工厂" : "打开建筑制造中心"} aria-label={constructionCenterUnavailable ? "建筑制造中心在 Windows 原生模式中暂不可用" : activeWorkspace === "construction-center" ? "建筑制造中心已打开，再次点击返回工厂" : "打开建筑制造中心"} aria-pressed={activeWorkspace === "construction-center"}><Factory size={17} /></button> : null}
         <button className={`header-action--overflowable${activeWorkspace === "star-map" ? " active" : ""}`} type="button" onClick={onOpenStarMap} title={activeWorkspace === "star-map" ? "星图已打开，再次点击返回工厂" : "打开星图"} aria-label={activeWorkspace === "star-map" ? "星图已打开，再次点击返回工厂" : "打开星图"} aria-pressed={activeWorkspace === "star-map"}><Telescope size={17} /></button>
         <button className={`header-action--overflowable${activeWorkspace === "statistics" ? " active" : ""}`} type="button" onClick={onOpenStatistics} title={activeWorkspace === "statistics" ? "生产统计已打开，再次点击返回工厂" : "打开生产统计"} aria-label={activeWorkspace === "statistics" ? "生产统计已打开，再次点击返回工厂" : "打开生产统计"} aria-pressed={activeWorkspace === "statistics"}><BarChart3 size={17} /></button>
         <button className={`header-action--overflowable${activeWorkspace === "recipes" ? " active" : ""}`} type="button" onClick={onOpenRecipes} title={activeWorkspace === "recipes" ? "生产资料库已打开，再次点击返回工厂" : "打开生产资料库"} aria-label={activeWorkspace === "recipes" ? "生产资料库已打开，再次点击返回工厂" : "打开生产资料库"} aria-pressed={activeWorkspace === "recipes"}><BookOpen size={17} /></button>
@@ -2893,7 +2895,7 @@ export function HeaderControls({
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenSettings)}><Settings size={15} />设置</button>
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenGalaxy)}><Globe2 size={15} />银河网络</button>
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenCampaign)}><Flag size={15} />主线任务</button>
-          {game.entities.some((entity) => entity.buildingId === "construction_center") ? <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenConstructionCenter)}><Factory size={15} />建筑制造中心</button> : null}
+          {game.entities.some((entity) => entity.buildingId === "construction_center") ? <button type="button" role="menuitem" disabled={constructionCenterUnavailable} onClick={() => runOverflowAction(onOpenConstructionCenter)}><Factory size={15} />建筑制造中心{constructionCenterUnavailable ? "（原生模式暂不可用）" : ""}</button> : null}
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenStarMap)}><Telescope size={15} />星图</button>
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenStatistics)}><BarChart3 size={15} />生产统计</button>
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenRecipes)}><BookOpen size={15} />生产资料库</button>

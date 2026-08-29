@@ -28,4 +28,10 @@ describe("canvas node semantic revision", () => {
     expect(createCanvasNodeSemanticRevisionToken(["a\u001fb", "c"]))
       .not.toBe(createCanvasNodeSemanticRevisionToken(["a", "b\u001fc"]));
   });
+
+  it("invalidates identical canvas revisions when native authority changes node interactivity", () => {
+    const web = createCanvasNodeSemanticRevisionToken(["home", 42, 7, "full", false, "web", false]);
+    const nativeReadOnly = createCanvasNodeSemanticRevisionToken(["home", 42, 7, "full", false, "web", true]);
+    expect(isCanvasNodeSemanticRevisionApplied(web, nativeReadOnly)).toBe(false);
+  });
 });

@@ -35,13 +35,13 @@ export type NativePlanetTransitionDecision =
  * require an exact atom before issuing a projection read.
  */
 export function retainNativePlanetRouteIdentity<TPlanetId extends string>(
-  activeSessionId: string | null | undefined,
+  boundSessionId: string | null | undefined,
   exact: NativePlanetRouteIdentity<TPlanetId> | null,
   confirmed: NativePlanetRouteIdentity<TPlanetId> | null,
 ): NativePlanetRouteIdentity<TPlanetId> | null {
-  if (!activeSessionId) return null;
-  if (exact?.sessionId === activeSessionId) return exact;
-  return confirmed?.sessionId === activeSessionId ? confirmed : null;
+  if (!boundSessionId) return null;
+  if (exact?.sessionId === boundSessionId) return exact;
+  return confirmed?.sessionId === boundSessionId ? confirmed : null;
 }
 
 /**

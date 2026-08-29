@@ -112,8 +112,9 @@ function RecipeFlowCard({ recipe, readModel, onSelect, onSelectBuilding, onSelec
   );
 }
 
-export function RecipeWorkspace({ open, readModel, onReadRequest, onClose, focusItemId, onFocus, onLocateProductionLine, mobile = false, mobileSubview, onMobileOpenDetail, onMobileReplaceDetail }: {
+export function RecipeWorkspace({ open, readOnly = false, readModel, onReadRequest, onClose, focusItemId, onFocus, onLocateProductionLine, mobile = false, mobileSubview, onMobileOpenDetail, onMobileReplaceDetail }: {
   open: boolean;
+  readOnly?: boolean;
   readModel: RecipeWorkspaceReadModel | null;
   onReadRequest: (selector: RecipeWorkspaceSelector) => void;
   onClose: () => void;
@@ -316,7 +317,7 @@ export function RecipeWorkspace({ open, readModel, onReadRequest, onClose, focus
             <ItemMark itemId={selectedItemId} />
             <div><span>{item.kind === "matrix" ? "科研矩阵" : item.kind === "fluid" ? "流体物品" : sources.length > 0 ? "天然资源" : "工业物品"}</span><strong>{item.name}</strong><p>{item.description}</p></div>
             <div className="recipe-item-actions">
-              <button type="button" className={readModel.recipeFocus.itemId === selectedItemId ? "active" : ""} onClick={() => onFocus(readModel.recipeFocus.itemId === selectedItemId ? null : selectedItemId)} title={readModel.recipeFocus.itemId === selectedItemId ? "取消主界面聚焦" : "固定生产链到主界面"}><Pin size={14} /><span>{readModel.recipeFocus.itemId === selectedItemId ? "已固定" : "固定到主界面"}</span></button>
+              <button type="button" disabled={readOnly} className={readModel.recipeFocus.itemId === selectedItemId ? "active" : ""} onClick={() => onFocus(readModel.recipeFocus.itemId === selectedItemId ? null : selectedItemId)} title={readOnly ? "Windows 原生模式下暂不可修改聚焦状态" : readModel.recipeFocus.itemId === selectedItemId ? "取消主界面聚焦" : "固定生产链到主界面"}><Pin size={14} /><span>{readModel.recipeFocus.itemId === selectedItemId ? "已固定" : "固定到主界面"}</span></button>
               {currentProductionLocation ? <button type="button" onClick={() => onLocateProductionLine(selectedItemId, readModel.activePlanetId)} title={`定位当前行星 ${currentProductionLocation.producerCount} 个${readModel.source === "native-core" ? "生产设备" : "生产节点及上游产线"}`}><LocateFixed size={14} /><span>定位{readModel.source === "native-core" ? "生产设备" : "产线"} · {currentProductionLocation.producerCount}</span></button> : null}
             </div>
             <dl>

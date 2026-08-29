@@ -12,8 +12,7 @@ use crate::state::{CoreState, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS};
 
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
-const MACRO_V10_ALGORITHM_VERSION: &str =
-    "native-pure-idle-macro-v10-three-window-closed-recipe-research-dyson-terminal-finite-vein-v9";
+const MACRO_V10_ALGORITHM_VERSION: &str = "native-pure-idle-macro-v10-three-window-closed-recipe-research-dyson-terminal-finite-vein-bounded-handcraft-v10";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MICROS_PER_SECOND: i128 = 1_000_000;
 const DYSON_ROCKET_LAUNCH_ENERGY_MICRO_MJ: i128 = 108_000_000;
@@ -24,6 +23,8 @@ const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 const TERMINAL_ROCKET_ITEM_ID: &str = "small_carrier_rocket";
 const TERMINAL_SAIL_ITEM_ID: &str = "solar_sail";
 const SETTLEMENT_ENTITY_ROWS_PER_CHUNK: usize = 256;
+const MAX_BOUNDED_HANDCRAFT_TAIL_BATCHES: i128 = 4_096;
+const HANDCRAFT_PROGRESS_EPSILON: f64 = 0.0001;
 
 type MaterialTotals = BTreeMap<String, i128>;
 type OrbitMaterialTotals = BTreeMap<String, MaterialTotals>;
@@ -5000,6 +5001,638 @@ struct OrdinaryFlowApplication {
     capacity_limited: bool,
 }
 
+#[derive(Debug, Clone)]
+struct BoundedHandcraftEntryPlan {
+    recipe_id: String,
+    planet_id: String,
+    duration_micros: i128,
+    inputs: MaterialTotals,
+    outputs: MaterialTotals,
+}
+
+#[derive(Debug, Clone)]
+struct BoundedHandcraftTailPlan {
+    active_planet_id: String,
+    tray_limit: i128,
+    initial_remaining_batches: i128,
+    entries: BTreeMap<String, BoundedHandcraftEntryPlan>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BoundedHandcraftWorkingSet {
+    queue: Vec<Value>,
+    tray: Map<String, Value>,
+    portable_fleet: Map<String, Value>,
+    total_produced: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct BoundedHandcraftApplication {
+    changed: bool,
+    input_units_debited: i128,
+    output_units_produced: i128,
+    completed_batches: i128,
+    remaining_batches: i128,
+    stopped_at_horizon: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BoundedHandcraftTailOutcome {
+    Inactive,
+    Frozen(String),
+    Applied(BoundedHandcraftApplication),
+}
+
+fn bounded_handcraft_catalog_totals(
+    amounts: &[crate::catalog::ItemAmount],
+    label: &str,
+) -> Result<MaterialTotals, String> {
+    let mut totals = MaterialTotals::new();
+    for amount in amounts {
+        let unit_amount =
+            construction_catalog_integer(amount.amount, &format!("{label}.{}", amount.item_id))?;
+        let current = totals.get(&amount.item_id).copied().unwrap_or(0);
+        totals.insert(
+            amount.item_id.clone(),
+            current
+                .checked_add(unit_amount)
+                .ok_or_else(|| format!("{label}.{} aggregate overflowed", amount.item_id))?,
+        );
+    }
+    Ok(totals)
+}
+
+fn bounded_handcraft_duration_micros(duration: f64, label: &str) -> Result<i128, String> {
+    let duration = duration.max(0.05);
+    if !duration.is_finite() || duration <= 0.0 {
+        return Err(format!("{label} duration is not finite and positive"));
+    }
+    let scaled = duration * MICROS_PER_SECOND as f64;
+    let rounded = scaled.round();
+    if !scaled.is_finite()
+        || !(1.0..=MAX_SAFE_INTEGER).contains(&rounded)
+        || (scaled - rounded).abs() > EPSILON * scaled.abs().max(1.0)
+    {
+        return Err(format!(
+            "{label} duration is not representable at microsecond precision"
+        ));
+    }
+    Ok(rounded as i128)
+}
+
+fn bounded_handcraft_progress_micros(
+    progress: f64,
+    duration_micros: i128,
+    label: &str,
+) -> Result<i128, String> {
+    if !progress.is_finite() || !(0.0..=1.0).contains(&progress) {
+        return Err(format!("{label} progress is outside the supported range"));
+    }
+    if progress <= HANDCRAFT_PROGRESS_EPSILON {
+        return Ok(0);
+    }
+    let scaled = progress * duration_micros as f64;
+    let rounded = scaled.round();
+    if !scaled.is_finite()
+        || rounded < 0.0
+        || rounded > duration_micros as f64
+        || (scaled - rounded).abs() > EPSILON * scaled.abs().max(1.0)
+    {
+        return Err(format!(
+            "{label} progress is not representable at microsecond precision"
+        ));
+    }
+    Ok(rounded as i128)
+}
+
+fn bounded_handcraft_plan(state: &CoreState) -> Result<Option<BoundedHandcraftTailPlan>, String> {
+    let base = state.base_value();
+    let queue = base
+        .get("handcraftQueue")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "handcraft queue is malformed".to_owned())?;
+    if queue.is_empty() {
+        return Ok(None);
+    }
+    let active_planet_id = base
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "handcraft active planet is missing".to_owned())?
+        .to_owned();
+    for (field, label) in [
+        (base.get("tray"), "active tray"),
+        (base.get("portableFleet"), "portable fleet"),
+        (base.get("totalProduced"), "totalProduced"),
+        (base.get("planetTrays"), "planet trays"),
+    ] {
+        if field.and_then(Value::as_object).is_none() {
+            return Err(format!("{label} is malformed"));
+        }
+    }
+    let tray_limit = base
+        .get("planetTrayItemLimits")
+        .and_then(Value::as_object)
+        .and_then(|limits| limits.get(&active_planet_id))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .map(|value| value.floor().clamp(1_000.0, 100_000_000.0))
+        .unwrap_or(1_000_000.0) as i128;
+
+    let mut seen_ids = HashSet::new();
+    let mut initial_remaining_batches = 0_i128;
+    let mut entries = BTreeMap::new();
+    for (index, entry) in queue.iter().enumerate() {
+        let entry = entry
+            .as_object()
+            .ok_or_else(|| format!("handcraft queue entry {index} is not an object"))?;
+        let id = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| format!("handcraft queue entry {index} has no ID"))?;
+        if !seen_ids.insert(id.to_owned()) {
+            return Err(format!("handcraft queue repeats ID {id}"));
+        }
+        let recipe_id = entry
+            .get("recipeId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| format!("handcraft queue entry {id} has no recipe ID"))?;
+        let planet_id = entry
+            .get("planetId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| format!("handcraft queue entry {id} has no planet ID"))?;
+        let remaining = proof_counter(
+            entry.get("batchesRemaining"),
+            &format!("handcraftQueue.{id}.batchesRemaining"),
+        )
+        .map_err(|error| error.to_string())?;
+        let total = proof_counter(
+            entry.get("batchesTotal"),
+            &format!("handcraftQueue.{id}.batchesTotal"),
+        )
+        .map_err(|error| error.to_string())?;
+        if remaining <= 0 || total < remaining {
+            return Err(format!(
+                "handcraft queue entry {id} has an invalid batch count"
+            ));
+        }
+        initial_remaining_batches = initial_remaining_batches
+            .checked_add(remaining)
+            .ok_or_else(|| "handcraft queue batch total overflowed".to_owned())?;
+        if initial_remaining_batches > MAX_BOUNDED_HANDCRAFT_TAIL_BATCHES {
+            return Err(format!(
+                "handcraft queue has {initial_remaining_batches} remaining batches; bounded tail limit is {MAX_BOUNDED_HANDCRAFT_TAIL_BATCHES}"
+            ));
+        }
+        let queued_at = entry
+            .get("queuedAt")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| format!("handcraft queue entry {id} queuedAt is invalid"))?;
+        let _ = queued_at;
+        let progress = entry
+            .get("progress")
+            .and_then(Value::as_f64)
+            .ok_or_else(|| format!("handcraft queue entry {id} progress is invalid"))?;
+        let recipe =
+            state.catalog.recipes.get(recipe_id).ok_or_else(|| {
+                format!("handcraft recipe {recipe_id} is absent from the catalog")
+            })?;
+        if recipe.outputs.is_empty() {
+            return Err(format!(
+                "handcraft recipe {recipe_id} has no material output"
+            ));
+        }
+        let duration_micros = bounded_handcraft_duration_micros(
+            recipe.duration,
+            &format!("handcraft recipe {recipe_id}"),
+        )?;
+        bounded_handcraft_progress_micros(
+            progress,
+            duration_micros,
+            &format!("handcraftQueue.{id}"),
+        )?;
+        entries.insert(
+            id.to_owned(),
+            BoundedHandcraftEntryPlan {
+                recipe_id: recipe_id.to_owned(),
+                planet_id: planet_id.to_owned(),
+                duration_micros,
+                inputs: bounded_handcraft_catalog_totals(
+                    &recipe.inputs,
+                    &format!("recipes.{recipe_id}.inputs"),
+                )?,
+                outputs: bounded_handcraft_catalog_totals(
+                    &recipe.outputs,
+                    &format!("recipes.{recipe_id}.outputs"),
+                )?,
+            },
+        );
+    }
+    Ok(Some(BoundedHandcraftTailPlan {
+        active_planet_id,
+        tray_limit,
+        initial_remaining_batches,
+        entries,
+    }))
+}
+
+fn bounded_handcraft_working_set(state: &CoreState) -> Result<BoundedHandcraftWorkingSet, String> {
+    let base = state.base_value();
+    Ok(BoundedHandcraftWorkingSet {
+        queue: base
+            .get("handcraftQueue")
+            .and_then(Value::as_array)
+            .cloned()
+            .ok_or_else(|| "handcraft queue disappeared before settlement".to_owned())?,
+        tray: base
+            .get("tray")
+            .and_then(Value::as_object)
+            .cloned()
+            .ok_or_else(|| "active tray disappeared before handcraft settlement".to_owned())?,
+        portable_fleet: base
+            .get("portableFleet")
+            .and_then(Value::as_object)
+            .cloned()
+            .ok_or_else(|| "portable fleet disappeared before handcraft settlement".to_owned())?,
+        total_produced: base
+            .get("totalProduced")
+            .and_then(Value::as_object)
+            .cloned()
+            .ok_or_else(|| "totalProduced disappeared before handcraft settlement".to_owned())?,
+    })
+}
+
+fn bounded_handcraft_map_counter(
+    map: &Map<String, Value>,
+    item_id: &str,
+    label: &str,
+) -> Result<i128, String> {
+    proof_counter(map.get(item_id), &format!("{label}.{item_id}"))
+        .map_err(|error| error.to_string())
+}
+
+fn bounded_handcraft_set_counter(
+    map: &mut Map<String, Value>,
+    item_id: &str,
+    amount: i128,
+    label: &str,
+) -> Result<(), String> {
+    if !(0..=MAX_SAFE_INTEGER as i128).contains(&amount) {
+        return Err(format!("{label}.{item_id} exceeds the safe integer range"));
+    }
+    map.insert(
+        item_id.to_owned(),
+        Value::Number(Number::from(
+            i64::try_from(amount).map_err(|_| format!("{label}.{item_id} cannot be encoded"))?,
+        )),
+    );
+    Ok(())
+}
+
+fn bounded_handcraft_can_store_outputs(
+    working: &BoundedHandcraftWorkingSet,
+    plan: &BoundedHandcraftTailPlan,
+    outputs: &MaterialTotals,
+) -> Result<bool, String> {
+    for (item_id, amount) in outputs {
+        if matches!(item_id.as_str(), "logistics_drone" | "logistics_vessel") {
+            continue;
+        }
+        let current = bounded_handcraft_map_counter(&working.tray, item_id, "tray")?;
+        if current
+            .checked_add(*amount)
+            .is_none_or(|next| next > plan.tray_limit)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn bounded_handcraft_has_inputs(
+    working: &BoundedHandcraftWorkingSet,
+    inputs: &MaterialTotals,
+) -> Result<bool, String> {
+    for (item_id, amount) in inputs {
+        if bounded_handcraft_map_counter(&working.tray, item_id, "tray")? < *amount {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn bounded_handcraft_debit_inputs(
+    working: &mut BoundedHandcraftWorkingSet,
+    inputs: &MaterialTotals,
+    debited: &mut MaterialTotals,
+) -> Result<(), String> {
+    for (item_id, amount) in inputs {
+        let current = bounded_handcraft_map_counter(&working.tray, item_id, "tray")?;
+        let next = current
+            .checked_sub(*amount)
+            .filter(|next| *next >= 0)
+            .ok_or_else(|| format!("handcraft input {item_id} underflowed"))?;
+        bounded_handcraft_set_counter(&mut working.tray, item_id, next, "tray")?;
+        let previous = debited.get(item_id).copied().unwrap_or(0);
+        debited.insert(
+            item_id.clone(),
+            previous
+                .checked_add(*amount)
+                .ok_or_else(|| format!("handcraft input {item_id} receipt overflowed"))?,
+        );
+    }
+    Ok(())
+}
+
+fn bounded_handcraft_credit_outputs(
+    working: &mut BoundedHandcraftWorkingSet,
+    outputs: &MaterialTotals,
+    credited: &mut MaterialTotals,
+) -> Result<(), String> {
+    for (item_id, amount) in outputs {
+        let target = if matches!(item_id.as_str(), "logistics_drone" | "logistics_vessel") {
+            &mut working.portable_fleet
+        } else {
+            &mut working.tray
+        };
+        let current = bounded_handcraft_map_counter(target, item_id, "handcraft output")?;
+        let next = current
+            .checked_add(*amount)
+            .ok_or_else(|| format!("handcraft output {item_id} overflowed"))?;
+        bounded_handcraft_set_counter(target, item_id, next, "handcraft output")?;
+
+        let current_produced =
+            bounded_handcraft_map_counter(&working.total_produced, item_id, "totalProduced")?;
+        let next_produced = current_produced
+            .checked_add(*amount)
+            .ok_or_else(|| format!("totalProduced.{item_id} overflowed"))?;
+        bounded_handcraft_set_counter(
+            &mut working.total_produced,
+            item_id,
+            next_produced,
+            "totalProduced",
+        )?;
+        let previous = credited.get(item_id).copied().unwrap_or(0);
+        credited.insert(
+            item_id.clone(),
+            previous
+                .checked_add(*amount)
+                .ok_or_else(|| format!("handcraft output {item_id} receipt overflowed"))?,
+        );
+    }
+    Ok(())
+}
+
+fn bounded_handcraft_remaining_batches(queue: &[Value]) -> Result<i128, String> {
+    let mut total = 0_i128;
+    for (index, entry) in queue.iter().enumerate() {
+        let entry = entry
+            .as_object()
+            .ok_or_else(|| format!("handcraft queue entry {index} is not an object"))?;
+        let remaining = proof_counter(
+            entry.get("batchesRemaining"),
+            &format!("handcraftQueue.{index}.batchesRemaining"),
+        )
+        .map_err(|error| error.to_string())?;
+        total = total
+            .checked_add(remaining)
+            .ok_or_else(|| "handcraft remaining batch total overflowed".to_owned())?;
+    }
+    Ok(total)
+}
+
+fn validate_bounded_handcraft_receipt(
+    before: &BoundedHandcraftWorkingSet,
+    after: &BoundedHandcraftWorkingSet,
+    plan: &BoundedHandcraftTailPlan,
+    input_debits: &MaterialTotals,
+    output_credits: &MaterialTotals,
+    completed_batches: i128,
+) -> Result<(), String> {
+    let remaining = bounded_handcraft_remaining_batches(&after.queue)?;
+    if plan
+        .initial_remaining_batches
+        .checked_sub(remaining)
+        .filter(|delta| *delta == completed_batches)
+        .is_none()
+    {
+        return Err("handcraft completed-batch receipt does not match the queue delta".to_owned());
+    }
+    for item_id in material_ids([input_debits, output_credits]) {
+        let before_owned = bounded_handcraft_map_counter(&before.tray, &item_id, "before.tray")?
+            .checked_add(bounded_handcraft_map_counter(
+                &before.portable_fleet,
+                &item_id,
+                "before.portableFleet",
+            )?)
+            .ok_or_else(|| format!("handcraft before ownership {item_id} overflowed"))?;
+        let after_owned = bounded_handcraft_map_counter(&after.tray, &item_id, "after.tray")?
+            .checked_add(bounded_handcraft_map_counter(
+                &after.portable_fleet,
+                &item_id,
+                "after.portableFleet",
+            )?)
+            .ok_or_else(|| format!("handcraft after ownership {item_id} overflowed"))?;
+        let expected_stock_delta = output_credits
+            .get(&item_id)
+            .copied()
+            .unwrap_or(0)
+            .checked_sub(input_debits.get(&item_id).copied().unwrap_or(0))
+            .ok_or_else(|| format!("handcraft stock receipt {item_id} overflowed"))?;
+        if after_owned - before_owned != expected_stock_delta {
+            return Err(format!(
+                "handcraft {item_id} stock delta {} does not match recipe receipt {expected_stock_delta}",
+                after_owned - before_owned
+            ));
+        }
+        let produced_delta =
+            bounded_handcraft_map_counter(&after.total_produced, &item_id, "after.totalProduced")?
+                - bounded_handcraft_map_counter(
+                    &before.total_produced,
+                    &item_id,
+                    "before.totalProduced",
+                )?;
+        let expected_produced = output_credits.get(&item_id).copied().unwrap_or(0);
+        if produced_delta != expected_produced {
+            return Err(format!(
+                "handcraft {item_id} cumulative production delta {produced_delta} does not match recipe output {expected_produced}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn apply_bounded_handcraft_tail(
+    state: &mut CoreState,
+    tail_seconds: f64,
+) -> Result<BoundedHandcraftTailOutcome, String> {
+    let Some(plan) = (match bounded_handcraft_plan(state) {
+        Ok(plan) => plan,
+        Err(reason) => return Ok(BoundedHandcraftTailOutcome::Frozen(reason)),
+    }) else {
+        return Ok(BoundedHandcraftTailOutcome::Inactive);
+    };
+    let mut working = bounded_handcraft_working_set(state)?;
+    let before = working.clone();
+    let mut remaining_micros = elapsed_micros(tail_seconds)?;
+    let mut input_debits = MaterialTotals::new();
+    let mut output_credits = MaterialTotals::new();
+    let mut completed_batches = 0_i128;
+    let mut stopped_at_horizon = false;
+
+    while remaining_micros > 0 && !working.queue.is_empty() {
+        let entry = working.queue[0]
+            .as_object()
+            .ok_or_else(|| "handcraft head entry became malformed".to_owned())?;
+        let entry_id = entry
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "handcraft head entry lost its ID".to_owned())?
+            .to_owned();
+        let entry_plan = plan
+            .entries
+            .get(&entry_id)
+            .ok_or_else(|| format!("handcraft head entry {entry_id} left the certified queue"))?;
+        if entry_plan.planet_id != plan.active_planet_id {
+            stopped_at_horizon = true;
+            break;
+        }
+        let progress = entry
+            .get("progress")
+            .and_then(Value::as_f64)
+            .ok_or_else(|| format!("handcraft queue entry {entry_id} progress disappeared"))?;
+        let mut progress_micros = bounded_handcraft_progress_micros(
+            progress,
+            entry_plan.duration_micros,
+            &format!("handcraftQueue.{entry_id}"),
+        )?;
+        if progress <= HANDCRAFT_PROGRESS_EPSILON {
+            if !bounded_handcraft_can_store_outputs(&working, &plan, &entry_plan.outputs)?
+                || !bounded_handcraft_has_inputs(&working, &entry_plan.inputs)?
+            {
+                stopped_at_horizon = true;
+                break;
+            }
+            bounded_handcraft_debit_inputs(&mut working, &entry_plan.inputs, &mut input_debits)?;
+            progress_micros = 0;
+        }
+
+        let cycle_remaining = entry_plan
+            .duration_micros
+            .checked_sub(progress_micros)
+            .ok_or_else(|| {
+                format!(
+                    "handcraft recipe {} progress overflowed",
+                    entry_plan.recipe_id
+                )
+            })?;
+        let elapsed = remaining_micros.min(cycle_remaining);
+        let next_progress_micros = progress_micros.checked_add(elapsed).ok_or_else(|| {
+            format!(
+                "handcraft recipe {} progress overflowed",
+                entry_plan.recipe_id
+            )
+        })?;
+        remaining_micros -= elapsed;
+        let next_progress = next_progress_micros as f64 / entry_plan.duration_micros as f64;
+        working.queue[0]
+            .as_object_mut()
+            .ok_or_else(|| "handcraft head entry became malformed".to_owned())?
+            .insert(
+                "progress".to_owned(),
+                Number::from_f64(next_progress)
+                    .map(Value::Number)
+                    .ok_or_else(|| "handcraft progress encode failed".to_owned())?,
+            );
+        if next_progress < 1.0 - HANDCRAFT_PROGRESS_EPSILON {
+            break;
+        }
+        if !bounded_handcraft_can_store_outputs(&working, &plan, &entry_plan.outputs)? {
+            stopped_at_horizon = true;
+            break;
+        }
+        bounded_handcraft_credit_outputs(&mut working, &entry_plan.outputs, &mut output_credits)?;
+        completed_batches = completed_batches
+            .checked_add(1)
+            .ok_or_else(|| "handcraft completed batch count overflowed".to_owned())?;
+        let remaining = proof_counter(
+            working.queue[0]
+                .as_object()
+                .and_then(|entry| entry.get("batchesRemaining")),
+            &format!("handcraftQueue.{entry_id}.batchesRemaining"),
+        )
+        .map_err(|error| error.to_string())?
+        .checked_sub(1)
+        .ok_or_else(|| format!("handcraft queue entry {entry_id} batch count underflowed"))?;
+        if remaining == 0 {
+            working.queue.remove(0);
+        } else {
+            let entry = working.queue[0]
+                .as_object_mut()
+                .ok_or_else(|| "handcraft head entry became malformed".to_owned())?;
+            entry.insert(
+                "batchesRemaining".to_owned(),
+                Value::Number(Number::from(i64::try_from(remaining).map_err(|_| {
+                    format!("handcraft queue entry {entry_id} cannot encode batch count")
+                })?)),
+            );
+            entry.insert("progress".to_owned(), Value::from(0));
+        }
+    }
+
+    validate_bounded_handcraft_receipt(
+        &before,
+        &working,
+        &plan,
+        &input_debits,
+        &output_credits,
+        completed_batches,
+    )?;
+    let input_units_debited = input_debits.values().try_fold(0_i128, |total, amount| {
+        total
+            .checked_add(*amount)
+            .ok_or_else(|| "handcraft input receipt total overflowed".to_owned())
+    })?;
+    let output_units_produced = output_credits.values().try_fold(0_i128, |total, amount| {
+        total
+            .checked_add(*amount)
+            .ok_or_else(|| "handcraft output receipt total overflowed".to_owned())
+    })?;
+    let remaining_batches = bounded_handcraft_remaining_batches(&working.queue)?;
+    let changed = working != before;
+    if changed {
+        let base = state.base_value_mut();
+        base.insert("handcraftQueue".to_owned(), Value::Array(working.queue));
+        base.insert("tray".to_owned(), Value::Object(working.tray.clone()));
+        base.insert(
+            "portableFleet".to_owned(),
+            Value::Object(working.portable_fleet),
+        );
+        base.insert(
+            "totalProduced".to_owned(),
+            Value::Object(working.total_produced),
+        );
+        base.get_mut("planetTrays")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| "planet trays disappeared before handcraft commit".to_owned())?
+            .insert(plan.active_planet_id, Value::Object(working.tray));
+    }
+    Ok(BoundedHandcraftTailOutcome::Applied(
+        BoundedHandcraftApplication {
+            changed,
+            input_units_debited,
+            output_units_produced,
+            completed_batches,
+            remaining_batches,
+            stopped_at_horizon,
+        },
+    ))
+}
+
 fn finite_vein_available_units(vein: &FiniteVeinProofSnapshot) -> Result<i128, String> {
     if vein.consumption_tenths <= 0 || vein.consumption_tenths > 10 {
         return Err(format!(
@@ -5844,7 +6477,11 @@ fn prove_internal_exact_settlement_candidate(
 /// Dynamic ray power is admitted only when a runtime-private per-grid proof
 /// removes transient orbit sails and still covers the calibrated demand from
 /// permanent sphere plus static renewable generation. Stored/fuel energy,
-/// construction and every other terminal remain frozen.
+/// A separate bounded handcraft tail may consume only the active tray's real
+/// starting stock. It carries an exact per-recipe input/output/queue receipt,
+/// never treats cumulative production as inventory, and stops after at most
+/// 4,096 remaining batches. Construction and every other unclosed terminal
+/// remain frozen.
 pub(crate) fn advance(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -6052,7 +6689,49 @@ fn advance_bounded(
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
         let elapsed = checked_elapsed_after_prefix(current_elapsed, tail_seconds)?;
-        if let Some(runtime) = macro_runtime.as_mut() {
+        let mut handcraft_handled_tail = false;
+        if macro_v10 && collection_has_entries(candidate.base_value().get("handcraftQueue")) {
+            handcraft_handled_tail = true;
+            match apply_bounded_handcraft_tail(&mut candidate, tail_seconds) {
+                Ok(BoundedHandcraftTailOutcome::Inactive) => {
+                    handcraft_handled_tail = false;
+                }
+                Ok(BoundedHandcraftTailOutcome::Frozen(reason)) => {
+                    tail_reason = Some(format!(
+                        "bounded handcraft tail froze before touching material: {reason}; ordinary production, construction, export, contract and Dyson tails remained frozen"
+                    ));
+                }
+                Ok(BoundedHandcraftTailOutcome::Applied(application)) => {
+                    tail_reason = Some(if application.changed {
+                        format!(
+                            "bounded handcraft tail completed {} certified batch(es), debited {} real input unit(s), produced {} catalog output unit(s), and left {} queued batch(es); ordinary production, construction, export, contract and Dyson tails remained frozen{}",
+                            application.completed_batches,
+                            application.input_units_debited,
+                            application.output_units_produced,
+                            application.remaining_batches,
+                            if application.stopped_at_horizon {
+                                " at the proven inventory/output/planet horizon"
+                            } else {
+                                ""
+                            }
+                        )
+                    } else {
+                        format!(
+                            "bounded handcraft tail reached its proven inventory/output/planet horizon with {} queued batch(es); no material changed and every other material-bearing tail remained frozen",
+                            application.remaining_batches
+                        )
+                    });
+                }
+                Err(reason) => {
+                    return unsupported(
+                        state,
+                        request,
+                        format!("pure-idle-bounded-handcraft-rejected: {reason}"),
+                    );
+                }
+            }
+        }
+        if !handcraft_handled_tail && let Some(runtime) = macro_runtime.as_mut() {
             if let Some(certificate) = runtime.certificate.as_mut() {
                 let ordinary_application = match apply_ordinary_flow_certificate(
                     &mut candidate,
@@ -7087,6 +7766,26 @@ mod tests {
         state.base_value_mut()["quantumLogisticsNetwork"]["enabled"] = json!(true);
         state.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"] =
             json!({ "iron_ore": "10000000000" });
+        state
+    }
+
+    fn bounded_handcraft_macro_fixture(
+        multiplier: f64,
+        batches: i64,
+        iron_ore_stock: i64,
+    ) -> CoreState {
+        let mut state = productive_powered_fixture(multiplier, "infinite");
+        state.base_value_mut()["tray"] = json!({ "iron_ore": iron_ore_stock });
+        state.base_value_mut()["planetTrays"]["home"] = json!({ "iron_ore": iron_ore_stock });
+        state.base_value_mut()["handcraftQueue"] = json!([{
+            "id": "handcraft-iron-ingot",
+            "recipeId": "iron_ingot",
+            "batchesTotal": batches,
+            "batchesRemaining": batches,
+            "progress": 0,
+            "queuedAt": 1,
+            "planetId": "home"
+        }]);
         state
     }
 
@@ -8709,6 +9408,223 @@ mod tests {
             );
             assert_eq!(segmented.pure_idle_macro_exact_seconds_used(), 30.0);
         }
+    }
+
+    #[test]
+    fn macro_v10_bounded_handcraft_tail_is_split_invariant_at_supported_multipliers() {
+        for multiplier in [8.0, 12.0, 15.0, 16.0] {
+            let mut calibrated = bounded_handcraft_macro_fixture(multiplier, 1_200, 1_200);
+            let revision = calibrated.revision;
+            let result = advance_macro_v10(
+                &mut calibrated,
+                &pure_idle_macro_request(revision, 30.0, 30.0 / multiplier),
+            )
+            .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+            assert_eq!(
+                proof_counter(
+                    calibrated.base_value()["totalProduced"].get("iron_ingot"),
+                    "calibrated handcraft iron ingot",
+                )
+                .unwrap(),
+                30
+            );
+            assert_eq!(calibrated.pure_idle_macro_exact_seconds_used(), 30.0);
+            let calibrated_state = calibrated.materialize().unwrap();
+
+            let mut long = calibrated.clone();
+            let revision = long.revision;
+            let result = advance_macro_v10(
+                &mut long,
+                &pure_idle_macro_request(revision, 570.0, 570.0 / multiplier),
+            )
+            .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+            assert!(
+                result
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("bounded handcraft tail completed 570")),
+                "reason={:?}",
+                result.reason
+            );
+
+            let mut segmented = calibrated;
+            for seconds in std::iter::repeat_n(1.0, 5)
+                .chain(std::iter::repeat_n(5.0, 5))
+                .chain(std::iter::repeat_n(60.0, 9))
+            {
+                let revision = segmented.revision;
+                let result = advance_macro_v10(
+                    &mut segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / multiplier),
+                )
+                .unwrap();
+                assert!(result.supported, "reason={:?}", result.reason);
+            }
+            assert_eq!(
+                segmented.summary().unwrap().canonical_sha256,
+                long.summary().unwrap().canonical_sha256,
+                "multiplier={multiplier}"
+            );
+            let state = long.materialize().unwrap();
+            assert_eq!(state["totalProduced"]["iron_ingot"], json!(600));
+            assert_eq!(state["tray"]["iron_ore"], json!(600));
+            assert_eq!(state["planetTrays"]["home"], state["tray"]);
+            assert_eq!(state["handcraftQueue"][0]["batchesRemaining"], json!(600));
+            for frozen in [
+                "entities",
+                "research",
+                "construction",
+                "constructionAutomation",
+                "dysonSwarm",
+                "dysonSphere",
+                "dysonEngineering",
+                "dysonPlans",
+                "endgame",
+            ] {
+                assert_eq!(state[frozen], calibrated_state[frozen], "field={frozen}");
+            }
+        }
+    }
+
+    #[test]
+    fn macro_v10_bounded_handcraft_uses_only_real_stock_and_freezes_oversized_queues() {
+        let mut finite_stock = bounded_handcraft_macro_fixture(15.0, 100, 12);
+        finite_stock.base_value_mut()["settings"]["resourceMode"] = json!("finite");
+        finite_stock.base_value_mut()["totalProduced"]["iron_ore"] = json!(1_000_000);
+        finite_stock
+            .install_pure_idle_macro_session_progress(30.0)
+            .unwrap();
+        let revision = finite_stock.revision;
+        let result = advance_macro_v10(
+            &mut finite_stock,
+            &pure_idle_macro_request(revision, 60.0, 4.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("proven inventory/output/planet horizon")),
+            "reason={:?}",
+            result.reason
+        );
+        let state = finite_stock.materialize().unwrap();
+        assert_eq!(state["tray"]["iron_ore"], json!(0));
+        assert_eq!(state["totalProduced"]["iron_ore"], json!(1_000_000));
+        assert_eq!(state["totalProduced"]["iron_ingot"], json!(12));
+        assert_eq!(state["handcraftQueue"][0]["batchesRemaining"], json!(88));
+
+        let mut oversized = bounded_handcraft_macro_fixture(15.0, 4_097, 4_097);
+        oversized
+            .install_pure_idle_macro_session_progress(30.0)
+            .unwrap();
+        let before = oversized.materialize().unwrap();
+        let revision = oversized.revision;
+        let result = advance_macro_v10(
+            &mut oversized,
+            &pure_idle_macro_request(revision, 60.0, 4.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("bounded tail limit is 4096")),
+            "reason={:?}",
+            result.reason
+        );
+        let after = oversized.materialize().unwrap();
+        for field in [
+            "tray",
+            "planetTrays",
+            "portableFleet",
+            "totalProduced",
+            "handcraftQueue",
+        ] {
+            assert_eq!(after[field], before[field], "field={field}");
+        }
+        assert_eq!(after["elapsedSeconds"], json!(60.0));
+    }
+
+    #[test]
+    fn macro_v10_bounded_handcraft_reload_discard_and_failure_are_atomic() {
+        let mut calibrated = bounded_handcraft_macro_fixture(15.0, 1_200, 1_200);
+        let revision = calibrated.revision;
+        let result = advance_macro_v10(
+            &mut calibrated,
+            &pure_idle_macro_request(revision, 30.0, 2.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+
+        let mut records = BTreeMap::<String, Vec<u8>>::new();
+        calibrated
+            .visit_internal_checkpoint_records(42, |key, value| {
+                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let mut identity = calibrated.identity.clone();
+        identity.revision = calibrated.revision;
+        let mut restored =
+            CoreState::from_internal_records(identity, &records, (*calibrated.catalog).clone())
+                .unwrap();
+        assert!(restored.pure_idle_macro_runtime.is_none());
+        for state in [&mut calibrated, &mut restored] {
+            let revision = state.revision;
+            let result =
+                advance_macro_v10(state, &pure_idle_macro_request(revision, 570.0, 38.0)).unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+        }
+        assert_eq!(
+            restored.summary().unwrap().canonical_sha256,
+            calibrated.summary().unwrap().canonical_sha256
+        );
+
+        let source = bounded_handcraft_macro_fixture(15.0, 100, 100);
+        let source_hash = source.summary().unwrap().canonical_sha256;
+        let mut discarded_candidate = source.clone();
+        discarded_candidate
+            .install_pure_idle_macro_session_progress(30.0)
+            .unwrap();
+        let revision = discarded_candidate.revision;
+        let result = advance_macro_v10(
+            &mut discarded_candidate,
+            &pure_idle_macro_request(revision, 60.0, 4.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(source.summary().unwrap().canonical_sha256, source_hash);
+
+        let mut overflow = bounded_handcraft_macro_fixture(15.0, 1, 1);
+        overflow.base_value_mut()["totalProduced"]["iron_ingot"] = json!(9_007_199_254_740_991_i64);
+        overflow
+            .install_pure_idle_macro_session_progress(30.0)
+            .unwrap();
+        let before_hash = overflow.summary().unwrap().canonical_sha256;
+        let before_revision = overflow.revision;
+        let before_credit = overflow.pure_idle_macro_exact_seconds_used();
+        let result = advance_macro_v10(
+            &mut overflow,
+            &pure_idle_macro_request(before_revision, 1.0, 1.0 / 15.0),
+        )
+        .unwrap();
+        assert!(!result.supported);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("pure-idle-bounded-handcraft-rejected")),
+            "reason={:?}",
+            result.reason
+        );
+        assert_eq!(overflow.summary().unwrap().canonical_sha256, before_hash);
+        assert_eq!(overflow.revision, before_revision);
+        assert_eq!(overflow.pure_idle_macro_exact_seconds_used(), before_credit);
     }
 
     #[test]

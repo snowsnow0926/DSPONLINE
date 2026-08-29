@@ -46,28 +46,39 @@ describe("NativeConstructionDock", () => {
     act(() => root.render(<NativeConstructionDock
       frame={null}
       selectedBuildingId={null}
+      selectedBeltTier={null}
+      beltLanes={1}
       pending={false}
       onPlacementChange={() => undefined}
+      onBeltPlacementChange={() => undefined}
+      onBeltLanesChange={() => undefined}
     />));
     expect(host.querySelector("[data-native-authority-unavailable='construction-inventory-v1']")).not.toBeNull();
     expect(host.textContent).toContain("旧网页库存不会显示");
   });
 
-  it("keeps known non-building rows disabled and exposes MOD placement candidates", () => {
+  it("exposes explicit built-in belt tiers and opaque MOD placement candidates", () => {
     const onPlacementChange = vi.fn();
+    const onBeltPlacementChange = vi.fn();
     act(() => root.render(<NativeConstructionDock
       frame={frame()}
       selectedBuildingId={null}
+      selectedBeltTier={null}
+      beltLanes={4}
       pending={false}
       onPlacementChange={onPlacementChange}
+      onBeltPlacementChange={onBeltPlacementChange}
+      onBeltLanesChange={() => undefined}
     />));
     expect(host.textContent).toContain("传送带 Mk.III");
     expect(host.textContent).toContain("MOD/quantum-factory");
     expect(host.textContent).toContain("3,009");
     const buttons = [...host.querySelectorAll<HTMLButtonElement>("button")];
     expect(buttons[0].disabled).toBe(false);
-    expect(buttons[1].disabled).toBe(true);
+    expect(buttons[1].disabled).toBe(false);
     expect(buttons[2].disabled).toBe(false);
+    act(() => buttons[1].click());
+    expect(onBeltPlacementChange).toHaveBeenCalledWith(3);
     act(() => buttons[2].click());
     expect(onPlacementChange).toHaveBeenCalledWith("MOD/quantum-factory");
     expect(host.querySelector("[data-native-construction-placement='ordinary-single-v1']")).not.toBeNull();
@@ -77,8 +88,12 @@ describe("NativeConstructionDock", () => {
     act(() => root.render(<NativeConstructionDock
       frame={frame()}
       selectedBuildingId="MOD/quantum-factory"
+      selectedBeltTier={null}
+      beltLanes={1}
       pending
       onPlacementChange={() => undefined}
+      onBeltPlacementChange={() => undefined}
+      onBeltLanesChange={() => undefined}
     />));
     const buttons = [...host.querySelectorAll<HTMLButtonElement>("button")];
     expect(buttons.every((button) => button.disabled)).toBe(true);

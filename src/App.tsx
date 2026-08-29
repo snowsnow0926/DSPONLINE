@@ -462,6 +462,15 @@ import {
   type NativeConstructionRemovalSupportReason,
 } from "./game/nativeConstructionRemoval";
 import {
+  createNativeProjectedOrdinaryBeltPlacementCommand,
+  readVerifiedNativeConstructionBeltPlacementContext,
+} from "./game/nativeConstructionBeltPlacement";
+import {
+  createNativeProjectedOrdinaryBuildingStackCommand,
+  readVerifiedNativeConstructionStackContext,
+  type NativeConstructionStackSupportReason,
+} from "./game/nativeConstructionStackContext";
+import {
   NativeTechnologyWorkspaceStore,
   createNativePlayerAuthorityTechnologyProjectionSource,
 } from "./game/nativeTechnologyWorkspaceStore";
@@ -1099,6 +1108,57 @@ function nativeRemovalBlockedMessage(reason: NativeConstructionRemovalSupportRea
   }
 }
 
+function nativeBeltPlacementBlockedMessage(reason: string): string {
+  switch (reason) {
+    case "unsupported-active-planet": return "当前行星不支持普通传送带；本次线路未建立";
+    case "invalid-lanes": return "并联数量必须是 1–4096 的整数；本次线路未建立";
+    case "unsupported-belt-tier": return "当前只支持明确选择 Mk.I、Mk.II 或 Mk.III 传送带";
+    case "missing-construction-definition": return "Rust 内容目录中缺少这一级传送带；本次线路未建立";
+    case "technology-locked": return "这一级传送带科技尚未解锁；本次线路未建立";
+    case "unknown-item": return "Rust 内容目录中没有这项物资；本次线路未建立";
+    case "insufficient-inventory": return "施工托盘中的同级传送带不足；本次线路未建立";
+    case "same-endpoint": return "线路不能连接同一栋建筑";
+    case "source-not-found":
+    case "target-not-found": return "线路端点已变化；本次线路未建立";
+    case "not-active-planet": return "线路两端已不在当前行星；本次线路未建立";
+    case "interaction-locked": return "线路端点包含已锁定建筑；本次线路未建立";
+    case "unsupported-source-domain":
+    case "unsupported-target-domain": return "该端点属于特殊物流系统，当前只开放普通物品端口";
+    case "source-not-configured": return "输出端当前没有配置这项物资；本次线路未建立";
+    case "target-not-configured": return "输入端当前没有配置这项物资；本次线路未建立";
+    case "matching-route-exists": return "相同起点、终点和物资的线路已经存在";
+    case "next-id-exhausted":
+    case "next-id-collision": return "线路 ID 无法安全分配；请导出备份并联系存档救援";
+    case "invalid-default-settings": return "传送带默认设置无法由 Rust 安全确认；本次线路未建立";
+    default: return "Rust 暂不支持这条线路；存档和施工库存均未改变";
+  }
+}
+
+function nativeStackBlockedMessage(reason: NativeConstructionStackSupportReason): string {
+  switch (reason) {
+    case "invalid-target-count": return "目标堆叠数量无效；本次调整未执行";
+    case "entity-not-found": return "这栋建筑已经不存在；本次调整未执行";
+    case "invalid-entity": return "建筑记录不完整；本次调整未执行";
+    case "not-active-planet": return "建筑已不在当前行星；本次调整未执行";
+    case "interaction-locked": return "建筑已锁定，请先解锁再调整堆叠";
+    case "missing-building-id": return "该节点不是可调整堆叠的普通建筑";
+    case "unknown-building": return "Rust 内容目录中没有这个建筑；本次调整未执行";
+    case "missing-construction-definition": return "这个建筑没有可核对的施工定义；本次调整未执行";
+    case "unsupported-building-kind":
+    case "unsupported-building-domain": return "该建筑需要专用堆叠流程；本次调整未执行";
+    case "entity-kind-mismatch": return "建筑类型与 Rust 目录不一致；本次调整未执行";
+    case "invalid-current-count":
+    case "empty-machine-stack": return "当前建筑堆叠数量无效；本次调整未执行";
+    case "unchanged-target": return "目标数量与当前堆叠相同";
+    case "stack-limit": return "已经达到这类建筑的当前堆叠上限";
+    case "catalog-incomplete": return "Rust 内容目录不足以证明这次堆叠安全；本次调整未执行";
+    case "invalid-construction-inventory": return "施工托盘记录无效；本次调整未执行";
+    case "inventory-insufficient": return "施工托盘中的同类建筑不足；本次调整未执行";
+    case "refund-overflow": return "减少堆叠后的返还会超过安全上限；请先导出备份";
+    default: return "Rust 暂不支持这次堆叠调整；存档和施工库存均未改变";
+  }
+}
+
 function pureIdleProgressLabel(progress: PureIdleMacroProgress): string {
   if (progress.phase === "preparing-power") return "正在准备权威供电快照";
   if (progress.phase === "calibrating") return "正在执行有界精确校准";
@@ -1668,6 +1728,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const [nativeRemovalContextPending, setNativeRemovalContextPending] = useState(false);
   const nativeRemovalContextPendingRef = useRef(false);
   const nativeRemovalRequestGenerationRef = useRef(0);
+  const [nativeStackContextPending, setNativeStackContextPending] = useState(false);
+  const nativeStackContextPendingRef = useRef(false);
+  const nativeStackRequestGenerationRef = useRef(0);
+  const [nativeBeltPlacementTier, setNativeBeltPlacementTier] = useState<BeltTier | null>(null);
+  const nativeBeltPlacementTierRef = useRef<BeltTier | null>(null);
+  nativeBeltPlacementTierRef.current = nativeBeltPlacementTier;
+  const [nativeBeltPlacementContextPending, setNativeBeltPlacementContextPending] = useState(false);
+  const nativeBeltPlacementContextPendingRef = useRef(false);
+  const nativeBeltPlacementRequestGenerationRef = useRef(0);
   const [beltTier, setBeltTier] = useState<BeltTier>(1);
   const [beltTierMode, setBeltTierMode] = useState<BeltTierMode>("auto");
   const [placementCount, setPlacementCount] = useState<PlacementCount>(1);
@@ -8298,6 +8367,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       buildingId,
       generation: nativePlacementIntentRef.current.generation + 1,
     };
+    nativeBeltPlacementRequestGenerationRef.current += 1;
+    nativeBeltPlacementTierRef.current = null;
+    setNativeBeltPlacementTier(null);
+    nativeBeltPlacementContextPendingRef.current = false;
+    setNativeBeltPlacementContextPending(false);
     setNativePlacementBuildingId(buildingId);
     nativePlacementContextPendingRef.current = false;
     setNativePlacementContextPending(false);
@@ -8329,6 +8403,58 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setSelectedBeltIds([]);
     setFocusedBeltNetworkId(null);
     if (buildingId) setNotice("请在空白画布选择落点；Rust 会按当前 revision 重新检查后再建造");
+  }, [flowStore, nativeConstructionInventoryFrame, updateConnectionDraft]);
+
+  const selectNativeBeltPlacement = useCallback((tier: BeltTier | null): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current) return;
+    if (tier !== null) {
+      const constructionId = getBeltConstructionId(tier);
+      const row = nativeConstructionInventoryFrame?.rowsByBuildingId.get(constructionId);
+      if (!row || row.amount < 1) {
+        setNotice(`当前 Rust 施工库存中没有 Mk.${tier === 3 ? "III" : tier === 2 ? "II" : "I"} 传送带；拉线未开始`);
+        return;
+      }
+    }
+    nativePlacementIntentRef.current = {
+      buildingId: null,
+      generation: nativePlacementIntentRef.current.generation + 1,
+    };
+    setNativePlacementBuildingId(null);
+    nativePlacementContextPendingRef.current = false;
+    setNativePlacementContextPending(false);
+    nativeBeltPlacementRequestGenerationRef.current += 1;
+    nativeBeltPlacementTierRef.current = tier;
+    setNativeBeltPlacementTier(tier);
+    nativeBeltPlacementContextPendingRef.current = false;
+    setNativeBeltPlacementContextPending(false);
+    setPlacement(null);
+    setBlueprintPlacementId(null);
+    setBeltTierMode("manual");
+    if (tier !== null) setBeltTier(tier);
+    flowStore.getState().cancelConnection();
+    flowStore.setState({ connectionClickStartHandle: null });
+    clickConnectionPreviewRef.current = null;
+    clickConnectionSucceededRef.current = false;
+    connectionDraftRef.current = null;
+    batchConnectionModeRef.current = false;
+    batchConnectionsRef.current = [];
+    setClickConnectionPreview(null);
+    setClickConnectionTone("pending");
+    setClickConnectionSnapPoint(null);
+    updateConnectionDraft(null);
+    setConnectionHint(null);
+    setBatchConnectionMode(false);
+    setBatchConnections([]);
+    setSelectionMode(false);
+    setDeleteMode(false);
+    setRegionMode(false);
+    setRegionDraft(null);
+    if (tier !== null) {
+      const tierName = tier === 3 ? "III" : tier === 2 ? "II" : "I";
+      setNotice(`已锁定传送带 Mk.${tierName}；请把普通建筑的同物品输出端口拖到输入端口`);
+    } else {
+      setConnectionHint(null);
+    }
   }, [flowStore, nativeConstructionInventoryFrame, updateConnectionDraft]);
 
   const placeNativeOrdinaryBuildingAt = useCallback(async (
@@ -8406,6 +8532,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativeRemovalRequestGenerationRef.current += 1;
     nativeRemovalContextPendingRef.current = false;
     setNativeRemovalContextPending(false);
+  }, [
+    nativePlayerAuthorityActiveFrame?.runId,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    nativeStackRequestGenerationRef.current += 1;
+    nativeStackContextPendingRef.current = false;
+    setNativeStackContextPending(false);
+    nativeBeltPlacementRequestGenerationRef.current += 1;
+    nativeBeltPlacementContextPendingRef.current = false;
+    setNativeBeltPlacementContextPending(false);
+    nativeBeltPlacementTierRef.current = null;
+    setNativeBeltPlacementTier(null);
   }, [
     nativePlayerAuthorityActiveFrame?.runId,
     nativePlayerAuthorityActiveFrame?.sessionId,
@@ -13460,6 +13600,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const stableOnEnergyModeChange = useStableEventCallback(onEnergyModeChange);
   const stableOnInteractionLockChange = useStableEventCallback(changeCanvasEntityInteractionLock);
   const stableOnStackActivate = useStableEventCallback(activateCanvasStack);
+  const nativeOrdinaryBeltConnectionEnabled = nativePlayerAuthorityOwnsRuntime &&
+    nativeBeltPlacementTier !== null && !nativePlacementBuildingId &&
+    !nativeFactoryRouteUnsafe && !nativeFactoryProjectionPending &&
+    !nativeBeltPlacementContextPending && !nativePlayerAuthorityCommandPending &&
+    Boolean(nativeFactoryInventoryIdentity) &&
+    typeof desktopBridge?.getNativeCoreConstructionBeltPlacementContext === "function";
 
   const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "presentationSignature" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "acceptedInputItemIds" | "producedOutputItemIds" | "connectionDraft" | "connectionViewportFull" | "dynamicEffects" | "presentationVisible" | "alertActive" | "stackHidden" | "stackMarker" | "stackHalo" | "stackCount" | "stackGroupId" | "stackMembershipToken" | "stackMemberIds" | "stackAlertCount" | "stackCriticalAlertCount" | "stackGeometryHandlesRequired">>(() => {
     const technology = getTechnology(canvasGame.research.selectedTechId);
@@ -13467,6 +13613,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const planetProfile = getPlanetIndustrialProfile(canvasGame, factoryCanvasPlanetId);
     return {
       readOnly: nativePlayerAuthorityOwnsRuntime,
+      beltConnectionsEnabled: nativeOrdinaryBeltConnectionEnabled,
       cargo: nativePlayerAuthorityOwnsRuntime ? null : canvasGame.cargo,
       placement,
       placementCount,
@@ -13499,7 +13646,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       simulationMultiplier: getEffectiveSimulationMultiplier(canvasGame),
       extremeVisuals: extremeVisualsActive,
     };
-  }, [beltNodeIndex.activeEntityIds, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, extremeVisualsActive, factoryCanvasPlanetId, factoryRunStatusReadModel.paused, miningEntityId, nativePlayerAuthorityOwnsRuntime, placement, placementCount, stableOnAddBuilding, stableOnDropCargo, stableOnDropDraggedItem, stableOnEnergyModeChange, stableOnFuelChange, stableOnInstallMiner, stableOnInteractionLockChange, stableOnMiningStart, stableOnMiningStop, stableOnPickInput, stableOnPickOutput, stableOnRecipeChange, stableOnStackActivate]);
+  }, [beltNodeIndex.activeEntityIds, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, extremeVisualsActive, factoryCanvasPlanetId, factoryRunStatusReadModel.paused, miningEntityId, nativeOrdinaryBeltConnectionEnabled, nativePlayerAuthorityOwnsRuntime, placement, placementCount, stableOnAddBuilding, stableOnDropCargo, stableOnDropDraggedItem, stableOnEnergyModeChange, stableOnFuelChange, stableOnInstallMiner, stableOnInteractionLockChange, stableOnMiningStart, stableOnMiningStop, stableOnPickInput, stableOnPickOutput, stableOnRecipeChange, stableOnStackActivate]);
 
   const canvasNodeSemanticRevisionToken = createCanvasNodeSemanticRevisionToken([
     factoryCanvasPlanetId,
@@ -13543,6 +13690,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     game.settings.fontScale,
     extremeVisualsActive,
     nativePlayerAuthorityOwnsRuntime,
+    nativeOrdinaryBeltConnectionEnabled,
   ]);
   const appliedCanvasNodeSemanticRevisionTokenRef = useRef<string | null>(null);
 
@@ -14214,7 +14362,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     return result;
   }, [factoryThinViewExpectedRevision, nativePlayerAuthorityActiveFrame?.sessionId]);
   const isValidConnection = useCallback((connection: Connection | Edge) => {
-    if (nativePlayerAuthorityOwnsRuntimeRef.current) return false;
     const sourceItem = parseHandleItem(connection.sourceHandle);
     const targetItem = parseHandleItem(connection.targetHandle);
     if (!connection.source || !connection.target || connection.source === connection.target ||
@@ -14223,6 +14370,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     if (!state) return false;
     const source = state.entities.find((entity) => entity.id === connection.source);
     const target = state.entities.find((entity) => entity.id === connection.target);
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      if (!nativeOrdinaryBeltConnectionEnabled || !nativeBeltPlacementTierRef.current ||
+          !connection.sourceHandle?.startsWith("out:") || !connection.targetHandle?.startsWith("in:") ||
+          isUniversalInputHandle(connection.targetHandle) || parseTargetPortIndex(connection.targetHandle) !== undefined) return false;
+      const matchingEndpoint = state.belts.some((candidate) =>
+        candidate.source === connection.source && candidate.target === connection.target &&
+        candidate.itemId === sourceItem);
+      return Boolean(source && target && !source.interactionLocked && !target.interactionLocked &&
+        source.planetId === target.planetId && source.planetId === nativeFactoryProjectionPlanetId &&
+        getProducedOutputs(source).includes(sourceItem) && targetItem === sourceItem && !matchingEndpoint);
+    }
     const draft = connectionDraftRef.current;
     const tier = draft?.tier ?? resolveConnectionBeltTier(state, beltTierMode, beltTier, connection.source, sourceItem);
     const constructionId = getBeltConstructionId(tier);
@@ -14233,13 +14391,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       (!existing || existing.tier === tier) &&
       canConnectBelt(state, connection.source, connection.target, sourceItem, tier, parseTargetPortIndex(connection.targetHandle), requestedLanes) &&
       (state.construction[constructionId] ?? 0) >= requestedLanes);
-  }, [beltTier, beltTierMode, getFactoryConnectionReadState]);
+  }, [beltTier, beltTierMode, getFactoryConnectionReadState, nativeFactoryProjectionPlanetId, nativeOrdinaryBeltConnectionEnabled]);
 
   const beginConnectionDraft = useCallback((params: OnConnectStartParams): ConnectionDraft | null => {
-    if (nativePlayerAuthorityOwnsRuntimeRef.current) return null;
     const itemId = parseHandleItem(params.handleId);
     const universalPort = parseTargetPortIndex(params.handleId);
     if (!params.nodeId || !params.handleType || !params.handleId || (!itemId && universalPort === undefined)) return null;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const tier = nativeBeltPlacementTierRef.current;
+      if (!nativeOrdinaryBeltConnectionEnabled || !tier || !itemId || universalPort !== undefined ||
+          (params.handleType === "source" && !params.handleId.startsWith("out:")) ||
+          (params.handleType === "target" && !params.handleId.startsWith("in:"))) return null;
+      const draft = { nodeId: params.nodeId, handleId: params.handleId, itemId, handleType: params.handleType, tier } satisfies ConnectionDraft;
+      updateConnectionDraft(draft);
+      setConnectionHint({
+        label: `${ITEMS[itemId]?.name ?? itemId} · Rust 已锁定 Mk.${tier === 3 ? "III" : tier === 2 ? "II" : "I"} · 只建立一条普通线路`,
+        tone: "ready",
+      });
+      return draft;
+    }
     const readState = getFactoryConnectionReadState(params.nodeId, params.nodeId);
     if (!readState) return null;
     const tier = resolveConnectionBeltTier(readState, beltTierMode, beltTier, params.nodeId, itemId ?? undefined);
@@ -14255,10 +14425,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       tone: "ready",
     });
     return draft;
-  }, [beltTier, beltTierMode, getFactoryConnectionReadState, updateConnectionDraft]);
+  }, [beltTier, beltTierMode, getFactoryConnectionReadState, nativeOrdinaryBeltConnectionEnabled, updateConnectionDraft]);
 
   const onConnectStart = useCallback((event: MouseEvent | TouchEvent, params: OnConnectStartParams) => {
-    if (nativePlayerAuthorityOwnsRuntimeRef.current) return;
     if (clickConnectionPreviewRef.current) return;
     clickConnectionSucceededRef.current = false;
     dragConnectionStartRef.current = getEventPoint(event);
@@ -14333,10 +14502,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [removeBatchConnectionAt]);
 
   const onClickConnectStart = useCallback((event: MouseEvent | TouchEvent, params: OnConnectStartParams) => {
-    if (nativePlayerAuthorityOwnsRuntimeRef.current) return;
     const activePreview = clickConnectionPreviewRef.current;
     const selectedHandle = getConnectionHandleTarget(event.target);
     const modifierContinuous = event instanceof MouseEvent && (event.ctrlKey || event.shiftKey);
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      if (modifierContinuous) {
+        setNotice("Windows 原生模式当前只允许逐条拉线；连续批量模式没有开启");
+        return;
+      }
+      if (activePreview) return;
+      const draft = beginConnectionDraft(params);
+      if (!draft || !selectedHandle) return;
+      startClickConnectionPreview(draft, selectedHandle);
+      return;
+    }
     // React Flow reports every handle click as a possible new connection
     // start. In continuous mode, a compatible opposite handle is another
     // target for the existing source and must not replace that source draft.
@@ -14613,7 +14792,36 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
 
   const onConnectEnd = useCallback((event: MouseEvent | TouchEvent, state: FinalConnectionState) => {
     if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const endPoint = getEventPoint(event);
+      const draft = connectionDraftRef.current ?? connectionDraft;
+      const releaseHandle = getConnectionHandleTarget(event.target) ?? (endPoint ? findConnectionHandleAtPoint(
+        endPoint.x,
+        endPoint.y,
+        connectionHitRadius,
+        draft ? (candidate) => isValidConnection(connectionFromDraft(draft, candidate)) : undefined,
+        connectionHandleSpatialIndexRef.current,
+      ) : null);
+      if (state.isValid && clickConnectionSucceededRef.current) {
+        clickConnectionSucceededRef.current = false;
+        updateConnectionDraft(null);
+        setClickConnectionSnapPoint(null);
+        setConnectionHint({ label: "线路请求已交给 Rust，正在核对并持久化…", tone: "ready" });
+        return;
+      }
+      if (draft && releaseHandle) {
+        const snappedConnection = connectionFromDraft(draft, releaseHandle);
+        if (isValidConnection(snappedConnection) && connectRequestRef.current(snappedConnection, draft.tier)) {
+          clickConnectionSucceededRef.current = false;
+          updateConnectionDraft(null);
+          setClickConnectionSnapPoint(null);
+          setConnectionHint({ label: "线路请求已交给 Rust，正在核对并持久化…", tone: "ready" });
+          return;
+        }
+      }
       clearConnectionPreview(false);
+      setNotice(releaseHandle
+        ? "原生线路未提交：只支持同物品的普通输出端口到普通输入端口"
+        : "已取消运输线连接");
       return;
     }
     const endPoint = getEventPoint(event);
@@ -14691,11 +14899,40 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setConnectionHint({ label, tone: "blocked" });
     spawnInteractionBurst(pointerRef.current.x, pointerRef.current.y, "连接失败", "warning");
     playTone("alert");
-  }, [beltTier, beltTierMode, clearConnectionPreview, coarsePointer, connectionDraft, getFactoryConnectionReadState, isValidConnection, playTone, spawnInteractionBurst, updateConnectionDraft]);
+  }, [beltTier, beltTierMode, clearConnectionPreview, coarsePointer, connectionDraft, connectionHitRadius, getFactoryConnectionReadState, isValidConnection, playTone, spawnInteractionBurst, updateConnectionDraft]);
 
   const onClickConnectEnd = useCallback((event: MouseEvent | TouchEvent) => {
     if (nativePlayerAuthorityOwnsRuntimeRef.current) {
-      clearConnectionPreview(false);
+      const preview = clickConnectionPreviewRef.current;
+      if (!preview) return;
+      const point = getEventPoint(event);
+      const targetHandle = getConnectionHandleTarget(event.target) ?? (point ? findConnectionHandleAtPoint(
+        point.x,
+        point.y,
+        connectionHitRadius,
+        (candidate) => isValidConnection(connectionFromDraft(preview.draft, candidate)),
+        connectionHandleSpatialIndexRef.current,
+      ) : null);
+      const connection = targetHandle ? connectionFromDraft(preview.draft, targetHandle) : null;
+      let accepted = clickConnectionSucceededRef.current;
+      if (!accepted && connection && isValidConnection(connection)) {
+        accepted = connectRequestRef.current(connection, preview.draft.tier);
+      }
+      clickConnectionPreviewRef.current = null;
+      clickConnectionSucceededRef.current = false;
+      setClickConnectionPreview(null);
+      setClickConnectionTone("pending");
+      setClickConnectionSnapPoint(null);
+      updateConnectionDraft(null);
+      if (accepted) {
+        setConnectionHint({ label: "线路请求已交给 Rust，正在核对并持久化…", tone: "ready" });
+      } else if (targetHandle) {
+        setNotice("原生线路未提交：只支持同物品的普通输出端口到普通输入端口");
+        setConnectionHint({ label: "当前端口不属于 Rust 普通线路范围", tone: "blocked" });
+      } else {
+        setConnectionHint(null);
+        setNotice("已取消运输线连接");
+      }
       return;
     }
     const preview = clickConnectionPreviewRef.current;
@@ -14781,9 +15018,107 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setConnectionHint({ label, tone: "blocked" });
     spawnInteractionBurst(pointerRef.current.x, pointerRef.current.y, "连接失败", "warning");
     playTone("alert");
-  }, [activateBatchConnectionMode, addBatchConnection, clearConnectionPreview, coarsePointer, getFactoryConnectionReadState, isValidConnection, playTone, spawnInteractionBurst, updateConnectionDraft]);
+  }, [activateBatchConnectionMode, addBatchConnection, clearConnectionPreview, coarsePointer, connectionHitRadius, getFactoryConnectionReadState, isValidConnection, playTone, spawnInteractionBurst, updateConnectionDraft]);
+
+  const requestNativeOrdinaryBeltPlacement = useCallback((connection: Connection, lockedTier?: BeltTier): boolean => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativeBeltPlacementContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次线路未提交");
+      return false;
+    }
+    const identity = nativeFactoryInventoryIdentity;
+    const selectedTier = nativeBeltPlacementTierRef.current;
+    const requestedTier = lockedTier ?? connectionDraftRef.current?.tier ?? selectedTier;
+    const sourceItem = parseHandleItem(connection.sourceHandle);
+    const targetItem = parseHandleItem(connection.targetHandle);
+    const lanes = defaultBeltLanesRef.current;
+    if (!identity || !selectedTier || requestedTier !== selectedTier ||
+        !connection.source || !connection.target || connection.source === connection.target ||
+        !sourceItem || sourceItem !== targetItem || !connection.sourceHandle?.startsWith("out:") ||
+        !connection.targetHandle?.startsWith("in:") || isUniversalInputHandle(connection.targetHandle) ||
+        parseTargetPortIndex(connection.targetHandle) !== undefined ||
+        !Number.isSafeInteger(lanes) || lanes < 1 || lanes > 4096 || !isValidConnection(connection)) {
+      setNotice("原生线路只接受同一物品的普通输出端口到普通输入端口；本次线路未提交");
+      return false;
+    }
+    const generation = nativeBeltPlacementRequestGenerationRef.current + 1;
+    nativeBeltPlacementRequestGenerationRef.current = generation;
+    nativeBeltPlacementContextPendingRef.current = true;
+    setNativeBeltPlacementContextPending(true);
+    void (async () => {
+      try {
+        const context = await readVerifiedNativeConstructionBeltPlacementContext(
+          desktopBridge,
+          identity,
+          {
+            sourceId: connection.source!,
+            targetId: connection.target!,
+            itemId: sourceItem,
+            tier: requestedTier,
+            lanes,
+          },
+        );
+        if (nativeBeltPlacementRequestGenerationRef.current !== generation ||
+            nativeBeltPlacementTierRef.current !== selectedTier || !nativePlayerAuthorityOwnsRuntimeRef.current) return;
+        if (!context) {
+          setNotice("没有取得同一 revision 的 Rust 拉线凭证；存档和施工库存均未改变，请重试");
+          return;
+        }
+        if (!context.support.supported || !context.placement || !context.nextBeltId) {
+          setNotice(nativeBeltPlacementBlockedMessage(context.support.reason ?? "unsupported-belt-domain"));
+          return;
+        }
+        if (context.activePlanetId !== nativeFactoryProjectionPlanetId) {
+          setNotice("拉线凭证所属行星已变化；存档未改变，请等待画布刷新");
+          return;
+        }
+        const tierName = requestedTier === 3 ? "III" : requestedTier === 2 ? "II" : "I";
+        const itemLabel = ITEMS[sourceItem]?.name ?? sourceItem;
+        const accepted = commitNativeProjectedCommand(context.revision, (baseRevision) =>
+          baseRevision === context.revision
+            ? createNativeProjectedOrdinaryBeltPlacementCommand(context)
+            : null,
+          () => {
+            selectedEntityIdsRef.current = [];
+            selectedBeltIdRef.current = context.nextBeltId;
+            selectedBeltIdsRef.current = [context.nextBeltId!];
+            setSelectedEntityIds([]);
+            setSelectedBeltId(context.nextBeltId);
+            setSelectedBeltIds([context.nextBeltId!]);
+            setInspectorTab("inspect");
+            setRightSidebarCollapsed(false);
+            setNotice(`${itemLabel}运输线已由 Rust 建立 · Mk.${tierName} · 并联 ×${lanes}`);
+            spawnInteractionBurst(pointerRef.current.x, pointerRef.current.y, "运输线已建立", "positive");
+            playTone("connect");
+            recordBasicOnboardingEvent("belt-connected");
+            trackAnalyticsEvent("belt_connect");
+          },
+        );
+        if (!accepted) setConnectionHint({ label: "Rust 没有接受这次线路命令", tone: "blocked" });
+      } finally {
+        if (nativeBeltPlacementRequestGenerationRef.current === generation) {
+          nativeBeltPlacementContextPendingRef.current = false;
+          setNativeBeltPlacementContextPending(false);
+        }
+      }
+    })();
+    clickConnectionSucceededRef.current = true;
+    setConnectionHint({ label: "正在由 Rust 核对端点、科技和施工库存…", tone: "ready" });
+    return true;
+  }, [
+    commitNativeProjectedCommand,
+    desktopBridge,
+    isValidConnection,
+    nativeFactoryInventoryIdentity,
+    nativeFactoryProjectionPlanetId,
+    playTone,
+    spawnInteractionBurst,
+  ]);
 
   const onConnect = useCallback((connection: Connection, lockedTier?: BeltTier): boolean => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      return requestNativeOrdinaryBeltPlacement(connection, lockedTier);
+    }
     if (rejectLegacyFactoryInteractionWhileNative("运输线创建")) return false;
     const sourceItem = parseHandleItem(connection.sourceHandle);
     const targetItem = parseHandleItem(connection.targetHandle);
@@ -14854,7 +15189,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     spawnInteractionBurst(pointerRef.current.x, pointerRef.current.y, "运输线已建立", "positive");
     playTone("connect");
     return true;
-  }, [beltTier, beltTierMode, coarsePointer, commitGame, flowStore, getFactoryConnectionReadState, mobileNavigation.openSheet, nextMobileShell, playTone, rejectLegacyFactoryInteractionWhileNative, spawnInteractionBurst]);
+  }, [beltTier, beltTierMode, coarsePointer, commitGame, flowStore, getFactoryConnectionReadState, mobileNavigation.openSheet, nextMobileShell, playTone, rejectLegacyFactoryInteractionWhileNative, requestNativeOrdinaryBeltPlacement, spawnInteractionBurst]);
 
   useEffect(() => { connectRequestRef.current = onConnect; }, [onConnect]);
 
@@ -15770,8 +16105,85 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     factoryInspectorSummaryReadModel,
     playTone,
   ]);
+  const changeNativeOrdinaryBuildingStack = useCallback(async (
+    entityId: string,
+    targetCount: number,
+  ): Promise<void> => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativeStackContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current || !Number.isSafeInteger(targetCount) || targetCount < 1) {
+      setNotice("Windows 原生权威正在确认上一项操作，或目标数量无效；本次堆叠未提交");
+      return;
+    }
+    const projected = factoryInspectorSummaryReadModel.source === "native-core"
+      ? factoryInspectorSummaryReadModel.entity
+      : null;
+    if (!projected || projected.entityId !== entityId || factoryInspectorSummaryReadModel.belt !== null ||
+        !projected.buildingId || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId) {
+      setNotice("没有取得当前建筑的同 revision Rust 摘要；本次堆叠未提交");
+      return;
+    }
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    const registryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
+    if (!routeIdentity || !commandSource || commandSource.sessionId !== routeIdentity.sessionId ||
+        commandSource.runId !== routeIdentity.runId || commandSource.baseRevision !== routeIdentity.revision) {
+      setNotice("原生建筑摘要已经过期；请等待当前 revision 刷新后重试");
+      return;
+    }
+    const generation = nativeStackRequestGenerationRef.current + 1;
+    nativeStackRequestGenerationRef.current = generation;
+    nativeStackContextPendingRef.current = true;
+    setNativeStackContextPending(true);
+    try {
+      const context = await readVerifiedNativeConstructionStackContext(desktopBridge, {
+        sessionId: routeIdentity.sessionId,
+        runId: routeIdentity.runId,
+        revision: routeIdentity.revision,
+        registryFingerprint,
+      }, entityId, targetCount);
+      if (nativeStackRequestGenerationRef.current !== generation ||
+          !nativePlayerAuthorityOwnsRuntimeRef.current) return;
+      if (!context) {
+        setNotice("没有取得同一 revision 的 Rust 堆叠凭证；存档和施工库存均未改变，请重试");
+        return;
+      }
+      if (!context.support.supported) {
+        setNotice(nativeStackBlockedMessage(context.support.reason ?? "unsupported-building-domain"));
+        return;
+      }
+      if (context.activePlanetId !== routeIdentity.planetId || context.entityId !== entityId ||
+          context.buildingId !== projected.buildingId || context.currentCount !== projected.machineCount ||
+          selectedEntityIdsRef.current.length !== 1 || selectedEntityIdsRef.current[0] !== entityId) {
+        setNotice("建筑、数量或行星在确认期间已经变化；存档未改变，请等待投影刷新");
+        return;
+      }
+      const label = getConstructionDefinition(context.buildingId)?.name ?? context.buildingId ?? entityId;
+      commitNativeProjectedCommand(context.revision, (baseRevision) =>
+        baseRevision === context.revision
+          ? createNativeProjectedOrdinaryBuildingStackCommand(context)
+          : null,
+        () => {
+          setNotice(`已由 Rust 将${label}堆叠调整为 ×${targetCount}`);
+          playTone(targetCount > projected.machineCount ? "place" : "remove");
+        },
+      );
+    } finally {
+      if (nativeStackRequestGenerationRef.current === generation) {
+        nativeStackContextPendingRef.current = false;
+        setNativeStackContextPending(false);
+      }
+    }
+  }, [
+    commitNativeProjectedCommand,
+    desktopBridge,
+    factoryInspectorSummaryReadModel,
+    playTone,
+  ]);
   const selectedBelts = factoryInteractionRows.selectedBelts;
-  const dockBeltTier = resolveConnectionBeltTier(game, beltTierMode, beltTier);
+  const dockBeltTier = nativePlayerAuthorityOwnsRuntime
+    ? nativeBeltPlacementTier ?? beltTier
+    : resolveConnectionBeltTier(game, beltTierMode, beltTier);
   const blueprintEligibleIds = useMemo(() => selectedEntityIds.length === 0
     ? []
     : getBlueprintEligibleEntityIds(game, selectedEntityIds),
@@ -17150,14 +17562,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             minZoom={canvasMinimumZoom}
             maxZoom={1.8}
             connectionRadius={connectionFlowRadius}
-            nodesConnectable={!nativePlayerAuthorityOwnsRuntime}
+            nodesConnectable={!nativePlayerAuthorityOwnsRuntime || nativeOrdinaryBeltConnectionEnabled}
             snapToGrid
             snapGrid={FACTORY_FLOW_SNAP_GRID}
-            autoPanOnConnect={!nativePlayerAuthorityOwnsRuntime && !coarsePointer}
+            autoPanOnConnect={(!nativePlayerAuthorityOwnsRuntime || nativeOrdinaryBeltConnectionEnabled) && !coarsePointer}
             autoPanOnNodeDrag={!coarsePointer}
             connectionLineStyle={{ stroke: "#62b5ae", strokeWidth: 2, strokeDasharray: "6 5" }}
             connectionLineComponent={FactoryConnectionLine}
-            connectOnClick={!nativePlayerAuthorityOwnsRuntime}
+            connectOnClick={!nativePlayerAuthorityOwnsRuntime || nativeOrdinaryBeltConnectionEnabled}
             defaultViewport={initialViewport}
             onMove={handleFactoryFlowMove}
             onMoveEnd={handleFactoryFlowMoveEnd}
@@ -17509,8 +17921,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         {nativePlayerAuthorityOwnsRuntime ? <NativeFactoryInspectorPanel
           inspector={factoryInspectorSummaryReadModel}
           multiSelection={factoryMultiSelectionSummaryReadModel}
-          pending={nativeRemovalContextPending || nativePlayerAuthorityCommandPending}
+          pending={nativeRemovalContextPending || nativeStackContextPending || nativePlayerAuthorityCommandPending}
           onRemoveEntity={(entityId) => void removeNativeOrdinaryBuilding(entityId)}
+          onStackCountChange={(entityId, targetCount) => void changeNativeOrdinaryBuildingStack(entityId, targetCount)}
         /> : <StableInspectorPanel
           game={panelGame}
           readOnly={false}
@@ -17741,10 +18154,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       {nativePlayerAuthorityOwnsRuntime ? <NativeConstructionDock
         frame={nativeConstructionInventoryFrame}
         selectedBuildingId={nativePlacementBuildingId}
-        pending={nativePlacementContextPending || nativePlayerAuthorityCommandPending ||
+        selectedBeltTier={nativeBeltPlacementTier}
+        beltLanes={defaultBeltLanes}
+        pending={nativePlacementContextPending || nativeBeltPlacementContextPending || nativePlayerAuthorityCommandPending ||
           !nativePlayerAuthorityCommandSource ||
-          typeof desktopBridge?.getNativeCoreConstructionPlacementContext !== "function"}
+          typeof desktopBridge?.getNativeCoreConstructionPlacementContext !== "function" ||
+          typeof desktopBridge?.getNativeCoreConstructionBeltPlacementContext !== "function"}
         onPlacementChange={selectNativeBuildingPlacement}
+        onBeltPlacementChange={selectNativeBeltPlacement}
+        onBeltLanesChange={updateDefaultBeltLanes}
       /> : <StableConstructionDock
         game={panelGame}
         placement={placement}

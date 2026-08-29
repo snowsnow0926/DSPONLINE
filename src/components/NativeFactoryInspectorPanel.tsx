@@ -1,4 +1,4 @@
-import { CircuitBoard, Layers3, LockKeyhole, Route, Trash2 } from "lucide-react";
+import { CircuitBoard, Layers3, LockKeyhole, Minus, Plus, Route, Trash2 } from "lucide-react";
 import { CONSTRUCTION, ITEMS } from "../game/content";
 import type {
   FactoryInspectorSummaryReadModel,
@@ -14,6 +14,7 @@ interface NativeFactoryInspectorPanelProps {
   multiSelection: FactoryMultiSelectionSummaryReadModel;
   pending: boolean;
   onRemoveEntity: (entityId: string) => void;
+  onStackCountChange: (entityId: string, targetCount: number) => void;
 }
 
 const constructionNames = new Map<string, string>(
@@ -37,10 +38,11 @@ function itemRows(label: string, rows: readonly ItemQuantityReadModel[], truncat
   </section>;
 }
 
-function NativeEntitySummary({ entity, pending, onRemoveEntity }: {
+function NativeEntitySummary({ entity, pending, onRemoveEntity, onStackCountChange }: {
   entity: SelectedEntityReadModel;
   pending: boolean;
   onRemoveEntity: (entityId: string) => void;
+  onStackCountChange: (entityId: string, targetCount: number) => void;
 }) {
   const label = entity.buildingId
     ? constructionNames.get(entity.buildingId) ?? entity.buildingId
@@ -59,6 +61,24 @@ function NativeEntitySummary({ entity, pending, onRemoveEntity }: {
       </dl>
       {itemRows("输入缓存", entity.inputItems.rows, entity.inputItems.truncated)}
       {itemRows("输出缓存", entity.outputItems.rows, entity.outputItems.truncated)}
+    </section>
+    <section className="native-inspector-safe-actions" data-native-construction-stack="ordinary-single-v1">
+      <strong>Rust 建筑堆叠</strong>
+      <p>每次只增减一栋。Rust 会用最新 revision 重新核对建筑上限和施工托盘；旧档中超过新上限的堆叠仍可安全减少。</p>
+      <div className="native-inspector-stack-actions" role="group" aria-label="Windows 原生建筑堆叠调整">
+        <button
+          type="button"
+          disabled={pending || entity.interactionLocked || !entity.buildingId || entity.machineCount <= 1}
+          onClick={() => onStackCountChange(entity.entityId, entity.machineCount - 1)}
+          aria-label="减少一栋建筑堆叠"
+        ><Minus size={14} />减少到 ×{Math.max(1, entity.machineCount - 1)}</button>
+        <button
+          type="button"
+          disabled={pending || entity.interactionLocked || !entity.buildingId || entity.machineCount >= Number.MAX_SAFE_INTEGER}
+          onClick={() => onStackCountChange(entity.entityId, entity.machineCount + 1)}
+          aria-label="增加一栋建筑堆叠"
+        ><Plus size={14} />增加到 ×{entity.machineCount + 1}</button>
+      </div>
     </section>
     <section className="native-inspector-safe-actions" data-native-construction-removal="ordinary-complete-v1">
       <strong>Rust 安全回收</strong>
@@ -95,6 +115,7 @@ export function NativeFactoryInspectorPanel({
   multiSelection,
   pending,
   onRemoveEntity,
+  onStackCountChange,
 }: NativeFactoryInspectorPanelProps) {
   const ready = inspector.schema === "factory-read-model-v1" &&
     inspector.source === "native-core" && Number.isSafeInteger(inspector.revision) &&
@@ -114,7 +135,7 @@ export function NativeFactoryInspectorPanel({
       <p>{complete ? "多选内容已经由同 revision 的 Rust 投影完整确认。" : "选择超过有界投影上限；修改功能保持关闭。"}</p>
     </section>;
   } else if (inspector.entity && !inspector.belt) {
-    content = <NativeEntitySummary entity={inspector.entity} pending={pending} onRemoveEntity={onRemoveEntity} />;
+    content = <NativeEntitySummary entity={inspector.entity} pending={pending} onRemoveEntity={onRemoveEntity} onStackCountChange={onStackCountChange} />;
   } else if (inspector.belt && !inspector.entity) {
     content = <NativeBeltSummary belt={inspector.belt} />;
   } else {

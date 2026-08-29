@@ -6131,6 +6131,28 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   color: var(--coral);
 }
 
+.native-inspector-safe-actions[data-native-construction-stack] {
+  border-color: color-mix(in srgb, var(--cyan) 42%, var(--line));
+  background: color-mix(in srgb, var(--cyan) 7%, transparent);
+}
+
+.native-inspector-stack-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.native-inspector-stack-actions > button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 34px;
+  border-color: color-mix(in srgb, var(--cyan) 46%, var(--line));
+  background: color-mix(in srgb, var(--cyan) 10%, transparent);
+  color: var(--cyan);
+}
+
 .native-inspector-items {
   margin-top: 12px;
   border-top: 1px solid var(--line);
@@ -8162,6 +8184,27 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   color: var(--cyan);
   font-size: 9px;
   white-space: nowrap;
+}
+
+.native-construction-dock__lanes {
+  display: inline-flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.native-construction-dock__lanes input {
+  width: 58px;
+  min-height: 24px;
+  padding: 2px 5px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel-strong);
+  color: var(--text);
+  font: inherit;
 }
 
 .native-construction-dock__notice {

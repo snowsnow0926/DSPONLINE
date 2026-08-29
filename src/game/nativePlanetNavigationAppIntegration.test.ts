@@ -86,7 +86,8 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeConstructionDock[\s\S]*?frame=\{nativeConstructionInventoryFrame\}[\s\S]*?: <StableConstructionDock/);
     expect(nativeConstructionDock).toMatch(/!frame[\s\S]*?data-native-authority-unavailable="construction-inventory-v1"/);
     expect(nativeConstructionDock).toMatch(/普通建筑可单栋放置/);
-    expect(nativeConstructionDock).toMatch(/线路、批量扩建、删除和制造仍保持关闭/);
+    expect(nativeConstructionDock).toMatch(/Mk\.I–III 线路可单条连接/);
+    expect(nativeConstructionDock).toMatch(/自动选级、连续批量拉线和特殊物流端口仍保持关闭/);
     expect(app).toMatch(/enabled=\{nextMobileShell && !nativePlayerAuthorityOwnsRuntime\}/);
     expect(app).toMatch(/native-mobile-shell-unavailable[\s\S]*?为避免显示旧星球数据/);
 
@@ -115,10 +116,11 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeFactoryInspectorPanel[\s\S]*?: <StableInspectorPanel/);
     expect(app).toMatch(/<HeaderControls[\s\S]*?constructionCenterUnavailable=\{nativePlayerAuthorityOwnsRuntime\}/);
     expect(app).toMatch(/constructionCenterOpen && !nativePlayerAuthorityOwnsRuntime \? \(/);
-    expect(app).toMatch(/nodesConnectable=\{!nativePlayerAuthorityOwnsRuntime\}/);
-    expect(app).toMatch(/connectOnClick=\{!nativePlayerAuthorityOwnsRuntime\}/);
-    expect(app).toMatch(/const isValidConnection = useCallback[\s\S]*?nativePlayerAuthorityOwnsRuntimeRef\.current\) return false/);
-    expect(app).toMatch(/const onConnect = useCallback[\s\S]*?rejectLegacyFactoryInteractionWhileNative\("运输线创建"\)/);
+    expect(app).toMatch(/nodesConnectable=\{!nativePlayerAuthorityOwnsRuntime \|\| nativeOrdinaryBeltConnectionEnabled\}/);
+    expect(app).toMatch(/connectOnClick=\{!nativePlayerAuthorityOwnsRuntime \|\| nativeOrdinaryBeltConnectionEnabled\}/);
+    expect(app).toMatch(/const isValidConnection = useCallback[\s\S]*?nativeOrdinaryBeltConnectionEnabled[\s\S]*?isUniversalInputHandle\(connection\.targetHandle\)/);
+    expect(app).toMatch(/const requestNativeOrdinaryBeltPlacement[\s\S]*?readVerifiedNativeConstructionBeltPlacementContext[\s\S]*?commitNativeProjectedCommand/);
+    expect(app).toMatch(/const onConnect = useCallback[\s\S]*?requestNativeOrdinaryBeltPlacement\(connection, lockedTier\)/);
     expect(panels).toMatch(/disabled=\{constructionCenterUnavailable\}[\s\S]*?Windows 原生模式尚未接入建筑制造中心/);
     expect(app).toMatch(/disabled: nativePlayerAuthorityOwnsRuntime \|\| nativeFactoryRouteUnsafe/);
     expect(app).toMatch(/const confirmBatchConnection = useCallback\(\(\) => \{[\s\S]*?nativePlayerAuthorityOwnsRuntimeRef\.current \|\| nativeFactoryProjectionPendingRef\.current[\s\S]*?clearConnectionPreview\(false\)/);

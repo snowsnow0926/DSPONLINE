@@ -2,13 +2,28 @@ import { Factory, LockKeyhole, Route } from "lucide-react";
 import { useMemo } from "react";
 import { BUILDINGS, CONSTRUCTION } from "../game/content";
 import type { NativeConstructionInventoryFrame } from "../game/nativeConstructionInventoryStore";
+import type { BeltTier } from "../game/types";
 import { QuantityValue } from "./QuantityValue";
 
 interface NativeConstructionDockProps {
   frame: NativeConstructionInventoryFrame | null;
   selectedBuildingId: string | null;
+  selectedBeltTier: BeltTier | null;
+  beltLanes: number;
   pending: boolean;
   onPlacementChange: (buildingId: string | null) => void;
+  onBeltPlacementChange: (tier: BeltTier | null) => void;
+  onBeltLanesChange: (lanes: number) => void;
+}
+
+const BELT_TIER_BY_CONSTRUCTION_ID = Object.freeze({
+  conveyor_belt_mk1: 1,
+  conveyor_belt_mk2: 2,
+  conveyor_belt_mk3: 3,
+} satisfies Record<string, BeltTier>);
+
+function beltTierForConstruction(buildingId: string): BeltTier | null {
+  return BELT_TIER_BY_CONSTRUCTION_ID[buildingId as keyof typeof BELT_TIER_BY_CONSTRUCTION_ID] ?? null;
 }
 
 function constructionLabel(
@@ -33,8 +48,12 @@ function ConstructionMark({ buildingId }: { buildingId: string }) {
 export function NativeConstructionDock({
   frame,
   selectedBuildingId,
+  selectedBeltTier,
+  beltLanes,
   pending,
   onPlacementChange,
+  onBeltPlacementChange,
+  onBeltLanesChange,
 }: NativeConstructionDockProps) {
   const rows = useMemo(() => frame?.rows ?? [], [frame?.rows]);
   const directory = useMemo(() => new Map<string, { readonly name: string }>(
@@ -58,7 +77,23 @@ export function NativeConstructionDock({
         <strong><QuantityValue value={frame.totalAmount} interactive={false} /></strong>
       </div>
       <div className="dock-mode-buttons">
-        <span role="status"><LockKeyhole size={12} />Rust 权威 · 单栋放置</span>
+        <span role="status"><LockKeyhole size={12} />Rust 权威 · 单次建造</span>
+        <label className="native-construction-dock__lanes">
+          <span>线路并联</span>
+          <input
+            type="number"
+            min={1}
+            max={4096}
+            step={1}
+            value={beltLanes}
+            disabled={pending}
+            onChange={(event) => {
+              const value = Number(event.target.value);
+              if (Number.isSafeInteger(value) && value >= 1 && value <= 4096) onBeltLanesChange(value);
+            }}
+            aria-label="Windows 原生单条线路并联数量"
+          />
+        </label>
       </div>
     </div>
     <div className="construction-items">
@@ -67,9 +102,12 @@ export function NativeConstructionDock({
       </div> : rows.map((row) => {
         const knownConstruction = directory.has(row.buildingId);
         const knownBuilding = Object.prototype.hasOwnProperty.call(BUILDINGS, row.buildingId);
-        const knownNonBuilding = knownConstruction && !knownBuilding;
+        const beltTier = beltTierForConstruction(row.buildingId);
+        const knownNonBuilding = knownConstruction && !knownBuilding && beltTier === null;
         const disabled = pending || row.amount < 1 || knownNonBuilding;
-        const selected = selectedBuildingId === row.buildingId;
+        const selected = beltTier === null
+          ? selectedBuildingId === row.buildingId
+          : selectedBeltTier === beltTier;
         const label = constructionLabel(directory, row.buildingId);
         return <div className="construction-item-shell" key={row.buildingId}>
           <button
@@ -77,9 +115,14 @@ export function NativeConstructionDock({
             type="button"
             disabled={disabled}
             aria-pressed={selected}
-            onClick={() => onPlacementChange(selected ? null : row.buildingId)}
+            onClick={() => {
+              if (beltTier !== null) onBeltPlacementChange(selected ? null : beltTier);
+              else onPlacementChange(selected ? null : row.buildingId);
+            }}
             title={knownNonBuilding
               ? `${label}尚未接入这条单栋建筑放置命令`
+              : beltTier !== null
+                ? `${label}：选择后拖动同物品输出端口到普通输入端口；每次只提交一条线路`
               : `${label}将由 Rust 在落点时重新检查库存、科技、行星和建筑模板`}
           >
             <i><ConstructionMark buildingId={row.buildingId} /></i>
@@ -90,7 +133,7 @@ export function NativeConstructionDock({
       })}
     </div>
     <p className="native-construction-dock__notice">
-      普通建筑可单栋放置；每次落点都会重新向 Rust 申请凭证并原子扣料。线路、批量扩建、删除和制造仍保持关闭。
+      普通建筑可单栋放置，Mk.I–III 线路可单条连接；每次都会重新向 Rust 申请凭证并原子扣料。自动选级、连续批量拉线和特殊物流端口仍保持关闭。
     </p>
   </footer>;
 }

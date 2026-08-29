@@ -28,11 +28,10 @@ describe("native factory interaction App wiring", () => {
     expect(interactionBlock).toMatch(/const selectedBelt = factoryInteractionRows\.selectedBelt/);
     expect(interactionBlock).toMatch(/const selectedBelts = factoryInteractionRows\.selectedBelts/);
     expect(interactionBlock).not.toMatch(/game\.entities\.(?:find|filter)|game\.belts\.(?:find|filter)|canvasGame\.belts\.(?:find|filter)/);
-    expect(interactionBlock).toMatch(/const factorySelectionReadGame = useMemo\([\s\S]*?entities: factoryInteractionRows\.projectionEntities/);
-    expect(interactionBlock).toMatch(/belts: factoryInteractionRows\.projectionBelts/);
-    expect(interactionBlock).toMatch(/activePlanetId: factoryCanvasPlanetId/);
-    expect(interactionBlock).toMatch(/cargo: null/);
-    expect(interactionBlock).toMatch(/tray: \{\}/);
+    expect(interactionBlock).toMatch(/factoryInteractionRows\.source === "native-authoritative"[\s\S]*?factoryInteractionRows\.multiSelectionSummaryReadModel/);
+    expect(interactionBlock).toMatch(/factoryInteractionRows\.source === "native-authoritative"[\s\S]*?factoryInteractionRows\.inspectorSummaryReadModel/);
+    expect(interactionBlock).toMatch(/factoryInteractionRows\.source === "native-authoritative"[\s\S]*?factoryInteractionRows\.selectionToolbarReadModel/);
+    expect(interactionBlock).not.toMatch(/factorySelectionReadGame|projectionEntities|projectionBelts/);
   });
 
   it("uses exact native rows for connection previews but revalidates commands on authority state", () => {

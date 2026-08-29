@@ -59,6 +59,8 @@ import type { CanvasLod } from "../game/canvasPerformance";
 export interface FactoryNodeData extends Record<string, unknown> {
   /** The native runtime owns gameplay state; this card may only select and display it. */
   readOnly?: boolean;
+  /** Exact item handles may create one Rust-validated ordinary belt while every other card control stays read-only. */
+  beltConnectionsEnabled?: boolean;
   visualSignature: string;
   presentationSignature: string;
   entity: FactoryEntity;
@@ -121,6 +123,27 @@ export interface FactoryNodeData extends Record<string, unknown> {
   stackAlertCount: number;
   stackCriticalAlertCount: number;
   stackGeometryHandlesRequired: boolean;
+}
+
+const SPECIAL_BELT_ENDPOINT_BUILDINGS = new Set([
+  "galactic_material_exporter",
+  "material_delivery_hub",
+  "micro_black_hole_connector",
+  "orbital_cargo_terminal",
+  "orbital_collector",
+  "planetary_logistics_station",
+  "interstellar_logistics_station",
+  "space_station_construction_launcher",
+  "time_warp_device",
+]);
+
+function ordinaryBeltHandlesEnabled(data: FactoryNodeData): boolean {
+  if (!data.readOnly) return true;
+  if (!data.beltConnectionsEnabled || data.entity.interactionLocked) return false;
+  if (data.entity.kind === "vein") return true;
+  if (data.entity.kind !== "machine" && data.entity.kind !== "power" &&
+      data.entity.kind !== "storage" && data.entity.kind !== "splitter") return false;
+  return Boolean(data.entity.buildingId && !SPECIAL_BELT_ENDPOINT_BUILDINGS.has(data.entity.buildingId));
 }
 
 export type FactoryFlowNode = Node<FactoryNodeData, EntityKind>;
@@ -244,6 +267,7 @@ interface OutputSlotProps {
   connectionDraft: FactoryNodeData["connectionDraft"];
   connectionCount?: number;
   readOnly?: boolean;
+  connectionsEnabled?: boolean;
 }
 
 function connectionHandleClass(entityId: string, itemId: ItemId, handleType: "source" | "target", draft: FactoryNodeData["connectionDraft"]): string {
@@ -253,7 +277,7 @@ function connectionHandleClass(entityId: string, itemId: ItemId, handleType: "so
   return draft.itemId === null || draft.itemId === itemId ? " factory-handle--compatible" : " factory-handle--incompatible";
 }
 
-function OutputSlot({ entityId, itemId, amount, onPick, connectionDraft, connectionCount = 0, readOnly = false }: OutputSlotProps) {
+function OutputSlot({ entityId, itemId, amount, onPick, connectionDraft, connectionCount = 0, readOnly = false, connectionsEnabled = false }: OutputSlotProps) {
   const hasAmount = amount > 0.001;
   const enabled = !readOnly && hasAmount;
   const previousAmountRef = useRef(Math.floor(amount));
@@ -286,7 +310,7 @@ function OutputSlot({ entityId, itemId, amount, onPick, connectionDraft, connect
       </button>
       {outputPulse > 0 ? <b className="node-output-pulse" key={outputPulse} aria-hidden="true">+{ITEMS[itemId].symbol}</b> : null}
       {connectionCount > 0 ? <span className="node-port__connections" title={`${connectionCount} 条输出线路`}>{connectionCount}</span> : null}
-      <Handle id={`out:${itemId}`} type="source" position={Position.Right} isConnectable={!readOnly} className={`factory-handle factory-handle--output nodrag nopan${connectionHandleClass(entityId, itemId, "source", connectionDraft)}`} />
+      <Handle id={`out:${itemId}`} type="source" position={Position.Right} isConnectable={!readOnly || connectionsEnabled} className={`factory-handle factory-handle--output nodrag nopan${connectionHandleClass(entityId, itemId, "source", connectionDraft)}`} />
     </div>
   );
 }
@@ -304,9 +328,10 @@ interface InputSlotProps {
   missing?: boolean;
   handleId?: string;
   readOnly?: boolean;
+  connectionsEnabled?: boolean;
 }
 
-function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, onDropDraggedItem, connectionDraft, connectionCount = 0, missing = false, handleId, readOnly = false }: InputSlotProps) {
+function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, onDropDraggedItem, connectionDraft, connectionCount = 0, missing = false, handleId, readOnly = false, connectionsEnabled = false }: InputSlotProps) {
   const compatible = cargo?.itemId === itemId;
   const previousAmountRef = useRef(Math.floor(amount));
   const [arrivalPulse, setArrivalPulse] = useState(0);
@@ -333,7 +358,7 @@ function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, 
   };
   return (
     <div className={`node-port node-port--input${compatible ? " node-port--compatible" : ""}${missing ? " node-port--missing" : ""}${arrivalPulse > 0 ? " node-port--arrival" : ""}`}>
-      <Handle id={handleId ?? `in:${itemId}`} type="target" position={Position.Left} isConnectable={!readOnly} className={`factory-handle factory-handle--input nodrag nopan${connectionHandleClass(entityId, itemId, "target", connectionDraft)}`} />
+      <Handle id={handleId ?? `in:${itemId}`} type="target" position={Position.Left} isConnectable={!readOnly || connectionsEnabled} className={`factory-handle factory-handle--input nodrag nopan${connectionHandleClass(entityId, itemId, "target", connectionDraft)}`} />
       <button
         className="node-slot nodrag nopan"
         type="button"
@@ -384,6 +409,7 @@ function uniqueItemIds(...groups: readonly (readonly ItemId[])[]): ItemId[] {
 
 function LightweightNodeHandles({ data }: { data: FactoryNodeData }) {
   const { entity } = data;
+  const ordinaryConnections = ordinaryBeltHandlesEnabled(data);
   const specialInputs = entity.buildingId === "material_delivery_hub"
     ? (entity.deliverySlots ?? []).flatMap((slot, index) => slot.mode === "disabled" ? [] : [{ id: `in:delivery:${index}`, itemId: slot.itemId }])
     : entity.buildingId === "orbital_cargo_terminal"
@@ -415,7 +441,7 @@ function LightweightNodeHandles({ data }: { data: FactoryNodeData }) {
       id={`in:${itemId}`}
       type="target"
       position={Position.Left}
-      isConnectable={!data.readOnly}
+      isConnectable={ordinaryConnections}
       style={{ top: position(index, inputCount) }}
       className={`factory-handle factory-handle--input factory-node-lod__handle nodrag nopan${connectionHandleClass(entity.id, itemId, "target", data.connectionDraft)}`}
       key={`in:${itemId}`}
@@ -425,7 +451,7 @@ function LightweightNodeHandles({ data }: { data: FactoryNodeData }) {
       id={`out:${itemId}`}
       type="source"
       position={Position.Right}
-      isConnectable={!data.readOnly}
+      isConnectable={ordinaryConnections}
       style={{ top: position(index, outputItems.length) }}
       className={`factory-handle factory-handle--output factory-node-lod__handle nodrag nopan${connectionHandleClass(entity.id, itemId, "source", data.connectionDraft)}`}
       key={`out:${itemId}`}
@@ -651,7 +677,7 @@ function VeinFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
           <i />
         </button>
       )}
-      <OutputSlot entityId={entity.id} itemId={resourceId} amount={output} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[resourceId] ?? 0} readOnly={data.readOnly} />
+      <OutputSlot entityId={entity.id} itemId={resourceId} amount={output} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[resourceId] ?? 0} readOnly={data.readOnly} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />
       {cargo?.itemId === resourceId ? <span className="node-cargo-match">同类物资已拿起</span> : null}
     </article>
   );
@@ -836,6 +862,7 @@ function MachineFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
               connectionCount={data.inputBeltCounts[input.itemId] ?? 0}
               missing={(data.status.code === "missing-input" || data.status.code === "missing-proliferator") && (entity.inputs[input.itemId] ?? 0) < input.amount}
               readOnly={data.readOnly}
+              connectionsEnabled={ordinaryBeltHandlesEnabled(data)}
             />
           )) : rayReceiver ? (
             <div className="stellar-input"><Sun size={14} /><span>戴森系统能量</span></div>
@@ -861,6 +888,7 @@ function MachineFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
               connectionDraft={data.connectionDraft}
               connectionCount={data.outputBeltCounts[output.itemId] ?? 0}
               readOnly={data.readOnly}
+              connectionsEnabled={ordinaryBeltHandlesEnabled(data)}
             />
           )) : railEjector ? (
             <div className="orbital-target"><Orbit size={14} /><span title={data.targetDysonOrbitLabel}>{data.targetDysonOrbitLabel ?? `在轨 ${formatQuantityCompact(data.dysonSwarm.sailsInOrbit)} 帆`}</span></div>
@@ -1008,11 +1036,11 @@ function LogisticsFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
           {configuredItems.map((configuredItemId, index) => <div className={`logistics-slot-row${warehouseStorage ? " logistics-slot-row--warehouse" : ""}`} key={configuredItemId}>
             {!orbitalCollector ? <div className="node-io__column">
               {index === 0 ? <span className="node-io__label">输入</span> : null}
-              <InputSlot entityId={entity.id} itemId={configuredItemId} amount={entity.inputs[configuredItemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[configuredItemId] ?? 0} readOnly={data.readOnly} />
+              <InputSlot entityId={entity.id} itemId={configuredItemId} amount={entity.inputs[configuredItemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[configuredItemId] ?? 0} readOnly={data.readOnly} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />
             </div> : null}
             {!deliveryHub ? <div className="node-io__column node-io__column--output">
               {index === 0 ? <span className="node-io__label">输出</span> : null}
-              <OutputSlot entityId={entity.id} itemId={configuredItemId} amount={entity.outputs[configuredItemId] ?? 0} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[configuredItemId] ?? 0} readOnly={data.readOnly} />
+              <OutputSlot entityId={entity.id} itemId={configuredItemId} amount={entity.outputs[configuredItemId] ?? 0} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[configuredItemId] ?? 0} readOnly={data.readOnly} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />
             </div> : <div className="delivery-hub-target"><Database size={14} /><span>进入物资托盘</span></div>}
           </div>)}
         </div>
@@ -1133,7 +1161,7 @@ function PowerFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
       </div>
       {fuelGenerator && fuelId ? (
         <div className="thermal-fuel">
-          <InputSlot entityId={entity.id} itemId={fuelId} amount={entity.inputs[fuelId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[fuelId] ?? 0} missing={data.status.code === "missing-fuel"} readOnly={data.readOnly} />
+          <InputSlot entityId={entity.id} itemId={fuelId} amount={entity.inputs[fuelId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[fuelId] ?? 0} missing={data.status.code === "missing-fuel"} readOnly={data.readOnly} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />
           <span>炉膛余热 <strong>{(entity.fuelRemainingMj ?? 0).toFixed(2)} MJ</strong></span>
         </div>
       ) : fuelGenerator ? <div className="thermal-empty">未配置燃料</div> : null}
@@ -1141,11 +1169,11 @@ function PowerFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
         <div className="node-io energy-exchange-io">
           <div className="node-io__column">
             <span className="node-io__label">输入</span>
-            {recipe.inputs.map((input) => <InputSlot key={input.itemId} entityId={entity.id} itemId={input.itemId} amount={entity.inputs[input.itemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[input.itemId] ?? 0} missing={data.status.code === "missing-input" && (entity.inputs[input.itemId] ?? 0) < input.amount} readOnly={data.readOnly} />)}
+            {recipe.inputs.map((input) => <InputSlot key={input.itemId} entityId={entity.id} itemId={input.itemId} amount={entity.inputs[input.itemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[input.itemId] ?? 0} missing={data.status.code === "missing-input" && (entity.inputs[input.itemId] ?? 0) < input.amount} readOnly={data.readOnly} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />)}
           </div>
           <div className="node-io__column node-io__column--output">
             <span className="node-io__label">输出</span>
-            {recipe.outputs.map((output) => <OutputSlot key={output.itemId} entityId={entity.id} itemId={output.itemId} amount={entity.outputs[output.itemId] ?? 0} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[output.itemId] ?? 0} readOnly={data.readOnly} />)}
+            {recipe.outputs.map((output) => <OutputSlot key={output.itemId} entityId={entity.id} itemId={output.itemId} amount={entity.outputs[output.itemId] ?? 0} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[output.itemId] ?? 0} readOnly={data.readOnly} connectionsEnabled={ordinaryBeltHandlesEnabled(data)} />)}
           </div>
         </div>
       ) : null}
@@ -1181,6 +1209,7 @@ function areNodeVisualPropsEqual(previous: NodeProps<FactoryFlowNode>, next: Nod
   return previous.id === next.id &&
     previous.selected === next.selected &&
     previous.data.readOnly === next.data.readOnly &&
+    previous.data.beltConnectionsEnabled === next.data.beltConnectionsEnabled &&
     previous.data.visualSignature === next.data.visualSignature &&
     previous.data.presentationSignature === next.data.presentationSignature &&
     previous.data.entity.position.x === next.data.entity.position.x &&

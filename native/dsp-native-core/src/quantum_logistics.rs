@@ -72,6 +72,7 @@ pub(crate) struct RuntimeBandwidth {
 
 const QUANTUM_ACTIVE_DENSE_NUMERATOR: usize = 3;
 const QUANTUM_ACTIVE_DENSE_DENOMINATOR: usize = 4;
+const QUANTUM_PLAN_VALIDATION_ROWS_PER_CHUNK: usize = 1_024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct QuantumActiveScan {
@@ -1755,6 +1756,33 @@ fn build_request_order_rank(
     ranks.iter().all(|rank| *rank != u32::MAX).then_some(ranks)
 }
 
+fn first_invalid_selected_plan_with_runtime(
+    selected: &[usize],
+    runtime: &DeterministicRuntime,
+    is_valid: &(dyn Fn(usize) -> bool + Sync),
+) -> Option<usize> {
+    if runtime.worker_count_for_items(selected.len()) == 1 {
+        return selected.iter().copied().find(|&index| !is_valid(index));
+    }
+
+    // Every worker owns a fixed ascending slice and returns at most its first
+    // invalid plan. Ordered chunk collection makes scheduling unobservable:
+    // the coordinator still selects the earliest invalid persisted plan.
+    runtime
+        .ordered_chunk_map(
+            selected.len(),
+            QUANTUM_PLAN_VALIDATION_ROWS_PER_CHUNK,
+            |_, range| {
+                range
+                    .map(|selected_index| selected[selected_index])
+                    .find(|&plan_index| !is_valid(plan_index))
+            },
+        )
+        .into_iter()
+        .flatten()
+        .next()
+}
+
 impl QuantumLogisticsDirectory {
     pub(crate) fn build(state: &CoreState, entities: &[Value]) -> Self {
         let mut directory = Self {
@@ -2127,8 +2155,16 @@ impl QuantumLogisticsDirectory {
         let Ok(endpoint_slots) = slots(endpoint) else {
             return false;
         };
-        let mut selected = None::<Slot>;
-        for slot in endpoint_slots {
+        let mut selected = None::<&Slot>;
+        let mut first_supply = None::<&Slot>;
+        for slot in &endpoint_slots {
+            if remote_mode == "supply"
+                && first_supply.is_none()
+                && slot.item_id.as_deref() == Some(item_id)
+                && slot.remote_mode == "supply"
+            {
+                first_supply = Some(slot);
+            }
             if slot.item_id.as_deref() != Some(item_id) || slot.remote_mode != remote_mode {
                 continue;
             }
@@ -2149,15 +2185,7 @@ impl QuantumLogisticsDirectory {
             return true;
         }
         let flush_contract = self.upload_flush_contract(plan_index, plan.slot);
-        slots(endpoint).is_ok_and(|slots| {
-            slots
-                .into_iter()
-                .find(|slot| {
-                    slot.item_id.as_deref() == Some(item_id) && slot.remote_mode == "supply"
-                })
-                .as_ref()
-                .is_some_and(|slot| flush_contract.matches(slot))
-        })
+        first_supply.is_some_and(|slot| flush_contract.matches(slot))
     }
 
     fn collector_plan_matches(
@@ -2239,6 +2267,21 @@ impl QuantumLogisticsDirectory {
         entities: &[Value],
         frozen_mode: bool,
     ) -> (Option<Vec<usize>>, QuantumActiveScan) {
+        self.selected_flush_plans_with_runtime(
+            state,
+            entities,
+            frozen_mode,
+            crate::deterministic_runtime::runtime(),
+        )
+    }
+
+    fn selected_flush_plans_with_runtime(
+        &self,
+        state: &CoreState,
+        entities: &[Value],
+        frozen_mode: bool,
+        runtime: &DeterministicRuntime,
+    ) -> (Option<Vec<usize>>, QuantumActiveScan) {
         let (selected, mut scan) = self.selected_plan_indices(
             self.upload_plans.len(),
             self.flush_all_pending,
@@ -2246,8 +2289,8 @@ impl QuantumLogisticsDirectory {
             self.topology_matches(state, entities),
         );
         if selected.as_ref().is_some_and(|indices| {
-            indices.iter().any(|&index| {
-                !self.plan_matches(
+            first_invalid_selected_plan_with_runtime(indices, runtime, &|index| {
+                self.plan_matches(
                     state,
                     entities,
                     &self.upload_plans,
@@ -2256,6 +2299,7 @@ impl QuantumLogisticsDirectory {
                     frozen_mode,
                 )
             })
+            .is_some()
         }) {
             scan.selected_rows = self.entity_count;
             scan.total_rows = self.entity_count;
@@ -8524,5 +8568,54 @@ mod tests {
         assert_eq!(base, source_base);
         assert_eq!(entities, source_entities);
         assert_eq!(transition_bytes(&base, &entities), source_bytes);
+    }
+
+    #[test]
+    fn flush_plan_validation_keeps_first_selected_failure_at_all_worker_limits() {
+        let count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 2_117;
+        let selected = (0..count).rev().collect::<Vec<_>>();
+        let first_invalid = selected[117];
+        let later_invalid = selected[4_913];
+        let selected_before = selected.clone();
+
+        for workers in [1, 2, 4, 8] {
+            let saw_worker = std::sync::atomic::AtomicBool::new(false);
+            let actual = first_invalid_selected_plan_with_runtime(
+                &selected,
+                &DeterministicRuntime::for_test(workers),
+                &|plan_index| {
+                    if rayon::current_thread_index().is_some() {
+                        saw_worker.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    plan_index != first_invalid && plan_index != later_invalid
+                },
+            );
+            assert_eq!(actual, Some(first_invalid), "worker limit {workers}");
+            assert_eq!(
+                saw_worker.load(std::sync::atomic::Ordering::Relaxed),
+                workers != 1,
+                "worker limit {workers}"
+            );
+            assert_eq!(selected, selected_before, "worker limit {workers}");
+        }
+    }
+
+    #[test]
+    fn flush_plan_validation_keeps_small_batches_serial_and_accepts_all_valid() {
+        let count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS - 1;
+        let selected = (0..count).collect::<Vec<_>>();
+        let saw_worker = std::sync::atomic::AtomicBool::new(false);
+        let actual = first_invalid_selected_plan_with_runtime(
+            &selected,
+            &DeterministicRuntime::for_test(8),
+            &|_| {
+                if rayon::current_thread_index().is_some() {
+                    saw_worker.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                true
+            },
+        );
+        assert_eq!(actual, None);
+        assert!(!saw_worker.load(std::sync::atomic::Ordering::Relaxed));
     }
 }

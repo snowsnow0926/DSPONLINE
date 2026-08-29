@@ -16,7 +16,7 @@ use crate::state::{
 };
 
 const EPSILON: f64 = 0.0001;
-const RESERVATION_TARGET_CAPACITY_ROWS_PER_CHUNK: usize = 1_024;
+const TARGET_CAPACITY_ROWS_PER_CHUNK: usize = 1_024;
 
 #[inline]
 fn persisted_belt_dimensions(belt: &Map<String, Value>) -> (f64, f64) {
@@ -1369,7 +1369,6 @@ struct Group {
 #[derive(Debug, Clone, Copy)]
 struct TargetCapacityPlanEntry {
     route_index: u32,
-    parallel_result_index: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2770,69 +2769,86 @@ fn target_capacity_for_route(
     .max(0.0))
 }
 
-fn resolve_target_capacity_plan_with_runtime<ParallelProbe, SerialProbe>(
+fn resolve_target_capacity_plan_with_runtime<Session, NewSession, Probe>(
     prepared_routes: &PreparedRoutes,
     plan: &[TargetCapacityPlanEntry],
-    parallel_route_indices: &[u32],
     target_free: &mut [f64],
+    serial_session: &mut Session,
     executor: &DeterministicRuntime,
-    parallel_probe: ParallelProbe,
-    mut serial_probe: SerialProbe,
+    new_private_session: NewSession,
+    probe: Probe,
 ) -> anyhow::Result<TargetCapacityPlanDiagnostics>
 where
-    ParallelProbe: Fn(usize) -> anyhow::Result<f64> + Sync,
-    SerialProbe: FnMut(usize) -> anyhow::Result<f64>,
+    Session: Send,
+    NewSession: Fn() -> Session + Sync,
+    Probe: Fn(usize, &mut Session) -> anyhow::Result<f64> + Sync,
 {
-    // Immutable probes write only worker-private result slots. Indexed
-    // collection fixes their order; the coordinator below remains the sole
-    // writer of the shared capacity ledger and reports the first stable plan
-    // error even when later workers have already completed.
-    let parallel_results = executor.indexed_map(parallel_route_indices, |_, route_index| {
-        parallel_probe(expand_compact_index(*route_index))
-    });
-    let worker_count = if parallel_route_indices.is_empty() {
+    let worker_count = if plan.is_empty() {
         0
     } else {
-        executor.worker_count_for_items(parallel_route_indices.len())
+        executor.worker_count_for_items(plan.len())
     };
-    let parallel_component_count = parallel_route_indices.len();
-    let mut parallel_results = parallel_results.into_iter().enumerate();
-    let mut serial_component_count = 0_usize;
-    for entry in plan {
-        let route_index = expand_compact_index(entry.route_index);
-        let capacity = if let Some(expected_result_index) = entry.parallel_result_index {
-            let (actual_result_index, result) = parallel_results
-                .next()
-                .ok_or_else(|| anyhow!("native belt target-capacity result is missing"))?;
-            if actual_result_index != expand_compact_index(expected_result_index) {
-                bail!("native belt target-capacity result order changed");
-            }
-            result?
-        } else {
-            serial_component_count = serial_component_count.saturating_add(1);
-            serial_probe(route_index)?
-        };
+    if plan.is_empty() {
+        return Ok(TargetCapacityPlanDiagnostics::default());
+    }
+
+    let apply_capacity = |entry: &TargetCapacityPlanEntry,
+                          capacity: f64,
+                          target_free: &mut [f64]|
+     -> anyhow::Result<()> {
         if !capacity.is_finite() || capacity < 0.0 {
             bail!("native belt target capacity is invalid");
         }
+        let route_index = expand_compact_index(entry.route_index);
         let target_slot = prepared_routes
             .routes
             .get(route_index)
             .ok_or_else(|| anyhow!("native belt target-capacity route is outside the topology"))?
             .target_slot();
-        let free = target_free
-            .get_mut(target_slot)
-            .ok_or_else(|| anyhow!("native belt target-capacity slot is outside the workspace"))?;
-        *free = capacity;
-    }
-    if parallel_results.next().is_some() {
-        bail!("native belt target-capacity result count changed");
+        *target_free.get_mut(target_slot).ok_or_else(|| {
+            anyhow!("native belt target-capacity slot is outside the workspace")
+        })? = capacity;
+        Ok(())
+    };
+
+    if worker_count == 1 {
+        for entry in plan {
+            let capacity = probe(expand_compact_index(entry.route_index), serial_session)?;
+            apply_capacity(entry, capacity, target_free)?;
+        }
+    } else {
+        // Fixed ascending chunks own private probe sessions. Workers never
+        // observe the shared target ledger, quantum deposit session, or entity
+        // writes; indexed chunk collection and this replay retain the exact
+        // first-use route order and first stable error.
+        let chunk_results =
+            executor.ordered_chunk_map(plan.len(), TARGET_CAPACITY_ROWS_PER_CHUNK, |_, range| {
+                let mut private_session = new_private_session();
+                range
+                    .map(|plan_index| {
+                        probe(
+                            expand_compact_index(plan[plan_index].route_index),
+                            &mut private_session,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+        let mut results = chunk_results.into_iter().flatten();
+        for entry in plan {
+            let capacity = results
+                .next()
+                .ok_or_else(|| anyhow!("native belt target-capacity result is missing"))??;
+            apply_capacity(entry, capacity, target_free)?;
+        }
+        if results.next().is_some() {
+            bail!("native belt target-capacity result count changed");
+        }
     }
 
     Ok(TargetCapacityPlanDiagnostics {
         component_count: plan.len(),
-        parallel_component_count,
-        serial_component_count,
+        parallel_component_count: if worker_count == 1 { 0 } else { plan.len() },
+        serial_component_count: if worker_count == 1 { plan.len() } else { 0 },
         worker_count,
     })
 }
@@ -2843,14 +2859,12 @@ fn build_transfer_target_capacity_plan(
     groups: &[Group],
     target_free: &mut [f64],
     touched_target_slots: &mut Vec<u32>,
-    mut route_requires_serial: impl FnMut(usize) -> anyhow::Result<bool>,
-) -> anyhow::Result<(Vec<TargetCapacityPlanEntry>, Vec<u32>)> {
+) -> anyhow::Result<Vec<TargetCapacityPlanEntry>> {
     if target_free.len() != expand_compact_index(prepared_routes.target_slot_count) {
         bail!("native belt target-capacity workspace changed");
     }
 
     let mut plan = Vec::<TargetCapacityPlanEntry>::new();
-    let mut parallel_route_indices = Vec::<u32>::new();
     for group_index in selection.group_indices(prepared_routes.groups.len()) {
         let group = groups
             .get(group_index)
@@ -2884,23 +2898,10 @@ fn build_transfer_target_capacity_plan(
             *target_free_slot = f64::NEG_INFINITY;
             touched_target_slots.push(compact_index(target_slot, "target-capacity touched slot")?);
 
-            let parallel_result_index = if route_requires_serial(route_index_expanded)? {
-                None
-            } else {
-                let result_index = compact_index(
-                    parallel_route_indices.len(),
-                    "parallel target-capacity result index",
-                )?;
-                parallel_route_indices.push(route_index);
-                Some(result_index)
-            };
-            plan.push(TargetCapacityPlanEntry {
-                route_index,
-                parallel_result_index,
-            });
+            plan.push(TargetCapacityPlanEntry { route_index });
         }
     }
-    Ok((plan, parallel_route_indices))
+    Ok(plan)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2916,52 +2917,30 @@ fn prepare_transfer_target_capacities_with_runtime(
     quantum_session: &mut Option<crate::quantum_logistics::SupplyDepositSession>,
     executor: &DeterministicRuntime,
 ) -> anyhow::Result<TargetCapacityPlanDiagnostics> {
-    let (plan, parallel_route_indices) = build_transfer_target_capacity_plan(
+    let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
+    let plan_started = profile_enabled.then(std::time::Instant::now);
+    let plan = build_transfer_target_capacity_plan(
         prepared_routes,
         selection,
         groups,
         target_free,
         touched_target_slots,
-        |route_index| {
-            let route = &prepared_routes.routes[route_index];
-            let prepared_group = &prepared_routes.groups[route.source_group()];
-            let item_id = state
-                .symbols
-                .resolve(prepared_group.item_symbol)
-                .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
-            let target = entities[route.target_index()]
-                .as_object()
-                .ok_or_else(|| anyhow!("native belt target is not an object"))?;
-            Ok(crate::quantum_logistics::is_supply_endpoint(
-                target, item_id,
-            ))
-        },
     )?;
+    if let Some(started) = plan_started {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tbelt-transfer-target-capacity-build-plan\t{:.3}",
+            started.elapsed().as_secs_f64() * 1_000.0
+        );
+    }
     resolve_target_capacity_plan_with_runtime(
         prepared_routes,
         &plan,
-        &parallel_route_indices,
         target_free,
+        quantum_session,
         executor,
-        |route_index| {
-            target_capacity_for_route(
-                state,
-                base,
-                entities,
-                prepared_routes,
-                route_index,
-                &mut None,
-            )
-        },
-        |route_index| {
-            target_capacity_for_route(
-                state,
-                base,
-                entities,
-                prepared_routes,
-                route_index,
-                quantum_session,
-            )
+        || None,
+        |route_index, session| {
+            target_capacity_for_route(state, base, entities, prepared_routes, route_index, session)
         },
     )
 }
@@ -3064,10 +3043,6 @@ fn build_reservation_target_capacity_plan(
                 route_index,
                 "reservation target-capacity plan route index",
             )?,
-            // Reservation has its own fixed-chunk resolver. Each large-batch
-            // chunk owns a private read-only quantum session, while a small
-            // batch uses one shared serial session.
-            parallel_result_index: None,
         });
     }
     Ok(plan)
@@ -3084,78 +3059,17 @@ fn resolve_reservation_target_capacity_plan_with_runtime(
     quantum_session: &mut Option<crate::quantum_logistics::SupplyDepositSession>,
     executor: &DeterministicRuntime,
 ) -> anyhow::Result<TargetCapacityPlanDiagnostics> {
-    if plan.is_empty() {
-        return Ok(TargetCapacityPlanDiagnostics::default());
-    }
-    let worker_count = executor.worker_count_for_items(plan.len());
-    if worker_count == 1 {
-        for entry in plan {
-            let route_index = expand_compact_index(entry.route_index);
-            let capacity = target_capacity_for_route(
-                state,
-                base,
-                entities,
-                prepared_routes,
-                route_index,
-                quantum_session,
-            )?;
-            if !capacity.is_finite() || capacity < 0.0 {
-                bail!("native belt target capacity is invalid");
-            }
-            target_free[prepared_routes.routes[route_index].target_slot()] = capacity;
-        }
-        return Ok(TargetCapacityPlanDiagnostics {
-            component_count: plan.len(),
-            parallel_component_count: 0,
-            serial_component_count: plan.len(),
-            worker_count,
-        });
-    }
-
-    // Supply-capacity queries only read their parsed network. Each fixed
-    // chunk owns one lazy private session, so quantum inventory never crosses
-    // worker boundaries and is parsed at most once per chunk. Chunk results
-    // are collected and replayed in first-use order; no worker can mutate the
-    // authoritative network, target ledger, reservation map, or float sums.
-    let chunk_results = executor.ordered_chunk_map(
-        plan.len(),
-        RESERVATION_TARGET_CAPACITY_ROWS_PER_CHUNK,
-        |_, range| {
-            let mut private_quantum_session = None;
-            range
-                .map(|plan_index| {
-                    target_capacity_for_route(
-                        state,
-                        base,
-                        entities,
-                        prepared_routes,
-                        expand_compact_index(plan[plan_index].route_index),
-                        &mut private_quantum_session,
-                    )
-                })
-                .collect::<Vec<_>>()
+    resolve_target_capacity_plan_with_runtime(
+        prepared_routes,
+        plan,
+        target_free,
+        quantum_session,
+        executor,
+        || None,
+        |route_index, session| {
+            target_capacity_for_route(state, base, entities, prepared_routes, route_index, session)
         },
-    );
-    let mut results = chunk_results.into_iter().flatten();
-    for entry in plan {
-        let route_index = expand_compact_index(entry.route_index);
-        let capacity = results.next().ok_or_else(|| {
-            anyhow!("native belt reservation target-capacity result is missing")
-        })??;
-        if !capacity.is_finite() || capacity < 0.0 {
-            bail!("native belt target capacity is invalid");
-        }
-        target_free[prepared_routes.routes[route_index].target_slot()] = capacity;
-    }
-    if results.next().is_some() {
-        bail!("native belt reservation target-capacity result count changed");
-    }
-    Ok(TargetCapacityPlanDiagnostics {
-        component_count: plan.len(),
-        parallel_component_count: plan.len(),
-        serial_component_count: 0,
-        worker_count,
-    })
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5425,18 +5339,12 @@ mod tests {
         let groups = target_capacity_runtime_groups([5.0, 7.0, 0.0]);
         let mut target_free = vec![f64::NAN; 4];
         let mut touched = Vec::new();
-        let mut classified = Vec::new();
-
-        let (plan, parallel_routes) = build_transfer_target_capacity_plan(
+        let plan = build_transfer_target_capacity_plan(
             &prepared,
             &ActiveSelection::All,
             &groups,
             &mut target_free,
             &mut touched,
-            |route_index| {
-                classified.push(route_index);
-                Ok(route_index == 3)
-            },
         )
         .unwrap();
 
@@ -5446,21 +5354,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             [0, 1, 3]
         );
-        assert_eq!(
-            plan.iter()
-                .map(|entry| entry.parallel_result_index.map(expand_compact_index))
-                .collect::<Vec<_>>(),
-            [Some(0), Some(1), None]
-        );
-        assert_eq!(
-            parallel_routes
-                .iter()
-                .copied()
-                .map(expand_compact_index)
-                .collect::<Vec<_>>(),
-            [0, 1]
-        );
-        assert_eq!(classified, [0, 1, 3]);
         assert_eq!(touched, [2, 0, 1]);
         assert!(target_free[0].is_infinite() && target_free[0].is_sign_negative());
         assert!(target_free[1].is_infinite() && target_free[1].is_sign_negative());
@@ -5469,7 +5362,7 @@ mod tests {
     }
 
     #[test]
-    fn target_capacity_plan_respects_sparse_selection_and_serial_components() {
+    fn target_capacity_plan_respects_sparse_selection() {
         let prepared = target_capacity_plan_fixture();
         let groups = target_capacity_runtime_groups([5.0, 7.0, 9.0]);
         let selection = ActiveSelection::Mask {
@@ -5479,13 +5372,12 @@ mod tests {
         let mut target_free = vec![f64::NAN; 4];
         let mut touched = Vec::new();
 
-        let (plan, parallel_routes) = build_transfer_target_capacity_plan(
+        let plan = build_transfer_target_capacity_plan(
             &prepared,
             &selection,
             &groups,
             &mut target_free,
             &mut touched,
-            |route_index| Ok(route_index == 3),
         )
         .unwrap();
 
@@ -5495,7 +5387,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             [2, 3]
         );
-        assert_eq!(parallel_routes, [2]);
         assert_eq!(touched, [0, 1]);
         assert!(target_free[2].is_nan() && target_free[3].is_nan());
     }
@@ -5514,7 +5405,6 @@ mod tests {
             &groups,
             &mut target_free,
             &mut touched,
-            |_| Ok(false),
         )
         .unwrap_err();
 
@@ -5560,12 +5450,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 3]
         );
-        assert_eq!(
-            plan.iter()
-                .map(|entry| entry.parallel_result_index.map(expand_compact_index))
-                .collect::<Vec<_>>(),
-            [None, None]
-        );
         assert_eq!(touched, [0, 2, 1]);
         assert!(target_free[0].is_infinite() && target_free[0].is_sign_negative());
         assert!(target_free[1].is_infinite() && target_free[1].is_sign_negative());
@@ -5595,13 +5479,10 @@ mod tests {
         }
     }
 
-    fn all_parallel_target_capacity_plan(component_count: usize) -> Vec<TargetCapacityPlanEntry> {
+    fn target_capacity_plan(component_count: usize) -> Vec<TargetCapacityPlanEntry> {
         (0..component_count)
             .map(|route_index| TargetCapacityPlanEntry {
                 route_index: compact_index(route_index, "resolver plan route").unwrap(),
-                parallel_result_index: Some(
-                    compact_index(route_index, "resolver result index").unwrap(),
-                ),
             })
             .collect()
     }
@@ -5618,20 +5499,18 @@ mod tests {
     fn target_capacity_resolution_matches_bitwise_at_one_two_four_and_eight_workers() {
         let component_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257;
         let prepared = target_capacity_resolver_fixture(component_count);
-        let plan = all_parallel_target_capacity_plan(component_count);
-        let parallel_routes = (0..component_count)
-            .map(|route_index| compact_index(route_index, "resolver parallel route").unwrap())
-            .collect::<Vec<_>>();
+        let plan = target_capacity_plan(component_count);
         let run = |workers| {
             let mut target_free = vec![f64::NEG_INFINITY; component_count];
+            let mut serial_session = ();
             let diagnostics = resolve_target_capacity_plan_with_runtime(
                 &prepared,
                 &plan,
-                &parallel_routes,
                 &mut target_free,
+                &mut serial_session,
                 &DeterministicRuntime::for_test(workers),
-                |route_index| Ok(resolver_capacity(route_index)),
-                |_| unreachable!("all resolver components are private probes"),
+                || (),
+                |route_index, _| Ok(resolver_capacity(route_index)),
             )
             .unwrap();
             (
@@ -5645,6 +5524,8 @@ mod tests {
 
         let expected = run(1);
         assert_eq!(expected.0.worker_count, 1);
+        assert_eq!(expected.0.parallel_component_count, 0);
+        assert_eq!(expected.0.serial_component_count, component_count);
         for workers in [2, 4, 8] {
             let actual = run(workers);
             assert_eq!(actual.0.worker_count, workers);
@@ -5652,42 +5533,78 @@ mod tests {
                 actual.0.component_count, expected.0.component_count,
                 "worker limit {workers}"
             );
-            assert_eq!(
-                actual.0.parallel_component_count, expected.0.parallel_component_count,
-                "worker limit {workers}"
-            );
-            assert_eq!(
-                actual.0.serial_component_count, expected.0.serial_component_count,
-                "worker limit {workers}"
-            );
+            assert_eq!(actual.0.parallel_component_count, component_count);
+            assert_eq!(actual.0.serial_component_count, 0);
             assert_eq!(actual.1, expected.1, "worker limit {workers}");
         }
+    }
+
+    #[test]
+    fn target_capacity_resolution_owns_one_private_session_per_fixed_chunk() {
+        let component_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 2_117;
+        let prepared = target_capacity_resolver_fixture(component_count);
+        let plan = target_capacity_plan(component_count);
+        let created_sessions = std::sync::atomic::AtomicUsize::new(0);
+        let mut serial_session = 0_usize;
+        let mut target_free = vec![f64::NEG_INFINITY; component_count];
+
+        let diagnostics = resolve_target_capacity_plan_with_runtime(
+            &prepared,
+            &plan,
+            &mut target_free,
+            &mut serial_session,
+            &DeterministicRuntime::for_test(8),
+            || {
+                created_sessions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                0_usize
+            },
+            |route_index, private_session| {
+                assert!(*private_session < TARGET_CAPACITY_ROWS_PER_CHUNK);
+                *private_session += 1;
+                Ok(resolver_capacity(route_index))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(diagnostics.worker_count, 8);
+        assert_eq!(
+            created_sessions.load(std::sync::atomic::Ordering::Relaxed),
+            component_count.div_ceil(TARGET_CAPACITY_ROWS_PER_CHUNK)
+        );
+        assert_eq!(serial_session, 0);
+        assert_eq!(
+            target_free
+                .into_iter()
+                .map(f64::to_bits)
+                .collect::<Vec<_>>(),
+            (0..component_count)
+                .map(|route_index| resolver_capacity(route_index).to_bits())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn target_capacity_resolution_keeps_small_batches_off_the_rayon_pool() {
         let component_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS - 1;
         let prepared = target_capacity_resolver_fixture(component_count);
-        let plan = all_parallel_target_capacity_plan(component_count);
-        let parallel_routes = (0..component_count)
-            .map(|route_index| compact_index(route_index, "small resolver route").unwrap())
-            .collect::<Vec<_>>();
+        let plan = target_capacity_plan(component_count);
         let observed_pool_worker = std::sync::atomic::AtomicBool::new(false);
         let mut target_free = vec![f64::NEG_INFINITY; component_count];
+        let mut serial_session = ();
 
         let diagnostics = resolve_target_capacity_plan_with_runtime(
             &prepared,
             &plan,
-            &parallel_routes,
             &mut target_free,
+            &mut serial_session,
             &DeterministicRuntime::for_test(8),
-            |route_index| {
+            || (),
+            |route_index, _| {
                 if rayon::current_thread_index().is_some() {
                     observed_pool_worker.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 Ok(resolver_capacity(route_index))
             },
-            |_| unreachable!("all resolver components are private probes"),
         )
         .unwrap();
 
@@ -5699,22 +5616,21 @@ mod tests {
     fn target_capacity_resolution_reports_the_first_stable_error_after_workers_finish() {
         let component_count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 1;
         let prepared = target_capacity_resolver_fixture(component_count);
-        let plan = all_parallel_target_capacity_plan(component_count);
-        let parallel_routes = (0..component_count)
-            .map(|route_index| compact_index(route_index, "error resolver route").unwrap())
-            .collect::<Vec<_>>();
+        let plan = target_capacity_plan(component_count);
         let completed = std::sync::atomic::AtomicUsize::new(0);
         let source = "mod:保持/原检查点/Ω🚀".to_owned();
         let source_before = source.clone();
         let mut target_free = vec![f64::NEG_INFINITY; component_count];
+        let mut serial_session = ();
 
         let error = resolve_target_capacity_plan_with_runtime(
             &prepared,
             &plan,
-            &parallel_routes,
             &mut target_free,
+            &mut serial_session,
             &DeterministicRuntime::for_test(8),
-            |route_index| {
+            || (),
+            |route_index, _| {
                 let _ = source.len();
                 completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if matches!(route_index, 17 | 4_096) {
@@ -5723,7 +5639,6 @@ mod tests {
                     Ok(resolver_capacity(route_index))
                 }
             },
-            |_| unreachable!("all resolver components are private probes"),
         )
         .unwrap_err();
 

@@ -507,6 +507,7 @@ import {
   createNativeProjectedStationLimitsCommand,
   createNativeProjectedStationPriorityCommand,
 } from "./game/nativeProjectedPlayerCommands";
+import { createNativeProjectedBeltPriorityCommand } from "./game/nativeProjectedBeltCommands";
 import { createNativeProjectedQuantumItemCapacityCommand } from "./game/nativeProjectedQuantumCommands";
 import {
   createNativeProjectedCargoReturnCommand,
@@ -16180,6 +16181,45 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     factoryInspectorSummaryReadModel,
     playTone,
   ]);
+  const changeNativeOrdinaryBeltPriority = useCallback((
+    beltId: string,
+    targetPriority: 0 | 1 | 2,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次线路优先级未提交");
+      return;
+    }
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!routeIdentity || !commandSource || commandSource.sessionId !== routeIdentity.sessionId ||
+        commandSource.runId !== routeIdentity.runId || commandSource.baseRevision !== routeIdentity.revision ||
+        selectedEntityIdsRef.current.length !== 0 || selectedBeltIdsRef.current.length !== 1 ||
+        selectedBeltIdsRef.current[0] !== beltId || selectedBeltIdRef.current !== beltId) {
+      setNotice("原生线路选择或 revision 已变化；本次优先级未提交");
+      return;
+    }
+    try {
+      const accepted = commitNativeProjectedCommand(routeIdentity.revision, (baseRevision) =>
+        baseRevision === routeIdentity.revision
+          ? createNativeProjectedBeltPriorityCommand({
+            commandIdentity: routeIdentity,
+            inspector: factoryInspectorSummaryReadModel,
+            selection: factoryMultiSelectionSummaryReadModel,
+            targetPriority,
+          })
+          : null,
+        () => setNotice(`已由 Rust 将当前线路优先级设为${targetPriority === 0 ? "低" : targetPriority === 1 ? "标准" : "高"}`),
+      );
+      if (!accepted) setNotice("Rust 没有接受这次线路优先级命令；存档未改变");
+    } catch {
+      setNotice("原生线路投影未通过同 revision 完整性校验；存档未改变");
+    }
+  }, [
+    commitNativeProjectedCommand,
+    factoryInspectorSummaryReadModel,
+    factoryMultiSelectionSummaryReadModel,
+  ]);
   const selectedBelts = factoryInteractionRows.selectedBelts;
   const dockBeltTier = nativePlayerAuthorityOwnsRuntime
     ? nativeBeltPlacementTier ?? beltTier
@@ -17924,6 +17964,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           pending={nativeRemovalContextPending || nativeStackContextPending || nativePlayerAuthorityCommandPending}
           onRemoveEntity={(entityId) => void removeNativeOrdinaryBuilding(entityId)}
           onStackCountChange={(entityId, targetCount) => void changeNativeOrdinaryBuildingStack(entityId, targetCount)}
+          onBeltPriorityChange={changeNativeOrdinaryBeltPriority}
         /> : <StableInspectorPanel
           game={panelGame}
           readOnly={false}

@@ -15,6 +15,7 @@ interface NativeFactoryInspectorPanelProps {
   pending: boolean;
   onRemoveEntity: (entityId: string) => void;
   onStackCountChange: (entityId: string, targetCount: number) => void;
+  onBeltPriorityChange: (beltId: string, targetPriority: 0 | 1 | 2) => void;
 }
 
 const constructionNames = new Map<string, string>(
@@ -93,20 +94,39 @@ function NativeEntitySummary({ entity, pending, onRemoveEntity, onStackCountChan
   </>;
 }
 
-function NativeBeltSummary({ belt }: { belt: SelectedBeltReadModel }) {
-  return <section className="inspector-content native-factory-inspector__belt" aria-label="Windows 原生传送带摘要">
-    <div className="inspector-identity"><i className="building-mark"><Route size={18} /></i><div><span>Windows 原生线路</span><strong>{itemLabel(belt.itemId)}</strong></div></div>
-    <dl className="metric-ledger">
-      <div><dt>等级</dt><dd>Mk.{belt.tier}</dd></div>
-      <div><dt>并联数量</dt><dd>×<QuantityValue value={belt.lanes} interactive={false} /></dd></div>
-      <div><dt>分拣器等级</dt><dd>Mk.{belt.sorterTier}</dd></div>
-      <div><dt>堆叠</dt><dd>{belt.stackSize ?? 1}</dd></div>
-      <div><dt>瞬时流量</dt><dd><QuantityValue value={belt.lastFlow} interactive={false} /></dd></div>
-      <div><dt>累计运输</dt><dd>{belt.totalTransferred === null ? "-" : <QuantityValue value={belt.totalTransferred} interactive={false} />}</dd></div>
-      <div><dt>拥堵</dt><dd>{belt.congestion === null ? "-" : `${Math.round(belt.congestion * 100)}%`}</dd></div>
-    </dl>
-    <p className="native-factory-inspector__route">{belt.sourceEntityId} → {belt.targetEntityId}</p>
-  </section>;
+function NativeBeltSummary({ belt, pending, onPriorityChange }: {
+  belt: SelectedBeltReadModel;
+  pending: boolean;
+  onPriorityChange: (beltId: string, targetPriority: 0 | 1 | 2) => void;
+}) {
+  return <>
+    <section className="inspector-content native-factory-inspector__belt" aria-label="Windows 原生传送带摘要">
+      <div className="inspector-identity"><i className="building-mark"><Route size={18} /></i><div><span>Windows 原生线路</span><strong>{itemLabel(belt.itemId)}</strong></div></div>
+      <dl className="metric-ledger">
+        <div><dt>等级</dt><dd>Mk.{belt.tier}</dd></div>
+        <div><dt>并联数量</dt><dd>×<QuantityValue value={belt.lanes} interactive={false} /></dd></div>
+        <div><dt>分拣器等级</dt><dd>Mk.{belt.sorterTier}</dd></div>
+        <div><dt>堆叠</dt><dd>{belt.stackSize ?? 1}</dd></div>
+        <div><dt>瞬时流量</dt><dd><QuantityValue value={belt.lastFlow} interactive={false} /></dd></div>
+        <div><dt>累计运输</dt><dd>{belt.totalTransferred === null ? "-" : <QuantityValue value={belt.totalTransferred} interactive={false} />}</dd></div>
+        <div><dt>拥堵</dt><dd>{belt.congestion === null ? "-" : `${Math.round(belt.congestion * 100)}%`}</dd></div>
+      </dl>
+      <p className="native-factory-inspector__route">{belt.sourceEntityId} → {belt.targetEntityId}</p>
+    </section>
+    <section className="native-inspector-safe-actions" data-native-belt-priority="ordinary-single-v1">
+      <strong>Rust 线路优先级</strong>
+      <p>只修改当前这一条线路；Rust 会核对最新 revision 和原优先级后再提交。</p>
+      <div className="native-inspector-stack-actions" role="group" aria-label="Windows 原生线路优先级">
+        {([0, 1, 2] as const).map((priority) => <button
+          type="button"
+          key={priority}
+          disabled={pending || belt.priority === priority}
+          aria-pressed={belt.priority === priority}
+          onClick={() => onPriorityChange(belt.beltId, priority)}
+        >{priority === 0 ? "低" : priority === 1 ? "标准" : "高"}</button>)}
+      </div>
+    </section>
+  </>;
 }
 
 /** A truly thin inspector: no full-state prop and no legacy fallback. */
@@ -116,6 +136,7 @@ export function NativeFactoryInspectorPanel({
   pending,
   onRemoveEntity,
   onStackCountChange,
+  onBeltPriorityChange,
 }: NativeFactoryInspectorPanelProps) {
   const ready = inspector.schema === "factory-read-model-v1" &&
     inspector.source === "native-core" && Number.isSafeInteger(inspector.revision) &&
@@ -137,7 +158,7 @@ export function NativeFactoryInspectorPanel({
   } else if (inspector.entity && !inspector.belt) {
     content = <NativeEntitySummary entity={inspector.entity} pending={pending} onRemoveEntity={onRemoveEntity} onStackCountChange={onStackCountChange} />;
   } else if (inspector.belt && !inspector.entity) {
-    content = <NativeBeltSummary belt={inspector.belt} />;
+    content = <NativeBeltSummary belt={inspector.belt} pending={pending} onPriorityChange={onBeltPriorityChange} />;
   } else {
     content = <section className="inspector-content native-read-only-unavailable" role="status"><strong>请选择一个建筑或传送带</strong><p>这里只显示同 revision 的 Rust 小型投影。</p></section>;
   }

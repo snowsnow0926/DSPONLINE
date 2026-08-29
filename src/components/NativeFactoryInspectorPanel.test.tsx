@@ -50,7 +50,7 @@ describe("NativeFactoryInspectorPanel", () => {
   it("renders opaque MOD rows and routes the guarded whole-building action", () => {
     const remove = vi.fn();
     const stack = vi.fn();
-    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi()} pending={false} onRemoveEntity={remove} onStackCountChange={stack} />));
+    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi()} pending={false} onRemoveEntity={remove} onStackCountChange={stack} onBeltPriorityChange={vi.fn()} />));
     expect(host.textContent).toContain("MOD/建筑-一");
     expect(host.textContent).toContain("MOD/输入");
     const button = host.querySelector<HTMLButtonElement>('[data-native-construction-removal] button')!;
@@ -64,8 +64,46 @@ describe("NativeFactoryInspectorPanel", () => {
   });
 
   it("fails closed for a mismatched revision and never exposes the removal action", () => {
-    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi({ revision: 9 })} pending={false} onRemoveEntity={vi.fn()} onStackCountChange={vi.fn()} />));
+    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi({ revision: 9 })} pending={false} onRemoveEntity={vi.fn()} onStackCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} />));
     expect(host.textContent).toContain("正在核对原生检查摘要");
     expect(host.querySelector("[data-native-construction-removal]")).toBeNull();
+  });
+
+  it("routes one ordinary belt priority action and disables the current value", () => {
+    const priority = vi.fn();
+    const selectedBelt = {
+      beltId: "MOD-线路/β",
+      planetId: "home",
+      sourceEntityId: "source-a",
+      targetEntityId: "target-a",
+      itemId: "MOD/输入",
+      lanes: 2,
+      tier: 1,
+      sorterTier: 1,
+      stackSize: 1,
+      priority: 1,
+      progress: 0,
+      lastFlow: 0,
+      totalTransferred: 0,
+      congestion: 0,
+    } as const;
+    act(() => root.render(<NativeFactoryInspectorPanel
+      inspector={inspector({ entity: null, belt: selectedBelt })}
+      multiSelection={multi({
+        requestedEntityCount: 0,
+        requestedBeltCount: 1,
+        entityRows: { rows: [], totalCount: 0, truncated: false },
+        beltRows: { rows: [selectedBelt], totalCount: 1, truncated: false },
+      })}
+      pending={false}
+      onRemoveEntity={vi.fn()}
+      onStackCountChange={vi.fn()}
+      onBeltPriorityChange={priority}
+    />));
+    const buttons = [...host.querySelectorAll<HTMLButtonElement>("[data-native-belt-priority] button")];
+    expect(buttons).toHaveLength(3);
+    expect(buttons[1].disabled).toBe(true);
+    act(() => buttons[2].click());
+    expect(priority).toHaveBeenCalledWith("MOD-线路/β", 2);
   });
 });

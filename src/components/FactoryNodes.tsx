@@ -57,6 +57,8 @@ import type {
 import type { CanvasLod } from "../game/canvasPerformance";
 
 export interface FactoryNodeData extends Record<string, unknown> {
+  /** The native runtime owns gameplay state; this card may only select and display it. */
+  readOnly?: boolean;
   visualSignature: string;
   presentationSignature: string;
   entity: FactoryEntity;
@@ -159,8 +161,12 @@ function ItemBadge({ itemId, amount, muted = false }: { itemId: ItemId; amount: 
   );
 }
 
-function InteractionLockBadge({ entity, onChange }: { entity: FactoryEntity; onChange: FactoryNodeData["onInteractionLockChange"] }) {
-  if (!entity.interactionLocked) return null;
+function InteractionLockBadge({ entity, onChange, readOnly = false }: {
+  entity: FactoryEntity;
+  onChange: FactoryNodeData["onInteractionLockChange"];
+  readOnly?: boolean;
+}) {
+  if (readOnly || !entity.interactionLocked) return null;
   return <button
     className="factory-node__lock nodrag nopan"
     type="button"
@@ -237,6 +243,7 @@ interface OutputSlotProps {
   onPick: (entityId: string, itemId: ItemId) => void;
   connectionDraft: FactoryNodeData["connectionDraft"];
   connectionCount?: number;
+  readOnly?: boolean;
 }
 
 function connectionHandleClass(entityId: string, itemId: ItemId, handleType: "source" | "target", draft: FactoryNodeData["connectionDraft"]): string {
@@ -246,8 +253,9 @@ function connectionHandleClass(entityId: string, itemId: ItemId, handleType: "so
   return draft.itemId === null || draft.itemId === itemId ? " factory-handle--compatible" : " factory-handle--incompatible";
 }
 
-function OutputSlot({ entityId, itemId, amount, onPick, connectionDraft, connectionCount = 0 }: OutputSlotProps) {
-  const enabled = amount > 0.001;
+function OutputSlot({ entityId, itemId, amount, onPick, connectionDraft, connectionCount = 0, readOnly = false }: OutputSlotProps) {
+  const hasAmount = amount > 0.001;
+  const enabled = !readOnly && hasAmount;
   const previousAmountRef = useRef(Math.floor(amount));
   const [outputPulse, setOutputPulse] = useState(0);
   useEffect(() => {
@@ -265,19 +273,20 @@ function OutputSlot({ entityId, itemId, amount, onPick, connectionDraft, connect
         draggable={enabled}
         onClick={(event) => { event.stopPropagation(); pick(); }}
         onDragStart={(event) => {
+          if (readOnly) return;
           event.stopPropagation();
           event.dataTransfer.setData("application/factory-item", itemId);
           event.dataTransfer.setData("application/factory-source-kind", "node");
           event.dataTransfer.setData("application/factory-source-id", entityId);
           event.dataTransfer.effectAllowed = "move";
         }}
-        title={`拿取${ITEMS[itemId].name}`}
+        title={readOnly ? `${ITEMS[itemId].name}（只读）` : `拿取${ITEMS[itemId].name}`}
       >
-        <ItemBadge itemId={itemId} amount={amount} muted={!enabled} />
+        <ItemBadge itemId={itemId} amount={amount} muted={!hasAmount} />
       </button>
       {outputPulse > 0 ? <b className="node-output-pulse" key={outputPulse} aria-hidden="true">+{ITEMS[itemId].symbol}</b> : null}
       {connectionCount > 0 ? <span className="node-port__connections" title={`${connectionCount} 条输出线路`}>{connectionCount}</span> : null}
-      <Handle id={`out:${itemId}`} type="source" position={Position.Right} className={`factory-handle factory-handle--output nodrag nopan${connectionHandleClass(entityId, itemId, "source", connectionDraft)}`} />
+      <Handle id={`out:${itemId}`} type="source" position={Position.Right} isConnectable={!readOnly} className={`factory-handle factory-handle--output nodrag nopan${connectionHandleClass(entityId, itemId, "source", connectionDraft)}`} />
     </div>
   );
 }
@@ -294,9 +303,10 @@ interface InputSlotProps {
   connectionCount?: number;
   missing?: boolean;
   handleId?: string;
+  readOnly?: boolean;
 }
 
-function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, onDropDraggedItem, connectionDraft, connectionCount = 0, missing = false, handleId }: InputSlotProps) {
+function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, onDropDraggedItem, connectionDraft, connectionCount = 0, missing = false, handleId, readOnly = false }: InputSlotProps) {
   const compatible = cargo?.itemId === itemId;
   const previousAmountRef = useRef(Math.floor(amount));
   const [arrivalPulse, setArrivalPulse] = useState(0);
@@ -307,10 +317,12 @@ function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, 
   }, [amount]);
   const dropCargo = (event: React.MouseEvent) => {
     event.stopPropagation();
+    if (readOnly) return;
     if (compatible) onDropCargo(entityId);
     else if (!cargo && amount >= 1) onPickInput(entityId, itemId);
   };
   const dropDragged = (event: React.DragEvent) => {
+    if (readOnly) return;
     const draggedItem = event.dataTransfer.getData("application/factory-item") as ItemId;
     if (draggedItem !== itemId) return;
     event.preventDefault();
@@ -321,13 +333,15 @@ function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, 
   };
   return (
     <div className={`node-port node-port--input${compatible ? " node-port--compatible" : ""}${missing ? " node-port--missing" : ""}${arrivalPulse > 0 ? " node-port--arrival" : ""}`}>
-      <Handle id={handleId ?? `in:${itemId}`} type="target" position={Position.Left} className={`factory-handle factory-handle--input nodrag nopan${connectionHandleClass(entityId, itemId, "target", connectionDraft)}`} />
+      <Handle id={handleId ?? `in:${itemId}`} type="target" position={Position.Left} isConnectable={!readOnly} className={`factory-handle factory-handle--input nodrag nopan${connectionHandleClass(entityId, itemId, "target", connectionDraft)}`} />
       <button
         className="node-slot nodrag nopan"
         type="button"
-        draggable={amount >= 1}
+        disabled={readOnly}
+        draggable={!readOnly && amount >= 1}
         onClick={dropCargo}
         onDragStart={(event) => {
+          if (readOnly) return;
           event.stopPropagation();
           event.dataTransfer.setData("application/factory-item", itemId);
           event.dataTransfer.setData("application/factory-source-kind", "node-input");
@@ -335,10 +349,10 @@ function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, 
           event.dataTransfer.effectAllowed = "move";
         }}
         onDragOver={(event) => {
-          if (event.dataTransfer.types.includes("application/factory-item")) event.preventDefault();
+          if (!readOnly && event.dataTransfer.types.includes("application/factory-item")) event.preventDefault();
         }}
         onDrop={dropDragged}
-        title={compatible ? `投入${ITEMS[itemId].name}` : amount >= 1 && !cargo ? `取出${ITEMS[itemId].name}` : `投入${ITEMS[itemId].name}`}
+        title={readOnly ? `${ITEMS[itemId].name}（只读）` : compatible ? `投入${ITEMS[itemId].name}` : amount >= 1 && !cargo ? `取出${ITEMS[itemId].name}` : `投入${ITEMS[itemId].name}`}
       >
         <ItemBadge itemId={itemId} amount={amount} muted={amount <= 0.001} />
       </button>
@@ -348,16 +362,17 @@ function InputSlot({ entityId, itemId, amount, cargo, onDropCargo, onPickInput, 
   );
 }
 
-function AutoInputPort({ connectionDraft, label = "自动匹配", handleId = "in:auto" }: {
+function AutoInputPort({ connectionDraft, label = "自动匹配", handleId = "in:auto", readOnly = false }: {
   connectionDraft: FactoryNodeData["connectionDraft"];
   label?: string;
   handleId?: string;
+  readOnly?: boolean;
 }) {
   const compatible = connectionDraft?.handleType === "source";
   const muted = connectionDraft?.handleType === "target";
   return (
     <div className={`node-auto-input${compatible ? " node-auto-input--compatible" : ""}${muted ? " node-auto-input--muted" : ""}`}>
-      <Handle id={handleId} type="target" position={Position.Left} className="factory-handle factory-handle--input factory-handle--auto nodrag nopan" />
+      <Handle id={handleId} type="target" position={Position.Left} isConnectable={!readOnly} className="factory-handle factory-handle--input factory-handle--auto nodrag nopan" />
       <Sparkles size={11} /><span>{label}</span>
     </div>
   );
@@ -392,6 +407,7 @@ function LightweightNodeHandles({ data }: { data: FactoryNodeData }) {
       id={port.id}
       type="target"
       position={Position.Left}
+      isConnectable={!data.readOnly}
       style={{ top: position(index, specialInputs.length) }}
       className={`factory-handle factory-handle--input factory-node-lod__handle nodrag nopan${port.itemId ? connectionHandleClass(entity.id, port.itemId, "target", data.connectionDraft) : " factory-handle--universal"}`}
       key={port.id}
@@ -399,15 +415,17 @@ function LightweightNodeHandles({ data }: { data: FactoryNodeData }) {
       id={`in:${itemId}`}
       type="target"
       position={Position.Left}
+      isConnectable={!data.readOnly}
       style={{ top: position(index, inputCount) }}
       className={`factory-handle factory-handle--input factory-node-lod__handle nodrag nopan${connectionHandleClass(entity.id, itemId, "target", data.connectionDraft)}`}
       key={`in:${itemId}`}
     />)}
-    {showAutoInput ? <Handle id="in:auto" type="target" position={Position.Left} className="factory-handle factory-handle--input factory-handle--auto factory-node-lod__handle nodrag nopan" /> : null}
+    {showAutoInput ? <Handle id="in:auto" type="target" position={Position.Left} isConnectable={!data.readOnly} className="factory-handle factory-handle--input factory-handle--auto factory-node-lod__handle nodrag nopan" /> : null}
     {outputItems.map((itemId, index) => <Handle
       id={`out:${itemId}`}
       type="source"
       position={Position.Right}
+      isConnectable={!data.readOnly}
       style={{ top: position(index, outputItems.length) }}
       className={`factory-handle factory-handle--output factory-node-lod__handle nodrag nopan${connectionHandleClass(entity.id, itemId, "source", data.connectionDraft)}`}
       key={`out:${itemId}`}
@@ -567,11 +585,11 @@ function VeinFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
   const water = resourceId === "water";
   const sulfuricOcean = resourceId === "sulfuric_acid";
   const remote = resourceId === "silicon_ore" || resourceId === "titanium_ore";
-  const installing = placement === extractorId;
+  const installing = !data.readOnly && placement === extractorId;
   const reserve = data.resourceReserve;
 
   const install = (event: React.MouseEvent) => {
-    if (!installing) return;
+    if (data.readOnly || !installing) return;
     event.preventDefault();
     event.stopPropagation();
     data.onInstallMiner(entity.id, data.placementCount);
@@ -583,9 +601,10 @@ function VeinFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
       className={`factory-node vein-node factory-node--status-${data.status.tone}${reserve?.exhausted ? " vein-node--depleted" : ""}${entity.interactionLocked ? " factory-node--locked" : ""}${selected ? " factory-node--selected" : ""}${installing ? " factory-node--placement" : ""}`}
       onClick={install}
       onDragOver={(event) => {
-        if (event.dataTransfer.types.includes("application/factory-building")) event.preventDefault();
+        if (!data.readOnly && event.dataTransfer.types.includes("application/factory-building")) event.preventDefault();
       }}
       onDrop={(event) => {
+        if (data.readOnly) return;
         const buildingId = event.dataTransfer.getData("application/factory-building") as BuildingId;
         if (buildingId !== extractorId) return;
         event.preventDefault();
@@ -593,7 +612,7 @@ function VeinFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
         data.onInstallMiner(entity.id, data.placementCount);
       }}
     >
-      <InteractionLockBadge entity={entity} onChange={data.onInteractionLockChange} />
+      <InteractionLockBadge entity={entity} onChange={data.onInteractionLockChange} readOnly={data.readOnly} />
       <header className="factory-node__header">
         <div className="node-icon" style={{ color: resource.color }}>{fluid ? <Droplets size={18} /> : <Pickaxe size={18} />}</div>
         <div>
@@ -616,21 +635,23 @@ function VeinFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
         <button
           className={`manual-mine nodrag nopan${mining ? " manual-mine--active" : ""}`}
           type="button"
+          disabled={data.readOnly}
           onPointerDown={(event) => {
+            if (data.readOnly) return;
             event.preventDefault();
             event.stopPropagation();
             data.onMiningStart(entity.id);
           }}
-          onPointerUp={data.onMiningStop}
-          onPointerCancel={data.onMiningStop}
-          title={`长按采集${resource.name}`}
+          onPointerUp={data.readOnly ? undefined : data.onMiningStop}
+          onPointerCancel={data.readOnly ? undefined : data.onMiningStop}
+          title={data.readOnly ? `${resource.name}（只读）` : `长按采集${resource.name}`}
         >
           <Hand size={16} />
           <span>{mining ? "采集中" : "采集"}</span>
           <i />
         </button>
       )}
-      <OutputSlot entityId={entity.id} itemId={resourceId} amount={output} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[resourceId] ?? 0} />
+      <OutputSlot entityId={entity.id} itemId={resourceId} amount={output} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[resourceId] ?? 0} readOnly={data.readOnly} />
       {cargo?.itemId === resourceId ? <span className="node-cargo-match">同类物资已拿起</span> : null}
     </article>
   );
@@ -660,8 +681,8 @@ function MachineFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
   useDynamicHandles(entity.id, blackHoleConnector
     ? `black-hole:${([0, 1, 2] as const).map((index) => data.blackHolePortConnections[index] ?? "empty").join(",")}`
     : `${inputs.map((input) => input.itemId).join(",")}:auto>${outputIds.join(",")}`);
-  const acceptsCargo = cargo && inputs.some((input) => input.itemId === cargo.itemId);
-  const adding = placement === entity.buildingId;
+  const acceptsCargo = !data.readOnly && cargo && inputs.some((input) => input.itemId === cargo.itemId);
+  const adding = !data.readOnly && placement === entity.buildingId;
   const utilizationTone = data.status.tone === "running" ? "good" : data.status.tone === "warning" ? "partial" : data.status.tone === "blocked" ? "blocked" : "idle";
   const recipeOptions = getRecipesForBuilding(entity.buildingId!).filter((option) =>
     !option.requiredTechId || data.completedTechIds.includes(option.requiredTechId));
@@ -683,7 +704,7 @@ function MachineFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
     ? Math.floor((entity.proliferatorPoints ?? 0) + (entity.inputs[proliferator.itemId] ?? 0) * proliferator.sprayPoints)
     : 0;
   const add = (event: React.MouseEvent) => {
-    if (!adding) return;
+    if (data.readOnly || !adding) return;
     event.preventDefault();
     event.stopPropagation();
     data.onAddBuilding(entity.id, entity.buildingId!, data.placementCount);
@@ -695,11 +716,12 @@ function MachineFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
       className={`factory-node machine-node factory-node--status-${data.status.tone}${entity.interactionLocked ? " factory-node--locked" : ""}${constructionCenter || galacticExporter || blackHoleConnector || timeWarpDevice ? " factory-node--megastructure" : ""}${galacticExporter ? " factory-node--galactic-exporter" : ""}${blackHoleConnector ? " factory-node--black-hole" : ""}${timeWarpDevice ? " factory-node--time-warp" : ""}${building.tier && building.tier > 1 ? ` factory-node--tier-${building.tier}` : ""}${selected ? " factory-node--selected" : ""}${adding ? " factory-node--placement" : ""}${acceptsCargo ? " factory-node--accepts-cargo" : ""}${(railEjector || launchSilo) && entity.utilization > 0.001 ? " factory-node--orbital-active" : ""}`}
       onClick={add}
       onDragOver={(event) => {
-        if (event.dataTransfer.types.some((type) => type === "application/factory-item" || type === "application/factory-building")) {
+        if (!data.readOnly && event.dataTransfer.types.some((type) => type === "application/factory-item" || type === "application/factory-building")) {
           event.preventDefault();
         }
       }}
       onDrop={(event) => {
+        if (data.readOnly) return;
         event.preventDefault();
         event.stopPropagation();
         const buildingId = event.dataTransfer.getData("application/factory-building") as BuildingId;
@@ -715,7 +737,7 @@ function MachineFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
         }
       }}
     >
-      <InteractionLockBadge entity={entity} onChange={data.onInteractionLockChange} />
+      <InteractionLockBadge entity={entity} onChange={data.onInteractionLockChange} readOnly={data.readOnly} />
       <header className="factory-node__header">
         <div className={`node-icon${rayReceiver ? " node-icon--ray" : railEjector || launchSilo ? " node-icon--orbit" : ""}`}>
           {blackHoleConnector ? <Atom size={18} /> : timeWarpDevice ? <Gauge size={18} /> : galacticExporter ? <Rocket size={18} /> : entity.buildingId === "miniature_particle_collider" ? <Atom size={18} /> : railEjector ? <Satellite size={18} /> : launchSilo ? <Rocket size={18} /> : rayReceiver ? <RadioTower size={18} /> : <Factory size={18} />}
@@ -740,7 +762,7 @@ function MachineFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
           <div><dt>阵列等级</dt><dd>Mk.{constructionCenterTier}</dd></div>
         </dl>
       </section> : null}
-      {selected && !entity.interactionLocked && !constructionCenter && !galacticExporter && !blackHoleConnector && !timeWarpDevice ? (
+      {selected && !data.readOnly && !entity.interactionLocked && !constructionCenter && !galacticExporter && !blackHoleConnector && !timeWarpDevice ? (
         <div className="node-inline-select nodrag nopan" onPointerDown={(event) => event.stopPropagation()}>
           <span>生产配方</span>
           <RecipeCatalogPicker value={entity.recipeId} recipes={recipeOptions} onChange={(recipeId) => data.onRecipeChange(entity.id, recipeId)} compact />
@@ -758,7 +780,7 @@ function MachineFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
             const port = entity.blackHolePorts?.find((entry) => entry.index === index);
             const itemId = data.blackHolePortConnections[index] ?? port?.currentItemId;
             return <div className="black-hole-port" key={index}>
-              <Handle id={`in:black-hole:${index}`} type="target" position={Position.Left} style={{ top: `${47 + index * 15}%` }} className="factory-handle factory-handle--input factory-handle--universal nodrag nopan" />
+              <Handle id={`in:black-hole:${index}`} type="target" position={Position.Left} isConnectable={!data.readOnly} style={{ top: `${47 + index * 15}%` }} className="factory-handle factory-handle--input factory-handle--universal nodrag nopan" />
               <span>接口 {index + 1}</span>
               <strong>{itemId ? getItem(itemId).name : "等待连接"}</strong>
               <small>累计 {formatQuantityCompact(port?.totalDestroyed ?? "0")}</small>
@@ -813,11 +835,12 @@ function MachineFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
               connectionDraft={data.connectionDraft}
               connectionCount={data.inputBeltCounts[input.itemId] ?? 0}
               missing={(data.status.code === "missing-input" || data.status.code === "missing-proliferator") && (entity.inputs[input.itemId] ?? 0) < input.amount}
+              readOnly={data.readOnly}
             />
           )) : rayReceiver ? (
             <div className="stellar-input"><Sun size={14} /><span>戴森系统能量</span></div>
           ) : null}
-          {!rayReceiver && !galacticExporter && data.connectionDraft ? <AutoInputPort connectionDraft={data.connectionDraft} label="自动选择配方" /> : null}
+          {!rayReceiver && !galacticExporter && data.connectionDraft ? <AutoInputPort connectionDraft={data.connectionDraft} label="自动选择配方" readOnly={data.readOnly} /> : null}
         </div>
         <div className="node-io__column node-io__column--output">
           <span className="node-io__label">{galacticExporter ? "去向" : recipe?.id === "matrix_research" ? "科研" : "输出"}</span>
@@ -837,6 +860,7 @@ function MachineFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
               onPick={data.onPickOutput}
               connectionDraft={data.connectionDraft}
               connectionCount={data.outputBeltCounts[output.itemId] ?? 0}
+              readOnly={data.readOnly}
             />
           )) : railEjector ? (
             <div className="orbital-target"><Orbit size={14} /><span title={data.targetDysonOrbitLabel}>{data.targetDysonOrbitLabel ?? `在轨 ${formatQuantityCompact(data.dysonSwarm.sailsInOrbit)} 帆`}</span></div>
@@ -887,12 +911,12 @@ function LogisticsFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
     ? deliverySlots.map((slot) => `${slot.mode}:${slot.itemId ?? "empty"}`).join(":")
     : `${configuredItems.join(":") || "unconfigured"}:${elevatorStation ? (entity.elevatorOutputItems ?? []).join(":") : "auto"}`);
   const cargoKind = cargo ? getItem(cargo.itemId).kind : null;
-  const acceptsCargo = Boolean(cargo && (cargoTerminal
+  const acceptsCargo = Boolean(!data.readOnly && cargo && (cargoTerminal
     ? data.acceptedInputItemIds.includes(cargo.itemId)
     : configuredItems.length === 0 || configuredItems.includes(cargo.itemId) || (deliveryHub && configuredItems.length < MATERIAL_DELIVERY_SLOT_COUNT)) && (
     building.accepts === "any" || building.accepts === cargoKind || (building.accepts === "solid" && cargoKind === "matrix")
   ));
-  const adding = placement === entity.buildingId;
+  const adding = !data.readOnly && placement === entity.buildingId;
   const isSplitter = entity.kind === "splitter";
   const planetaryStation = entity.buildingId === "planetary_logistics_station";
   const stationVehicleCapacity = planetaryStation ? getStationDroneCapacity(entity) : getStationVesselCapacity(entity);
@@ -910,15 +934,16 @@ function LogisticsFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
       ref={nodeRef}
       className={`factory-node logistics-node factory-node--status-${data.status.tone}${entity.interactionLocked ? " factory-node--locked" : ""}${isStation ? " station-node" : ""}${deliveryHub ? " delivery-hub-node" : ""}${cargoTerminal ? " orbital-cargo-node" : ""}${warehouseStorage ? " storage-buffer-node" : ""}${entity.buildingId === "storage_tank" ? " storage-buffer-node--fluid" : ""}${selected ? " factory-node--selected" : ""}${adding ? " factory-node--placement" : ""}${acceptsCargo ? " factory-node--accepts-cargo" : ""}`}
       onClick={(event) => {
-        if (!adding) return;
+        if (data.readOnly || !adding) return;
         event.preventDefault();
         event.stopPropagation();
         data.onAddBuilding(entity.id, entity.buildingId!, data.placementCount);
       }}
       onDragOver={(event) => {
-        if (event.dataTransfer.types.some((type) => type === "application/factory-item" || type === "application/factory-building")) event.preventDefault();
+        if (!data.readOnly && event.dataTransfer.types.some((type) => type === "application/factory-item" || type === "application/factory-building")) event.preventDefault();
       }}
       onDrop={(event) => {
+        if (data.readOnly) return;
         event.preventDefault();
         event.stopPropagation();
         const buildingId = event.dataTransfer.getData("application/factory-building") as BuildingId;
@@ -933,7 +958,7 @@ function LogisticsFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
         data.onDropDraggedItem(entity.id, draggedItem, sourceKind, sourceId);
       }}
     >
-      <InteractionLockBadge entity={entity} onChange={data.onInteractionLockChange} />
+      <InteractionLockBadge entity={entity} onChange={data.onInteractionLockChange} readOnly={data.readOnly} />
       <header className="factory-node__header">
         <div className="node-icon">{cargoTerminal ? <Satellite size={18} /> : isStation ? <Orbit size={18} /> : isSplitter ? <GitFork size={18} /> : <Database size={18} />}</div>
         <div><span>{cargoTerminal ? "全星系空间站上传" : deliveryHub ? "物资托盘直送" : orbitalCollector ? "气态巨星采集" : planetaryStation ? "行星无线运输" : isStation ? "跨行星运输" : isSplitter ? "物流分配" : "物流缓存"}</span><strong>{building.name}</strong></div>
@@ -952,16 +977,16 @@ function LogisticsFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
       />
       {elevatorStation ? (
         <div className="node-io logistics-io elevator-logistics-io">
-          <div className="logistics-slot-row"><div className="node-io__column"><span className="node-io__label">通用输入</span><AutoInputPort connectionDraft={data.connectionDraft} label="任意物资" handleId="in:auto" /></div><div className="delivery-hub-target"><Database size={14} /><span>进入系统共享仓库</span></div></div>
-          {(entity.elevatorOutputItems ?? []).map((outputItemId, index) => outputItemId ? <div className="logistics-slot-row" key={`${outputItemId}:${index}`}><div className="node-io__column node-io__column--output"><span className="node-io__label">输出 {index + 1}</span><OutputSlot entityId={entity.id} itemId={outputItemId} amount={entity.outputs[outputItemId] ?? 0} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[outputItemId] ?? 0} /></div><div className="delivery-hub-target"><Route size={14} /><span>{ITEMS[outputItemId].name}</span></div></div> : <div className="logistics-slot-row" key={`empty-output:${index}`}><div className="node-io__column node-io__column--output"><span className="node-io__label">输出 {index + 1}</span><span className="logistics-empty">未配置</span></div></div>)}
+          <div className="logistics-slot-row"><div className="node-io__column"><span className="node-io__label">通用输入</span><AutoInputPort connectionDraft={data.connectionDraft} label="任意物资" handleId="in:auto" readOnly={data.readOnly} /></div><div className="delivery-hub-target"><Database size={14} /><span>进入系统共享仓库</span></div></div>
+          {(entity.elevatorOutputItems ?? []).map((outputItemId, index) => outputItemId ? <div className="logistics-slot-row" key={`${outputItemId}:${index}`}><div className="node-io__column node-io__column--output"><span className="node-io__label">输出 {index + 1}</span><OutputSlot entityId={entity.id} itemId={outputItemId} amount={entity.outputs[outputItemId] ?? 0} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[outputItemId] ?? 0} readOnly={data.readOnly} /></div><div className="delivery-hub-target"><Route size={14} /><span>{ITEMS[outputItemId].name}</span></div></div> : <div className="logistics-slot-row" key={`empty-output:${index}`}><div className="node-io__column node-io__column--output"><span className="node-io__label">输出 {index + 1}</span><span className="logistics-empty">未配置</span></div></div>)}
         </div>
       ) : cargoTerminal ? (
         <div className="node-io logistics-io orbital-cargo-io">
           {cargoPorts.map((portItemId, index) => <div className="logistics-slot-row orbital-cargo-slot-row" key={`orbital-${index}`}>
             <div className="node-io__column">
               <span className="node-io__label">上传口 {index + 1}</span>
-              {portItemId ? <InputSlot entityId={entity.id} itemId={portItemId} amount={entity.inputs[portItemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[portItemId] ?? 0} handleId={`in:orbital:${index}`} />
-                : <AutoInputPort connectionDraft={data.connectionDraft} label="按绑定目标识别" handleId={`in:orbital:${index}`} />}
+              {portItemId ? <InputSlot entityId={entity.id} itemId={portItemId} amount={entity.inputs[portItemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[portItemId] ?? 0} handleId={`in:orbital:${index}`} readOnly={data.readOnly} />
+                : <AutoInputPort connectionDraft={data.connectionDraft} label="按绑定目标识别" handleId={`in:orbital:${index}`} readOnly={data.readOnly} />}
             </div>
             <div className="delivery-hub-target"><Satellite size={14} /><span>{portItemId ? "等待上传" : "目标物资"}</span></div>
           </div>)}
@@ -971,9 +996,9 @@ function LogisticsFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
           {deliverySlots.map((slot, index) => <div className={`logistics-slot-row delivery-hub-slot-row delivery-hub-slot-row--${slot.mode}`} key={`delivery-${index}`}>
             <div className="node-io__column">
               <span className="node-io__label">接口 {index + 1}</span>
-              {slot.itemId ? <InputSlot entityId={entity.id} itemId={slot.itemId} amount={entity.inputs[slot.itemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[slot.itemId] ?? 0} handleId={`in:delivery:${index}`} />
+              {slot.itemId ? <InputSlot entityId={entity.id} itemId={slot.itemId} amount={entity.inputs[slot.itemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[slot.itemId] ?? 0} handleId={`in:delivery:${index}`} readOnly={data.readOnly} />
                 : slot.mode === "disabled" ? <div className="delivery-hub-port-disabled">接口已清空</div>
-                  : <AutoInputPort connectionDraft={data.connectionDraft} label="自动识别" handleId={`in:delivery:${index}`} />}
+                  : <AutoInputPort connectionDraft={data.connectionDraft} label="自动识别" handleId={`in:delivery:${index}`} readOnly={data.readOnly} />}
             </div>
             <div className="delivery-hub-target" title={slot.mode === "manual" ? "指定物资直接送入当前行星物资托盘" : slot.mode === "disabled" ? "此接口已停止接收" : "自动识别后送入当前行星物资托盘"}><Database size={14} /><span>{slot.mode === "manual" ? "指定直送" : slot.mode === "disabled" ? "停止接收" : "进入托盘"}</span></div>
           </div>)}
@@ -983,18 +1008,18 @@ function LogisticsFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
           {configuredItems.map((configuredItemId, index) => <div className={`logistics-slot-row${warehouseStorage ? " logistics-slot-row--warehouse" : ""}`} key={configuredItemId}>
             {!orbitalCollector ? <div className="node-io__column">
               {index === 0 ? <span className="node-io__label">输入</span> : null}
-              <InputSlot entityId={entity.id} itemId={configuredItemId} amount={entity.inputs[configuredItemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[configuredItemId] ?? 0} />
+              <InputSlot entityId={entity.id} itemId={configuredItemId} amount={entity.inputs[configuredItemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[configuredItemId] ?? 0} readOnly={data.readOnly} />
             </div> : null}
             {!deliveryHub ? <div className="node-io__column node-io__column--output">
               {index === 0 ? <span className="node-io__label">输出</span> : null}
-              <OutputSlot entityId={entity.id} itemId={configuredItemId} amount={entity.outputs[configuredItemId] ?? 0} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[configuredItemId] ?? 0} />
+              <OutputSlot entityId={entity.id} itemId={configuredItemId} amount={entity.outputs[configuredItemId] ?? 0} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[configuredItemId] ?? 0} readOnly={data.readOnly} />
             </div> : <div className="delivery-hub-target"><Database size={14} /><span>进入物资托盘</span></div>}
           </div>)}
         </div>
       ) : (
         <div className="logistics-empty">{deliveryHub ? "连接任意输出端口，自动占用 3 个直送接口" : planetaryStation ? "在检查器中选择行星货物" : isStation ? "在检查器中选择星际货物" : "拖入物品或在检查器中选择缓存类型"}</div>
       )}
-      {!orbitalCollector && !deliveryHub && !cargoTerminal && data.connectionDraft ? <div className="logistics-auto-input"><AutoInputPort connectionDraft={data.connectionDraft} label={isStation ? "连接时自动占用空槽" : "连接时自动设置物品"} /></div> : null}
+      {!orbitalCollector && !deliveryHub && !cargoTerminal && data.connectionDraft ? <div className="logistics-auto-input"><AutoInputPort connectionDraft={data.connectionDraft} label={isStation ? "连接时自动占用空槽" : "连接时自动设置物品"} readOnly={data.readOnly} /></div> : null}
       <footer className="factory-node__footer">
         <span title={data.status.label}>{data.status.label}</span>
         <span title={isStation ? `累计 ${entity.stationTrips ?? 0} 航次` : undefined}>{cargoTerminal ? `${configuredItems.length}/${ORBITAL_CARGO_TERMINAL_PORT_COUNT} 接口 · ${entity.productionRate.toFixed(1)}/min` : deliveryHub ? `${configuredItems.length}/${MATERIAL_DELIVERY_SLOT_COUNT} 接口 · ${entity.productionRate.toFixed(1)}/min` : orbitalCollector ? `${itemId ? ITEMS[itemId].name : "资源"} · ${entity.productionRate.toFixed(1)}/min` : isStation ? `${primaryStationMode === "demand" ? "需求" : primaryStationMode === "supply" ? "供应" : "仓储"} · ${configuredItems.length}/5 槽 · ${stationVehicles}/${stationVehicleCapacity} ${planetaryStation ? "机队" : "舰队"}` : isSplitter ? entity.distributionMode === "priority" ? "优先分流" : "均衡分流" : `${data.outputCapacity} 容量`}</span>
@@ -1014,7 +1039,7 @@ function PowerFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
   const solar = entity.buildingId === "solar_panel";
   const geothermal = entity.buildingId === "geothermal_power_station";
   useDynamicHandles(entity.id, `${entity.fuelItemId ?? "no-fuel-port"}:${recipe?.id ?? "no-energy-recipe"}`);
-  const adding = placement === entity.buildingId;
+  const adding = !data.readOnly && placement === entity.buildingId;
   const fuelId = entity.fuelItemId;
   const environmentMultiplier = solar ? data.solarGenerationMultiplier : geothermal ? data.geothermalGenerationMultiplier : data.windGenerationMultiplier;
   const ratedPower = (building.powerGenerationKw ?? 0) * entity.machineCount * environmentMultiplier;
@@ -1029,16 +1054,17 @@ function PowerFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
       data-heavy-card="true"
       className={`factory-node power-node factory-node--status-${data.status.tone}${entity.interactionLocked ? " factory-node--locked" : ""}${fuelGenerator ? " thermal-node" : ""}${accumulator || exchanger ? " storage-power-node" : ""}${selected ? " factory-node--selected" : ""}${adding ? " factory-node--placement" : ""}`}
       onClick={(event) => {
-        if (!adding) return;
+        if (data.readOnly || !adding) return;
         event.preventDefault();
         event.stopPropagation();
         data.onAddBuilding(entity.id, entity.buildingId!, data.placementCount);
       }}
       onDragOver={(event) => {
-        if (event.dataTransfer.types.includes("application/factory-building") ||
-          (acceptsItems && event.dataTransfer.types.includes("application/factory-item"))) event.preventDefault();
+        if (!data.readOnly && (event.dataTransfer.types.includes("application/factory-building") ||
+          (acceptsItems && event.dataTransfer.types.includes("application/factory-item")))) event.preventDefault();
       }}
       onDrop={(event) => {
+        if (data.readOnly) return;
         const buildingId = event.dataTransfer.getData("application/factory-building") as BuildingId;
         if (buildingId === entity.buildingId) {
           event.preventDefault();
@@ -1056,7 +1082,7 @@ function PowerFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
         data.onDropDraggedItem(entity.id, draggedItem, sourceKind, sourceId);
       }}
     >
-      <InteractionLockBadge entity={entity} onChange={data.onInteractionLockChange} />
+      <InteractionLockBadge entity={entity} onChange={data.onInteractionLockChange} readOnly={data.readOnly} />
       <header className="factory-node__header">
         <div className="node-icon node-icon--power">{icon}</div>
         <div>
@@ -1065,7 +1091,7 @@ function PowerFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
         </div>
         <small>×{entity.machineCount}</small>
       </header>
-      {fuelGenerator && selected && !entity.interactionLocked ? (
+      {fuelGenerator && selected && !data.readOnly && !entity.interactionLocked ? (
         <label className="node-inline-select nodrag nopan" onPointerDown={(event) => event.stopPropagation()}>
           <span>燃烧燃料</span>
           <select value={fuelId ?? ""} onChange={(event) => data.onFuelChange(entity.id, event.target.value as ItemId)}>
@@ -1074,7 +1100,7 @@ function PowerFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
           </select>
         </label>
       ) : null}
-      {exchanger && selected && !entity.interactionLocked ? (
+      {exchanger && selected && !data.readOnly && !entity.interactionLocked ? (
         <label className="node-inline-select nodrag nopan" onPointerDown={(event) => event.stopPropagation()}>
           <span>能量模式</span>
           <select value={entity.energyMode === "discharge" ? "discharge" : "charge"} disabled={(entity.storedEnergyMj ?? 0) > 0.0001} onChange={(event) => data.onEnergyModeChange(entity.id, event.target.value as EnergyMode)}>
@@ -1107,7 +1133,7 @@ function PowerFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
       </div>
       {fuelGenerator && fuelId ? (
         <div className="thermal-fuel">
-          <InputSlot entityId={entity.id} itemId={fuelId} amount={entity.inputs[fuelId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[fuelId] ?? 0} missing={data.status.code === "missing-fuel"} />
+          <InputSlot entityId={entity.id} itemId={fuelId} amount={entity.inputs[fuelId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[fuelId] ?? 0} missing={data.status.code === "missing-fuel"} readOnly={data.readOnly} />
           <span>炉膛余热 <strong>{(entity.fuelRemainingMj ?? 0).toFixed(2)} MJ</strong></span>
         </div>
       ) : fuelGenerator ? <div className="thermal-empty">未配置燃料</div> : null}
@@ -1115,11 +1141,11 @@ function PowerFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
         <div className="node-io energy-exchange-io">
           <div className="node-io__column">
             <span className="node-io__label">输入</span>
-            {recipe.inputs.map((input) => <InputSlot key={input.itemId} entityId={entity.id} itemId={input.itemId} amount={entity.inputs[input.itemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[input.itemId] ?? 0} missing={data.status.code === "missing-input" && (entity.inputs[input.itemId] ?? 0) < input.amount} />)}
+            {recipe.inputs.map((input) => <InputSlot key={input.itemId} entityId={entity.id} itemId={input.itemId} amount={entity.inputs[input.itemId] ?? 0} cargo={cargo} onDropCargo={data.onDropCargo} onPickInput={data.onPickInput} onDropDraggedItem={data.onDropDraggedItem} connectionDraft={data.connectionDraft} connectionCount={data.inputBeltCounts[input.itemId] ?? 0} missing={data.status.code === "missing-input" && (entity.inputs[input.itemId] ?? 0) < input.amount} readOnly={data.readOnly} />)}
           </div>
           <div className="node-io__column node-io__column--output">
             <span className="node-io__label">输出</span>
-            {recipe.outputs.map((output) => <OutputSlot key={output.itemId} entityId={entity.id} itemId={output.itemId} amount={entity.outputs[output.itemId] ?? 0} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[output.itemId] ?? 0} />)}
+            {recipe.outputs.map((output) => <OutputSlot key={output.itemId} entityId={entity.id} itemId={output.itemId} amount={entity.outputs[output.itemId] ?? 0} onPick={data.onPickOutput} connectionDraft={data.connectionDraft} connectionCount={data.outputBeltCounts[output.itemId] ?? 0} readOnly={data.readOnly} />)}
           </div>
         </div>
       ) : null}
@@ -1154,6 +1180,7 @@ export function PowerNode(props: NodeProps<FactoryFlowNode>) {
 function areNodeVisualPropsEqual(previous: NodeProps<FactoryFlowNode>, next: NodeProps<FactoryFlowNode>): boolean {
   return previous.id === next.id &&
     previous.selected === next.selected &&
+    previous.data.readOnly === next.data.readOnly &&
     previous.data.visualSignature === next.data.visualSignature &&
     previous.data.presentationSignature === next.data.presentationSignature &&
     previous.data.entity.position.x === next.data.entity.position.x &&

@@ -14,6 +14,16 @@ function sourceBlock(start: string, end: string): string {
   return APP_SOURCE.slice(startIndex, endIndex);
 }
 
+function effectContaining(marker: string): string {
+  const markerIndex = APP_SOURCE.indexOf(marker);
+  const startIndex = APP_SOURCE.lastIndexOf("  useEffect(() => {", markerIndex);
+  const endIndex = APP_SOURCE.indexOf("\n  },", markerIndex);
+  expect(markerIndex, `missing effect marker: ${marker}`).toBeGreaterThanOrEqual(0);
+  expect(startIndex, `missing effect start: ${marker}`).toBeGreaterThanOrEqual(0);
+  expect(endIndex, `missing effect end: ${marker}`).toBeGreaterThan(markerIndex);
+  return APP_SOURCE.slice(startIndex, endIndex);
+}
+
 describe("renderer side of the native player-authority handoff", () => {
   const handoffEffect = sourceBlock(
     "if (!desktopBridge?.onNativePlayerAuthorityHandoffRequest) return;",
@@ -123,5 +133,16 @@ describe("renderer side of the native player-authority handoff", () => {
     expect(handoffEffect).toContain("classifyNativePlayerAuthorityPreTransferCancel({");
     expect(handoffEffect).toContain('disposition === "already-cancelled"');
     expect(handoffEffect).toContain('disposition === "reject"');
+  });
+
+  it("never derives legacy achievement or campaign commands from the inert native renderer shell", () => {
+    const achievement = effectContaining('measureRuntimeTransitionPhase("achievement-progress-sync"');
+    const campaign = effectContaining('measureRuntimeTransitionPhase("campaign-progress-sync"');
+    for (const effect of [achievement, campaign]) {
+      expect(effect).toContain("if (nativePlayerAuthorityOwnsRuntimeRef.current) return;");
+      expect(effect.indexOf("nativePlayerAuthorityOwnsRuntimeRef.current")).toBeLessThan(
+        effect.indexOf("measureRuntimeTransitionPhase"),
+      );
+    }
   });
 });

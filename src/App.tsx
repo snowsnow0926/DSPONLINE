@@ -10895,6 +10895,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [game.research.completedTechIds, playTone]);
 
   useEffect(() => {
+    // The native renderer shell intentionally contains no authoritative
+    // entity/belt history. Achievement progression belongs to the Rust
+    // campaign domain while it owns the player session, so never derive a
+    // legacy command from that inert shell.
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) return;
     const newAchievementIds = measureRuntimeTransitionPhase("achievement-progress-sync", () => getNewAchievementIds(game), {
       entities: game.entities.length,
       belts: game.belts.length,
@@ -10914,6 +10919,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [game.achievements.unlockedIds, playTone]);
 
   useEffect(() => {
+    // See the achievement guard above: syncCampaignProgress() is a full
+    // GameState updater and must not run against the renderer-only shell.
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) return;
     const synced = measureRuntimeTransitionPhase("campaign-progress-sync", () => syncCampaignProgress(game), {
       entities: game.entities.length,
       belts: game.belts.length,

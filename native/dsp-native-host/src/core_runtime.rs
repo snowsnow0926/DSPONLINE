@@ -2736,6 +2736,21 @@ impl CoreRegistry {
         )
     }
 
+    pub fn construction_placement_context(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        building_id: &str,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?
+            .construction_placement_context_projection(
+                expected_revision,
+                expected_registry_fingerprint,
+                building_id,
+            )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn statistics_projection(
         &self,

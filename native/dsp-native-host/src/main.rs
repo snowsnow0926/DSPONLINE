@@ -82,6 +82,7 @@ fn handle_request(
                     "native-core-factory-read-model-v1",
                     "native-core-factory-inventory-v1",
                     "native-core-construction-inventory-v1",
+                    "native-core-construction-placement-context-v1",
                     "native-core-statistics-projection-v1",
                     "native-core-technology-projection-v1",
                     "native-core-recipe-workspace-projection-v1",
@@ -303,6 +304,17 @@ fn handle_request(
             &expected_registry_fingerprint,
             cursor,
             limit,
+        )?,
+        ControlRequest::CoreConstructionPlacementContext {
+            session_id,
+            expected_revision,
+            expected_registry_fingerprint,
+            building_id,
+        } => cores.construction_placement_context(
+            &session_id,
+            expected_revision,
+            &expected_registry_fingerprint,
+            &building_id,
         )?,
         ControlRequest::CoreStatisticsProjection {
             session_id,

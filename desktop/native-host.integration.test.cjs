@@ -385,6 +385,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.ok(hello.capabilities.includes("native-core-factory-read-model-v1"));
   assert.ok(hello.capabilities.includes("native-core-factory-inventory-v1"));
   assert.ok(hello.capabilities.includes("native-core-construction-inventory-v1"));
+  assert.ok(hello.capabilities.includes("native-core-construction-placement-context-v1"));
   assert.ok(hello.capabilities.includes("native-core-statistics-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-star-map-overview-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-stellar-industry-projection-v1"));
@@ -655,6 +656,45 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     cursor: 0,
     limit: 32,
   }), /construction inventory projection request is invalid/);
+  const constructionPlacementContext = await client.request({
+    operation: "coreConstructionPlacementContext",
+    sessionId: opened.sessionId,
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    buildingId: "未知/MOD-建筑",
+  });
+  assert.doesNotThrow(() => normalizeRendererNativeResult(
+    "coreConstructionPlacementContext",
+    constructionPlacementContext,
+    {
+      sessionId: opened.sessionId,
+      expectedRevision: 2,
+      expectedRegistryFingerprint: "builtin:test",
+      buildingId: "未知/MOD-建筑",
+    },
+  ));
+  assert.equal(constructionPlacementContext.available, 5);
+  assert.equal(constructionPlacementContext.appendEntityIndex, 1);
+  assert.equal(constructionPlacementContext.nextEntityId, "entity_0");
+  assert.deepEqual(constructionPlacementContext.support, {
+    supported: false,
+    reason: "unknown-building",
+  });
+  assert.equal(constructionPlacementContext.placement, null);
+  await assert.rejects(client.request({
+    operation: "coreConstructionPlacementContext",
+    sessionId: opened.sessionId,
+    expectedRevision: 1,
+    expectedRegistryFingerprint: "builtin:test",
+    buildingId: "未知/MOD-建筑",
+  }), /construction placement context request is invalid/);
+  await assert.rejects(client.request({
+    operation: "coreConstructionPlacementContext",
+    sessionId: opened.sessionId,
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "other",
+    buildingId: "未知/MOD-建筑",
+  }), /construction placement context request is invalid/);
   const statisticsProjection = await client.request({
     operation: "coreStatisticsProjection",
     sessionId: opened.sessionId,

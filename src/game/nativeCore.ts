@@ -18,6 +18,8 @@ import {
   type DesktopNativeCoreFactoryInventoryResult,
   type DesktopNativeCoreConstructionInventoryRequest,
   type DesktopNativeCoreConstructionInventoryResult,
+  type DesktopNativeCoreConstructionPlacementContextRequest,
+  type DesktopNativeCoreConstructionPlacementContextResult,
   type DesktopNativeCoreStatisticsProjectionRequest,
   type DesktopNativeCoreStatisticsProjectionResult,
   type DesktopNativeCoreTechnologyProjectionRequest,
@@ -53,6 +55,7 @@ type NativeCoreTransferProjection =
   | DesktopNativeCoreFactoryReadModelResult
   | DesktopNativeCoreFactoryInventoryResult
   | DesktopNativeCoreConstructionInventoryResult
+  | DesktopNativeCoreConstructionPlacementContextResult
   | DesktopNativeCoreStatisticsProjectionResult
   | DesktopNativeCoreTechnologyProjectionResult
   | DesktopNativeCoreRecipeWorkspaceProjectionResult
@@ -108,6 +111,7 @@ export interface WindowsNativeCoreShadow {
   factoryReadModel(request: Omit<DesktopNativeCoreFactoryReadModelRequest, "sessionId">): Promise<DesktopNativeCoreFactoryReadModelResult>;
   factoryInventoryProjection?(request: Omit<DesktopNativeCoreFactoryInventoryRequest, "sessionId">): Promise<DesktopNativeCoreFactoryInventoryResult>;
   constructionInventoryProjection?(request: Omit<DesktopNativeCoreConstructionInventoryRequest, "sessionId">): Promise<DesktopNativeCoreConstructionInventoryResult>;
+  constructionPlacementContext?(request: Omit<DesktopNativeCoreConstructionPlacementContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionPlacementContextResult>;
   statisticsProjection(request: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStatisticsProjectionResult>;
   technologyProjection(request: Omit<DesktopNativeCoreTechnologyProjectionRequest, "sessionId">): Promise<DesktopNativeCoreTechnologyProjectionResult>;
   recipeWorkspaceProjection(request: Omit<DesktopNativeCoreRecipeWorkspaceProjectionRequest, "sessionId">): Promise<DesktopNativeCoreRecipeWorkspaceProjectionResult>;
@@ -397,6 +401,29 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
       throw new Error("Windows 原生建筑库存投影不可用");
     }
     return desktop.getNativeCoreConstructionInventory({ sessionId: this.sessionId, ...request });
+  }
+
+  async constructionPlacementContext(
+    request: Omit<DesktopNativeCoreConstructionPlacementContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreConstructionPlacementContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "construction-placement-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreConstructionPlacementContextResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "construction-placement-context-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreConstructionPlacementContext !== "function") {
+      throw new Error("Windows 原生建筑放置上下文不可用");
+    }
+    return desktop.getNativeCoreConstructionPlacementContext({ sessionId: this.sessionId, ...request });
   }
 
   async statisticsProjection(

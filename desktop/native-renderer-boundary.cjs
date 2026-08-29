@@ -398,6 +398,24 @@ function normalizeConstructionInventoryContext(value, label) {
   };
 }
 
+function normalizeConstructionPlacementContext(value, label) {
+  const source = exactObject(
+    value,
+    ["sessionId", "expectedRevision", "expectedRegistryFingerprint", "buildingId"],
+    label,
+  );
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} expected registry fingerprint`,
+      256,
+    ),
+    buildingId: factoryInventoryId(source.buildingId, `${label} building ID`),
+  };
+}
+
 function factoryInventoryId(value, label) {
   const result = opaqueId(value, label);
   for (const character of result) {
@@ -1960,6 +1978,263 @@ function normalizeCoreConstructionInventoryProjection(value, context) {
     nextCursor,
     truncated: expectedNextCursor !== null,
     limits: { rows: 256, projectionBytes: MAX_NATIVE_PROJECTION_BYTES },
+  };
+}
+
+function normalizeConstructionPlacementEntityTemplate(value, context) {
+  const requiredKeys = [
+    "id", "kind", "planetId", "interactionLocked", "buildingId", "powerGridId",
+    "powerPriority", "machineCount", "minerCount", "inputs", "outputs", "progress",
+    "routingCursor", "utilization", "productionRate",
+  ];
+  const optionalKeys = [
+    "generationPriority", "powerOutputKw", "powerInputKw", "recipeId",
+    "targetDysonOrbitId", "distributionMode", "fuelRemainingMj", "storedEnergyMj",
+    "energyMode",
+  ];
+  const source = objectWithKeys(
+    value,
+    requiredKeys,
+    optionalKeys,
+    "native construction placement entity template",
+  );
+  const id = logicalId(source.id, "native construction placement entity ID", 160);
+  const kind = oneOf(
+    source.kind,
+    ["machine", "power", "storage", "splitter"],
+    "native construction placement entity kind",
+  );
+  const planetId = factoryInventoryId(
+    source.planetId,
+    "native construction placement entity planet",
+  );
+  const buildingId = factoryInventoryId(
+    source.buildingId,
+    "native construction placement entity building",
+  );
+  if (id !== context.nextEntityId || planetId !== context.activePlanetId ||
+      buildingId !== context.buildingId ||
+      boolean(source.interactionLocked, "native construction placement interaction lock") !== false ||
+      logicalId(source.powerGridId, "native construction placement power grid", 160) !== "grid-a" ||
+      source.powerPriority !== 2 || source.machineCount !== 1 || source.minerCount !== 0 ||
+      source.progress !== 0 || source.routingCursor !== 0 || source.utilization !== 0 ||
+      source.productionRate !== 0) {
+    throw protocolError("native construction placement canonical entity fields");
+  }
+  exactObject(source.inputs, [], "native construction placement entity inputs");
+  exactObject(source.outputs, [], "native construction placement entity outputs");
+
+  const hasPowerFields = ["generationPriority", "powerOutputKw", "powerInputKw"]
+    .map((key) => Object.hasOwn(source, key));
+  if (kind === "power") {
+    if (hasPowerFields.some((present) => !present) ||
+        ![1, 2, 3].includes(source.generationPriority) ||
+        source.powerOutputKw !== 0 || source.powerInputKw !== 0) {
+      throw protocolError("native construction placement power template");
+    }
+  } else if (hasPowerFields.some(Boolean)) {
+    throw protocolError("native construction placement power template");
+  }
+  if (kind === "splitter") {
+    if (source.distributionMode !== "balanced") {
+      throw protocolError("native construction placement splitter template");
+    }
+  } else if (Object.hasOwn(source, "distributionMode")) {
+    throw protocolError("native construction placement splitter template");
+  }
+  if (Object.hasOwn(source, "targetDysonOrbitId")) {
+    factoryInventoryId(
+      source.targetDysonOrbitId,
+      "native construction placement Dyson orbit",
+    );
+    if (buildingId !== "em_rail_ejector") {
+      throw protocolError("native construction placement Dyson orbit binding");
+    }
+  }
+  if (Object.hasOwn(source, "recipeId")) {
+    factoryInventoryId(source.recipeId, "native construction placement recipe");
+  }
+  if (Object.hasOwn(source, "fuelRemainingMj") && source.fuelRemainingMj !== 0) {
+    throw protocolError("native construction placement fuel template");
+  }
+  const hasStoredEnergy = Object.hasOwn(source, "storedEnergyMj");
+  const hasEnergyMode = Object.hasOwn(source, "energyMode");
+  if (hasStoredEnergy !== hasEnergyMode ||
+      hasStoredEnergy && (kind !== "power" || source.storedEnergyMj !== 0 ||
+        !["auto", "charge"].includes(source.energyMode))) {
+    throw protocolError("native construction placement energy template");
+  }
+
+  const result = {
+    id,
+    kind,
+    planetId,
+    interactionLocked: false,
+    buildingId,
+    powerGridId: "grid-a",
+    powerPriority: 2,
+    machineCount: 1,
+    minerCount: 0,
+    inputs: {},
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  };
+  for (const key of optionalKeys) {
+    if (Object.hasOwn(source, key)) result[key] = source[key];
+  }
+  return result;
+}
+
+function normalizeCoreConstructionPlacementContext(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "revision", "stateVersion",
+    "registryFingerprint", "request", "activePlanetId", "available",
+    "appendEntityIndex", "nextEntityId", "support", "placement", "limits",
+  ], "native construction placement context");
+  if (source.schemaVersion !== 1 ||
+      source.projectionType !== "construction-placement-context-v1" ||
+      source.source !== "native-core" || source.stateVersion !== 47) {
+    throw protocolError("native construction placement identity");
+  }
+  requireProjectionByteBudget(source, "native construction placement context");
+  const projectionContext = normalizeConstructionPlacementContext(
+    context,
+    "native construction placement request context",
+  );
+  const revision = safeInteger(source.revision, "native construction placement revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native construction placement registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint) {
+    throw protocolError("native construction placement revision binding");
+  }
+  const requestSource = exactObject(
+    source.request,
+    ["expectedRevision", "expectedRegistryFingerprint", "buildingId"],
+    "native construction placement request echo",
+  );
+  const requestBuildingId = factoryInventoryId(
+    requestSource.buildingId,
+    "native construction placement request building ID",
+  );
+  if (requestSource.expectedRevision !== projectionContext.expectedRevision ||
+      requestSource.expectedRegistryFingerprint !== projectionContext.expectedRegistryFingerprint ||
+      requestBuildingId !== projectionContext.buildingId) {
+    throw protocolError("native construction placement request binding");
+  }
+  const activePlanetId = factoryInventoryId(
+    source.activePlanetId,
+    "native construction placement active planet",
+  );
+  const available = safeInteger(source.available, "native construction placement available");
+  const appendEntityIndex = safeInteger(
+    source.appendEntityIndex,
+    "native construction placement append entity index",
+  );
+  const nextEntityId = logicalId(
+    source.nextEntityId,
+    "native construction placement next entity ID",
+    160,
+  );
+  const nextIdMatch = /^entity_(0|[1-9]\d*)$/.exec(nextEntityId);
+  const nextId = nextIdMatch ? Number(nextIdMatch[1]) : Number.NaN;
+  if (!Number.isSafeInteger(nextId)) {
+    throw protocolError("native construction placement next entity ID");
+  }
+  const supportSource = exactObject(
+    source.support,
+    ["supported", "reason"],
+    "native construction placement support",
+  );
+  const supported = boolean(
+    supportSource.supported,
+    "native construction placement support flag",
+  );
+  const unsupportedReasons = [
+    "unknown-building", "missing-construction-definition", "technology-locked",
+    "unsupported-building-kind", "unsupported-building-domain",
+    "unsupported-active-planet", "inventory-empty", "next-id-exhausted",
+  ];
+  const reason = supportSource.reason === null
+    ? null
+    : oneOf(
+        supportSource.reason,
+        unsupportedReasons,
+        "native construction placement unsupported reason",
+      );
+  if (supported !== (reason === null) ||
+      reason === "inventory-empty" && available !== 0 ||
+      reason === "next-id-exhausted" && nextId !== Number.MAX_SAFE_INTEGER) {
+    throw protocolError("native construction placement support binding");
+  }
+
+  let placement = null;
+  if (supported) {
+    const placementSource = exactObject(
+      source.placement,
+      ["remainingConstruction", "nextIdAfterPlacement", "entityTemplate"],
+      "native construction placement command context",
+    );
+    const remainingConstruction = safeInteger(
+      placementSource.remainingConstruction,
+      "native construction placement remaining inventory",
+    );
+    const nextIdAfterPlacement = safeInteger(
+      placementSource.nextIdAfterPlacement,
+      "native construction placement next ID after placement",
+    );
+    if (available < 1 || remainingConstruction !== available - 1 ||
+        nextId === Number.MAX_SAFE_INTEGER || nextIdAfterPlacement !== nextId + 1) {
+      throw protocolError("native construction placement material/ID binding");
+    }
+    placement = {
+      remainingConstruction,
+      nextIdAfterPlacement,
+      entityTemplate: normalizeConstructionPlacementEntityTemplate(
+        placementSource.entityTemplate,
+        {
+          nextEntityId,
+          activePlanetId,
+          buildingId: projectionContext.buildingId,
+        },
+      ),
+    };
+  } else if (source.placement !== null) {
+    throw protocolError("native construction placement unsupported payload");
+  }
+  const limitsSource = exactObject(
+    source.limits,
+    ["projectionBytes"],
+    "native construction placement limits",
+  );
+  if (limitsSource.projectionBytes !== MAX_NATIVE_PROJECTION_BYTES) {
+    throw protocolError("native construction placement limits");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "construction-placement-context-v1",
+    source: "native-core",
+    revision,
+    stateVersion: 47,
+    registryFingerprint,
+    request: {
+      expectedRevision: projectionContext.expectedRevision,
+      expectedRegistryFingerprint: projectionContext.expectedRegistryFingerprint,
+      buildingId: projectionContext.buildingId,
+    },
+    activePlanetId,
+    available,
+    appendEntityIndex,
+    nextEntityId,
+    support: { supported, reason },
+    placement,
+    limits: { projectionBytes: MAX_NATIVE_PROJECTION_BYTES },
   };
 }
 
@@ -4978,6 +5253,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreFactoryReadModelProjection: normalizeCoreFactoryReadModelProjection,
   coreFactoryInventoryProjection: normalizeCoreFactoryInventoryProjection,
   coreConstructionInventoryProjection: normalizeCoreConstructionInventoryProjection,
+  coreConstructionPlacementContext: normalizeCoreConstructionPlacementContext,
   coreStatisticsProjection: normalizeCoreStatisticsProjection,
   coreTechnologyProjection: normalizeCoreTechnologyProjection,
   coreRecipeWorkspaceProjection: normalizeCoreRecipeWorkspaceProjection,

@@ -212,6 +212,12 @@ pub enum ControlRequest {
         cursor: usize,
         limit: usize,
     },
+    CoreConstructionPlacementContext {
+        session_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        building_id: String,
+    },
     CoreStatisticsProjection {
         session_id: String,
         min_elapsed_seconds: f64,
@@ -822,6 +828,32 @@ mod tests {
                 assert_eq!(cursor, 0);
             }
             _ => panic!("construction inventory defaults decoded as the wrong variant"),
+        }
+    }
+
+    #[test]
+    fn construction_placement_context_protocol_preserves_exact_identity() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreConstructionPlacementContext",
+            "sessionId": "core-placement",
+            "expectedRevision": 47,
+            "expectedRegistryFingerprint": "builtin:test",
+            "buildingId": "MOD/custom-machine"
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreConstructionPlacementContext {
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                building_id,
+            } => {
+                assert_eq!(session_id, "core-placement");
+                assert_eq!(expected_revision, 47);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(building_id, "MOD/custom-machine");
+            }
+            _ => panic!("construction placement context decoded as the wrong variant"),
         }
     }
 

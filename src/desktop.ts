@@ -325,6 +325,8 @@ export interface DesktopBridge {
   getNativeCoreFactoryInventory?: (request: DesktopNativeCoreFactoryInventoryRequest) => Promise<DesktopNativeCoreFactoryInventoryResult>;
   /** Read-only, catalog-identity-bound top-level construction stock for the native thin UI. */
   getNativeCoreConstructionInventory?: (request: DesktopNativeCoreConstructionInventoryRequest) => Promise<DesktopNativeCoreConstructionInventoryResult>;
+  /** Same-revision Rust-derived ordinary single-building template; the renderer may add only a finite position. */
+  getNativeCoreConstructionPlacementContext?: (request: DesktopNativeCoreConstructionPlacementContextRequest) => Promise<DesktopNativeCoreConstructionPlacementContextResult>;
   getNativeCoreStatisticsProjection: (request: DesktopNativeCoreStatisticsProjectionRequest) => Promise<DesktopNativeCoreStatisticsProjectionResult>;
   getNativeCoreTechnologyProjection: (request: DesktopNativeCoreTechnologyProjectionRequest) => Promise<DesktopNativeCoreTechnologyProjectionResult>;
   /** Current Windows thin-UI host only; older shells fail closed instead of reading the Web GameState. */
@@ -1020,6 +1022,52 @@ export interface DesktopNativeCoreConstructionInventoryResult {
   truncated: boolean;
   limits: {
     rows: 256;
+    projectionBytes: 1048576;
+  };
+}
+
+export interface DesktopNativeCoreConstructionPlacementContextRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  buildingId: string;
+}
+
+export type DesktopNativeCoreConstructionPlacementUnsupportedReason =
+  | "unknown-building"
+  | "missing-construction-definition"
+  | "technology-locked"
+  | "unsupported-building-kind"
+  | "unsupported-building-domain"
+  | "unsupported-active-planet"
+  | "inventory-empty"
+  | "next-id-exhausted";
+
+export interface DesktopNativeCoreConstructionPlacementContextResult {
+  schemaVersion: 1;
+  projectionType: "construction-placement-context-v1";
+  source: "native-core";
+  revision: number;
+  stateVersion: 47;
+  registryFingerprint: string;
+  request: {
+    expectedRevision: number;
+    expectedRegistryFingerprint: string;
+    buildingId: string;
+  };
+  activePlanetId: string;
+  available: number;
+  appendEntityIndex: number;
+  nextEntityId: string;
+  support: {
+    supported: boolean;
+    reason: DesktopNativeCoreConstructionPlacementUnsupportedReason | null;
+  };
+  placement: null | {
+    remainingConstruction: number;
+    nextIdAfterPlacement: number;
+    entityTemplate: Record<string, unknown>;
+  };
+  limits: {
     projectionBytes: 1048576;
   };
 }
@@ -1929,6 +1977,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
     }
   | {
       sessionId: string;
+      projectionType: "construction-placement-context-v1";
+      payload: Omit<DesktopNativeCoreConstructionPlacementContextRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
       projectionType: "statistics-v1";
       payload: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">;
     }
@@ -1978,7 +2031,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "construction-placement-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
   payloadLength: number;
   sha256: string;
 }

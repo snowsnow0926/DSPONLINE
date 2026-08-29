@@ -660,6 +660,49 @@ fn technology_is_completed(state: &CoreState, technology_id: &str) -> bool {
         })
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OrdinaryPlacementUnsupportedReason {
+    UnknownBuilding,
+    MissingConstructionDefinition,
+    TechnologyLocked,
+    UnsupportedBuildingKind,
+    UnsupportedBuildingDomain,
+    UnsupportedActivePlanet,
+}
+
+impl OrdinaryPlacementUnsupportedReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownBuilding => "unknown-building",
+            Self::MissingConstructionDefinition => "missing-construction-definition",
+            Self::TechnologyLocked => "technology-locked",
+            Self::UnsupportedBuildingKind => "unsupported-building-kind",
+            Self::UnsupportedBuildingDomain => "unsupported-building-domain",
+            Self::UnsupportedActivePlanet => "unsupported-active-planet",
+        }
+    }
+
+    fn validation_message(self) -> &'static str {
+        match self {
+            Self::UnknownBuilding => {
+                "native player-authority placed building is not in the catalog"
+            }
+            Self::MissingConstructionDefinition => {
+                "native player-authority placed building has no construction definition"
+            }
+            Self::TechnologyLocked => {
+                "native player-authority placed building technology is locked"
+            }
+            Self::UnsupportedBuildingKind | Self::UnsupportedBuildingDomain => {
+                "native player-authority building placement domain is not covered"
+            }
+            Self::UnsupportedActivePlanet => {
+                "native player-authority placed entity planet is invalid"
+            }
+        }
+    }
+}
+
 fn recipe_building_base<'a>(building_id: &'a str, family: Option<&str>) -> &'a str {
     match family {
         Some("smelter") => "arc_smelter",
@@ -739,100 +782,69 @@ fn active_or_first_dyson_orbit(
         .transpose()
 }
 
-fn expected_ordinary_placement_entity(
+pub(crate) fn ordinary_placement_support_reason(
     state: &CoreState,
-    addition: &AddedRecord,
-) -> anyhow::Result<(String, u64)> {
-    if addition.index != state.entity_index.len() {
-        bail!("native player-authority building placement is not appended")
-    }
-    let entity = addition
-        .value
-        .as_object()
-        .ok_or_else(|| anyhow!("native player-authority placed entity is not an object"))?;
-    let building_id = entity
-        .get("buildingId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("native player-authority placed building ID is missing"))?;
-    let building =
-        state.catalog.buildings.get(building_id).ok_or_else(|| {
-            anyhow!("native player-authority placed building is not in the catalog")
-        })?;
-    let construction = state
-        .catalog
-        .constructions
-        .get(building_id)
-        .ok_or_else(|| {
-            anyhow!("native player-authority placed building has no construction definition")
-        })?;
+    building_id: &str,
+) -> anyhow::Result<Option<OrdinaryPlacementUnsupportedReason>> {
+    let Some(building) = state.catalog.buildings.get(building_id) else {
+        return Ok(Some(OrdinaryPlacementUnsupportedReason::UnknownBuilding));
+    };
+    let Some(construction) = state.catalog.constructions.get(building_id) else {
+        return Ok(Some(
+            OrdinaryPlacementUnsupportedReason::MissingConstructionDefinition,
+        ));
+    };
     if construction
         .required_tech_id
         .as_deref()
         .is_some_and(|technology_id| !technology_is_completed(state, technology_id))
     {
-        bail!("native player-authority placed building technology is locked")
+        return Ok(Some(OrdinaryPlacementUnsupportedReason::TechnologyLocked));
     }
     if matches!(building.kind.as_str(), "miner" | "station")
         || !matches!(
             building.kind.as_str(),
             "machine" | "power" | "storage" | "splitter"
         )
-        || UNSUPPORTED_ORDINARY_PLACEMENT_BUILDINGS.contains(&building_id)
     {
-        bail!("native player-authority building placement domain is not covered")
+        return Ok(Some(
+            OrdinaryPlacementUnsupportedReason::UnsupportedBuildingKind,
+        ));
     }
-    let machine_count = safe_json_integer(entity.get("machineCount"), "building stack")?;
-    // The current native catalog intentionally does not carry the optional
-    // MOD `stackLimit`. A single-unit placement is valid for every accepted
-    // catalog definition; larger placement batches stay fail-closed until
-    // that bound can be proved without changing the CORE protocol.
-    if machine_count != 1 {
-        bail!("native player-authority building placement must contain one unit")
-    }
-    let next_id = safe_json_integer(state.base_value().get("nextId"), "next entity ID")?;
-    if next_id == MAX_JAVASCRIPT_SAFE_INTEGER {
-        bail!("native player-authority next entity ID is exhausted")
-    }
-    let expected_id = format!("entity_{next_id}");
-    if entity.get("id").and_then(Value::as_str) != Some(expected_id.as_str()) {
-        bail!("native player-authority placed entity ID is not the next deterministic ID")
+    if UNSUPPORTED_ORDINARY_PLACEMENT_BUILDINGS.contains(&building_id) {
+        return Ok(Some(
+            OrdinaryPlacementUnsupportedReason::UnsupportedBuildingDomain,
+        ));
     }
     let active_planet_id = state
         .base_value()
         .get("activePlanetId")
         .and_then(Value::as_str)
-        .filter(|planet_id| {
-            state
-                .catalog
-                .planets
-                .iter()
-                .any(|planet| planet.id == *planet_id)
-        })
         .ok_or_else(|| anyhow!("native player-authority active planet is missing"))?;
-    if entity.get("planetId").and_then(Value::as_str) != Some(active_planet_id)
-        || !state
-            .catalog
-            .planets
-            .iter()
-            .any(|planet| planet.id == active_planet_id && planet.kind == "terrestrial")
-    {
-        bail!("native player-authority placed entity planet is invalid")
+    let active_planet = state
+        .catalog
+        .planets
+        .iter()
+        .find(|planet| planet.id == active_planet_id)
+        .ok_or_else(|| anyhow!("native player-authority active planet is missing"))?;
+    if active_planet.kind != "terrestrial" {
+        return Ok(Some(
+            OrdinaryPlacementUnsupportedReason::UnsupportedActivePlanet,
+        ));
     }
-    let position = entity
-        .get("position")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("native player-authority building position is invalid"))?;
-    let x = position
-        .get("x")
-        .and_then(Value::as_f64)
-        .filter(|value| value.is_finite())
-        .ok_or_else(|| anyhow!("native player-authority building X position is invalid"))?;
-    let y = position
-        .get("y")
-        .and_then(Value::as_f64)
-        .filter(|value| value.is_finite())
-        .ok_or_else(|| anyhow!("native player-authority building Y position is invalid"))?;
+    Ok(None)
+}
 
+pub(crate) fn canonical_ordinary_placement_entity_template(
+    state: &CoreState,
+    building_id: &str,
+    expected_id: &str,
+    active_planet_id: &str,
+) -> anyhow::Result<Map<String, Value>> {
+    let building =
+        state.catalog.buildings.get(building_id).ok_or_else(|| {
+            anyhow!("native player-authority placed building is not in the catalog")
+        })?;
     let entity_kind = match building.kind.as_str() {
         "power" => "power",
         "storage" => "storage",
@@ -844,12 +856,11 @@ fn expected_ordinary_placement_entity(
         ("id", Value::from(expected_id)),
         ("kind", Value::from(entity_kind)),
         ("planetId", Value::from(active_planet_id)),
-        ("position", serde_json::json!({ "x": x, "y": y })),
         ("interactionLocked", Value::from(false)),
         ("buildingId", Value::from(building_id)),
         ("powerGridId", Value::from("grid-a")),
         ("powerPriority", Value::from(2)),
-        ("machineCount", Value::from(machine_count)),
+        ("machineCount", Value::from(1)),
         ("minerCount", Value::from(0)),
         ("inputs", serde_json::json!({})),
         ("outputs", serde_json::json!({})),
@@ -901,6 +912,80 @@ fn expected_ordinary_placement_entity(
             }),
         );
     }
+    Ok(expected)
+}
+
+fn expected_ordinary_placement_entity(
+    state: &CoreState,
+    addition: &AddedRecord,
+) -> anyhow::Result<(String, u64)> {
+    if addition.index != state.entity_index.len() {
+        bail!("native player-authority building placement is not appended")
+    }
+    let entity = addition
+        .value
+        .as_object()
+        .ok_or_else(|| anyhow!("native player-authority placed entity is not an object"))?;
+    let building_id = entity
+        .get("buildingId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority placed building ID is missing"))?;
+    if let Some(reason) = ordinary_placement_support_reason(state, building_id)? {
+        bail!(reason.validation_message())
+    }
+    let machine_count = safe_json_integer(entity.get("machineCount"), "building stack")?;
+    // The current native catalog intentionally does not carry the optional
+    // MOD `stackLimit`. A single-unit placement is valid for every accepted
+    // catalog definition; larger placement batches stay fail-closed until
+    // that bound can be proved without changing the CORE protocol.
+    if machine_count != 1 {
+        bail!("native player-authority building placement must contain one unit")
+    }
+    let next_id = safe_json_integer(state.base_value().get("nextId"), "next entity ID")?;
+    if next_id == MAX_JAVASCRIPT_SAFE_INTEGER {
+        bail!("native player-authority next entity ID is exhausted")
+    }
+    let expected_id = format!("entity_{next_id}");
+    if entity.get("id").and_then(Value::as_str) != Some(expected_id.as_str()) {
+        bail!("native player-authority placed entity ID is not the next deterministic ID")
+    }
+    let active_planet_id = state
+        .base_value()
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .filter(|planet_id| {
+            state
+                .catalog
+                .planets
+                .iter()
+                .any(|planet| planet.id == *planet_id)
+        })
+        .ok_or_else(|| anyhow!("native player-authority active planet is missing"))?;
+    if entity.get("planetId").and_then(Value::as_str) != Some(active_planet_id) {
+        bail!("native player-authority placed entity planet is invalid")
+    }
+    let position = entity
+        .get("position")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority building position is invalid"))?;
+    let x = position
+        .get("x")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| anyhow!("native player-authority building X position is invalid"))?;
+    let y = position
+        .get("y")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| anyhow!("native player-authority building Y position is invalid"))?;
+
+    let mut expected = canonical_ordinary_placement_entity_template(
+        state,
+        building_id,
+        &expected_id,
+        active_planet_id,
+    )?;
+    expected.insert("position".to_owned(), serde_json::json!({ "x": x, "y": y }));
     if addition.value != Value::Object(expected) {
         bail!("native player-authority placed entity fields are not canonical")
     }

@@ -4421,6 +4421,7 @@ fn simulate_step(
     let mut renewable_power_facility_patches =
         renewable_power_facility_patches.into_iter().peekable();
     let mut produced_by_item = HashMap::<String, f64>::new();
+    let mut dyson_launch_runtime = None;
     let has_galactic_material_exporter = state.factory_topology.has_galactic_material_exporter;
     let research_entity_indexes = &state.factory_topology.research_entity_indices;
     let mut reset_research_progress_before_next_entity = false;
@@ -4731,7 +4732,14 @@ fn simulate_step(
                     );
                 }
                 consume_proliferator_points(state, object, recipe, sprayed_cycles)?;
-                crate::dyson::launch(state, base, object, &recipe.id, cycles)?;
+                crate::dyson::launch_deferred(
+                    &mut dyson_launch_runtime,
+                    state,
+                    base,
+                    object,
+                    &recipe.id,
+                    cycles,
+                )?;
                 for output in &recipe.outputs {
                     let accumulated_bonus = object
                         .get("proliferatorBonusProgress")
@@ -4868,6 +4876,7 @@ fn simulate_step(
             bail!("native local machine settlement outcome was not replayed");
         }
     }
+    crate::dyson::commit_deferred_launches(base, dyson_launch_runtime);
     profile_mark!("power-facilities-machines-miners");
 
     if reset_research_progress_before_next_entity {

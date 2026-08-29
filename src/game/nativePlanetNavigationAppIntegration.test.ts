@@ -86,7 +86,8 @@ describe("native planet navigation App integration", () => {
   it("fails closed instead of showing or mutating the old planet through uncovered UI", () => {
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeResourceRail[\s\S]*?frame=\{nativeFactoryInventoryFrame\}[\s\S]*?: <StableResourceRail/);
     expect(nativeRail).toMatch(/!frame \? <section[\s\S]*?data-native-authority-unavailable="tray-cargo-v1"/);
-    expect(nativeRail).toMatch(/丢弃与建筑拖放仍保持关闭/);
+    expect(nativeRail).toMatch(/可将普通建筑输入\/输出拖回托盘/);
+    expect(nativeRail).toMatch(/建筑间直拖与永久丢弃仍保持关闭/);
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeConstructionDock[\s\S]*?frame=\{nativeConstructionInventoryFrame\}[\s\S]*?: <StableConstructionDock/);
     expect(nativeConstructionDock).toMatch(/!frame[\s\S]*?data-native-authority-unavailable="construction-inventory-v1"/);
     expect(nativeConstructionDock).toMatch(/普通建筑可单栋放置/);

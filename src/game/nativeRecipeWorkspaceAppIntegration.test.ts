@@ -12,7 +12,7 @@ describe("native recipe workspace App integration", () => {
   it("never constructs the Web recipe model while a native authority session is bound", () => {
     expect(app).toMatch(/recipesOpen && !nativePlayerAuthorityBoundFrame[\s\S]*?createWebRecipeWorkspaceReadModel\(game/);
     expect(app).toMatch(/const recipeWorkspaceReadModel = nativePlayerAuthorityBoundFrame[\s\S]*?nativeRecipeWorkspaceReadModel[\s\S]*?: webRecipeWorkspaceReadModel/);
-    expect(app).toMatch(/<RecipeWorkspace open readOnly=\{nativePlayerAuthorityOwnsRuntime\} readModel=\{recipeWorkspaceReadModel\}[\s\S]*?onReadRequest=\{updateRecipeWorkspaceSelector\}/);
+    expect(app).toMatch(/<RecipeWorkspace open readOnly=\{nativePlayerAuthorityOwnsRuntime && \(!nativeRecipeFocusReadModel \|\| nativePlayerAuthorityCommandPending\)\} readModel=\{recipeWorkspaceReadModel\}[\s\S]*?onReadRequest=\{updateRecipeWorkspaceSelector\}/);
     expect(app).not.toMatch(/<RecipeWorkspace[^>]*game=\{game\}/);
   });
 

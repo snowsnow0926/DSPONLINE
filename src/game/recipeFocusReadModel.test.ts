@@ -119,7 +119,7 @@ describe("recipe focus thin read model", () => {
     const panel = readFileSync(resolve("src/components/RecipeFocusPanel.tsx"), "utf8");
 
     expect(RECIPE_FOCUS_NATIVE_BASE_FIELDS).toEqual(["recipeFocus"]);
-    expect(app).toMatch(/baseFields:\s*\[\.\.\.RECIPE_FOCUS_NATIVE_BASE_FIELDS\]/);
+    expect(app).toMatch(/baseFields:\s*\[\.\.\.RECIPE_FOCUS_NATIVE_BASE_FIELDS, \.\.\.PLANET_VIEWPORT_NATIVE_BASE_FIELDS\]/);
     expect(app).toMatch(/selectNativeRecipeFocusReadModel\(nativeFactoryThinViewSnapshot/);
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime\s*\?\s*nativeRecipeFocusReadModel\s*:\s*webRecipeFocusReadModel/);
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? null : createWebRecipeFocusReadModel\(game\)/);

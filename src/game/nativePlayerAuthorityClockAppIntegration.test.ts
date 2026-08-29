@@ -11,7 +11,7 @@ describe("main-owned authority clock App wiring", () => {
     expect(app).toMatch(/useSyncExternalStore\([\s\S]*?nativePlayerAuthorityClock\.subscribe/);
     expect(app).toMatch(/nativeCoreProjectionSessionId = windowsNativeCoreBetaControllerRef\.current\.snapshot\(\)\.authority\.sessionId/);
     expect(app).toMatch(/current\.currentFrame === null[\s\S]*?nativePlayerAuthorityClock\.bindSession\(nativeCoreProjectionSessionId\)/);
-    expect(app).toMatch(/nativePlayerAuthoritySessionId = nativePlayerAuthorityClockSnapshot\.expectedSessionId \?\?[\s\S]*?nativeCoreProjectionSessionId/);
+    expect(app).toMatch(/nativePlayerAuthoritySessionId = nativePlayerAuthorityClockSnapshot\.currentFrame\?\.schemaVersion === 2 &&[\s\S]*?nativePlayerAuthorityClockSnapshot\.expectedSessionId === null[\s\S]*?\? null[\s\S]*?: nativePlayerAuthorityClockSnapshot\.expectedSessionId \?\? nativeCoreProjectionSessionId/);
     expect(app).toMatch(/selectActiveNativePlayerAuthorityFrame\([\s\S]*?nativePlayerAuthoritySessionId/);
     expect(app).toMatch(/selectBoundNativePlayerAuthorityFrame\([\s\S]*?nativePlayerAuthoritySessionId/);
     expect(app).toMatch(/selectNativePlayerAuthorityMacroStatus\([\s\S]*?nativePlayerAuthorityClockSnapshot,[\s\S]*?nativePlayerAuthoritySessionId/);

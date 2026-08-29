@@ -262,9 +262,10 @@ function validateStartupRecoveryReceipt(value, ownerId) {
     "macroSessionId", "recoveredMacroOperationId", "macroAlgorithmVersion",
     "macroSimulationMilliseconds", "macroWallMilliseconds",
   ];
+  const recoveryKeys = ["entryCheckpoint"];
   if (!isRecord(value) || baseKeys.some((key) => !Object.hasOwn(value, key)) ||
       Reflect.ownKeys(value).some((key) => typeof key !== "string" ||
-        !baseKeys.includes(key) && !macroKeys.includes(key)) ||
+        !baseKeys.includes(key) && !macroKeys.includes(key) && !recoveryKeys.includes(key)) ||
       value.schemaVersion !== 1 ||
       value.kind !== "native-core-player-authority-startup-recovery-v1" ||
       value.ownerId !== ownerId) {
@@ -278,6 +279,9 @@ function validateStartupRecoveryReceipt(value, ownerId) {
   requireLogicalId(value.registryFingerprint, "startup recovery registryFingerprint");
   const revision = requireSafeInteger(value.revision, 0, "startup recovery revision");
   const checkpoint = normalizeCheckpoint(value.checkpoint, "startup recovery checkpoint");
+  const entryCheckpoint = Object.hasOwn(value, "entryCheckpoint")
+    ? normalizeCheckpoint(value.entryCheckpoint, "startup recovery entry checkpoint")
+    : null;
   const acknowledgedSequence = requireSafeInteger(
     value.acknowledgedSequence,
     0,
@@ -294,7 +298,8 @@ function validateStartupRecoveryReceipt(value, ownerId) {
     TICK_MILLISECONDS,
     "startup recovery nextDeadlineMs",
   );
-  if (checkpoint.revision !== revision || nextSequence !== acknowledgedSequence + 1 ||
+  if (checkpoint.revision !== revision || entryCheckpoint && entryCheckpoint.revision > checkpoint.revision ||
+      nextSequence !== acknowledgedSequence + 1 ||
       nextDeadlineMs !== settledDeadlineMs + TICK_MILLISECONDS ||
       value.summary?.registryFingerprint !== value.registryFingerprint) {
     throw runtimeError(
@@ -379,7 +384,17 @@ function validateStartupRecoveryReceipt(value, ownerId) {
       }),
     });
   }
-  return { sessionId, runId, revision, checkpoint, nextSequence, nextDeadlineMs, lastCommand, macroSession };
+  return {
+    sessionId,
+    runId,
+    revision,
+    checkpoint,
+    ...(entryCheckpoint ? { entryCheckpoint } : {}),
+    nextSequence,
+    nextDeadlineMs,
+    lastCommand,
+    macroSession,
+  };
 }
 
 function normalizeMacroAdvanceRequest(value) {
@@ -574,6 +589,11 @@ class NativePlayerAuthorityRuntime {
     this.commandQueue = [];
     this.activeCommand = null;
     this.pendingMacroAction = null;
+    // A main-owned checkpoint/export read holds the scheduler at an already
+    // acknowledged durable boundary. It is intentionally separate from the
+    // mutation `inFlight` promise so renderer clock frames never advertise a
+    // synthetic gameplay operation.
+    this.persistenceBoundaryInFlight = false;
     this.shutdownRequested = false;
     this.lastError = null;
   }
@@ -827,9 +847,61 @@ class NativePlayerAuthorityRuntime {
     return promise;
   }
 
+  /**
+   * Runs one main-process persistence read against an immutable, already ACKed
+   * player-authority boundary. Every player-authority tick/command publishes
+   * its checkpoint before the Rust lease ACK, so a manual save must validate
+   * and reuse that checkpoint rather than enter the generic checkpoint path
+   * (which is correctly fenced while this lease exists).
+   */
+  async withSettledPersistenceBoundary(operation) {
+    if (typeof operation !== "function") {
+      throw new TypeError("native player-authority persistence operation is invalid");
+    }
+    if (this.phase !== "active" || !this.context || this.inFlight ||
+        this.currentOperation !== null || this.persistenceBoundaryInFlight ||
+        this.context.macroSession !== null) {
+      throw runtimeError(
+        "native player-authority persistence requires a settled active boundary",
+        "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+      );
+    }
+    if (this.timer !== null) this.cancel(this.timer);
+    this.timer = null;
+    this.persistenceBoundaryInFlight = true;
+    const context = this.context;
+    const boundary = Object.freeze({
+      sessionId: context.sessionId,
+      runId: context.runId,
+      revision: context.revision,
+      checkpoint: Object.freeze({ ...context.checkpoint }),
+      acknowledgedSequence: context.nextSequence - 1,
+      settledDeadlineMs: context.nextDeadlineMs - TICK_MILLISECONDS,
+    });
+    try {
+      const result = await operation(boundary);
+      if (this.shutdownRequested || this.phase !== "active" || this.context !== context ||
+          context.sessionId !== boundary.sessionId || context.runId !== boundary.runId ||
+          context.revision !== boundary.revision ||
+          !sameCheckpoint(context.checkpoint, boundary.checkpoint) ||
+          context.nextSequence - 1 !== boundary.acknowledgedSequence ||
+          context.nextDeadlineMs - TICK_MILLISECONDS !== boundary.settledDeadlineMs ||
+          context.macroSession !== null || this.inFlight || this.currentOperation !== null) {
+        throw runtimeError(
+          "native player-authority persistence boundary changed before completion",
+          "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_STALE",
+        );
+      }
+      return result;
+    } finally {
+      this.persistenceBoundaryInFlight = false;
+      if (!this.shutdownRequested && this.phase === "active") this.pump();
+    }
+  }
+
   commitMacroAdvance(rawRequest) {
     if (!this.context || !["active", "macro-active", "macro-uncertain"].includes(this.phase) ||
-        this.inFlight || this.activeCommand || this.commandQueue.length > 0 ||
+        this.inFlight || this.persistenceBoundaryInFlight || this.activeCommand || this.commandQueue.length > 0 ||
         typeof this.registry.commitPlayerAuthorityMacroAdvance !== "function") {
       return Promise.reject(runtimeError("native player-authority runtime cannot start a macro advance"));
     }
@@ -1017,7 +1089,7 @@ class NativePlayerAuthorityRuntime {
   }
 
   pump() {
-    if (this.phase !== "active" || !this.context || this.inFlight) return;
+    if (this.phase !== "active" || !this.context || this.inFlight || this.persistenceBoundaryInFlight) return;
     if (!this.activeCommand && this.commandQueue.length > 0) {
       this.activeCommand = this.commandQueue.shift();
     }
@@ -1031,7 +1103,7 @@ class NativePlayerAuthorityRuntime {
   commitCurrentCommand() {
     const context = this.context;
     const entry = this.activeCommand;
-    if (!context || !entry || this.inFlight) return this.inFlight;
+    if (!context || !entry || this.inFlight || this.persistenceBoundaryInFlight) return this.inFlight;
     this.currentOperation = "command";
     let resolveInFlight;
     const completion = new Promise((resolve) => {
@@ -1108,7 +1180,7 @@ class NativePlayerAuthorityRuntime {
 
   armTimer() {
     if (this.phase !== "active" || !this.context || this.timer !== null || this.inFlight ||
-        this.activeCommand || this.commandQueue.length > 0) return;
+        this.persistenceBoundaryInFlight || this.activeCommand || this.commandQueue.length > 0) return;
     const now = this.now();
     if (!Number.isFinite(now)) {
       this.transition("faulted", runtimeError("native player-authority clock is invalid"));
@@ -1127,6 +1199,7 @@ class NativePlayerAuthorityRuntime {
   settleDue() {
     if (this.phase !== "active" || !this.context) return Promise.resolve(this.snapshot());
     if (this.inFlight) return this.inFlight;
+    if (this.persistenceBoundaryInFlight) return Promise.resolve(this.snapshot());
     if (this.now() < this.context.nextDeadlineMs) {
       this.armTimer();
       return Promise.resolve(this.snapshot());
@@ -1161,6 +1234,12 @@ class NativePlayerAuthorityRuntime {
   commitCurrentSequence() {
     const context = this.context;
     if (!context) return Promise.reject(runtimeError("native player-authority runtime is not active"));
+    if (this.persistenceBoundaryInFlight) {
+      return Promise.reject(runtimeError(
+        "native player-authority persistence boundary is active",
+        "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+      ));
+    }
     this.currentOperation = "tick";
     let invocation;
     try {

@@ -1,32 +1,36 @@
-import type {
-  DesktopNativeCoreCommitOperationResult,
-  DesktopNativeCoreFactoryReadModelRequest,
-  DesktopNativeCoreFactoryReadModelResult,
-  DesktopNativeCoreProjectionResult,
-  DesktopNativeCoreStatisticsProjectionRequest,
-  DesktopNativeCoreStatisticsProjectionResult,
-  DesktopNativeCoreStarMapOverviewProjectionRequest,
-  DesktopNativeCoreStarMapOverviewProjectionResult,
-  DesktopNativeCoreStellarIndustryProjectionRequest,
-  DesktopNativeCoreStellarIndustryProjectionResult,
-  DesktopNativeCoreStellarIndustryV2ProjectionRequest,
-  DesktopNativeCoreStellarIndustryV2ProjectionResult,
-  DesktopNativeCoreTechnologyProjectionRequest,
-  DesktopNativeCoreTechnologyProjectionResult,
-  DesktopNativeCoreViewportProjectionV2Request,
-  DesktopNativeCoreViewportProjectionV2Result,
-  DesktopNativeCoreSummary,
-  DesktopNativeSaveCommitResult,
-  DesktopNativeCoreExportResult,
+import {
+  getDesktopBridge,
+  type DesktopNativeCoreCommitOperationResult,
+  type DesktopNativeCoreFactoryReadModelRequest,
+  type DesktopNativeCoreFactoryReadModelResult,
+  type DesktopNativeCoreProjectionResult,
+  type DesktopNativeCoreStatisticsProjectionRequest,
+  type DesktopNativeCoreStatisticsProjectionResult,
+  type DesktopNativeCoreStarMapOverviewProjectionRequest,
+  type DesktopNativeCoreStarMapOverviewProjectionResult,
+  type DesktopNativeCoreStellarIndustryProjectionRequest,
+  type DesktopNativeCoreStellarIndustryProjectionResult,
+  type DesktopNativeCoreStellarIndustryV2ProjectionRequest,
+  type DesktopNativeCoreStellarIndustryV2ProjectionResult,
+  type DesktopNativeCoreTechnologyProjectionRequest,
+  type DesktopNativeCoreTechnologyProjectionResult,
+  type DesktopNativeCoreViewportProjectionV2Request,
+  type DesktopNativeCoreViewportProjectionV2Result,
+  type DesktopNativeCoreSummary,
+  type DesktopNativeSaveCommitResult,
+  type DesktopNativeCoreExportResult,
+  type DesktopNativePlayerAuthorityCheckpointResult,
 } from "../desktop";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
 import {
+  attachWindowsNativeCoreMainOwnedAuthority,
   openWindowsNativeCoreShadow,
   type NativeCoreAdvanceMode,
   type WindowsNativeCoreShadow,
 } from "./nativeCore";
 import {
   beginNativeCoreShadow,
+  bindMainOwnedNativeCoreAuthority,
   createNativeCoreAuthorityState,
   fallbackNativeCoreToJavaScript,
   handleNativeCoreExit,
@@ -172,6 +176,7 @@ export class WindowsNativeCoreBetaController {
   private lastSummary: DesktopNativeCoreSummary | null = null;
   private recoveryRootHash: string | null = null;
   private operationInFlight = false;
+  private mainOwnedPlayerAuthority = false;
 
   constructor(
     private readonly opener: NativeCoreShadowOpener = openWindowsNativeCoreShadow,
@@ -394,6 +399,47 @@ export class WindowsNativeCoreBetaController {
     throw new Error("原生权威尚未获得主进程 Rust 持久租约，已保持 JavaScript 权威");
   }
 
+  /**
+   * Completes only the renderer-side binding after a trusted main challenge
+   * proves that Rust is already the active owner. Calling this method cannot
+   * prepare/activate a lease or transfer a host session.
+   */
+  bindMainOwnedPlayerAuthority(input: {
+    sessionId: string;
+    runId: string;
+    checkpoint: { generation: number; rootHash: string; revision: number };
+    summary: DesktopNativeCoreSummary;
+    source: "handoff" | "startup-recovery";
+  }): NativeCoreBetaControllerSnapshot {
+    if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(input.runId) ||
+      input.summary.stateVersion !== 47 || input.summary.mode !== "normal" || input.summary.paused ||
+      input.summary.coverage.authorityEligible !== true ||
+      input.summary.revision !== input.checkpoint.revision) {
+      throw new Error("主进程原生权威完成回执无效");
+    }
+    if (input.source === "startup-recovery" && this.session) {
+      throw new Error("启动恢复不能替换已有原生影子会话");
+    }
+    if (input.source === "handoff" && (!this.session || this.session.sessionId !== input.sessionId)) {
+      throw new Error("原生权威完成回执不属于当前影子会话");
+    }
+    const proof = proofFromSummary(input.summary, input.checkpoint.rootHash);
+    const nextAuthorityState = bindMainOwnedNativeCoreAuthority(this.authorityState, {
+      sessionId: input.sessionId,
+      proof,
+      authorityEligibleCoverage: true,
+      source: input.source,
+    });
+    if (input.source === "startup-recovery") {
+      this.session = attachWindowsNativeCoreMainOwnedAuthority(input.sessionId, input.checkpoint);
+    }
+    this.authorityState = nextAuthorityState;
+    this.recoveryRootHash = input.checkpoint.rootHash;
+    this.lastSummary = input.summary;
+    this.mainOwnedPlayerAuthority = true;
+    return this.snapshot();
+  }
+
   async commitAuthoritativeOperation(input: {
     commandId: string;
     baseRevision: number;
@@ -445,7 +491,16 @@ export class WindowsNativeCoreBetaController {
       throw new Error("只有原生权威可以创建检查点");
     }
     try {
-      const result = await this.session.createCheckpoint(savedAtMs);
+      const result: DesktopNativePlayerAuthorityCheckpointResult |
+        Awaited<ReturnType<WindowsNativeCoreShadow["createCheckpoint"]>> = this.mainOwnedPlayerAuthority
+          ? await (() => {
+            const desktop = getDesktopBridge();
+            if (!desktop?.checkpointNativePlayerAuthority) {
+              throw new Error("主进程原生权威检查点桥接不可用");
+            }
+            return desktop.checkpointNativePlayerAuthority();
+          })()
+          : await this.session.createCheckpoint(savedAtMs);
       const nativeProof = proofFromSummary(result.summary, result.checkpoint.rootHash);
       this.recoveryRootHash = result.checkpoint.rootHash;
       this.lastSummary = result.summary;
@@ -470,8 +525,26 @@ export class WindowsNativeCoreBetaController {
       throw new Error("只有原生权威可以直接流式导出 v47 存档");
     }
     try {
-      const result = await this.session.exportV47(exportId, suggestedName, savedAtMs);
-      if (!this.lastSummary || result.result.revision !== this.lastSummary.revision) {
+      const result = this.mainOwnedPlayerAuthority
+        ? await (() => {
+          const desktop = getDesktopBridge();
+          if (!desktop?.exportNativePlayerAuthorityV47) {
+            throw new Error("主进程原生权威导出桥接不可用");
+          }
+          return desktop.exportNativePlayerAuthorityV47({
+            exportId,
+            savedAtMs,
+            ...(suggestedName ? { suggestedName } : {}),
+          });
+        })()
+        : await this.session.exportV47(exportId, suggestedName, savedAtMs);
+      // The main-owned clock can advance between renderer projections and the
+      // frozen export boundary. The dedicated main broker proves that export
+      // belongs to the current lease, so forward progress is valid; a
+      // renderer-owned shadow must still match its exact cached revision.
+      if (!this.lastSummary || (this.mainOwnedPlayerAuthority
+        ? result.result.revision < this.lastSummary.revision
+        : result.result.revision !== this.lastSummary.revision)) {
         throw new Error("原生导出 revision 与当前权威状态不一致");
       }
       return result;
@@ -840,6 +913,8 @@ export class WindowsNativeCoreBetaController {
   private async closeSession(): Promise<void> {
     const current = this.session;
     this.session = null;
-    if (current) await current.close().catch(() => undefined);
+    const mainOwned = this.mainOwnedPlayerAuthority;
+    this.mainOwnedPlayerAuthority = false;
+    if (current && !mainOwned) await current.close().catch(() => undefined);
   }
 }

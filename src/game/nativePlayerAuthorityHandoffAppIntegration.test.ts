@@ -24,19 +24,24 @@ describe("renderer side of the native player-authority handoff", () => {
     expect(DESKTOP_TYPES_SOURCE).toContain("onNativePlayerAuthorityHandoffRequest?:");
     expect(DESKTOP_TYPES_SOURCE).not.toMatch(/startNativePlayerAuthorityHandoff|transferNativePlayerAuthorityOwner/);
     expect(handoffEffect).toContain("desktopBridge.onNativePlayerAuthorityHandoffRequest(handleRequest)");
-    expect(APP_SOURCE).toMatch(/if \(nativeAuthorityHandoffRef\.current\) \{[\s\S]*reason: "native-authority-handoff-quiescing"/);
+    expect(APP_SOURCE).toMatch(/nativeAuthorityHandoffRef\.current\.phase !== "native-active"[\s\S]*reason: "native-authority-handoff-quiescing"/);
+    expect(DESKTOP_TYPES_SOURCE).toMatch(/checkpointNativePlayerAuthority\?: \(\) =>/);
+    expect(DESKTOP_TYPES_SOURCE).toMatch(/sessionId\?: never;[\s\S]*runId\?: never;/);
   });
 
   it("admits prepare only from a quiet exact boundary before invalidating legacy continuations", () => {
-    const busyCheck = handoffEffect.indexOf("const initialCounts = inFlightCounts();");
-    const fenceChange = handoffEffect.indexOf('reconcileLegacyAuthorityAsyncLeaseFence(\n          legacyAuthorityAsyncLeaseFenceRef.current,\n          "native"');
-    const workerStop = handoffEffect.indexOf("stopLegacySimulationWorker();");
-    const drain = handoffEffect.indexOf("await waitUntilDrained(request.timeoutMs, shadowQueue)");
+    const prepare = handoffEffect.slice(handoffEffect.indexOf(
+      'request.kind === "native-player-authority-quiescence-prepare-v1"',
+    ));
+    const busyCheck = prepare.indexOf("const initialCounts = inFlightCounts();");
+    const fenceChange = prepare.indexOf('reconcileLegacyAuthorityAsyncLeaseFence(\n          legacyAuthorityAsyncLeaseFenceRef.current,\n          "native"');
+    const workerStop = prepare.indexOf("stopLegacySimulationWorker();");
+    const drain = prepare.indexOf("await waitUntilDrained(request.timeoutMs, shadowQueue)");
     expect(busyCheck).toBeGreaterThanOrEqual(0);
     expect(fenceChange).toBeGreaterThan(busyCheck);
     expect(workerStop).toBeGreaterThan(fenceChange);
     expect(drain).toBeGreaterThan(workerStop);
-    expect(handoffEffect).toMatch(/initialCounts\.renderer !== 0 \|\| initialCounts\.worker !== 0/);
+    expect(prepare).toMatch(/initialCounts\.renderer !== 0 \|\| initialCounts\.worker !== 0/);
     expect(handoffEffect).toMatch(/renderer: Number\(verifiedPrimarySaveInFlightDepthRef\.current > 0\)[\s\S]*cloudAutoSyncInFlightRef\.current/);
     expect(handoffEffect).toMatch(/worker: Number\(Boolean\(simulationSubmissionRef\.current\)\)[\s\S]*simulationAuthorityReplacementRef\.current/);
   });
@@ -70,5 +75,53 @@ describe("renderer side of the native player-authority handoff", () => {
     expect(releaseBranch.indexOf("resumeJavaScriptAfterPreTransferBlock();")).toBeGreaterThan(
       releaseBranch.indexOf("await releaseLocalSaveNativeAuthorityHandoff({"),
     );
+  });
+
+  it("formally completes only after the trusted clock, fence, revision, coverage, and controller all match", () => {
+    const completion = handoffEffect.slice(handoffEffect.indexOf(
+      'request.kind === "native-player-authority-handoff-complete-v1"',
+    ));
+    const refresh = completion.indexOf("await nativePlayerAuthorityClock.refresh()");
+    const active = completion.indexOf("selectActiveNativePlayerAuthorityFrame(");
+    const counts = completion.indexOf("const counts = inFlightCounts();");
+    const bind = completion.indexOf("controller.bindMainOwnedPlayerAuthority({");
+    const nativeActive = completion.indexOf('current.phase = "native-active";');
+    expect(refresh).toBeGreaterThanOrEqual(0);
+    expect(active).toBeGreaterThan(refresh);
+    expect(counts).toBeGreaterThan(active);
+    expect(bind).toBeGreaterThan(counts);
+    expect(nativeActive).toBeGreaterThan(bind);
+    expect(completion).toMatch(/sameCheckpoint\(request\.checkpoint, current\.checkpoint\)/);
+    expect(completion).toMatch(/sameFence\(request\.nativeWriterFence, current\.receipt\.nativeWriterFence\)/);
+    expect(completion).toMatch(/request\.summary\.coverage\.authorityEligible !== true/);
+    expect(completion).toMatch(/counts\.renderer !== 0 \|\| counts\.worker !== 0/);
+  });
+
+  it("reconciles startup active/absent/unknown only after stopping and draining legacy work", () => {
+    const startup = handoffEffect.slice(
+      handoffEffect.indexOf('request.kind === "native-player-authority-startup-reconcile-v1"'),
+      handoffEffect.indexOf('request.kind === "native-player-authority-quiescence-prepare-v1"'),
+    );
+    const invalidate = startup.indexOf("legacyAuthorityAsyncLeaseFenceRef.current = reconcileLegacyAuthorityAsyncLeaseFence(");
+    const workerStop = startup.indexOf("stopLegacySimulationWorker();");
+    const drain = startup.indexOf("await waitUntilDrained(request.timeoutMs, shadowQueue)");
+    const inspect = startup.indexOf("await inspectLocalSaveNativeAuthorityHandoff()");
+    expect(invalidate).toBeGreaterThanOrEqual(0);
+    expect(workerStop).toBeGreaterThan(invalidate);
+    expect(drain).toBeGreaterThan(workerStop);
+    expect(inspect).toBeGreaterThan(drain);
+    expect(startup).toContain("checkpoint: request.rustLease.entryCheckpoint");
+    expect(startup).toContain("reconcileLocalSaveNativeAuthorityHandoff({");
+    expect(startup).toContain('decision.action === "release-browser-fence"');
+    expect(startup).toContain('action: "fail-closed"');
+    expect(startup).toContain('source: "startup-recovery"');
+  });
+
+  it("makes prepare and pre-transfer cancel idempotent without making post-transfer release implicit", () => {
+    expect(handoffEffect).toMatch(/sameIdentity\(request, existing\) && existing\.phase === "prepared"/);
+    expect(handoffEffect).toContain("lastCancelledNativeAuthorityHandoffRef.current");
+    expect(handoffEffect).toContain("classifyNativePlayerAuthorityPreTransferCancel({");
+    expect(handoffEffect).toContain('disposition === "already-cancelled"');
+    expect(handoffEffect).toContain('disposition === "reject"');
   });
 });

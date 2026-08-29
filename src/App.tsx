@@ -393,6 +393,7 @@ import {
   getLocalSaveRawCacheSize,
   getLocalSaveWriterStatus,
   getPrimaryLocalSaveRecoveryIdentity,
+  inspectLocalSaveNativeAuthorityHandoff,
   listLocalSaveCatalogs,
   readLocalSavePayload,
   releaseLocalSaveNativeAuthorityHandoff,
@@ -403,7 +404,12 @@ import type {
   LocalSaveNativeAuthorityLeaseReceipt,
   LocalSaveWriterFence,
 } from "./game/localSaveAuthorityLease";
+import {
+  isLocalSaveNativeAuthorityLease,
+  reconcileLocalSaveNativeAuthorityHandoff,
+} from "./game/localSaveAuthorityLease";
 import { resolveLargeSaveAutosavePolicy, type LargeSaveAutosavePolicy } from "./game/largeSaveAutosavePolicy";
+import { classifyNativePlayerAuthorityPreTransferCancel } from "./game/nativePlayerAuthorityRendererHandoff";
 import { clearChunkedSaveJournal, prepareChunkedSaveJournalContext, type PersistChunkedSaveResult } from "./game/chunkedSaveJournal";
 import { persistChunkedSaveJournalFromTransfer, type ChunkedSaveTransferFailure } from "./game/chunkedSaveJournalClient";
 import { appendWindowsNativeWal, beginWindowsNativeSave, type NativeSaveTransaction } from "./game/nativeSave";
@@ -2038,11 +2044,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     handoffId: string;
     sessionId: string;
     runId: string;
-    phase: "prepared" | "browser-fenced";
+    phase: "prepared" | "browser-fenced" | "native-active";
     publicWriterFence: LocalSaveWriterFence;
     settledDeadlineMs: number;
     checkpoint: LocalSaveNativeAuthorityCheckpoint | null;
     receipt: LocalSaveNativeAuthorityLeaseReceipt | null;
+  } | null>(null);
+  const lastCancelledNativeAuthorityHandoffRef = useRef<{
+    handoffId: string;
+    sessionId: string;
+    runId: string;
   } | null>(null);
   // Memory/lifecycle callbacks are intentionally stable and may run between
   // React renders. Keep the latest fail-closed ownership decision available
@@ -2148,8 +2159,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     nativePlayerAuthorityClock.start();
     return () => nativePlayerAuthorityClock.stop();
   }, [nativePlayerAuthorityClock]);
-  const nativePlayerAuthoritySessionId = nativePlayerAuthorityClockSnapshot.expectedSessionId ??
-    nativeCoreProjectionSessionId;
+  const nativePlayerAuthoritySessionId = nativePlayerAuthorityClockSnapshot.currentFrame?.schemaVersion === 2 &&
+    nativePlayerAuthorityClockSnapshot.expectedSessionId === null
+    ? null
+    : nativePlayerAuthorityClockSnapshot.expectedSessionId ?? nativeCoreProjectionSessionId;
   const nativePlayerAuthorityBoundFrame = selectBoundNativePlayerAuthorityFrame(
     nativePlayerAuthorityClockSnapshot,
     nativePlayerAuthoritySessionId,
@@ -2191,7 +2204,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const readNativeAuthorityRuntimeObservation = useCallback((): NativeAuthorityRuntimeObservation => {
     const controllerSnapshot = windowsNativeCoreBetaControllerRef.current?.snapshot();
     const clockSnapshot = nativePlayerAuthorityClock.getSnapshot();
-    const sessionId = controllerSnapshot?.authority.sessionId ?? clockSnapshot.expectedSessionId;
+    const sessionId = clockSnapshot.currentFrame?.schemaVersion === 2 && clockSnapshot.expectedSessionId === null
+      ? null
+      : controllerSnapshot?.authority.sessionId ?? clockSnapshot.expectedSessionId;
     const macro = selectNativePlayerAuthorityMacroStatus(clockSnapshot, sessionId);
     if (macro) return { kind: "macro", sessionId, revision: macro.revision };
     const active = selectActiveNativePlayerAuthorityFrame(clockSnapshot, sessionId);
@@ -2201,7 +2216,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     return { kind: "inactive", sessionId: null, revision: null };
   }, [nativePlayerAuthorityClock]);
   const readNativeAuthorityPersistenceBoundary = useCallback((): NativeAuthorityPersistenceBoundary => {
-    if (nativeAuthorityHandoffRef.current) {
+    if (nativeAuthorityHandoffRef.current && nativeAuthorityHandoffRef.current.phase !== "native-active") {
       return {
         protected: true,
         runtimeKind: "bound-paused",
@@ -7092,7 +7107,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const sameIdentity = (
       request: DesktopNativePlayerAuthorityHandoffRequest,
       current: NonNullable<typeof nativeAuthorityHandoffRef.current>,
-    ) => request.handoffId === current.handoffId && request.sessionId === current.sessionId &&
+    ) => "sessionId" in request && "runId" in request &&
+      request.handoffId === current.handoffId && request.sessionId === current.sessionId &&
       request.runId === current.runId;
     const sameFence = (left: LocalSaveWriterFence, right: LocalSaveWriterFence) =>
       left.ownerId === right.ownerId && left.fencingToken === right.fencingToken;
@@ -7101,9 +7117,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
       right: LocalSaveNativeAuthorityCheckpoint,
     ) => left.generation === right.generation && left.rootHash === right.rootHash &&
       left.revision === right.revision;
-    const resumeJavaScriptAfterPreTransferBlock = () => {
+    const resumeJavaScriptAfterPreTransferBlock = (cancelledIdentity?: {
+      handoffId: string;
+      sessionId: string;
+      runId: string;
+    }) => {
       const nativeStillOwns = readNativeAuthorityRuntimeObservation().kind !== "inactive";
       if (nativeStillOwns) return;
+      if (cancelledIdentity) lastCancelledNativeAuthorityHandoffRef.current = { ...cancelledIdentity };
       nativeAuthorityHandoffRef.current = null;
       nativeAuthorityPersistenceProtectedRef.current = false;
       legacyAuthorityAsyncLeaseFenceRef.current = reconcileLegacyAuthorityAsyncLeaseFence(
@@ -7178,8 +7199,167 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     const handleRequest = async (
       request: DesktopNativePlayerAuthorityHandoffRequest,
     ): Promise<DesktopNativePlayerAuthorityHandoffResult> => {
+      if (request.kind === "native-player-authority-startup-reconcile-v1") {
+        // The trusted main challenge may arrive after startup effects have
+        // already queued old JavaScript work. Invalidate every old async
+        // continuation synchronously, then stop/abort and wait for the exact
+        // same save/cloud/Worker/shadow boundary used by live handoff.
+        legacyAuthorityAsyncLeaseFenceRef.current = reconcileLegacyAuthorityAsyncLeaseFence(
+          legacyAuthorityAsyncLeaseFenceRef.current,
+          "native",
+        );
+        nativePlayerAuthorityOwnsRuntimeRef.current = true;
+        nativeAuthorityPersistenceProtectedRef.current = true;
+        simulationWorkerDisabledRef.current = true;
+        setNativeAuthorityHandoffQuiescing(true);
+        windowsNativeCoreBetaGenerationRef.current += 1;
+        windowsNativeCoreBetaCheckpointTokenRef.current += 1;
+        if (windowsNativeCoreBetaTimerRef.current !== null) {
+          window.clearTimeout(windowsNativeCoreBetaTimerRef.current);
+          windowsNativeCoreBetaTimerRef.current = null;
+        }
+        const shadowQueue = windowsNativeCoreBetaQueueRef.current;
+        cloudAutoSyncAbortRef.current?.abort();
+        pureIdleBackgroundOfflineAbortRef.current?.abort();
+        pureIdleMacroClientRef.current?.cancel("Windows 原生权威启动恢复已接管");
+        pureIdleMacroClientRef.current = null;
+        pureIdleMacroActiveRef.current = false;
+        pureIdleStoppingRef.current = false;
+        setPureIdleActive(false);
+        stopLegacySimulationWorker();
+        const counts = await waitUntilDrained(request.timeoutMs, shadowQueue);
+        const inspection = await inspectLocalSaveNativeAuthorityHandoff();
+        const journal = inspection.journal;
+        if (!journal || journal.phase !== "browser-fenced") {
+          const noBrowserFence = request.rustLease.state === "absent" &&
+            inspection.storage === "indexeddb" &&
+            !isLocalSaveNativeAuthorityLease(inspection.writerLease) &&
+            (inspection.journalState === "missing" || journal?.phase === "handed-back");
+          if (noBrowserFence) resumeJavaScriptAfterPreTransferBlock();
+          return {
+            kind: "native-player-authority-startup-reconciled-v1",
+            action: noBrowserFence ? "no-browser-fence" : "fail-closed",
+            rendererInFlightCoreOperations: counts.renderer as 0,
+            workerInFlightCoreOperations: counts.worker as 0,
+          };
+        }
+        const rustLease = request.rustLease.state === "active"
+          ? {
+            state: "active" as const,
+            runId: request.rustLease.runId,
+            sessionId: request.rustLease.sessionId,
+            stateVersion: 47 as const,
+            mode: "normal" as const,
+            checkpoint: request.rustLease.entryCheckpoint,
+          }
+          : request.rustLease;
+        const decision = reconcileLocalSaveNativeAuthorityHandoff({
+          journal,
+          currentLease: inspection.writerLease,
+          rustLease,
+          releaseAuthorized: request.releaseAuthorized,
+        });
+        if (decision.action === "release-browser-fence") {
+          await releaseLocalSaveNativeAuthorityHandoff({
+            receipt: {
+              kind: "local-save-native-authority-lease-v1",
+              leaseId: journal.runId,
+              previousWriterFence: journal.previousWriterFence,
+              nativeWriterFence: journal.nativeWriterFence,
+            },
+            decision,
+          });
+          resumeJavaScriptAfterPreTransferBlock();
+          return {
+            kind: "native-player-authority-startup-reconciled-v1",
+            action: "released-browser-fence",
+            rendererInFlightCoreOperations: 0,
+            workerInFlightCoreOperations: 0,
+          };
+        }
+        if (decision.action !== "resume-native" || request.rustLease.state !== "active") {
+          nativeAuthorityPersistenceProtectedRef.current = true;
+          simulationWorkerDisabledRef.current = true;
+          return {
+            kind: "native-player-authority-startup-reconciled-v1",
+            action: "fail-closed",
+            rendererInFlightCoreOperations: 0,
+            workerInFlightCoreOperations: 0,
+          };
+        }
+        await nativePlayerAuthorityClock.refresh();
+        const clockSnapshot = nativePlayerAuthorityClock.getSnapshot();
+        const active = selectActiveNativePlayerAuthorityFrame(clockSnapshot, request.rustLease.sessionId);
+        const macro = selectNativePlayerAuthorityMacroStatus(
+          clockSnapshot,
+          clockSnapshot.expectedSessionId,
+        );
+        const clockRevision = active?.revision ?? macro?.revision ?? null;
+        const nextDeadlineMs = active?.nextDeadlineMs ?? macro?.nextDeadlineMs ?? null;
+        if ((!active && !macro) || active && active.runId !== request.rustLease.runId ||
+          clockRevision !== request.rustLease.checkpoint.revision ||
+          !Number.isSafeInteger(nextDeadlineMs) ||
+          journal.nativeWriterFence.ownerId !== `native_authority:${request.rustLease.runId}`) {
+          nativeAuthorityPersistenceProtectedRef.current = true;
+          simulationWorkerDisabledRef.current = true;
+          return {
+            kind: "native-player-authority-startup-reconciled-v1",
+            action: "fail-closed",
+            rendererInFlightCoreOperations: 0,
+            workerInFlightCoreOperations: 0,
+          };
+        }
+        const controller = windowsNativeCoreBetaControllerRef.current;
+        if (!controller) throw new Error("Windows 原生权威控制器不可用");
+        controller.bindMainOwnedPlayerAuthority({
+          sessionId: request.rustLease.sessionId,
+          runId: request.rustLease.runId,
+          checkpoint: request.rustLease.checkpoint,
+          summary: request.rustLease.summary,
+          source: "startup-recovery",
+        });
+        nativeAuthorityHandoffRef.current = {
+          handoffId: request.handoffId,
+          sessionId: journal.sessionId,
+          runId: journal.runId,
+          phase: "native-active",
+          publicWriterFence: journal.previousWriterFence,
+          settledDeadlineMs: (nextDeadlineMs as number) - 1_000,
+          checkpoint: request.rustLease.checkpoint,
+          receipt: {
+            kind: "local-save-native-authority-lease-v1",
+            leaseId: journal.runId,
+            previousWriterFence: journal.previousWriterFence,
+            nativeWriterFence: journal.nativeWriterFence,
+          },
+        };
+        nativeAuthorityPersistenceProtectedRef.current = true;
+        simulationWorkerDisabledRef.current = true;
+        setNativeAuthorityHandoffQuiescing(false);
+        return {
+          kind: "native-player-authority-startup-reconciled-v1",
+          action: "resumed-native",
+          rendererInFlightCoreOperations: 0,
+          workerInFlightCoreOperations: 0,
+        };
+      }
       if (request.kind === "native-player-authority-quiescence-prepare-v1") {
         const existing = nativeAuthorityHandoffRef.current;
+        if (existing && sameIdentity(request, existing) && existing.phase === "prepared") {
+          const counts = inFlightCounts();
+          if (counts.renderer !== 0 || counts.worker !== 0) {
+            throw Object.assign(new Error("重复交接准备尚未处于空闲边界"), {
+              code: "NATIVE_PLAYER_AUTHORITY_QUIESCENCE_BUSY",
+            });
+          }
+          return {
+            kind: "native-player-authority-quiescence-prepared-v1",
+            publicWriterFence: existing.publicWriterFence,
+            rendererInFlightCoreOperations: 0,
+            workerInFlightCoreOperations: 0,
+            settledDeadlineMs: existing.settledDeadlineMs,
+          };
+        }
         if (existing || nativePlayerAuthorityOwnsRuntimeRef.current ||
           windowsNativeCoreBetaControllerRef.current?.snapshot().authority.sessionId !== request.sessionId) {
           throw Object.assign(new Error("Windows 原生权威交接准备身份无效"), {
@@ -7275,11 +7455,33 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             settledDeadlineMs,
           };
         } catch (error) {
-          resumeJavaScriptAfterPreTransferBlock();
+          resumeJavaScriptAfterPreTransferBlock({
+            handoffId: request.handoffId,
+            sessionId: request.sessionId,
+            runId: request.runId,
+          });
           throw error;
         }
       }
 
+      if (request.kind === "native-player-authority-quiescence-cancel-v1") {
+        const disposition = classifyNativePlayerAuthorityPreTransferCancel({
+          request,
+          current: nativeAuthorityHandoffRef.current,
+          lastCancelled: lastCancelledNativeAuthorityHandoffRef.current,
+        });
+        if (disposition === "already-cancelled") {
+          return {
+            kind: "native-player-authority-quiescence-cancelled-v1",
+            resumedJavaScript: true,
+          };
+        }
+        if (disposition === "reject") {
+          throw Object.assign(new Error("Windows 原生权威交接取消未经授权"), {
+            code: "NATIVE_PLAYER_AUTHORITY_RELEASE_NOT_AUTHORIZED",
+          });
+        }
+      }
       const current = nativeAuthorityHandoffRef.current;
       if (!current || !sameIdentity(request, current)) {
         throw Object.assign(new Error("Windows 原生权威交接请求已过期"), {
@@ -7287,13 +7489,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         });
       }
       if (request.kind === "native-player-authority-quiescence-cancel-v1") {
-        if (current.phase !== "prepared" || request.releaseAuthorized !== true ||
-          request.browserFenceAcquired !== false) {
-          throw Object.assign(new Error("Windows 原生权威交接取消未经授权"), {
-            code: "NATIVE_PLAYER_AUTHORITY_RELEASE_NOT_AUTHORIZED",
-          });
-        }
-        resumeJavaScriptAfterPreTransferBlock();
+        resumeJavaScriptAfterPreTransferBlock({
+          handoffId: request.handoffId,
+          sessionId: request.sessionId,
+          runId: request.runId,
+        });
         return {
           kind: "native-player-authority-quiescence-cancelled-v1",
           resumedJavaScript: true,
@@ -7345,6 +7545,59 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
           journal: acquired.journal,
           rendererInFlightCoreOperations: 0,
           workerInFlightCoreOperations: 0,
+        };
+      }
+      if (request.kind === "native-player-authority-handoff-complete-v1") {
+        if (current.phase !== "browser-fenced" || !current.receipt || !current.checkpoint ||
+          request.revision !== request.checkpoint.revision ||
+          !sameCheckpoint(request.checkpoint, current.checkpoint) ||
+          !sameFence(request.nativeWriterFence, current.receipt.nativeWriterFence) ||
+          request.summary.revision !== request.revision || request.summary.stateVersion !== 47 ||
+          request.summary.mode !== "normal" || request.summary.paused !== false ||
+          request.summary.coverage.authorityEligible !== true) {
+          throw Object.assign(new Error("Windows 原生权威完成回执与 browser fence 不一致"), {
+            code: "NATIVE_PLAYER_AUTHORITY_COMPLETION_STALE",
+          });
+        }
+        await nativePlayerAuthorityClock.refresh();
+        const active = selectActiveNativePlayerAuthorityFrame(
+          nativePlayerAuthorityClock.getSnapshot(),
+          request.sessionId,
+        );
+        const counts = inFlightCounts();
+        if (!active || active.runId !== request.runId || active.revision !== request.revision ||
+          counts.renderer !== 0 || counts.worker !== 0) {
+          throw Object.assign(new Error("Windows 原生权威时钟尚未到达完成边界"), {
+            code: "NATIVE_PLAYER_AUTHORITY_COMPLETION_STALE",
+          });
+        }
+        const controller = windowsNativeCoreBetaControllerRef.current;
+        if (!controller) throw new Error("Windows 原生权威控制器不可用");
+        const bound = controller.bindMainOwnedPlayerAuthority({
+          sessionId: request.sessionId,
+          runId: request.runId,
+          checkpoint: request.checkpoint,
+          summary: request.summary,
+          source: "handoff",
+        });
+        if (bound.authority.phase !== "native-authoritative" || bound.authority.authority !== "native") {
+          throw new Error("Windows 原生权威控制器未完成正式绑定");
+        }
+        current.phase = "native-active";
+        current.checkpoint = request.checkpoint;
+        nativeAuthorityPersistenceProtectedRef.current = true;
+        simulationWorkerDisabledRef.current = true;
+        setNativeAuthorityHandoffQuiescing(false);
+        return {
+          kind: "native-player-authority-handoff-completed-v1",
+          sessionId: request.sessionId,
+          runId: request.runId,
+          revision: request.revision,
+          checkpoint: request.checkpoint,
+          nativeWriterFence: request.nativeWriterFence,
+          rendererInFlightCoreOperations: 0,
+          workerInFlightCoreOperations: 0,
+          controllerPhase: "native-authoritative",
         };
       }
       if (request.kind === "native-player-authority-browser-fence-release-v1") {

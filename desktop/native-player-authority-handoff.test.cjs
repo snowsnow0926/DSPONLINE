@@ -457,9 +457,17 @@ test("handoff wiring is main-initiated, coverage-gated, and exposes no renderer 
   assert.match(main, /DSP_NATIVE_PLAYER_AUTHORITY_HANDOFF === "1"/);
   assert.match(main, /summary\?\.coverage\?\.authorityEligible === true/);
   assert.match(main, /ipcMain\.on\(NATIVE_PLAYER_AUTHORITY_HANDOFF_RESPONSE_CHANNEL/);
+  assert.match(main, /ipcMain\.on\(NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_READY_CHANNEL/);
   assert.doesNotMatch(main, /ipcMain\.handle\([^\n]*native-player-authority-handoff/);
-  assert.match(main, /nativePlayerAuthorityDurableOwner\(rendererOwnerId, request\?\.sessionId\)/);
+  assert.doesNotMatch(main, /nativePlayerAuthorityDurableOwner/);
+  assert.match(main, /desktop:native-player-authority-checkpoint/);
+  assert.match(main, /nativePlayerAuthorityPersistenceBroker\.checkpoint\(rendererOwnerId\)/);
+  assert.match(main, /desktop:native-player-authority-export-v47/);
+  assert.match(main, /nativePlayerAuthorityPersistenceBroker\.exportV47\(rendererOwnerId/);
   assert.match(preload, /onNativePlayerAuthorityHandoffRequest:/);
   assert.match(preload, /subscribeRendererToNativePlayerAuthorityHandoff/);
+  assert.match(preload, /checkpointNativePlayerAuthority:\s*\(\) =>/);
+  assert.match(preload, /exportNativePlayerAuthorityV47:\s*\(request\) =>/);
   assert.doesNotMatch(preload, /invokeNative\([^\n]*native-player-authority-handoff/);
+  assert.doesNotMatch(preload, /checkpointNativePlayerAuthority:\s*\([^)]*(?:session|run|owner|lease|fence)/i);
 });

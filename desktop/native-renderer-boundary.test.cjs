@@ -748,6 +748,41 @@ test("save/open/advance/checkpoint/compare receipts fail closed on Host-only fie
   ]);
   assert.throws(() => normalizeRendererNativeResult("coreCheckpoint", { ...checkpoint, stderr: SECRET_BODY }), /native core checkpoint result is invalid/);
 
+  const playerAuthorityCheckpoint = {
+    checkpoint: {
+      generation: 9,
+      rootHash: SHA_A,
+      revision: 2,
+    },
+    summary: coreSummary(2),
+    reusedAcknowledgedCheckpoint: true,
+  };
+  assert.deepEqual(
+    normalizeRendererNativeResult("playerAuthorityCheckpoint", playerAuthorityCheckpoint),
+    playerAuthorityCheckpoint,
+  );
+  assert.throws(
+    () => normalizeRendererNativeResult("playerAuthorityCheckpoint", {
+      ...playerAuthorityCheckpoint,
+      ownerId: "renderer-forged-owner",
+    }),
+    /native player-authority checkpoint result is invalid/,
+  );
+  assert.throws(
+    () => normalizeRendererNativeResult("playerAuthorityCheckpoint", {
+      ...playerAuthorityCheckpoint,
+      reusedAcknowledgedCheckpoint: false,
+    }),
+    /native player-authority checkpoint binding is invalid/,
+  );
+  assert.throws(
+    () => normalizeRendererNativeResult("playerAuthorityCheckpoint", {
+      ...playerAuthorityCheckpoint,
+      checkpoint: { ...playerAuthorityCheckpoint.checkpoint, revision: 3 },
+    }),
+    /native player-authority checkpoint binding is invalid/,
+  );
+
   const compared = {
     matches: true,
     revisionMatches: true,
@@ -1084,7 +1119,11 @@ test("Electron main uses the dedicated native renderer boundary", () => {
     .map((match) => match[1]);
   const preloadChannels = [...preload.matchAll(/invokeNative\("(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  assert.equal(mainChannels.length, 40);
+  assert.equal(mainChannels.length, 42);
+  assert.ok(mainChannels.includes("desktop:native-player-authority-checkpoint"));
+  assert.ok(preloadChannels.includes("desktop:native-player-authority-checkpoint"));
+  assert.ok(mainChannels.includes("desktop:native-player-authority-export-v47"));
+  assert.ok(preloadChannels.includes("desktop:native-player-authority-export-v47"));
   assert.ok(mainChannels.includes("desktop:native-core-star-map-catalog-projection"));
   assert.ok(preloadChannels.includes("desktop:native-core-star-map-catalog-projection"));
   assert.ok(mainChannels.includes("desktop:native-core-stellar-quantum-projection"));

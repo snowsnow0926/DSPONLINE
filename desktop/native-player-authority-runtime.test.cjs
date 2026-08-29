@@ -12,6 +12,16 @@ const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
 const HASH_C = "c".repeat(64);
 
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function changeReceipt(overrides = {}) {
   return {
     changedEntityIds: [],
@@ -224,6 +234,84 @@ test("activation stays main-owned and arms one anchored exact-second timer", asy
     ["prepare", "main-player-authority"],
     ["activate", "main-player-authority"],
   ]);
+});
+
+test("main-owned persistence freezes an ACKed boundary and resumes queued gameplay only after it settles", async () => {
+  const value = fixture();
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  const gate = deferred();
+  let observedBoundary = null;
+  const persistence = value.runtime.withSettledPersistenceBoundary(async (boundary) => {
+    observedBoundary = boundary;
+    await gate.promise;
+    return "persisted";
+  });
+
+  assert.equal(value.timers[0].cancelled, true);
+  value.setNow(11_000);
+  const dueWhileFrozen = await value.runtime.settleDue();
+  assert.equal(dueWhileFrozen.revision, 7);
+  assert.equal(value.calls.filter(([operation]) => operation === "tick").length, 0);
+
+  const queuedCommand = value.runtime.commitCommand(playerCommand(7, "after-save", 1));
+  await Promise.resolve();
+  assert.equal(value.calls.filter(([operation]) => operation === "command").length, 0);
+  assert.deepEqual(observedBoundary, {
+    sessionId: "core-main-1",
+    runId: "player-run-1",
+    revision: 7,
+    checkpoint: value.checkpoint,
+    acknowledgedSequence: 0,
+    settledDeadlineMs: 10_000,
+  });
+
+  gate.resolve();
+  assert.equal(await persistence, "persisted");
+  const committed = await queuedCommand;
+  assert.equal(committed.revision, 8);
+  assert.equal(value.calls.filter(([operation]) => operation === "command").length, 1);
+});
+
+test("persistence refuses in-flight gameplay and overlapping persistence reads", async () => {
+  const tickGate = deferred();
+  const ticking = fixture({
+    registry: {
+      commitPlayerAuthorityTick(ownerId, request) {
+        ticking.calls.push(["tick", ownerId, request]);
+        return tickGate.promise;
+      },
+    },
+  });
+  await ticking.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: ticking.checkpoint, settledDeadlineMs: 10_000,
+  });
+  ticking.setNow(11_000);
+  const pendingTick = ticking.runtime.settleDue();
+  await assert.rejects(
+    ticking.runtime.withSettledPersistenceBoundary(async () => undefined),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+  );
+  tickGate.resolve({
+    sequence: 1,
+    revision: 8,
+    duplicate: false,
+    checkpoint: { generation: 4, rootHash: HASH_A, revision: 8 },
+    summary: summary(8),
+  });
+  await pendingTick;
+
+  const persistenceGate = deferred();
+  const first = ticking.runtime.withSettledPersistenceBoundary(() => persistenceGate.promise);
+  await assert.rejects(
+    ticking.runtime.withSettledPersistenceBoundary(async () => undefined),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
+  );
+  persistenceGate.resolve("done");
+  assert.equal(await first, "done");
 });
 
 test("only one tick is in flight and successful receipts advance exactly once", async () => {

@@ -684,10 +684,11 @@ function normalizePlayerAuthorityStartupRecovery(value) {
     "macroSessionId", "recoveredMacroOperationId", "macroAlgorithmVersion",
     "macroSimulationMilliseconds", "macroWallMilliseconds",
   ];
+  const recoveryKeys = ["entryCheckpoint"];
   if (!value || typeof value !== "object" || Array.isArray(value) ||
       baseKeys.some((key) => !Object.hasOwn(value, key)) ||
       Reflect.ownKeys(value).some((key) => typeof key !== "string" ||
-        !baseKeys.includes(key) && !macroKeys.includes(key))) {
+        !baseKeys.includes(key) && !macroKeys.includes(key) && !recoveryKeys.includes(key))) {
     throw new NativeHostError(
       "native host returned an invalid player-authority startup recovery receipt",
       "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID",
@@ -697,6 +698,12 @@ function normalizePlayerAuthorityStartupRecovery(value) {
     value.checkpoint,
     "native player-authority startup checkpoint",
   );
+  const entryCheckpoint = Object.hasOwn(value, "entryCheckpoint")
+    ? normalizePlayerAuthorityCheckpoint(
+      value.entryCheckpoint,
+      "native player-authority startup entry checkpoint",
+    )
+    : null;
   const summary = value.summary;
   const changedEntityIds = normalizeStablePlayerAuthorityChangeIds(
     value.changedEntityIds,
@@ -729,6 +736,7 @@ function normalizePlayerAuthorityStartupRecovery(value) {
     !validLogicalId(value.registryFingerprint, 256) ||
     !Number.isSafeInteger(value.revision) || value.revision < 0 ||
     checkpoint.revision !== value.revision ||
+    entryCheckpoint && entryCheckpoint.revision > checkpoint.revision ||
     !Number.isSafeInteger(value.acknowledgedSequence) || value.acknowledgedSequence < 0 ||
     !Number.isSafeInteger(value.nextSequence) ||
     value.nextSequence !== value.acknowledgedSequence + 1 ||
@@ -763,6 +771,7 @@ function normalizePlayerAuthorityStartupRecovery(value) {
     registryFingerprint: value.registryFingerprint,
     revision: value.revision,
     checkpoint: Object.freeze(checkpoint),
+    ...(entryCheckpoint ? { entryCheckpoint: Object.freeze(entryCheckpoint) } : {}),
     acknowledgedSequence: value.acknowledgedSequence,
     nextSequence: value.nextSequence,
     settledDeadlineMs: value.settledDeadlineMs,

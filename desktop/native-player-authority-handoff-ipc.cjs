@@ -10,6 +10,8 @@
 
 const REQUEST_CHANNEL = "desktop:native-player-authority-handoff-request";
 const RESPONSE_CHANNEL = "desktop:native-player-authority-handoff-response";
+const RENDERER_READY_CHANNEL = "desktop:native-player-authority-handoff-renderer-ready";
+const RENDERER_READY_KIND = "native-player-authority-handoff-renderer-ready-v1";
 const RESPONSE_KIND = "native-player-authority-handoff-renderer-response-v1";
 const PREPARE_REQUEST_KIND = "native-player-authority-quiescence-prepare-v1";
 const PREPARED_RESULT_KIND = "native-player-authority-quiescence-prepared-v1";
@@ -19,6 +21,10 @@ const CANCEL_REQUEST_KIND = "native-player-authority-quiescence-cancel-v1";
 const CANCELLED_RESULT_KIND = "native-player-authority-quiescence-cancelled-v1";
 const RELEASE_REQUEST_KIND = "native-player-authority-browser-fence-release-v1";
 const RELEASED_RESULT_KIND = "native-player-authority-browser-fence-released-v1";
+const COMPLETE_REQUEST_KIND = "native-player-authority-handoff-complete-v1";
+const COMPLETED_RESULT_KIND = "native-player-authority-handoff-completed-v1";
+const STARTUP_RECONCILE_REQUEST_KIND = "native-player-authority-startup-reconcile-v1";
+const STARTUP_RECONCILED_RESULT_KIND = "native-player-authority-startup-reconciled-v1";
 
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
@@ -209,12 +215,66 @@ function normalizeReleasedResult(value, request) {
   return Object.freeze({ kind: RELEASED_RESULT_KIND, released: true, returnedWriterFence });
 }
 
+function normalizeCompletedResult(value, request) {
+  const source = exactKeys(value, [
+    "kind", "sessionId", "runId", "revision", "checkpoint", "nativeWriterFence",
+    "rendererInFlightCoreOperations", "workerInFlightCoreOperations", "controllerPhase",
+  ], "renderer authority completion result");
+  const completedCheckpoint = checkpoint(source.checkpoint, "completed checkpoint");
+  const completedFence = writerFence(source.nativeWriterFence, "completed nativeWriterFence");
+  const requestedCheckpoint = checkpoint(request.checkpoint, "completion request checkpoint");
+  const requestedFence = writerFence(request.nativeWriterFence, "completion request nativeWriterFence");
+  if (source.kind !== COMPLETED_RESULT_KIND || source.sessionId !== request.sessionId ||
+      source.runId !== request.runId || source.revision !== request.revision ||
+      source.revision !== completedCheckpoint.revision ||
+      !sameCheckpoint(completedCheckpoint, requestedCheckpoint) ||
+      !sameFence(completedFence, requestedFence) ||
+      source.rendererInFlightCoreOperations !== 0 || source.workerInFlightCoreOperations !== 0 ||
+      source.controllerPhase !== "native-authoritative") {
+    throw protocolError("renderer authority completion is not bound to the active Rust lease");
+  }
+  return Object.freeze({
+    kind: COMPLETED_RESULT_KIND,
+    sessionId: source.sessionId,
+    runId: source.runId,
+    revision: source.revision,
+    checkpoint: completedCheckpoint,
+    nativeWriterFence: completedFence,
+    rendererInFlightCoreOperations: 0,
+    workerInFlightCoreOperations: 0,
+    controllerPhase: "native-authoritative",
+  });
+}
+
+function normalizeStartupReconciledResult(value, request) {
+  const source = exactKeys(value, [
+    "kind", "action", "rendererInFlightCoreOperations", "workerInFlightCoreOperations",
+  ], "renderer startup reconciliation result");
+  const allowed = request.rustLease?.state === "active"
+    ? new Set(["resumed-native", "fail-closed"])
+    : request.rustLease?.state === "absent"
+      ? new Set(["released-browser-fence", "no-browser-fence", "fail-closed"])
+      : new Set(["fail-closed"]);
+  if (source.kind !== STARTUP_RECONCILED_RESULT_KIND || !allowed.has(source.action) ||
+      source.rendererInFlightCoreOperations !== 0 || source.workerInFlightCoreOperations !== 0) {
+    throw protocolError("renderer startup reconciliation result conflicts with Rust observation");
+  }
+  return Object.freeze({
+    kind: STARTUP_RECONCILED_RESULT_KIND,
+    action: source.action,
+    rendererInFlightCoreOperations: 0,
+    workerInFlightCoreOperations: 0,
+  });
+}
+
 function normalizeResultForRequest(value, request) {
   switch (request.kind) {
     case PREPARE_REQUEST_KIND: return normalizePreparedResult(value, request);
     case COMMIT_REQUEST_KIND: return normalizeBrowserFencedResult(value, request);
     case CANCEL_REQUEST_KIND: return normalizeCancelledResult(value);
     case RELEASE_REQUEST_KIND: return normalizeReleasedResult(value, request);
+    case COMPLETE_REQUEST_KIND: return normalizeCompletedResult(value, request);
+    case STARTUP_RECONCILE_REQUEST_KIND: return normalizeStartupReconciledResult(value, request);
     default: throw protocolError("native player-authority handoff request kind is invalid");
   }
 }
@@ -359,6 +419,10 @@ function subscribeRendererToNativePlayerAuthorityHandoff(ipcRenderer, listener) 
     });
   };
   ipcRenderer.on(REQUEST_CHANNEL, handler);
+  // This carries no lease/session/owner identity and cannot start or approve a
+  // transfer. It only tells main that a response listener now exists, so main
+  // can generate the one-shot startup reconciliation challenge itself.
+  ipcRenderer.send(RENDERER_READY_CHANNEL, Object.freeze({ kind: RENDERER_READY_KIND }));
   return () => {
     if (!active) return;
     active = false;
@@ -371,13 +435,19 @@ module.exports = {
   CANCEL_REQUEST_KIND,
   COMMITTED_RESULT_KIND,
   COMMIT_REQUEST_KIND,
+  COMPLETE_REQUEST_KIND,
+  COMPLETED_RESULT_KIND,
   NativePlayerAuthorityHandoffIpcBridge,
   NativePlayerAuthorityHandoffIpcError,
   PREPARED_RESULT_KIND,
   PREPARE_REQUEST_KIND,
   RELEASED_RESULT_KIND,
   RELEASE_REQUEST_KIND,
+  RENDERER_READY_CHANNEL,
+  RENDERER_READY_KIND,
   REQUEST_CHANNEL,
   RESPONSE_CHANNEL,
+  STARTUP_RECONCILE_REQUEST_KIND,
+  STARTUP_RECONCILED_RESULT_KIND,
   subscribeRendererToNativePlayerAuthorityHandoff,
 };

@@ -1049,6 +1049,7 @@ test("startup recovery receipt is strictly adopted once as a main-owned Rust ses
     runId: "player-run-1",
     registryFingerprint: "builtin:test",
     revision: 11,
+    entryCheckpoint: { generation: 3, rootHash: "e".repeat(64), revision: 7 },
     checkpoint: { generation: 8, rootHash: "a".repeat(64), revision: 11 },
     acknowledgedSequence: 4,
     nextSequence: 5,
@@ -1127,12 +1128,18 @@ test("startup recovery receipt is strictly adopted once as a main-owned Rust ses
   receipt.summary.revision = 999;
   const adopted = registry.takePlayerAuthorityStartupRecovery("main-player-authority");
   assert.equal(adopted.summary.revision, 11);
+  assert.deepEqual(adopted.entryCheckpoint, {
+    generation: 3,
+    rootHash: "e".repeat(64),
+    revision: 7,
+  });
   assert.equal(registry.takePlayerAuthorityStartupRecovery("main-player-authority"), null);
 
   const initialReceipt = {
     ...receipt,
     sessionId: "core-restarted-initial",
     revision: 0,
+    entryCheckpoint: { ...receipt.entryCheckpoint, revision: 0 },
     checkpoint: { ...receipt.checkpoint, revision: 0 },
     acknowledgedSequence: 0,
     nextSequence: 1,

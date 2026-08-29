@@ -4231,6 +4231,41 @@ function normalizeCoreCheckpoint(value) {
   return { checkpoint, summary, encodedRecords: safeInteger(source.encodedRecords, "native checkpoint encoded records"), reusedRecords: safeInteger(source.reusedRecords, "native checkpoint reused records") };
 }
 
+function normalizePlayerAuthorityCheckpoint(value) {
+  const source = exactObject(
+    value,
+    ["checkpoint", "summary", "reusedAcknowledgedCheckpoint"],
+    "native player-authority checkpoint result",
+  );
+  const checkpointSource = exactObject(
+    source.checkpoint,
+    ["generation", "rootHash", "revision"],
+    "native player-authority checkpoint",
+  );
+  const checkpoint = {
+    generation: safeInteger(
+      checkpointSource.generation,
+      "native player-authority checkpoint generation",
+      1,
+    ),
+    rootHash: sha256(
+      checkpointSource.rootHash,
+      "native player-authority checkpoint root hash",
+    ),
+    revision: safeInteger(
+      checkpointSource.revision,
+      "native player-authority checkpoint revision",
+    ),
+  };
+  const summary = normalizeCoreSummary(source.summary);
+  if (source.reusedAcknowledgedCheckpoint !== true || checkpoint.revision !== summary.revision ||
+      summary.stateVersion !== 47 || summary.mode !== "normal" || summary.paused !== false ||
+      summary.coverage.authorityEligible !== true) {
+    throw protocolError("native player-authority checkpoint binding");
+  }
+  return { checkpoint, summary, reusedAcknowledgedCheckpoint: true };
+}
+
 function normalizeCoreExport(value) {
   const source = exactObject(value, ["exportId", "mode", "result"], "native core v47 export result");
   const proof = exactObject(source.result, ["revision", "savedAtMs", "byteLength", "envelopeSha256", "stateChecksum"], "native v47 export proof");
@@ -4565,6 +4600,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreAdvance: normalizeCoreAdvance,
   coreCommit: normalizeCoreCommit,
   coreCheckpoint: normalizeCoreCheckpoint,
+  playerAuthorityCheckpoint: normalizePlayerAuthorityCheckpoint,
   coreExport: normalizeCoreExport,
   coreCompare: normalizeCoreCompare,
   coreClose: normalizeCoreClose,

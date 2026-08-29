@@ -5,11 +5,15 @@ const { EventEmitter } = require("node:events");
 const test = require("node:test");
 const {
   COMMIT_REQUEST_KIND,
+  COMPLETE_REQUEST_KIND,
   NativePlayerAuthorityHandoffIpcBridge,
   PREPARE_REQUEST_KIND,
   RELEASE_REQUEST_KIND,
+  RENDERER_READY_CHANNEL,
+  RENDERER_READY_KIND,
   REQUEST_CHANNEL,
   RESPONSE_CHANNEL,
+  STARTUP_RECONCILE_REQUEST_KIND,
   subscribeRendererToNativePlayerAuthorityHandoff,
 } = require("./native-player-authority-handoff-ipc.cjs");
 
@@ -67,6 +71,51 @@ function browserFencedResult(overrides = {}) {
     },
     rendererInFlightCoreOperations: 0,
     workerInFlightCoreOperations: 0,
+    ...overrides,
+  };
+}
+
+function completeRequest(overrides = {}) {
+  return {
+    kind: COMPLETE_REQUEST_KIND,
+    handoffId: "handoff-1",
+    sessionId: "core-1",
+    runId: "player-run-1",
+    revision: 17,
+    checkpoint: CHECKPOINT,
+    nativeWriterFence: NATIVE_FENCE,
+    summary: {
+      revision: 17,
+      stateVersion: 47,
+      mode: "normal",
+      paused: false,
+      canonicalSha256: "b".repeat(64),
+      domainSha256: "c".repeat(64),
+      coverage: { authorityEligible: true },
+    },
+    ...overrides,
+  };
+}
+
+function startupRequest(state, overrides = {}) {
+  const rustLease = state === "active"
+    ? {
+      state: "active",
+      runId: "player-run-1",
+      sessionId: "core-1",
+      stateVersion: 47,
+      mode: "normal",
+      entryCheckpoint: CHECKPOINT,
+      checkpoint: CHECKPOINT,
+      summary: completeRequest().summary,
+    }
+    : { state };
+  return {
+    kind: STARTUP_RECONCILE_REQUEST_KIND,
+    handoffId: "startup-1",
+    rustLease,
+    releaseAuthorized: state === "absent",
+    timeoutMs: 5_000,
     ...overrides,
   };
 }
@@ -204,6 +253,84 @@ test("release ACK requires the original browser writer and exact N+2 fence", asy
   });
 });
 
+test("completion ACK is exactly bound to the active session, checkpoint, writer fence, and zero work", async () => {
+  const valid = {
+    kind: "native-player-authority-handoff-completed-v1",
+    sessionId: "core-1",
+    runId: "player-run-1",
+    revision: 17,
+    checkpoint: CHECKPOINT,
+    nativeWriterFence: NATIVE_FENCE,
+    rendererInFlightCoreOperations: 0,
+    workerInFlightCoreOperations: 0,
+    controllerPhase: "native-authoritative",
+  };
+  for (const invalid of [
+    { ...valid, revision: 18 },
+    { ...valid, checkpoint: { ...CHECKPOINT, generation: 5 } },
+    { ...valid, nativeWriterFence: { ...NATIVE_FENCE, fencingToken: 11 } },
+    { ...valid, workerInFlightCoreOperations: 1 },
+    { ...valid, controllerPhase: "native-ready" },
+  ]) {
+    const { bridge } = bridgeFixture();
+    const request = completeRequest();
+    const pending = bridge.request(7, request, 5_000);
+    bridge.accept({ sender: { id: 7 } }, response(request, invalid));
+    await assert.rejects(
+      pending,
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_HANDOFF_IPC_INVALID",
+    );
+  }
+
+  const { bridge } = bridgeFixture();
+  const request = completeRequest();
+  const pending = bridge.request(7, request, 5_000);
+  bridge.accept({ sender: { id: 7 } }, response(request, valid));
+  assert.deepEqual(await pending, valid);
+});
+
+test("startup reconciliation actions are constrained by main's active/absent/unknown observation", async () => {
+  const permitted = [
+    ["active", "resumed-native"],
+    ["active", "fail-closed"],
+    ["absent", "released-browser-fence"],
+    ["absent", "no-browser-fence"],
+    ["unknown", "fail-closed"],
+  ];
+  for (const [state, action] of permitted) {
+    const { bridge } = bridgeFixture();
+    const request = startupRequest(state);
+    const pending = bridge.request(7, request, 5_000);
+    bridge.accept({ sender: { id: 7 } }, response(request, {
+      kind: "native-player-authority-startup-reconciled-v1",
+      action,
+      rendererInFlightCoreOperations: 0,
+      workerInFlightCoreOperations: 0,
+    }));
+    assert.equal((await pending).action, action);
+  }
+
+  for (const [state, action] of [
+    ["active", "released-browser-fence"],
+    ["absent", "resumed-native"],
+    ["unknown", "no-browser-fence"],
+  ]) {
+    const { bridge } = bridgeFixture();
+    const request = startupRequest(state);
+    const pending = bridge.request(7, request, 5_000);
+    bridge.accept({ sender: { id: 7 } }, response(request, {
+      kind: "native-player-authority-startup-reconciled-v1",
+      action,
+      rendererInFlightCoreOperations: 0,
+      workerInFlightCoreOperations: 0,
+    }));
+    await assert.rejects(
+      pending,
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_HANDOFF_IPC_INVALID",
+    );
+  }
+});
+
 test("preload subscription is response-only and removes its listener cleanly", async () => {
   const emitter = new EventEmitter();
   const sent = [];
@@ -226,6 +353,9 @@ test("preload subscription is response-only and removes its listener cleanly", a
   emitter.emit(REQUEST_CHANNEL, {}, request);
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(sent, [{
+    channel: RENDERER_READY_CHANNEL,
+    value: { kind: RENDERER_READY_KIND },
+  }, {
     channel: RESPONSE_CHANNEL,
     value: {
       kind: "native-player-authority-handoff-renderer-response-v1",
@@ -244,5 +374,5 @@ test("preload subscription is response-only and removes its listener cleanly", a
   unsubscribe();
   emitter.emit(REQUEST_CHANNEL, {}, prepareRequest({ handoffId: "handoff-2" }));
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(sent.length, 1);
+  assert.equal(sent.length, 2);
 });

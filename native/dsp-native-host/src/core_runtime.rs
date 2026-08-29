@@ -652,6 +652,9 @@ pub struct CorePlayerAuthorityStartupRecoveryReceipt {
     pub run_id: String,
     pub registry_fingerprint: String,
     pub revision: u64,
+    /// Immutable checkpoint at which the browser handoff journal was fenced.
+    /// This remains stable while `checkpoint` advances with acknowledged work.
+    pub entry_checkpoint: ExactRealtimeCheckpoint,
     pub checkpoint: ExactRealtimeCheckpoint,
     pub acknowledged_sequence: u64,
     pub next_sequence: u64,
@@ -1991,6 +1994,7 @@ impl CoreRegistry {
             run_id: acknowledged.run_id,
             registry_fingerprint: acknowledged.registry_fingerprint,
             revision: acknowledged.acknowledged.revision,
+            entry_checkpoint: acknowledged.checkpoint.clone(),
             checkpoint: acknowledged.acknowledged.checkpoint,
             acknowledged_sequence: acknowledged.acknowledged.sequence,
             next_sequence,
@@ -6424,6 +6428,7 @@ mod tests {
         assert_eq!(recovered.next_sequence, 2);
         assert_eq!(recovered.settled_deadline_ms, 42_000);
         assert_eq!(recovered.next_deadline_ms, 43_000);
+        assert_eq!(recovered.entry_checkpoint, entry_checkpoint);
         assert_eq!(recovered.checkpoint.revision, recovered.revision);
         assert_eq!(
             recovered.command_id.as_deref(),

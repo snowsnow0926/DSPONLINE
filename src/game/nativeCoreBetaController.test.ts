@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   DesktopNativeCoreCommitOperationResult,
@@ -95,6 +95,8 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
   uncertainOnce = false;
   alwaysFail = false;
   closed = false;
+  checkpointCalls = 0;
+  exportCalls = 0;
   projectionCalls = 0;
   factoryReadModelCalls = 0;
   factoryReadModelRevisionOffset = 0;
@@ -498,11 +500,13 @@ class FakeNativeSession implements WindowsNativeCoreShadow {
   }
 
   async createCheckpoint() {
+    this.checkpointCalls += 1;
     const nextCheckpoint = { ...checkpoint, generation: 2, revision: this.current.revision, rootHash: "f".repeat(64) };
     return { checkpoint: nextCheckpoint, summary: await this.status(), encodedRecords: 1, reusedRecords: 0 };
   }
 
   async exportV47(exportId: string, _suggestedName?: string, savedAtMs = 1) {
+    this.exportCalls += 1;
     return {
       exportId,
       mode: "normal" as const,
@@ -579,6 +583,9 @@ function stellarIndustryV2Request() {
 }
 
 describe("Windows native core invitation-Beta controller", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
   it("serves factory read models only from a verified same-revision JavaScript shadow", async () => {
     const session = new FakeNativeSession();
     const controller = await openController(session);
@@ -1072,6 +1079,130 @@ describe("Windows native core invitation-Beta controller", () => {
     expect(session.current.revision).toBe(2);
     expect(controller.snapshot().authority).toMatchObject({ phase: "native-ready", authority: "javascript" });
     expect(session.commitRequests).toHaveLength(1);
+  });
+
+  it("formally binds a completed main-owned handoff and routes persistence without the old renderer owner", async () => {
+    const session = new FakeNativeSession();
+    const controller = await gatedController(session);
+    const authorityCheckpoint = {
+      generation: 5,
+      rootHash: "f".repeat(64),
+      revision: 2,
+    };
+    const authoritySummary = summary(2, true);
+    const checkpointBridge = vi.fn(async () => ({
+      checkpoint: authorityCheckpoint,
+      summary: authoritySummary,
+      reusedAcknowledgedCheckpoint: true as const,
+    }));
+    const exportBridge = vi.fn(async (request: {
+      exportId: string;
+      savedAtMs: number;
+      suggestedName?: string;
+    }) => ({
+      exportId: request.exportId,
+      mode: "normal" as const,
+      result: {
+        revision: 2,
+        savedAtMs: request.savedAtMs,
+        byteLength: 123,
+        envelopeSha256: "d".repeat(64),
+        stateChecksum: "12345678",
+      },
+      cancelled: false,
+      fileName: request.suggestedName,
+    }));
+    vi.stubGlobal("window", {
+      dspDesktop: {
+        checkpointNativePlayerAuthority: checkpointBridge,
+        exportNativePlayerAuthorityV47: exportBridge,
+      },
+    });
+
+    const bound = controller.bindMainOwnedPlayerAuthority({
+      sessionId: session.sessionId,
+      runId: "player-run-1",
+      checkpoint: authorityCheckpoint,
+      summary: authoritySummary,
+      source: "handoff",
+    });
+    expect(bound.authority).toMatchObject({
+      phase: "native-authoritative",
+      authority: "native",
+      sessionId: session.sessionId,
+      shadowRevision: 2,
+    });
+
+    const checkpointed = await controller.createAuthorityCheckpoint(undefined, 20_000);
+    expect(checkpointed.authority).toMatchObject({ phase: "native-authoritative", authority: "native" });
+    expect(checkpointBridge).toHaveBeenCalledTimes(1);
+    expect(session.checkpointCalls).toBe(0);
+
+    await expect(controller.exportAuthoritativeV47("export-1", "factory.json", 21_000)).resolves.toMatchObject({
+      exportId: "export-1",
+      mode: "normal",
+      result: { revision: 2, savedAtMs: 21_000 },
+    });
+    expect(exportBridge).toHaveBeenCalledWith({
+      exportId: "export-1",
+      savedAtMs: 21_000,
+      suggestedName: "factory.json",
+    });
+    exportBridge.mockResolvedValueOnce({
+      exportId: "export-after-clock-tick",
+      mode: "normal" as const,
+      result: {
+        revision: 3,
+        savedAtMs: 22_000,
+        byteLength: 124,
+        envelopeSha256: "e".repeat(64),
+        stateChecksum: "87654321",
+      },
+      cancelled: false,
+      fileName: "factory-after-clock-tick.json",
+    });
+    await expect(controller.exportAuthoritativeV47(
+      "export-after-clock-tick",
+      "factory-after-clock-tick.json",
+      22_000,
+    )).resolves.toMatchObject({ result: { revision: 3 } });
+    expect(session.exportCalls).toBe(0);
+  });
+
+  it("recovers a main-owned startup session only from a complete v47 eligible receipt", async () => {
+    const opener = vi.fn(async () => null);
+    const controller = new WindowsNativeCoreBetaController(opener, () => 1_000);
+    const startupCheckpoint = {
+      generation: 8,
+      rootHash: "e".repeat(64),
+      revision: 41,
+    };
+    const startupSummary = summary(41, true);
+
+    const bound = controller.bindMainOwnedPlayerAuthority({
+      sessionId: "core-recovered-1",
+      runId: "player-run-recovered-1",
+      checkpoint: startupCheckpoint,
+      summary: startupSummary,
+      source: "startup-recovery",
+    });
+    expect(bound.authority).toMatchObject({
+      phase: "native-authoritative",
+      authority: "native",
+      sessionId: "core-recovered-1",
+      shadowRevision: 41,
+    });
+    expect(opener).not.toHaveBeenCalled();
+
+    const rejected = new WindowsNativeCoreBetaController(opener, () => 1_000);
+    expect(() => rejected.bindMainOwnedPlayerAuthority({
+      sessionId: "core-recovered-2",
+      runId: "player-run-recovered-2",
+      checkpoint: startupCheckpoint,
+      summary: summary(41, false),
+      source: "startup-recovery",
+    })).toThrow(/完成回执无效/);
+    expect(rejected.snapshot().authority).toMatchObject({ phase: "js-only", authority: "javascript" });
   });
 
   it("requires explicit player opt-in before consulting any authority transition", async () => {

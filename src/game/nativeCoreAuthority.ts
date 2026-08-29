@@ -269,6 +269,62 @@ export function promoteNativeCoreAuthority(
   };
 }
 
+/**
+ * Installs the renderer-side binding only after main has already transferred
+ * the host session and activated the durable Rust lease. This cannot mutate a
+ * host owner; complete native coverage and an exact checkpoint proof remain
+ * mandatory.
+ */
+export function bindMainOwnedNativeCoreAuthority(
+  current: NativeCoreAuthorityState,
+  input: {
+    sessionId: string;
+    proof: NativeCoreRevisionProof;
+    authorityEligibleCoverage: true;
+    source: "handoff" | "startup-recovery";
+  },
+): NativeCoreAuthorityState {
+  if (!SESSION_ID_PATTERN.test(input.sessionId) || !validProof(input.proof) ||
+    input.authorityEligibleCoverage !== true) {
+    throw new Error("主进程原生权威绑定身份无效");
+  }
+  if (input.source === "handoff") {
+    if (!["shadow", "native-ready"].includes(current.phase) || current.authority !== "javascript" ||
+      current.sessionId !== input.sessionId || !current.latestVerifiedProof ||
+      current.shadowRevision !== input.proof.revision ||
+      current.latestVerifiedProof.revision !== input.proof.revision ||
+      current.latestVerifiedProof.canonicalSha256 !== input.proof.canonicalSha256 ||
+      current.latestVerifiedProof.domainSha256 !== input.proof.domainSha256 ||
+      current.latestVerifiedProof.registryFingerprint !== input.proof.registryFingerprint) {
+      throw new Error("主进程原生权威绑定与已验证影子不一致");
+    }
+    return {
+      ...current,
+      phase: "native-authoritative",
+      authority: "native",
+      latestVerifiedProof: input.proof,
+      exactCompatibleFallback: input.proof,
+      reason: null,
+    };
+  }
+  if (input.source !== "startup-recovery" || current.phase !== "js-only" ||
+      current.authority !== "javascript" || current.sessionId !== null) {
+    throw new Error("启动恢复原生权威绑定状态无效");
+  }
+  return {
+    phase: "native-authoritative",
+    authority: "native",
+    sessionId: input.sessionId,
+    shadowStartedAtMs: null,
+    shadowRevision: input.proof.revision,
+    comparisonCount: 0,
+    latestVerifiedProof: input.proof,
+    exactCompatibleFallback: input.proof,
+    gateEvidence: null,
+    reason: null,
+  };
+}
+
 export function recordNativeCoreAuthorityCheckpoint(
   current: NativeCoreAuthorityState,
   nativeProof: NativeCoreRevisionProof,

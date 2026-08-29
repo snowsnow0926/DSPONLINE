@@ -94,7 +94,7 @@ export async function decodeNativeCoreProjectionTransfer<T extends NativeCoreTra
 
 export interface WindowsNativeCoreShadow {
   readonly sessionId: string;
-  readonly checkpoint: DesktopNativeSaveCommitResult;
+  readonly checkpoint: Pick<DesktopNativeSaveCommitResult, "slot" | "generation" | "rootHash" | "revision">;
   status(): Promise<DesktopNativeCoreSummary>;
   projection(request: { baseFields?: string[]; entityIds?: string[]; beltIds?: string[] }): Promise<DesktopNativeCoreProjectionResult>;
   viewportProjection(request: Omit<DesktopNativeCoreViewportProjectionRequest, "sessionId">): Promise<DesktopNativeCoreViewportProjectionResult>;
@@ -263,7 +263,7 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
 
   constructor(
     readonly sessionId: string,
-    readonly checkpoint: DesktopNativeSaveCommitResult,
+    readonly checkpoint: Pick<DesktopNativeSaveCommitResult, "slot" | "generation" | "rootHash" | "revision">,
   ) {}
 
   async status(): Promise<DesktopNativeCoreSummary> {
@@ -644,6 +644,18 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
     if (!desktop) return;
     await desktop.closeNativeCore({ sessionId: this.sessionId });
   }
+}
+
+/**
+ * Creates only a renderer-side thin-session facade for a host session whose
+ * owner was independently recovered by main. It never calls coreOpen and
+ * cannot claim or transfer native ownership.
+ */
+export function attachWindowsNativeCoreMainOwnedAuthority(
+  sessionId: string,
+  checkpoint: { generation: number; rootHash: string; revision: number },
+): WindowsNativeCoreShadow {
+  return new DesktopNativeCoreShadow(sessionId, { slot: "normal-main", ...checkpoint });
 }
 
 export async function openWindowsNativeCoreShadow(

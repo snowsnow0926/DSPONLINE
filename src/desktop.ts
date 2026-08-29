@@ -156,11 +156,48 @@ export interface DesktopNativePlayerAuthorityHandoffReleaseRequest {
   readonly decision: LocalSaveNativeAuthorityHandoffReconcileDecision;
 }
 
+export interface DesktopNativePlayerAuthorityHandoffCompleteRequest {
+  readonly kind: "native-player-authority-handoff-complete-v1";
+  readonly handoffId: string;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly checkpoint: LocalSaveNativeAuthorityCheckpoint;
+  readonly nativeWriterFence: LocalSaveWriterFence;
+  readonly summary: DesktopNativeCoreSummary;
+}
+
+export type DesktopNativePlayerAuthorityStartupLeaseObservation =
+  | {
+      readonly state: "active";
+      readonly runId: string;
+      readonly sessionId: string;
+      readonly stateVersion: 47;
+      readonly mode: "normal";
+      /** Exact entry checkpoint stored in the browser-fence journal. */
+      readonly entryCheckpoint: LocalSaveNativeAuthorityCheckpoint;
+      /** Latest Rust-ACKed checkpoint used to bind the thin renderer. */
+      readonly checkpoint: LocalSaveNativeAuthorityCheckpoint;
+      readonly summary: DesktopNativeCoreSummary;
+    }
+  | { readonly state: "absent" }
+  | { readonly state: "unknown" };
+
+export interface DesktopNativePlayerAuthorityStartupReconcileRequest {
+  readonly kind: "native-player-authority-startup-reconcile-v1";
+  readonly handoffId: string;
+  readonly rustLease: DesktopNativePlayerAuthorityStartupLeaseObservation;
+  readonly releaseAuthorized: boolean;
+  readonly timeoutMs: number;
+}
+
 export type DesktopNativePlayerAuthorityHandoffRequest =
   | DesktopNativePlayerAuthorityHandoffPrepareRequest
   | DesktopNativePlayerAuthorityHandoffCommitRequest
   | DesktopNativePlayerAuthorityHandoffCancelRequest
-  | DesktopNativePlayerAuthorityHandoffReleaseRequest;
+  | DesktopNativePlayerAuthorityHandoffReleaseRequest
+  | DesktopNativePlayerAuthorityHandoffCompleteRequest
+  | DesktopNativePlayerAuthorityStartupReconcileRequest;
 
 export type DesktopNativePlayerAuthorityHandoffResult =
   | {
@@ -185,6 +222,23 @@ export type DesktopNativePlayerAuthorityHandoffResult =
       readonly kind: "native-player-authority-browser-fence-released-v1";
       readonly released: true;
       readonly returnedWriterFence: LocalSaveWriterFence;
+    }
+  | {
+      readonly kind: "native-player-authority-handoff-completed-v1";
+      readonly sessionId: string;
+      readonly runId: string;
+      readonly revision: number;
+      readonly checkpoint: LocalSaveNativeAuthorityCheckpoint;
+      readonly nativeWriterFence: LocalSaveWriterFence;
+      readonly rendererInFlightCoreOperations: 0;
+      readonly workerInFlightCoreOperations: 0;
+      readonly controllerPhase: "native-authoritative";
+    }
+  | {
+      readonly kind: "native-player-authority-startup-reconciled-v1";
+      readonly action: "resumed-native" | "released-browser-fence" | "no-browser-fence" | "fail-closed";
+      readonly rendererInFlightCoreOperations: 0;
+      readonly workerInFlightCoreOperations: 0;
     };
 
 export interface DesktopNativePlayerAuthorityMacroBudgetRequest {
@@ -220,6 +274,12 @@ export interface DesktopBridge {
       request: DesktopNativePlayerAuthorityHandoffRequest,
     ) => Promise<DesktopNativePlayerAuthorityHandoffResult>,
   ) => () => void;
+  /** Main-owned and identity-free; reuses the last Rust lease ACK checkpoint. */
+  checkpointNativePlayerAuthority?: () => Promise<DesktopNativePlayerAuthorityCheckpointResult>;
+  /** Main selects the active authority session; renderer supplies only export presentation data. */
+  exportNativePlayerAuthorityV47?: (
+    request: DesktopNativePlayerAuthorityExportRequest,
+  ) => Promise<DesktopNativeCoreExportResult>;
   /** Budget-only request; session/run/operation IDs cannot be supplied by the renderer. */
   startNativePlayerAuthorityMacro?: (
     request: DesktopNativePlayerAuthorityMacroBudgetRequest,
@@ -1889,6 +1949,21 @@ export interface DesktopNativeCoreCheckpointResult {
   summary: DesktopNativeCoreSummary;
   encodedRecords: number;
   reusedRecords: number;
+}
+
+export interface DesktopNativePlayerAuthorityCheckpointResult {
+  checkpoint: LocalSaveNativeAuthorityCheckpoint;
+  summary: DesktopNativeCoreSummary;
+  reusedAcknowledgedCheckpoint: true;
+}
+
+export interface DesktopNativePlayerAuthorityExportRequest {
+  exportId: string;
+  savedAtMs: number;
+  suggestedName?: string;
+  /** Authority identities are deliberately impossible on this wire shape. */
+  sessionId?: never;
+  runId?: never;
 }
 
 export interface DesktopNativeCoreExportRequest extends DesktopNativeCoreSessionRequest {

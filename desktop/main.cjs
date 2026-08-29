@@ -45,10 +45,14 @@ const {
 const {
   CANCEL_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_CANCEL_REQUEST_KIND,
   COMMIT_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_COMMIT_REQUEST_KIND,
+  COMPLETE_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_COMPLETE_REQUEST_KIND,
   NativePlayerAuthorityHandoffIpcBridge,
   PREPARE_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_PREPARE_REQUEST_KIND,
   RELEASE_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_RELEASE_REQUEST_KIND,
+  RENDERER_READY_CHANNEL: NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_READY_CHANNEL,
+  RENDERER_READY_KIND: NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_READY_KIND,
   RESPONSE_CHANNEL: NATIVE_PLAYER_AUTHORITY_HANDOFF_RESPONSE_CHANNEL,
+  STARTUP_RECONCILE_REQUEST_KIND: NATIVE_PLAYER_AUTHORITY_STARTUP_RECONCILE_REQUEST_KIND,
 } = require("./native-player-authority-handoff-ipc.cjs");
 const {
   NativePlayerAuthorityCommandBroker,
@@ -59,6 +63,9 @@ const {
 const {
   NativePlayerAuthorityProjectionBroker,
 } = require("./native-player-authority-projection-broker.cjs");
+const {
+  NativePlayerAuthorityPersistenceBroker,
+} = require("./native-player-authority-persistence-broker.cjs");
 const {
   NativePlayerAuthorityStateBroker,
 } = require("./native-player-authority-state-broker.cjs");
@@ -164,10 +171,15 @@ let nativePlayerAuthorityRuntime = null;
 let nativePlayerAuthorityCommandBroker = null;
 let nativePlayerAuthorityMacroBroker = null;
 let nativePlayerAuthorityProjectionBroker = null;
+let nativePlayerAuthorityPersistenceBroker = null;
 let nativePlayerAuthorityStateBroker = null;
 let nativePlayerAuthorityHandoffIpcBridge = null;
 let nativePlayerAuthorityHandoffCoordinator = null;
 let nativePlayerAuthorityHandoffAttempt = null;
+let nativePlayerAuthorityDeferredHandoff = null;
+let nativePlayerAuthorityStartupReconcileObservation = Object.freeze({ state: "unknown" });
+let nativePlayerAuthorityStartupReconcileCompleted = false;
+let nativePlayerAuthorityStartupReconcileAttempt = null;
 let nativeHostQuitDrainPromise = null;
 let nativeHostQuitDrainComplete = false;
 let nativeExactRealtimeStartupStatus = unavailableStartupStatus(process.env);
@@ -339,31 +351,24 @@ function nativePlayerAuthoritySummaryEligible(summary) {
     summary?.paused === false && summary?.coverage?.authorityEligible === true;
 }
 
-function nativePlayerAuthorityDurableOwner(rendererOwnerId, sessionId) {
-  if (!nativeCoreSessions || !validNativeLogicalId(sessionId)) return rendererOwnerId;
-  const runtimeSessionId = nativePlayerAuthorityRuntime?.snapshot()?.sessionId ?? null;
-  const handoffSessionId = nativePlayerAuthorityHandoffCoordinator?.snapshot()?.sessionId ?? null;
-  if (sessionId !== runtimeSessionId && sessionId !== handoffSessionId) return rendererOwnerId;
-  try {
-    const owned = nativeCoreSessions.inspectSession("main-player-authority", sessionId);
-    return owned.ownerId === "main-player-authority" && owned.slot === "normal-main" && owned.state === "owned"
-      ? "main-player-authority"
-      : rendererOwnerId;
-  } catch {
-    return rendererOwnerId;
-  }
-}
-
 async function cancelPreparedNativePlayerAuthorityHandoff(rendererOwnerId, identity) {
   if (!nativePlayerAuthorityHandoffIpcBridge) return;
-  await nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
-    kind: NATIVE_PLAYER_AUTHORITY_HANDOFF_CANCEL_REQUEST_KIND,
-    handoffId: identity.handoffId,
-    sessionId: identity.sessionId,
-    runId: identity.runId,
-    releaseAuthorized: true,
-    browserFenceAcquired: false,
-  }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
+        kind: NATIVE_PLAYER_AUTHORITY_HANDOFF_CANCEL_REQUEST_KIND,
+        handoffId: identity.handoffId,
+        sessionId: identity.sessionId,
+        runId: identity.runId,
+        releaseAuthorized: true,
+        browserFenceAcquired: false,
+      }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError ?? new Error("native player-authority prepare cancellation is uncertain");
 }
 
 async function performNativePlayerAuthorityHandoff(rendererOwnerId, opened) {
@@ -376,17 +381,17 @@ async function performNativePlayerAuthorityHandoff(rendererOwnerId, opened) {
     runId: `player-run-${randomUUID()}`,
     sessionId: opened.sessionId,
   });
-  let prepared = false;
+  let prepareDispatched = false;
   let coordinatorStarted = false;
   const operation = (async () => {
     try {
+      prepareDispatched = true;
       const preparedResult = await nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
         kind: NATIVE_PLAYER_AUTHORITY_HANDOFF_PREPARE_REQUEST_KIND,
         ...identity,
         initialRevision: opened.summary.revision,
         timeoutMs: NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS,
       }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
-      prepared = true;
 
       // The renderer has invalidated its legacy async generation and drained
       // all JS/Worker/save/cloud work. Only now is the final Rust checkpoint
@@ -475,7 +480,7 @@ async function performNativePlayerAuthorityHandoff(rendererOwnerId, opened) {
       });
       nativePlayerAuthorityHandoffCoordinator = coordinator;
       coordinatorStarted = true;
-      return await coordinator.handoff({
+      const handoff = await coordinator.handoff({
         ...identity,
         rendererOwnerId,
         expectedRevision: expectedCheckpoint.revision,
@@ -484,8 +489,23 @@ async function performNativePlayerAuthorityHandoff(rendererOwnerId, opened) {
         settledDeadlineMs: preparedResult.settledDeadlineMs,
         timeoutMs: NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS,
       });
+      if (handoff.phase !== "active" || !browserFence || !nativePlayerAuthorityPersistenceBroker) {
+        throw Object.assign(new Error("native player-authority completion boundary is unavailable"), {
+          code: "NATIVE_PLAYER_AUTHORITY_HANDOFF_COMPLETION_UNAVAILABLE",
+        });
+      }
+      const durable = await nativePlayerAuthorityPersistenceBroker.checkpoint(rendererOwnerId);
+      await nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
+        kind: NATIVE_PLAYER_AUTHORITY_HANDOFF_COMPLETE_REQUEST_KIND,
+        ...identity,
+        revision: durable.checkpoint.revision,
+        checkpoint: durable.checkpoint,
+        nativeWriterFence: browserFence.leaseReceipt.nativeWriterFence,
+        summary: durable.summary,
+      }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
+      return handoff;
     } catch (error) {
-      if (prepared && !coordinatorStarted) {
+      if (prepareDispatched && !coordinatorStarted) {
         await cancelPreparedNativePlayerAuthorityHandoff(rendererOwnerId, identity).catch(() => undefined);
       }
       throw error;
@@ -502,8 +522,73 @@ async function performNativePlayerAuthorityHandoff(rendererOwnerId, opened) {
   }
 }
 
+async function reconcileNativePlayerAuthorityStartupWithRenderer(rendererOwnerId) {
+  if (nativePlayerAuthorityStartupReconcileCompleted || !nativePlayerAuthorityHandoffIpcBridge) return null;
+  if (nativePlayerAuthorityStartupReconcileAttempt) return nativePlayerAuthorityStartupReconcileAttempt;
+  const operation = (async () => {
+    let observation = nativePlayerAuthorityStartupReconcileObservation;
+    const recoveredRuntimePhase = nativePlayerAuthorityRuntime?.snapshot().phase ?? null;
+    if (observation.state === "active" && recoveredRuntimePhase === "active" &&
+        nativePlayerAuthorityPersistenceBroker) {
+      // Startup recovery immediately resumes the exact clock. Refresh the
+      // latest ACKed checkpoint instead of challenging the renderer with the
+      // older hello receipt after catch-up ticks have already committed.
+      const deadline = Date.now() + Math.min(2_000, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
+      let refreshed = false;
+      while (Date.now() <= deadline) {
+        try {
+          const durable = await nativePlayerAuthorityPersistenceBroker.checkpoint(rendererOwnerId);
+          observation = Object.freeze({
+            ...observation,
+            checkpoint: durable.checkpoint,
+            summary: durable.summary,
+          });
+          refreshed = true;
+          break;
+        } catch (error) {
+          if (error?.code !== "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY") {
+            observation = Object.freeze({ state: "unknown" });
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
+      if (!refreshed || observation.state === "active" &&
+          observation.checkpoint.revision !== observation.summary.revision) {
+        observation = Object.freeze({ state: "unknown" });
+      }
+    } else if (observation.state === "active" && recoveredRuntimePhase !== "macro-active") {
+      observation = Object.freeze({ state: "unknown" });
+    }
+    const result = await nativePlayerAuthorityHandoffIpcBridge.request(rendererOwnerId, {
+      kind: NATIVE_PLAYER_AUTHORITY_STARTUP_RECONCILE_REQUEST_KIND,
+      handoffId: `startup-reconcile-${randomUUID()}`,
+      rustLease: observation,
+      releaseAuthorized: observation.state === "absent",
+      timeoutMs: NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS,
+    }, NATIVE_PLAYER_AUTHORITY_HANDOFF_TIMEOUT_MS);
+    nativePlayerAuthorityStartupReconcileCompleted = true;
+    const deferred = nativePlayerAuthorityDeferredHandoff;
+    nativePlayerAuthorityDeferredHandoff = null;
+    if (deferred) scheduleNativePlayerAuthorityHandoff(deferred.rendererOwnerId, deferred.opened);
+    return result;
+  })();
+  nativePlayerAuthorityStartupReconcileAttempt = operation;
+  try {
+    return await operation;
+  } finally {
+    if (nativePlayerAuthorityStartupReconcileAttempt === operation) {
+      nativePlayerAuthorityStartupReconcileAttempt = null;
+    }
+  }
+}
+
 function scheduleNativePlayerAuthorityHandoff(rendererOwnerId, opened) {
   if (!nativePlayerAuthorityHandoffFeatureEnabled || !nativePlayerAuthoritySummaryEligible(opened?.summary)) return;
+  if (!nativePlayerAuthorityStartupReconcileCompleted) {
+    nativePlayerAuthorityDeferredHandoff = Object.freeze({ rendererOwnerId, opened });
+    return;
+  }
   setImmediate(() => {
     void performNativePlayerAuthorityHandoff(rendererOwnerId, opened).catch(() => undefined);
   });
@@ -599,6 +684,14 @@ async function initializeNativeHost() {
         mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
       ),
     });
+    nativePlayerAuthorityPersistenceBroker = new NativePlayerAuthorityPersistenceBroker({
+      runtime: nativePlayerAuthorityRuntime,
+      registry: nativeCoreSessions,
+      ownerId: playerAuthorityOwnerId,
+      isTrustedRendererOwner: (ownerId) => Boolean(
+        mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
+      ),
+    });
     const inspectedExactRealtimeStartup = await inspectNativeExactRealtimeStartup({
       leaseStore: new NativeCoreExactRealtimeRustLeaseStore({
         leaseRegistry: new NativeExactRealtimeLeaseRegistry(nativeHostClient),
@@ -618,6 +711,25 @@ async function initializeNativeHost() {
           : "已恢复 Windows 原生玩家权威会话并继续确定性时钟",
       }
       : inspectedExactRealtimeStartup;
+    nativePlayerAuthorityStartupReconcileObservation = playerAuthorityStartupRecovery?.entryCheckpoint
+      ? Object.freeze({
+        state: "active",
+        runId: playerAuthorityStartupRecovery.runId,
+        sessionId: playerAuthorityStartupRecovery.sessionId,
+        stateVersion: 47,
+        mode: "normal",
+        entryCheckpoint: playerAuthorityStartupRecovery.entryCheckpoint,
+        checkpoint: playerAuthorityStartupRecovery.checkpoint,
+        summary: playerAuthorityStartupRecovery.summary,
+      })
+      : Object.freeze({
+        state: !playerAuthorityStartupRecovery && inspectedExactRealtimeStartup.leaseState === "missing"
+          ? "absent"
+          : "unknown",
+      });
+    nativePlayerAuthorityStartupReconcileCompleted = false;
+    nativePlayerAuthorityStartupReconcileAttempt = null;
+    nativePlayerAuthorityDeferredHandoff = null;
     nativeHostState = {
       available: true,
       state: "ready",
@@ -658,10 +770,22 @@ async function initializeNativeHost() {
     nativePlayerAuthorityCommandBroker = null;
     nativePlayerAuthorityMacroBroker = null;
     nativePlayerAuthorityProjectionBroker = null;
+    nativePlayerAuthorityPersistenceBroker = null;
     nativePlayerAuthorityStateBroker = null;
-    nativePlayerAuthorityHandoffIpcBridge = null;
+    // Startup reconciliation remains available even when the host failed:
+    // an explicit fixed-root "absent" result is what authorizes an IndexedDB
+    // N+2 hand-back. Unknown/blocked observations still fail closed.
+    nativePlayerAuthorityHandoffIpcBridge = new NativePlayerAuthorityHandoffIpcBridge({
+      getRenderer: trustedRendererForNativePlayerAuthority,
+    });
     nativePlayerAuthorityHandoffCoordinator = null;
     nativePlayerAuthorityHandoffAttempt = null;
+    nativePlayerAuthorityDeferredHandoff = null;
+    nativePlayerAuthorityStartupReconcileObservation = Object.freeze({
+      state: nativeExactRealtimeStartupStatus.leaseState === "missing" ? "absent" : "unknown",
+    });
+    nativePlayerAuthorityStartupReconcileCompleted = false;
+    nativePlayerAuthorityStartupReconcileAttempt = null;
   }
   return nativeHostState;
 }
@@ -1145,6 +1269,16 @@ function configureAutoUpdater() {
 // for that exact WebContents ID.
 ipcMain.on(NATIVE_PLAYER_AUTHORITY_HANDOFF_RESPONSE_CHANNEL, (event, response) => {
   nativePlayerAuthorityHandoffIpcBridge?.accept(event, response);
+});
+
+// Renderer readiness carries no authority identity. Main creates every
+// startup challenge and binds it to this exact WebContents before accepting a
+// response. A remount can safely retry a timed-out challenge.
+ipcMain.on(NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_READY_CHANNEL, (event, message) => {
+  if (message?.kind !== NATIVE_PLAYER_AUTHORITY_HANDOFF_RENDERER_READY_KIND ||
+      Reflect.ownKeys(message).length !== 1 ||
+      !trustedRendererForNativePlayerAuthority(event?.sender?.id)) return;
+  void reconcileNativePlayerAuthorityStartupWithRenderer(event.sender.id).catch(() => undefined);
 });
 
 ipcMain.handle("desktop:release-info", () => ({
@@ -1771,20 +1905,12 @@ ipcMain.handle("desktop:native-core-checkpoint", async (event, request) => {
     fallbackCode: "NATIVE_CORE_CHECKPOINT_FAILED",
     message: "原生影子检查点生成失败，请重试",
   }, async () => {
-    const rendererOwnerId = requireTrustedNativeSender(event);
-    const ownerId = nativePlayerAuthorityDurableOwner(rendererOwnerId, request?.sessionId);
+    const ownerId = requireTrustedNativeSender(event);
     return nativeCoreSessions.checkpoint(ownerId, request);
   });
 });
 
-ipcMain.handle("desktop:native-core-export-v47", async (event, request) => {
-  try {
-    const rendererOwnerId = requireTrustedNativeSender(event);
-    const ownerId = nativePlayerAuthorityDurableOwner(rendererOwnerId, request?.sessionId);
-    const suggestedName = typeof request?.suggestedName === "string" && /^[A-Za-z0-9._\-\u4e00-\u9fff]{1,160}\.json$/.test(request.suggestedName)
-      ? request.suggestedName
-      : `dsp-idle-native-${Date.now()}.json`;
-    const prepared = normalizeRendererNativeResult("coreExport", await nativeCoreSessions.exportV47(ownerId, request));
+async function deliverNativeV47Export(prepared, suggestedName) {
     const sourcePath = path.join(nativeHostClient.rootPath, "exports", `${prepared.exportId}.json`);
     const sourceStat = await fs.promises.stat(sourcePath);
     const sourceSha256 = sourceStat.isFile() ? await sha256File(sourcePath) : "";
@@ -1857,10 +1983,67 @@ ipcMain.handle("desktop:native-core-export-v47", async (event, request) => {
       cancelled: false,
       fileName: path.basename(targetPath),
     };
+}
+
+function suggestedNativeExportName(value) {
+  return typeof value === "string" && /^[A-Za-z0-9._\-\u4e00-\u9fff]{1,160}\.json$/.test(value)
+    ? value
+    : `dsp-idle-native-${Date.now()}.json`;
+}
+
+ipcMain.handle("desktop:native-core-export-v47", async (event, request) => {
+  try {
+    const ownerId = requireTrustedNativeSender(event);
+    const prepared = normalizeRendererNativeResult(
+      "coreExport",
+      await nativeCoreSessions.exportV47(ownerId, request),
+    );
+    return await deliverNativeV47Export(prepared, suggestedNativeExportName(request?.suggestedName));
   } catch (error) {
     throw createRendererNativeError(error, {
       fallbackCode: "NATIVE_CORE_V47_EXPORT_FAILED",
       message: "原生 v47 存档导出失败；目标文件不会接收未经校验的内容",
+    });
+  }
+});
+
+ipcMain.handle("desktop:native-player-authority-checkpoint", async (event) => {
+  return runRendererNativeOperation("playerAuthorityCheckpoint", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_CHECKPOINT_FAILED",
+    message: "Windows 原生权威检查点验证失败，请重试",
+  }, async () => {
+    const rendererOwnerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityPersistenceBroker) {
+      throw Object.assign(new Error("native player-authority persistence broker is unavailable"), {
+        code: "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_UNAVAILABLE",
+      });
+    }
+    return nativePlayerAuthorityPersistenceBroker.checkpoint(rendererOwnerId);
+  });
+});
+
+ipcMain.handle("desktop:native-player-authority-export-v47", async (event, request) => {
+  try {
+    const rendererOwnerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityPersistenceBroker || !request || typeof request !== "object" ||
+        Reflect.ownKeys(request).some((key) => !["exportId", "savedAtMs", "suggestedName"].includes(key)) ||
+        !Object.hasOwn(request, "exportId") || !Object.hasOwn(request, "savedAtMs")) {
+      throw Object.assign(new Error("native player-authority export request is invalid"), {
+        code: "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_INVALID",
+      });
+    }
+    const prepared = normalizeRendererNativeResult(
+      "coreExport",
+      await nativePlayerAuthorityPersistenceBroker.exportV47(rendererOwnerId, {
+        exportId: request.exportId,
+        savedAtMs: request.savedAtMs,
+      }),
+    );
+    return await deliverNativeV47Export(prepared, suggestedNativeExportName(request.suggestedName));
+  } catch (error) {
+    throw createRendererNativeError(error, {
+      fallbackCode: "NATIVE_PLAYER_AUTHORITY_EXPORT_FAILED",
+      message: "Windows 原生权威 v47 存档导出失败；目标文件不会接收未经校验的内容",
     });
   }
 });

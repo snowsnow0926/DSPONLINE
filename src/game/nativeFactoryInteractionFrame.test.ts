@@ -62,6 +62,8 @@ function frame(input: {
   sessionId?: string;
   runId?: string;
   revision?: number;
+  selectionEntityIds?: string[];
+  selectionBeltIds?: string[];
 } = {}): NativeAuthoritativeFactoryCanvasFrame {
   const entities = input.entities ?? [entity("source", 10), entity("target", 40)];
   const belts = input.belts ?? [belt("selected-belt", "source", "target")];
@@ -70,6 +72,57 @@ function frame(input: {
   const pinnedEntityIds = input.pinnedEntityIds ?? ["source", "target"];
   const pinnedBeltIds = input.pinnedBeltIds ?? ["selected-belt"];
   const revision = input.revision ?? 9;
+  const selectionEntityIds = input.selectionEntityIds ?? ["source"];
+  const selectionBeltIds = input.selectionBeltIds ?? ["selected-belt"];
+  const selectedEntityRows = selectionEntityIds.map((id) => {
+    const row = entityById.get(id)!;
+    const quantities = (record: Readonly<Record<string, number>>) => ({
+      rows: Object.entries(record).sort(([left], [right]) => left.localeCompare(right))
+        .map(([itemId, amount]) => ({ itemId, amount })),
+      totalCount: Object.keys(record).length,
+      truncated: false,
+    });
+    return {
+      entityId: row.id,
+      planetId: row.planetId,
+      kind: row.kind,
+      position: { ...row.position },
+      interactionLocked: row.interactionLocked,
+      buildingId: row.buildingId ?? null,
+      resourceId: row.resourceId ?? null,
+      recipeId: row.recipeId ?? null,
+      storedItemId: row.storedItemId ?? null,
+      fuelItemId: row.fuelItemId ?? null,
+      machineCount: row.machineCount,
+      minerCount: row.minerCount,
+      progress: row.progress,
+      utilization: row.utilization,
+      productionRate: row.productionRate,
+      powerFactor: row.powerFactor ?? null,
+      inputItems: quantities(row.inputs),
+      outputItems: quantities(row.outputs),
+      stationConfiguration: null,
+    };
+  });
+  const selectedBeltRows = selectionBeltIds.map((id) => {
+    const row = beltById.get(id)!;
+    return {
+      beltId: row.id,
+      planetId: row.planetId,
+      sourceEntityId: row.source,
+      targetEntityId: row.target,
+      itemId: row.itemId,
+      lanes: row.lanes,
+      tier: row.tier,
+      sorterTier: row.sorterTier,
+      stackSize: row.stackSize ?? null,
+      priority: row.priority,
+      progress: row.progress,
+      lastFlow: row.lastFlow,
+      totalTransferred: row.totalTransferred ?? null,
+      congestion: row.congestion ?? null,
+    };
+  });
   return {
     source: "native-authoritative",
     sessionId: input.sessionId ?? "authority-a",
@@ -120,6 +173,14 @@ function frame(input: {
       })),
       broadQueryFallback: false,
     },
+    factorySelection: {
+      schema: "factory-read-model-v1",
+      activePlanetId: "home",
+      requestedEntityCount: selectionEntityIds.length,
+      requestedBeltCount: selectionBeltIds.length,
+      entityRows: { rows: selectedEntityRows, totalCount: selectedEntityRows.length, truncated: false },
+      beltRows: { rows: selectedBeltRows, totalCount: selectedBeltRows.length, truncated: false },
+    },
   };
 }
 
@@ -150,6 +211,72 @@ function throwingRows<Row>(): Row[] {
 }
 
 describe("native factory interaction atom", () => {
+  it("preserves the Rust station configuration row and rejects viewport/selection drift", () => {
+    const projectedStation: FactoryEntity = {
+      ...entity("source", 10),
+      kind: "station",
+      buildingId: "interstellar_logistics_station",
+      recipeId: undefined,
+    };
+    const base = frame({ entities: [projectedStation, entity("target", 40)] });
+    const slots = Array.from({ length: 5 }, (_, slotIndex) => ({
+      slotIndex,
+      itemId: slotIndex === 0 ? "iron_ore" : null,
+      localMode: slotIndex === 0 ? "supply" as const : "storage" as const,
+      remoteMode: slotIndex === 0 ? "demand" as const : "storage" as const,
+      minimumLoad: 0.5 as const,
+      minStock: 0,
+      maxStock: slotIndex === 0 ? 100 : 0,
+      priority: 1 as const,
+      routePolicy: "relay-preferred" as const,
+      warperBudget: 2 as const,
+    }));
+    const stationConfiguration = {
+      schema: "station-configuration-v1" as const,
+      registryFingerprint: "7df8cf3a" as const,
+      stationType: "interstellar" as const,
+      stationDrones: 5,
+      stationVessels: 2,
+      stationWarpers: 1,
+      slots,
+      spaceWarpUnlocked: true,
+      stationWarpEnabled: true,
+      stationWarperAutoRefill: false,
+      stationWarperTarget: 25,
+      stationHubEnabled: false,
+      stationHubPriority: 1 as const,
+    };
+    const exact = {
+      ...base,
+      factorySelection: {
+        ...base.factorySelection,
+        entityRows: {
+          rows: [{ ...base.factorySelection.entityRows.rows[0], stationConfiguration }],
+          totalCount: 1,
+          truncated: false,
+        },
+      },
+    };
+    const selected = selectNativeAuthoritativeFactoryInteractionRows(exact, binding());
+    expect(selected?.inspectorSummaryReadModel.entity?.stationConfiguration).toBe(stationConfiguration);
+    expect(JSON.stringify(selected?.inspectorSummaryReadModel)).not.toContain("stationRoutes");
+
+    const drift = {
+      ...exact,
+      factorySelection: {
+        ...exact.factorySelection,
+        entityRows: {
+          ...exact.factorySelection.entityRows,
+          rows: [{
+            ...exact.factorySelection.entityRows.rows[0],
+            buildingId: "planetary_logistics_station",
+          }],
+        },
+      },
+    };
+    expect(selectNativeAuthoritativeFactoryInteractionRows(drift, binding())).toBeNull();
+  });
+
   it("reads selection, inspector and connection candidates while Web arrays are throwing proxies", () => {
     const native = selectNativeAuthoritativeFactoryInteractionRows(frame(), binding());
     expect(native).not.toBeNull();
@@ -181,14 +308,15 @@ describe("native factory interaction atom", () => {
   });
 
   it("reads a belt-only inspector and multi-selection without evaluating Web arrays", () => {
-    const nativeFrame = frame();
-    const beltRows = selectNativeAuthoritativeFactoryInteractionRows(nativeFrame, binding({
+    const beltFrame = frame({ selectionEntityIds: [], selectionBeltIds: ["selected-belt"] });
+    const beltRows = selectNativeAuthoritativeFactoryInteractionRows(beltFrame, binding({
       selectedEntityIds: [],
       selectedBeltIds: ["selected-belt"],
       primarySelectedBeltId: "selected-belt",
       connectionEntityIds: [],
     }));
-    const multiRows = selectNativeAuthoritativeFactoryInteractionRows(nativeFrame, binding({
+    const multiFrame = frame({ selectionEntityIds: ["source", "target"], selectionBeltIds: ["selected-belt"] });
+    const multiRows = selectNativeAuthoritativeFactoryInteractionRows(multiFrame, binding({
       selectedEntityIds: ["source", "target"],
       selectedBeltIds: ["selected-belt"],
       primarySelectedBeltId: null,
@@ -259,11 +387,15 @@ describe("native factory interaction atom", () => {
       entities: [source, target],
       belts: [selected, crossing],
       pinnedEntityIds: ["source", "target"],
+      selectionEntityIds: [],
+      selectionBeltIds: ["selected-belt"],
     });
     const closed = frame({
       entities: [source, target, offscreen],
       belts: [selected, crossing],
       pinnedEntityIds: ["source", "target"],
+      selectionEntityIds: [],
+      selectionBeltIds: ["selected-belt"],
     });
 
     expect(selectNativeAuthoritativeFactoryInteractionRows(open, selectedBinding)).toBeNull();

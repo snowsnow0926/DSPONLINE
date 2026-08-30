@@ -458,6 +458,7 @@ function factoryReadModelProjection(overrides = {}) {
         powerFactor: null,
         inputItems: rows([{ itemId: "MOD-物品/Ω", amount: 4 }]),
         outputItems: rows([]),
+        stationConfiguration: null,
       }]),
       beltRows: rows([{
         beltId: "MOD-线路",
@@ -986,7 +987,6 @@ test("projection receipts are request-bound, cloned, and reject nested Host diag
     planetId: "home",
     position: { x: 1, y: 2 },
     interactionLocked: false,
-    stationRoutes: [{ id: "route-1", slotIndex: 0, peerId: "peer-1", itemId: "iron_ore", scope: "local", cargo: 1, vehicleCount: 1, progress: 0, duration: 1, requiresWarp: false }],
     routingCursor: 0,
     machineCount: 1,
     minerCount: 0,
@@ -1005,7 +1005,7 @@ test("projection receipts are request-bound, cloned, and reject nested Host diag
   assert.deepEqual(normalized, raw);
   assert.notEqual(normalized.base, raw.base);
   assert.notEqual(normalized.entities[0], raw.entities[0]);
-  assert.notEqual(normalized.entities[0].stationRoutes, raw.entities[0].stationRoutes);
+  assert.equal(Object.hasOwn(normalized.entities[0], "stationRoutes"), false);
   assert.deepEqual(normalized.entities[0].inputs, { state: 1 });
   assert.deepEqual(normalized.entities[0].outputs, { body: 2 });
 
@@ -1016,7 +1016,7 @@ test("projection receipts are request-bound, cloned, and reject nested Host diag
   rejectsProtocol({ ...raw, base: { paused: false, elapsedSeconds: 10 } });
   rejectsProtocol({ ...raw, base: { paused: { entities: [], belts: [] } } });
   rejectsProtocol({ ...raw, entities: [{ ...entity, sourcePath: SECRET_PATH }] });
-  rejectsProtocol({ ...raw, entities: [{ ...entity, stationRoutes: [{ ...entity.stationRoutes[0], stderr: SECRET_BODY }] }] });
+  rejectsProtocol({ ...raw, entities: [{ ...entity, stationRoutes: [{ id: "route-1" }] }] });
   rejectsProtocol({ ...raw, entities: [{ ...entity, inputs: { state: { path: SECRET_PATH } } }] });
   rejectsProtocol({ ...raw, belts: [{ ...belt, congestion: { rawBody: SECRET_BODY } }] });
   rejectsProtocol(raw, { baseFields: ["entities"], entityIds: ["entity-1"], beltIds: ["belt-1"] });
@@ -1190,6 +1190,48 @@ test("factory read model is strictly bounded and revision-bound before renderer 
   assert.deepEqual(normalized.shell.timeWarp, projection.shell.timeWarp);
   assert.equal(normalized.selection.entityRows.rows[0].inputItems.rows[0].itemId, "MOD-物品/Ω");
 
+  const stationSlots = Array.from({ length: 5 }, (_, slotIndex) => ({
+    slotIndex,
+    itemId: slotIndex === 2 ? "iron_ore" : null,
+    localMode: slotIndex === 2 ? "supply" : "storage",
+    remoteMode: slotIndex === 2 ? "demand" : "storage",
+    minimumLoad: slotIndex === 2 ? 0.25 : 1,
+    minStock: slotIndex === 2 ? 10 : 0,
+    maxStock: slotIndex === 2 ? 100 : 0,
+    priority: slotIndex === 2 ? 2 : 1,
+    routePolicy: "relay-preferred",
+    warperBudget: 2,
+  }));
+  const stationConfiguration = {
+    schema: "station-configuration-v1",
+    registryFingerprint: "7df8cf3a",
+    stationType: "interstellar",
+    stationDrones: 5,
+    stationVessels: 2,
+    stationWarpers: 1,
+    slots: stationSlots,
+    spaceWarpUnlocked: true,
+    stationWarpEnabled: true,
+    stationWarperAutoRefill: false,
+    stationWarperTarget: 25,
+    stationHubEnabled: false,
+    stationHubPriority: 1,
+  };
+  const stationProjection = structuredClone(projection);
+  Object.assign(stationProjection.selection.entityRows.rows[0], {
+    kind: "station",
+    buildingId: "interstellar_logistics_station",
+    stationConfiguration,
+  });
+  const normalizedStation = normalizeRendererNativeResult(
+    "coreFactoryReadModelProjection",
+    stationProjection,
+    context,
+  );
+  assert.equal(normalizedStation.selection.entityRows.rows[0].stationConfiguration.slots.length, 5);
+  assert.equal(normalizedStation.selection.entityRows.rows[0].stationConfiguration.slots[2].itemId, "iron_ore");
+  assert.equal(Object.hasOwn(normalizedStation.selection.entityRows.rows[0].stationConfiguration, "stationRoutes"), false);
+
   const rejects = (value, requestContext = context) => assert.throws(
     () => normalizeRendererNativeResult("coreFactoryReadModelProjection", value, requestContext),
     (error) => error?.code === "NATIVE_PROTOCOL_INVALID",
@@ -1244,6 +1286,15 @@ test("factory read model is strictly bounded and revision-bound before renderer 
     },
   });
   rejects({ ...projection, shell: { ...projection.shell, constructionQueueCount: 2 } });
+  const malformedStationProjection = structuredClone(stationProjection);
+  malformedStationProjection.selection.entityRows.rows[0].stationConfiguration.slots.pop();
+  rejects(malformedStationProjection);
+  const forgedModStationProjection = structuredClone(stationProjection);
+  forgedModStationProjection.selection.entityRows.rows[0].stationConfiguration.registryFingerprint = "MOD/forged";
+  rejects(forgedModStationProjection);
+  const routedStationProjection = structuredClone(stationProjection);
+  routedStationProjection.selection.entityRows.rows[0].stationConfiguration.stationRoutes = [{ id: "secret" }];
+  rejects(routedStationProjection);
   rejects({
     ...projection,
     selection: {

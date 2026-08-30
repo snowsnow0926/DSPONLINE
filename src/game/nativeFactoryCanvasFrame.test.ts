@@ -62,9 +62,16 @@ function factory(revision: number): DesktopNativeCoreFactoryReadModelResult {
     revision,
     shell: { source: "native-core", activePlanetId: "home" },
     planetNavigation: { activePlanetId: "home" },
-    selection: { activePlanetId: "home" },
+    selection: {
+      schema: "factory-read-model-v1",
+      activePlanetId: "home",
+      requestedEntityCount: 0,
+      requestedBeltCount: 0,
+      entityRows: { rows: [], totalCount: 0, truncated: false },
+      beltRows: { rows: [], totalCount: 0, truncated: false },
+    },
     construction: { activePlanetId: "home" },
-  } as DesktopNativeCoreFactoryReadModelResult;
+  } as unknown as DesktopNativeCoreFactoryReadModelResult;
 }
 
 function viewport(

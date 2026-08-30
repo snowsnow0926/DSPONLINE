@@ -30,7 +30,7 @@ const ENTITY_PROJECTION_KEYS = new Set([
   "elevatorOutputItems", "stationProgress", "stationTrips", "stationLastTransfer", "stationPeerId",
   "stationDrones", "stationVessels", "stationWarpers", "stationWarpEnabled",
   "stationWarperAutoRefill", "stationWarperTarget", "stationHubEnabled", "stationHubPriority",
-  "stationMinimumLoad", "stationSlots", "stationRoutes", "stationDispatchCursor",
+  "stationMinimumLoad", "stationSlots", "stationDispatchCursor",
   "stationLastSupplyPeerBySlot", "stationCongestion", "sprayCoaterInstalled", "proliferatorTier",
   "proliferatorMode", "proliferatorPoints", "proliferatorBonusProgress", "galacticExporterPaused",
   "blackHolePaused", "blackHoleActivationConfirmed", "blackHolePorts", "routingCursor",
@@ -1587,13 +1587,109 @@ function normalizeFactoryPlanetNavigation(value, activePlanetId) {
   return { schema: "factory-read-model-v1", activePlanetId, planets };
 }
 
+function normalizeFactoryStationConfiguration(value, label, entity) {
+  if (value === null) return null;
+  const source = exactObject(value, [
+    "schema", "registryFingerprint", "stationType", "stationDrones", "stationVessels",
+    "stationWarpers", "slots", "spaceWarpUnlocked", "stationWarpEnabled",
+    "stationWarperAutoRefill", "stationWarperTarget", "stationHubEnabled",
+    "stationHubPriority",
+  ], label);
+  if (source.schema !== "station-configuration-v1" || source.registryFingerprint !== "7df8cf3a") {
+    throw protocolError(`${label} identity`);
+  }
+  const stationType = oneOf(source.stationType, ["planetary", "interstellar"], `${label}.stationType`);
+  const expectedBuildingId = stationType === "interstellar"
+    ? "interstellar_logistics_station"
+    : "planetary_logistics_station";
+  if (entity.kind !== "station" || entity.buildingId !== expectedBuildingId ||
+      !Array.isArray(source.slots) || source.slots.length !== 5) {
+    throw protocolError(`${label} station binding`);
+  }
+  const stationDrones = safeInteger(source.stationDrones, `${label}.stationDrones`);
+  const stationVessels = source.stationVessels === null
+    ? null
+    : safeInteger(source.stationVessels, `${label}.stationVessels`);
+  const stationWarpers = source.stationWarpers === null
+    ? null
+    : safeInteger(source.stationWarpers, `${label}.stationWarpers`);
+  const machineCount = safeInteger(entity.machineCount, `${label}.machineCount`);
+  if (stationDrones > machineCount * 50) throw protocolError(`${label}.stationDrones capacity`);
+  const itemIds = new Set();
+  const slots = source.slots.map((value, slotIndex) => {
+    const keys = stationType === "interstellar"
+      ? ["slotIndex", "itemId", "localMode", "remoteMode", "minimumLoad", "minStock", "maxStock", "priority", "routePolicy", "warperBudget"]
+      : ["slotIndex", "itemId", "localMode", "remoteMode", "minimumLoad", "minStock", "maxStock", "priority"];
+    const slot = exactObject(value, keys, `${label}.slots[${slotIndex}]`);
+    if (slot.slotIndex !== slotIndex) throw protocolError(`${label}.slots[${slotIndex}].slotIndex`);
+    const itemId = nullableReadModelId(slot.itemId, `${label}.slots[${slotIndex}].itemId`);
+    if (itemId !== null && itemIds.has(itemId)) throw protocolError(`${label} duplicate slot item`);
+    if (itemId !== null) itemIds.add(itemId);
+    const minimumLoad = oneOf(slot.minimumLoad, [0.1, 0.25, 0.5, 1], `${label}.slots[${slotIndex}].minimumLoad`);
+    const minStock = safeInteger(slot.minStock, `${label}.slots[${slotIndex}].minStock`);
+    const maxStock = safeInteger(slot.maxStock, `${label}.slots[${slotIndex}].maxStock`);
+    const priority = safeInteger(slot.priority, `${label}.slots[${slotIndex}].priority`);
+    if (minStock > 100_000_000 || maxStock > 100_000_000 ||
+        maxStock > 0 && minStock > maxStock || priority > 2) {
+      throw protocolError(`${label}.slots[${slotIndex}] bounds`);
+    }
+    const result = {
+      slotIndex,
+      itemId,
+      localMode: oneOf(slot.localMode, ["supply", "demand", "storage"], `${label}.slots[${slotIndex}].localMode`),
+      remoteMode: oneOf(slot.remoteMode, ["supply", "demand", "storage"], `${label}.slots[${slotIndex}].remoteMode`),
+      minimumLoad,
+      minStock,
+      maxStock,
+      priority,
+    };
+    if (stationType === "interstellar") {
+      result.routePolicy = oneOf(slot.routePolicy, ["direct", "relay-preferred", "relay-required"], `${label}.slots[${slotIndex}].routePolicy`);
+      result.warperBudget = safeInteger(slot.warperBudget, `${label}.slots[${slotIndex}].warperBudget`, 1);
+      if (result.warperBudget > 4) throw protocolError(`${label}.slots[${slotIndex}].warperBudget`);
+    }
+    return result;
+  });
+  const spaceWarpUnlocked = boolean(source.spaceWarpUnlocked, `${label}.spaceWarpUnlocked`);
+  if (stationType === "planetary") {
+    if (stationVessels !== null || stationWarpers !== null || source.stationWarpEnabled !== null ||
+        source.stationWarperAutoRefill !== null || source.stationWarperTarget !== null ||
+        source.stationHubEnabled !== null || source.stationHubPriority !== null) {
+      throw protocolError(`${label} planetary scalar binding`);
+    }
+    return {
+      schema: "station-configuration-v1", registryFingerprint: "7df8cf3a", stationType,
+      stationDrones, stationVessels: null, stationWarpers: null, slots, spaceWarpUnlocked,
+      stationWarpEnabled: null, stationWarperAutoRefill: null, stationWarperTarget: null,
+      stationHubEnabled: null, stationHubPriority: null,
+    };
+  }
+  const stationWarperTarget = safeInteger(source.stationWarperTarget, `${label}.stationWarperTarget`, 1);
+  const stationHubPriority = safeInteger(source.stationHubPriority, `${label}.stationHubPriority`);
+  if (stationVessels === null || stationWarpers === null || stationVessels > machineCount * 10 ||
+      stationWarpers > machineCount * 50 || stationWarperTarget > machineCount * 50 ||
+      stationHubPriority > 2) {
+    throw protocolError(`${label} interstellar scalar binding`);
+  }
+  return {
+    schema: "station-configuration-v1", registryFingerprint: "7df8cf3a", stationType,
+    stationDrones, stationVessels, stationWarpers, slots, spaceWarpUnlocked,
+    stationWarpEnabled: boolean(source.stationWarpEnabled, `${label}.stationWarpEnabled`),
+    stationWarperAutoRefill: boolean(source.stationWarperAutoRefill, `${label}.stationWarperAutoRefill`),
+    stationWarperTarget,
+    stationHubEnabled: boolean(source.stationHubEnabled, `${label}.stationHubEnabled`),
+    stationHubPriority,
+  };
+}
+
 function normalizeFactorySelectedEntity(value, label) {
   const source = exactObject(value, [
     "entityId", "planetId", "kind", "position", "interactionLocked", "buildingId",
     "resourceId", "recipeId", "storedItemId", "fuelItemId", "machineCount", "minerCount",
     "progress", "utilization", "productionRate", "powerFactor", "inputItems", "outputItems",
+    "stationConfiguration",
   ], label);
-  return {
+  const result = {
     entityId: opaqueId(source.entityId, `${label}.entityId`),
     planetId: opaqueId(source.planetId, `${label}.planetId`),
     kind: opaqueId(source.kind, `${label}.kind`),
@@ -1613,6 +1709,12 @@ function normalizeFactorySelectedEntity(value, label) {
     inputItems: normalizeReadModelQuantityRows(source.inputItems, `${label}.inputItems`, 32, "itemId"),
     outputItems: normalizeReadModelQuantityRows(source.outputItems, `${label}.outputItems`, 32, "itemId"),
   };
+  result.stationConfiguration = normalizeFactoryStationConfiguration(
+    source.stationConfiguration,
+    `${label}.stationConfiguration`,
+    result,
+  );
+  return result;
 }
 
 function normalizeFactorySelectedBelt(value, label) {
@@ -1671,6 +1773,10 @@ function normalizeFactorySelection(value, activePlanetId, context) {
   const beltRows = normalizeReadModelRows(source.beltRows, "native factory selected belts", 64, normalizeFactorySelectedBelt);
   if (entityRows.totalCount !== entityRows.rows.length || beltRows.totalCount !== beltRows.rows.length) {
     throw protocolError("native factory selection cardinality");
+  }
+  if (entityRows.rows.some((row) => row.planetId !== activePlanetId) ||
+      beltRows.rows.some((row) => row.planetId !== activePlanetId)) {
+    throw protocolError("native factory selection active planet binding");
   }
   requireFactorySelectionOrder(entityRows.rows, "entityId", context.selectedEntityIds, "native factory entity selection order");
   requireFactorySelectionOrder(beltRows.rows, "beltId", context.selectedBeltIds, "native factory belt selection order");

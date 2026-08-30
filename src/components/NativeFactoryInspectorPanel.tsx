@@ -4,6 +4,7 @@ import type {
   FactoryInspectorSummaryReadModel,
   FactoryMultiSelectionSummaryReadModel,
   ItemQuantityReadModel,
+  NativeStationRoutePolicyReadModel,
   SelectedBeltReadModel,
   SelectedEntityReadModel,
 } from "../game/factoryReadModels";
@@ -22,7 +23,8 @@ import {
   type NativeProjectedEjectorOrbitFrame,
   type NativeProjectedTimeWarpControllerBinding,
 } from "../game/nativeProjectedTimeWarpEjectorCommands";
-import type { ItemId, PowerPriority } from "../game/types";
+import type { NativeProjectedStationConfigurationBinding } from "../game/nativeProjectedStationConfigurationCommands";
+import type { ItemId, LogisticsPriority, PowerPriority, StationMinimumLoad } from "../game/types";
 import { PowerValue } from "./PowerValue";
 import { QuantityValue } from "./QuantityValue";
 
@@ -32,6 +34,7 @@ interface NativeFactoryInspectorPanelProps {
   entityConfiguration: NativeProjectedEntityConfigurationBinding | null;
   timeWarpController?: NativeProjectedTimeWarpControllerBinding | null;
   ejectorOrbitFrame?: NativeProjectedEjectorOrbitFrame | null;
+  stationConfiguration?: NativeProjectedStationConfigurationBinding | null;
   pending: boolean;
   onEntityLockChange: (entityId: string, locked: boolean) => void;
   onRemoveEntity: (entityId: string) => void;
@@ -53,10 +56,28 @@ interface NativeFactoryInspectorPanelProps {
   onTimeWarpEnabledChange?: (entityId: string, enabled: boolean) => void;
   onTimeWarpRequestedMultiplierChange?: (entityId: string, requestedMultiplier: number) => void;
   onEjectorOrbitChange?: (entityId: string, orbitId: string) => void;
+  onStationConfigurationChange?: (
+    entityId: string,
+    action: NativeStationConfigurationUiAction,
+  ) => void;
   onBeltLaneCountChange: (beltId: string, targetLanes: number) => void;
   onBeltPriorityChange: (beltId: string, targetPriority: 0 | 1 | 2) => void;
   onRemoveBelt: (beltId: string) => void;
 }
+
+export type NativeStationConfigurationUiAction =
+  | Readonly<{ kind: "slot-priority"; slotIndex: number; target: LogisticsPriority }>
+  | Readonly<{ kind: "slot-minimum-load"; slotIndex: number; target: StationMinimumLoad }>
+  | Readonly<{ kind: "slot-limits"; slotIndex: number; minStock: number; maxStock: number }>
+  | Readonly<{ kind: "slot-route-policy"; slotIndex: number; target: NativeStationRoutePolicyReadModel }>
+  | Readonly<{ kind: "slot-warper-budget"; slotIndex: number; target: number }>
+  | Readonly<{
+      kind: "station-scalar";
+      field: "stationWarpEnabled" | "stationWarperAutoRefill" | "stationHubEnabled";
+      target: boolean;
+    }>
+  | Readonly<{ kind: "station-scalar"; field: "stationWarperTarget"; target: number }>
+  | Readonly<{ kind: "station-scalar"; field: "stationHubPriority"; target: LogisticsPriority }>;
 
 const constructionNames = new Map<string, string>(
   CONSTRUCTION.map((definition) => [definition.buildingId, definition.name]),
@@ -79,11 +100,152 @@ function itemRows(label: string, rows: readonly ItemQuantityReadModel[], truncat
   </section>;
 }
 
+function NativeStationConfiguration({
+  entity,
+  binding,
+  pending,
+  onChange,
+}: {
+  entity: SelectedEntityReadModel;
+  binding: NativeProjectedStationConfigurationBinding | null;
+  pending: boolean;
+  onChange?: (entityId: string, action: NativeStationConfigurationUiAction) => void;
+}) {
+  const configuration = entity.stationConfiguration;
+  if (!configuration) return null;
+  const writable = Boolean(binding && onChange && !pending && !entity.interactionLocked);
+  const submit = (action: NativeStationConfigurationUiAction) => {
+    if (writable) onChange?.(entity.entityId, action);
+  };
+  const interstellar = configuration.stationType === "interstellar";
+  return <section
+    className="native-inspector-safe-actions native-station-configuration"
+    data-native-station-configuration="bounded-no-material-v1"
+  >
+    <strong>Rust 物流站配置</strong>
+    <p>物品、收发模式、舰队和站内翘曲器仅显示；可写按钮只提交一个配置意图，等待 durable ACK 后再刷新。</p>
+    <dl className="metric-ledger">
+      <div><dt>无人机</dt><dd>{configuration.stationDrones}</dd></div>
+      <div><dt>运输船</dt><dd>{configuration.stationVessels ?? "-"}</dd></div>
+      <div><dt>站内翘曲器</dt><dd>{configuration.stationWarpers ?? "-"}</dd></div>
+    </dl>
+    <div className="native-inspector-stack-actions" role="group" aria-label="物流站舰队只读">
+      <button type="button" disabled aria-label="物流无人机只读">无人机 ±</button>
+      {interstellar ? <button type="button" disabled aria-label="物流运输船只读">运输船 ±</button> : null}
+      {interstellar ? <button type="button" disabled aria-label="站内翘曲器只读">翘曲器 ±</button> : null}
+    </div>
+    {interstellar ? <>
+      <div className="native-inspector-stack-actions" role="group" aria-label="Windows 原生星际站开关">
+        <button
+          type="button"
+          disabled={!writable || !configuration.stationWarpEnabled && !configuration.spaceWarpUnlocked}
+          aria-pressed={configuration.stationWarpEnabled ?? false}
+          onClick={() => submit({ kind: "station-scalar", field: "stationWarpEnabled", target: !configuration.stationWarpEnabled })}
+        >{configuration.stationWarpEnabled ? "关闭翘曲" : "启用翘曲"}</button>
+        <button
+          type="button"
+          disabled={!writable || !configuration.stationWarperAutoRefill && !configuration.spaceWarpUnlocked}
+          aria-pressed={configuration.stationWarperAutoRefill ?? false}
+          onClick={() => submit({ kind: "station-scalar", field: "stationWarperAutoRefill", target: !configuration.stationWarperAutoRefill })}
+        >{configuration.stationWarperAutoRefill ? "关闭自动补充" : "启用自动补充"}</button>
+        <button
+          type="button"
+          disabled={!writable}
+          aria-pressed={configuration.stationHubEnabled ?? false}
+          onClick={() => submit({ kind: "station-scalar", field: "stationHubEnabled", target: !configuration.stationHubEnabled })}
+        >{configuration.stationHubEnabled ? "关闭枢纽" : "启用枢纽"}</button>
+      </div>
+      <label>
+        <span>翘曲器目标</span>
+        <input
+          key={`warper-target-${configuration.stationWarperTarget}`}
+          aria-label="Windows 原生物流站翘曲器目标"
+          type="number"
+          min={1}
+          max={Math.max(1, entity.machineCount * 50)}
+          defaultValue={configuration.stationWarperTarget ?? 1}
+          disabled={!writable}
+          onBlur={(event) => {
+            const target = Number(event.currentTarget.value);
+            if (Number.isSafeInteger(target)) submit({ kind: "station-scalar", field: "stationWarperTarget", target });
+          }}
+        />
+      </label>
+      <div className="native-inspector-stack-actions" role="group" aria-label="Windows 原生物流站枢纽优先级">
+        {([0, 1, 2] as const).map((priority) => <button
+          type="button"
+          key={priority}
+          disabled={!writable || configuration.stationHubPriority === priority}
+          aria-pressed={configuration.stationHubPriority === priority}
+          onClick={() => submit({ kind: "station-scalar", field: "stationHubPriority", target: priority })}
+        >枢纽 {priority}</button>)}
+      </div>
+    </> : null}
+    {configuration.slots.map((slot) => <fieldset key={slot.slotIndex} className="native-station-slot">
+      <legend>槽位 {slot.slotIndex + 1}</legend>
+      <label><span>物品（只读）</span><select aria-label={`物流站槽位 ${slot.slotIndex + 1} 物品只读`} value={slot.itemId ?? ""} disabled>
+        <option value="">未配置</option>{slot.itemId ? <option value={slot.itemId}>{itemLabel(slot.itemId)}</option> : null}
+      </select></label>
+      <label><span>本地模式（只读）</span><select aria-label={`物流站槽位 ${slot.slotIndex + 1} 本地模式只读`} value={slot.localMode} disabled>
+        <option value={slot.localMode}>{slot.localMode}</option>
+      </select></label>
+      <label><span>星际模式（只读）</span><select aria-label={`物流站槽位 ${slot.slotIndex + 1} 星际模式只读`} value={slot.remoteMode} disabled>
+        <option value={slot.remoteMode}>{slot.remoteMode}</option>
+      </select></label>
+      <label><span>最低装载</span><select
+        aria-label={`物流站槽位 ${slot.slotIndex + 1} 最低装载`}
+        value={slot.minimumLoad}
+        disabled={!writable}
+        onChange={(event) => submit({
+          kind: "slot-minimum-load",
+          slotIndex: slot.slotIndex,
+          target: Number(event.target.value) as StationMinimumLoad,
+        })}
+      >{([0.1, 0.25, 0.5, 1] as const).map((value) => <option value={value} key={value}>{value * 100}%</option>)}</select></label>
+      <label><span>最低库存</span><input
+        key={`min-${slot.slotIndex}-${slot.minStock}`}
+        aria-label={`物流站槽位 ${slot.slotIndex + 1} 最低库存`}
+        type="number" min={0} max={100_000_000} defaultValue={slot.minStock} disabled={!writable}
+        onBlur={(event) => submit({ kind: "slot-limits", slotIndex: slot.slotIndex, minStock: Number(event.currentTarget.value), maxStock: slot.maxStock })}
+      /></label>
+      <label><span>最高库存</span><input
+        key={`max-${slot.slotIndex}-${slot.maxStock}`}
+        aria-label={`物流站槽位 ${slot.slotIndex + 1} 最高库存`}
+        type="number" min={0} max={100_000_000} defaultValue={slot.maxStock} disabled={!writable}
+        onBlur={(event) => submit({ kind: "slot-limits", slotIndex: slot.slotIndex, minStock: slot.minStock, maxStock: Number(event.currentTarget.value) })}
+      /></label>
+      <div className="native-inspector-stack-actions" role="group" aria-label={`物流站槽位 ${slot.slotIndex + 1} 优先级`}>
+        {([0, 1, 2] as const).map((priority) => <button type="button" key={priority}
+          disabled={!writable || slot.priority === priority} aria-pressed={slot.priority === priority}
+          onClick={() => submit({ kind: "slot-priority", slotIndex: slot.slotIndex, target: priority })}
+        >{priority}</button>)}
+      </div>
+      {interstellar && slot.routePolicy && slot.warperBudget ? <>
+        <label><span>路线策略</span><select
+          aria-label={`物流站槽位 ${slot.slotIndex + 1} 路线策略`}
+          value={slot.routePolicy}
+          disabled={!writable}
+          onChange={(event) => submit({ kind: "slot-route-policy", slotIndex: slot.slotIndex, target: event.target.value as NativeStationRoutePolicyReadModel })}
+        >
+          <option value="direct">直达</option><option value="relay-preferred">优先中继</option><option value="relay-required">必须中继</option>
+        </select></label>
+        <label><span>翘曲器预算</span><select
+          aria-label={`物流站槽位 ${slot.slotIndex + 1} 翘曲器预算`}
+          value={slot.warperBudget}
+          disabled={!writable}
+          onChange={(event) => submit({ kind: "slot-warper-budget", slotIndex: slot.slotIndex, target: Number(event.target.value) })}
+        >{([1, 2, 3, 4] as const).map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
+      </> : null}
+    </fieldset>)}
+  </section>;
+}
+
 function NativeEntitySummary({
   entity,
   configuration,
   timeWarpController,
   ejectorOrbitFrame,
+  stationConfiguration,
   pending,
   onEntityLockChange,
   onRemoveEntity,
@@ -96,11 +258,13 @@ function NativeEntitySummary({
   onTimeWarpEnabledChange,
   onTimeWarpRequestedMultiplierChange,
   onEjectorOrbitChange,
+  onStationConfigurationChange,
 }: {
   entity: SelectedEntityReadModel;
   configuration: NativeProjectedEntityConfigurationBinding | null;
   timeWarpController: NativeProjectedTimeWarpControllerBinding | null;
   ejectorOrbitFrame: NativeProjectedEjectorOrbitFrame | null;
+  stationConfiguration: NativeProjectedStationConfigurationBinding | null;
   pending: boolean;
   onEntityLockChange: (entityId: string, locked: boolean) => void;
   onRemoveEntity: (entityId: string) => void;
@@ -122,6 +286,7 @@ function NativeEntitySummary({
   onTimeWarpEnabledChange?: (entityId: string, enabled: boolean) => void;
   onTimeWarpRequestedMultiplierChange?: (entityId: string, requestedMultiplier: number) => void;
   onEjectorOrbitChange?: (entityId: string, orbitId: string) => void;
+  onStationConfigurationChange?: (entityId: string, action: NativeStationConfigurationUiAction) => void;
 }) {
   const label = entity.buildingId
     ? constructionNames.get(entity.buildingId) ?? entity.buildingId
@@ -164,6 +329,12 @@ function NativeEntitySummary({
       {itemRows("输入缓存", entity.inputItems.rows, entity.inputItems.truncated)}
       {itemRows("输出缓存", entity.outputItems.rows, entity.outputItems.truncated)}
     </section>
+    <NativeStationConfiguration
+      entity={entity}
+      binding={stationConfiguration}
+      pending={pending}
+      onChange={onStationConfigurationChange}
+    />
     <section className="native-inspector-safe-actions" data-native-entity-lock="ordinary-single-v1">
       <strong>Rust 建筑锁定</strong>
       <p>只切换当前建筑的交互锁。Rust 会在最新 revision 再确认实体仍存在，锁定不会改变库存、线路或生产数据。</p>
@@ -448,6 +619,7 @@ export function NativeFactoryInspectorPanel({
   entityConfiguration,
   timeWarpController = null,
   ejectorOrbitFrame = null,
+  stationConfiguration = null,
   pending,
   onEntityLockChange,
   onRemoveEntity,
@@ -460,6 +632,7 @@ export function NativeFactoryInspectorPanel({
   onTimeWarpEnabledChange,
   onTimeWarpRequestedMultiplierChange,
   onEjectorOrbitChange,
+  onStationConfigurationChange,
   onBeltLaneCountChange,
   onBeltPriorityChange,
   onRemoveBelt,
@@ -509,6 +682,19 @@ export function NativeFactoryInspectorPanel({
     ejectorOrbitFrame.entity.targetDysonOrbitId === currentEntityConfiguration.entity.targetDysonOrbitId
     ? ejectorOrbitFrame
     : null;
+  const currentStationConfiguration = ready && inspector.entity && stationConfiguration &&
+    projectionIdentity && stationConfiguration.sessionId === projectionIdentity.sessionId &&
+    stationConfiguration.runId === projectionIdentity.runId &&
+    stationConfiguration.revision === projectionIdentity.revision &&
+    stationConfiguration.activePlanetId === projectionIdentity.planetId &&
+    stationConfiguration.entity.entityId === inspector.entity.entityId &&
+    stationConfiguration.entity.planetId === inspector.entity.planetId &&
+    stationConfiguration.entity.kind === inspector.entity.kind &&
+    stationConfiguration.entity.buildingId === inspector.entity.buildingId &&
+    stationConfiguration.entity.interactionLocked === inspector.entity.interactionLocked &&
+    stationConfiguration.configuration === inspector.entity.stationConfiguration
+    ? stationConfiguration
+    : null;
   let content;
   if (!ready) {
     content = <section className="inspector-content native-read-only-unavailable" role="status"><strong>正在核对原生检查摘要</strong><p>旧 JavaScript 存档不会作为备用显示来源。</p></section>;
@@ -526,6 +712,7 @@ export function NativeFactoryInspectorPanel({
       configuration={currentEntityConfiguration}
       timeWarpController={currentTimeWarpController}
       ejectorOrbitFrame={currentEjectorOrbitFrame}
+      stationConfiguration={currentStationConfiguration}
       pending={pending}
       onEntityLockChange={onEntityLockChange}
       onRemoveEntity={onRemoveEntity}
@@ -538,6 +725,7 @@ export function NativeFactoryInspectorPanel({
       onTimeWarpEnabledChange={onTimeWarpEnabledChange}
       onTimeWarpRequestedMultiplierChange={onTimeWarpRequestedMultiplierChange}
       onEjectorOrbitChange={onEjectorOrbitChange}
+      onStationConfigurationChange={onStationConfigurationChange}
     />;
   } else if (inspector.belt && !inspector.entity) {
     content = <NativeBeltSummary belt={inspector.belt} pending={pending} onLaneCountChange={onBeltLaneCountChange} onPriorityChange={onBeltPriorityChange} onRemove={onRemoveBelt} />;

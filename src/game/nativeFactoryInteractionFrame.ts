@@ -123,6 +123,7 @@ function selectedEntityRow(entity: FactoryEntity): SelectedEntityReadModel | nul
     powerFactor: entity.powerFactor ?? null,
     inputItems,
     outputItems,
+    stationConfiguration: null,
   });
 }
 
@@ -143,6 +144,24 @@ function selectedBeltRow(belt: BeltConnection): SelectedBeltReadModel {
     totalTransferred: belt.totalTransferred ?? null,
     congestion: belt.congestion ?? null,
   });
+}
+
+function selectedEntityProjectionMatchesViewport(
+  projected: SelectedEntityReadModel,
+  entity: FactoryEntity,
+): boolean {
+  const reconstructed = selectedEntityRow(entity);
+  if (!reconstructed) return false;
+  const { stationConfiguration: _stationConfiguration, ...common } = projected;
+  const { stationConfiguration: _reconstructedStationConfiguration, ...reconstructedCommon } = reconstructed;
+  return JSON.stringify(common) === JSON.stringify(reconstructedCommon);
+}
+
+function selectedBeltProjectionMatchesViewport(
+  projected: SelectedBeltReadModel,
+  belt: BeltConnection,
+): boolean {
+  return JSON.stringify(projected) === JSON.stringify(selectedBeltRow(belt));
 }
 
 function allSelectedBeltIds(selection: FactoryInteractionSelection): string[] {
@@ -263,7 +282,8 @@ function createNativeModels(
   selectedEntities: readonly FactoryEntity[],
   selectedBelt: BeltConnection | null,
   selectedBelts: readonly BeltConnection[],
-  multiSelectedBelts: readonly BeltConnection[],
+  entityRows: readonly SelectedEntityReadModel[],
+  beltRows: readonly SelectedBeltReadModel[],
 ): Pick<FactoryInteractionRows, "selectionToolbarReadModel" | "inspectorSummaryReadModel" | "multiSelectionSummaryReadModel"> | null {
   const projectionIdentity = Object.freeze({
     sessionId: frame.sessionId,
@@ -271,15 +291,14 @@ function createNativeModels(
     revision: frame.revision,
     planetId: frame.planetId,
   });
-  const entityRows: SelectedEntityReadModel[] = [];
-  for (const entity of selectedEntities) {
-    const row = selectedEntityRow(entity);
-    if (!row) return null;
-    entityRows.push(row);
-  }
-  const multiBeltRows = multiSelectedBelts.map(selectedBeltRow);
+  if (entityRows.length !== selectedEntities.length || beltRows.length !== selectedBelts.length ||
+      entityRows.some((row, index) => !selectedEntityProjectionMatchesViewport(row, selectedEntities[index])) ||
+      beltRows.some((row, index) => !selectedBeltProjectionMatchesViewport(row, selectedBelts[index]))) return null;
+  const multiBeltRows = selectedEntities.length > 1 ? beltRows : [];
   const inspectorEntity = selectedEntities.length === 1 ? entityRows[0] ?? null : null;
-  const inspectorBelt = inspectorEntity ? null : selectedBelt ? selectedBeltRow(selectedBelt) : null;
+  const inspectorBelt = inspectorEntity ? null : selectedBelt
+    ? beltRows.find((row) => row.beltId === selectedBelt.id) ?? null
+    : null;
   return {
     selectionToolbarReadModel: Object.freeze({
       schema: FACTORY_READ_MODEL_SCHEMA,
@@ -307,7 +326,7 @@ function createNativeModels(
       activePlanetId: frame.planetId,
       projectionIdentity,
       requestedEntityCount: binding.selectedEntityIds.length,
-      requestedBeltCount: multiSelectedBelts.length,
+      requestedBeltCount: multiBeltRows.length,
       entityRows: Object.freeze({ rows: Object.freeze(entityRows), totalCount: entityRows.length, truncated: false }),
       beltRows: Object.freeze({ rows: Object.freeze(multiBeltRows), totalCount: multiBeltRows.length, truncated: false }),
     }),
@@ -334,6 +353,17 @@ export function selectNativeAuthoritativeFactoryInteractionRows(
     !sameIdSet(frame.viewportReadModel.pinnedBeltIds, binding.requestedPinnedBeltIds)) return null;
 
   const selectedBeltIds = allSelectedBeltIds(binding);
+  const factorySelection = frame.factorySelection;
+  if (factorySelection.activePlanetId !== binding.planetId || factorySelection.entityRows.truncated ||
+    factorySelection.beltRows.truncated ||
+    factorySelection.requestedEntityCount !== binding.selectedEntityIds.length ||
+    factorySelection.requestedBeltCount !== selectedBeltIds.length ||
+    factorySelection.entityRows.totalCount !== binding.selectedEntityIds.length ||
+    factorySelection.beltRows.totalCount !== selectedBeltIds.length ||
+    factorySelection.entityRows.rows.length !== binding.selectedEntityIds.length ||
+    factorySelection.beltRows.rows.length !== selectedBeltIds.length ||
+    factorySelection.entityRows.rows.some((row, index) => row.entityId !== binding.selectedEntityIds[index]) ||
+    factorySelection.beltRows.rows.some((row, index) => row.beltId !== selectedBeltIds[index])) return null;
   if (binding.selectedEntityIds.some((id) => !binding.requestedPinnedEntityIds.includes(id)) ||
     binding.connectionEntityIds.some((id) => !binding.requestedPinnedEntityIds.includes(id)) ||
     selectedBeltIds.some((id) => !binding.requestedPinnedBeltIds.includes(id))) return null;
@@ -353,7 +383,15 @@ export function selectNativeAuthoritativeFactoryInteractionRows(
   if (!selectedEntity && selectedBelt &&
     !selectedBeltNetworkIsClosed(selectedBelt, frame.entityById, frame.projectedBelts)) return null;
   const multiSelectedBelts = selectedEntities.length > 1 ? allBelts : [];
-  const models = createNativeModels(frame, binding, selectedEntities, selectedBelt, toolbarBelts, multiSelectedBelts);
+  const models = createNativeModels(
+    frame,
+    binding,
+    selectedEntities,
+    selectedBelt,
+    toolbarBelts,
+    factorySelection.entityRows.rows,
+    factorySelection.beltRows.rows,
+  );
   if (!models) return null;
   return Object.freeze({
     source: "native-authoritative",

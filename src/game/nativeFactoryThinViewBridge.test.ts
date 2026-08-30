@@ -169,6 +169,7 @@ function selectedEntity(entityId: string, interactionLocked: boolean): SelectedE
     powerFactor: 1,
     inputItems: emptyRows,
     outputItems: emptyRows,
+    stationConfiguration: null,
   };
 }
 

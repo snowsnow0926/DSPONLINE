@@ -459,8 +459,15 @@ import {
 import {
   NativeBlueprintWorkspaceStore,
   createNativePlayerAuthorityBlueprintWorkspaceSource,
+  nativeBlueprintRenameIdentityMatchesFrame,
   selectNativeBlueprintWorkspaceFrame,
+  type NativeBlueprintRenameIdentity,
+  type NativeBlueprintRenamePendingIdentity,
 } from "./game/nativeBlueprintWorkspaceStore";
+import {
+  canonicalizeNativeBlueprintName,
+  createNativeBlueprintRenameIntentCommand,
+} from "./game/nativeBlueprintRenameIntentCommands";
 import {
   createNativeProjectedOrdinaryBuildingPlacementCommand,
   readVerifiedNativeConstructionPlacementContext,
@@ -1926,6 +1933,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const [nativeBlueprintSelectedId, setNativeBlueprintSelectedId] = useState<string | null>(null);
   const [nativeBlueprintLibraryCursor, setNativeBlueprintLibraryCursor] = useState(0);
   const [nativeBlueprintQueueCursor, setNativeBlueprintQueueCursor] = useState(0);
+  const [nativeBlueprintRenamePendingIdentity, setNativeBlueprintRenamePendingIdentity] = useState<
+    NativeBlueprintRenamePendingIdentity | null
+  >(null);
   const [dysonPlannerOpen, setDysonPlannerOpen] = useState(false);
   const [nativeDysonSelectedSystemId, setNativeDysonSelectedSystemId] = useState<string | null>(null);
   const [operationsOpen, setOperationsOpen] = useState(false);
@@ -2770,6 +2780,52 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const nativeBlueprintWorkspaceFrame = useMemo(() => nativeFactoryInventoryIdentity
     ? selectNativeBlueprintWorkspaceFrame(nativeBlueprintWorkspaceSnapshot, nativeFactoryInventoryIdentity)
     : null, [nativeBlueprintWorkspaceSnapshot, nativeFactoryInventoryIdentity]);
+  const nativeBlueprintWorkspaceFrameRef = useRef(nativeBlueprintWorkspaceFrame);
+  const nativeBlueprintRenamePendingIdentityRef = useRef(nativeBlueprintRenamePendingIdentity);
+  const blueprintsOpenRef = useRef(blueprintsOpen);
+  nativeBlueprintWorkspaceFrameRef.current = nativeBlueprintWorkspaceFrame;
+  nativeBlueprintRenamePendingIdentityRef.current = nativeBlueprintRenamePendingIdentity;
+  blueprintsOpenRef.current = blueprintsOpen;
+  useEffect(() => {
+    const pending = nativeBlueprintRenamePendingIdentityRef.current;
+    if (!pending) return;
+    const current = nativeBlueprintWorkspaceFrame;
+    const activeLineageDrifted = Boolean(nativePlayerAuthorityActiveFrame) && (
+      nativePlayerAuthorityActiveFrame!.sessionId !== pending.sessionId ||
+      nativePlayerAuthorityActiveFrame!.runId !== pending.runId
+    );
+    const routeLineageDrifted = Boolean(nativeFactoryInventoryIdentity) && (
+      nativeFactoryInventoryIdentity!.sessionId !== pending.sessionId ||
+      nativeFactoryInventoryIdentity!.runId !== pending.runId ||
+      nativeFactoryInventoryIdentity!.registryFingerprint !== pending.registryFingerprint
+    );
+    const failedBeforeAck = !nativePlayerAuthorityCommandPending && pending.expectedRevision === null;
+    const sameLineageProjectionArrived = !nativePlayerAuthorityCommandPending &&
+      pending.expectedRevision !== null && Boolean(current) &&
+      current!.sessionId === pending.sessionId && current!.runId === pending.runId &&
+      current!.registryFingerprint === pending.registryFingerprint &&
+      current!.revision >= pending.expectedRevision;
+    const row = current?.libraryById.get(pending.blueprintId);
+    const projectionConfirmed = sameLineageProjectionArrived &&
+      current!.selectedBlueprintId === pending.blueprintId &&
+      row?.name === pending.targetName && row?.revision === pending.currentRevision + 1;
+    if (!nativePlayerAuthorityOwnsRuntime || activeLineageDrifted || routeLineageDrifted ||
+        failedBeforeAck || projectionConfirmed) {
+      nativeBlueprintRenamePendingIdentityRef.current = null;
+      setNativeBlueprintRenamePendingIdentity(null);
+      if (projectionConfirmed) setNotice("蓝图名称已由新的 Rust 权威投影确认");
+      return;
+    }
+    if (sameLineageProjectionArrived) {
+      setNotice("蓝图重命名已耐久提交，但新投影未确认目标名称；界面保持锁定并停止猜测");
+    }
+  }, [
+    nativeBlueprintWorkspaceFrame,
+    nativeFactoryInventoryIdentity,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityCommandPending,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
   const nativePlacementLabel = useMemo(() => nativePlacementBuildingId
     ? getConstructionDefinition(nativePlacementBuildingId)?.name ?? nativePlacementBuildingId
     : null, [nativePlacementBuildingId]);
@@ -8667,6 +8723,53 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     });
     return true;
   }, [invalidateFactoryAlertProjection, rejectPlayerStateEditDuringPrimarySave]);
+
+  const submitNativeBlueprintRenameIntent = useCallback((
+    identity: NativeBlueprintRenameIdentity,
+    targetName: string,
+  ): void => {
+    const frame = nativeBlueprintWorkspaceFrameRef.current;
+    const routeIdentity = nativeFactoryInventoryIdentity;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    const canonicalName = canonicalizeNativeBlueprintName(targetName);
+    if (!blueprintsOpenRef.current || !nativePlayerAuthorityOwnsRuntimeRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current || nativeBlueprintRenamePendingIdentityRef.current ||
+        !nativeBlueprintRenameIdentityMatchesFrame(identity, frame) || !frame || !routeIdentity ||
+        frame.selectedBlueprintId !== identity.blueprintId ||
+        routeIdentity.sessionId !== identity.sessionId || routeIdentity.runId !== identity.runId ||
+        routeIdentity.revision !== identity.revision ||
+        routeIdentity.registryFingerprint !== identity.registryFingerprint ||
+        !commandSource || commandSource.sessionId !== identity.sessionId ||
+        commandSource.runId !== identity.runId || commandSource.baseRevision !== identity.revision ||
+        canonicalName === null || canonicalName !== targetName || targetName === identity.currentName) {
+      setNotice("蓝图 session、run、registry、revision、选中行或名称已变化；本次重命名未提交");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(identity.revision, (baseRevision) => {
+      if (baseRevision !== identity.revision) return null;
+      return createNativeBlueprintRenameIntentCommand(baseRevision, identity.blueprintId, targetName);
+    }, (receipt) => {
+      const pending = nativeBlueprintRenamePendingIdentityRef.current;
+      if (pending && pending.sessionId === identity.sessionId && pending.runId === identity.runId &&
+          pending.registryFingerprint === identity.registryFingerprint &&
+          pending.revision === identity.revision && pending.blueprintId === identity.blueprintId &&
+          pending.currentName === identity.currentName && pending.currentRevision === identity.currentRevision &&
+          pending.targetName === targetName) {
+        const acknowledged = Object.freeze({ ...pending, expectedRevision: receipt.revision });
+        nativeBlueprintRenamePendingIdentityRef.current = acknowledged;
+        setNativeBlueprintRenamePendingIdentity(acknowledged);
+      }
+      setNotice(`蓝图重命名意图已由 Rust 耐久提交；等待 revision ${receipt.revision.toLocaleString("zh-CN")} 投影`);
+    });
+    if (!accepted) return;
+    const pending = Object.freeze({
+      ...identity,
+      targetName,
+      expectedRevision: null,
+    });
+    nativeBlueprintRenamePendingIdentityRef.current = pending;
+    setNativeBlueprintRenamePendingIdentity(pending);
+  }, [commitNativeProjectedCommand, nativeFactoryInventoryIdentity]);
 
   const commitNativeConstructionCenterIntent = useCallback((
     identity: NativeConstructionCenterFrameIdentity,
@@ -19657,10 +19760,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setBlueprintsOpen(false)}
         onSelectBlueprint={setNativeBlueprintSelectedId}
         onLibraryCursorChange={(cursor) => {
+          if (nativeBlueprintRenamePendingIdentity || nativePlayerAuthorityCommandPending) return;
           setNativeBlueprintSelectedId(null);
           setNativeBlueprintLibraryCursor(cursor);
         }}
-        onQueueCursorChange={setNativeBlueprintQueueCursor}
+        onQueueCursorChange={(cursor) => {
+          if (nativeBlueprintRenamePendingIdentity || nativePlayerAuthorityCommandPending) return;
+          setNativeBlueprintQueueCursor(cursor);
+        }}
+        onSubmitRenameIntent={submitNativeBlueprintRenameIntent}
+        pendingIdentity={nativeBlueprintRenamePendingIdentity}
+        commandPending={nativePlayerAuthorityCommandPending}
       /> : <BlueprintWorkspace
         open={blueprintsOpen}
         game={game}

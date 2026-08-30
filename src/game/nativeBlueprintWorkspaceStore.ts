@@ -19,6 +19,17 @@ export interface NativeBlueprintWorkspaceIdentity {
   readonly registryFingerprint: string;
 }
 
+export interface NativeBlueprintRenameIdentity extends NativeBlueprintWorkspaceIdentity {
+  readonly blueprintId: string;
+  readonly currentName: string;
+  readonly currentRevision: number;
+}
+
+export interface NativeBlueprintRenamePendingIdentity extends NativeBlueprintRenameIdentity {
+  readonly targetName: string;
+  readonly expectedRevision: number | null;
+}
+
 export interface NativeBlueprintWorkspaceSource {
   readonly boundIdentity: NativeBlueprintWorkspaceIdentity;
   readVerifiedBlueprintPage(
@@ -273,6 +284,18 @@ export function selectNativeBlueprintWorkspaceFrame(
   return snapshot.status === "ready" && snapshot.frame && sameIdentity(snapshot.frame, identity)
     ? snapshot.frame
     : null;
+}
+
+export function nativeBlueprintRenameIdentityMatchesFrame(
+  identity: NativeBlueprintRenameIdentity,
+  frame: NativeBlueprintWorkspaceFrame | null,
+): boolean {
+  if (!frame || !validIdentity(identity) || !sameIdentity(identity, frame) ||
+      !validOpaqueText(identity.blueprintId, 512) || !validOpaqueText(identity.currentName, 256) ||
+      !Number.isSafeInteger(identity.currentRevision) || identity.currentRevision < 1 ||
+      frame.selectedBlueprintId !== identity.blueprintId) return false;
+  const row = frame.libraryById.get(identity.blueprintId);
+  return row?.name === identity.currentName && row.revision === identity.currentRevision;
 }
 
 export class NativeBlueprintWorkspaceStore {

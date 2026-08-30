@@ -10,7 +10,11 @@ import type {
   DesktopNativeCoreBlueprintQueueRow,
   DesktopNativeCoreBlueprintSummary,
 } from "../desktop";
-import type { NativeBlueprintWorkspaceFrame } from "../game/nativeBlueprintWorkspaceStore";
+import type {
+  NativeBlueprintRenameIdentity,
+  NativeBlueprintRenamePendingIdentity,
+  NativeBlueprintWorkspaceFrame,
+} from "../game/nativeBlueprintWorkspaceStore";
 import { NativeBlueprintWorkspace } from "./NativeBlueprintWorkspace";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -96,11 +100,16 @@ describe("NativeBlueprintWorkspace", () => {
       onSelectBlueprint?: (blueprintId: string) => void;
       onLibraryCursorChange?: (cursor: number) => void;
       onQueueCursorChange?: (cursor: number) => void;
+      onSubmitRenameIntent?: (identity: NativeBlueprintRenameIdentity, name: string) => void;
+      pendingIdentity?: NativeBlueprintRenamePendingIdentity | null;
+      commandPending?: boolean;
     } = {},
   ) {
     const onSelectBlueprint = callbacks.onSelectBlueprint ?? vi.fn<(blueprintId: string) => void>();
     const onLibraryCursorChange = callbacks.onLibraryCursorChange ?? vi.fn<(cursor: number) => void>();
     const onQueueCursorChange = callbacks.onQueueCursorChange ?? vi.fn<(cursor: number) => void>();
+    const onSubmitRenameIntent = callbacks.onSubmitRenameIntent ??
+      vi.fn<(identity: NativeBlueprintRenameIdentity, name: string) => void>();
     act(() => root.render(<NativeBlueprintWorkspace
       open
       status={status}
@@ -109,8 +118,11 @@ describe("NativeBlueprintWorkspace", () => {
       onSelectBlueprint={onSelectBlueprint}
       onLibraryCursorChange={onLibraryCursorChange}
       onQueueCursorChange={onQueueCursorChange}
+      onSubmitRenameIntent={onSubmitRenameIntent}
+      pendingIdentity={callbacks.pendingIdentity ?? null}
+      commandPending={callbacks.commandPending ?? false}
     />));
-    return { onSelectBlueprint, onLibraryCursorChange, onQueueCursorChange };
+    return { onSelectBlueprint, onLibraryCursorChange, onQueueCursorChange, onSubmitRenameIntent };
   }
 
   it("renders current library and queue pages in persisted order and emits only read cursors or selection", () => {
@@ -164,6 +176,68 @@ describe("NativeBlueprintWorkspace", () => {
     expect(host.querySelector("[data-native-blueprint-entity-key]")).toBeNull();
   });
 
+  it("submits one canonical rename intent from the selected MOD row without blur or IME duplication", () => {
+    const callbacks = renderWorkspace(frame({ detailStatus: "unsupported" }));
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='begin-rename']")!.click());
+    const input = host.querySelector<HTMLInputElement>("[data-native-blueprint-rename-input]")!;
+    const form = host.querySelector<HTMLFormElement>("[data-native-blueprint-rename-form]")!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!
+        .call(input, "  新模组名🚀 \uFEFF");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new FocusEvent("blur", { bubbles: true }));
+    });
+    expect(callbacks.onSubmitRenameIntent).not.toHaveBeenCalled();
+    act(() => {
+      input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+      form.requestSubmit();
+    });
+    expect(callbacks.onSubmitRenameIntent).not.toHaveBeenCalled();
+    act(() => {
+      input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+      form.requestSubmit();
+      form.requestSubmit();
+    });
+    expect(callbacks.onSubmitRenameIntent).toHaveBeenCalledTimes(1);
+    expect(callbacks.onSubmitRenameIntent).toHaveBeenCalledWith({
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 47,
+      registryFingerprint: "registry-a",
+      blueprintId: "mod:Ω/🚀",
+      currentName: "模组蓝图 Ω",
+      currentRevision: 4,
+    }, "新模组名🚀");
+  });
+
+  it("locks selection, pagination and resubmission until durable ACK receives a same-lineage projection", () => {
+    const pending: NativeBlueprintRenamePendingIdentity = Object.freeze({
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 47,
+      registryFingerprint: "registry-a",
+      blueprintId: "mod:Ω/🚀",
+      currentName: "模组蓝图 Ω",
+      currentRevision: 4,
+      targetName: "等待确认名",
+      expectedRevision: 48,
+    });
+    const lockedLibrary = Object.freeze([
+      ...summaries,
+      ...Array.from({ length: 30 }, (_, index) => ({ ...summaries[1], id: `locked-row-${index}` })),
+    ]);
+    const callbacks = renderWorkspace(frame({
+      library: lockedLibrary,
+      libraryPage: { cursor: 0, totalCount: 34, nextCursor: 32 },
+    }), "ready", { pendingIdentity: pending, commandPending: false });
+    expect(host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='page-library-next']")?.disabled).toBe(true);
+    expect(host.querySelector<HTMLButtonElement>("[data-native-blueprint-select='builtin-second']")?.disabled).toBe(true);
+    expect(host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='begin-rename']")?.disabled).toBe(true);
+    expect(host.textContent).toContain("revision 48");
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-blueprint-select='builtin-second']")!.click());
+    expect(callbacks.onSelectBlueprint).not.toHaveBeenCalled();
+  });
+
   it("fails closed while loading or when a ready frame has stale selection identity", () => {
     const retained = frame();
     renderWorkspace(retained, "loading");
@@ -177,18 +251,23 @@ describe("NativeBlueprintWorkspace", () => {
     expect(host.textContent).toContain("\u4e0d\u4f1a\u8bfb\u53d6\u6216\u663e\u793a JavaScript \u4e2d\u7684\u65e7\u84dd\u56fe\u6570\u636e");
   });
 
-  it("keeps the implementation detached from legacy state and mutation callbacks", () => {
+  it("keeps the implementation detached from legacy state and every mutation except rename", () => {
     const source = readFileSync(resolve("src/components/NativeBlueprintWorkspace.tsx"), "utf8");
     expect(source).not.toMatch(/from\s+["'](?:\.\/BlueprintWorkspace|\.\.\/game\/(?:engine|types|content))["']/);
     expect(source).not.toMatch(/\bGameState\b|\bgame\./);
-    expect(source).not.toMatch(/on(?:Capture|Import|Rename|Transform|Delete|Remove|Deploy|Place|Undo|Ghost|Fund|Cancel|Export)\b/);
+    expect(source).not.toMatch(/on(?:Capture|Import|Transform|Delete|Remove|Deploy|Place|Undo|Ghost|Fund|Cancel|Export)\b/);
+    expect(source).toMatch(/onSubmitRenameIntent/);
+    expect(source).not.toMatch(/onBlur=|onKeyDown=/);
 
     renderWorkspace(frame());
     const actions = new Set([...host.querySelectorAll<HTMLElement>("[data-native-blueprint-action]")].map((node) => node.dataset.nativeBlueprintAction));
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='begin-rename']")!.click());
+    for (const node of host.querySelectorAll<HTMLElement>("[data-native-blueprint-action]")) actions.add(node.dataset.nativeBlueprintAction);
     act(() => host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='tab-queue']")!.click());
     for (const node of host.querySelectorAll<HTMLElement>("[data-native-blueprint-action]")) actions.add(node.dataset.nativeBlueprintAction);
     expect(actions).toEqual(new Set([
       "close", "tab-library", "tab-queue", "select",
+      "begin-rename", "cancel-rename", "submit-rename",
       "page-library-prev", "page-library-next", "page-queue-prev", "page-queue-next",
     ]));
   });

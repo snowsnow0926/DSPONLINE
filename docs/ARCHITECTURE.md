@@ -1,5 +1,7 @@
 # 系统架构
 
+> **Windows 原生蓝图重命名语义边界（2026-08-30，开发候选，未启用）**：蓝图写面首批只接通重命名。durable marker 固定为一个 `blueprints/intent` set，正文只有 `kind/id/name`；Rust 必须从权威 v47 目录定位唯一行并展开为该行 `name` 与安全递增的 `revision`。live 提交与 generic WAL replay 共用同一 expander，首批均保守返回 `topologyDirty=true`。名称必须已经按 Unicode whitespace/FEFF 去边、无控制字符且不超过 32 个 UTF-16 code unit；renderer 与 Rust 双侧复验，same-name 和任何混合 patch 失败。完整未知/MOD字段、版本快照、施工队列、库存、实体、线路与 nextId 保持不变。公开投影仍是 read-only v1；没有新增 IPC/schema/version，也没有改变 `authorityEligible=false`。
+
 > **Windows 原生玩家命令的 `null`/删除边界（2026-08-29，开发候选，未启用）**：Rust `ValuePatch` 现在把显式 JSON `null` 与缺失 `value` 分开解码，因此清空配方、目标或可选配置的 `set null` 不再被误判为“没有值”。renderer 生成的 `delete` 可以继续省略 `value`；Host 只对该精确形状兼容既有 durable `value:null` 表示，其他缺字段、未知字段或非规范对象仍失败关闭。命令在 WAL 前预检，已暂存命令经过进程重启后使用相同 command ID/revision 恢复，同 ID 重试只返回既有回执；失败不能发布部分状态。该修复不改变核心协议版本、GameState v47、envelope v2、cloud schema v8 或 SQLite layout v3，也不改变 `authorityEligible=false`。
 
 > **Windows 原生权威 E1a 写入栅栏（2026-08-28，开发候选，未启用）**：性能开发版的 `normal-main` 原生存档现在以 Rust 持久租约作为唯一写入栅栏。租约存在或损坏时，普通保存事务的开始与提交、原始/幂等 WAL、压缩、通用核心提交和检查点都会 fail-closed；即使事务先于租约创建，也会在发布边界再次被拒绝。实验性精确推进只能由主进程内部使用独立 capability 调用，调用者只提供租约身份，command ID、base revision、固定 1 秒 exact 预算和空 gameplay command 均由 Rust 从已持久化 pending tick 派生。该操作没有 `ipcMain`/preload/renderer 入口。桌面启动会在 Host hello 后、创建普通窗口前检查租约；有效或无法验证的租约会阻止窗口启动，缺失租约保持既有路径。此门禁解决“双写”风险，但**没有**把实验核心提升为玩家可见权威，`authorityEligible=false` 保持不变。

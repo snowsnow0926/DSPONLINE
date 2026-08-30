@@ -8422,6 +8422,9 @@ impl CoreState {
         if crate::manual_mining::command_contains_intent(command) {
             return crate::manual_mining::validate_command(self, command);
         }
+        if crate::blueprint_command::command_contains_intent(command) {
+            return crate::blueprint_command::validate_command(self, command);
+        }
         if command_contains_black_hole_pause_intent(command) {
             return validate_black_hole_pause_command(self, command);
         }
@@ -8675,6 +8678,11 @@ impl CoreState {
         revision: u64,
     ) -> anyhow::Result<CommandApplyResult> {
         let mut result = command.deterministic_apply_result(previous_revision, revision)?;
+        if crate::blueprint_command::command_contains_intent(command) {
+            crate::blueprint_command::validate_resume_marker(command)?;
+            result.topology_dirty = true;
+            return Ok(result);
+        }
         if command_contains_station_warper_inventory_intent(command) {
             require_station_warper_inventory_intent(command)?;
             result.topology_dirty = false;
@@ -8829,6 +8837,7 @@ impl CoreState {
         let expanded_manual_mining_intent;
         let expanded_black_hole_pause_intent;
         let expanded_time_warp_intent;
+        let expanded_blueprint_rename_intent;
         let applied_command = if command_contains_active_planet_intent(command) {
             expanded_active_planet_intent = expand_active_planet_intent(self, command)?;
             &expanded_active_planet_intent
@@ -8861,6 +8870,10 @@ impl CoreState {
             expanded_construction_automation_intent =
                 expand_construction_automation_intent(self, command)?;
             &expanded_construction_automation_intent
+        } else if crate::blueprint_command::command_contains_intent(command) {
+            expanded_blueprint_rename_intent =
+                crate::blueprint_command::expand_intent(self, command)?;
+            &expanded_blueprint_rename_intent
         } else if crate::manual_mining::command_contains_intent(command) {
             expanded_manual_mining_intent = crate::manual_mining::expand_intent(self, command)?;
             &expanded_manual_mining_intent
@@ -18514,6 +18527,271 @@ mod tests {
             assert!(state.apply_player_authority_command(&command).is_err());
             assert_eq!(state.revision, 9);
             assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+    }
+
+    fn blueprint_rename_state() -> CoreState {
+        let mut state = player_command_state();
+        state.base_value_mut().insert(
+            "blueprints".to_owned(),
+            serde_json::json!([
+                {
+                    "id": "mod:opaque/rocket",
+                    "name": "旧模组蓝图",
+                    "entities": (0..513).map(|index| serde_json::json!({
+                        "key": format!("mod-entity-{index}"),
+                        "buildingId": "mod:unknown-building",
+                        "opaqueEntityPayload": { "owner": "future-mod", "index": index }
+                    })).collect::<Vec<_>>(),
+                    "belts": [{
+                        "key": "mod-belt-a",
+                        "sourceKey": "mod-entity-0",
+                        "targetKey": "mod-entity-1",
+                        "itemId": "mod:unknown-item",
+                        "opaqueBeltPayload": [1, 2, 3]
+                    }],
+                    "opaqueDefinitionPayload": {
+                        "owner": "future-mod",
+                        "nested": { "keep": true }
+                    }
+                },
+                {
+                    "id": "builtin-second",
+                    "name": "第二张蓝图",
+                    "revision": 7,
+                    "rotation": 90,
+                    "mirror": "horizontal",
+                    "entities": [],
+                    "belts": [],
+                    "resourceAnchors": [],
+                    "externalPorts": [],
+                    "futureBuiltinPayload": "keep-byte-for-byte"
+                }
+            ]),
+        );
+        state.base_value_mut().insert(
+            "blueprintVersions".to_owned(),
+            serde_json::json!([{
+                "id": "version-mod-1",
+                "blueprintId": "mod:opaque/rocket",
+                "revision": 1,
+                "createdAt": 123,
+                "definition": {
+                    "id": "mod:opaque/rocket",
+                    "name": "历史快照名",
+                    "entities": [{ "key": "historic", "buildingId": "mod:historic" }],
+                    "belts": [],
+                    "opaqueVersionPayload": { "doNotRewrite": true }
+                }
+            }]),
+        );
+        state.base_value_mut().insert(
+            "constructionQueue".to_owned(),
+            serde_json::json!([{
+                "id": "queue-mod-1",
+                "blueprintId": "mod:opaque/rocket",
+                "blueprintVersionId": "version-mod-1",
+                "blueprintRevision": 1,
+                "blueprintName": "排队时快照名",
+                "opaqueQueuePayload": { "doNotRewrite": ["a", "b"] }
+            }]),
+        );
+        state
+    }
+
+    fn blueprint_rename_intent_command(
+        revision: u64,
+        id: &str,
+        name: &str,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("blueprints".to_owned()),
+                PathSegment::Key("intent".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(serde_json::json!({
+                "kind": "rename",
+                "id": id,
+                "name": name
+            })),
+        }];
+        command
+    }
+
+    #[test]
+    fn player_authority_blueprint_rename_is_minimal_atomic_and_preserves_opaque_state() {
+        let mut state = blueprint_rename_state();
+        let command = blueprint_rename_intent_command(9, "mod:opaque/rocket", "新模组蓝图🚀");
+        let encoded = serde_json::to_string(&command).unwrap();
+        assert!(encoded.contains("\"kind\":\"rename\""));
+        assert!(!encoded.contains("entities"));
+        assert!(!encoded.contains("belts"));
+        assert!(!encoded.contains("blueprintVersions"));
+        assert!(!encoded.contains("constructionQueue"));
+
+        let before = state.base_value().clone();
+        let versions_before = serde_json::to_vec(&before["blueprintVersions"]).unwrap();
+        let queue_before = serde_json::to_vec(&before["constructionQueue"]).unwrap();
+        let entity_before = state.parse_entity(0).unwrap();
+        let belt_before = state.parse_belt(0).unwrap();
+        let next_id_before = before["nextId"].clone();
+        let receipt = state.apply_player_authority_command(&command).unwrap();
+
+        assert_eq!(receipt.previous_revision, 9);
+        assert_eq!(receipt.revision, 10);
+        assert!(receipt.changed_entity_ids.is_empty());
+        assert!(receipt.changed_belt_ids.is_empty());
+        assert!(receipt.topology_dirty);
+        let target = &state.base_value()["blueprints"][0];
+        assert_eq!(target["name"], "新模组蓝图🚀");
+        assert_eq!(target["revision"], 2);
+        assert_eq!(
+            target["opaqueDefinitionPayload"],
+            before["blueprints"][0]["opaqueDefinitionPayload"]
+        );
+        assert_eq!(target["entities"], before["blueprints"][0]["entities"]);
+        assert_eq!(target["belts"], before["blueprints"][0]["belts"]);
+        assert_eq!(state.base_value()["blueprints"][1], before["blueprints"][1]);
+        assert_eq!(
+            serde_json::to_vec(&state.base_value()["blueprintVersions"]).unwrap(),
+            versions_before
+        );
+        assert_eq!(
+            serde_json::to_vec(&state.base_value()["constructionQueue"]).unwrap(),
+            queue_before
+        );
+        assert_eq!(state.base_value()["nextId"], next_id_before);
+        assert_eq!(state.parse_entity(0).unwrap(), entity_before);
+        assert_eq!(state.parse_belt(0).unwrap(), belt_before);
+    }
+
+    #[test]
+    fn player_authority_blueprint_rename_replays_identically_from_semantic_wal_marker() {
+        let command = blueprint_rename_intent_command(9, "builtin-second", "稳定重放名");
+        let durable = serde_json::to_string(&command).unwrap();
+        let replayed: SimulationCommandPatch = serde_json::from_str(&durable).unwrap();
+        let mut live = blueprint_rename_state();
+        let mut replay = live.clone();
+        let live_receipt = live.apply_player_authority_command(&command).unwrap();
+        let replay_receipt = replay.apply_command(&replayed).unwrap();
+        assert_eq!(live_receipt, replay_receipt);
+        assert!(live_receipt.topology_dirty);
+        assert_eq!(
+            live.canonical_sha256().unwrap(),
+            replay.canonical_sha256().unwrap()
+        );
+        assert_eq!(replay.base_value()["blueprints"][1]["name"], "稳定重放名");
+        assert_eq!(replay.base_value()["blueprints"][1]["revision"], 8);
+    }
+
+    #[test]
+    fn player_authority_blueprint_rename_fails_closed_for_every_forged_boundary() {
+        let mut cases = Vec::new();
+        let mut extra = blueprint_rename_intent_command(9, "builtin-second", "新名字");
+        extra.top_level_changes[0].value.as_mut().unwrap()["entities"] = serde_json::json!([]);
+        cases.push(extra);
+        let mut direct = blueprint_rename_intent_command(9, "builtin-second", "新名字");
+        direct.top_level_changes[0].path = vec![
+            PathSegment::Key("blueprints".to_owned()),
+            PathSegment::Index(1),
+            PathSegment::Key("name".to_owned()),
+        ];
+        cases.push(direct);
+        let mut mixed = blueprint_rename_intent_command(9, "builtin-second", "新名字");
+        mixed.changed_entities.push(RecordPatch {
+            id: "smelter-a".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("machineCount".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(2)),
+            }],
+        });
+        cases.push(mixed);
+        for (id, name) in [
+            ("missing", "新名字"),
+            ("builtin-second", "第二张蓝图"),
+            ("builtin-second", " 前导空格"),
+            ("builtin-second", "尾随空格\u{feff}"),
+            ("builtin-second", "控制\u{0001}字符"),
+            ("builtin-second", ""),
+            ("builtin-second", "1234567890123456789012345678901🚀"),
+        ] {
+            cases.push(blueprint_rename_intent_command(9, id, name));
+        }
+        for command in cases {
+            let mut state = blueprint_rename_state();
+            let before = state.canonical_sha256().unwrap();
+            let revision = state.revision;
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, revision);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        for mutate in ["duplicate-id", "hidden-bad-row", "source-limit", "overflow"] {
+            let mut state = blueprint_rename_state();
+            match mutate {
+                "duplicate-id" => {
+                    state.base_value_mut()["blueprints"][1]["id"] =
+                        Value::from("mod:opaque/rocket");
+                }
+                "hidden-bad-row" => {
+                    state.base_value_mut()["blueprints"].as_array_mut().unwrap().push(
+                        serde_json::json!({ "id": "hidden\u{0001}", "name": "坏行", "entities": [], "belts": [] }),
+                    );
+                }
+                "source-limit" => {
+                    state.base_value_mut()["blueprints"] = Value::Array(
+                        (0..4_097)
+                            .map(|index| {
+                                serde_json::json!({
+                                    "id": format!("blueprint-{index}"),
+                                    "name": format!("蓝图{index}"),
+                                    "entities": [],
+                                    "belts": []
+                                })
+                            })
+                            .collect(),
+                    );
+                }
+                "overflow" => {
+                    state.base_value_mut()["blueprints"][1]["revision"] =
+                        Value::from(MAX_JAVASCRIPT_SAFE_INTEGER);
+                }
+                _ => unreachable!(),
+            }
+            let before = state.canonical_sha256().unwrap();
+            assert!(
+                state
+                    .apply_player_authority_command(&blueprint_rename_intent_command(
+                        9,
+                        if mutate == "source-limit" {
+                            "blueprint-0"
+                        } else {
+                            "builtin-second"
+                        },
+                        "新名字",
+                    ))
+                    .is_err()
+            );
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn player_authority_blueprint_rename_accepts_exact_utf16_emoji_boundary() {
+        for name in [format!("{}🚀", "a".repeat(30)), "🚀".repeat(16)] {
+            let mut state = blueprint_rename_state();
+            state
+                .apply_player_authority_command(&blueprint_rename_intent_command(
+                    9,
+                    "builtin-second",
+                    &name,
+                ))
+                .unwrap();
+            assert_eq!(state.base_value()["blueprints"][1]["name"], name);
         }
     }
 }

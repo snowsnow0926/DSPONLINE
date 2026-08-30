@@ -2746,10 +2746,11 @@ struct StationRouteWarperRefund {
     amount: u64,
 }
 
-fn validate_station_slot_mode_command(
+fn derive_station_slot_mode_command_from_direct(
     state: &CoreState,
     command: &SimulationCommandPatch,
-) -> anyhow::Result<()> {
+    validate_candidate: bool,
+) -> anyhow::Result<SimulationCommandPatch> {
     if !command.added_entities.is_empty()
         || !command.removed_entity_ids.is_empty()
         || !command.changed_belts.is_empty()
@@ -3234,7 +3235,9 @@ fn validate_station_slot_mode_command(
             }
         }
     }
-    exact_patch_sets_match(&command.top_level_changes, &expected_top_level)?;
+    if validate_candidate {
+        exact_patch_sets_match(&command.top_level_changes, &expected_top_level)?;
+    }
 
     let mut expected_records = BTreeMap::<String, Vec<ValuePatch>>::new();
     for (entity_id, (current, expected)) in expected_entities {
@@ -3244,20 +3247,42 @@ fn validate_station_slot_mode_command(
             expected_records.insert(entity_id, changes);
         }
     }
-    if command.changed_entities.len() != expected_records.len() {
-        bail!("native player-authority station mode entity set is incomplete or mixed")
-    }
-    let mut seen_entities = HashSet::new();
-    for record in &command.changed_entities {
-        if !seen_entities.insert(record.id.as_str()) {
-            bail!("native player-authority station mode entity is repeated")
+    if validate_candidate {
+        if command.changed_entities.len() != expected_records.len() {
+            bail!("native player-authority station mode entity set is incomplete or mixed")
         }
-        let expected = expected_records.get(&record.id).ok_or_else(|| {
-            anyhow!("native player-authority station mode changed an unrelated entity")
-        })?;
-        exact_patch_sets_match(&record.changes, expected)?;
+        let mut seen_entities = HashSet::new();
+        for record in &command.changed_entities {
+            if !seen_entities.insert(record.id.as_str()) {
+                bail!("native player-authority station mode entity is repeated")
+            }
+            let expected = expected_records.get(&record.id).ok_or_else(|| {
+                anyhow!("native player-authority station mode changed an unrelated entity")
+            })?;
+            exact_patch_sets_match(&record.changes, expected)?;
+        }
     }
-    Ok(())
+    Ok(SimulationCommandPatch {
+        protocol_version: command.protocol_version,
+        base_revision: command.base_revision,
+        top_level_changes: expected_top_level,
+        changed_entities: expected_records
+            .into_iter()
+            .map(|(id, changes)| RecordPatch { id, changes })
+            .collect(),
+        added_entities: Vec::new(),
+        removed_entity_ids: Vec::new(),
+        changed_belts: Vec::new(),
+        added_belts: Vec::new(),
+        removed_belt_ids: Vec::new(),
+    })
+}
+
+fn validate_station_slot_mode_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    derive_station_slot_mode_command_from_direct(state, command, true).map(|_| ())
 }
 
 fn validated_station_slot_item_id(
@@ -3388,10 +3413,11 @@ fn add_protective_station_inventory_refund(
     Ok(())
 }
 
-fn validate_station_slot_item_command(
+fn derive_station_slot_item_command_from_direct(
     state: &CoreState,
     command: &SimulationCommandPatch,
-) -> anyhow::Result<()> {
+    validate_candidate: bool,
+) -> anyhow::Result<SimulationCommandPatch> {
     if !command.added_entities.is_empty()
         || !command.removed_entity_ids.is_empty()
         || !command.changed_belts.is_empty()
@@ -3908,7 +3934,7 @@ fn validate_station_slot_item_command(
             expected_removed_belt_ids.push(belt_id.to_owned());
         }
     }
-    if command.removed_belt_ids != expected_removed_belt_ids {
+    if validate_candidate && command.removed_belt_ids != expected_removed_belt_ids {
         bail!("native player-authority station slot belt removal set is invalid")
     }
     if !belt_refunds.is_empty() {
@@ -4017,7 +4043,9 @@ fn validate_station_slot_item_command(
         Vec::new(),
         &mut expected_top_level,
     );
-    exact_patch_sets_match(&command.top_level_changes, &expected_top_level)?;
+    if validate_candidate {
+        exact_patch_sets_match(&command.top_level_changes, &expected_top_level)?;
+    }
 
     let mut expected_records = BTreeMap::<String, Vec<ValuePatch>>::new();
     for (entity_id, (current, expected)) in expected_entities {
@@ -4027,20 +4055,329 @@ fn validate_station_slot_item_command(
             expected_records.insert(entity_id, changes);
         }
     }
-    if command.changed_entities.len() != expected_records.len() {
-        bail!("native player-authority station slot entity set is incomplete or mixed")
-    }
-    let mut seen_entities = HashSet::new();
-    for record in &command.changed_entities {
-        if !seen_entities.insert(record.id.as_str()) {
-            bail!("native player-authority station slot entity is repeated")
+    if validate_candidate {
+        if command.changed_entities.len() != expected_records.len() {
+            bail!("native player-authority station slot entity set is incomplete or mixed")
         }
-        let expected = expected_records.get(&record.id).ok_or_else(|| {
-            anyhow!("native player-authority station slot changed an unrelated entity")
+        let mut seen_entities = HashSet::new();
+        for record in &command.changed_entities {
+            if !seen_entities.insert(record.id.as_str()) {
+                bail!("native player-authority station slot entity is repeated")
+            }
+            let expected = expected_records.get(&record.id).ok_or_else(|| {
+                anyhow!("native player-authority station slot changed an unrelated entity")
+            })?;
+            exact_patch_sets_match(&record.changes, expected)?;
+        }
+    }
+    Ok(SimulationCommandPatch {
+        protocol_version: command.protocol_version,
+        base_revision: command.base_revision,
+        top_level_changes: expected_top_level,
+        changed_entities: expected_records
+            .into_iter()
+            .map(|(id, changes)| RecordPatch { id, changes })
+            .collect(),
+        added_entities: Vec::new(),
+        removed_entity_ids: Vec::new(),
+        changed_belts: Vec::new(),
+        added_belts: Vec::new(),
+        removed_belt_ids: expected_removed_belt_ids,
+    })
+}
+
+fn validate_station_slot_item_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    derive_station_slot_item_command_from_direct(state, command, true).map(|_| ())
+}
+
+fn command_contains_station_slot_mode_intent(command: &SimulationCommandPatch) -> bool {
+    command.changed_entities.iter().any(|record| {
+        record
+            .changes
+            .iter()
+            .any(|change| path_matches(&change.path, &["stationSlotMode", "intent"]))
+    })
+}
+
+fn command_contains_station_slot_item_intent(command: &SimulationCommandPatch) -> bool {
+    command.changed_entities.iter().any(|record| {
+        record
+            .changes
+            .iter()
+            .any(|change| path_matches(&change.path, &["stationSlotItem", "intent"]))
+    })
+}
+
+fn require_station_slot_mode_intent(
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<(&str, usize, &str, &str)> {
+    if command.changed_entities.len() != 1
+        || command.changed_entities[0].changes.len() != 1
+        || !command.top_level_changes.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority station slot mode intent shape is invalid")
+    }
+    let record = &command.changed_entities[0];
+    let change = &record.changes[0];
+    if !path_matches(&change.path, &["stationSlotMode", "intent"]) || change.operation != "set" {
+        bail!("native player-authority station slot mode intent path is invalid")
+    }
+    let intent = change
+        .value
+        .as_ref()
+        .and_then(Value::as_object)
+        .filter(|intent| intent.len() == 3)
+        .ok_or_else(|| anyhow!("native player-authority station slot mode intent is invalid"))?;
+    let slot_index = intent
+        .get("slotIndex")
+        .and_then(Value::as_u64)
+        .and_then(|slot_index| usize::try_from(slot_index).ok())
+        .filter(|slot_index| *slot_index < PLAYER_STATION_SLOT_COUNT)
+        .ok_or_else(|| {
+            anyhow!("native player-authority station slot mode intent index is invalid")
         })?;
-        exact_patch_sets_match(&record.changes, expected)?;
+    let scope = intent
+        .get("scope")
+        .and_then(Value::as_str)
+        .filter(|scope| matches!(*scope, "local" | "remote"))
+        .ok_or_else(|| {
+            anyhow!("native player-authority station slot mode intent scope is invalid")
+        })?;
+    let mode = intent
+        .get("mode")
+        .and_then(Value::as_str)
+        .filter(|mode| matches!(*mode, "supply" | "demand" | "storage"))
+        .ok_or_else(|| {
+            anyhow!("native player-authority station slot mode intent target is invalid")
+        })?;
+    Ok((record.id.as_str(), slot_index, scope, mode))
+}
+
+fn require_station_slot_item_intent(
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<(&str, usize, Option<&str>)> {
+    if command.changed_entities.len() != 1
+        || command.changed_entities[0].changes.len() != 1
+        || !command.top_level_changes.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority station slot item intent shape is invalid")
+    }
+    let record = &command.changed_entities[0];
+    let change = &record.changes[0];
+    if !path_matches(&change.path, &["stationSlotItem", "intent"]) || change.operation != "set" {
+        bail!("native player-authority station slot item intent path is invalid")
+    }
+    let intent = change
+        .value
+        .as_ref()
+        .and_then(Value::as_object)
+        .filter(|intent| intent.len() == 2)
+        .ok_or_else(|| anyhow!("native player-authority station slot item intent is invalid"))?;
+    let slot_index = intent
+        .get("slotIndex")
+        .and_then(Value::as_u64)
+        .and_then(|slot_index| usize::try_from(slot_index).ok())
+        .filter(|slot_index| *slot_index < PLAYER_STATION_SLOT_COUNT)
+        .ok_or_else(|| {
+            anyhow!("native player-authority station slot item intent index is invalid")
+        })?;
+    let item_id = match intent.get("itemId") {
+        Some(Value::Null) => None,
+        Some(Value::String(item_id)) if !item_id.is_empty() => Some(item_id.as_str()),
+        _ => {
+            bail!("native player-authority station slot item intent target is invalid")
+        }
+    };
+    Ok((record.id.as_str(), slot_index, item_id))
+}
+
+fn validate_builtin_active_station_slot_target(
+    state: &CoreState,
+    station_id: &str,
+) -> anyhow::Result<()> {
+    if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    {
+        bail!("native player-authority station slot intent requires the built-in catalog")
+    }
+    let station_index = *state
+        .entity_index
+        .get(station_id)
+        .ok_or_else(|| anyhow!("native player-authority station slot intent target is missing"))?;
+    let station = state.parse_entity(station_index)?;
+    let station = station
+        .as_object()
+        .ok_or_else(|| anyhow!("native player-authority station slot intent target is invalid"))?;
+    let building_id = station
+        .get("buildingId")
+        .and_then(Value::as_str)
+        .filter(|building_id| {
+            matches!(
+                *building_id,
+                "planetary_logistics_station" | "interstellar_logistics_station"
+            )
+        })
+        .ok_or_else(|| {
+            anyhow!("native player-authority station slot intent target is incompatible")
+        })?;
+    let building = state
+        .catalog
+        .buildings
+        .get(building_id)
+        .filter(|building| building.kind == "station")
+        .ok_or_else(|| {
+            anyhow!("native player-authority station slot intent target is incompatible")
+        })?;
+    if station.get("kind").and_then(Value::as_str) != Some("station") {
+        bail!("native player-authority station slot intent target is incompatible")
+    }
+    if station.get("interactionLocked").and_then(Value::as_bool) != Some(false) {
+        bail!("native player-authority station slot intent target is locked or malformed")
+    }
+    let planet_id = station
+        .get("planetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority station slot intent planet is invalid"))?;
+    let active_planet_id = state
+        .base_value()
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority active planet is missing"))?;
+    if planet_id != active_planet_id {
+        bail!("native player-authority station slot intent target is not on the active planet")
+    }
+    let slots = station
+        .get("stationSlots")
+        .and_then(Value::as_array)
+        .filter(|slots| slots.len() == PLAYER_STATION_SLOT_COUNT)
+        .ok_or_else(|| {
+            anyhow!("native player-authority station slot intent directory is invalid")
+        })?;
+    let accepts = building.accepts.as_deref().unwrap_or("any");
+    let mut seen_items = HashSet::new();
+    for (slot_index, slot) in slots.iter().enumerate() {
+        let slot = slot.as_object().ok_or_else(|| {
+            anyhow!("native player-authority station slot intent slot {slot_index} is invalid")
+        })?;
+        if let Some(item_id) = validate_station_slot_shape(
+            state,
+            slot,
+            &format!("station slot intent slot {slot_index}"),
+        )? {
+            if !seen_items.insert(item_id.clone()) {
+                bail!("native player-authority station slot intent item is repeated")
+            }
+            let item = state
+                .catalog
+                .items
+                .get(&item_id)
+                .expect("the station slot intent item was validated above");
+            if accepts != "any"
+                && accepts != item.kind
+                && !(accepts == "solid" && item.kind == "matrix")
+            {
+                bail!("native player-authority station slot intent item is incompatible")
+            }
+        }
     }
     Ok(())
+}
+
+fn expand_station_slot_mode_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<SimulationCommandPatch> {
+    let (station_id, slot_index, scope, mode) = require_station_slot_mode_intent(command)?;
+    validate_builtin_active_station_slot_target(state, station_id)?;
+    let field = if scope == "local" {
+        "localMode"
+    } else {
+        "remoteMode"
+    };
+    let direct = SimulationCommandPatch {
+        protocol_version: command.protocol_version,
+        base_revision: command.base_revision,
+        top_level_changes: Vec::new(),
+        changed_entities: vec![RecordPatch {
+            id: station_id.to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![
+                    PathSegment::Key("stationSlots".to_owned()),
+                    PathSegment::Index(slot_index),
+                    PathSegment::Key(field.to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::from(mode)),
+            }],
+        }],
+        added_entities: Vec::new(),
+        removed_entity_ids: Vec::new(),
+        changed_belts: Vec::new(),
+        added_belts: Vec::new(),
+        removed_belt_ids: Vec::new(),
+    };
+    // Keep the marker immutable in the WAL. Only this temporary direct leaf is
+    // expanded into the same complete route/refund/mirror diff accepted from
+    // legacy renderers.
+    derive_station_slot_mode_command_from_direct(state, &direct, false)
+}
+
+fn expand_station_slot_item_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<SimulationCommandPatch> {
+    let (station_id, slot_index, item_id) = require_station_slot_item_intent(command)?;
+    validate_builtin_active_station_slot_target(state, station_id)?;
+    let direct = SimulationCommandPatch {
+        protocol_version: command.protocol_version,
+        base_revision: command.base_revision,
+        top_level_changes: Vec::new(),
+        changed_entities: vec![RecordPatch {
+            id: station_id.to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![
+                    PathSegment::Key("stationSlots".to_owned()),
+                    PathSegment::Index(slot_index),
+                    PathSegment::Key("itemId".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(item_id.map_or(Value::Null, Value::from)),
+            }],
+        }],
+        added_entities: Vec::new(),
+        removed_entity_ids: Vec::new(),
+        changed_belts: Vec::new(),
+        added_belts: Vec::new(),
+        removed_belt_ids: Vec::new(),
+    };
+    derive_station_slot_item_command_from_direct(state, &direct, false)
+}
+
+fn validate_station_slot_mode_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    expand_station_slot_mode_intent(state, command).map(|_| ())
+}
+
+fn validate_station_slot_item_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    expand_station_slot_item_intent(state, command).map(|_| ())
 }
 
 fn validate_station_slot_configuration_command(
@@ -7730,6 +8067,12 @@ impl CoreState {
         if command_contains_station_warper_inventory_intent(command) {
             return validate_station_warper_inventory_intent(self, command);
         }
+        if command_contains_station_slot_mode_intent(command) {
+            return validate_station_slot_mode_intent(self, command);
+        }
+        if command_contains_station_slot_item_intent(command) {
+            return validate_station_slot_item_intent(self, command);
+        }
         if command.changed_entities.iter().any(|record| {
             record.changes.iter().any(|change| {
                 matches!(
@@ -7931,6 +8274,22 @@ impl CoreState {
             result.topology_dirty = false;
             return Ok(result);
         }
+        if command_contains_station_slot_mode_intent(command) {
+            require_station_slot_mode_intent(command)?;
+            // The post-commit state no longer contains canceled route leaves.
+            // A conservative topology invalidation is deterministic and makes
+            // cold recovery refresh every affected station without persisting
+            // renderer-derived IDs beside the semantic WAL marker.
+            result.topology_dirty = true;
+            return Ok(result);
+        }
+        if command_contains_station_slot_item_intent(command) {
+            require_station_slot_item_intent(command)?;
+            // Item replacement may also remove matching belts; force a full
+            // topology refresh when a staged command resumes after restart.
+            result.topology_dirty = true;
+            return Ok(result);
+        }
         if !command_contains_station_fleet_target_intent(command) {
             return Ok(result);
         }
@@ -8058,6 +8417,8 @@ impl CoreState {
         let expanded_fuel_item_intent;
         let expanded_station_fleet_target_intent;
         let expanded_station_warper_inventory_intent;
+        let expanded_station_slot_mode_intent;
+        let expanded_station_slot_item_intent;
         let expanded_manual_mining_intent;
         let expanded_black_hole_pause_intent;
         let expanded_time_warp_intent;
@@ -8083,6 +8444,12 @@ impl CoreState {
             expanded_station_warper_inventory_intent =
                 expand_station_warper_inventory_intent(self, command)?;
             &expanded_station_warper_inventory_intent
+        } else if command_contains_station_slot_mode_intent(command) {
+            expanded_station_slot_mode_intent = expand_station_slot_mode_intent(self, command)?;
+            &expanded_station_slot_mode_intent
+        } else if command_contains_station_slot_item_intent(command) {
+            expanded_station_slot_item_intent = expand_station_slot_item_intent(self, command)?;
+            &expanded_station_slot_item_intent
         } else if crate::manual_mining::command_contains_intent(command) {
             expanded_manual_mining_intent = crate::manual_mining::expand_intent(self, command)?;
             &expanded_manual_mining_intent
@@ -10228,6 +10595,56 @@ mod tests {
             operation: "set".to_owned(),
             value: Some(value),
         }
+    }
+
+    fn station_slot_mode_intent_command(
+        revision: u64,
+        entity_id: &str,
+        slot_index: Value,
+        scope: &str,
+        mode: &str,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.changed_entities = vec![RecordPatch {
+            id: entity_id.to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![
+                    PathSegment::Key("stationSlotMode".to_owned()),
+                    PathSegment::Key("intent".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(serde_json::json!({
+                    "slotIndex": slot_index,
+                    "scope": scope,
+                    "mode": mode,
+                })),
+            }],
+        }];
+        command
+    }
+
+    fn station_slot_item_intent_command(
+        revision: u64,
+        entity_id: &str,
+        slot_index: Value,
+        item_id: Value,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.changed_entities = vec![RecordPatch {
+            id: entity_id.to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![
+                    PathSegment::Key("stationSlotItem".to_owned()),
+                    PathSegment::Key("intent".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(serde_json::json!({
+                    "slotIndex": slot_index,
+                    "itemId": item_id,
+                })),
+            }],
+        }];
+        command
     }
 
     fn station_fleet_command(
@@ -13262,6 +13679,396 @@ mod tests {
         let error = first.apply_player_authority_command(&durable).unwrap_err();
         assert!(format!("{error:#}").contains("base revision is not current"));
         assert_eq!(first.canonical_sha256().unwrap(), committed_hash);
+    }
+
+    #[test]
+    fn station_slot_semantic_intents_match_direct_derivations_and_generic_wal_replay() {
+        let mode_baseline = player_station_route_mode_state();
+        let direct_mode = station_remote_mode_with_route_cancellation_command(&mode_baseline);
+        let mode_intent = station_slot_mode_intent_command(
+            mode_baseline.revision,
+            "station-ils",
+            Value::from(0),
+            "remote",
+            "storage",
+        );
+        let mut direct_mode_state = mode_baseline.clone();
+        let mut live_mode_state = mode_baseline.clone();
+        let mut replayed_mode_state = mode_baseline;
+        let direct_mode_receipt = direct_mode_state
+            .apply_player_authority_command(&direct_mode)
+            .unwrap();
+        let live_mode_receipt = live_mode_state
+            .apply_player_authority_command(&mode_intent)
+            .unwrap();
+        let replayed_mode_receipt = replayed_mode_state.apply_command(&mode_intent).unwrap();
+        assert_eq!(live_mode_receipt, direct_mode_receipt);
+        assert_eq!(replayed_mode_receipt, direct_mode_receipt);
+        assert_eq!(
+            live_mode_state.canonical_sha256().unwrap(),
+            direct_mode_state.canonical_sha256().unwrap()
+        );
+        assert_eq!(
+            replayed_mode_state.canonical_sha256().unwrap(),
+            direct_mode_state.canonical_sha256().unwrap()
+        );
+
+        let item_baseline = player_station_slot_item_state();
+        let item_target_before = item_baseline
+            .parse_entity(*item_baseline.entity_index.get("station-ils").unwrap())
+            .unwrap();
+        let item_peer_before = item_baseline
+            .parse_entity(*item_baseline.entity_index.get("station-remote").unwrap())
+            .unwrap();
+        assert_eq!(
+            item_target_before["stationRoutes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            item_peer_before["stationRoutes"].as_array().unwrap().len(),
+            1
+        );
+        let direct_item = station_slot_item_assignment_command(&item_baseline);
+        let item_intent = station_slot_item_intent_command(
+            item_baseline.revision,
+            "station-ils",
+            Value::from(0),
+            Value::from("iron_ingot"),
+        );
+        let mut direct_item_state = item_baseline.clone();
+        let mut live_item_state = item_baseline.clone();
+        let mut replayed_item_state = item_baseline;
+        let direct_item_receipt = direct_item_state
+            .apply_player_authority_command(&direct_item)
+            .unwrap();
+        let live_item_receipt = live_item_state
+            .apply_player_authority_command(&item_intent)
+            .unwrap();
+        let replayed_item_receipt = replayed_item_state.apply_command(&item_intent).unwrap();
+        assert_eq!(live_item_receipt, direct_item_receipt);
+        assert_eq!(replayed_item_receipt, direct_item_receipt);
+        assert_eq!(
+            live_item_state.canonical_sha256().unwrap(),
+            direct_item_state.canonical_sha256().unwrap()
+        );
+        assert_eq!(
+            replayed_item_state.canonical_sha256().unwrap(),
+            direct_item_state.canonical_sha256().unwrap()
+        );
+        let target = live_item_state
+            .parse_entity(*live_item_state.entity_index.get("station-ils").unwrap())
+            .unwrap();
+        let peer = live_item_state
+            .parse_entity(*live_item_state.entity_index.get("station-remote").unwrap())
+            .unwrap();
+        assert_eq!(target["stationRoutes"], serde_json::json!([]));
+        assert_eq!(peer["stationRoutes"], serde_json::json!([]));
+        assert_eq!(peer["outputs"]["iron_ore"], 150);
+        assert_eq!(live_item_state.base_value()["tray"]["iron_ore"], 18);
+        // The two target-owned routes and the remote peer-owned route are
+        // canceled together. Each owner's reserved warpers fill that station
+        // first; the target overflow returns to the active tray and the remote
+        // owner's overflow returns to its own planet tray.
+        assert_eq!(target["stationWarpers"], 50);
+        assert_eq!(peer["stationWarpers"], 50);
+        assert_eq!(live_item_state.base_value()["tray"]["space_warper"], 11);
+        assert_eq!(
+            live_item_state.base_value()["planetTrays"]["ashen"]["space_warper"],
+            8
+        );
+        assert_eq!(
+            live_item_receipt.changed_belt_ids,
+            ["belt-station-in", "belt-station-out"]
+        );
+    }
+
+    #[test]
+    fn station_slot_item_null_intent_matches_direct_and_preserves_unknown_payloads() {
+        let mut baseline = player_station_configuration_state();
+        let quantum_network_sentinel = serde_json::json!({
+            "enabled": true,
+            "inventory": { "iron_ore": "25000", "hydrogen": "9007199254740991" },
+            "itemCapacities": { "iron_ore": "100000", "hydrogen": "9007199254740991" },
+            "routingCursors": { "iron_ore": 17 },
+            "uploadRoutingCursors": { "hydrogen": 23 },
+            "runtimeFlow": {
+                "boundarySecond": 120,
+                "uploaded": { "iron_ore": "31" },
+                "withdrawn": { "hydrogen": "29" }
+            }
+        });
+        baseline.base_value_mut().insert(
+            "quantumLogisticsNetwork".to_owned(),
+            quantum_network_sentinel.clone(),
+        );
+        let target_index = *baseline.entity_index.get("station-ils").unwrap();
+        let mut target = baseline.parse_entity(target_index).unwrap();
+        target["stationSlots"][0]["quantumSlotPayload"] =
+            serde_json::json!({ "owner": "future:quantum", "revision": 7 });
+        target["quantumMaterialBuffer"] = serde_json::json!({ "hydrogen": 123 });
+        baseline.replace_entity_raw(
+            target_index,
+            Arc::<str>::from(serde_json::to_string(&target).unwrap()),
+        );
+        baseline.rebuild_indexes().unwrap();
+
+        let direct = station_slot_item_removal_command(&baseline);
+        let intent = station_slot_item_intent_command(
+            baseline.revision,
+            "station-ils",
+            Value::from(0),
+            Value::Null,
+        );
+        let mut direct_state = baseline.clone();
+        let mut intent_state = baseline;
+        direct_state
+            .apply_player_authority_command(&direct)
+            .unwrap();
+        intent_state
+            .apply_player_authority_command(&intent)
+            .unwrap();
+        assert_eq!(
+            intent_state.canonical_sha256().unwrap(),
+            direct_state.canonical_sha256().unwrap()
+        );
+        let target = intent_state
+            .parse_entity(*intent_state.entity_index.get("station-ils").unwrap())
+            .unwrap();
+        assert!(target["stationSlots"][0].get("itemId").is_none());
+        assert_eq!(
+            target["stationSlots"][0]["quantumSlotPayload"],
+            serde_json::json!({ "owner": "future:quantum", "revision": 7 })
+        );
+        assert_eq!(
+            target["quantumMaterialBuffer"],
+            serde_json::json!({ "hydrogen": 123 })
+        );
+        assert_eq!(
+            intent_state.base_value()["quantumLogisticsNetwork"],
+            quantum_network_sentinel
+        );
+    }
+
+    #[test]
+    fn station_slot_item_intent_refunds_portable_fleet_without_touching_tray() {
+        for (item_id, expected_drones, expected_vessels) in
+            [("logistics_drone", 17, 20), ("logistics_vessel", 10, 27)]
+        {
+            let mut state = player_station_configuration_state();
+            state.base_value_mut()["portableFleet"] = serde_json::json!({
+                "logistics_drone": 10,
+                "logistics_vessel": 20,
+            });
+            state.base_value_mut()["tray"]["logistics_drone"] = Value::from(777);
+            state.base_value_mut()["tray"]["logistics_vessel"] = Value::from(888);
+            let target_index = *state.entity_index.get("station-ils").unwrap();
+            let mut target = state.parse_entity(target_index).unwrap();
+            target["stationSlots"][0]["itemId"] = Value::from(item_id);
+            target["storedItemId"] = Value::from(item_id);
+            target["inputs"] =
+                Value::Object([(item_id.to_owned(), Value::from(3))].into_iter().collect());
+            target["outputs"] =
+                Value::Object([(item_id.to_owned(), Value::from(4))].into_iter().collect());
+            target["stationSlots"][0]["slotPayload"] =
+                serde_json::json!({ "owner": "future:slot", "revision": 9 });
+            state.replace_entity_raw(
+                target_index,
+                Arc::<str>::from(serde_json::to_string(&target).unwrap()),
+            );
+            state.rebuild_indexes().unwrap();
+
+            let intent = station_slot_item_intent_command(
+                state.revision,
+                "station-ils",
+                Value::from(0),
+                Value::Null,
+            );
+            state.apply_player_authority_command(&intent).unwrap();
+            assert_eq!(
+                state.base_value()["portableFleet"]["logistics_drone"],
+                expected_drones
+            );
+            assert_eq!(
+                state.base_value()["portableFleet"]["logistics_vessel"],
+                expected_vessels
+            );
+            assert_eq!(state.base_value()["tray"]["logistics_drone"], 777);
+            assert_eq!(state.base_value()["tray"]["logistics_vessel"], 888);
+            let target = state
+                .parse_entity(*state.entity_index.get("station-ils").unwrap())
+                .unwrap();
+            assert_eq!(target["inputs"][item_id], 0);
+            assert_eq!(target["outputs"][item_id], 0);
+            assert_eq!(
+                target["stationSlots"][0]["slotPayload"],
+                serde_json::json!({ "owner": "future:slot", "revision": 9 })
+            );
+        }
+    }
+
+    #[test]
+    fn station_slot_semantic_intents_fail_closed_for_untrusted_or_malformed_requests() {
+        let baseline = player_station_configuration_state();
+        let mut mixed = station_slot_mode_intent_command(
+            baseline.revision,
+            "station-ils",
+            Value::from(0),
+            "local",
+            "demand",
+        );
+        mixed.top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("paused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(true)),
+        });
+        let mut extra_key = station_slot_mode_intent_command(
+            baseline.revision,
+            "station-ils",
+            Value::from(0),
+            "local",
+            "demand",
+        );
+        extra_key.changed_entities[0].changes[0]
+            .value
+            .as_mut()
+            .unwrap()["rendererDerived"] = Value::from(true);
+        let mut repeated = station_slot_item_intent_command(
+            baseline.revision,
+            "station-ils",
+            Value::from(0),
+            Value::Null,
+        );
+        let repeated_change = repeated.changed_entities[0].changes[0].clone();
+        repeated.changed_entities[0].changes.push(repeated_change);
+        let mut delete_marker = station_slot_item_intent_command(
+            baseline.revision,
+            "station-ils",
+            Value::from(0),
+            Value::Null,
+        );
+        delete_marker.changed_entities[0].changes[0].operation = "delete".to_owned();
+        let commands = [
+            mixed,
+            extra_key,
+            repeated,
+            delete_marker,
+            station_slot_mode_intent_command(
+                baseline.revision,
+                "station-pls",
+                Value::from(0),
+                "remote",
+                "demand",
+            ),
+            station_slot_mode_intent_command(
+                baseline.revision,
+                "station-ils",
+                Value::from(5),
+                "local",
+                "demand",
+            ),
+            station_slot_mode_intent_command(
+                baseline.revision,
+                "station-ils",
+                Value::from(0.5),
+                "local",
+                "demand",
+            ),
+            station_slot_mode_intent_command(
+                baseline.revision,
+                "station-ils",
+                Value::from(0),
+                "local",
+                "supply",
+            ),
+            station_slot_item_intent_command(
+                baseline.revision,
+                "station-ils",
+                Value::from(0),
+                Value::from("missing-item"),
+            ),
+            station_slot_item_intent_command(
+                baseline.revision,
+                "station-empty",
+                Value::from(0),
+                Value::Null,
+            ),
+            station_slot_item_intent_command(
+                baseline.revision + 1,
+                "station-ils",
+                Value::from(0),
+                Value::Null,
+            ),
+        ];
+        for command in commands {
+            let mut state = baseline.clone();
+            let before_revision = state.revision;
+            let before_hash = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, before_revision);
+            assert_eq!(state.canonical_sha256().unwrap(), before_hash);
+        }
+
+        for (mut state, command) in [
+            (
+                player_station_configuration_state_for_registry("pack:test"),
+                station_slot_mode_intent_command(
+                    baseline.revision,
+                    "station-ils",
+                    Value::from(0),
+                    "local",
+                    "demand",
+                ),
+            ),
+            (
+                player_station_configuration_state(),
+                station_slot_item_intent_command(
+                    baseline.revision,
+                    "station-remote",
+                    Value::from(0),
+                    Value::Null,
+                ),
+            ),
+            (
+                player_station_configuration_state(),
+                station_slot_item_intent_command(
+                    baseline.revision,
+                    "station-locked",
+                    Value::from(0),
+                    Value::Null,
+                ),
+            ),
+        ] {
+            let before_revision = state.revision;
+            let before_hash = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, before_revision);
+            assert_eq!(state.canonical_sha256().unwrap(), before_hash);
+        }
+
+        let mut malformed_slots = player_station_configuration_state();
+        let target_index = *malformed_slots.entity_index.get("station-ils").unwrap();
+        let mut target = malformed_slots.parse_entity(target_index).unwrap();
+        target["stationSlots"].as_array_mut().unwrap().pop();
+        malformed_slots.replace_entity_raw(
+            target_index,
+            Arc::<str>::from(serde_json::to_string(&target).unwrap()),
+        );
+        malformed_slots.rebuild_indexes().unwrap();
+        let before_hash = malformed_slots.canonical_sha256().unwrap();
+        assert!(
+            malformed_slots
+                .apply_player_authority_command(&station_slot_item_intent_command(
+                    malformed_slots.revision,
+                    "station-ils",
+                    Value::from(0),
+                    Value::Null,
+                ))
+                .is_err()
+        );
+        assert_eq!(malformed_slots.canonical_sha256().unwrap(), before_hash);
     }
 
     #[test]

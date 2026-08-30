@@ -165,6 +165,22 @@ describe("native blueprint rename reconciliation", () => {
     expect(result.resolution).toBeNull();
   });
 
+  it("holds the exact pending identity across a temporary authority handoff", () => {
+    const acknowledged = acknowledgeNativeBlueprintRename(
+      pending(),
+      7,
+      { previousRevision: 47, revision: 48 },
+    );
+    const held = reconcileNativeBlueprintRename(acknowledged, {
+      ownsRuntime: false,
+      commandPending: false,
+      activeIdentity: null,
+      latestIdentity: null,
+      frame: null,
+    });
+    expect(held).toEqual({ pending: acknowledged, resolution: null });
+  });
+
   it("restores the stable draft identity after a definite pre-ACK failure", () => {
     const result = settleNativeBlueprintRenameFailure(pending(), 7, "definite-failure");
     expect(result.pending).toBeNull();
@@ -191,5 +207,26 @@ describe("native blueprint rename reconciliation", () => {
     });
     expect(reconciled.pending).toBe(uncertain.pending);
     expect(reconciled.resolution).toBeNull();
+  });
+
+  it("accepts an exact durable receipt discovered by read-only uncertain reconciliation", () => {
+    const uncertain = settleNativeBlueprintRenameFailure(pending(), 7, "uncertain").pending!;
+    const acknowledged = acknowledgeNativeBlueprintRename(
+      uncertain,
+      7,
+      { previousRevision: 47, revision: 48 },
+    );
+    expect(acknowledged).toMatchObject({
+      phase: "awaiting-projection",
+      expectedRevision: 48,
+      conflictReason: null,
+    });
+    expect(reconcileNativeBlueprintRename(acknowledged, {
+      ownsRuntime: true,
+      commandPending: false,
+      activeIdentity: ACTIVE,
+      latestIdentity: workspaceIdentity(48),
+      frame: frame(48, "新名", 5),
+    }).resolution).toMatchObject({ status: "confirmed", submissionId: 7 });
   });
 });

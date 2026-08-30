@@ -73,7 +73,8 @@ export function acknowledgeNativeBlueprintRename(
   submissionId: number,
   receipt: Readonly<{ previousRevision: number; revision: number }>,
 ): NativeBlueprintRenamePendingIdentity {
-  if (pending.submissionId !== submissionId || pending.phase !== "awaiting-ack") return pending;
+  if (pending.submissionId !== submissionId ||
+      pending.phase !== "awaiting-ack" && pending.phase !== "uncertain") return pending;
   if (receipt.previousRevision !== pending.commandRevision ||
       receipt.revision !== pending.commandRevision + 1) {
     return Object.freeze({
@@ -138,6 +139,14 @@ function conflict(
   return Object.freeze({ ...pending, phase: "conflict" as const, conflictReason: reason });
 }
 
+export function conflictNativeBlueprintRename(
+  pending: NativeBlueprintRenamePendingIdentity,
+  submissionId: number,
+  reason: NativeBlueprintRenameConflictReason,
+): NativeBlueprintRenamePendingIdentity {
+  return pending.submissionId === submissionId ? conflict(pending, reason) : pending;
+}
+
 export function reconcileNativeBlueprintRename(
   pending: NativeBlueprintRenamePendingIdentity,
   input: Readonly<{
@@ -151,7 +160,7 @@ export function reconcileNativeBlueprintRename(
   pending: NativeBlueprintRenamePendingIdentity | null;
   resolution: NativeBlueprintRenameResolution | null;
 }> {
-  if (!input.ownsRuntime || input.activeIdentity && (
+  if (input.activeIdentity && (
     input.activeIdentity.sessionId !== pending.sessionId || input.activeIdentity.runId !== pending.runId
   ) || input.latestIdentity && !nativeBlueprintRenameLineageMatchesIdentity(pending, input.latestIdentity)) {
     return Object.freeze({ pending: conflict(pending, "lineage-drift"), resolution: null });
@@ -159,6 +168,7 @@ export function reconcileNativeBlueprintRename(
   if (pending.phase === "uncertain" || pending.phase === "conflict") {
     return Object.freeze({ pending, resolution: null });
   }
+  if (!input.ownsRuntime) return Object.freeze({ pending, resolution: null });
   if (pending.phase === "awaiting-ack") {
     return Object.freeze({
       pending: input.commandPending ? pending : conflict(pending, "ack-missing"),

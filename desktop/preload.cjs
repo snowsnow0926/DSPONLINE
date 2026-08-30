@@ -201,6 +201,7 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   getNativeCoreCommandPaletteEntitySearch: (request) => invokeNative("desktop:native-core-command-palette-entity-search", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生命令面板设备搜索失败，请重试" }, request),
   requestNativeCoreProjectionTransfer,
   applyNativeCoreCommand: (request) => invokeNative("desktop:native-core-apply-command", { fallbackCode: "NATIVE_CORE_COMMAND_FAILED", message: "原生影子命令执行失败，请重试" }, request),
+  reconcileNativeCoreCommand: (request) => invokeNative("desktop:native-core-reconcile-command", { fallbackCode: "NATIVE_CORE_COMMAND_RECONCILE_FAILED", message: "原生权威命令耐久收据对账失败" }, request),
   advanceNativeCore: (request) => invokeNative("desktop:native-core-advance", { fallbackCode: "NATIVE_CORE_ADVANCE_FAILED", message: "原生影子模拟推进失败，请重试" }, request),
   commitNativeCoreOperation: (request) => invokeNative("desktop:native-core-commit-operation", { fallbackCode: "NATIVE_CORE_COMMIT_FAILED", message: "原生影子事务提交失败，请重新检查影子状态" }, request),
   checkpointNativeCore: (request) => invokeNative("desktop:native-core-checkpoint", { fallbackCode: "NATIVE_CORE_CHECKPOINT_FAILED", message: "原生影子检查点生成失败，请重试" }, request),

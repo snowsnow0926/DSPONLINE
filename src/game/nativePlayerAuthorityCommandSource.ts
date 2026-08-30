@@ -143,11 +143,25 @@ export interface NativePlayerAuthorityCommandSource {
    * or any uncertain transport outcome consumes the source permanently.
    */
   applyCommand(command: SimulationCommandPatch): Promise<NativePlayerAuthorityCommandReceipt>;
+  /** Read-only main receipt lookup; never dispatches or retries the command. */
+  reconcileCommand(
+    command: SimulationCommandPatch,
+  ): Promise<NativePlayerAuthorityCommandReconciliationOutcome>;
 }
+
+export type NativePlayerAuthorityCommandReconciliationOutcome = Readonly<
+  | { status: "committed"; receipt: DesktopNativeCoreCommandResult }
+  | {
+    status: "pending" | "not-committed" | "conflict";
+    baseRevision: number;
+    currentRevision: number;
+  }
+  | { status: "unavailable" }
+>;
 
 type NativePlayerAuthorityCommandBridge = Pick<
   DesktopBridge,
-  "getNativePlayerAuthorityState" | "applyNativeCoreCommand"
+  "getNativePlayerAuthorityState" | "applyNativeCoreCommand" | "reconcileNativeCoreCommand"
 >;
 
 interface NormalizedCommand {
@@ -550,6 +564,39 @@ function normalizeReceipt(value: unknown, command: NormalizedCommand): DesktopNa
   });
 }
 
+function normalizeReconciliation(
+  value: unknown,
+  command: NormalizedCommand,
+): NativePlayerAuthorityCommandReconciliationOutcome {
+  if (!isRecord(value) || typeof value.status !== "string") {
+    throw sourceError(
+      "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+      "原生玩家命令对账回执结构非法",
+    );
+  }
+  if (value.status === "committed" && hasExactKeys(value, ["status", "receipt"])) {
+    return Object.freeze({
+      status: "committed" as const,
+      receipt: normalizeReceipt(value.receipt, command),
+    });
+  }
+  if ((value.status === "pending" || value.status === "not-committed" ||
+      value.status === "conflict") &&
+      hasExactKeys(value, ["status", "baseRevision", "currentRevision"]) &&
+      value.baseRevision === command.command.baseRevision &&
+      Number.isSafeInteger(value.currentRevision) && (value.currentRevision as number) >= 0) {
+    return Object.freeze({
+      status: value.status,
+      baseRevision: command.command.baseRevision,
+      currentRevision: value.currentRevision as number,
+    });
+  }
+  throw sourceError(
+    "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+    "原生玩家命令对账回执与原命令不一致",
+  );
+}
+
 function normalizeSettledActiveFrame(value: unknown): DesktopNativePlayerAuthorityClockState | null {
   let frame: DesktopNativePlayerAuthorityState;
   try {
@@ -651,6 +698,22 @@ export function createNativePlayerAuthorityCommandSource(
     sessionId,
     runId,
     baseRevision: revision,
+    async reconcileCommand(rawCommand) {
+      const command = normalizeCommand(rawCommand, revision);
+      if (typeof bridge.reconcileNativeCoreCommand !== "function") {
+        return Object.freeze({ status: "unavailable" as const });
+      }
+      let raw: unknown;
+      try {
+        raw = await bridge.reconcileNativeCoreCommand({
+          sessionId,
+          command: command.command as unknown as Record<string, unknown>,
+        });
+      } catch {
+        return Object.freeze({ status: "unavailable" as const });
+      }
+      return normalizeReconciliation(raw, command);
+    },
     async applyCommand(rawCommand) {
       if (inFlight) {
         throw sourceError(

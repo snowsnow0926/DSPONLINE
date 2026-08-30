@@ -2349,6 +2349,19 @@ ipcMain.handle("desktop:native-core-apply-command", async (event, request) => {
   });
 });
 
+ipcMain.handle("desktop:native-core-reconcile-command", async (event, request) => {
+  return runRendererNativeOperation("coreCommandReconcile", {
+    fallbackCode: "NATIVE_CORE_COMMAND_RECONCILE_FAILED",
+    message: "原生权威命令耐久收据对账失败",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityCommandBroker?.ownsSession(request?.sessionId)) {
+      throw new Error("原生玩家权威命令对账会话不可用");
+    }
+    return nativePlayerAuthorityCommandBroker.reconcile(ownerId, request);
+  });
+});
+
 ipcMain.handle("desktop:native-core-advance", async (event, request) => {
   return runRendererNativeOperation("coreAdvance", {
     fallbackCode: "NATIVE_CORE_ADVANCE_FAILED",

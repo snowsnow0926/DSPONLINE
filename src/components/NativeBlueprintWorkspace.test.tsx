@@ -163,6 +163,7 @@ describe("NativeBlueprintWorkspace", () => {
       resolution?: NativeBlueprintRenameResolution | null;
       onConsumeRenameResolution?: (submissionId: number) => void;
       commandPending?: boolean;
+      open?: boolean;
     } = {},
   ) {
     const onSelectBlueprint = callbacks.onSelectBlueprint ?? vi.fn<(blueprintId: string) => void>();
@@ -185,7 +186,7 @@ describe("NativeBlueprintWorkspace", () => {
       }
       : callbacks.latestIdentity ?? null;
     act(() => root.render(<NativeBlueprintWorkspace
-      open
+      open={callbacks.open ?? true}
       status={status}
       frame={value}
       latestIdentity={latestIdentity}
@@ -473,6 +474,35 @@ describe("NativeBlueprintWorkspace", () => {
     expect(host.querySelector<HTMLInputElement>("[data-native-blueprint-rename-input]")).toBe(input);
     expect(input.disabled).toBe(true);
     expect(host.textContent).toContain("禁止自动重发");
+  });
+
+  it("retains the draft and clears an interrupted IME composition while temporarily hidden", () => {
+    const onSubmitRenameIntent = vi.fn<(
+      identity: NativeBlueprintRenameIdentity,
+      name: string,
+    ) => NativeBlueprintRenameSubmitOutcome>().mockReturnValue(Object.freeze({
+      status: "accepted",
+      submissionId: 12,
+      commandRevision: 47,
+    }));
+    renderWorkspace(frame(), "ready", { onSubmitRenameIntent });
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='begin-rename']")!.click());
+    const input = host.querySelector<HTMLInputElement>("[data-native-blueprint-rename-input]")!;
+    act(() => {
+      replaceInputValue(input, "输入法中的草稿");
+      input.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    });
+    expect(host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='submit-rename']")?.disabled).toBe(true);
+
+    renderWorkspace(frame(), "ready", { onSubmitRenameIntent, open: false });
+    expect(host.querySelector("[data-native-blueprint-rename-form]")).toBeNull();
+    renderWorkspace(frame(), "ready", { onSubmitRenameIntent, open: true });
+
+    const restored = host.querySelector<HTMLInputElement>("[data-native-blueprint-rename-input]")!;
+    expect(restored.value).toBe("输入法中的草稿");
+    expect(host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='submit-rename']")?.disabled).toBe(false);
+    act(() => host.querySelector<HTMLFormElement>("[data-native-blueprint-rename-form]")!.requestSubmit());
+    expect(onSubmitRenameIntent).toHaveBeenCalledOnce();
   });
 
   it.each([

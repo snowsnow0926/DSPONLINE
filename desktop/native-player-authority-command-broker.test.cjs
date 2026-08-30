@@ -139,6 +139,42 @@ test("black-hole intent crosses the host as a minimal durable command with a set
   });
 });
 
+test("blueprint rename crosses as one opaque semantic marker and returns topology invalidation", async () => {
+  const renameCommand = command(17, {
+    topLevelChanges: [{
+      path: ["blueprints", "intent"],
+      operation: "set",
+      value: { kind: "rename", id: "mod:opaque/rocket", name: "新模组蓝图🚀" },
+    }],
+  });
+  const observed = [];
+  const { broker, calls } = brokerFixture({
+    onCommittedCommand(value) { observed.push(value); },
+    commit: async (request) => commandResult(request, {
+      changedEntityIds: [],
+      changedBeltIds: [],
+      topologyDirty: true,
+    }),
+  });
+
+  const receipt = await broker.commit(7, { sessionId: "core-1", command: renameCommand });
+  assert.deepEqual(receipt, {
+    previousRevision: 17,
+    revision: 18,
+    changedEntityIds: [],
+    changedBeltIds: [],
+    topologyDirty: true,
+  });
+  assert.deepEqual(calls[0].command, renameCommand);
+  assert.deepEqual(observed[0].command, renameCommand);
+  const encoded = JSON.stringify(calls[0].command);
+  assert.equal(encoded.includes('"entities":'), false);
+  assert.equal(encoded.includes('"belts":'), false);
+  assert.equal(encoded.includes("blueprintVersions"), false);
+  assert.equal(encoded.includes("constructionQueue"), false);
+  assert.equal(encoded.includes("nextId"), false);
+});
+
 test("time-warp intent and ejector target cross the host without renderer-derived state", async () => {
   const timeWarpCommand = command(17, {
     topLevelChanges: [{

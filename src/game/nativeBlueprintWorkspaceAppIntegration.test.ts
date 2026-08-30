@@ -33,15 +33,47 @@ describe("native blueprint workspace App integration", () => {
     expect(nativeTag).toContain("frame={nativeBlueprintWorkspaceFrame}");
     expect(nativeTag).toContain("onSelectBlueprint={setNativeBlueprintSelectedId}");
     expect(nativeTag).toContain("onLibraryCursorChange=");
-    expect(nativeTag).toContain("onQueueCursorChange={setNativeBlueprintQueueCursor}");
+    expect(nativeTag).toContain("onQueueCursorChange=");
+    expect(nativeTag).toMatch(/nativeBlueprintRenamePendingIdentity \|\| nativePlayerAuthorityCommandPending[\s\S]*?setNativeBlueprintQueueCursor/);
+    expect(nativeTag).toContain("onSubmitRenameIntent={submitNativeBlueprintRenameIntent}");
+    expect(nativeTag).toContain("pendingIdentity={nativeBlueprintRenamePendingIdentity}");
+    expect(nativeTag).toContain("commandPending={nativePlayerAuthorityCommandPending}");
     expect(nativeTag).not.toMatch(/\bgame=|onDeploy=|onRemove=|onRename=|onTransform=|onFund|onCancel=|onExport=|onImport=/);
     expect(app).toMatch(/: <BlueprintWorkspace[\s\S]*?game=\{game\}[\s\S]*?onDeploy=\{deployBlueprint\}/);
   });
 
-  it("keeps the native component detached from GameState and all blueprint mutation surfaces", () => {
+  it("keeps the native component detached from GameState and every blueprint mutation except rename", () => {
     expect(component).not.toMatch(/\bGameState\b|\bgame\.|from\s+["']\.\.\/game\/(?:engine|types|content)["']/);
-    expect(component).not.toMatch(/on(?:Capture|Import|Rename|Transform|Delete|Remove|Deploy|Place|Undo|Ghost|Fund|Cancel|Export)\b/);
+    expect(component).not.toMatch(/on(?:Capture|Import|Transform|Delete|Remove|Deploy|Place|Undo|Ghost|Fund|Cancel|Export)\b/);
+    expect(component).toMatch(/onSubmitRenameIntent/);
     expect(component).toMatch(/readOnly !== true/);
+  });
+
+  it("routes exactly one semantic rename marker through durable ACK and same-lineage projection confirmation", () => {
+    expect(app).toMatch(/from "\.\/game\/nativeBlueprintRenameIntentCommands"/);
+    const commandBlock = app.slice(
+      app.indexOf("const submitNativeBlueprintRenameIntent"),
+      app.indexOf("const commitNativeConstructionCenterIntent"),
+    );
+    expect(commandBlock).toMatch(/nativeBlueprintRenameIdentityMatchesFrame\(identity, frame\)/);
+    expect(commandBlock).toMatch(/routeIdentity\.sessionId !== identity\.sessionId/);
+    expect(commandBlock).toMatch(/routeIdentity\.runId !== identity\.runId/);
+    expect(commandBlock).toMatch(/routeIdentity\.revision !== identity\.revision/);
+    expect(commandBlock).toMatch(/routeIdentity\.registryFingerprint !== identity\.registryFingerprint/);
+    expect(commandBlock).toMatch(/frame\.selectedBlueprintId !== identity\.blueprintId/);
+    expect(commandBlock).toMatch(/commandSource\.baseRevision !== identity\.revision/);
+    expect(commandBlock.match(/createNativeBlueprintRenameIntentCommand\(/g)).toHaveLength(1);
+    expect(commandBlock).toMatch(/commitNativeProjectedCommand\(identity\.revision/);
+    expect(commandBlock).not.toMatch(/\bgameRef\b|\bgame\.|blueprintVersions|constructionQueue|entities|belts|nextId/);
+
+    const pendingBlock = app.slice(
+      app.indexOf("const nativeBlueprintWorkspaceFrameRef"),
+      app.indexOf("const nativePlacementLabel"),
+    );
+    expect(pendingBlock).toMatch(/pending\.expectedRevision !== null[\s\S]*?current!\.revision >= pending\.expectedRevision/);
+    expect(pendingBlock).toMatch(/row\?\.name === pending\.targetName/);
+    expect(pendingBlock).toMatch(/row\?\.revision === pending\.currentRevision \+ 1/);
+    expect(pendingBlock).toMatch(/sessionId !== pending\.sessionId[\s\S]*?runId !== pending\.runId[\s\S]*?registryFingerprint !== pending\.registryFingerprint/);
   });
 
   it("does not derive native blueprint selection or placement UI from legacy GameState", () => {

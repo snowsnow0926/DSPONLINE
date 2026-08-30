@@ -10,6 +10,7 @@ import {
   NATIVE_BLUEPRINT_PAGE_ROWS,
   NativeBlueprintWorkspaceStore,
   createNativePlayerAuthorityBlueprintWorkspaceSource,
+  nativeBlueprintRenameIdentityMatchesFrame,
   selectNativeBlueprintWorkspaceFrame,
   type NativeBlueprintWorkspaceIdentity,
   type NativeBlueprintWorkspaceSource,
@@ -377,5 +378,31 @@ describe("NativeBlueprintWorkspaceStore", () => {
     const wrong = fixtureSource({ ...IDENTITY, sessionId: "other" }, [], []);
     await expect(store.refresh(wrong, IDENTITY, null)).resolves.toBe("unavailable");
     expect(store.getSnapshot().status).toBe("unavailable");
+  });
+
+  it("admits rename only for the selected row on the exact session/run/revision/registry frame", async () => {
+    const row = { ...summary("bp-selected", "当前名称"), revision: 4 };
+    const store = new NativeBlueprintWorkspaceStore();
+    await expect(store.refresh(fixtureSource(IDENTITY, [row], []), IDENTITY, row.id))
+      .resolves.toBe("committed");
+    const frame = store.getSnapshot().frame;
+    const identity = {
+      ...IDENTITY,
+      blueprintId: row.id,
+      currentName: row.name,
+      currentRevision: row.revision,
+    };
+    expect(nativeBlueprintRenameIdentityMatchesFrame(identity, frame)).toBe(true);
+    for (const drift of [
+      { sessionId: "other-session" },
+      { runId: "other-run" },
+      { revision: 18 },
+      { registryFingerprint: "other-registry" },
+      { blueprintId: "other-blueprint" },
+      { currentName: "过期名称" },
+      { currentRevision: 5 },
+    ]) {
+      expect(nativeBlueprintRenameIdentityMatchesFrame({ ...identity, ...drift }, frame)).toBe(false);
+    }
   });
 });

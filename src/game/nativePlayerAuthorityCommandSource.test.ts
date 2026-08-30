@@ -25,6 +25,7 @@ import {
   type SimulationCommandPatch,
 } from "./simulationRuntimeProtocol";
 import { createNativeProjectedManualMineCommand } from "./nativeProjectedManualMiningCommands";
+import { createNativeBlueprintRenameIntentCommand } from "./nativeBlueprintRenameIntentCommands";
 
 function activeFrame(
   revision = 10,
@@ -199,6 +200,28 @@ function stationSlotPatchFixture() {
 }
 
 describe("native player-authority command source", () => {
+  it("requires topologyDirty for the minimal blueprint rename marker", async () => {
+    const patch = createNativeBlueprintRenameIntentCommand(10, "mod:opaque/rocket", "新蓝图名🚀");
+    const accepted = sourceHarness(patch, {
+      topologyDirty: true,
+      receipt: receiptForPatch(patch, true),
+    });
+    await expect(accepted.source.applyCommand(patch)).resolves.toMatchObject({
+      previousRevision: 10,
+      revision: 11,
+      changedEntityIds: [],
+      changedBeltIds: [],
+      topologyDirty: true,
+    });
+    const rejected = sourceHarness(patch, {
+      topologyDirty: true,
+      receipt: receiptForPatch(patch, false),
+    });
+    await expect(rejected.source.applyCommand(patch)).rejects.toMatchObject({
+      code: "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+    });
+  });
+
   it("accepts one opaque manual-mining marker with the projected dirty receipt", async () => {
     const patch = createNativeProjectedManualMineCommand({
       baseRevision: 10,

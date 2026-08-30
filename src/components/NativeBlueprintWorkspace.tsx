@@ -8,14 +8,18 @@ import {
   LockKeyhole,
   MapPin,
   Network,
+  PencilLine,
   ShieldCheck,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { canonicalizeNativeBlueprintName } from "../game/nativeBlueprintRenameIntentCommands";
 import { NATIVE_BLUEPRINT_PAGE_ROWS } from "../game/nativeBlueprintWorkspaceStore";
 import type {
   NativeBlueprintWorkspaceFrame,
   NativeBlueprintWorkspaceSnapshot,
+  NativeBlueprintRenameIdentity,
+  NativeBlueprintRenamePendingIdentity,
 } from "../game/nativeBlueprintWorkspaceStore";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 
@@ -29,6 +33,9 @@ export interface NativeBlueprintWorkspaceProps {
   onSelectBlueprint: (blueprintId: string) => void;
   onLibraryCursorChange: (cursor: number) => void;
   onQueueCursorChange: (cursor: number) => void;
+  onSubmitRenameIntent: (identity: NativeBlueprintRenameIdentity, name: string) => void;
+  pendingIdentity: NativeBlueprintRenamePendingIdentity | null;
+  commandPending: boolean;
 }
 
 const DETAIL_PREVIEW_ROWS = 24;
@@ -72,6 +79,7 @@ function NativeBlueprintPagination({
   totalCount,
   nextCursor,
   rowCount,
+  locked,
   onCursorChange,
 }: {
   section: "library" | "queue";
@@ -79,6 +87,7 @@ function NativeBlueprintPagination({
   totalCount: number;
   nextCursor: number | null;
   rowCount: number;
+  locked: boolean;
   onCursorChange: (cursor: number) => void;
 }) {
   const label = section === "library" ? "蓝图库" : "施工队列";
@@ -92,7 +101,7 @@ function NativeBlueprintPagination({
   >
     <button
       type="button"
-      disabled={cursor === 0}
+      disabled={locked || cursor === 0}
       onClick={() => onCursorChange(Math.max(0, cursor - NATIVE_BLUEPRINT_PAGE_ROWS))}
       aria-label={`${label}上一页`}
       data-native-blueprint-action={`page-${section}-prev`}
@@ -100,7 +109,7 @@ function NativeBlueprintPagination({
     <span data-native-blueprint-page-range={section}>第 {first}–{last} 项 / 共 {totalCount} 项</span>
     <button
       type="button"
-      disabled={nextCursor === null}
+      disabled={locked || nextCursor === null}
       onClick={() => { if (nextCursor !== null) onCursorChange(nextCursor); }}
       aria-label={`${label}下一页`}
       data-native-blueprint-action={`page-${section}-next`}
@@ -185,7 +194,8 @@ function NativeBlueprintDetail({ frame }: { frame: NativeBlueprintWorkspaceFrame
 
 /**
  * Player-authority blueprint surface. It accepts only the same-revision native
- * read projection and deliberately exposes no state-changing command surface.
+ * read projection. The sole mutation is a minimal rename intent; renderer does
+ * not receive or construct a blueprint body, version snapshot, or queue edit.
  */
 export function NativeBlueprintWorkspace({
   open,
@@ -195,13 +205,31 @@ export function NativeBlueprintWorkspace({
   onSelectBlueprint,
   onLibraryCursorChange,
   onQueueCursorChange,
+  onSubmitRenameIntent,
+  pendingIdentity,
+  commandPending,
 }: NativeBlueprintWorkspaceProps) {
   const [activeTab, setActiveTab] = useState<"library" | "queue">("library");
+  const [renameEditor, setRenameEditor] = useState<{
+    identity: NativeBlueprintRenameIdentity;
+    draft: string;
+    composing: boolean;
+  } | null>(null);
+  const renameCompositionRef = useRef(false);
+  const renameSubmittedRef = useRef(false);
   if (!open) return null;
   if (!nativeFrameIsComplete(frame, status)) {
     const unavailableStatus = status === "loading" || status === "empty" ? status : "unavailable";
     return <NativeBlueprintUnavailable open status={unavailableStatus} onClose={onClose} />;
   }
+  const interactionLocked = commandPending || pendingIdentity !== null;
+  const pendingCopy = pendingIdentity
+    ? pendingIdentity.expectedRevision === null
+      ? "重命名正在等待 main-owned durable ACK"
+      : `重命名已耐久提交；等待同 lineage revision ${pendingIdentity.expectedRevision} 投影确认`
+    : commandPending
+      ? "另一条原生命令正在等待 durable ACK"
+      : "页面按存储顺序显示；名称修改由 Rust 守恒提交。";
 
   return <WorkspaceFrame
     className="blueprint-workspace native-blueprint-workspace"
@@ -211,14 +239,14 @@ export function NativeBlueprintWorkspace({
     data-native-blueprint-revision={frame.revision}
   >
     <header className="blueprint-header">
-      <div className="blueprint-title"><i><Layers3 size={20} /></i><div><span>Rust 玩家权威 · revision {frame.revision} · 只读</span><strong>{activeTab === "library" ? "蓝图库" : "待建施工"}</strong></div></div>
+      <div className="blueprint-title"><i><Layers3 size={20} /></i><div><span>Rust 玩家权威 · revision {frame.revision} · 有界投影</span><strong>{activeTab === "library" ? "蓝图库" : "待建施工"}</strong></div></div>
       <div className="blueprint-headline"><span>模板 <strong>{frame.libraryPage.totalCount}</strong></span><span>队列 <strong>{frame.queuePage.totalCount}</strong></span><span><ShieldCheck size={12} /> 同版本投影</span></div>
       <button className="blueprint-close" type="button" onClick={onClose} title="关闭原生蓝图工作区" aria-label="关闭原生蓝图工作区" data-native-blueprint-action="close"><X size={18} /></button>
     </header>
     <nav className="blueprint-tabs" aria-label="原生蓝图视图">
       <button className={activeTab === "library" ? "active" : ""} type="button" aria-current={activeTab === "library" ? "page" : undefined} onClick={() => setActiveTab("library")} data-native-blueprint-action="tab-library"><Layers3 size={14} />蓝图库</button>
       <button className={activeTab === "queue" ? "active" : ""} type="button" aria-current={activeTab === "queue" ? "page" : undefined} onClick={() => setActiveTab("queue")} data-native-blueprint-action="tab-queue"><ListChecks size={14} />待建施工{frame.queuePage.totalCount > 0 ? <em>{frame.queuePage.totalCount}</em> : null}</button>
-      <span role="status">页面按存储顺序显示；当前仅提供查看。</span>
+      <span role="status">{pendingCopy}</span>
     </nav>
 
     {activeTab === "library" ? <div className="blueprint-library" data-native-blueprint-section="library">
@@ -228,6 +256,7 @@ export function NativeBlueprintWorkspace({
         totalCount={frame.libraryPage.totalCount}
         nextCursor={frame.libraryPage.nextCursor}
         rowCount={frame.library.length}
+        locked={interactionLocked}
         onCursorChange={onLibraryCursorChange}
       />
       {frame.library.length === 0 ? <div className="blueprint-empty"><BoxSelect size={28} /><strong>原生蓝图库为空</strong><span>当前 revision 没有已存储的蓝图记录。</span></div> : frame.library.map((summary) => {
@@ -248,10 +277,83 @@ export function NativeBlueprintWorkspace({
               type="button"
               style={{ gridColumn: "1 / -1" }}
               aria-pressed={selected}
+              disabled={interactionLocked}
               onClick={() => onSelectBlueprint(summary.id)}
               data-native-blueprint-action="select"
               data-native-blueprint-select={summary.id}
             ><ShieldCheck size={14} />{selected ? "当前只读详情" : "查看只读详情"}</button>
+            {selected ? <button
+              type="button"
+              disabled={interactionLocked}
+              onClick={() => {
+                renameCompositionRef.current = false;
+                renameSubmittedRef.current = false;
+                setRenameEditor({
+                  identity: {
+                    sessionId: frame.sessionId,
+                    runId: frame.runId,
+                    revision: frame.revision,
+                    registryFingerprint: frame.registryFingerprint,
+                    blueprintId: summary.id,
+                    currentName: summary.name,
+                    currentRevision: summary.revision,
+                  },
+                  draft: summary.name,
+                  composing: false,
+                });
+              }}
+              data-native-blueprint-action="begin-rename"
+            ><PencilLine size={14} />重命名</button> : null}
+            {selected && renameEditor?.identity.blueprintId === summary.id &&
+              renameEditor.identity.revision === frame.revision ? <form
+                style={{ gridColumn: "1 / -1", display: "grid", gridTemplateColumns: "1fr auto auto", gap: 6 }}
+                data-native-blueprint-rename-form={summary.id}
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (interactionLocked || renameCompositionRef.current || renameSubmittedRef.current) return;
+                  const canonical = canonicalizeNativeBlueprintName(renameEditor.draft);
+                  if (canonical === null || canonical === renameEditor.identity.currentName) return;
+                  const identity = renameEditor.identity;
+                  renameSubmittedRef.current = true;
+                  setRenameEditor(null);
+                  onSubmitRenameIntent(identity, canonical);
+                }}
+              >
+                <input
+                  value={renameEditor.draft}
+                  disabled={interactionLocked}
+                  maxLength={64}
+                  aria-label={`重命名蓝图${summary.name}`}
+                  data-native-blueprint-rename-input={summary.id}
+                  onChange={(event) => {
+                    const draft = event.currentTarget.value;
+                    setRenameEditor((current) => current ? { ...current, draft } : current);
+                  }}
+                  onCompositionStart={() => {
+                    renameCompositionRef.current = true;
+                    setRenameEditor((current) => current ? { ...current, composing: true } : current);
+                  }}
+                  onCompositionEnd={() => {
+                    renameCompositionRef.current = false;
+                    setRenameEditor((current) => current ? { ...current, composing: false } : current);
+                  }}
+                />
+                <button
+                  type="button"
+                  disabled={interactionLocked}
+                  onClick={() => {
+                    renameCompositionRef.current = false;
+                    renameSubmittedRef.current = false;
+                    setRenameEditor(null);
+                  }}
+                  data-native-blueprint-action="cancel-rename"
+                >取消</button>
+                <button
+                  type="submit"
+                  disabled={interactionLocked}
+                  data-native-blueprint-action="submit-rename"
+                >提交名称</button>
+              </form> : null}
           </footer>
         </article>;
       })}
@@ -263,6 +365,7 @@ export function NativeBlueprintWorkspace({
         totalCount={frame.queuePage.totalCount}
         nextCursor={frame.queuePage.nextCursor}
         rowCount={frame.queue.length}
+        locked={interactionLocked}
         onCursorChange={onQueueCursorChange}
       />
       {frame.queue.length === 0 ? <div className="blueprint-empty"><ListChecks size={28} /><strong>没有待建施工记录</strong><span>当前 revision 的原生队列为空。</span></div> : <div className="pending-construction-list">

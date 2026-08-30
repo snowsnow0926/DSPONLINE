@@ -459,15 +459,20 @@ import {
 import {
   NativeBlueprintWorkspaceStore,
   createNativePlayerAuthorityBlueprintWorkspaceSource,
-  nativeBlueprintRenameIdentityMatchesFrame,
   selectNativeBlueprintWorkspaceFrame,
   type NativeBlueprintRenameIdentity,
-  type NativeBlueprintRenamePendingIdentity,
 } from "./game/nativeBlueprintWorkspaceStore";
 import {
-  canonicalizeNativeBlueprintName,
-  createNativeBlueprintRenameIntentCommand,
+  prepareNativeBlueprintRenameIntentCommand,
 } from "./game/nativeBlueprintRenameIntentCommands";
+import {
+  acknowledgeNativeBlueprintRename,
+  reconcileNativeBlueprintRename,
+  settleNativeBlueprintRenameFailure,
+  type NativeBlueprintRenamePendingIdentity,
+  type NativeBlueprintRenameResolution,
+  type NativeBlueprintRenameSubmitOutcome,
+} from "./game/nativeBlueprintRenameWorkflow";
 import {
   createNativeProjectedOrdinaryBuildingPlacementCommand,
   readVerifiedNativeConstructionPlacementContext,
@@ -1936,6 +1941,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const [nativeBlueprintRenamePendingIdentity, setNativeBlueprintRenamePendingIdentity] = useState<
     NativeBlueprintRenamePendingIdentity | null
   >(null);
+  const [nativeBlueprintRenameResolution, setNativeBlueprintRenameResolution] = useState<
+    NativeBlueprintRenameResolution | null
+  >(null);
+  const nativeBlueprintRenameSubmissionSequenceRef = useRef(0);
   const [dysonPlannerOpen, setDysonPlannerOpen] = useState(false);
   const [nativeDysonSelectedSystemId, setNativeDysonSelectedSystemId] = useState<string | null>(null);
   const [operationsOpen, setOperationsOpen] = useState(false);
@@ -2781,43 +2790,39 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     ? selectNativeBlueprintWorkspaceFrame(nativeBlueprintWorkspaceSnapshot, nativeFactoryInventoryIdentity)
     : null, [nativeBlueprintWorkspaceSnapshot, nativeFactoryInventoryIdentity]);
   const nativeBlueprintWorkspaceFrameRef = useRef(nativeBlueprintWorkspaceFrame);
+  const nativeBlueprintWorkspaceIdentityRef = useRef(nativeFactoryInventoryIdentity);
   const nativeBlueprintRenamePendingIdentityRef = useRef(nativeBlueprintRenamePendingIdentity);
   const blueprintsOpenRef = useRef(blueprintsOpen);
   nativeBlueprintWorkspaceFrameRef.current = nativeBlueprintWorkspaceFrame;
+  nativeBlueprintWorkspaceIdentityRef.current = nativeFactoryInventoryIdentity;
   nativeBlueprintRenamePendingIdentityRef.current = nativeBlueprintRenamePendingIdentity;
   blueprintsOpenRef.current = blueprintsOpen;
   useEffect(() => {
     const pending = nativeBlueprintRenamePendingIdentityRef.current;
     if (!pending) return;
-    const current = nativeBlueprintWorkspaceFrame;
-    const activeLineageDrifted = Boolean(nativePlayerAuthorityActiveFrame) && (
-      nativePlayerAuthorityActiveFrame!.sessionId !== pending.sessionId ||
-      nativePlayerAuthorityActiveFrame!.runId !== pending.runId
-    );
-    const routeLineageDrifted = Boolean(nativeFactoryInventoryIdentity) && (
-      nativeFactoryInventoryIdentity!.sessionId !== pending.sessionId ||
-      nativeFactoryInventoryIdentity!.runId !== pending.runId ||
-      nativeFactoryInventoryIdentity!.registryFingerprint !== pending.registryFingerprint
-    );
-    const failedBeforeAck = !nativePlayerAuthorityCommandPending && pending.expectedRevision === null;
-    const sameLineageProjectionArrived = !nativePlayerAuthorityCommandPending &&
-      pending.expectedRevision !== null && Boolean(current) &&
-      current!.sessionId === pending.sessionId && current!.runId === pending.runId &&
-      current!.registryFingerprint === pending.registryFingerprint &&
-      current!.revision >= pending.expectedRevision;
-    const row = current?.libraryById.get(pending.blueprintId);
-    const projectionConfirmed = sameLineageProjectionArrived &&
-      current!.selectedBlueprintId === pending.blueprintId &&
-      row?.name === pending.targetName && row?.revision === pending.currentRevision + 1;
-    if (!nativePlayerAuthorityOwnsRuntime || activeLineageDrifted || routeLineageDrifted ||
-        failedBeforeAck || projectionConfirmed) {
-      nativeBlueprintRenamePendingIdentityRef.current = null;
-      setNativeBlueprintRenamePendingIdentity(null);
-      if (projectionConfirmed) setNotice("蓝图名称已由新的 Rust 权威投影确认");
-      return;
+    const reconciled = reconcileNativeBlueprintRename(pending, {
+      ownsRuntime: nativePlayerAuthorityOwnsRuntime,
+      commandPending: nativePlayerAuthorityCommandPending ||
+        nativePlayerAuthorityCommandInFlightRef.current,
+      activeIdentity: nativePlayerAuthorityActiveFrame?.sessionId &&
+        nativePlayerAuthorityActiveFrame.runId
+        ? {
+          sessionId: nativePlayerAuthorityActiveFrame.sessionId,
+          runId: nativePlayerAuthorityActiveFrame.runId,
+        }
+        : null,
+      latestIdentity: nativeFactoryInventoryIdentity,
+      frame: nativeBlueprintWorkspaceFrame,
+    });
+    if (reconciled.pending !== pending) {
+      nativeBlueprintRenamePendingIdentityRef.current = reconciled.pending;
+      setNativeBlueprintRenamePendingIdentity(reconciled.pending);
     }
-    if (sameLineageProjectionArrived) {
-      setNotice("蓝图重命名已耐久提交，但新投影未确认目标名称；界面保持锁定并停止猜测");
+    if (reconciled.resolution) {
+      setNativeBlueprintRenameResolution(reconciled.resolution);
+      setNotice("蓝图名称已由新的 Rust 权威投影精确确认");
+    } else if (reconciled.pending?.phase === "conflict" && pending.phase !== "conflict") {
+      setNotice("蓝图重命名的 lineage、durable ACK 或目标行投影发生冲突；界面保持锁定并停止猜测");
     }
   }, [
     nativeBlueprintWorkspaceFrame,
@@ -8668,6 +8673,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     projectedRevision: number,
     buildCommand: (baseRevision: number) => SimulationCommandPatch | null,
     afterCommitted?: (receipt: NativePlayerAuthorityCommandReceipt) => void,
+    afterFailed?: (failure: "definite-failure" | "uncertain") => void,
   ): boolean => {
     if (rejectPlayerStateEditDuringPrimarySave()) return false;
     if (!nativePlayerAuthorityOwnsRuntimeRef.current) {
@@ -8705,9 +8711,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         setNotice("原生命令已提交；界面刷新失败，请等待下一次权威投影");
       }
     }).catch((error: unknown) => {
-      const code = error && typeof error === "object" && "code" in error &&
-        typeof error.code === "string" ? error.code : "";
-      setNotice(code === "NATIVE_PLAYER_AUTHORITY_COMMAND_TRANSPORT_UNCERTAIN"
+      const commandId = error && typeof error === "object" && "commandId" in error &&
+        typeof error.commandId === "string" && error.commandId.length > 0
+        ? error.commandId
+        : null;
+      const failure = commandId === null ? "definite-failure" as const : "uncertain" as const;
+      try {
+        afterFailed?.(failure);
+      } catch {
+        // A renderer reconciliation callback cannot change the command result.
+      }
+      setNotice(failure === "uncertain"
         ? "原生玩家命令结果暂时无法确认；已停止重试并等待权威恢复"
         : "原生投影命令未通过当前 revision 的权威校验；本次操作未应用");
     }).finally(async () => {
@@ -8727,49 +8741,85 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const submitNativeBlueprintRenameIntent = useCallback((
     identity: NativeBlueprintRenameIdentity,
     targetName: string,
-  ): void => {
-    const frame = nativeBlueprintWorkspaceFrameRef.current;
-    const routeIdentity = nativeFactoryInventoryIdentity;
-    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
-    const canonicalName = canonicalizeNativeBlueprintName(targetName);
-    if (!blueprintsOpenRef.current || !nativePlayerAuthorityOwnsRuntimeRef.current ||
-        nativePlayerAuthorityCommandInFlightRef.current || nativeBlueprintRenamePendingIdentityRef.current ||
-        !nativeBlueprintRenameIdentityMatchesFrame(identity, frame) || !frame || !routeIdentity ||
-        frame.selectedBlueprintId !== identity.blueprintId ||
-        routeIdentity.sessionId !== identity.sessionId || routeIdentity.runId !== identity.runId ||
-        routeIdentity.revision !== identity.revision ||
-        routeIdentity.registryFingerprint !== identity.registryFingerprint ||
-        !commandSource || commandSource.sessionId !== identity.sessionId ||
-        commandSource.runId !== identity.runId || commandSource.baseRevision !== identity.revision ||
-        canonicalName === null || canonicalName !== targetName || targetName === identity.currentName) {
-      setNotice("蓝图 session、run、registry、revision、选中行或名称已变化；本次重命名未提交");
-      return;
+  ): NativeBlueprintRenameSubmitOutcome => {
+    if (!blueprintsOpenRef.current) {
+      setNotice("蓝图工作区已关闭；草稿已保留，本次重命名未提交");
+      return Object.freeze({ status: "rejected", reason: "closed" });
     }
-    const accepted = commitNativeProjectedCommand(identity.revision, (baseRevision) => {
-      if (baseRevision !== identity.revision) return null;
-      return createNativeBlueprintRenameIntentCommand(baseRevision, identity.blueprintId, targetName);
-    }, (receipt) => {
-      const pending = nativeBlueprintRenamePendingIdentityRef.current;
-      if (pending && pending.sessionId === identity.sessionId && pending.runId === identity.runId &&
-          pending.registryFingerprint === identity.registryFingerprint &&
-          pending.revision === identity.revision && pending.blueprintId === identity.blueprintId &&
-          pending.currentName === identity.currentName && pending.currentRevision === identity.currentRevision &&
-          pending.targetName === targetName) {
-        const acknowledged = Object.freeze({ ...pending, expectedRevision: receipt.revision });
-        nativeBlueprintRenamePendingIdentityRef.current = acknowledged;
-        setNativeBlueprintRenamePendingIdentity(acknowledged);
-      }
-      setNotice(`蓝图重命名意图已由 Rust 耐久提交；等待 revision ${receipt.revision.toLocaleString("zh-CN")} 投影`);
-    });
-    if (!accepted) return;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current) {
+      setNotice("原生玩家权威未接管；草稿已保留，本次重命名未提交");
+      return Object.freeze({ status: "rejected", reason: "gate" });
+    }
+    if (nativePlayerAuthorityCommandInFlightRef.current ||
+        nativeBlueprintRenamePendingIdentityRef.current) {
+      setNotice("原生命令或蓝图重命名仍在对账；草稿已保留，本次重命名未提交");
+      return Object.freeze({ status: "rejected", reason: "busy" });
+    }
+    const frame = nativeBlueprintWorkspaceFrameRef.current;
+    const routeIdentity = nativeBlueprintWorkspaceIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    const command = prepareNativeBlueprintRenameIntentCommand(
+      identity,
+      targetName,
+      frame,
+      routeIdentity,
+      commandSource,
+    );
+    if (!command) {
+      setNotice("蓝图 lineage、选中行、名称或最新命令 revision 已变化；草稿已保留，本次重命名未提交");
+      return Object.freeze({ status: "rejected", reason: "stale" });
+    }
+    const submissionId = nativeBlueprintRenameSubmissionSequenceRef.current + 1;
+    if (!Number.isSafeInteger(submissionId)) {
+      setNotice("蓝图重命名本地提交序列已耗尽；草稿已保留");
+      return Object.freeze({ status: "rejected", reason: "gate" });
+    }
     const pending = Object.freeze({
       ...identity,
+      submissionId,
+      commandRevision: command.baseRevision,
       targetName,
+      phase: "awaiting-ack" as const,
       expectedRevision: null,
+      conflictReason: null,
     });
+    const accepted = commitNativeProjectedCommand(command.baseRevision, (baseRevision) => {
+      if (baseRevision !== command.baseRevision) return null;
+      return command;
+    }, (receipt) => {
+      const current = nativeBlueprintRenamePendingIdentityRef.current;
+      if (!current) return;
+      const acknowledged = acknowledgeNativeBlueprintRename(current, submissionId, receipt);
+      nativeBlueprintRenamePendingIdentityRef.current = acknowledged;
+      setNativeBlueprintRenamePendingIdentity(acknowledged);
+      setNotice(acknowledged.phase === "awaiting-projection"
+        ? `蓝图重命名意图已由 Rust 耐久提交；等待 revision ${receipt.revision.toLocaleString("zh-CN")} 精确投影`
+        : "蓝图重命名 durable ACK 与提交 revision 不匹配；界面保持锁定");
+    }, (failure) => {
+      const current = nativeBlueprintRenamePendingIdentityRef.current;
+      if (!current) return;
+      const settled = settleNativeBlueprintRenameFailure(current, submissionId, failure);
+      nativeBlueprintRenamePendingIdentityRef.current = settled.pending;
+      setNativeBlueprintRenamePendingIdentity(settled.pending);
+      if (settled.resolution) setNativeBlueprintRenameResolution(settled.resolution);
+    });
+    if (!accepted) return Object.freeze({ status: "rejected", reason: "gate" });
+    nativeBlueprintRenameSubmissionSequenceRef.current = submissionId;
     nativeBlueprintRenamePendingIdentityRef.current = pending;
     setNativeBlueprintRenamePendingIdentity(pending);
-  }, [commitNativeProjectedCommand, nativeFactoryInventoryIdentity]);
+    setNativeBlueprintRenameResolution(null);
+    return Object.freeze({
+      status: "accepted",
+      submissionId,
+      commandRevision: command.baseRevision,
+    });
+  }, [commitNativeProjectedCommand]);
+
+  const consumeNativeBlueprintRenameResolution = useCallback((submissionId: number) => {
+    setNativeBlueprintRenameResolution((current) => current?.submissionId === submissionId
+      ? null
+      : current);
+  }, []);
 
   const commitNativeConstructionCenterIntent = useCallback((
     identity: NativeConstructionCenterFrameIdentity,
@@ -19757,6 +19807,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         open={blueprintsOpen}
         status={nativeBlueprintWorkspaceSnapshot.status}
         frame={nativeBlueprintWorkspaceFrame}
+        latestIdentity={nativeFactoryInventoryIdentity}
         onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setBlueprintsOpen(false)}
         onSelectBlueprint={setNativeBlueprintSelectedId}
         onLibraryCursorChange={(cursor) => {
@@ -19770,6 +19821,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         }}
         onSubmitRenameIntent={submitNativeBlueprintRenameIntent}
         pendingIdentity={nativeBlueprintRenamePendingIdentity}
+        resolution={nativeBlueprintRenameResolution}
+        onConsumeRenameResolution={consumeNativeBlueprintRenameResolution}
         commandPending={nativePlayerAuthorityCommandPending}
       /> : <BlueprintWorkspace
         open={blueprintsOpen}

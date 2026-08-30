@@ -19,15 +19,13 @@ export interface NativeBlueprintWorkspaceIdentity {
   readonly registryFingerprint: string;
 }
 
-export interface NativeBlueprintRenameIdentity extends NativeBlueprintWorkspaceIdentity {
+export interface NativeBlueprintRenameIdentity {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly registryFingerprint: string;
   readonly blueprintId: string;
   readonly currentName: string;
   readonly currentRevision: number;
-}
-
-export interface NativeBlueprintRenamePendingIdentity extends NativeBlueprintRenameIdentity {
-  readonly targetName: string;
-  readonly expectedRevision: number | null;
 }
 
 export interface NativeBlueprintWorkspaceSource {
@@ -290,12 +288,22 @@ export function nativeBlueprintRenameIdentityMatchesFrame(
   identity: NativeBlueprintRenameIdentity,
   frame: NativeBlueprintWorkspaceFrame | null,
 ): boolean {
-  if (!frame || !validIdentity(identity) || !sameIdentity(identity, frame) ||
+  if (!frame || !nativeBlueprintRenameLineageMatchesIdentity(identity, frame) ||
       !validOpaqueText(identity.blueprintId, 512) || !validOpaqueText(identity.currentName, 256) ||
       !Number.isSafeInteger(identity.currentRevision) || identity.currentRevision < 1 ||
       frame.selectedBlueprintId !== identity.blueprintId) return false;
   const row = frame.libraryById.get(identity.blueprintId);
   return row?.name === identity.currentName && row.revision === identity.currentRevision;
+}
+
+export function nativeBlueprintRenameLineageMatchesIdentity(
+  identity: NativeBlueprintRenameIdentity,
+  candidate: Pick<NativeBlueprintWorkspaceIdentity, "sessionId" | "runId" | "registryFingerprint">,
+): boolean {
+  return validLogicalId(identity.sessionId, 128) && validLogicalId(identity.runId, 128) &&
+    validLogicalId(identity.registryFingerprint, 256) &&
+    identity.sessionId === candidate.sessionId && identity.runId === candidate.runId &&
+    identity.registryFingerprint === candidate.registryFingerprint;
 }
 
 export class NativeBlueprintWorkspaceStore {

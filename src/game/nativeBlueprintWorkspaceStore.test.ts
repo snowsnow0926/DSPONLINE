@@ -380,23 +380,25 @@ describe("NativeBlueprintWorkspaceStore", () => {
     expect(store.getSnapshot().status).toBe("unavailable");
   });
 
-  it("admits rename only for the selected row on the exact session/run/revision/registry frame", async () => {
+  it("keeps rename row identity stable across global revisions but rejects lineage or row drift", async () => {
     const row = { ...summary("bp-selected", "当前名称"), revision: 4 };
     const store = new NativeBlueprintWorkspaceStore();
     await expect(store.refresh(fixtureSource(IDENTITY, [row], []), IDENTITY, row.id))
       .resolves.toBe("committed");
     const frame = store.getSnapshot().frame;
     const identity = {
-      ...IDENTITY,
+      sessionId: IDENTITY.sessionId,
+      runId: IDENTITY.runId,
+      registryFingerprint: IDENTITY.registryFingerprint,
       blueprintId: row.id,
       currentName: row.name,
       currentRevision: row.revision,
     };
     expect(nativeBlueprintRenameIdentityMatchesFrame(identity, frame)).toBe(true);
+    expect(nativeBlueprintRenameIdentityMatchesFrame(identity, frame && { ...frame, revision: 18 })).toBe(true);
     for (const drift of [
       { sessionId: "other-session" },
       { runId: "other-run" },
-      { revision: 18 },
       { registryFingerprint: "other-registry" },
       { blueprintId: "other-blueprint" },
       { currentName: "过期名称" },

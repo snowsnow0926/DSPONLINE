@@ -12,7 +12,7 @@ use crate::state::{CoreState, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS};
 
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
-const MACRO_V10_ALGORITHM_VERSION: &str = "native-pure-idle-macro-v10-three-window-closed-recipe-research-dyson-terminal-finite-vein-bounded-handcraft-v10";
+const MACRO_V10_ALGORITHM_VERSION: &str = "native-pure-idle-macro-v10-three-window-closed-recipe-research-dyson-terminal-finite-vein-handcraft-construction-stock-v11";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MICROS_PER_SECOND: i128 = 1_000_000;
 const DYSON_ROCKET_LAUNCH_ENERGY_MICRO_MJ: i128 = 108_000_000;
@@ -185,6 +185,19 @@ struct RenewablePowerTailCertificate {
     shell_floor_by_system: BTreeMap<String, i128>,
 }
 
+/// Runtime-only authority for a construction-only macro tail. This certificate
+/// never grants ordinary production, logistics delivery,
+/// research, Dyson or terminal work; construction may spend only inventory
+/// already present at the exact-prefix boundary.
+/// Every admitted center belongs to a grid whose complete calibrated demand
+/// is covered by a permanent renewable lower bound, so the tail never burns
+/// fuel or storage owned by another subsystem.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConstructionTailCertificate {
+    renewable_power: RenewablePowerTailCertificate,
+    center_entity_ids: Vec<String>,
+}
+
 /// Ephemeral proof input for one native candidate. It is never serialized into
 /// public GameState v47, the save envelope, or a canonical hash. Each capture
 /// owns only compact per-item counters; entity rows are decoded one at a time.
@@ -353,6 +366,8 @@ pub(crate) struct PureIdleMacroRuntimeCache {
     calibration_snapshots: Vec<SettlementProofSnapshot>,
     certificate: Option<OrdinaryFlowCertificate>,
     rejection_reason: Option<String>,
+    construction_certificate: Option<ConstructionTailCertificate>,
+    construction_rejection_reason: Option<String>,
 }
 
 impl PureIdleMacroRuntimeCache {
@@ -362,6 +377,8 @@ impl PureIdleMacroRuntimeCache {
             calibration_snapshots: vec![snapshot],
             certificate: None,
             rejection_reason: None,
+            construction_certificate: None,
+            construction_rejection_reason: None,
         }
     }
 
@@ -372,6 +389,11 @@ impl PureIdleMacroRuntimeCache {
             certificate: None,
             rejection_reason: Some(
                 "runtime calibration cache was unavailable; a disposable three-window probe is required"
+                    .to_owned(),
+            ),
+            construction_certificate: None,
+            construction_rejection_reason: Some(
+                "runtime calibration cache was unavailable; a disposable construction probe is required"
                     .to_owned(),
             ),
         }
@@ -3111,6 +3133,196 @@ fn validate_renewable_power_tail_certificate(
         }
     }
     Ok(())
+}
+
+fn construction_tail_requested(state: &CoreState) -> bool {
+    let automation = state
+        .base_value()
+        .get("constructionAutomation")
+        .and_then(Value::as_object);
+    automation
+        .and_then(|automation| automation.get("enabled"))
+        .and_then(Value::as_bool)
+        == Some(true)
+        && !state
+            .factory_topology
+            .construction_center_indices
+            .is_empty()
+        && (collection_has_entries(automation.and_then(|value| value.get("jobs")))
+            || collection_has_entries(automation.and_then(|value| value.get("targetStock")))
+            || collection_has_entries(
+                automation.and_then(|value| value.get("quantumMaterialBuffer")),
+            ))
+}
+
+fn construction_center_identity(
+    state: &CoreState,
+    entity_index: usize,
+) -> Result<(String, PowerGridKey), String> {
+    let entity = state
+        .parse_entity(entity_index)
+        .map_err(|error| format!("construction center decode failed: {error:#}"))?;
+    if entity.get("buildingId").and_then(Value::as_str) != Some("construction_center") {
+        return Err("construction center topology points at another building".to_owned());
+    }
+    let entity_id = entity
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "construction center has no entity ID".to_owned())?
+        .to_owned();
+    let planet_id = entity
+        .get("planetId")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("construction center {entity_id} has no planet"))?
+        .to_owned();
+    let grid_id = entity
+        .get("powerGridId")
+        .and_then(Value::as_str)
+        .unwrap_or("grid-a");
+    if !matches!(grid_id, "grid-a" | "grid-b" | "grid-c") {
+        return Err(format!(
+            "construction center {entity_id} has an unknown power grid"
+        ));
+    }
+    Ok((
+        entity_id,
+        PowerGridKey {
+            planet_id,
+            grid_id: grid_id.to_owned(),
+        },
+    ))
+}
+
+fn build_construction_tail_certificate(
+    state: &CoreState,
+    snapshots: &[SettlementProofSnapshot],
+) -> Result<Option<ConstructionTailCertificate>, String> {
+    if !construction_tail_requested(state) {
+        return Ok(None);
+    }
+    if collection_has_entries(state.base_value().get("handcraftQueue"))
+        || collection_has_entries(state.base_value().get("constructionQueue"))
+    {
+        return Err(
+            "construction automation cannot share a macro tail with handcraft or placement work"
+                .to_owned(),
+        );
+    }
+    let renewable_power = build_renewable_power_tail_certificate(state, snapshots)?;
+    let mut center_entity_ids =
+        Vec::with_capacity(state.factory_topology.construction_center_indices.len());
+    for &entity_index in &state.factory_topology.construction_center_indices {
+        let (entity_id, grid) = construction_center_identity(state, entity_index)?;
+        if !renewable_power.grids.contains_key(&grid) {
+            return Err(format!(
+                "construction center {entity_id} has no permanent renewable grid grant"
+            ));
+        }
+        center_entity_ids.push(entity_id);
+    }
+    Ok(Some(ConstructionTailCertificate {
+        renewable_power,
+        center_entity_ids,
+    }))
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ConstructionTailApplication {
+    crafted: i128,
+}
+
+fn apply_construction_tail_certificate(
+    state: &mut CoreState,
+    certificate: &ConstructionTailCertificate,
+    elapsed_before: f64,
+    elapsed_after: f64,
+) -> Result<ConstructionTailApplication, String> {
+    validate_renewable_power_tail_certificate(state, &certificate.renewable_power)?;
+    if !construction_tail_requested(state) {
+        return Ok(ConstructionTailApplication::default());
+    }
+    let before_micros = elapsed_micros(elapsed_before)?;
+    let after_micros = elapsed_micros(elapsed_after)?;
+    if after_micros < before_micros {
+        return Err("construction-tail clock regressed".to_owned());
+    }
+    let scheduled_seconds = after_micros
+        .checked_div(MICROS_PER_SECOND)
+        .and_then(|after| {
+            before_micros
+                .checked_div(MICROS_PER_SECOND)
+                .and_then(|before| after.checked_sub(before))
+        })
+        .ok_or_else(|| "construction-tail schedule overflowed".to_owned())?;
+    if scheduled_seconds == 0 {
+        return Ok(ConstructionTailApplication::default());
+    }
+
+    let mut current_ids =
+        Vec::with_capacity(state.factory_topology.construction_center_indices.len());
+    let mut power_factors = HashMap::<usize, f64>::new();
+    for &entity_index in &state.factory_topology.construction_center_indices {
+        let (entity_id, grid) = construction_center_identity(state, entity_index)?;
+        if !certificate.renewable_power.grids.contains_key(&grid) {
+            return Err(format!(
+                "construction center {entity_id} left its certified renewable grid"
+            ));
+        }
+        current_ids.push(entity_id);
+        power_factors.insert(entity_index, 1.0);
+    }
+    if current_ids != certificate.center_entity_ids {
+        return Err("construction center identity changed after calibration".to_owned());
+    }
+
+    let mut base = state.base_value().clone();
+    let mut entities = state
+        .parse_entities_parallel()
+        .map_err(|error| format!("construction-tail entity snapshot failed: {error:#}"))?;
+    let mut runtime = state.prepared_construction_runtime().unwrap_or_else(|| {
+        Arc::new(crate::construction::ConstructionRuntime::build(
+            state, &base, &entities,
+        ))
+    });
+    let outcome = crate::construction::run_centers(
+        state,
+        &mut base,
+        &mut entities,
+        scheduled_seconds as f64,
+        &power_factors,
+        &state.factory_topology.construction_center_indices,
+        Arc::make_mut(&mut runtime),
+    )
+    .map_err(|error| format!("construction-tail settlement failed: {error:#}"))?;
+
+    // Bucket-average diagnostics are not gameplay authority and vary with the
+    // caller's segmentation. Preserve work progress, but keep these two
+    // presentation fields out of the canonical split boundary just like the
+    // JavaScript construction-only macro.
+    for &entity_index in &state.factory_topology.construction_center_indices {
+        let center = entities
+            .get_mut(entity_index)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| "construction center disappeared before commit".to_owned())?;
+        center.insert("utilization".to_owned(), Value::from(0));
+        center.insert("productionRate".to_owned(), Value::from(0));
+    }
+
+    let next_revision = state
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| "construction-tail revision exhausted".to_owned())?;
+    let belt_commit = crate::belts::BeltCommitBatch::unchanged(state)
+        .map_err(|error| format!("construction-tail belt seal failed: {error:#}"))?;
+    state
+        .commit_simulated_state(base, entities, belt_commit, next_revision, false)
+        .map_err(|error| format!("construction-tail commit failed: {error:#}"))?;
+    state.install_prepared_construction_runtime(runtime);
+    Ok(ConstructionTailApplication {
+        crafted: outcome.receipt.crafted,
+    })
 }
 
 fn source_has_unbounded_vein(state: &CoreState, item_id: &str) -> Result<bool, String> {
@@ -6477,11 +6689,16 @@ fn prove_internal_exact_settlement_candidate(
 /// Dynamic ray power is admitted only when a runtime-private per-grid proof
 /// removes transient orbit sails and still covers the calibrated demand from
 /// permanent sphere plus static renewable generation. Stored/fuel energy,
-/// A separate bounded handcraft tail may consume only the active tray's real
+/// incomplete grids and cross-grid pooling are never accepted. A separate
+/// bounded handcraft tail may consume only the active tray's real
 /// starting stock. It carries an exact per-recipe input/output/queue receipt,
 /// never treats cumulative production as inventory, and stops after at most
-/// 4,096 remaining batches. Construction and every other unclosed terminal
-/// remain frozen.
+/// 4,096 remaining batches. A construction-only tail may reuse the exact
+/// native construction engine on whole-second boundaries, but only for centers
+/// on certified permanent-renewable grids and only against real tray or
+/// already-reserved quantum-buffer stock. It cannot download new quantum
+/// material or extrapolate an ordinary source; every unclosed terminal remains
+/// frozen.
 pub(crate) fn advance(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -6490,9 +6707,10 @@ pub(crate) fn advance(
 }
 
 /// New wire-distinct macro mode. It retains the deterministic 3x10-second
-/// calibration boundary and can settle only the source or closed recipe-DAG
-/// ordinary flow plus its explicitly closed research/rocket sinks authorized
-/// by `OrdinaryFlowCertificate`; all other tail domains freeze.
+/// calibration boundary and settles only independently certified domains:
+/// source/closed-recipe ordinary flow and its research/Dyson sinks, bounded
+/// handcraft, or real-stock construction on permanent-renewable grids. Every
+/// domain without its own closed receipt freezes.
 pub(crate) fn advance_macro_v10(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -6659,23 +6877,47 @@ fn advance_bounded(
         (exact_seconds_used_before + exact_seconds).min(PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS);
     if let Some(runtime) = macro_runtime.as_mut()
         && exact_progress + EPSILON >= PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS
-        && runtime.certificate.is_none()
+        && (runtime.certificate.is_none()
+            || construction_tail_requested(&candidate)
+                && runtime.construction_certificate.is_none())
     {
         let snapshots = if runtime.calibration_snapshots.len() == 4 {
             Ok(runtime.calibration_snapshots.clone())
         } else {
             exact_three_window_probe(&candidate, request)
         };
-        match snapshots
-            .and_then(|snapshots| build_ordinary_flow_certificate(&candidate, &snapshots))
-        {
-            Ok(certificate) => {
-                runtime.certificate = Some(certificate);
-                runtime.rejection_reason = None;
+        match snapshots {
+            Ok(snapshots) => {
+                if runtime.certificate.is_none() {
+                    match build_ordinary_flow_certificate(&candidate, &snapshots) {
+                        Ok(certificate) => {
+                            runtime.certificate = Some(certificate);
+                            runtime.rejection_reason = None;
+                        }
+                        Err(reason) => {
+                            runtime.certificate = None;
+                            runtime.rejection_reason = Some(reason);
+                        }
+                    }
+                }
+                if runtime.construction_certificate.is_none() {
+                    match build_construction_tail_certificate(&candidate, &snapshots) {
+                        Ok(certificate) => {
+                            runtime.construction_certificate = certificate;
+                            runtime.construction_rejection_reason = None;
+                        }
+                        Err(reason) => {
+                            runtime.construction_certificate = None;
+                            runtime.construction_rejection_reason = Some(reason);
+                        }
+                    }
+                }
             }
             Err(reason) => {
                 runtime.certificate = None;
-                runtime.rejection_reason = Some(reason);
+                runtime.rejection_reason = Some(reason.clone());
+                runtime.construction_certificate = None;
+                runtime.construction_rejection_reason = Some(reason);
             }
         }
     }
@@ -6813,6 +7055,49 @@ fn advance_bounded(
                         .as_deref()
                         .unwrap_or("calibration was incomplete")
                 ));
+            }
+
+            if let Some(certificate) = runtime.construction_certificate.as_ref() {
+                let construction_application = match apply_construction_tail_certificate(
+                    &mut candidate,
+                    certificate,
+                    current_elapsed,
+                    elapsed,
+                ) {
+                    Ok(application) => application,
+                    Err(reason) => {
+                        return unsupported(
+                            state,
+                            request,
+                            format!("pure-idle-construction-tail-rejected: {reason}"),
+                        );
+                    }
+                };
+                let construction_reason = if construction_application.crafted > 0 {
+                    format!(
+                        "construction-only tail spent real owned inventory and completed {} item(s); no material source was extrapolated for it",
+                        construction_application.crafted,
+                    )
+                } else {
+                    "construction-only tail reached its real inventory/target horizon without manufacturing an item"
+                        .to_owned()
+                };
+                tail_reason = Some(match tail_reason.take() {
+                    Some(reason) => format!("{reason}; {construction_reason}"),
+                    None => construction_reason,
+                });
+            } else if construction_tail_requested(&candidate) {
+                let construction_reason = format!(
+                    "construction tail froze because no renewable power certificate was available: {}",
+                    runtime
+                        .construction_rejection_reason
+                        .as_deref()
+                        .unwrap_or("calibration was incomplete"),
+                );
+                tail_reason = Some(match tail_reason.take() {
+                    Some(reason) => format!("{reason}; {construction_reason}"),
+                    None => construction_reason,
+                });
             }
         }
         candidate.base_value_mut().insert(
@@ -8445,6 +8730,21 @@ mod tests {
         )
     }
 
+    fn productive_construction_macro_fixture(multiplier: f64, target: u64) -> CoreState {
+        let mut state = construction_powered_fixture();
+        state.base_value_mut()["timeWarp"]["requestedMultiplier"] = json!(multiplier);
+        state.base_value_mut()["timeWarp"]["effectiveMultiplier"] = json!(multiplier);
+        state.base_value_mut()["timeWarp"]["requiredPowerKw"] =
+            json!(10_f64.powf(multiplier + 1.0));
+        state.base_value_mut()["timeWarp"]["allocatedPowerKw"] =
+            json!(10_f64.powf(multiplier + 1.0));
+        state.base_value_mut()["tray"]["iron_ore"] = json!(target);
+        state.base_value_mut()["planetTrays"]["home"]["iron_ore"] = json!(target);
+        state.base_value_mut()["constructionAutomation"]["targetStock"]["test_building"] =
+            json!(target);
+        state
+    }
+
     fn pure_idle_request(
         revision: u64,
         simulation_seconds: f64,
@@ -8825,6 +9125,272 @@ mod tests {
             one_second_windows_again.canonical_sha256().unwrap(),
             one_second_windows.canonical_sha256().unwrap(),
         );
+    }
+
+    #[test]
+    fn macro_v10_construction_tail_spends_real_stock_and_is_split_invariant() {
+        for multiplier in [8.0, 12.0, 15.0, 16.0] {
+            let initial = productive_construction_macro_fixture(multiplier, 100);
+            let mut prefix = initial.clone();
+            let prefix_revision = prefix.revision;
+            let prefix_result = advance_macro_v10(
+                &mut prefix,
+                &pure_idle_macro_request(prefix_revision, 30.0, 30.0 / multiplier),
+            )
+            .unwrap();
+            assert!(prefix_result.supported, "reason={:?}", prefix_result.reason);
+            let prefix_crafted = proof_counter(
+                prefix.base_value()["constructionAutomation"].get("totalCrafted"),
+                "prefix construction totalCrafted",
+            )
+            .unwrap();
+            assert!(prefix_crafted > 0 && prefix_crafted < 100);
+
+            let mut long = initial.clone();
+            let revision = long.revision;
+            let result = advance_macro_v10(
+                &mut long,
+                &pure_idle_macro_request(revision, 600.0, 600.0 / multiplier),
+            )
+            .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+            assert_eq!(
+                proof_counter(
+                    long.base_value()["constructionAutomation"].get("totalCrafted"),
+                    "long construction totalCrafted",
+                )
+                .unwrap(),
+                100,
+            );
+            assert_eq!(
+                long.base_value()["construction"]["test_building"],
+                json!(100.0)
+            );
+            assert_eq!(long.base_value()["tray"]["iron_ore"], json!(0.0));
+            assert_eq!(
+                long.base_value()["planetTrays"]["home"]["iron_ore"],
+                prefix.base_value()["planetTrays"]["home"]["iron_ore"],
+                "the inactive mirror is not a second inventory and remains at the exact-prefix boundary",
+            );
+
+            let mut segmented = initial;
+            for seconds in [30.0, 190.0, 190.0, 190.0] {
+                let revision = segmented.revision;
+                let result = advance_macro_v10(
+                    &mut segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / multiplier),
+                )
+                .unwrap();
+                assert!(result.supported, "reason={:?}", result.reason);
+            }
+            assert_eq!(
+                segmented.summary().unwrap().canonical_sha256,
+                long.summary().unwrap().canonical_sha256,
+            );
+        }
+    }
+
+    #[test]
+    fn macro_v10_construction_tail_stops_at_owned_stock_and_rebuilds_after_reload() {
+        let mut stock_limited = productive_construction_macro_fixture(15.0, 100);
+        stock_limited.base_value_mut()["tray"]["iron_ore"] = json!(12);
+        stock_limited.base_value_mut()["planetTrays"]["home"]["iron_ore"] = json!(12);
+        let revision = stock_limited.revision;
+        let result = advance_macro_v10(
+            &mut stock_limited,
+            &pure_idle_macro_request(revision, 600.0, 40.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(
+            proof_counter(
+                stock_limited.base_value()["constructionAutomation"].get("totalCrafted"),
+                "stock-limited construction totalCrafted",
+            )
+            .unwrap(),
+            12,
+        );
+        assert_eq!(stock_limited.base_value()["tray"]["iron_ore"], json!(0.0));
+        assert_eq!(
+            stock_limited.base_value()["construction"]["test_building"],
+            json!(12.0),
+        );
+
+        let initial = productive_construction_macro_fixture(15.0, 100);
+        let mut continuous = initial.clone();
+        let revision = continuous.revision;
+        advance_macro_v10(
+            &mut continuous,
+            &pure_idle_macro_request(revision, 600.0, 40.0),
+        )
+        .unwrap();
+
+        let mut calibrated = initial;
+        let revision = calibrated.revision;
+        advance_macro_v10(
+            &mut calibrated,
+            &pure_idle_macro_request(revision, 30.0, 2.0),
+        )
+        .unwrap();
+        let mut records = BTreeMap::<String, Vec<u8>>::new();
+        calibrated
+            .visit_internal_checkpoint_records(42, |key, value| {
+                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let mut identity = calibrated.identity.clone();
+        identity.revision = calibrated.revision;
+        let mut reloaded =
+            CoreState::from_internal_records(identity, &records, (*calibrated.catalog).clone())
+                .unwrap();
+        assert!(reloaded.pure_idle_macro_runtime.is_none());
+        let revision = reloaded.revision;
+        let result = advance_macro_v10(
+            &mut reloaded,
+            &pure_idle_macro_request(revision, 570.0, 38.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(
+            reloaded.summary().unwrap().canonical_sha256,
+            continuous.summary().unwrap().canonical_sha256,
+        );
+    }
+
+    #[test]
+    fn macro_v10_construction_tail_freezes_without_permanent_renewable_power() {
+        let mut initial = productive_construction_macro_fixture(15.0, 100);
+        let wind_definition = initial.catalog.buildings["wind_turbine"].clone();
+        let mut accumulator_definition = wind_definition;
+        accumulator_definition.id = "accumulator".to_owned();
+        accumulator_definition.energy_capacity_mj = 1.0e18;
+        std::sync::Arc::make_mut(&mut initial.catalog)
+            .buildings
+            .insert("accumulator".to_owned(), accumulator_definition);
+        let wind_index = initial.entity_index.get("wind").copied().unwrap();
+        let mut accumulator = initial.parse_entity(wind_index).unwrap();
+        accumulator["buildingId"] = json!("accumulator");
+        accumulator["storedEnergyMj"] = json!(1.0e18);
+        initial.replace_entity_raw(
+            wind_index,
+            serde_json::to_string(&accumulator).unwrap().into(),
+        );
+
+        let mut prefix = initial.clone();
+        let revision = prefix.revision;
+        let prefix_result =
+            advance_macro_v10(&mut prefix, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
+        assert!(prefix_result.supported, "reason={:?}", prefix_result.reason);
+
+        let mut long = initial;
+        let revision = long.revision;
+        let result =
+            advance_macro_v10(&mut long, &pure_idle_macro_request(revision, 600.0, 40.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert!(
+            result.reason.as_deref().is_some_and(|reason| {
+                reason.contains("construction tail froze")
+                    && reason.contains("finite generation or storage")
+            }),
+            "reason={:?}",
+            result.reason,
+        );
+        assert_eq!(
+            long.base_value()["construction"],
+            prefix.base_value()["construction"],
+            "the uncertified tail must not repeat construction work",
+        );
+        assert_eq!(
+            long.base_value()["constructionAutomation"]["totalCrafted"],
+            prefix.base_value()["constructionAutomation"]["totalCrafted"],
+        );
+        assert_eq!(
+            long.base_value()["tray"],
+            prefix.base_value()["tray"],
+            "the uncertified tail must not spend another material unit",
+        );
+    }
+
+    #[test]
+    fn macro_v10_construction_tail_never_downloads_new_quantum_material() {
+        let mut initial = productive_construction_macro_fixture(15.0, 100);
+        initial.base_value_mut()["tray"]["iron_ore"] = json!(0);
+        initial.base_value_mut()["planetTrays"]["home"]["iron_ore"] = json!(0);
+        initial.base_value_mut()["constructionAutomation"]["quantumSourceEnabled"] = json!(true);
+        initial.base_value_mut()["quantumLogisticsNetwork"]["enabled"] = json!(true);
+        initial.base_value_mut()["quantumLogisticsNetwork"]["inventory"]["iron_ore"] = json!(100);
+        initial.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ore"] =
+            json!("1000");
+
+        let mut prefix = initial.clone();
+        let revision = prefix.revision;
+        let prefix_result =
+            advance_macro_v10(&mut prefix, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
+        assert!(prefix_result.supported, "reason={:?}", prefix_result.reason);
+        let network_after_prefix =
+            prefix.base_value()["quantumLogisticsNetwork"]["inventory"].clone();
+        let crafted_after_prefix = proof_counter(
+            prefix.base_value()["constructionAutomation"].get("totalCrafted"),
+            "prefix construction totalCrafted",
+        )
+        .unwrap();
+
+        let mut long = initial;
+        let revision = long.revision;
+        let result =
+            advance_macro_v10(&mut long, &pure_idle_macro_request(revision, 600.0, 40.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(
+            long.base_value()["quantumLogisticsNetwork"]["inventory"],
+            network_after_prefix,
+            "only the bounded exact prefix may download from global quantum inventory",
+        );
+        let crafted_after_long = proof_counter(
+            long.base_value()["constructionAutomation"].get("totalCrafted"),
+            "long construction totalCrafted",
+        )
+        .unwrap();
+        assert!(crafted_after_long >= crafted_after_prefix);
+        assert!(crafted_after_long <= 100);
+    }
+
+    #[test]
+    fn macro_v10_construction_certificate_failure_is_atomic() {
+        let mut state = productive_construction_macro_fixture(15.0, 100);
+        let revision = state.revision;
+        let result =
+            advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let certificate = state
+            .pure_idle_macro_runtime
+            .as_mut()
+            .and_then(|runtime| runtime.construction_certificate.as_mut())
+            .expect("construction certificate");
+        certificate.center_entity_ids[0] = "forged-center".to_owned();
+
+        let before_revision = state.revision;
+        let before_hash = state.summary().unwrap().canonical_sha256;
+        let before_credit = state.pure_idle_macro_exact_seconds_used();
+        let before_state = state.materialize().unwrap();
+        let result = advance_macro_v10(
+            &mut state,
+            &pure_idle_macro_request(before_revision, 570.0, 38.0),
+        )
+        .unwrap();
+        assert!(!result.supported);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("construction center identity changed")),
+            "reason={:?}",
+            result.reason,
+        );
+        assert_eq!(state.revision, before_revision);
+        assert_eq!(state.summary().unwrap().canonical_sha256, before_hash);
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), before_credit);
+        assert_eq!(state.materialize().unwrap(), before_state);
     }
 
     #[test]
@@ -9356,6 +9922,10 @@ mod tests {
 
     #[test]
     fn macro_v10_uses_three_ten_second_windows_and_freezes_the_unproved_tail() {
+        assert!(
+            MACRO_V10_ALGORITHM_VERSION.encode_utf16().count() <= 128,
+            "desktop authority boundary accepts at most 128 UTF-16 units",
+        );
         for multiplier in [8.0, 12.0, 15.0, 16.0] {
             let initial = productive_powered_fixture(multiplier, "infinite");
             let mut prefix = initial.clone();

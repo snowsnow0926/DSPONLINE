@@ -124,6 +124,15 @@ impl BeltCommitBatch {
         Ok(ValidatedBeltCommit { patches, dynamics })
     }
 
+    /// Seals an explicit no-op belt write-back for a domain-only state
+    /// transaction. The caller still has to publish through
+    /// `CoreState::commit_simulated_state`, whose source/revision checks make
+    /// the batch unusable after any intervening belt or state commit.
+    pub(crate) fn unchanged(state: &CoreState) -> anyhow::Result<Self> {
+        state.validate_belt_runtime_topology()?;
+        Ok(Self::seal(state.belt_commit_source(), Vec::new(), None))
+    }
+
     #[cfg(test)]
     pub(crate) fn unchanged_for_test(state: &CoreState) -> Self {
         Self::seal(state.belt_commit_source(), Vec::new(), None)

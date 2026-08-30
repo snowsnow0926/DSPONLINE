@@ -4500,6 +4500,11 @@ fn validate_station_fleet_target_command(
     {
         bail!("native player-authority station fleet command shape is invalid")
     }
+    if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    {
+        bail!("native player-authority station fleet requires the built-in catalog")
+    }
     let mut target = None;
     for record in &command.changed_entities {
         for change in &record.changes {
@@ -4598,32 +4603,26 @@ fn validate_station_fleet_target_command(
         bail!("native player-authority station fleet item is not in the catalog")
     }
     let base = state.base_value();
-    let (inventory_root, expected_inventory) = if final_count > current_count {
-        let portable = base
-            .get("portableFleet")
-            .and_then(Value::as_object)
-            .ok_or_else(|| anyhow!("native player-authority portable fleet is missing"))?;
-        let available = normalized_construction_inventory(portable.get(item_id))?;
+    let portable = base
+        .get("portableFleet")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority portable fleet is missing"))?;
+    let portable_count = normalized_construction_inventory(portable.get(item_id))?;
+    let expected_inventory = if final_count > current_count {
         let loaded = final_count - current_count;
-        let remaining = available.checked_sub(loaded).ok_or_else(|| {
+        portable_count.checked_sub(loaded).ok_or_else(|| {
             anyhow!("native player-authority portable fleet stock is insufficient")
-        })?;
-        ("portableFleet", remaining)
+        })?
     } else {
-        let tray = base
-            .get("tray")
-            .and_then(Value::as_object)
-            .ok_or_else(|| anyhow!("native player-authority tray is missing"))?;
-        let current = normalized_construction_inventory(tray.get(item_id))?;
         let returned = current_count - final_count;
-        let next = current
+        portable_count
             .checked_add(returned)
             .filter(|next| *next <= MAX_JAVASCRIPT_SAFE_INTEGER)
-            .ok_or_else(|| anyhow!("native player-authority fleet refund overflows"))?;
-        ("tray", next)
+            .ok_or_else(|| anyhow!("native player-authority fleet refund overflows"))?
     };
     if command.top_level_changes.len() != 1
-        || require_exact_set_patch(&command.top_level_changes, &[inventory_root, item_id])?.as_u64()
+        || require_exact_set_patch(&command.top_level_changes, &["portableFleet", item_id])?
+            .as_u64()
             != Some(expected_inventory)
     {
         bail!("native player-authority station fleet inventory accounting is invalid")
@@ -8660,8 +8659,8 @@ mod tests {
         )
     }
 
-    fn player_station_configuration_state() -> CoreState {
-        let mut state = player_command_state();
+    fn player_station_configuration_state_for_registry(registry_fingerprint: &str) -> CoreState {
+        let mut state = player_command_state_for_registry(registry_fingerprint);
         let mut addition = empty_player_command(state.revision);
         addition.added_entities = [
             (
@@ -8739,6 +8738,52 @@ mod tests {
         .collect();
         state.apply_command(&addition).unwrap();
         state
+    }
+
+    fn player_station_configuration_state() -> CoreState {
+        player_station_configuration_state_for_registry(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT)
+    }
+
+    fn station_fleet_conservation_fixture() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/synthetic/station-fleet-conservation-v1.json"
+        ))
+        .unwrap()
+    }
+
+    fn player_station_fleet_conservation_state_for_registry(
+        registry_fingerprint: &str,
+    ) -> CoreState {
+        let fixture = station_fleet_conservation_fixture();
+        let mut state = player_station_configuration_state_for_registry(registry_fingerprint);
+        state.base_value_mut()["portableFleet"] = fixture["portableFleet"].clone();
+        state.base_value_mut()["tray"]["logistics_drone"] =
+            fixture["traySentinel"]["logistics_drone"].clone();
+        state.base_value_mut()["tray"]["logistics_vessel"] =
+            fixture["traySentinel"]["logistics_vessel"].clone();
+
+        let target_id = fixture["targetStationId"].as_str().unwrap();
+        let peer_id = fixture["peerStationId"].as_str().unwrap();
+        let target_index = *state.entity_index.get(target_id).unwrap();
+        let peer_index = *state.entity_index.get(peer_id).unwrap();
+        let mut target = state.parse_entity(target_index).unwrap();
+        target["stationDrones"] = fixture["station"]["stationDrones"].clone();
+        target["stationVessels"] = fixture["station"]["stationVessels"].clone();
+        target["stationProgress"] = fixture["station"]["stationProgress"].clone();
+        target["stationPeerId"] = Value::from(peer_id);
+        let mut peer = state.parse_entity(peer_index).unwrap();
+        peer["stationProgress"] = fixture["peer"]["stationProgress"].clone();
+        peer["stationRoutes"] = fixture["busyRoutes"].clone();
+        state.replace_entity_raw(target_index, serde_json::to_string(&target).unwrap().into());
+        state.replace_entity_raw(peer_index, serde_json::to_string(&peer).unwrap().into());
+        state.rebuild_indexes().unwrap();
+        state
+    }
+
+    fn player_station_fleet_conservation_state() -> CoreState {
+        player_station_fleet_conservation_state_for_registry(
+            EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        )
     }
 
     fn station_route(
@@ -9474,6 +9519,55 @@ mod tests {
                 value: Some(Value::from(final_count)),
             }],
         }];
+        command
+    }
+
+    fn station_fleet_conservation_case(name: &str) -> Value {
+        station_fleet_conservation_fixture()["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["name"].as_str() == Some(name))
+            .unwrap()
+            .clone()
+    }
+
+    fn station_fleet_conservation_command(
+        state: &CoreState,
+        test_case: &Value,
+    ) -> SimulationCommandPatch {
+        let fixture = station_fleet_conservation_fixture();
+        let field = match test_case["kind"].as_str().unwrap() {
+            "drone" => "stationDrones",
+            "vessel" => "stationVessels",
+            other => panic!("unsupported station fleet fixture kind {other}"),
+        };
+        let target_id = fixture["targetStationId"].as_str().unwrap();
+        let peer_id = fixture["peerStationId"].as_str().unwrap();
+        let mut command = station_fleet_command(
+            state.revision,
+            target_id,
+            field,
+            test_case["expected"]["final"].as_u64().unwrap(),
+            "portableFleet",
+            test_case["itemId"].as_str().unwrap(),
+            test_case["expected"]["portableFleetAfter"]
+                .as_u64()
+                .unwrap(),
+        );
+        command.changed_entities[0].changes.push(ValuePatch {
+            path: vec![PathSegment::Key("stationProgress".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(0)),
+        });
+        command.changed_entities.push(RecordPatch {
+            id: peer_id.to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("stationProgress".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(0)),
+            }],
+        });
         command
     }
 
@@ -12459,9 +12553,9 @@ mod tests {
             "station-ils",
             "stationDrones",
             8,
-            "tray",
+            "portableFleet",
             "logistics_drone",
-            2,
+            17,
         );
         unload.changed_entities[0].changes.push(ValuePatch {
             path: vec![PathSegment::Key("stationProgress".to_owned())],
@@ -12469,7 +12563,8 @@ mod tests {
             value: Some(Value::from(0)),
         });
         state.apply_player_authority_command(&unload).unwrap();
-        assert_eq!(state.base_value()["tray"]["logistics_drone"], 2);
+        assert_eq!(state.base_value()["portableFleet"]["logistics_drone"], 17);
+        assert_eq!(state.base_value()["tray"]["logistics_drone"], 0);
 
         state
             .apply_player_authority_command(&station_fleet_command(
@@ -12493,6 +12588,186 @@ mod tests {
             serde_json::json!({ "owner": "pack:test", "revision": 31 })
         );
         assert_eq!(state.revision, 14);
+    }
+
+    #[test]
+    fn player_authority_station_fleet_matches_cross_language_conservation_fixture() {
+        let fixture = station_fleet_conservation_fixture();
+        for case_name in [
+            "drone-partial-load",
+            "drone-busy-floor-refund",
+            "vessel-busy-floor-refund",
+        ] {
+            let test_case = station_fleet_conservation_case(case_name);
+            let mut state = player_station_fleet_conservation_state();
+            let target_id = fixture["targetStationId"].as_str().unwrap();
+            let peer_id = fixture["peerStationId"].as_str().unwrap();
+            let field = if test_case["kind"] == "drone" {
+                "stationDrones"
+            } else {
+                "stationVessels"
+            };
+            let item_id = test_case["itemId"].as_str().unwrap();
+            let target_before = state
+                .parse_entity(*state.entity_index.get(target_id).unwrap())
+                .unwrap();
+            let peer_before = state
+                .parse_entity(*state.entity_index.get(peer_id).unwrap())
+                .unwrap();
+            let tray_before = state.base_value()["tray"].clone();
+            let total_before = target_before[field].as_u64().unwrap()
+                + state.base_value()["portableFleet"][item_id]
+                    .as_u64()
+                    .unwrap();
+            let command = station_fleet_conservation_command(&state, &test_case);
+
+            state.apply_player_authority_command(&command).unwrap();
+
+            let target = state
+                .parse_entity(*state.entity_index.get(target_id).unwrap())
+                .unwrap();
+            let peer = state
+                .parse_entity(*state.entity_index.get(peer_id).unwrap())
+                .unwrap();
+            assert_eq!(
+                target[field], test_case["expected"]["final"],
+                "{case_name} final station fleet"
+            );
+            assert_eq!(
+                state.base_value()["portableFleet"][item_id],
+                test_case["expected"]["portableFleetAfter"],
+                "{case_name} portable fleet"
+            );
+            assert_eq!(state.base_value()["tray"], tray_before, "{case_name} tray");
+            assert_eq!(target["stationProgress"], 0, "{case_name} target progress");
+            assert_eq!(peer["stationProgress"], 0, "{case_name} peer progress");
+            assert_eq!(
+                peer["stationRoutes"], peer_before["stationRoutes"],
+                "{case_name} routes"
+            );
+            assert_eq!(
+                target[field].as_u64().unwrap()
+                    + state.base_value()["portableFleet"][item_id]
+                        .as_u64()
+                        .unwrap(),
+                total_before,
+                "{case_name} conservation"
+            );
+        }
+    }
+
+    #[test]
+    fn player_authority_station_fleet_generic_wal_replay_matches_live_hash() {
+        let baseline = player_station_fleet_conservation_state();
+        let command = station_fleet_conservation_command(
+            &baseline,
+            &station_fleet_conservation_case("drone-busy-floor-refund"),
+        );
+        let durable: SimulationCommandPatch =
+            serde_json::from_str(&serde_json::to_string(&command).unwrap()).unwrap();
+
+        let mut live = baseline.clone();
+        let receipt = live.apply_player_authority_command(&durable).unwrap();
+        let live_hash = live.canonical_sha256().unwrap();
+
+        let mut replayed = baseline;
+        replayed
+            .replay_operation(
+                command.base_revision,
+                receipt.revision,
+                Some(&durable),
+                0.0,
+                0.0,
+                crate::CoreAdvanceMode::Exact,
+            )
+            .unwrap();
+        assert_eq!(replayed.canonical_sha256().unwrap(), live_hash);
+        assert_eq!(replayed.base_value(), live.base_value());
+    }
+
+    #[test]
+    fn player_authority_station_fleet_conservation_failures_are_atomic() {
+        let test_case = station_fleet_conservation_case("drone-busy-floor-refund");
+        let assert_rejected =
+            |mut state: CoreState, command: SimulationCommandPatch, expected_error: &str| {
+                let revision = state.revision;
+                let before = state.canonical_sha256().unwrap();
+                let error = state.apply_player_authority_command(&command).unwrap_err();
+                assert!(
+                    format!("{error:#}").contains(expected_error),
+                    "unexpected station fleet rejection: {error:#}"
+                );
+                assert_eq!(state.revision, revision);
+                assert_eq!(state.canonical_sha256().unwrap(), before);
+            };
+
+        let stale_state = player_station_fleet_conservation_state();
+        let mut stale = station_fleet_conservation_command(&stale_state, &test_case);
+        stale.base_revision -= 1;
+        assert_rejected(stale_state, stale, "base revision is not current");
+
+        let forged_tray_state = player_station_fleet_conservation_state();
+        let mut forged_tray = station_fleet_conservation_command(&forged_tray_state, &test_case);
+        forged_tray.top_level_changes[0].path[0] = PathSegment::Key("tray".to_owned());
+        assert_rejected(forged_tray_state, forged_tray, "protected patch is missing");
+
+        let mut locked_state = player_station_fleet_conservation_state();
+        let target_index = *locked_state.entity_index.get("station-ils").unwrap();
+        let mut target = locked_state.parse_entity(target_index).unwrap();
+        target["interactionLocked"] = Value::from(true);
+        locked_state
+            .replace_entity_raw(target_index, serde_json::to_string(&target).unwrap().into());
+        locked_state.rebuild_indexes().unwrap();
+        let locked_command = station_fleet_conservation_command(&locked_state, &test_case);
+        assert_rejected(locked_state, locked_command, "locked or malformed");
+
+        let mut malformed_count_state = player_station_fleet_conservation_state();
+        let target_index = *malformed_count_state
+            .entity_index
+            .get("station-ils")
+            .unwrap();
+        let mut target = malformed_count_state.parse_entity(target_index).unwrap();
+        target["stationDrones"] = Value::from("seven");
+        malformed_count_state
+            .replace_entity_raw(target_index, serde_json::to_string(&target).unwrap().into());
+        malformed_count_state.rebuild_indexes().unwrap();
+        let malformed_count_command =
+            station_fleet_conservation_command(&malformed_count_state, &test_case);
+        assert_rejected(
+            malformed_count_state,
+            malformed_count_command,
+            "current station fleet count",
+        );
+
+        let mut malformed_route_state = player_station_fleet_conservation_state();
+        let peer_index = *malformed_route_state
+            .entity_index
+            .get("station-empty")
+            .unwrap();
+        let mut peer = malformed_route_state.parse_entity(peer_index).unwrap();
+        peer["stationRoutes"][0]["vehicleCount"] = Value::from("two");
+        malformed_route_state
+            .replace_entity_raw(peer_index, serde_json::to_string(&peer).unwrap().into());
+        malformed_route_state.rebuild_indexes().unwrap();
+        let malformed_route_command =
+            station_fleet_conservation_command(&malformed_route_state, &test_case);
+        assert_rejected(
+            malformed_route_state,
+            malformed_route_command,
+            "busy vehicle count",
+        );
+
+        let mut overflow_state = player_station_fleet_conservation_state();
+        overflow_state.base_value_mut()["portableFleet"]["logistics_drone"] =
+            Value::from(MAX_JAVASCRIPT_SAFE_INTEGER);
+        let overflow_command = station_fleet_conservation_command(&overflow_state, &test_case);
+        assert_rejected(overflow_state, overflow_command, "fleet refund overflows");
+
+        let modded_state = player_station_fleet_conservation_state_for_registry(
+            "station-fleet-conservation-modded",
+        );
+        let modded_command = station_fleet_conservation_command(&modded_state, &test_case);
+        assert_rejected(modded_state, modded_command, "built-in catalog");
     }
 
     #[test]

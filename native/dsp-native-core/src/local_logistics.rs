@@ -13,6 +13,7 @@ use crate::station_route_ledger::StationRouteLedger;
 
 const EPSILON: f64 = 0.0001;
 const SLOT_COUNT: usize = 5;
+const BUFFER_ROWS_PER_CHUNK: usize = 1_024;
 const DRONES_PER_BUILDING: f64 = 50.0;
 const CARGO_PER_DRONE: f64 = 25.0;
 const BASE_TRIP_SECONDS: f64 = 8.0;
@@ -1707,16 +1708,211 @@ fn transfer_buffers_for_indices(
     plan_buffer_activity(entities, directory, station_indices)
 }
 
+struct BufferStationPlan {
+    station_index: usize,
+    slot_amounts: [(f64, f64); SLOT_COUNT],
+    slot_patch_mask: u8,
+    active_after: bool,
+    terminal_error: Option<anyhow::Error>,
+}
+
+fn planned_buffer_amounts(
+    station: &Map<String, Value>,
+    station_slots: &[Slot],
+    slot_amounts: &[(f64, f64); SLOT_COUNT],
+    slot_patch_mask: u8,
+    before_slot: usize,
+    item_id: &str,
+) -> (f64, f64) {
+    for previous_slot in (0..before_slot).rev() {
+        if slot_patch_mask & (1_u8 << previous_slot) == 0
+            || station_slots[previous_slot].item_id.as_deref() != Some(item_id)
+        {
+            continue;
+        }
+        return slot_amounts[previous_slot];
+    }
+    (
+        item_amount(station, "inputs", item_id),
+        item_amount(station, "outputs", item_id),
+    )
+}
+
+fn plan_buffer_station(
+    state: &CoreState,
+    entities: &[Value],
+    directory: &LocalPeerDirectory,
+    buffer_limit: f64,
+    station_index: usize,
+) -> BufferStationPlan {
+    let mut plan = BufferStationPlan {
+        station_index,
+        slot_amounts: [(0.0, 0.0); SLOT_COUNT],
+        slot_patch_mask: 0,
+        active_after: false,
+        terminal_error: None,
+    };
+    let Some(station_slots) = directory.station_slots.get(&station_index) else {
+        plan.terminal_error = Some(anyhow!("native local station slots are missing"));
+        return plan;
+    };
+    let Some(station) = entities[station_index].as_object() else {
+        plan.terminal_error = Some(anyhow!("native local station is invalid"));
+        return plan;
+    };
+    if matches!(
+        string_at(station, "buildingId"),
+        Some("planetary_logistics_station" | "interstellar_logistics_station")
+    ) {
+        for (slot_index, slot) in station_slots.iter().enumerate() {
+            let Some(item_id) = slot.item_id.as_deref() else {
+                continue;
+            };
+            let capacity = match station_capacity(state, station, slot, buffer_limit) {
+                Ok(capacity) => capacity,
+                Err(error) => {
+                    plan.terminal_error = Some(error);
+                    return plan;
+                }
+            };
+            let (input_before, output_before) = planned_buffer_amounts(
+                station,
+                station_slots,
+                &plan.slot_amounts,
+                plan.slot_patch_mask,
+                slot_index,
+                item_id,
+            );
+            let incoming = (input_before + EPSILON).floor();
+            let stored = (output_before + EPSILON).floor();
+            let moved = incoming.min((capacity - stored).max(0.0));
+            plan.slot_amounts[slot_index] = (incoming - moved, stored + moved);
+            plan.slot_patch_mask |= 1_u8 << slot_index;
+        }
+    }
+
+    plan.active_after = station_slots.iter().any(|slot| {
+        slot.item_id.as_deref().is_some_and(|item_id| {
+            let (input_after, _) = planned_buffer_amounts(
+                station,
+                station_slots,
+                &plan.slot_amounts,
+                plan.slot_patch_mask,
+                SLOT_COUNT,
+                item_id,
+            );
+            (input_after + EPSILON).floor() >= 1.0
+        })
+    });
+    plan
+}
+
+fn apply_buffer_station_plan(
+    entities: &mut [Value],
+    directory: &LocalPeerDirectory,
+    mut plan: BufferStationPlan,
+) -> anyhow::Result<(usize, bool)> {
+    if plan.slot_patch_mask != 0 {
+        let station_slots = directory
+            .station_slots
+            .get(&plan.station_index)
+            .ok_or_else(|| anyhow!("native local station slots are missing"))?;
+        let station = entities[plan.station_index]
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("native local station is invalid"))?;
+        for (slot_index, slot) in station_slots.iter().enumerate() {
+            if plan.slot_patch_mask & (1_u8 << slot_index) == 0 {
+                continue;
+            }
+            let item_id = slot
+                .item_id
+                .as_deref()
+                .expect("planned local buffer item disappeared");
+            let (input_after, output_after) = plan.slot_amounts[slot_index];
+            // Preserve the legacy per-slot write order. This matters when a
+            // malformed output map fails after the input write, and when MOD
+            // slots repeat one item and overwrite the same ordered map key.
+            set_item_amount(station, "inputs", item_id, input_after)?;
+            set_item_amount(station, "outputs", item_id, output_after)?;
+        }
+    }
+    if let Some(error) = plan.terminal_error.take() {
+        return Err(error);
+    }
+    Ok((plan.station_index, plan.active_after))
+}
+
+fn transfer_buffers_for_indices_with_runtime(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &mut [Value],
+    directory: &LocalPeerDirectory,
+    station_indices: &[usize],
+    executor: &DeterministicRuntime,
+) -> anyhow::Result<Vec<(usize, bool)>> {
+    if executor.worker_count_for_items(station_indices.len()) == 1 {
+        return transfer_buffers_for_indices(state, base, entities, directory, station_indices);
+    }
+
+    let buffer_limit = normalized_buffer_limit(base);
+    let chunk_results =
+        executor.ordered_chunk_map(station_indices.len(), BUFFER_ROWS_PER_CHUNK, |_, range| {
+            range
+                .map(|station_position| {
+                    plan_buffer_station(
+                        state,
+                        entities,
+                        directory,
+                        buffer_limit,
+                        station_indices[station_position],
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+    let mut plans = chunk_results.into_iter().flatten();
+    let mut updates = Vec::with_capacity(station_indices.len());
+    for &expected_station_index in station_indices {
+        let plan = plans
+            .next()
+            .ok_or_else(|| anyhow!("native local buffer plan result is missing"))?;
+        if plan.station_index != expected_station_index {
+            bail!("native local buffer plan order changed");
+        }
+        updates.push(apply_buffer_station_plan(entities, directory, plan)?);
+    }
+    if plans.next().is_some() {
+        bail!("native local buffer plan result count changed");
+    }
+    Ok(updates)
+}
+
+fn transfer_buffers_with_runtime(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &mut [Value],
+    directory: &mut LocalPeerDirectory,
+    executor: &DeterministicRuntime,
+) -> anyhow::Result<Vec<usize>> {
+    let (station_indices, _dense_fallback) = directory.buffer_scan_indices();
+    let updates = transfer_buffers_for_indices_with_runtime(
+        state,
+        base,
+        entities,
+        directory,
+        &station_indices,
+        executor,
+    )?;
+    directory.replace_scanned_buffer_activity(&updates);
+    Ok(station_indices)
+}
+
 pub(crate) fn transfer_buffers(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &mut [Value],
     directory: &mut LocalPeerDirectory,
 ) -> anyhow::Result<Vec<usize>> {
-    let (station_indices, _dense_fallback) = directory.buffer_scan_indices();
-    let updates = transfer_buffers_for_indices(state, base, entities, directory, &station_indices)?;
-    directory.replace_scanned_buffer_activity(&updates);
-    Ok(station_indices)
+    transfer_buffers_with_runtime(state, base, entities, directory, deterministic_runtime())
 }
 
 /// Installs exact wake evidence produced by inventory-moving subsystems. The
@@ -3197,10 +3393,249 @@ mod tests {
         assert_eq!(rebuilt_boundary.station_indices.as_ref(), &[1]);
     }
 
+    fn parallel_buffer_source(count: usize) -> Vec<Value> {
+        (0..count)
+            .map(|index| {
+                let mut station = route_station(index, "storage");
+                let station = station.as_object_mut().expect("parallel buffer station");
+                let slots = station["stationSlots"]
+                    .as_array_mut()
+                    .expect("parallel buffer slots");
+                slots[0] = json!({
+                    "itemId": "mod:物流/Ω🚀", "localMode": "storage",
+                    "minimumLoad": 0.1, "minStock": 0, "maxStock": 5, "priority": 1
+                });
+                // Slot one repeats the same item. It must observe slot zero's
+                // output before applying its own larger stock limit.
+                slots[1] = json!({
+                    "itemId": "mod:物流/Ω🚀", "localMode": "storage",
+                    "minimumLoad": 0.1, "minStock": 0, "maxStock": 12, "priority": 1
+                });
+                slots[2] = json!({
+                    "itemId": "iron_ore", "localMode": "storage",
+                    "minimumLoad": 0.1, "minStock": 0, "maxStock": 100, "priority": 1
+                });
+
+                let mut inputs = Map::from_iter([
+                    ("alpha".to_owned(), Value::from(index)),
+                    (
+                        "iron_ore".to_owned(),
+                        Value::from((index % 7) as f64 + 0.75),
+                    ),
+                    ("omega".to_owned(), Value::from(-0.0)),
+                ]);
+                let mut outputs = Map::from_iter([
+                    ("alpha".to_owned(), Value::from(index + 1)),
+                    ("iron_ore".to_owned(), Value::from((index % 11) as f64)),
+                    ("omega".to_owned(), Value::Null),
+                ]);
+                match index % 5 {
+                    0 => {
+                        inputs.insert("mod:物流/Ω🚀".to_owned(), Value::from(11.75));
+                        outputs.insert("mod:物流/Ω🚀".to_owned(), Value::from(-0.0));
+                    }
+                    1 => {
+                        inputs.insert("mod:物流/Ω🚀".to_owned(), Value::Null);
+                        outputs.insert("mod:物流/Ω🚀".to_owned(), Value::from(-0.0));
+                    }
+                    2 => {
+                        // Both keys are absent: slot zero inserts them and the
+                        // duplicate slot overwrites those exact keys in place.
+                    }
+                    3 => {
+                        inputs.insert("mod:物流/Ω🚀".to_owned(), Value::from(9.0));
+                        outputs.insert("mod:物流/Ω🚀".to_owned(), Value::from(12.0));
+                    }
+                    _ => {
+                        inputs.insert("mod:物流/Ω🚀".to_owned(), Value::from(-0.0));
+                        outputs.insert("mod:物流/Ω🚀".to_owned(), Value::from(100.0));
+                    }
+                }
+                station.insert("inputs".to_owned(), Value::Object(inputs));
+                station.insert("outputs".to_owned(), Value::Object(outputs));
+                station.insert(
+                    "mod:buffer/原样保留".to_owned(),
+                    json!({ "index": index, "signedZero": -0.0, "text": "中🚀" }),
+                );
+                Value::Object(station.clone())
+            })
+            .collect()
+    }
+
+    fn run_buffer_indices_with_workers(
+        state: &CoreState,
+        base: &Map<String, Value>,
+        source: &[Value],
+        directory: &LocalPeerDirectory,
+        station_indices: &[usize],
+        workers: usize,
+    ) -> (Vec<u8>, Vec<(usize, bool)>) {
+        let mut entities = source.to_vec();
+        let updates = transfer_buffers_for_indices_with_runtime(
+            state,
+            base,
+            &mut entities,
+            directory,
+            station_indices,
+            &DeterministicRuntime::for_test(workers),
+        )
+        .unwrap();
+        (serde_json::to_vec(&entities).unwrap(), updates)
+    }
+
+    #[test]
+    fn dense_buffer_plans_match_legacy_bytes_at_one_two_four_and_eight_workers() {
+        let source = parallel_buffer_source(PARALLEL_MIN_ITEMS + 73);
+        let state = route_fixture_state(&source);
+        let base = route_fixture_base();
+        let base = base.as_object().unwrap();
+        let directory =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        let station_indices = directory.station_indices.to_vec();
+        let mut oracle_entities = source.clone();
+        let oracle_updates = transfer_buffers_for_indices(
+            &state,
+            base,
+            &mut oracle_entities,
+            &directory,
+            &station_indices,
+        )
+        .unwrap();
+        let expected = (
+            serde_json::to_vec(&oracle_entities).unwrap(),
+            oracle_updates,
+        );
+
+        for workers in [1, 2, 4, 8] {
+            assert_eq!(
+                run_buffer_indices_with_workers(
+                    &state,
+                    base,
+                    &source,
+                    &directory,
+                    &station_indices,
+                    workers,
+                ),
+                expected,
+                "workers={workers}"
+            );
+        }
+        assert_eq!(oracle_entities[0]["inputs"]["mod:物流/Ω🚀"], 0.0);
+        assert_eq!(oracle_entities[0]["outputs"]["mod:物流/Ω🚀"], 11.0);
+        assert_eq!(oracle_entities[3]["inputs"]["mod:物流/Ω🚀"], 9.0);
+        assert!(expected.1[3].1, "full duplicate slots remain active");
+        assert_eq!(oracle_entities[2]["mod:buffer/原样保留"]["text"], "中🚀");
+    }
+
+    #[test]
+    fn sparse_buffer_plans_match_legacy_and_leave_unselected_mod_rows_byte_exact() {
+        let selected_count = PARALLEL_MIN_ITEMS + 37;
+        let source = parallel_buffer_source(selected_count * 2 + 1);
+        let state = route_fixture_state(&source);
+        let base = route_fixture_base();
+        let base = base.as_object().unwrap();
+        let directory =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        let station_indices = (0..selected_count)
+            .map(|index| index * 2)
+            .collect::<Vec<_>>();
+        let unselected_before = serde_json::to_vec(&source[1]).unwrap();
+        let mut oracle_entities = source.clone();
+        let oracle_updates = transfer_buffers_for_indices(
+            &state,
+            base,
+            &mut oracle_entities,
+            &directory,
+            &station_indices,
+        )
+        .unwrap();
+        let expected = (
+            serde_json::to_vec(&oracle_entities).unwrap(),
+            oracle_updates,
+        );
+
+        for workers in [1, 2, 4, 8] {
+            assert_eq!(
+                run_buffer_indices_with_workers(
+                    &state,
+                    base,
+                    &source,
+                    &directory,
+                    &station_indices,
+                    workers,
+                ),
+                expected,
+                "workers={workers}"
+            );
+        }
+        assert_eq!(
+            serde_json::to_vec(&oracle_entities[1]).unwrap(),
+            unselected_before
+        );
+        assert_eq!(expected.1.len(), selected_count);
+        assert!(
+            expected
+                .1
+                .iter()
+                .map(|(station_index, _)| *station_index)
+                .eq(station_indices.iter().copied())
+        );
+    }
+
+    #[test]
+    fn parallel_buffer_errors_keep_legacy_first_failure_and_partial_mutation_boundary() {
+        let mut source = parallel_buffer_source(PARALLEL_MIN_ITEMS + 64);
+        let first_failure = 17;
+        let second_failure = PARALLEL_MIN_ITEMS + 5;
+        source[first_failure]["inputs"]["mod:物流/Ω🚀"] = Value::from(4.0);
+        source[first_failure]["outputs"] = Value::Null;
+        source[second_failure]["inputs"] = Value::Null;
+        let state = route_fixture_state(&source);
+        let base = route_fixture_base();
+        let base = base.as_object().unwrap();
+        let directory =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        let station_indices = directory.station_indices.to_vec();
+        let mut oracle = source.clone();
+        let oracle_error =
+            transfer_buffers_for_indices(&state, base, &mut oracle, &directory, &station_indices)
+                .unwrap_err()
+                .to_string();
+        let expected_bytes = serde_json::to_vec(&oracle).unwrap();
+
+        for workers in [1, 2, 4, 8] {
+            let mut actual = source.clone();
+            let error = transfer_buffers_for_indices_with_runtime(
+                &state,
+                base,
+                &mut actual,
+                &directory,
+                &station_indices,
+                &DeterministicRuntime::for_test(workers),
+            )
+            .unwrap_err()
+            .to_string();
+            assert_eq!(error, oracle_error, "workers={workers}");
+            assert_eq!(
+                serde_json::to_vec(&actual).unwrap(),
+                expected_bytes,
+                "workers={workers}"
+            );
+        }
+        assert_eq!(oracle_error, "native local logistics inventory is missing");
+        assert_eq!(oracle[first_failure]["inputs"]["mod:物流/Ω🚀"], 0.0);
+        assert!(oracle[first_failure]["outputs"].is_null());
+        assert_eq!(
+            serde_json::to_vec(&oracle[first_failure + 1]).unwrap(),
+            serde_json::to_vec(&source[first_failure + 1]).unwrap()
+        );
+    }
+
     fn run_buffer_activity_steps(
         source: &[Value],
         iterations: usize,
         force_full_scan: bool,
+        worker_count: usize,
     ) -> (Vec<Value>, LocalPeerDirectory, Vec<(usize, bool)>) {
         let state = route_fixture_state(source);
         let base = route_fixture_base();
@@ -3208,7 +3643,9 @@ mod tests {
         let mut entities = source.to_vec();
         let mut directory =
             prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
-        transfer_buffers(&state, base, &mut entities, &mut directory).unwrap();
+        let executor = DeterministicRuntime::for_test(worker_count);
+        transfer_buffers_with_runtime(&state, base, &mut entities, &mut directory, &executor)
+            .unwrap();
         assert!(directory.buffer_activity_initialized);
 
         let active = [7, source.len() / 2, source.len() - 1];
@@ -3238,7 +3675,14 @@ mod tests {
                 .unwrap();
                 directory.replace_scanned_buffer_activity(&updates);
             } else {
-                transfer_buffers(&state, base, &mut entities, &mut directory).unwrap();
+                transfer_buffers_with_runtime(
+                    &state,
+                    base,
+                    &mut entities,
+                    &mut directory,
+                    &executor,
+                )
+                .unwrap();
             }
         }
         (entities, directory, scans)
@@ -3252,18 +3696,20 @@ mod tests {
         let source_hash = state.canonical_sha256().unwrap();
 
         for iterations in [1, 5, 60] {
-            let scheduled = run_buffer_activity_steps(&source, iterations, false);
-            let oracle = run_buffer_activity_steps(&source, iterations, true);
-            assert!(scheduled.2.iter().all(|scan| *scan == (3, false)));
-            assert_eq!(
-                serde_json::to_vec(&scheduled.0).unwrap(),
-                serde_json::to_vec(&oracle.0).unwrap(),
-                "sparse buffer replay diverged at {iterations} steps"
-            );
-            assert_eq!(
-                scheduled.1.buffer_active_station_indices,
-                oracle.1.buffer_active_station_indices
-            );
+            let oracle = run_buffer_activity_steps(&source, iterations, true, 1);
+            for workers in [1, 2, 4, 8] {
+                let scheduled = run_buffer_activity_steps(&source, iterations, false, workers);
+                assert!(scheduled.2.iter().all(|scan| *scan == (3, false)));
+                assert_eq!(
+                    serde_json::to_vec(&scheduled.0).unwrap(),
+                    serde_json::to_vec(&oracle.0).unwrap(),
+                    "sparse buffer replay diverged at {iterations} steps with {workers} workers"
+                );
+                assert_eq!(
+                    scheduled.1.buffer_active_station_indices,
+                    oracle.1.buffer_active_station_indices
+                );
+            }
         }
         assert_eq!(state.canonical_sha256().unwrap(), source_hash);
     }

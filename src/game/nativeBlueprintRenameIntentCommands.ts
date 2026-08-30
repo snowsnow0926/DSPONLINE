@@ -2,6 +2,13 @@ import {
   SIMULATION_RUNTIME_PROTOCOL_VERSION,
   type SimulationCommandPatch,
 } from "./simulationRuntimeProtocol";
+import {
+  nativeBlueprintRenameIdentityMatchesFrame,
+  nativeBlueprintRenameLineageMatchesIdentity,
+  type NativeBlueprintRenameIdentity,
+  type NativeBlueprintWorkspaceFrame,
+  type NativeBlueprintWorkspaceIdentity,
+} from "./nativeBlueprintWorkspaceStore";
 
 const UTF8_ENCODER = new TextEncoder();
 const MAX_BLUEPRINT_ID_BYTES = 512;
@@ -80,4 +87,34 @@ export function createNativeBlueprintRenameIntentCommand(
     addedBelts: [],
     removedBeltIds: [],
   };
+}
+
+/**
+ * Rebinds a stable editor identity to the newest exact authority frame. The
+ * row identity is deliberately independent of the global frame revision, but
+ * the emitted command always uses the current route/source revision.
+ */
+export function prepareNativeBlueprintRenameIntentCommand(
+  identity: NativeBlueprintRenameIdentity,
+  name: string,
+  frame: NativeBlueprintWorkspaceFrame | null,
+  routeIdentity: NativeBlueprintWorkspaceIdentity | null,
+  commandSource: Readonly<{
+    sessionId: string;
+    runId: string;
+    baseRevision: number;
+  }> | null,
+): SimulationCommandPatch | null {
+  const canonicalName = canonicalizeNativeBlueprintName(name);
+  if (!frame || !routeIdentity || !commandSource ||
+      !nativeBlueprintRenameIdentityMatchesFrame(identity, frame) ||
+      !nativeBlueprintRenameLineageMatchesIdentity(identity, routeIdentity) ||
+      frame.revision !== routeIdentity.revision ||
+      commandSource.sessionId !== identity.sessionId ||
+      commandSource.runId !== identity.runId ||
+      commandSource.baseRevision !== frame.revision ||
+      canonicalName === null || canonicalName !== name || name === identity.currentName) {
+    return null;
+  }
+  return createNativeBlueprintRenameIntentCommand(frame.revision, identity.blueprintId, name);
 }

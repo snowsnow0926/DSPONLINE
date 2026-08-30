@@ -26,6 +26,11 @@ export const FACTORY_READ_MODEL_LIMITS = Object.freeze({
   constructionReservationRows: 32,
   constructionTargetRows: 128,
   constructionJobRows: 64,
+  constructionCenterRows: 64,
+  constructionMaterialRows: 256,
+  constructionQuantumBufferRows: 256,
+  constructionDestroyedByproductRows: 256,
+  constructionCostRows: 32,
   stationItemOptions: 128,
 } as const);
 
@@ -286,10 +291,97 @@ export interface ConstructionJobReadModel {
   readonly inventory: BoundedReadModelRows<ItemQuantityReadModel>;
 }
 
+export type NativeConstructionCenterCategoryReadModel = "power" | "production" | "logistics" | "dyson";
+export type NativeConstructionCenterStatusReadModel = "game-paused" | "automation-paused" | "working" | "idle";
+
+export interface NativeConstructionCenterNamedQuantityReadModel extends ItemQuantityReadModel {
+  readonly name: string;
+}
+
+export interface NativeConstructionCenterQuantityRows<Row> extends BoundedReadModelRows<Row> {
+  readonly totalAmount: number;
+}
+
+export interface NativeConstructionCenterTargetReadModel {
+  readonly targetId: string;
+  readonly name: string;
+  readonly kind: "building" | "fleet";
+  readonly category: NativeConstructionCenterCategoryReadModel;
+  readonly target: number;
+  readonly currentStock: number;
+  readonly unlocked: boolean;
+  readonly requiredTechId: string | null;
+  readonly requiredTechName: string | null;
+  readonly outputAmount: number;
+  readonly costs: BoundedReadModelRows<NativeConstructionCenterNamedQuantityReadModel>;
+}
+
+export interface NativeConstructionCenterRowReadModel {
+  readonly entityId: string;
+  readonly planetId: string;
+  readonly planetName: string;
+  readonly machineCount: number;
+  readonly status: NativeConstructionCenterStatusReadModel;
+}
+
+export interface NativeConstructionCenterJobReadModel {
+  readonly entityId: string;
+  readonly targetId: string;
+  readonly targetName: string;
+  readonly stepIndex: number;
+  readonly stepCount: number;
+  readonly elapsedSeconds: number;
+  readonly inventory: NativeConstructionCenterQuantityRows<NativeConstructionCenterNamedQuantityReadModel>;
+}
+
+export interface NativeConstructionCenterQuantumBufferReadModel extends NativeConstructionCenterNamedQuantityReadModel {
+  readonly entityId: string;
+}
+
+/**
+ * Built-in-only, display-only construction-center projection emitted by Rust.
+ * A null value is the required fail-closed representation for MOD/unknown
+ * registries; the renderer never fills the directory from JS content tables.
+ */
+export interface NativeConstructionCenterWorkspaceReadModel {
+  readonly schema: "construction-center-workspace-v1";
+  readonly registryFingerprint: "7df8cf3a";
+  readonly readOnly: true;
+  readonly activePlanetId: string;
+  readonly activePlanetName: string;
+  readonly paused: boolean;
+  readonly enabled: boolean;
+  readonly quantumSourceEnabled: boolean;
+  readonly quantumNetworkEnabled: boolean;
+  readonly totalCrafted: number;
+  readonly lastCraftedId: string | null;
+  readonly lastCraftedName: string | null;
+  readonly stockLimit: number;
+  readonly cycleSeconds: number;
+  readonly materialSeconds: number;
+  readonly targets: BoundedReadModelRows<NativeConstructionCenterTargetReadModel>;
+  readonly centers: BoundedReadModelRows<NativeConstructionCenterRowReadModel>;
+  readonly jobs: BoundedReadModelRows<NativeConstructionCenterJobReadModel>;
+  readonly materials: NativeConstructionCenterQuantityRows<NativeConstructionCenterNamedQuantityReadModel>;
+  readonly quantumBuffer: NativeConstructionCenterQuantityRows<NativeConstructionCenterQuantumBufferReadModel>;
+  readonly destroyedByproducts: NativeConstructionCenterQuantityRows<NativeConstructionCenterNamedQuantityReadModel>;
+  readonly limits: Readonly<{
+    targetRows: typeof FACTORY_READ_MODEL_LIMITS.constructionTargetRows;
+    centerRows: typeof FACTORY_READ_MODEL_LIMITS.constructionCenterRows;
+    jobRows: typeof FACTORY_READ_MODEL_LIMITS.constructionJobRows;
+    materialRows: typeof FACTORY_READ_MODEL_LIMITS.constructionMaterialRows;
+    quantumBufferRows: typeof FACTORY_READ_MODEL_LIMITS.constructionQuantumBufferRows;
+    destroyedByproductRows: typeof FACTORY_READ_MODEL_LIMITS.constructionDestroyedByproductRows;
+    costRowsPerTarget: typeof FACTORY_READ_MODEL_LIMITS.constructionCostRows;
+    projectionBytes: 1048576;
+  }>;
+}
+
 export interface ConstructionSummaryReadModel {
   readonly schema: typeof FACTORY_READ_MODEL_SCHEMA;
   readonly activePlanetId: string;
   readonly queue: BoundedReadModelRows<ConstructionQueueRowReadModel>;
+  readonly nativeCenterWorkspace: NativeConstructionCenterWorkspaceReadModel | null;
   readonly automation: Readonly<{
     enabled: boolean;
     quantumSourceEnabled: boolean;

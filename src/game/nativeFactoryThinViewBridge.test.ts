@@ -75,6 +75,7 @@ const constructionWorkspaceWeb: FactoryConstructionWorkspaceReadModel = {
     totalCount: 1,
     truncated: false,
   },
+  nativeCenterWorkspace: null,
   automation: {
     enabled: true,
     quantumSourceEnabled: true,
@@ -305,6 +306,7 @@ function factory(revision: number, paused = false): DesktopNativeCoreFactoryRead
       schema: "factory-read-model-v1",
       activePlanetId: "home",
       queue: emptyRows,
+      nativeCenterWorkspace: null,
       automation: {
         enabled: false,
         quantumSourceEnabled: false,
@@ -375,6 +377,7 @@ function constructionWorkspaceSnapshot(revision = 31): NativeFactoryThinViewSnap
           schema: constructionWorkspaceWeb.schema,
           activePlanetId: constructionWorkspaceWeb.activePlanetId,
           queue: constructionWorkspaceWeb.queue,
+          nativeCenterWorkspace: null,
           automation: constructionWorkspaceWeb.automation,
         },
       },

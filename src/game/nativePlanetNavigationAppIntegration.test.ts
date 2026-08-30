@@ -119,14 +119,14 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeBlueprintWorkspace[\s\S]*?: <BlueprintWorkspace/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <RuntimeRenderProfile id="onboarding">/);
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeFactoryInspectorPanel[\s\S]*?: <StableInspectorPanel/);
-    expect(app).toMatch(/<HeaderControls[\s\S]*?constructionCenterUnavailable=\{nativePlayerAuthorityOwnsRuntime\}/);
-    expect(app).toMatch(/constructionCenterOpen && !nativePlayerAuthorityOwnsRuntime \? \(/);
+    expect(app).toMatch(/<HeaderControls[\s\S]*?constructionCenterVisible=\{nativePlayerAuthorityOwnsRuntime \|\| game\.entities\.some/);
+    expect(app).toMatch(/constructionCenterOpen \? nativePlayerAuthorityOwnsRuntime \? \([\s\S]*?<NativeConstructionCenterWorkspace[\s\S]*?: \([\s\S]*?<ConstructionCenterWorkspace/);
     expect(app).toMatch(/nodesConnectable=\{!nativePlayerAuthorityOwnsRuntime \|\| nativeOrdinaryBeltConnectionEnabled\}/);
     expect(app).toMatch(/connectOnClick=\{!nativePlayerAuthorityOwnsRuntime \|\| nativeOrdinaryBeltConnectionEnabled\}/);
     expect(app).toMatch(/const isValidConnection = useCallback[\s\S]*?nativeOrdinaryBeltConnectionEnabled[\s\S]*?isUniversalInputHandle\(connection\.targetHandle\)/);
     expect(app).toMatch(/const requestNativeOrdinaryBeltPlacement[\s\S]*?readVerifiedNativeConstructionBeltPlacementContext[\s\S]*?commitNativeProjectedCommand/);
     expect(app).toMatch(/const onConnect = useCallback[\s\S]*?requestNativeOrdinaryBeltPlacement\(connection, lockedTier\)/);
-    expect(panels).toMatch(/disabled=\{constructionCenterUnavailable\}[\s\S]*?Windows 原生模式尚未接入建筑制造中心/);
+    expect(panels).toMatch(/showConstructionCenter[\s\S]*?disabled=\{constructionCenterUnavailable\}[\s\S]*?打开建筑制造中心/);
     expect(app).toMatch(/disabled: nativePlayerAuthorityOwnsRuntime \|\| nativeFactoryRouteUnsafe/);
     expect(app).toMatch(/const confirmBatchConnection = useCallback\(\(\) => \{[\s\S]*?nativePlayerAuthorityOwnsRuntimeRef\.current \|\| nativeFactoryProjectionPendingRef\.current[\s\S]*?clearConnectionPreview\(false\)/);
     expect(app).toMatch(/batchConnectionModeRef\.current && event\.key === "Enter"[\s\S]*?nativePlayerAuthorityOwnsRuntimeRef\.current \|\| nativeFactoryProjectionPendingRef\.current[\s\S]*?cancelBatchConnectionRef\.current\(\)/);

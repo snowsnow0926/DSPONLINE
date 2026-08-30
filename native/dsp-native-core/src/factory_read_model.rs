@@ -4,7 +4,7 @@
 //! v47 envelope. It is reconstructed from the already-owned native state and
 //! can therefore replace renderer-side full-state reads one surface at a time.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Value, json};
@@ -22,6 +22,12 @@ const MAX_QUEUE_ROWS: usize = 64;
 const MAX_RESERVATION_ROWS: usize = 32;
 const MAX_TARGET_ROWS: usize = 128;
 const MAX_JOB_ROWS: usize = 64;
+const MAX_CONSTRUCTION_CENTER_ROWS: usize = 64;
+const MAX_CONSTRUCTION_MATERIAL_ROWS: usize = 256;
+const MAX_CONSTRUCTION_QUANTUM_BUFFER_ROWS: usize = 256;
+const MAX_CONSTRUCTION_DESTROYED_BYPRODUCT_ROWS: usize = 256;
+const MAX_CONSTRUCTION_COST_ROWS: usize = 32;
+const MAX_CONSTRUCTION_LABEL_BYTES: usize = 256;
 const PLAYER_STATION_SLOT_COUNT: usize = 5;
 const MAX_STATION_ITEM_OPTIONS: usize = 128;
 const MAX_STATION_ITEM_LABEL_BYTES: usize = 256;
@@ -589,6 +595,546 @@ fn construction_jobs(automation: Option<&Map<String, Value>>) -> Value {
     rows_model(rows, total_count, MAX_JOB_ROWS)
 }
 
+fn construction_catalog_label(value: &str, label: &str) -> anyhow::Result<String> {
+    if value.is_empty() || value.len() > MAX_CONSTRUCTION_LABEL_BYTES || value.contains('\0') {
+        bail!("native construction-center {label} is invalid");
+    }
+    Ok(value.to_owned())
+}
+
+fn construction_safe_amount(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
+    let value = value
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.0 && value.fract() == 0.0)
+        .ok_or_else(|| anyhow!("native construction-center {label} is invalid"))?;
+    if value > MAX_JAVASCRIPT_SAFE_INTEGER as f64 {
+        bail!("native construction-center {label} exceeds the safe integer limit");
+    }
+    Ok(value as u64)
+}
+
+fn construction_catalog_amount(value: f64, label: &str) -> anyhow::Result<u64> {
+    if !value.is_finite()
+        || value <= 0.0
+        || value.fract() != 0.0
+        || value > MAX_JAVASCRIPT_SAFE_INTEGER as f64
+    {
+        bail!("native construction-center {label} is invalid");
+    }
+    Ok(value as u64)
+}
+
+fn construction_item_label(state: &CoreState, item_id: &str) -> anyhow::Result<String> {
+    let item = state
+        .catalog
+        .items
+        .get(item_id)
+        .ok_or_else(|| anyhow!("native construction-center item directory is unknown"))?;
+    construction_catalog_label(&item.name, "item name")
+}
+
+fn construction_named_quantity_rows(
+    state: &CoreState,
+    value: Option<&Value>,
+    limit: usize,
+    label: &str,
+) -> anyhow::Result<Value> {
+    let entries = match value {
+        None => Vec::new(),
+        Some(value) => value
+            .as_object()
+            .ok_or_else(|| anyhow!("native construction-center {label} is invalid"))?
+            .iter()
+            .map(|(item_id, amount)| {
+                if !valid_opaque_id(item_id) {
+                    bail!("native construction-center {label} item ID is invalid");
+                }
+                let name = construction_item_label(state, item_id)?;
+                let amount = construction_safe_amount(Some(amount), label)?;
+                Ok((item_id.to_owned(), name, amount))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?,
+    };
+    let mut entries = entries
+        .into_iter()
+        .filter(|(_, _, amount)| *amount > 0)
+        .collect::<Vec<_>>();
+    entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let total_count = entries.len();
+    let total_amount = entries.iter().try_fold(0_u64, |total, (_, _, amount)| {
+        total
+            .checked_add(*amount)
+            .filter(|total| *total <= MAX_JAVASCRIPT_SAFE_INTEGER)
+            .ok_or_else(|| anyhow!("native construction-center {label} total is invalid"))
+    })?;
+    let rows = entries
+        .into_iter()
+        .take(limit)
+        .map(|(item_id, name, amount)| json!({ "itemId": item_id, "name": name, "amount": amount }))
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "rows": rows,
+        "totalCount": total_count,
+        "totalAmount": total_amount,
+        "truncated": total_count > limit,
+    }))
+}
+
+const BUILT_IN_CONSTRUCTION_TARGETS: &[(&str, &str, &str)] = &[
+    ("wind_turbine", "风力涡轮机", "power"),
+    ("solar_panel", "太阳能板", "power"),
+    ("geothermal_power_station", "地热发电站", "power"),
+    ("thermal_power_plant", "火力发电厂", "power"),
+    ("mini_fusion_power_plant", "微型聚变发电站", "power"),
+    ("artificial_star", "人造恒星", "power"),
+    ("accumulator", "蓄电器", "power"),
+    ("energy_exchanger", "能量枢纽", "power"),
+    ("mining_machine", "采矿机", "production"),
+    ("arc_smelter", "电弧熔炉", "production"),
+    ("plane_smelter", "位面熔炉", "production"),
+    ("assembling_machine_mk1", "制造台 Mk.I", "production"),
+    ("assembling_machine_mk2", "制造台 Mk.II", "production"),
+    ("assembling_machine_mk3", "制造台 Mk.III", "production"),
+    ("spray_coater", "喷涂机", "production"),
+    ("matrix_lab", "矩阵研究站", "production"),
+    ("oil_extractor", "原油萃取站", "production"),
+    ("oil_refinery", "原油精炼厂", "production"),
+    ("water_pump", "抽水站", "production"),
+    ("chemical_plant", "化工厂", "production"),
+    ("quantum_chemical_plant", "量子化工厂", "production"),
+    ("fractionator", "分馏塔", "production"),
+    (
+        "miniature_particle_collider",
+        "微型粒子对撞机",
+        "production",
+    ),
+    ("construction_center", "建筑制造中心", "production"),
+    ("conveyor_belt_mk1", "传送带 Mk.I", "logistics"),
+    ("conveyor_belt_mk2", "传送带 Mk.II", "logistics"),
+    ("conveyor_belt_mk3", "传送带 Mk.III", "logistics"),
+    ("storage_mk1", "小型储物仓", "logistics"),
+    ("material_delivery_hub", "物资配送枢纽", "logistics"),
+    ("orbital_cargo_terminal", "轨道货运终端", "logistics"),
+    ("splitter_4way", "四向分流器", "logistics"),
+    ("storage_tank", "储液罐", "logistics"),
+    ("planetary_logistics_station", "行星物流站", "logistics"),
+    ("interstellar_logistics_station", "星际物流站", "logistics"),
+    (
+        "space_station_construction_launcher",
+        "空间站施工发射平台",
+        "logistics",
+    ),
+    ("orbital_collector", "轨道采集器", "logistics"),
+    ("logistics_drone", "物流运输机", "logistics"),
+    ("logistics_vessel", "物流运输船", "logistics"),
+    ("em_rail_ejector", "电磁轨道弹射器", "dyson"),
+    ("vertical_launching_silo", "垂直发射井", "dyson"),
+    ("ray_receiver", "射线接收站", "dyson"),
+    ("galactic_material_exporter", "超大型物资出口", "dyson"),
+    ("micro_black_hole_connector", "微型黑洞连接装置", "dyson"),
+    ("time_warp_device", "时间扭曲装置", "dyson"),
+];
+
+fn construction_target_metadata(target_id: &str) -> anyhow::Result<(&'static str, &'static str)> {
+    BUILT_IN_CONSTRUCTION_TARGETS
+        .iter()
+        .find(|(id, _, _)| *id == target_id)
+        .map(|(_, name, category)| (*name, *category))
+        .ok_or_else(|| anyhow!("native construction-center target directory is unknown"))
+}
+
+fn construction_target_stock(
+    base: &Map<String, Value>,
+    target_id: &str,
+    fleet: bool,
+) -> anyhow::Result<u64> {
+    let inventory = if fleet {
+        "portableFleet"
+    } else {
+        "construction"
+    };
+    match base
+        .get(inventory)
+        .and_then(Value::as_object)
+        .and_then(|stock| stock.get(target_id))
+    {
+        Some(value) => construction_safe_amount(Some(value), "current stock"),
+        None => Ok(0),
+    }
+}
+
+fn construction_stock_limit(base: &Map<String, Value>) -> u64 {
+    if crate::construction_planner::completed_tech(base, "construction_capacity_2") {
+        100_000_000
+    } else if crate::construction_planner::completed_tech(base, "construction_capacity_1") {
+        500
+    } else {
+        100
+    }
+}
+
+fn construction_cycle_seconds(base: &Map<String, Value>) -> f64 {
+    if crate::construction_planner::completed_tech(base, "construction_capacity_2") {
+        1.0
+    } else if crate::construction_planner::completed_tech(base, "construction_capacity_1") {
+        2.5
+    } else {
+        5.0
+    }
+}
+
+fn native_construction_center_workspace(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    active_planet_id: &str,
+) -> anyhow::Result<Value> {
+    if state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    {
+        return Ok(Value::Null);
+    }
+    let active_planet = state
+        .catalog
+        .planets
+        .iter()
+        .find(|planet| planet.id == active_planet_id)
+        .ok_or_else(|| anyhow!("native construction-center active planet is missing"))?;
+    let active_planet_name = construction_catalog_label(&active_planet.name, "planet name")?;
+    let automation = base
+        .get("constructionAutomation")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native construction-center automation state is missing"))?;
+    let enabled = automation
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("native construction-center enabled state is invalid"))?;
+    let quantum_source_enabled = match automation.get("quantumSourceEnabled") {
+        None => false,
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(_) => bail!("native construction-center quantum source state is invalid"),
+    };
+    let paused = base
+        .get("paused")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("native construction-center pause state is invalid"))?;
+
+    let targets = crate::construction_planner::targets(state);
+    let target_ids = targets
+        .iter()
+        .map(|target| target.id.as_str())
+        .collect::<HashSet<_>>();
+    let target_stock = automation
+        .get("targetStock")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native construction-center target stock is invalid"))?;
+    if target_stock
+        .keys()
+        .any(|target_id| !target_ids.contains(target_id.as_str()))
+    {
+        bail!("native construction-center target stock contains an unknown target");
+    }
+    let mut target_names = HashMap::<String, String>::new();
+    let mut target_rows = Vec::with_capacity(targets.len().min(MAX_TARGET_ROWS));
+    for target in &targets {
+        let (built_in_name, category) = construction_target_metadata(&target.id)?;
+        let (kind, costs) = match &target.kind {
+            crate::construction_planner::TargetKind::Building => {
+                let definition = state.catalog.constructions.get(&target.id).ok_or_else(|| {
+                    anyhow!("native construction-center construction directory is stale")
+                })?;
+                ("building", definition.costs.as_slice())
+            }
+            crate::construction_planner::TargetKind::Fleet { recipe_id } => {
+                let recipe =
+                    state.catalog.recipes.get(recipe_id).ok_or_else(|| {
+                        anyhow!("native construction-center fleet recipe is missing")
+                    })?;
+                let item_name = construction_item_label(state, &target.id)?;
+                if item_name != built_in_name {
+                    bail!("native construction-center fleet item directory is stale");
+                }
+                ("fleet", recipe.inputs.as_slice())
+            }
+        };
+        let name = construction_catalog_label(built_in_name, "target name")?;
+        let required_tech = match target.required_tech_id.as_deref() {
+            None => (Value::Null, Value::Null),
+            Some(tech_id) => {
+                let technology = state.catalog.technologies.get(tech_id).ok_or_else(|| {
+                    anyhow!("native construction-center technology directory is stale")
+                })?;
+                (
+                    Value::from(tech_id.to_owned()),
+                    Value::from(construction_catalog_label(
+                        &technology.name,
+                        "technology name",
+                    )?),
+                )
+            }
+        };
+        let mut cost_rows = Vec::with_capacity(costs.len().min(MAX_CONSTRUCTION_COST_ROWS));
+        for cost in costs {
+            cost_rows.push(json!({
+                "itemId": cost.item_id,
+                "name": construction_item_label(state, &cost.item_id)?,
+                "amount": construction_catalog_amount(cost.amount, "target cost")?,
+            }));
+        }
+        let desired = match target_stock.get(&target.id) {
+            Some(value) => construction_safe_amount(Some(value), "target stock")?,
+            None => 0,
+        };
+        let fleet = matches!(
+            target.kind,
+            crate::construction_planner::TargetKind::Fleet { .. }
+        );
+        let current_stock = construction_target_stock(base, &target.id, fleet)?;
+        let output_amount = construction_catalog_amount(target.output_amount, "target output")?;
+        target_names.insert(target.id.clone(), name.clone());
+        target_rows.push(json!({
+            "targetId": target.id,
+            "name": name,
+            "kind": kind,
+            "category": category,
+            "target": desired,
+            "currentStock": current_stock,
+            "unlocked": crate::construction_planner::target_is_unlocked(base, target),
+            "requiredTechId": required_tech.0,
+            "requiredTechName": required_tech.1,
+            "outputAmount": output_amount,
+            "costs": rows_model(cost_rows, costs.len(), MAX_CONSTRUCTION_COST_ROWS),
+        }));
+    }
+
+    let raw_jobs = automation
+        .get("jobs")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native construction-center jobs are invalid"))?;
+    let mut all_center_ids = HashSet::<String>::new();
+    let mut active_center_ids = HashSet::<String>::new();
+    let mut center_rows = Vec::<Value>::new();
+    for index in &state.factory_topology.construction_center_indices {
+        let entity = state.parse_entity(*index)?;
+        let entity = entity
+            .as_object()
+            .ok_or_else(|| anyhow!("native construction-center entity is invalid"))?;
+        if entity.get("buildingId").and_then(Value::as_str) != Some("construction_center") {
+            bail!("native construction-center topology is stale");
+        }
+        let entity_id = entity
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| valid_opaque_id(id))
+            .ok_or_else(|| anyhow!("native construction-center entity ID is invalid"))?;
+        let planet_id = entity
+            .get("planetId")
+            .and_then(Value::as_str)
+            .filter(|id| valid_opaque_id(id))
+            .ok_or_else(|| anyhow!("native construction-center entity planet is invalid"))?;
+        all_center_ids.insert(entity_id.to_owned());
+        if planet_id == active_planet_id {
+            active_center_ids.insert(entity_id.to_owned());
+            let status = if paused {
+                "game-paused"
+            } else if !enabled {
+                "automation-paused"
+            } else if raw_jobs.contains_key(entity_id) {
+                "working"
+            } else {
+                "idle"
+            };
+            center_rows.push(json!({
+                "entityId": entity_id,
+                "planetId": planet_id,
+                "planetName": active_planet_name,
+                "machineCount": required_safe_integer(
+                    entity.get("machineCount"),
+                    "construction center machine count",
+                    MAX_JAVASCRIPT_SAFE_INTEGER,
+                )?,
+                "status": status,
+            }));
+        }
+    }
+    center_rows.sort_by(|left, right| left["entityId"].as_str().cmp(&right["entityId"].as_str()));
+
+    let mut job_entries = raw_jobs.iter().collect::<Vec<_>>();
+    job_entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    let mut job_rows = Vec::<Value>::new();
+    for (entity_id, value) in job_entries {
+        if !all_center_ids.contains(entity_id) {
+            bail!("native construction-center job refers to an unknown center");
+        }
+        let job = value
+            .as_object()
+            .ok_or_else(|| anyhow!("native construction-center job is invalid"))?;
+        let target_id = job
+            .get("constructionId")
+            .and_then(Value::as_str)
+            .filter(|target_id| target_ids.contains(*target_id))
+            .ok_or_else(|| anyhow!("native construction-center job target is unknown"))?;
+        let step_index = construction_safe_amount(job.get("stepIndex"), "job step index")?;
+        let steps = job
+            .get("steps")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("native construction-center job steps are invalid"))?;
+        if step_index as usize > steps.len() {
+            bail!("native construction-center job step binding is invalid");
+        }
+        let elapsed_seconds = job
+            .get("elapsedSeconds")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .ok_or_else(|| anyhow!("native construction-center job elapsed time is invalid"))?;
+        let inventory = construction_named_quantity_rows(
+            state,
+            job.get("inventory"),
+            MAX_CONSTRUCTION_MATERIAL_ROWS,
+            "job inventory",
+        )?;
+        if active_center_ids.contains(entity_id) {
+            job_rows.push(json!({
+                "entityId": entity_id,
+                "targetId": target_id,
+                "targetName": target_names.get(target_id).ok_or_else(|| anyhow!("native construction-center job name is missing"))?,
+                "stepIndex": step_index,
+                "stepCount": steps.len(),
+                "elapsedSeconds": elapsed_seconds,
+                "inventory": inventory,
+            }));
+        }
+    }
+
+    let quantum_buffers = match automation.get("quantumMaterialBuffer") {
+        None => None,
+        Some(Value::Object(buffers)) => Some(buffers),
+        Some(_) => bail!("native construction-center quantum buffer directory is invalid"),
+    };
+    let mut quantum_rows = Vec::<Value>::new();
+    let mut quantum_total_amount = 0_u64;
+    if let Some(buffers) = quantum_buffers {
+        let mut entries = buffers.iter().collect::<Vec<_>>();
+        entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        for (entity_id, inventory) in entries {
+            if !all_center_ids.contains(entity_id) {
+                bail!("native construction-center quantum buffer refers to an unknown center");
+            }
+            let inventory = inventory
+                .as_object()
+                .ok_or_else(|| anyhow!("native construction-center quantum buffer is invalid"))?;
+            let mut items = inventory.iter().collect::<Vec<_>>();
+            items.sort_unstable_by(|left, right| left.0.cmp(right.0));
+            for (item_id, amount) in items {
+                let name = construction_item_label(state, item_id)?;
+                let amount = construction_safe_amount(Some(amount), "quantum buffer amount")?;
+                if active_center_ids.contains(entity_id) && amount > 0 {
+                    quantum_total_amount = quantum_total_amount
+                        .checked_add(amount)
+                        .filter(|total| *total <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                        .ok_or_else(|| {
+                            anyhow!("native construction-center quantum buffer total is invalid")
+                        })?;
+                    quantum_rows.push(json!({
+                        "entityId": entity_id,
+                        "itemId": item_id,
+                        "name": name,
+                        "amount": amount,
+                    }));
+                }
+            }
+        }
+    }
+    let quantum_total_count = quantum_rows.len();
+    let quantum_buffer = json!({
+        "rows": quantum_rows.into_iter().take(MAX_CONSTRUCTION_QUANTUM_BUFFER_ROWS).collect::<Vec<_>>(),
+        "totalCount": quantum_total_count,
+        "totalAmount": quantum_total_amount,
+        "truncated": quantum_total_count > MAX_CONSTRUCTION_QUANTUM_BUFFER_ROWS,
+    });
+
+    let materials = construction_named_quantity_rows(
+        state,
+        base.get("tray"),
+        MAX_CONSTRUCTION_MATERIAL_ROWS,
+        "active planet materials",
+    )?;
+    let destroyed_byproducts = construction_named_quantity_rows(
+        state,
+        automation.get("destroyedByproducts"),
+        MAX_CONSTRUCTION_DESTROYED_BYPRODUCT_ROWS,
+        "destroyed byproducts",
+    )?;
+    let total_crafted = construction_safe_amount(automation.get("totalCrafted"), "total crafted")?;
+    let (last_crafted_id, last_crafted_name) = match automation.get("lastCraftedId") {
+        None | Some(Value::Null) => (Value::Null, Value::Null),
+        Some(value) => {
+            let id = value
+                .as_str()
+                .filter(|id| target_ids.contains(*id))
+                .ok_or_else(|| {
+                    anyhow!("native construction-center last crafted target is unknown")
+                })?;
+            (
+                Value::from(id.to_owned()),
+                Value::from(
+                    target_names
+                        .get(id)
+                        .ok_or_else(|| {
+                            anyhow!("native construction-center last crafted name is missing")
+                        })?
+                        .clone(),
+                ),
+            )
+        }
+    };
+    let quantum_network_enabled = match base.get("quantumLogisticsNetwork") {
+        None => false,
+        Some(Value::Object(network)) => match network.get("enabled") {
+            None => false,
+            Some(Value::Bool(enabled)) => *enabled,
+            Some(_) => bail!("native construction-center quantum network state is invalid"),
+        },
+        Some(_) => bail!("native construction-center quantum network directory is invalid"),
+    };
+    let cycle_seconds = construction_cycle_seconds(base);
+    let target_total = target_rows.len();
+    let center_total = center_rows.len();
+    let job_total = job_rows.len();
+    Ok(json!({
+        "schema": "construction-center-workspace-v1",
+        "registryFingerprint": EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        "readOnly": true,
+        "activePlanetId": active_planet_id,
+        "activePlanetName": active_planet_name,
+        "paused": paused,
+        "enabled": enabled,
+        "quantumSourceEnabled": quantum_source_enabled,
+        "quantumNetworkEnabled": quantum_network_enabled,
+        "totalCrafted": total_crafted,
+        "lastCraftedId": last_crafted_id,
+        "lastCraftedName": last_crafted_name,
+        "stockLimit": construction_stock_limit(base),
+        "cycleSeconds": cycle_seconds,
+        "materialSeconds": cycle_seconds / 50.0,
+        "targets": rows_model(target_rows, target_total, MAX_TARGET_ROWS),
+        "centers": rows_model(center_rows, center_total, MAX_CONSTRUCTION_CENTER_ROWS),
+        "jobs": rows_model(job_rows, job_total, MAX_JOB_ROWS),
+        "materials": materials,
+        "quantumBuffer": quantum_buffer,
+        "destroyedByproducts": destroyed_byproducts,
+        "limits": {
+            "targetRows": MAX_TARGET_ROWS,
+            "centerRows": MAX_CONSTRUCTION_CENTER_ROWS,
+            "jobRows": MAX_JOB_ROWS,
+            "materialRows": MAX_CONSTRUCTION_MATERIAL_ROWS,
+            "quantumBufferRows": MAX_CONSTRUCTION_QUANTUM_BUFFER_ROWS,
+            "destroyedByproductRows": MAX_CONSTRUCTION_DESTROYED_BYPRODUCT_ROWS,
+            "costRowsPerTarget": MAX_CONSTRUCTION_COST_ROWS,
+            "projectionBytes": MAX_PROJECTION_BYTES,
+        },
+    }))
+}
+
 impl CoreState {
     /// Produces the complete bounded shell/selection/construction contract
     /// needed by a thin desktop renderer. The result is read-only and bound to
@@ -773,6 +1319,11 @@ impl CoreState {
             "schema": READ_MODEL_SCHEMA,
             "activePlanetId": active_planet_id,
             "queue": construction_queue(base),
+            // Construction-center data is an optional, built-in-only slice.
+            // Any malformed/unknown catalog or state directory closes only
+            // that slice instead of weakening the rest of the factory atom.
+            "nativeCenterWorkspace": native_construction_center_workspace(self, base, active_planet_id)
+                .unwrap_or(Value::Null),
             "automation": {
                 "enabled": automation.and_then(|value| value.get("enabled")).and_then(Value::as_bool).unwrap_or(false),
                 "quantumSourceEnabled": automation.and_then(|value| value.get("quantumSourceEnabled")).and_then(Value::as_bool).unwrap_or(false),
@@ -807,8 +1358,8 @@ mod tests {
 
     use super::*;
     use crate::catalog::{
-        BeltDefinition, BuildingDefinition, CatalogSnapshot, ItemDefinition, PlanetDefinition,
-        RuntimeCatalog,
+        BeltDefinition, BuildingDefinition, CatalogSnapshot, ConstructionDefinition, ItemAmount,
+        ItemDefinition, PlanetDefinition, RecipeDefinition, RuntimeCatalog, TechnologyDefinition,
     };
     use crate::state::CoreCheckpointIdentity;
 
@@ -1002,6 +1553,198 @@ mod tests {
         .unwrap()
     }
 
+    fn construction_center_state(registry_fingerprint: &str, unknown_target: bool) -> CoreState {
+        let catalog = RuntimeCatalog::validate(
+            CatalogSnapshot {
+                protocol_version: 1,
+                registry_fingerprint: registry_fingerprint.to_owned(),
+                planets: vec![PlanetDefinition {
+                    id: "home".to_owned(),
+                    name: "家园星".to_owned(),
+                    system_id: "helios".to_owned(),
+                    kind: "terrestrial".to_owned(),
+                    orbit_index: 1,
+                    simulation_order: 0,
+                    orbital_yields: HashMap::new(),
+                }],
+                items: vec![
+                    ItemDefinition {
+                        id: "iron_ore".to_owned(),
+                        name: "铁矿石".to_owned(),
+                        kind: "solid".to_owned(),
+                        fuel_energy_mj: 0.0,
+                    },
+                    ItemDefinition {
+                        id: "logistics_drone".to_owned(),
+                        name: "物流运输机".to_owned(),
+                        kind: "solid".to_owned(),
+                        fuel_energy_mj: 0.0,
+                    },
+                ],
+                buildings: vec![BuildingDefinition {
+                    id: "construction_center".to_owned(),
+                    kind: "machine".to_owned(),
+                    speed: 1.0,
+                    input_capacity: 0.0,
+                    output_capacity: 0.0,
+                    power_demand_kw: 0.0,
+                    power_generation_kw: 0.0,
+                    power_charge_kw: 0.0,
+                    energy_capacity_mj: 0.0,
+                    fuel_item_ids: Vec::new(),
+                    fuel_efficiency: 1.0,
+                    family: None,
+                    accepts: None,
+                }],
+                recipes: vec![RecipeDefinition {
+                    id: "logistics_drone".to_owned(),
+                    name: "物流运输机".to_owned(),
+                    building_id: "construction_center".to_owned(),
+                    duration: 4.0,
+                    required_tech_id: Some("planetary_logistics".to_owned()),
+                    recursive_priority: 0.0,
+                    recursive_manufacturing: false,
+                    inputs: vec![ItemAmount {
+                        item_id: "iron_ore".to_owned(),
+                        amount: 2.0,
+                    }],
+                    outputs: vec![ItemAmount {
+                        item_id: "logistics_drone".to_owned(),
+                        amount: 1.0,
+                    }],
+                }],
+                constructions: vec![ConstructionDefinition {
+                    id: "wind_turbine".to_owned(),
+                    output_amount: 1.0,
+                    automation_order: 0,
+                    required_tech_id: Some("electromagnetism".to_owned()),
+                    costs: vec![ItemAmount {
+                        item_id: "iron_ore".to_owned(),
+                        amount: 6.0,
+                    }],
+                }],
+                belts: Vec::new(),
+                proliferators: Vec::new(),
+                technologies: vec![
+                    TechnologyDefinition {
+                        id: "electromagnetism".to_owned(),
+                        name: "电磁学".to_owned(),
+                        costs: vec![ItemAmount {
+                            item_id: "iron_ore".to_owned(),
+                            amount: 1.0,
+                        }],
+                        prerequisites: Vec::new(),
+                        construction_rewards: vec!["wind_turbine".to_owned()],
+                    },
+                    TechnologyDefinition {
+                        id: "planetary_logistics".to_owned(),
+                        name: "行星物流".to_owned(),
+                        costs: vec![ItemAmount {
+                            item_id: "iron_ore".to_owned(),
+                            amount: 1.0,
+                        }],
+                        prerequisites: Vec::new(),
+                        construction_rewards: Vec::new(),
+                    },
+                ],
+            },
+            registry_fingerprint,
+        )
+        .unwrap();
+        let target_stock = if unknown_target {
+            json!({ "wind_turbine": 50, "logistics_drone": 10, "MOD/unknown": 1 })
+        } else {
+            json!({ "wind_turbine": 50, "logistics_drone": 10 })
+        };
+        let base = json!({
+            "version": 47,
+            "mode": "normal",
+            "activePlanetId": "home",
+            "elapsedSeconds": 12,
+            "paused": false,
+            "settings": { "simulationSpeed": 1 },
+            "timeWarp": {
+                "controllerEntityId": null,
+                "enabled": false,
+                "requestedMultiplier": 1,
+                "effectiveMultiplier": 1,
+                "requiredPowerKw": 0,
+                "allocatedPowerKw": 0
+            },
+            "research": { "completedTechIds": ["electromagnetism", "planetary_logistics"] },
+            "exploration": { "unlockedSystemIds": ["helios"], "colonizedPlanetIds": ["home"] },
+            "galaxy": { "planetMetadata": {}, "planetRoles": {} },
+            "planetMetrics": { "home": { "powerFactor": 1 } },
+            "constructionQueue": [],
+            "construction": { "wind_turbine": 41 },
+            "portableFleet": { "logistics_drone": 7, "logistics_vessel": 0 },
+            "tray": { "iron_ore": 123 },
+            "planetTrays": {},
+            "orbitalStation": { "status": "eligible" },
+            "quantumLogisticsNetwork": { "enabled": true, "inventory": {} },
+            "constructionAutomation": {
+                "enabled": true,
+                "quantumSourceEnabled": true,
+                "totalCrafted": 3,
+                "lastCraftedId": "wind_turbine",
+                "targetStock": target_stock,
+                "destroyedByproducts": { "iron_ore": 3 },
+                "quantumMaterialBuffer": { "center-a": { "iron_ore": 4 } },
+                "jobs": {
+                    "center-a": {
+                        "constructionId": "wind_turbine",
+                        "stepIndex": 1,
+                        "steps": [
+                            { "kind": "material", "recipeId": "iron", "batches": 1, "outputItemId": "iron_ore", "outputAmount": 1 },
+                            { "kind": "building", "constructionId": "wind_turbine" }
+                        ],
+                        "elapsedSeconds": 0.5,
+                        "inventory": { "iron_ore": 2 }
+                    }
+                }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let entities = vec![
+            json!({
+                "id": "center-a",
+                "kind": "machine",
+                "planetId": "home",
+                "position": { "x": 5, "y": 6 },
+                "interactionLocked": false,
+                "buildingId": "construction_center",
+                "recipeId": null,
+                "machineCount": 2,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "utilization": 0,
+                "productionRate": 0
+            })
+            .to_string(),
+        ];
+        CoreState::from_public_v47_parts(
+            CoreCheckpointIdentity {
+                slot: "normal-main".to_owned(),
+                generation: 1,
+                root_hash: "c".repeat(64),
+                revision: 19,
+                state_version: 47,
+                mode: "normal".to_owned(),
+                registry_fingerprint: registry_fingerprint.to_owned(),
+                base_primary_checksum: "12345678".to_owned(),
+            },
+            base,
+            entities,
+            Vec::new(),
+            catalog,
+        )
+        .unwrap()
+    }
+
     fn state() -> CoreState {
         let base = json!({
             "version": 47,
@@ -1183,6 +1926,129 @@ mod tests {
     }
 
     #[test]
+    fn built_in_construction_center_projection_is_named_bounded_and_stock_correct() {
+        let state = construction_center_state(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, false);
+        let before = state.summary().unwrap().canonical_sha256;
+        let projection = state.factory_read_model_projection(&[], &[]).unwrap();
+        let workspace = &projection["construction"]["nativeCenterWorkspace"];
+        assert_eq!(workspace["schema"], "construction-center-workspace-v1");
+        assert_eq!(
+            workspace["registryFingerprint"],
+            EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        );
+        assert_eq!(workspace["readOnly"], true);
+        assert_eq!(workspace["activePlanetId"], "home");
+        assert_eq!(workspace["activePlanetName"], "家园星");
+        assert_eq!(workspace["limits"]["targetRows"], MAX_TARGET_ROWS);
+        assert_eq!(
+            workspace["limits"]["centerRows"],
+            MAX_CONSTRUCTION_CENTER_ROWS
+        );
+        assert_eq!(
+            workspace["limits"]["materialRows"],
+            MAX_CONSTRUCTION_MATERIAL_ROWS
+        );
+        assert_eq!(workspace["limits"]["projectionBytes"], MAX_PROJECTION_BYTES);
+        assert_eq!(workspace["targets"]["totalCount"], 2);
+        assert_eq!(workspace["targets"]["truncated"], false);
+        let targets = workspace["targets"]["rows"].as_array().unwrap();
+        let building = targets
+            .iter()
+            .find(|row| row["targetId"] == "wind_turbine")
+            .unwrap();
+        assert_eq!(building["name"], "风力涡轮机");
+        assert_eq!(building["kind"], "building");
+        assert_eq!(building["category"], "power");
+        assert_eq!(building["target"], 50);
+        assert_eq!(building["currentStock"], 41);
+        assert_eq!(building["unlocked"], true);
+        assert_eq!(building["requiredTechName"], "电磁学");
+        assert_eq!(building["outputAmount"], 1);
+        assert_eq!(building["costs"]["rows"][0]["name"], "铁矿石");
+        let fleet = targets
+            .iter()
+            .find(|row| row["targetId"] == "logistics_drone")
+            .unwrap();
+        assert_eq!(fleet["name"], "物流运输机");
+        assert_eq!(fleet["kind"], "fleet");
+        assert_eq!(fleet["category"], "logistics");
+        assert_eq!(fleet["target"], 10);
+        assert_eq!(fleet["currentStock"], 7);
+        assert_eq!(workspace["centers"]["totalCount"], 1);
+        assert_eq!(workspace["centers"]["rows"][0]["status"], "working");
+        assert_eq!(workspace["centers"]["rows"][0]["machineCount"], 2);
+        assert_eq!(workspace["jobs"]["rows"][0]["targetName"], "风力涡轮机");
+        assert_eq!(workspace["jobs"]["rows"][0]["inventory"]["totalAmount"], 2);
+        assert_eq!(workspace["materials"]["totalAmount"], 123);
+        assert_eq!(workspace["quantumBuffer"]["totalAmount"], 4);
+        assert_eq!(workspace["destroyedByproducts"]["totalAmount"], 3);
+        assert!(serde_json::to_vec(&projection).unwrap().len() <= MAX_PROJECTION_BYTES);
+        assert_eq!(state.summary().unwrap().canonical_sha256, before);
+    }
+
+    #[test]
+    fn construction_center_workspace_fails_closed_for_mod_or_unknown_directories() {
+        for state in [
+            construction_center_state("content-pack:mod", false),
+            construction_center_state(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, true),
+        ] {
+            let before = state.summary().unwrap().canonical_sha256;
+            let projection = state.factory_read_model_projection(&[], &[]).unwrap();
+            assert!(projection["construction"]["nativeCenterWorkspace"].is_null());
+            assert_eq!(state.summary().unwrap().canonical_sha256, before);
+        }
+    }
+
+    #[test]
+    fn construction_center_workspace_fails_closed_for_present_invalid_state_fields() {
+        for malformed_field in [
+            "paused",
+            "quantum-source-enabled",
+            "quantum-buffer-directory",
+            "quantum-network-directory",
+            "quantum-network-enabled",
+        ] {
+            let mut state =
+                construction_center_state(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, false);
+            let base = state.base_value_mut();
+            match malformed_field {
+                "paused" => {
+                    base.insert("paused".to_owned(), Value::from("invalid"));
+                }
+                "quantum-source-enabled" => {
+                    base.get_mut("constructionAutomation")
+                        .and_then(Value::as_object_mut)
+                        .unwrap()
+                        .insert("quantumSourceEnabled".to_owned(), Value::from("invalid"));
+                }
+                "quantum-buffer-directory" => {
+                    base.get_mut("constructionAutomation")
+                        .and_then(Value::as_object_mut)
+                        .unwrap()
+                        .insert("quantumMaterialBuffer".to_owned(), json!([]));
+                }
+                "quantum-network-directory" => {
+                    base.insert("quantumLogisticsNetwork".to_owned(), json!([]));
+                }
+                "quantum-network-enabled" => {
+                    base.get_mut("quantumLogisticsNetwork")
+                        .and_then(Value::as_object_mut)
+                        .unwrap()
+                        .insert("enabled".to_owned(), Value::from("invalid"));
+                }
+                _ => unreachable!(),
+            }
+            let before = state.summary().unwrap().canonical_sha256;
+            let projection = state.factory_read_model_projection(&[], &[]).unwrap();
+            assert!(
+                projection["construction"]["nativeCenterWorkspace"].is_null(),
+                "{malformed_field}"
+            );
+            assert_eq!(state.summary().unwrap().canonical_sha256, before);
+        }
+    }
+
+    #[test]
     fn factory_projection_rejects_unbounded_or_invalid_selectors_without_mutation() {
         let state = state();
         let before = state.summary().unwrap().canonical_sha256;
@@ -1282,14 +2148,10 @@ mod tests {
         assert_eq!(options["truncated"], true);
         assert_eq!(rows.len(), MAX_STATION_ITEM_OPTIONS);
         assert_eq!(rows[0]["itemId"], "a_item_000");
-        assert_eq!(
-            rows[MAX_STATION_ITEM_OPTIONS - 1]["itemId"],
-            "a_item_127"
-        );
+        assert_eq!(rows[MAX_STATION_ITEM_OPTIONS - 1]["itemId"], "a_item_127");
         assert!(rows.iter().all(|row| row["itemId"] != "iron_ore"));
         assert_eq!(
-            first["selection"]["entityRows"]["rows"][0]["stationConfiguration"]["slots"]
-                [2]["itemId"],
+            first["selection"]["entityRows"]["rows"][0]["stationConfiguration"]["slots"][2]["itemId"],
             "iron_ore"
         );
         assert!(rows.windows(2).all(|pair| {

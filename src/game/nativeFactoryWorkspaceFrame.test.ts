@@ -7,6 +7,44 @@ import { selectNativeAuthoritativeFactoryWorkspaceFrame } from "./nativeFactoryW
 import type { NativeFactoryThinViewSnapshot } from "./nativeFactoryThinViewStore";
 
 const emptyRows = <Row>(rows: Row[] = []) => ({ rows, totalCount: rows.length, truncated: false });
+const emptyNativeRows = () => ({ rows: [] as never[], totalCount: 0, truncated: false });
+const emptyQuantityRows = () => ({ rows: [] as never[], totalCount: 0, totalAmount: 0, truncated: false });
+
+function nativeCenterWorkspace() {
+  return {
+    schema: "construction-center-workspace-v1" as const,
+    registryFingerprint: "7df8cf3a" as const,
+    readOnly: true as const,
+    activePlanetId: "home",
+    activePlanetName: "家园星",
+    paused: false,
+    enabled: true,
+    quantumSourceEnabled: true,
+    quantumNetworkEnabled: true,
+    totalCrafted: 0,
+    lastCraftedId: null,
+    lastCraftedName: null,
+    stockLimit: 100,
+    cycleSeconds: 5,
+    materialSeconds: 0.1,
+    targets: emptyNativeRows(),
+    centers: emptyNativeRows(),
+    jobs: emptyNativeRows(),
+    materials: emptyQuantityRows(),
+    quantumBuffer: emptyQuantityRows(),
+    destroyedByproducts: emptyQuantityRows(),
+    limits: {
+      targetRows: 128 as const,
+      centerRows: 64 as const,
+      jobRows: 64 as const,
+      materialRows: 256 as const,
+      quantumBufferRows: 256 as const,
+      destroyedByproductRows: 256 as const,
+      costRowsPerTarget: 32 as const,
+      projectionBytes: 1048576 as const,
+    },
+  };
+}
 
 function factory(revision = 17): DesktopNativeCoreFactoryReadModelResult {
   return {
@@ -66,6 +104,7 @@ function factory(revision = 17): DesktopNativeCoreFactoryReadModelResult {
     construction: {
       schema: "factory-read-model-v1",
       activePlanetId: "home",
+      nativeCenterWorkspace: null,
       queue: emptyRows([{
         queueId: "queue-1",
         blueprintId: "blueprint-1",
@@ -125,6 +164,7 @@ function snapshot(overrides: Partial<NativeFactoryThinViewSnapshot> = {}): Nativ
       revision: 17,
       planetId: "home",
       authoritySessionId: "authority-1",
+      authorityRunId: "run-1",
       factory: factory(),
       viewport: viewport(),
     },
@@ -135,6 +175,7 @@ function snapshot(overrides: Partial<NativeFactoryThinViewSnapshot> = {}): Nativ
 const binding = {
   enabled: true,
   sessionId: "authority-1",
+  runId: "run-1",
   expectedRevision: 17,
   activePlanetId: "home",
 } as const;
@@ -145,6 +186,7 @@ describe("native authoritative factory workspace frame", () => {
     expect(result).toMatchObject({
       source: "native-authoritative",
       sessionId: "authority-1",
+      runId: "run-1",
       revision: 17,
       simulationSpeed: 1,
       runStatus: { source: "native-core", paused: false },
@@ -159,6 +201,10 @@ describe("native authoritative factory workspace frame", () => {
     expect(selectNativeAuthoritativeFactoryWorkspaceFrame(snapshot(), {
       ...binding,
       sessionId: "authority-2",
+    })).toBeNull();
+    expect(selectNativeAuthoritativeFactoryWorkspaceFrame(snapshot(), {
+      ...binding,
+      runId: "run-2",
     })).toBeNull();
     expect(selectNativeAuthoritativeFactoryWorkspaceFrame(snapshot({ requestedRevision: 16 }), binding)).toBeNull();
     expect(selectNativeAuthoritativeFactoryWorkspaceFrame(snapshot(), {
@@ -211,6 +257,30 @@ describe("native authoritative factory workspace frame", () => {
     };
     expect(selectNativeAuthoritativeFactoryWorkspaceFrame(snapshot({
       frame: { ...snapshot().frame!, factory: missingActiveFactory },
+    }), binding)).toBeNull();
+  });
+
+  it("accepts only the exact built-in construction-center directory", () => {
+    const completeFactory = factory();
+    const withWorkspace = {
+      ...completeFactory,
+      construction: {
+        ...completeFactory.construction,
+        nativeCenterWorkspace: nativeCenterWorkspace(),
+      },
+    };
+    expect(selectNativeAuthoritativeFactoryWorkspaceFrame(snapshot({
+      frame: { ...snapshot().frame!, factory: withWorkspace },
+    }), binding)?.constructionWorkspace.nativeCenterWorkspace).toMatchObject({
+      registryFingerprint: "7df8cf3a",
+      readOnly: true,
+      activePlanetId: "home",
+    });
+
+    const forged = structuredClone(withWorkspace);
+    forged.construction.nativeCenterWorkspace!.registryFingerprint = "MOD/forged" as "7df8cf3a";
+    expect(selectNativeAuthoritativeFactoryWorkspaceFrame(snapshot({
+      frame: { ...snapshot().frame!, factory: forged },
     }), binding)).toBeNull();
   });
 });

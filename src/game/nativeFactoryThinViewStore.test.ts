@@ -49,6 +49,7 @@ function factoryProjection(revision: number, planetId = "planet-a"): DesktopNati
       schema: "factory-read-model-v1",
       activePlanetId: planetId,
       queue: { rows: [], totalCount: 0, truncated: false },
+      nativeCenterWorkspace: null,
       automation: {
         enabled: false,
         quantumSourceEnabled: false,

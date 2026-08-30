@@ -16,6 +16,7 @@ import {
   createNativeProjectedResumeResearchCommand,
   createNativeProjectedSelectInfiniteResearchCommand,
   createNativeProjectedSelectTechnologyCommand,
+  createNativeProjectedTechnologyLayoutCommand,
 } from "./nativeProjectedTechnologyCommands";
 
 function projection(
@@ -251,6 +252,33 @@ describe("native projected technology commands", () => {
       projection: projection({ completedTechIds: ["gravity_matrix", "research_speed_1"] }),
       enabled: true,
     })).toBeNull();
+  });
+
+  it("persists only a changed standard or compact technology layout leaf", () => {
+    expect(createNativeProjectedTechnologyLayoutCommand({
+      baseRevision: 7,
+      projection: projection(),
+      layout: "standard",
+    })?.topLevelChanges).toEqual([{
+      path: ["settings", "technologyLayout"],
+      operation: "set",
+      value: "standard",
+    }]);
+    expect(createNativeProjectedTechnologyLayoutCommand({
+      baseRevision: 7,
+      projection: projection(),
+      layout: "compact",
+    })).toBeNull();
+    expect(() => createNativeProjectedTechnologyLayoutCommand({
+      baseRevision: 8,
+      projection: projection(),
+      layout: "standard",
+    })).toThrow(/revision/);
+    expect(() => createNativeProjectedTechnologyLayoutCommand({
+      baseRevision: 7,
+      projection: projection(),
+      layout: "expanded" as never,
+    })).toThrow(/布局目标无效/);
   });
 
   it("fails closed on stale, truncated, unknown, completed-boundary, and non-queueable input", () => {

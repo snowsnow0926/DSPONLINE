@@ -9,7 +9,7 @@ import {
   selectNativeTechnologyWorkspaceReadModel,
   type TechnologyWorkspaceReadModel,
 } from "./technologyWorkspaceReadModel";
-import type { InfiniteResearchId, TechId } from "./types";
+import type { InfiniteResearchId, TechnologyLayoutMode, TechId } from "./types";
 
 const COMMAND_PROJECTION_SESSION_ID = "native-technology-command";
 
@@ -38,6 +38,11 @@ export interface NativeProjectedInfiniteResearchAutomationCommandInput
 export interface NativeProjectedSelectInfiniteResearchCommandInput
   extends NativeProjectedTechnologyCommandInput {
   readonly researchId: InfiniteResearchId;
+}
+
+export interface NativeProjectedTechnologyLayoutCommandInput
+  extends NativeProjectedTechnologyCommandInput {
+  readonly layout: TechnologyLayoutMode;
 }
 
 function emptyCommand(baseRevision: number): SimulationCommandPatch {
@@ -252,6 +257,24 @@ export function createNativeProjectedSelectInfiniteResearchCommand(
     path: ["endgame", "activeInfiniteResearchId"],
     operation: "set",
     value: input.researchId,
+  });
+  return command;
+}
+
+/** Persists the technology workspace's visual layout through Rust authority. */
+export function createNativeProjectedTechnologyLayoutCommand(
+  input: NativeProjectedTechnologyLayoutCommandInput,
+): SimulationCommandPatch | null {
+  const readModel = requireExactNativeReadModel(input);
+  if (input.layout !== "standard" && input.layout !== "compact") {
+    throw new TypeError("原生科技树布局目标无效");
+  }
+  if (readModel.settings.technologyLayout === input.layout) return null;
+  const command = emptyCommand(input.baseRevision);
+  command.topLevelChanges.push({
+    path: ["settings", "technologyLayout"],
+    operation: "set",
+    value: input.layout,
   });
   return command;
 }

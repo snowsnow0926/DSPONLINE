@@ -544,6 +544,7 @@ import {
   createNativeProjectedResumeResearchCommand,
   createNativeProjectedSelectInfiniteResearchCommand,
   createNativeProjectedSelectTechnologyCommand,
+  createNativeProjectedTechnologyLayoutCommand,
 } from "./game/nativeProjectedTechnologyCommands";
 import { createNativeProjectedActivePlanetCommand } from "./game/nativeProjectedPlanetNavigationCommands";
 import {
@@ -19159,7 +19160,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             }}
             onLayoutChange={(technologyLayout) => {
               if (nativePlayerAuthorityBoundFrame) {
-                setNotice("原生权威暂未开放科技树布局写入；当前权威状态未改变");
+                const projection = nativeTechnologyCommandProjection;
+                if (!projection) {
+                  setNotice("原生科研投影尚未完成当前 revision 校验；本次操作未应用");
+                  return;
+                }
+                commitNativeProjectedCommand(projection.revision, (baseRevision) =>
+                  createNativeProjectedTechnologyLayoutCommand({
+                    baseRevision,
+                    projection,
+                    layout: technologyLayout,
+                  }));
                 return;
               }
               updateSettings({ technologyLayout });

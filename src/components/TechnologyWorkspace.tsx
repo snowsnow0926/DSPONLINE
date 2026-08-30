@@ -257,8 +257,8 @@ export function TechnologyWorkspace({ open, readModel, nativeAuthorityRequired =
           <span>无限等级 <strong>{Object.values(readModel.infiniteResearch).reduce((sum, progress) => sum + progress.level, 0)}</strong></span>
         </div>
         <div className="technology-layout-toggle" role="group" aria-label="科技树布局">
-          <button className={readModel.settings.technologyLayout === "standard" ? "active" : ""} type="button" disabled={nativeAuthorityRequired} onClick={() => onLayoutChange("standard")} title={nativeAuthorityRequired ? "原生权威暂未开放布局设置写入" : undefined}>标准</button>
-          <button className={readModel.settings.technologyLayout === "compact" ? "active" : ""} type="button" disabled={nativeAuthorityRequired} onClick={() => onLayoutChange("compact")} title={nativeAuthorityRequired ? "原生权威暂未开放布局设置写入" : undefined}>精简</button>
+          <button className={readModel.settings.technologyLayout === "standard" ? "active" : ""} type="button" disabled={nativeCommandPending} onClick={() => onLayoutChange("standard")} title={nativeCommandPending ? "等待上一条原生科研命令确认" : undefined}>标准</button>
+          <button className={readModel.settings.technologyLayout === "compact" ? "active" : ""} type="button" disabled={nativeCommandPending} onClick={() => onLayoutChange("compact")} title={nativeCommandPending ? "等待上一条原生科研命令确认" : undefined}>精简</button>
         </div>
         <button className="technology-close" type="button" onClick={onClose} title="关闭科技树" aria-label="关闭科技树"><X size={18} /></button>
       </header>

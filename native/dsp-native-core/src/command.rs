@@ -287,6 +287,13 @@ fn top_level_change_is_projection_safe(change: &ValuePatch) -> bool {
             if root == "recipeFocus" && matches!(field.as_str(), "itemId" | "mode")
     ) || matches!(
         change.path.as_slice(),
+        [PathSegment::Key(root), PathSegment::Key(field)]
+            if root == "settings"
+                && field == "technologyLayout"
+                && change.operation == "set"
+                && change.value.is_some()
+    ) || matches!(
+        change.path.as_slice(),
         [
             PathSegment::Key(root),
             PathSegment::Key(position),
@@ -4771,14 +4778,15 @@ fn expand_player_research_transition_intent(
     let reset_rows = candidate_entities
         .iter()
         .enumerate()
-        .filter_map(|(index, entity)| {
-            (entity.get("recipeId").and_then(Value::as_str) == Some("matrix_research")).then(|| {
-                (
-                    index,
-                    entity.get("id").and_then(Value::as_str).map(str::to_owned),
-                    entity.get("progress").cloned(),
-                )
-            })
+        .filter(|(_, entity)| {
+            entity.get("recipeId").and_then(Value::as_str) == Some("matrix_research")
+        })
+        .map(|(index, entity)| {
+            (
+                index,
+                entity.get("id").and_then(Value::as_str).map(str::to_owned),
+                entity.get("progress").cloned(),
+            )
         })
         .collect::<Vec<_>>();
     crate::simple_factory::apply_player_research_transition(
@@ -5597,6 +5605,46 @@ fn validate_recipe_focus_command(
     Ok(())
 }
 
+fn validate_technology_layout_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.top_level_changes.len() != 1
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority technology layout command shape is invalid")
+    }
+    if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    {
+        bail!("native player-authority technology layout requires the built-in catalog")
+    }
+    let target = require_exact_set_patch(
+        &command.top_level_changes,
+        &["settings", "technologyLayout"],
+    )?
+    .as_str()
+    .filter(|layout| matches!(*layout, "standard" | "compact"))
+    .ok_or_else(|| anyhow!("native player-authority technology layout target is invalid"))?;
+    let current = state
+        .base_value()
+        .get("settings")
+        .and_then(Value::as_object)
+        .and_then(|settings| settings.get("technologyLayout"))
+        .and_then(Value::as_str)
+        .filter(|layout| matches!(*layout, "standard" | "compact"))
+        .ok_or_else(|| anyhow!("native player-authority current technology layout is invalid"))?;
+    if current == target {
+        bail!("native player-authority technology layout target is unchanged")
+    }
+    Ok(())
+}
+
 fn validate_planet_viewport_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
@@ -6285,6 +6333,15 @@ impl CoreState {
             )
         }) {
             return validate_player_research_command(self, command);
+        }
+        if command.top_level_changes.iter().any(|change| {
+            matches!(
+                change.path.as_slice(),
+                [PathSegment::Key(root), PathSegment::Key(field)]
+                    if root == "settings" && field == "technologyLayout"
+            )
+        }) {
+            return validate_technology_layout_command(self, command);
         }
         if command.top_level_changes.iter().any(|change| {
             matches!(change.path.first(), Some(PathSegment::Key(root)) if root == "recipeFocus")
@@ -7137,6 +7194,12 @@ mod tests {
 
     fn player_command_state() -> CoreState {
         player_command_state_for_registry(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT)
+    }
+
+    fn player_technology_layout_state() -> CoreState {
+        let mut state = player_command_state();
+        state.base_value_mut()["settings"]["technologyLayout"] = Value::from("standard");
+        state
     }
 
     fn player_research_state() -> CoreState {
@@ -9239,6 +9302,100 @@ mod tests {
             left.canonical_sha256().unwrap(),
             right.canonical_sha256().unwrap()
         );
+    }
+
+    #[test]
+    fn player_authority_applies_and_replays_only_the_exact_technology_layout_leaf() {
+        let mut live = player_technology_layout_state();
+        let mut replay = live.clone();
+        let command = top_level_leaf_command(
+            live.revision,
+            &["settings", "technologyLayout"],
+            Value::from("compact"),
+        );
+
+        let live_receipt = live.apply_player_authority_command(&command).unwrap();
+        let replay_receipt = replay.apply_command(&command).unwrap();
+
+        assert_eq!(live_receipt, replay_receipt);
+        assert!(live_receipt.changed_entity_ids.is_empty());
+        assert!(live_receipt.changed_belt_ids.is_empty());
+        assert!(!live_receipt.topology_dirty);
+        assert_eq!(live.base_value()["settings"]["technologyLayout"], "compact");
+        assert_eq!(live.base_value(), replay.base_value());
+        assert_eq!(
+            live.canonical_sha256().unwrap(),
+            replay.canonical_sha256().unwrap()
+        );
+    }
+
+    #[test]
+    fn player_authority_technology_layout_rejects_stale_modded_mixed_and_invalid_commands() {
+        let revision = player_technology_layout_state().revision;
+        let wrong_leaf =
+            top_level_leaf_command(revision, &["settings", "fontScale"], Value::from(1.25));
+        let whole_settings = top_level_leaf_command(
+            revision,
+            &["settings"],
+            serde_json::json!({ "technologyLayout": "compact" }),
+        );
+        let mut delete_layout = top_level_leaf_command(
+            revision,
+            &["settings", "technologyLayout"],
+            Value::from("compact"),
+        );
+        delete_layout.top_level_changes[0].operation = "delete".to_owned();
+        delete_layout.top_level_changes[0].value = None;
+        let mut mixed = top_level_leaf_command(
+            revision,
+            &["settings", "technologyLayout"],
+            Value::from("compact"),
+        );
+        mixed.top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("paused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(true)),
+        });
+        let commands = [
+            top_level_leaf_command(
+                revision - 1,
+                &["settings", "technologyLayout"],
+                Value::from("compact"),
+            ),
+            top_level_leaf_command(
+                revision,
+                &["settings", "technologyLayout"],
+                Value::from("standard"),
+            ),
+            top_level_leaf_command(
+                revision,
+                &["settings", "technologyLayout"],
+                Value::from("expanded"),
+            ),
+            wrong_leaf,
+            whole_settings,
+            delete_layout,
+            mixed,
+        ];
+        for command in commands {
+            let mut state = player_technology_layout_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, revision);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut modded = player_command_state_for_registry("modded-technology-layout-test");
+        modded.base_value_mut()["settings"]["technologyLayout"] = Value::from("standard");
+        let before = modded.canonical_sha256().unwrap();
+        let command = top_level_leaf_command(
+            modded.revision,
+            &["settings", "technologyLayout"],
+            Value::from("compact"),
+        );
+        assert!(modded.apply_player_authority_command(&command).is_err());
+        assert_eq!(modded.revision, revision);
+        assert_eq!(modded.canonical_sha256().unwrap(), before);
     }
 
     #[test]

@@ -30,6 +30,7 @@ describe("native technology workspace App integration", () => {
     expect(app).toMatch(/createNativeProjectedCancelResearchCommand\(\{ baseRevision, projection \}\)/);
     expect(app).toMatch(/createNativeProjectedResumeResearchCommand\(\{ baseRevision, projection \}\)/);
     expect(app).toMatch(/createNativeProjectedSelectInfiniteResearchCommand\(\{ baseRevision, projection, researchId \}\)/);
+    expect(app).toMatch(/createNativeProjectedTechnologyLayoutCommand\(\{[\s\S]*?baseRevision,[\s\S]*?projection,[\s\S]*?layout: technologyLayout/);
     expect(app).toMatch(/createNativeProjectedRemoveQueuedTechnologyCommand\(\{ baseRevision, projection, techId \}\)/);
     expect(app).toMatch(/createNativeProjectedInfiniteResearchAutomationCommand\(\{ baseRevision, projection, enabled \}\)/);
     expect(app).toMatch(/nativeTechnologyWorkspaceReadModel\.revision === factoryThinViewExpectedRevision[\s\S]*?nativeTechnologyWorkspaceSnapshot\.frame\?\.projection/);
@@ -41,6 +42,8 @@ describe("native technology workspace App integration", () => {
     expect(workspace).toMatch(/finiteQueueMutationReady = !nativeCommandPending && \([\s\S]*?!nativeAuthorityRequired \|\| !readModel\.activeInfiniteResearchId/);
     expect(workspace).not.toMatch(/原生权威暂未开放暂停科研/);
     expect(app).not.toMatch(/原生权威暂未开放无限科研目标切换/);
+    expect(app).not.toMatch(/原生权威暂未开放科技树布局写入/);
+    expect(workspace).toMatch(/technology-layout-toggle[\s\S]*?disabled=\{nativeCommandPending\}/);
   });
 
   it("does not apply the conservative native infinite guard to the Web workspace", () => {

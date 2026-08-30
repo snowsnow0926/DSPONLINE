@@ -97,8 +97,12 @@ describe("TechnologyWorkspace", () => {
     act(() => currentActions.find((button) => button.textContent?.includes("取消"))!.click());
     expect(onPauseResearch).toHaveBeenCalledOnce();
     expect(onCancelResearch).toHaveBeenCalledOnce();
-    expect(Array.from(host.querySelectorAll<HTMLButtonElement>(".technology-layout-toggle button"))
-      .every((button) => button.disabled)).toBe(true);
+    const layoutButtons = Array.from(
+      host.querySelectorAll<HTMLButtonElement>(".technology-layout-toggle button"),
+    );
+    expect(layoutButtons.every((button) => !button.disabled)).toBe(true);
+    act(() => layoutButtons.find((button) => button.textContent === "精简")!.click());
+    expect(onLayoutChange).toHaveBeenCalledWith("compact");
 
     const append = host.querySelector<HTMLButtonElement>('[data-tech-id="basic_logistics"]')!;
     expect(append.disabled).toBe(false);
@@ -119,7 +123,6 @@ describe("TechnologyWorkspace", () => {
       .every((button) => button.disabled)).toBe(true);
     expect(onResumeResearch).not.toHaveBeenCalled();
     expect(onSelectInfiniteResearch).not.toHaveBeenCalled();
-    expect(onLayoutChange).not.toHaveBeenCalled();
   });
 
   it("does not apply the conservative native infinite-research guard to Web play", () => {
@@ -150,5 +153,32 @@ describe("TechnologyWorkspace", () => {
     expect(matrixCompression.disabled).toBe(false);
     act(() => matrixCompression.click());
     expect(onSelectInfiniteResearch).toHaveBeenCalledWith("matrix_compression");
+  });
+
+  it("keeps native layout writes single-flight while the durable ACK is pending", () => {
+    act(() => root.render(
+      <TechnologyWorkspace
+        open
+        readModel={createWebTechnologyWorkspaceReadModel(createInitialState())}
+        nativeAuthorityRequired
+        nativeCommandPending
+        onClose={vi.fn()}
+        onSelect={vi.fn()}
+        onPauseResearch={vi.fn()}
+        onCancelResearch={vi.fn()}
+        onResumeResearch={vi.fn()}
+        onRemoveQueued={vi.fn()}
+        onSelectInfiniteResearch={vi.fn()}
+        onInfiniteResearchAutomation={vi.fn()}
+        onLayoutChange={vi.fn()}
+      />,
+    ));
+
+    const layoutButtons = Array.from(
+      host.querySelectorAll<HTMLButtonElement>(".technology-layout-toggle button"),
+    );
+    expect(layoutButtons.every((button) => button.disabled)).toBe(true);
+    expect(layoutButtons.every((button) => button.title.includes("等待上一条原生科研命令确认")))
+      .toBe(true);
   });
 });

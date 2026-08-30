@@ -235,6 +235,12 @@ describe("native factory interaction atom", () => {
       schema: "station-configuration-v1" as const,
       registryFingerprint: "7df8cf3a" as const,
       stationType: "interstellar" as const,
+      itemOptions: {
+        rows: [{ itemId: "iron_ore", name: "铁矿", kind: "solid" as const }],
+        totalCount: 1,
+        truncated: false,
+        limit: 128 as const,
+      },
       stationDrones: 5,
       stationVessels: 2,
       stationWarpers: 1,

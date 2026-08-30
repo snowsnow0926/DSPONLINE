@@ -90,6 +90,83 @@ function configuration(
   };
 }
 
+function stationConfigurationReadModel(
+  overrides: Partial<NativeStationConfigurationReadModel> = {},
+): NativeStationConfigurationReadModel {
+  const stationType = overrides.stationType ?? "interstellar";
+  const interstellar = stationType === "interstellar";
+  return {
+    schema: "station-configuration-v1",
+    registryFingerprint: "7df8cf3a",
+    stationType,
+    itemOptions: {
+      rows: [
+        { itemId: "copper_ore", name: "铜矿", kind: "solid" },
+        { itemId: "iron_ore", name: "铁矿", kind: "solid" },
+      ],
+      totalCount: 2,
+      truncated: false,
+      limit: 128,
+    },
+    stationDrones: 5,
+    stationVessels: interstellar ? 2 : null,
+    stationWarpers: interstellar ? 1 : null,
+    slots: Array.from({ length: 5 }, (_, slotIndex) => ({
+      slotIndex,
+      itemId: slotIndex === 1 ? "iron_ore" : null,
+      localMode: slotIndex === 1 ? "supply" as const : "storage" as const,
+      remoteMode: slotIndex === 1 ? "demand" as const : "storage" as const,
+      minimumLoad: slotIndex === 1 ? 0.5 as const : 1 as const,
+      minStock: 0,
+      maxStock: slotIndex === 1 ? 100 : 0,
+      priority: 1 as const,
+      ...(interstellar ? { routePolicy: "relay-preferred" as const, warperBudget: 2 as const } : {}),
+    })),
+    spaceWarpUnlocked: true,
+    stationWarpEnabled: interstellar ? true : null,
+    stationWarperAutoRefill: interstellar ? false : null,
+    stationWarperTarget: interstellar ? 25 : null,
+    stationHubEnabled: interstellar ? false : null,
+    stationHubPriority: interstellar ? 1 : null,
+    ...overrides,
+  };
+}
+
+function stationEntityReadModel(
+  stationConfiguration = stationConfigurationReadModel(),
+  overrides: Partial<SelectedEntityReadModel> = {},
+): SelectedEntityReadModel {
+  return {
+    ...entity,
+    entityId: "station-ils",
+    kind: "station",
+    buildingId: stationConfiguration.stationType === "interstellar"
+      ? "interstellar_logistics_station"
+      : "planetary_logistics_station",
+    recipeId: null,
+    storedItemId: "iron_ore",
+    machineCount: 1,
+    stationConfiguration,
+    ...overrides,
+  };
+}
+
+function stationProjectionBinding(
+  stationConfiguration = stationConfigurationReadModel(),
+  overrides: Partial<NativeProjectedStationConfigurationBinding> = {},
+): NativeProjectedStationConfigurationBinding {
+  const projectedEntity = stationEntityReadModel(stationConfiguration);
+  return {
+    sessionId: "s",
+    runId: "r",
+    revision: 8,
+    activePlanetId: "home",
+    entity: projectedEntity,
+    configuration: stationConfiguration,
+    ...overrides,
+  };
+}
+
 describe("NativeFactoryInspectorPanel", () => {
   let host: HTMLDivElement;
   let root: Root;
@@ -605,50 +682,9 @@ describe("NativeFactoryInspectorPanel", () => {
 
   it("renders five Rust station slots and converges fleet controls only after ACK projection", () => {
     const onChange = vi.fn();
-    const stationConfiguration = {
-      schema: "station-configuration-v1",
-      registryFingerprint: "7df8cf3a",
-      stationType: "interstellar",
-      stationDrones: 5,
-      stationVessels: 2,
-      stationWarpers: 1,
-      slots: Array.from({ length: 5 }, (_, slotIndex) => ({
-        slotIndex,
-        itemId: slotIndex === 1 ? "iron_ore" : null,
-        localMode: slotIndex === 1 ? "supply" as const : "storage" as const,
-        remoteMode: slotIndex === 1 ? "demand" as const : "storage" as const,
-        minimumLoad: slotIndex === 1 ? 0.5 as const : 1 as const,
-        minStock: 0,
-        maxStock: slotIndex === 1 ? 100 : 0,
-        priority: 1 as const,
-        routePolicy: "relay-preferred" as const,
-        warperBudget: 2 as const,
-      })),
-      spaceWarpUnlocked: true,
-      stationWarpEnabled: true,
-      stationWarperAutoRefill: false,
-      stationWarperTarget: 25,
-      stationHubEnabled: false,
-      stationHubPriority: 1 as const,
-    } as const;
-    const stationSummary = {
-      ...entity,
-      entityId: "station-ils",
-      kind: "station",
-      buildingId: "interstellar_logistics_station",
-      recipeId: null,
-      storedItemId: "iron_ore",
-      machineCount: 1,
-      stationConfiguration,
-    } as const;
-    const binding: NativeProjectedStationConfigurationBinding = {
-      sessionId: "s",
-      runId: "r",
-      revision: 8,
-      activePlanetId: "home",
-      entity: stationSummary,
-      configuration: stationConfiguration,
-    };
+    const stationConfiguration = stationConfigurationReadModel();
+    const stationSummary = stationEntityReadModel(stationConfiguration);
+    const binding = stationProjectionBinding(stationConfiguration, { entity: stationSummary });
     const render = (
       projected: NativeProjectedStationConfigurationBinding | null,
       pending = false,
@@ -682,7 +718,9 @@ describe("NativeFactoryInspectorPanel", () => {
 
     render(binding);
     expect(host.querySelectorAll("[data-native-station-configuration] fieldset")).toHaveLength(5);
-    expect([...host.querySelectorAll<HTMLSelectElement>('select[aria-label$="只读"]')].every((select) => select.disabled)).toBe(true);
+    expect(host.querySelector<HTMLSelectElement>('[aria-label="物流站槽位 2 物品"]')?.disabled).toBe(false);
+    expect(host.querySelector<HTMLSelectElement>('[aria-label="物流站槽位 2 本地模式"]')?.disabled).toBe(false);
+    expect(host.querySelector<HTMLSelectElement>('[aria-label="物流站槽位 2 星际模式"]')?.disabled).toBe(false);
     act(() => host.querySelector<HTMLButtonElement>('[aria-label="物流无人机+10"]')!.click());
     expect(onChange).toHaveBeenLastCalledWith("station-ils", {
       kind: "station-fleet-adjust",
@@ -704,6 +742,18 @@ describe("NativeFactoryInspectorPanel", () => {
     const priorityButtons = [...host.querySelectorAll<HTMLButtonElement>('[aria-label="物流站槽位 2 优先级"] button')];
     act(() => priorityButtons[2].click());
     expect(onChange).toHaveBeenLastCalledWith("station-ils", { kind: "slot-priority", slotIndex: 1, target: 2 });
+    const localMode = host.querySelector<HTMLSelectElement>('[aria-label="物流站槽位 2 本地模式"]')!;
+    act(() => {
+      localMode.value = "demand";
+      localMode.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(onChange).toHaveBeenLastCalledWith("station-ils", {
+      kind: "slot-mode",
+      slotIndex: 1,
+      scope: "local",
+      target: "demand",
+    });
+    expect(localMode.value).toBe("supply");
 
     render(binding, true);
     expect([...host.querySelectorAll<HTMLButtonElement>('[aria-label^="物流无人机"]')]
@@ -715,6 +765,8 @@ describe("NativeFactoryInspectorPanel", () => {
     expect(host.textContent).toContain("物流无人机 5 / 50");
     expect([...host.querySelectorAll<HTMLButtonElement>('[aria-label="物流站槽位 2 优先级"] button')]
       .every((button) => button.disabled)).toBe(true);
+    expect([...host.querySelectorAll<HTMLSelectElement>('[data-native-station-configuration] select')]
+      .every((select) => select.disabled)).toBe(true);
 
     const acknowledgedConfiguration = { ...stationConfiguration, stationDrones: 7, stationWarpers: 3 } as const;
     const acknowledgedSummary = {
@@ -737,25 +789,11 @@ describe("NativeFactoryInspectorPanel", () => {
     expect([...host.querySelectorAll<HTMLButtonElement>('[aria-label="物流站槽位 2 优先级"] button')]
       .every((button) => button.disabled)).toBe(true);
 
-    const planetaryConfiguration: NativeStationConfigurationReadModel = {
-      ...stationConfiguration,
+    const planetaryConfiguration = stationConfigurationReadModel({
       stationType: "planetary",
-      stationVessels: null,
-      stationWarpers: null,
-      slots: stationConfiguration.slots.map(({ routePolicy: _routePolicy, warperBudget: _warperBudget, ...slot }) => slot),
       spaceWarpUnlocked: false,
-      stationWarpEnabled: null,
-      stationWarperAutoRefill: null,
-      stationWarperTarget: null,
-      stationHubEnabled: null,
-      stationHubPriority: null,
-    };
-    const planetarySummary: SelectedEntityReadModel = {
-      ...stationSummary,
-      entityId: "station-pls",
-      buildingId: "planetary_logistics_station",
-      stationConfiguration: planetaryConfiguration,
-    };
+    });
+    const planetarySummary = stationEntityReadModel(planetaryConfiguration, { entityId: "station-pls" });
     const planetaryBinding: NativeProjectedStationConfigurationBinding = {
       ...binding,
       revision: 10,
@@ -766,5 +804,208 @@ describe("NativeFactoryInspectorPanel", () => {
     expect(host.querySelector('[aria-label="Windows 原生物流无人机数量"]')).not.toBeNull();
     expect(host.querySelector('[aria-label="Windows 原生物流运输船数量"]')).toBeNull();
     expect(host.querySelector('[aria-label="Windows 原生站内翘曲器数量"]')).toBeNull();
+  });
+
+  it("requires explicit item confirmation, allows a rejected submission retry, and converges only after ACK", () => {
+    const onChange = vi.fn();
+    const initialConfiguration = stationConfigurationReadModel();
+    const initialSummary = stationEntityReadModel(initialConfiguration);
+    const initialBinding = stationProjectionBinding(initialConfiguration, { entity: initialSummary });
+    const render = (
+      projected: NativeProjectedStationConfigurationBinding | null,
+      options: {
+        pending?: boolean;
+        revision?: number;
+        summary?: SelectedEntityReadModel;
+        sessionId?: string;
+        runId?: string;
+      } = {},
+    ) => {
+      const revision = options.revision ?? 8;
+      const summary = options.summary ?? initialSummary;
+      act(() => root.render(<NativeFactoryInspectorPanel
+        inspector={inspector({ revision, entity: summary })}
+        multiSelection={multi({
+          revision,
+          projectionIdentity: {
+            sessionId: options.sessionId ?? "s",
+            runId: options.runId ?? "r",
+            revision,
+            planetId: "home",
+          },
+          entityRows: { rows: [summary], totalCount: 1, truncated: false },
+        })}
+        entityConfiguration={null}
+        stationConfiguration={projected}
+        pending={options.pending ?? false}
+        onEntityLockChange={vi.fn()}
+        onRemoveEntity={vi.fn()}
+        onStackCountChange={vi.fn()}
+        onEntityPowerPriorityChange={vi.fn()}
+        onSplitterDistributionModeChange={vi.fn()}
+        onEnergyExchangerModeChange={vi.fn()}
+        onFuelItemChange={vi.fn()}
+        onBlackHolePausedChange={vi.fn()}
+        onStationConfigurationChange={onChange}
+        onBeltLaneCountChange={vi.fn()}
+        onBeltPriorityChange={vi.fn()}
+        onRemoveBelt={vi.fn()}
+      />));
+    };
+    const chooseCopper = () => {
+      const select = host.querySelector<HTMLSelectElement>('[aria-label="物流站槽位 2 物品"]')!;
+      act(() => {
+        select.value = "copper_ore";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      return select;
+    };
+    const dialogButton = (label: string) => [...document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')]
+      .find((button) => button.textContent === label)!;
+
+    render(initialBinding);
+    const firstSelect = chooseCopper();
+    expect(firstSelect.value).toBe("iron_ore");
+    expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain("取消相关物流路线");
+    act(() => dialogButton("取消").click());
+    expect(onChange).not.toHaveBeenCalled();
+
+    chooseCopper();
+    act(() => dialogButton("确认更换").click());
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenLastCalledWith("station-ils", {
+      kind: "slot-item",
+      slotIndex: 1,
+      target: "copper_ore",
+    });
+    expect(host.querySelector<HTMLSelectElement>('[aria-label="物流站槽位 2 物品"]')?.value).toBe("iron_ore");
+
+    // The first synchronous submission can be rejected by App without a
+    // pending transition. A fresh explicit confirmation must remain usable.
+    chooseCopper();
+    act(() => dialogButton("确认更换").click());
+    expect(onChange).toHaveBeenCalledTimes(2);
+
+    render(initialBinding, { pending: true });
+    const pendingItem = host.querySelector<HTMLSelectElement>('[aria-label="物流站槽位 2 物品"]')!;
+    expect(pendingItem.disabled).toBe(true);
+    expect(pendingItem.value).toBe("iron_ore");
+
+    const acknowledgedConfiguration = stationConfigurationReadModel({
+      slots: initialConfiguration.slots.map((slot) => slot.slotIndex === 1
+        ? { ...slot, itemId: "copper_ore" }
+        : slot),
+    });
+    const acknowledgedSummary = stationEntityReadModel(acknowledgedConfiguration);
+    const acknowledgedBinding = stationProjectionBinding(acknowledgedConfiguration, {
+      revision: 9,
+      entity: acknowledgedSummary,
+    });
+    render(acknowledgedBinding, { revision: 9, summary: acknowledgedSummary });
+    expect(host.querySelector<HTMLSelectElement>('[aria-label="物流站槽位 2 物品"]')?.value).toBe("copper_ore");
+  });
+
+  it("cancels item confirmation on stale identity and keeps pending, locked, MOD, and truncated rows fail-closed", () => {
+    const onChange = vi.fn();
+    const initialConfiguration = stationConfigurationReadModel();
+    const initialSummary = stationEntityReadModel(initialConfiguration);
+    const initialBinding = stationProjectionBinding(initialConfiguration, { entity: initialSummary });
+    const render = (
+      projected: NativeProjectedStationConfigurationBinding | null,
+      summary: SelectedEntityReadModel = initialSummary,
+      pending = false,
+      revision = 8,
+    ) => act(() => root.render(<NativeFactoryInspectorPanel
+      inspector={inspector({ revision, entity: summary })}
+      multiSelection={multi({
+        revision,
+        projectionIdentity: { sessionId: "s", runId: "r", revision, planetId: "home" },
+        entityRows: { rows: [summary], totalCount: 1, truncated: false },
+      })}
+      entityConfiguration={null}
+      stationConfiguration={projected}
+      pending={pending}
+      onEntityLockChange={vi.fn()}
+      onRemoveEntity={vi.fn()}
+      onStackCountChange={vi.fn()}
+      onEntityPowerPriorityChange={vi.fn()}
+      onSplitterDistributionModeChange={vi.fn()}
+      onEnergyExchangerModeChange={vi.fn()}
+      onFuelItemChange={vi.fn()}
+      onBlackHolePausedChange={vi.fn()}
+      onStationConfigurationChange={onChange}
+      onBeltLaneCountChange={vi.fn()}
+      onBeltPriorityChange={vi.fn()}
+      onRemoveBelt={vi.fn()}
+    />));
+    const openChange = () => {
+      const select = host.querySelector<HTMLSelectElement>('[aria-label="物流站槽位 2 物品"]')!;
+      act(() => {
+        select.value = "copper_ore";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      expect(document.querySelector('[role="alertdialog"]')).not.toBeNull();
+    };
+
+    render(initialBinding);
+    openChange();
+    render(null);
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(onChange).not.toHaveBeenCalled();
+
+    render(initialBinding);
+    openChange();
+    render({ ...initialBinding, revision: 7 });
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect([...host.querySelectorAll<HTMLSelectElement>('[data-native-station-configuration] select')]
+      .every((select) => select.disabled)).toBe(true);
+
+    const lockedSummary = stationEntityReadModel(initialConfiguration, { interactionLocked: true });
+    const lockedBinding = stationProjectionBinding(initialConfiguration, { entity: lockedSummary });
+    render(lockedBinding, lockedSummary);
+    expect([...host.querySelectorAll<HTMLSelectElement>('[data-native-station-configuration] select')]
+      .every((select) => select.disabled)).toBe(true);
+
+    const forgedModConfiguration = {
+      ...initialConfiguration,
+      registryFingerprint: "MOD/forged",
+    } as unknown as NativeStationConfigurationReadModel;
+    const forgedSummary = stationEntityReadModel(forgedModConfiguration);
+    render(null, forgedSummary);
+    expect([...host.querySelectorAll<HTMLSelectElement>('[data-native-station-configuration] select')]
+      .every((select) => select.disabled)).toBe(true);
+
+    const truncatedRows = Array.from({ length: 128 }, (_, index) => ({
+      itemId: `item_${String(index).padStart(3, "0")}`,
+      name: `物品 ${index}`,
+      kind: "solid" as const,
+    }));
+    const truncatedConfiguration = stationConfigurationReadModel({
+      itemOptions: { rows: truncatedRows, totalCount: 129, truncated: true, limit: 128 },
+      slots: initialConfiguration.slots.map((slot) => slot.slotIndex === 1
+        ? { ...slot, itemId: "zz_current" }
+        : slot),
+    });
+    const truncatedSummary = stationEntityReadModel(truncatedConfiguration);
+    const truncatedBinding = stationProjectionBinding(truncatedConfiguration, { entity: truncatedSummary });
+    render(truncatedBinding, truncatedSummary);
+    const currentSelect = host.querySelector<HTMLSelectElement>('[aria-label="物流站槽位 2 物品"]')!;
+    expect(currentSelect.value).toBe("zz_current");
+    expect(currentSelect.querySelector<HTMLOptionElement>('option[value="zz_current"]')?.textContent)
+      .toContain("（当前）");
+    expect(host.querySelector<HTMLSelectElement>('[aria-label="物流站槽位 1 物品"] option[value="zz_current"]'))
+      .toBeNull();
+    act(() => {
+      currentSelect.value = "";
+      currentSelect.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const confirm = [...document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')]
+      .find((button) => button.textContent === "确认更换")!;
+    act(() => confirm.click());
+    expect(onChange).toHaveBeenLastCalledWith("station-ils", {
+      kind: "slot-item",
+      slotIndex: 1,
+      target: null,
+    });
   });
 });

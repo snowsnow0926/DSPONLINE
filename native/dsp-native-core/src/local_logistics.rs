@@ -6,6 +6,7 @@ use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value, json};
 
 use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
+use crate::simple_factory::StationPowerLookup;
 use crate::state::CoreState;
 #[cfg(test)]
 use crate::state::ExactRowIdIndex;
@@ -783,9 +784,9 @@ impl LocalPeerDirectory {
         self.readiness_signature = Some(signature);
     }
 
-    fn plan_dispatch_power_wakes(
+    fn plan_dispatch_power_wakes<P: StationPowerLookup + ?Sized>(
         &self,
-        powers: &HashMap<usize, f64>,
+        powers: &P,
     ) -> (Vec<usize>, Vec<usize>, bool) {
         let mut next_powered = powers
             .iter()
@@ -2110,11 +2111,11 @@ fn set_peer(entities: &mut [Value], index: usize, peer_id: &str) {
     }
 }
 
-fn dispatch_for_indices<L: LocalDispatchLedger + ?Sized>(
+fn dispatch_for_indices<P: StationPowerLookup + ?Sized, L: LocalDispatchLedger + ?Sized>(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     directory: &LocalPeerDirectory,
     demand_indices: &[usize],
     ledger: &mut L,
@@ -2367,11 +2368,11 @@ fn dispatch_for_indices<L: LocalDispatchLedger + ?Sized>(
     Ok(activated_local_demands)
 }
 
-fn dispatch_with_ledger_mode<L: LocalDispatchLedger + ?Sized>(
+fn dispatch_with_ledger_mode<P: StationPowerLookup + ?Sized, L: LocalDispatchLedger + ?Sized>(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     directory: &mut LocalPeerDirectory,
     ledger: &mut L,
     force_full_scan: bool,
@@ -2399,11 +2400,11 @@ fn dispatch_with_ledger_mode<L: LocalDispatchLedger + ?Sized>(
     Ok(scan)
 }
 
-fn dispatch_with_ledger<L: LocalDispatchLedger + ?Sized>(
+fn dispatch_with_ledger<P: StationPowerLookup + ?Sized, L: LocalDispatchLedger + ?Sized>(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     directory: &mut LocalPeerDirectory,
     ledger: &mut L,
 ) -> anyhow::Result<LocalDispatchScan> {
@@ -2411,22 +2412,22 @@ fn dispatch_with_ledger<L: LocalDispatchLedger + ?Sized>(
 }
 
 #[cfg(test)]
-fn dispatch_full_scan_oracle<L: LocalDispatchLedger + ?Sized>(
+fn dispatch_full_scan_oracle<P: StationPowerLookup + ?Sized, L: LocalDispatchLedger + ?Sized>(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     directory: &mut LocalPeerDirectory,
     ledger: &mut L,
 ) -> anyhow::Result<LocalDispatchScan> {
     dispatch_with_ledger_mode(state, base, entities, powers, directory, ledger, true)
 }
 
-pub(crate) fn dispatch(
+pub(crate) fn dispatch<P: StationPowerLookup + ?Sized>(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     directory: &mut LocalPeerDirectory,
     route_ledger: &mut StationRouteLedger,
 ) -> anyhow::Result<LocalDispatchScan> {
@@ -2438,13 +2439,13 @@ struct LocalRouteAdvanceOutcome {
     changed_station_indices: Vec<usize>,
 }
 
-fn advance_routes_for_indices(
+fn advance_routes_for_indices<P: StationPowerLookup + ?Sized>(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
     quantum_bandwidth: crate::quantum_logistics::RuntimeBandwidth,
     seconds: f64,
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     route_scan_indices: &[usize],
 ) -> anyhow::Result<LocalRouteAdvanceOutcome> {
     let indexes = &state.entity_index;
@@ -2594,12 +2595,12 @@ fn advance_routes_for_indices(
 }
 
 #[cfg(test)]
-pub(crate) fn advance_routes(
+pub(crate) fn advance_routes<P: StationPowerLookup + ?Sized>(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
     seconds: f64,
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     directory: &mut LocalPeerDirectory,
 ) -> anyhow::Result<Vec<usize>> {
     let quantum_bandwidth = crate::quantum_logistics::runtime_bandwidth(base, entities);
@@ -2615,13 +2616,13 @@ pub(crate) fn advance_routes(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn advance_routes_with_bandwidth(
+pub(crate) fn advance_routes_with_bandwidth<P: StationPowerLookup + ?Sized>(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
     quantum_bandwidth: crate::quantum_logistics::RuntimeBandwidth,
     seconds: f64,
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     directory: &mut LocalPeerDirectory,
 ) -> anyhow::Result<Vec<usize>> {
     if !directory.has_local_routes() {
@@ -4338,17 +4339,17 @@ mod tests {
         assert!(mismatch_scan.directory_fallback);
     }
 
-    fn run_local_dispatch_slice(
+    fn run_local_dispatch_slice_with_powers<P: StationPowerLookup + ?Sized>(
         source: &[Value],
         seconds: usize,
         force_full_scan: bool,
+        powers: &P,
     ) -> (Vec<u8>, Vec<LocalDispatchScan>) {
         let state = route_fixture_state(source);
         let mut base = route_fixture_base();
         let mut entities = source.to_vec();
         let mut directory =
             prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
-        let powers = HashMap::from([(0, 1.0), (1, 1.0)]);
         let mut scans = Vec::with_capacity(seconds);
         for _ in 0..seconds {
             let remote_activity = crate::interstellar_logistics::prepare_route_activity(&entities);
@@ -4359,7 +4360,7 @@ mod tests {
                     &state,
                     base.as_object_mut().unwrap(),
                     &mut entities,
-                    &powers,
+                    powers,
                     &mut directory,
                     &mut ledger,
                 )
@@ -4368,7 +4369,7 @@ mod tests {
                     &state,
                     base.as_object_mut().unwrap(),
                     &mut entities,
-                    &powers,
+                    powers,
                     &mut directory,
                     &mut ledger,
                 )
@@ -4380,7 +4381,7 @@ mod tests {
                 base.as_object_mut().unwrap(),
                 &mut entities,
                 1.0,
-                &powers,
+                powers,
                 &mut directory,
             )
             .unwrap();
@@ -4390,6 +4391,39 @@ mod tests {
             serde_json::to_vec(&json!({ "base": base, "entities": entities })).unwrap(),
             scans,
         )
+    }
+
+    fn run_local_dispatch_slice(
+        source: &[Value],
+        seconds: usize,
+        force_full_scan: bool,
+    ) -> (Vec<u8>, Vec<LocalDispatchScan>) {
+        run_local_dispatch_slice_with_powers(
+            source,
+            seconds,
+            force_full_scan,
+            &HashMap::from([(0, 1.0), (1, 1.0)]),
+        )
+    }
+
+    #[test]
+    fn power_view_matches_hashmap_oracle_for_local_dispatch_and_routes_at_1_5_60() {
+        let count = 32;
+        let mut source = sparse_readiness_matrix(count, 1);
+        source[0]["outputs"]["iron_ore"] = Value::from(5_000.0);
+        let power_indices = [0_usize, 1];
+        let power_factors = [1.0_f64, 1.0];
+        let view = crate::simple_factory::PowerView::new(&power_indices, &power_factors);
+        let oracle = HashMap::from([(0, 1.0), (1, 1.0)]);
+
+        for seconds in [1_usize, 5, 60] {
+            let viewed = run_local_dispatch_slice_with_powers(&source, seconds, false, &view);
+            let mapped = run_local_dispatch_slice_with_powers(&source, seconds, false, &oracle);
+            assert_eq!(
+                viewed, mapped,
+                "PowerView local dispatch/route bytes diverged at {seconds}s"
+            );
+        }
     }
 
     #[test]

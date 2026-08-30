@@ -7,6 +7,7 @@ use serde_json::{Map, Number, Value, json};
 
 use crate::catalog::PlanetDefinition;
 use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
+use crate::simple_factory::StationPowerLookup;
 use crate::state::{CoreState, ExactRowIdIndex, SharedArc};
 use crate::station_route_ledger::StationRouteLedger;
 
@@ -749,11 +750,11 @@ impl InterstellarRouteActivity {
         }
     }
 
-    fn refresh_power_wakes(
+    fn refresh_power_wakes<P: StationPowerLookup + ?Sized>(
         &mut self,
         directory: &InterstellarPeerDirectory,
         station_indices: &[usize],
-        powers: &HashMap<usize, f64>,
+        powers: &P,
     ) {
         let mut next_powered = Vec::new();
         for &station_index in station_indices {
@@ -1434,9 +1435,9 @@ pub(crate) fn wake_orbital_supply_demands(
     );
 }
 
-pub(crate) fn refresh_dispatch_power_wakes(
+pub(crate) fn refresh_dispatch_power_wakes<P: StationPowerLookup + ?Sized>(
     station_indices: &[usize],
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     peer_directory: &InterstellarPeerDirectory,
     route_activity: &mut InterstellarRouteActivity,
 ) {
@@ -3194,11 +3195,11 @@ struct DispatchDemandProbe {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn probe_dispatch_demand<L: InterstellarDispatchLedger + ?Sized>(
+fn probe_dispatch_demand<P: StationPowerLookup + ?Sized, L: InterstellarDispatchLedger + ?Sized>(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &[Value],
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     demand_index: usize,
     peer_directory: &InterstellarPeerDirectory,
     ledger: &L,
@@ -3334,12 +3335,15 @@ fn probe_dispatch_demand<L: InterstellarDispatchLedger + ?Sized>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn plan_dispatch_demand_indices_with<L: InterstellarDispatchLedger + ?Sized>(
+fn plan_dispatch_demand_indices_with<
+    P: StationPowerLookup + Sync + ?Sized,
+    L: InterstellarDispatchLedger + ?Sized,
+>(
     runtime: &DeterministicRuntime,
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &[Value],
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     route_activity: &mut InterstellarRouteActivity,
     peer_directory: &InterstellarPeerDirectory,
     ledger: &L,
@@ -3395,12 +3399,15 @@ fn plan_dispatch_demand_indices_with<L: InterstellarDispatchLedger + ?Sized>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn dispatch_with_ledger_mode<L: InterstellarDispatchLedger + ?Sized>(
+fn dispatch_with_ledger_mode<
+    P: StationPowerLookup + Sync + ?Sized,
+    L: InterstellarDispatchLedger + ?Sized,
+>(
     runtime: &DeterministicRuntime,
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     route_activity: &mut InterstellarRouteActivity,
     peer_directory: &InterstellarPeerDirectory,
     ledger: &mut L,
@@ -3756,11 +3763,14 @@ fn dispatch_with_ledger_mode<L: InterstellarDispatchLedger + ?Sized>(
     Ok(dispatch_scan)
 }
 
-fn dispatch_with_ledger<L: InterstellarDispatchLedger + ?Sized>(
+fn dispatch_with_ledger<
+    P: StationPowerLookup + Sync + ?Sized,
+    L: InterstellarDispatchLedger + ?Sized,
+>(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     route_activity: &mut InterstellarRouteActivity,
     peer_directory: &InterstellarPeerDirectory,
     ledger: &mut L,
@@ -3779,11 +3789,14 @@ fn dispatch_with_ledger<L: InterstellarDispatchLedger + ?Sized>(
 }
 
 #[cfg(test)]
-fn dispatch_full_scan_oracle<L: InterstellarDispatchLedger + ?Sized>(
+fn dispatch_full_scan_oracle<
+    P: StationPowerLookup + Sync + ?Sized,
+    L: InterstellarDispatchLedger + ?Sized,
+>(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     route_activity: &mut InterstellarRouteActivity,
     peer_directory: &InterstellarPeerDirectory,
     ledger: &mut L,
@@ -3801,11 +3814,11 @@ fn dispatch_full_scan_oracle<L: InterstellarDispatchLedger + ?Sized>(
     )
 }
 
-pub(crate) fn dispatch(
+pub(crate) fn dispatch<P: StationPowerLookup + Sync + ?Sized>(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     route_activity: &mut InterstellarRouteActivity,
     peer_directory: &InterstellarPeerDirectory,
     route_ledger: &mut StationRouteLedger,
@@ -3838,10 +3851,10 @@ struct InterstellarRouteAdvanceOutcome {
     changed_station_indices: Vec<usize>,
 }
 
-fn advance_routes_for_indices<I: EntityIndexLookup + ?Sized>(
+fn advance_routes_for_indices<I: EntityIndexLookup + ?Sized, P: StationPowerLookup + ?Sized>(
     entities: &mut [Value],
     seconds: f64,
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     indexes: &I,
     route_scan_indices: &[usize],
 ) -> anyhow::Result<InterstellarRouteAdvanceOutcome> {
@@ -3995,10 +4008,10 @@ fn advance_routes_for_indices<I: EntityIndexLookup + ?Sized>(
     })
 }
 
-fn advance_routes_with_activity<I: EntityIndexLookup + ?Sized>(
+fn advance_routes_with_activity<I: EntityIndexLookup + ?Sized, P: StationPowerLookup + ?Sized>(
     entities: &mut [Value],
     seconds: f64,
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     indexes: &I,
     route_activity: &mut InterstellarRouteActivity,
 ) -> anyhow::Result<Vec<usize>> {
@@ -4017,11 +4030,11 @@ fn advance_routes_with_activity<I: EntityIndexLookup + ?Sized>(
     Ok(outcome.changed_station_indices)
 }
 
-pub(crate) fn advance_routes(
+pub(crate) fn advance_routes<P: StationPowerLookup + ?Sized>(
     state: &CoreState,
     entities: &mut [Value],
     seconds: f64,
-    powers: &HashMap<usize, f64>,
+    powers: &P,
     route_activity: &mut InterstellarRouteActivity,
 ) -> anyhow::Result<Vec<usize>> {
     advance_routes_with_activity(
@@ -7325,7 +7338,7 @@ mod tests {
     }
 
     #[test]
-    fn active_station_power_selection_matches_full_dispatch_and_route_oracle_at_1_5_60() {
+    fn power_view_active_selection_matches_full_interstellar_dispatch_and_route_oracle_at_1_5_60() {
         let mut entities = dispatch_fixture_entities();
         entities[1]["stationWarpers"] = Value::from(1.0);
         for index in 2..14 {
@@ -7387,10 +7400,12 @@ mod tests {
 
         for seconds in [1.0, 5.0, 60.0] {
             let full_powers = route_activity_powers(entities.len(), 1.0);
-            let sparse_powers = selected
+            let sparse_power_values = selected
                 .iter()
-                .map(|index| (*index, full_powers[index]))
-                .collect::<HashMap<_, _>>();
+                .map(|index| full_powers[index])
+                .collect::<Vec<_>>();
+            let sparse_powers =
+                crate::simple_factory::PowerView::new(&selected, &sparse_power_values);
             let mut indexed_base = base.clone();
             let mut oracle_base = base.clone();
             let mut indexed_entities = entities.clone();
@@ -7460,20 +7475,16 @@ mod tests {
             .pending_warper_refill_station_indices
             .clear();
         selection_activity.warper_refill_all_pending = false;
-        let off = selected
-            .iter()
-            .map(|index| (*index, 0.0))
-            .collect::<HashMap<_, _>>();
+        let off_values = vec![0.0; selected.len()];
+        let off = crate::simple_factory::PowerView::new(&selected, &off_values);
         selection_activity.refresh_power_wakes(&directory, &selected, &off);
         assert!(
             selection_activity
                 .pending_dispatch_demand_indices
                 .is_empty()
         );
-        let on = selected
-            .iter()
-            .map(|index| (*index, 1.0))
-            .collect::<HashMap<_, _>>();
+        let on_values = vec![1.0; selected.len()];
+        let on = crate::simple_factory::PowerView::new(&selected, &on_values);
         selection_activity.refresh_power_wakes(&directory, &selected, &on);
         assert_eq!(selection_activity.pending_dispatch_demand_indices, vec![1]);
     }

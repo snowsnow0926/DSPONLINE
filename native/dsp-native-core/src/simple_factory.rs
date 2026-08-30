@@ -182,6 +182,105 @@ impl Default for GridRuntime {
     }
 }
 
+pub(crate) trait StationPowerLookup {
+    type Iter<'a>: Iterator<Item = (&'a usize, &'a f64)>
+    where
+        Self: 'a;
+
+    fn get(&self, entity_index: &usize) -> Option<&f64>;
+    fn iter(&self) -> Self::Iter<'_>;
+}
+
+impl StationPowerLookup for HashMap<usize, f64> {
+    type Iter<'a> = std::collections::hash_map::Iter<'a, usize, f64>;
+
+    fn get(&self, entity_index: &usize) -> Option<&f64> {
+        HashMap::get(self, entity_index)
+    }
+
+    fn iter(&self) -> Self::Iter<'_> {
+        HashMap::iter(self)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PowerView<'a> {
+    entity_indices: &'a [usize],
+    factors: &'a [f64],
+}
+
+impl<'a> PowerView<'a> {
+    pub(crate) fn new(entity_indices: &'a [usize], factors: &'a [f64]) -> Self {
+        debug_assert!(
+            entity_indices.windows(2).all(|pair| pair[0] < pair[1]),
+            "native station power view indices must be sorted and unique"
+        );
+        Self {
+            entity_indices,
+            factors,
+        }
+    }
+}
+
+impl StationPowerLookup for PowerView<'_> {
+    type Iter<'a>
+        = std::iter::Zip<std::slice::Iter<'a, usize>, std::slice::Iter<'a, f64>>
+    where
+        Self: 'a;
+
+    fn get(&self, entity_index: &usize) -> Option<&f64> {
+        let row = self.entity_indices.binary_search(entity_index).ok()?;
+        self.factors.get(row).filter(|factor| factor.is_finite())
+    }
+
+    fn iter(&self) -> Self::Iter<'_> {
+        self.entity_indices.iter().zip(self.factors.iter())
+    }
+}
+
+fn station_power_values(
+    station_indices: &[usize],
+    entities: &[Value],
+    entity_planet_indices: &[usize],
+    entity_grid_indices: &[usize],
+    explicit_power_factors: &HashMap<usize, f64>,
+    grids: &[GridRuntime],
+) -> Vec<f64> {
+    station_indices
+        .iter()
+        .copied()
+        .map(|entity_index| {
+            let Some(object) = entities.get(entity_index).and_then(Value::as_object) else {
+                return 0.0;
+            };
+            if string_at(object, "buildingId") == Some("orbital_collector") {
+                return 1.0;
+            }
+            let Some(&planet) = entity_planet_indices.get(entity_index) else {
+                return 0.0;
+            };
+            let Some(&grid) = entity_grid_indices.get(entity_index) else {
+                return 0.0;
+            };
+            if planet == usize::MAX || grid >= GRID_IDS.len() {
+                return 0.0;
+            }
+            let Some(grid_slot) = planet
+                .checked_mul(GRID_IDS.len())
+                .and_then(|offset| offset.checked_add(grid))
+            else {
+                return 0.0;
+            };
+            let factor = explicit_power_factors
+                .get(&entity_index)
+                .copied()
+                .or_else(|| grids.get(grid_slot).map(|runtime| runtime.factor))
+                .unwrap_or(0.0);
+            if factor.is_finite() { factor } else { 0.0 }
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy)]
 enum PowerSourceKind {
     Ray,
@@ -5188,28 +5287,15 @@ fn simulate_step(
             interstellar_peer_directory,
             interstellar_route_activity,
         );
-    let station_powers = station_power_indices
-        .iter()
-        .copied()
-        .filter_map(|entity_index| {
-            let object = entities[entity_index].as_object()?;
-            if string_at(object, "buildingId") == Some("orbital_collector") {
-                return Some((entity_index, 1.0));
-            }
-            let planet = state.factory_topology.entity_planet_indices[entity_index];
-            let grid = state.factory_topology.entity_grid_indices[entity_index];
-            if planet == usize::MAX || grid == usize::MAX {
-                return None;
-            }
-            Some((
-                entity_index,
-                power_factors
-                    .get(&entity_index)
-                    .copied()
-                    .unwrap_or(grids[grid_slot(planet, grid)].factor),
-            ))
-        })
-        .collect::<HashMap<_, _>>();
+    let station_power_values = station_power_values(
+        &station_power_indices,
+        entities,
+        &state.factory_topology.entity_planet_indices,
+        &state.factory_topology.entity_grid_indices,
+        &power_factors,
+        &grids,
+    );
+    let station_powers = PowerView::new(&station_power_indices, &station_power_values);
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tstation-power-active\t{}/{}\tdense={}\tdirectory-fallback={}\truntime-fallback={}",
@@ -6005,6 +6091,72 @@ pub(crate) mod tests {
     use serde_json::json;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+    #[test]
+    fn power_view_preserves_priority_and_fails_closed_across_planets_and_bad_inputs() {
+        let entities = vec![
+            json!({ "buildingId": "orbital_collector" }),
+            json!({ "buildingId": "planetary_logistics_station" }),
+            json!({ "buildingId": "interstellar_logistics_station" }),
+            json!({ "buildingId": "interstellar_logistics_station" }),
+            json!({ "buildingId": "planetary_logistics_station" }),
+            json!({ "buildingId": "planetary_logistics_station" }),
+            json!({ "buildingId": "planetary_logistics_station" }),
+            Value::Null,
+        ];
+        let entity_planet_indices = [usize::MAX, 0, 1, 1, 0, 2, 0, 0];
+        let entity_grid_indices = [usize::MAX, 0, 0, 1, 2, 0, 3, 0];
+        let mut grids = vec![GridRuntime::default(); GRID_IDS.len() * 2];
+        for (grid, factor) in grids
+            .iter_mut()
+            .zip([0.25, 0.30, f64::NAN, 0.50, 0.60, 0.70])
+        {
+            grid.factor = factor;
+        }
+        let explicit_power_factors =
+            HashMap::from([(0, f64::NAN), (2, 0.875), (3, f64::NAN), (6, 0.90)]);
+        let station_indices = (0..=8).collect::<Vec<_>>();
+        let factors = station_power_values(
+            &station_indices,
+            &entities,
+            &entity_planet_indices,
+            &entity_grid_indices,
+            &explicit_power_factors,
+            &grids,
+        );
+        assert_eq!(
+            factors,
+            vec![1.0, 0.25, 0.875, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        );
+
+        let view = PowerView::new(&station_indices, &factors);
+        assert_eq!(
+            view.iter()
+                .map(|(entity_index, factor)| (*entity_index, *factor))
+                .collect::<Vec<_>>(),
+            station_indices
+                .iter()
+                .copied()
+                .zip(factors.iter().copied())
+                .collect::<Vec<_>>()
+        );
+        for (entity_index, expected) in factors.iter().copied().enumerate() {
+            assert_eq!(view.get(&entity_index).copied().unwrap_or(0.0), expected);
+        }
+        assert!(view.get(&99).is_none(), "missing station must fail closed");
+
+        let malformed_indices = [1_usize];
+        let malformed_factors = [f64::NAN];
+        let malformed = PowerView::new(&malformed_indices, &malformed_factors);
+        assert!(
+            malformed.get(&1).is_none(),
+            "non-finite backing values must fail closed"
+        );
+        assert_eq!(
+            std::mem::size_of::<PowerView<'_>>(),
+            std::mem::size_of::<&[usize]>() + std::mem::size_of::<&[f64]>()
+        );
+    }
 
     #[test]
     fn construction_power_group_matches_forced_full_at_critical_supply_and_fails_closed() {

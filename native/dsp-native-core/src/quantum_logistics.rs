@@ -3945,17 +3945,15 @@ pub(crate) fn settle_active_downloads(
         base,
         entities,
         &center_indices,
+        &indexed_construction_rows,
     )?;
-    let selected_construction_rows_by_id = indexed_construction_rows
-        .iter()
-        .filter_map(|&row| {
-            let entity_index = directory.construction_center_indices.get(row).copied()?;
-            Some((state.entities.ids[entity_index].to_string(), row))
-        })
-        .collect::<BTreeMap<_, _>>();
     if construction_demands.iter().any(|demand| {
         !directory.construction_demand_is_indexable(state, demand)
-            || !selected_construction_rows_by_id.contains_key(&demand.entity_id)
+            || demand.entity_index >= state.entities.ids.len()
+            || &state.entities.ids[demand.entity_index] != demand.entity_id.as_str()
+            || demand.active_row.is_none_or(|row| {
+                directory.construction_center_indices.get(row) != Some(&demand.entity_index)
+            })
     }) {
         // A valid extension can still be simulated by the permissive oracle,
         // but bandwidth, request order and network normalization must all come
@@ -4065,7 +4063,7 @@ pub(crate) fn settle_active_downloads(
     }
     let mut construction_retain = BTreeSet::new();
     for demand in &construction_demands {
-        if let Some(&row) = selected_construction_rows_by_id.get(&demand.entity_id) {
+        if let Some(row) = demand.active_row {
             construction_retain.insert(row);
         }
     }
@@ -4133,13 +4131,9 @@ pub(crate) fn settle_active_downloads(
                 amount.to_u64().unwrap_or(MAX_SAFE_INTEGER),
             )?;
             if applied > 0 {
-                if let Some(&row) = selected_construction_rows_by_id.get(&demand.entity_id)
-                    && let Some(&entity_index) = directory.construction_center_indices.get(row)
-                {
-                    directory
-                        .construction_inventory_written_center_indices
-                        .insert(entity_index);
-                }
+                directory
+                    .construction_inventory_written_center_indices
+                    .insert(demand.entity_index);
                 add_flow(
                     &mut flow.downloaded,
                     &request.item_id,

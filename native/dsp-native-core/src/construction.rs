@@ -32,6 +32,8 @@ enum Step {
 #[derive(Debug, Clone)]
 pub(crate) struct QuantumDemand {
     pub key: String,
+    pub entity_index: usize,
+    pub active_row: Option<usize>,
     pub entity_id: String,
     pub item_id: String,
     pub amount: u64,
@@ -3426,6 +3428,8 @@ fn probe_quantum_demands(
     base: &Map<String, Value>,
     automation: &Map<String, Value>,
     jobs: &Map<String, Value>,
+    entity_index: usize,
+    active_row: Option<usize>,
     center: &Map<String, Value>,
 ) -> anyhow::Result<Vec<QuantumDemand>> {
     if center
@@ -3479,6 +3483,8 @@ fn probe_quantum_demands(
             let amount = floor_amount(amount) as u64;
             (amount > 0).then(|| QuantumDemand {
                 key: format!("construction-direct:{entity_id}:{item_id}"),
+                entity_index,
+                active_row,
                 entity_id: entity_id.to_owned(),
                 item_id,
                 amount,
@@ -3495,22 +3501,35 @@ fn collect_quantum_demands_with_runtime(
     jobs: &Map<String, Value>,
     entities: &[Value],
 ) -> anyhow::Result<Vec<QuantumDemand>> {
-    let mut centers = entities
+    let mut indexed_centers = entities
         .iter()
-        .filter_map(Value::as_object)
-        .filter(|entity| string_at(entity, "buildingId") == Some("construction_center"))
+        .enumerate()
+        .filter_map(|(entity_index, value)| value.as_object().map(|center| (entity_index, center)))
+        .filter(|(_, entity)| string_at(entity, "buildingId") == Some("construction_center"))
         .collect::<Vec<_>>();
-    centers.sort_by(|left, right| {
+    indexed_centers.sort_by(|(_, left), (_, right)| {
         string_at(left, "id")
             .unwrap_or_default()
             .cmp(string_at(right, "id").unwrap_or_default())
     });
+    let centers = indexed_centers
+        .iter()
+        .map(|(_, center)| *center)
+        .collect::<Vec<_>>();
     // A center probe only reads its saved job and the immutable inventory
     // snapshot. The later quantum-logistics replay still allocates the shared
     // stock in this exact ID order, so worker scheduling cannot change which
     // center wins a scarce item.
-    let planned = plan_construction_center_probes(runtime, &centers, |_, center| {
-        probe_quantum_demands(catalog, base, automation, jobs, center)
+    let planned = plan_construction_center_probes(runtime, &centers, |index, center| {
+        probe_quantum_demands(
+            catalog,
+            base,
+            automation,
+            jobs,
+            indexed_centers[index].0,
+            None,
+            center,
+        )
     })?;
     let demand_count = planned.iter().map(Vec::len).sum();
     let mut result = Vec::with_capacity(demand_count);
@@ -3520,15 +3539,23 @@ fn collect_quantum_demands_with_runtime(
     Ok(result)
 }
 
+struct QuantumDemandProbeInputs<'a> {
+    catalog: &'a RuntimeCatalog,
+    base: &'a Map<String, Value>,
+    automation: &'a Map<String, Value>,
+    jobs: &'a Map<String, Value>,
+}
+
 fn collect_quantum_demands_for_center_indices_with_runtime(
     runtime: &DeterministicRuntime,
-    catalog: &RuntimeCatalog,
-    base: &Map<String, Value>,
-    automation: &Map<String, Value>,
-    jobs: &Map<String, Value>,
+    inputs: &QuantumDemandProbeInputs<'_>,
     entities: &[Value],
     center_indices: &[usize],
+    active_rows: &[usize],
 ) -> anyhow::Result<Vec<QuantumDemand>> {
+    if active_rows.len() != center_indices.len() {
+        bail!("native construction quantum active row directory is stale");
+    }
     let centers = center_indices
         .iter()
         .map(|&entity_index| {
@@ -3539,8 +3566,16 @@ fn collect_quantum_demands_for_center_indices_with_runtime(
                 .ok_or_else(|| anyhow!("native construction center index is stale"))
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let planned = plan_construction_center_probes(runtime, &centers, |_, center| {
-        probe_quantum_demands(catalog, base, automation, jobs, center)
+    let planned = plan_construction_center_probes(runtime, &centers, |index, center| {
+        probe_quantum_demands(
+            inputs.catalog,
+            inputs.base,
+            inputs.automation,
+            inputs.jobs,
+            center_indices[index],
+            Some(active_rows[index]),
+            center,
+        )
     })?;
     let demand_count = planned.iter().map(Vec::len).sum();
     let mut result = Vec::with_capacity(demand_count);
@@ -3555,6 +3590,7 @@ pub(crate) fn quantum_demands_for_center_indices(
     base: &Map<String, Value>,
     entities: &[Value],
     center_indices: &[usize],
+    active_rows: &[usize],
 ) -> anyhow::Result<Vec<QuantumDemand>> {
     let automation = automation(base)?;
     if automation.get("enabled").and_then(Value::as_bool) != Some(true)
@@ -3571,12 +3607,15 @@ pub(crate) fn quantum_demands_for_center_indices(
         .ok_or_else(|| anyhow!("native construction jobs are missing"))?;
     collect_quantum_demands_for_center_indices_with_runtime(
         deterministic_runtime(),
-        state.catalog.as_ref(),
-        base,
-        automation,
-        jobs,
+        &QuantumDemandProbeInputs {
+            catalog: state.catalog.as_ref(),
+            base,
+            automation,
+            jobs,
+        },
         entities,
         center_indices,
+        active_rows,
     )
 }
 
@@ -3925,12 +3964,16 @@ mod tests {
         (catalog, base, automation, entities)
     }
 
-    fn demand_projection(demands: &[QuantumDemand]) -> Vec<(String, String, String, u64)> {
+    fn demand_projection(
+        demands: &[QuantumDemand],
+    ) -> Vec<(String, usize, Option<usize>, String, String, u64)> {
         demands
             .iter()
             .map(|demand| {
                 (
                     demand.key.clone(),
+                    demand.entity_index,
+                    demand.active_row,
                     demand.entity_id.clone(),
                     demand.item_id.clone(),
                     demand.amount,
@@ -3946,6 +3989,8 @@ mod tests {
                 .map(|demand| {
                     json!({
                         "key": demand.key,
+                        "entityIndex": demand.entity_index,
+                        "activeRow": demand.active_row,
                         "entityId": demand.entity_id,
                         "itemId": demand.item_id,
                         "amount": demand.amount,
@@ -4638,6 +4683,8 @@ mod tests {
         );
         let demand = QuantumDemand {
             key: format!("construction-direct:{center_id}:iron"),
+            entity_index: 2,
+            active_row: None,
             entity_id: center_id,
             item_id: "iron".to_owned(),
             amount: 1,
@@ -4979,6 +5026,9 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0].entity_id <= pair[1].entity_id)
         );
+        assert!(expected.iter().all(|demand| {
+            entities[demand.entity_index]["id"].as_str() == Some(demand.entity_id.as_str())
+        }));
 
         for worker_limit in [1, 2, 4, 8] {
             let actual = collect_quantum_demands_with_runtime(
@@ -4993,6 +5043,43 @@ mod tests {
             assert_eq!(demand_projection(&actual), expected_projection);
             assert_eq!(demand_bytes(&actual), expected_bytes);
         }
+    }
+
+    #[test]
+    fn indexed_quantum_demand_keeps_its_active_directory_row() {
+        let (catalog, base, automation, entities) = quantum_probe_fixture(10);
+        let jobs = automation["jobs"].as_object().expect("construction jobs");
+        let center_indices = [0, 1, 2];
+        let active_rows = [4, 9, 15];
+        let demands = collect_quantum_demands_for_center_indices_with_runtime(
+            &DeterministicRuntime::for_test(4),
+            &QuantumDemandProbeInputs {
+                catalog: &catalog,
+                base: &base,
+                automation: &automation,
+                jobs,
+            },
+            &entities,
+            &center_indices,
+            &active_rows,
+        )
+        .expect("indexed construction demand probe");
+        assert!(!demands.is_empty());
+        assert!(demands.iter().all(|demand| {
+            let selected_index = center_indices
+                .iter()
+                .position(|&entity_index| entity_index == demand.entity_index)
+                .expect("demand belongs to selected center");
+            demand.active_row == Some(active_rows[selected_index])
+                && entities[demand.entity_index]["id"].as_str() == Some(demand.entity_id.as_str())
+        }));
+        assert_eq!(
+            demands
+                .iter()
+                .map(|demand| demand.entity_index)
+                .collect::<BTreeSet<_>>(),
+            center_indices.into_iter().collect()
+        );
     }
 
     #[test]

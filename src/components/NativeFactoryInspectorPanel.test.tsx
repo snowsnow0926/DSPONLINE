@@ -2,7 +2,12 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { FactoryInspectorSummaryReadModel, FactoryMultiSelectionSummaryReadModel } from "../game/factoryReadModels";
+import type {
+  FactoryInspectorSummaryReadModel,
+  FactoryMultiSelectionSummaryReadModel,
+  NativeStationConfigurationReadModel,
+  SelectedEntityReadModel,
+} from "../game/factoryReadModels";
 import type { NativeProjectedEntityConfigurationBinding } from "../game/nativeProjectedEntityConfigurationCommands";
 import type {
   NativeProjectedEjectorOrbitFrame,
@@ -598,7 +603,7 @@ describe("NativeFactoryInspectorPanel", () => {
     expect(host.textContent).toContain("旧网页存档不会作为备用来源");
   });
 
-  it("renders exactly five Rust station slots, keeps material controls read-only, and waits for ACK", () => {
+  it("renders five Rust station slots and converges fleet controls only after ACK projection", () => {
     const onChange = vi.fn();
     const stationConfiguration = {
       schema: "station-configuration-v1",
@@ -644,10 +649,19 @@ describe("NativeFactoryInspectorPanel", () => {
       entity: stationSummary,
       configuration: stationConfiguration,
     };
-    const render = (projected: NativeProjectedStationConfigurationBinding | null, pending = false) => act(() => root.render(
+    const render = (
+      projected: NativeProjectedStationConfigurationBinding | null,
+      pending = false,
+      projectionRevision = 8,
+      projectedEntity: SelectedEntityReadModel = stationSummary,
+    ) => act(() => root.render(
       <NativeFactoryInspectorPanel
-        inspector={inspector({ entity: stationSummary })}
-        multiSelection={multi({ entityRows: { rows: [stationSummary], totalCount: 1, truncated: false } })}
+        inspector={inspector({ revision: projectionRevision, entity: projectedEntity })}
+        multiSelection={multi({
+          revision: projectionRevision,
+          projectionIdentity: { sessionId: "s", runId: "r", revision: projectionRevision, planetId: "home" },
+          entityRows: { rows: [projectedEntity], totalCount: 1, truncated: false },
+        })}
         entityConfiguration={null}
         stationConfiguration={projected}
         pending={pending}
@@ -669,16 +683,88 @@ describe("NativeFactoryInspectorPanel", () => {
     render(binding);
     expect(host.querySelectorAll("[data-native-station-configuration] fieldset")).toHaveLength(5);
     expect([...host.querySelectorAll<HTMLSelectElement>('select[aria-label$="只读"]')].every((select) => select.disabled)).toBe(true);
-    expect([...host.querySelectorAll<HTMLButtonElement>('[aria-label="物流站舰队只读"] button')].every((button) => button.disabled)).toBe(true);
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="物流无人机+10"]')!.click());
+    expect(onChange).toHaveBeenLastCalledWith("station-ils", {
+      kind: "station-fleet-adjust",
+      fleetKind: "drone",
+      adjustment: 10,
+    });
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="物流运输船归零"]')!.click());
+    expect(onChange).toHaveBeenLastCalledWith("station-ils", {
+      kind: "station-fleet-adjust",
+      fleetKind: "vessel",
+      adjustment: "zero",
+    });
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="站内翘曲器填满"]')!.click());
+    expect(onChange).toHaveBeenLastCalledWith("station-ils", {
+      kind: "station-warper-inventory-adjust",
+      adjustment: "capacity",
+    });
+    expect(host.textContent).toContain("物流无人机 5 / 50");
     const priorityButtons = [...host.querySelectorAll<HTMLButtonElement>('[aria-label="物流站槽位 2 优先级"] button')];
     act(() => priorityButtons[2].click());
     expect(onChange).toHaveBeenLastCalledWith("station-ils", { kind: "slot-priority", slotIndex: 1, target: 2 });
 
     render(binding, true);
+    expect([...host.querySelectorAll<HTMLButtonElement>('[aria-label^="物流无人机"]')]
+      .every((button) => button.disabled)).toBe(true);
+    expect([...host.querySelectorAll<HTMLButtonElement>('[aria-label^="物流运输船"]')]
+      .every((button) => button.disabled)).toBe(true);
+    expect([...host.querySelectorAll<HTMLButtonElement>('[aria-label^="站内翘曲器"]')]
+      .every((button) => button.disabled)).toBe(true);
+    expect(host.textContent).toContain("物流无人机 5 / 50");
     expect([...host.querySelectorAll<HTMLButtonElement>('[aria-label="物流站槽位 2 优先级"] button')]
       .every((button) => button.disabled)).toBe(true);
+
+    const acknowledgedConfiguration = { ...stationConfiguration, stationDrones: 7, stationWarpers: 3 } as const;
+    const acknowledgedSummary = {
+      ...stationSummary,
+      stationConfiguration: acknowledgedConfiguration,
+    } as const;
+    const acknowledgedBinding: NativeProjectedStationConfigurationBinding = {
+      ...binding,
+      revision: 9,
+      entity: acknowledgedSummary,
+      configuration: acknowledgedConfiguration,
+    };
+    render(acknowledgedBinding, false, 9, acknowledgedSummary);
+    expect(host.textContent).toContain("物流无人机 7 / 50");
+    expect(host.textContent).toContain("站内翘曲器 3 / 50");
+
     render({ ...binding, revision: 7 });
+    expect([...host.querySelectorAll<HTMLButtonElement>('[aria-label^="物流无人机"]')]
+      .every((button) => button.disabled)).toBe(true);
     expect([...host.querySelectorAll<HTMLButtonElement>('[aria-label="物流站槽位 2 优先级"] button')]
       .every((button) => button.disabled)).toBe(true);
+
+    const planetaryConfiguration: NativeStationConfigurationReadModel = {
+      ...stationConfiguration,
+      stationType: "planetary",
+      stationVessels: null,
+      stationWarpers: null,
+      slots: stationConfiguration.slots.map(({ routePolicy: _routePolicy, warperBudget: _warperBudget, ...slot }) => slot),
+      spaceWarpUnlocked: false,
+      stationWarpEnabled: null,
+      stationWarperAutoRefill: null,
+      stationWarperTarget: null,
+      stationHubEnabled: null,
+      stationHubPriority: null,
+    };
+    const planetarySummary: SelectedEntityReadModel = {
+      ...stationSummary,
+      entityId: "station-pls",
+      buildingId: "planetary_logistics_station",
+      stationConfiguration: planetaryConfiguration,
+    };
+    const planetaryBinding: NativeProjectedStationConfigurationBinding = {
+      ...binding,
+      revision: 10,
+      entity: planetarySummary,
+      configuration: planetaryConfiguration,
+    };
+    render(planetaryBinding, false, 10, planetarySummary);
+    expect(host.querySelector('[aria-label="Windows 原生物流无人机数量"]')).not.toBeNull();
+    expect(host.querySelector('[aria-label="Windows 原生物流运输船数量"]')).toBeNull();
+    expect(host.querySelector('[aria-label="Windows 原生站内翘曲器数量"]')).toBeNull();
   });
 });

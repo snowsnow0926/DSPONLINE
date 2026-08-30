@@ -541,12 +541,14 @@ import {
   type NativeProjectedTimeWarpControllerBinding,
 } from "./game/nativeProjectedTimeWarpEjectorCommands";
 import {
+  createNativeProjectedStationFleetAdjustmentCommand,
   createNativeProjectedStationScalarCommand,
   createNativeProjectedStationSlotLimitsCommand,
   createNativeProjectedStationSlotMinimumLoadCommand,
   createNativeProjectedStationSlotPriorityCommand,
   createNativeProjectedStationSlotRoutePolicyCommand,
   createNativeProjectedStationSlotWarperBudgetCommand,
+  createNativeProjectedStationWarperInventoryAdjustmentCommand,
   selectNativeProjectedStationConfigurationBinding,
   type NativeProjectedStationConfigurationBinding,
 } from "./game/nativeProjectedStationConfigurationCommands";
@@ -17326,6 +17328,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             return createNativeProjectedStationSlotRoutePolicyCommand(binding, action.slotIndex, action.target);
           case "slot-warper-budget":
             return createNativeProjectedStationSlotWarperBudgetCommand(binding, action.slotIndex, action.target);
+          case "station-fleet-adjust":
+            return createNativeProjectedStationFleetAdjustmentCommand(
+              binding,
+              action.fleetKind,
+              action.adjustment,
+            );
+          case "station-warper-inventory-adjust":
+            return createNativeProjectedStationWarperInventoryAdjustmentCommand(binding, action.adjustment);
           case "station-scalar":
             return createNativeProjectedStationScalarCommand(binding, action);
         }

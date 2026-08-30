@@ -34,16 +34,21 @@ describe("native station configuration App integration", () => {
     expect(handler).toMatch(/createNativeProjectedStationSlotLimitsCommand/);
     expect(handler).toMatch(/createNativeProjectedStationSlotRoutePolicyCommand/);
     expect(handler).toMatch(/createNativeProjectedStationSlotWarperBudgetCommand/);
+    expect(handler).toMatch(/createNativeProjectedStationFleetAdjustmentCommand/);
+    expect(handler).toMatch(/createNativeProjectedStationWarperInventoryAdjustmentCommand/);
     expect(handler).toMatch(/createNativeProjectedStationScalarCommand/);
     expect(handler).toMatch(/durable revision \$\{receipt\.revision\}/);
-    expect(handler).not.toMatch(/commitGame|gameRef\.current|stationRoutes|stationWarpers|inputs|outputs/);
+    expect(handler).not.toMatch(/commitGame|gameRef\.current|stationRoutes|stationDrones|stationVessels|stationWarpers|portableFleet|space_warper|inputs|outputs/);
   });
 
   it("wires the native panel while leaving the ordinary Web station handlers intact", () => {
     expect(app).toMatch(/stationConfiguration=\{nativeStationConfigurationProjectionBinding\}/);
     expect(app).toMatch(/onStationConfigurationChange=\{changeNativeStationConfiguration\}/);
     expect(inspector).toMatch(/data-native-station-configuration="bounded-no-material-v1"/);
-    expect(inspector).toMatch(/aria-label="物流站舰队只读"/);
+    expect(inspector).toMatch(/aria-label=\{`Windows 原生\$\{label\}数量`\}/);
+    expect(inspector).toMatch(/aria-label="Windows 原生站内翘曲器数量"/);
+    expect(inspector).toMatch(/kind: "station-fleet-adjust"/);
+    expect(inspector).toMatch(/kind: "station-warper-inventory-adjust"/);
     expect(inspector).toMatch(/value=\{slot\.itemId \?\? ""\} disabled/);
     expect(app).toMatch(/onStationPriorityChange=\{\(entityId:[\s\S]*?setStationSlotPriority/);
     expect(app).toMatch(/onStationMinimumLoadChange=\{\(entityId:[\s\S]*?setStationSlotMinimumLoad/);

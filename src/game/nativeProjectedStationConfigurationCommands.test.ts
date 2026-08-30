@@ -8,12 +8,14 @@ import type {
   SelectedEntityReadModel,
 } from "./factoryReadModels";
 import {
+  createNativeProjectedStationFleetAdjustmentCommand,
   createNativeProjectedStationScalarCommand,
   createNativeProjectedStationSlotLimitsCommand,
   createNativeProjectedStationSlotMinimumLoadCommand,
   createNativeProjectedStationSlotPriorityCommand,
   createNativeProjectedStationSlotRoutePolicyCommand,
   createNativeProjectedStationSlotWarperBudgetCommand,
+  createNativeProjectedStationWarperInventoryAdjustmentCommand,
   selectNativeProjectedStationConfigurationBinding,
 } from "./nativeProjectedStationConfigurationCommands";
 
@@ -151,7 +153,85 @@ describe("native projected station configuration commands", () => {
     expect(encoded).not.toContain("outputs");
   });
 
-  it("keeps PLS item/mode/fleet read-only and rejects ILS-only actions", () => {
+  it("emits only bounded fleet and warper semantic markers from the Rust projection", () => {
+    const binding = selectNativeProjectedStationConfigurationBinding({ commandIdentity: identity, ...models() })!;
+    const drone = createNativeProjectedStationFleetAdjustmentCommand(binding, "drone", 10)!;
+    expect(drone.changedEntities).toEqual([{
+      id: "station-ils",
+      changes: [{
+        path: ["stationFleetTarget", "intent"],
+        operation: "set",
+        value: { kind: "drone", targetCount: 15 },
+      }],
+    }]);
+    expect(createNativeProjectedStationFleetAdjustmentCommand(binding, "drone", -10)?.changedEntities[0].changes[0].value)
+      .toEqual({ kind: "drone", targetCount: 0 });
+    expect(createNativeProjectedStationFleetAdjustmentCommand(binding, "vessel", "capacity")?.changedEntities[0].changes[0].value)
+      .toEqual({ kind: "vessel", targetCount: 10 });
+
+    const warpers = createNativeProjectedStationWarperInventoryAdjustmentCommand(binding, 10)!;
+    expect(warpers.changedEntities).toEqual([{
+      id: "station-ils",
+      changes: [{
+        path: ["stationWarperInventory", "intent"],
+        operation: "set",
+        value: { delta: 10 },
+      }],
+    }]);
+    expect(createNativeProjectedStationWarperInventoryAdjustmentCommand(binding, "zero")?.changedEntities[0].changes[0].value)
+      .toEqual({ delta: -1 });
+    expect(createNativeProjectedStationWarperInventoryAdjustmentCommand(binding, "capacity")?.changedEntities[0].changes[0].value)
+      .toEqual({ delta: 49 });
+
+    const nearCapacityConfiguration = {
+      ...configuration(),
+      stationDrones: 45,
+      stationWarpers: 45,
+    };
+    const nearCapacityEntity = station(nearCapacityConfiguration);
+    const nearCapacity = selectNativeProjectedStationConfigurationBinding({
+      commandIdentity: identity,
+      ...models(nearCapacityEntity),
+    })!;
+    expect(createNativeProjectedStationFleetAdjustmentCommand(nearCapacity, "drone", 10)?.changedEntities[0].changes[0].value)
+      .toEqual({ kind: "drone", targetCount: 55 });
+    expect(createNativeProjectedStationWarperInventoryAdjustmentCommand(nearCapacity, 10)?.changedEntities[0].changes[0].value)
+      .toEqual({ delta: 10 });
+
+    const encoded = JSON.stringify([drone, warpers]);
+    expect(encoded).not.toContain("stationDrones");
+    expect(encoded).not.toContain("stationVessels");
+    expect(encoded).not.toContain("stationWarpers");
+    expect(encoded).not.toContain("portableFleet");
+    expect(encoded).not.toContain("space_warper");
+  });
+
+  it("fails without mutating the projected row and converges only from a newer ACK projection", () => {
+    const projected = models();
+    const binding = selectNativeProjectedStationConfigurationBinding({ commandIdentity: identity, ...projected })!;
+    const before = JSON.stringify(projected);
+    expect(() => createNativeProjectedStationFleetAdjustmentCommand(binding, "invalid" as "drone", 1))
+      .toThrow(/舰队类型/);
+    expect(() => createNativeProjectedStationWarperInventoryAdjustmentCommand(binding, 0 as 1))
+      .toThrow(/数量调整/);
+    expect(JSON.stringify(projected)).toBe(before);
+    expect(createNativeProjectedStationFleetAdjustmentCommand(binding, "drone", 1)?.changedEntities[0].changes[0].value)
+      .toEqual({ kind: "drone", targetCount: 6 });
+    expect(binding.configuration.stationDrones).toBe(5);
+
+    const acknowledgedConfiguration = { ...configuration(), stationDrones: 6 };
+    const acknowledgedIdentity = { ...identity, revision: 42 };
+    const acknowledgedEntity = station(acknowledgedConfiguration);
+    const acknowledged = selectNativeProjectedStationConfigurationBinding({
+      commandIdentity: acknowledgedIdentity,
+      ...models(acknowledgedEntity, acknowledgedIdentity),
+    })!;
+    expect(acknowledged.configuration.stationDrones).toBe(6);
+    expect(createNativeProjectedStationFleetAdjustmentCommand(acknowledged, "drone", 1)?.changedEntities[0].changes[0].value)
+      .toEqual({ kind: "drone", targetCount: 7 });
+  });
+
+  it("keeps PLS item/mode directions bounded and rejects ILS-only actions", () => {
     const projected = station(configuration("planetary"), {
       entityId: "station-pls",
       buildingId: "planetary_logistics_station",
@@ -164,6 +244,10 @@ describe("native projected station configuration commands", () => {
     expect(() => createNativeProjectedStationSlotRoutePolicyCommand(binding, 2, "direct")).toThrow(/行星物流站/);
     expect(() => createNativeProjectedStationScalarCommand(binding, { field: "stationHubEnabled", target: true }))
       .toThrow(/行星物流站/);
+    expect(() => createNativeProjectedStationFleetAdjustmentCommand(binding, "vessel", 1))
+      .toThrow(/运输船/);
+    expect(() => createNativeProjectedStationWarperInventoryAdjustmentCommand(binding, 1))
+      .toThrow(/站内翘曲器/);
   });
 
   it("fails closed for stale/session/run/planet/MOD/malformed/selection-drift rows", () => {
@@ -220,5 +304,7 @@ describe("native projected station configuration commands", () => {
       field: "stationWarperTarget",
       target: 51,
     })).toThrow(/目标/);
+    expect(() => createNativeProjectedStationWarperInventoryAdjustmentCommand(binding, 1))
+      .toThrow(/科技/);
   });
 });

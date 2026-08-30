@@ -111,12 +111,6 @@ fn biguint_record(values: BTreeMap<String, BigUint>) -> Value {
 }
 
 fn capture_pure_idle_replication(state: &CoreState, base: &Map<String, Value>) -> Option<Value> {
-    let total_produced = base.get("totalProduced")?.as_object()?;
-    let mut produced = BTreeMap::<String, BigUint>::new();
-    for (item_id, value) in total_produced {
-        produced.insert(item_id.clone(), non_negative_integer(Some(value), false)?);
-    }
-
     let research = base.get("research")?.as_object()?;
     let completed = research
         .get("completedTechIds")?
@@ -130,6 +124,9 @@ fn capture_pure_idle_replication(state: &CoreState, base: &Map<String, Value>) -
             continue;
         };
         for cost in &technology.costs {
+            if cost.item_id != "universe_matrix" {
+                continue;
+            }
             let amount = cost.amount.to_biguint()?;
             add_biguint(&mut investment, &cost.item_id, amount);
         }
@@ -139,11 +136,11 @@ fn capture_pure_idle_replication(state: &CoreState, base: &Map<String, Value>) -
             continue;
         }
         for (item_id, value) in progress.as_object()? {
-            add_biguint(
-                &mut investment,
-                item_id,
-                non_negative_integer(Some(value), true)?,
-            );
+            let amount = non_negative_integer(Some(value), true)?;
+            if item_id != "universe_matrix" {
+                continue;
+            }
+            add_biguint(&mut investment, item_id, amount);
         }
     }
 
@@ -184,7 +181,6 @@ fn capture_pure_idle_replication(state: &CoreState, base: &Map<String, Value>) -
     }
 
     Some(serde_json::json!({
-        "totalProduced": biguint_record(produced),
         "researchInvestmentByItem": biguint_record(investment),
         "structurePointsBySystem": structure,
         "shellSailsBySystem": sails,
@@ -1188,14 +1184,12 @@ mod tests {
             "generationKw": 0,
             "demandKw": 0,
             "pureIdleReplication": {
-                "totalProduced": { "iron_ore": "1" },
                 "researchInvestmentByItem": {},
                 "structurePointsBySystem": {},
                 "shellSailsBySystem": {},
             },
         });
         let latest_replication = serde_json::json!({
-            "totalProduced": { "iron_ore": "2" },
             "researchInvestmentByItem": { "universe_matrix": "3" },
             "structurePointsBySystem": { "helios": 4 },
             "shellSailsBySystem": { "helios": 5 },

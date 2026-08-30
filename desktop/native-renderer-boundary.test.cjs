@@ -480,6 +480,7 @@ function factoryReadModelProjection(overrides = {}) {
     construction: {
       schema: "factory-read-model-v1",
       activePlanetId: "MOD-星球",
+      nativeCenterWorkspace: null,
       queue: rows([{
         queueId: "queue-1",
         blueprintId: "bp-1",
@@ -1245,6 +1246,85 @@ test("factory read model is strictly bounded and revision-bound before renderer 
   );
   assert.equal(Object.hasOwn(normalizedStation.selection.entityRows.rows[0].stationConfiguration, "stationRoutes"), false);
 
+  const bounded = (entries, totalCount = entries.length) => ({
+    rows: entries,
+    totalCount,
+    truncated: totalCount > entries.length,
+  });
+  const quantities = (entries, totalAmount = entries.reduce((sum, row) => sum + row.amount, 0)) => ({
+    ...bounded(entries),
+    totalAmount,
+  });
+  const builtInWorkspace = {
+    schema: "construction-center-workspace-v1",
+    registryFingerprint: "7df8cf3a",
+    readOnly: true,
+    activePlanetId: "MOD-星球",
+    activePlanetName: "测试家园 Ω",
+    paused: false,
+    enabled: true,
+    quantumSourceEnabled: true,
+    quantumNetworkEnabled: true,
+    totalCrafted: 7,
+    lastCraftedId: "wind_turbine",
+    lastCraftedName: "风力涡轮机",
+    stockLimit: 500,
+    cycleSeconds: 2.5,
+    materialSeconds: 0.05,
+    targets: bounded([{
+      targetId: "wind_turbine",
+      name: "风力涡轮机",
+      kind: "building",
+      category: "power",
+      target: 50,
+      currentStock: 41,
+      unlocked: true,
+      requiredTechId: "electromagnetism",
+      requiredTechName: "电磁学",
+      outputAmount: 1,
+      costs: bounded([{ itemId: "iron_ore", name: "铁矿石", amount: 6 }]),
+    }]),
+    centers: bounded([{
+      entityId: "center-a",
+      planetId: "MOD-星球",
+      planetName: "测试家园 Ω",
+      machineCount: 2,
+      status: "working",
+    }]),
+    jobs: bounded([{
+      entityId: "center-a",
+      targetId: "wind_turbine",
+      targetName: "风力涡轮机",
+      stepIndex: 1,
+      stepCount: 2,
+      elapsedSeconds: 0.5,
+      inventory: quantities([{ itemId: "iron_ore", name: "铁矿石", amount: 2 }]),
+    }]),
+    materials: quantities([{ itemId: "iron_ore", name: "铁矿石", amount: 123 }]),
+    quantumBuffer: quantities([{ entityId: "center-a", itemId: "iron_ore", name: "铁矿石", amount: 4 }]),
+    destroyedByproducts: quantities([{ itemId: "iron_ore", name: "铁矿石", amount: 3 }]),
+    limits: {
+      targetRows: 128,
+      centerRows: 64,
+      jobRows: 64,
+      materialRows: 256,
+      quantumBufferRows: 256,
+      destroyedByproductRows: 256,
+      costRowsPerTarget: 32,
+      projectionBytes: 1_048_576,
+    },
+  };
+  const builtInProjection = structuredClone(projection);
+  builtInProjection.construction.nativeCenterWorkspace = builtInWorkspace;
+  const normalizedBuiltIn = normalizeRendererNativeResult(
+    "coreFactoryReadModelProjection",
+    builtInProjection,
+    context,
+  );
+  assert.equal(normalizedBuiltIn.construction.nativeCenterWorkspace.targets.rows[0].currentStock, 41);
+  assert.equal(normalizedBuiltIn.construction.nativeCenterWorkspace.quantumBuffer.totalAmount, 4);
+  assert.equal(normalizedBuiltIn.construction.nativeCenterWorkspace.limits.projectionBytes, 1_048_576);
+
   const rejects = (value, requestContext = context) => assert.throws(
     () => normalizeRendererNativeResult("coreFactoryReadModelProjection", value, requestContext),
     (error) => error?.code === "NATIVE_PROTOCOL_INVALID",
@@ -1257,6 +1337,18 @@ test("factory read model is strictly bounded and revision-bound before renderer 
   rejects({ ...projection, shell: { ...projection.shell, timeWarp: { ...projection.shell.timeWarp, effectiveMultiplier: 4.5 } } });
   rejects({ ...projection, shell: { ...projection.shell, timeWarp: { ...projection.shell.timeWarp, allocatedPowerKw: 1e14 } } });
   rejects({ ...projection, shell: { ...projection.shell, path: SECRET_PATH } });
+  for (const mutate of [
+    (workspace) => { workspace.registryFingerprint = "MOD/forged"; },
+    (workspace) => { workspace.engineStatus = { body: SECRET_BODY }; },
+    (workspace) => { workspace.centers.rows[0].planetId = "other"; },
+    (workspace) => { workspace.quantumBuffer.rows[0].entityId = "unknown-center"; },
+    (workspace) => { workspace.materials.totalAmount = 1; },
+    (workspace) => { workspace.targets.rows[0].currentStock = 1.5; },
+  ]) {
+    const malformed = structuredClone(builtInProjection);
+    mutate(malformed.construction.nativeCenterWorkspace);
+    rejects(malformed);
+  }
   rejects({
     ...projection,
     selection: {

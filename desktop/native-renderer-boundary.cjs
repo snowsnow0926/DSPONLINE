@@ -1865,8 +1865,213 @@ function normalizeFactorySelection(value, activePlanetId, context) {
   };
 }
 
+function normalizeConstructionCenterNamedQuantityRows(value, label, maximumRows, withEntityId = false) {
+  const source = exactObject(value, ["rows", "totalCount", "totalAmount", "truncated"], label);
+  const rowsModel = normalizeReadModelRows({
+    rows: source.rows,
+    totalCount: source.totalCount,
+    truncated: source.truncated,
+  }, label, maximumRows, (row, rowLabel) => {
+    const entry = exactObject(row, withEntityId
+      ? ["entityId", "itemId", "name", "amount"]
+      : ["itemId", "name", "amount"], rowLabel);
+    return {
+      ...(withEntityId ? { entityId: opaqueId(entry.entityId, `${rowLabel}.entityId`) } : {}),
+      itemId: opaqueId(entry.itemId, `${rowLabel}.itemId`),
+      name: boundedReadModelText(entry.name, `${rowLabel}.name`, 256, 1),
+      amount: safeInteger(entry.amount, `${rowLabel}.amount`),
+    };
+  });
+  const totalAmount = safeInteger(source.totalAmount, `${label}.totalAmount`);
+  const visibleAmount = rowsModel.rows.reduce((total, row) => total + row.amount, 0);
+  if (!Number.isSafeInteger(visibleAmount) || totalAmount < visibleAmount ||
+      (!rowsModel.truncated && totalAmount !== visibleAmount)) {
+    throw protocolError(`${label} total amount binding`);
+  }
+  const ids = new Set();
+  for (const row of rowsModel.rows) {
+    const id = withEntityId ? `${row.entityId}\0${row.itemId}` : row.itemId;
+    if (ids.has(id)) throw protocolError(`${label} duplicate row`);
+    ids.add(id);
+  }
+  return { ...rowsModel, totalAmount };
+}
+
+function normalizeNativeConstructionCenterWorkspace(value, activePlanetId) {
+  if (value === null) return null;
+  const source = exactObject(value, [
+    "schema", "registryFingerprint", "readOnly", "activePlanetId", "activePlanetName",
+    "paused", "enabled", "quantumSourceEnabled", "quantumNetworkEnabled", "totalCrafted",
+    "lastCraftedId", "lastCraftedName", "stockLimit", "cycleSeconds", "materialSeconds",
+    "targets", "centers", "jobs", "materials", "quantumBuffer", "destroyedByproducts", "limits",
+  ], "native construction-center workspace");
+  if (source.schema !== "construction-center-workspace-v1" ||
+      source.registryFingerprint !== "7df8cf3a" || source.readOnly !== true ||
+      opaqueId(source.activePlanetId, "native construction-center active planet") !== activePlanetId) {
+    throw protocolError("native construction-center identity");
+  }
+  const limits = exactObject(source.limits, [
+    "targetRows", "centerRows", "jobRows", "materialRows", "quantumBufferRows",
+    "destroyedByproductRows", "costRowsPerTarget", "projectionBytes",
+  ], "native construction-center limits");
+  const expectedLimits = {
+    targetRows: 128,
+    centerRows: 64,
+    jobRows: 64,
+    materialRows: 256,
+    quantumBufferRows: 256,
+    destroyedByproductRows: 256,
+    costRowsPerTarget: 32,
+    projectionBytes: 1_048_576,
+  };
+  for (const [key, expected] of Object.entries(expectedLimits)) {
+    if (safeInteger(limits[key], `native construction-center limits.${key}`, 1) !== expected) {
+      throw protocolError("native construction-center limit binding");
+    }
+  }
+  const targets = normalizeReadModelRows(source.targets, "native construction-center targets", 128, (row, label) => {
+    const entry = exactObject(row, [
+      "targetId", "name", "kind", "category", "target", "currentStock", "unlocked",
+      "requiredTechId", "requiredTechName", "outputAmount", "costs",
+    ], label);
+    const costs = normalizeReadModelRows(entry.costs, `${label}.costs`, 32, (cost, costLabel) => {
+      const costSource = exactObject(cost, ["itemId", "name", "amount"], costLabel);
+      return {
+        itemId: opaqueId(costSource.itemId, `${costLabel}.itemId`),
+        name: boundedReadModelText(costSource.name, `${costLabel}.name`, 256, 1),
+        amount: safeInteger(costSource.amount, `${costLabel}.amount`, 1),
+      };
+    });
+    if (new Set(costs.rows.map((cost) => cost.itemId)).size !== costs.rows.length) {
+      throw protocolError(`${label}.costs duplicate item`);
+    }
+    const requiredTechId = nullableReadModelId(entry.requiredTechId, `${label}.requiredTechId`);
+    const requiredTechName = entry.requiredTechName === null
+      ? null
+      : boundedReadModelText(entry.requiredTechName, `${label}.requiredTechName`, 256, 1);
+    if ((requiredTechId === null) !== (requiredTechName === null)) {
+      throw protocolError(`${label} technology binding`);
+    }
+    return {
+      targetId: opaqueId(entry.targetId, `${label}.targetId`),
+      name: boundedReadModelText(entry.name, `${label}.name`, 256, 1),
+      kind: oneOf(entry.kind, ["building", "fleet"], `${label}.kind`),
+      category: oneOf(entry.category, ["power", "production", "logistics", "dyson"], `${label}.category`),
+      target: safeInteger(entry.target, `${label}.target`),
+      currentStock: safeInteger(entry.currentStock, `${label}.currentStock`),
+      unlocked: boolean(entry.unlocked, `${label}.unlocked`),
+      requiredTechId,
+      requiredTechName,
+      outputAmount: safeInteger(entry.outputAmount, `${label}.outputAmount`, 1),
+      costs,
+    };
+  });
+  if (new Set(targets.rows.map((row) => row.targetId)).size !== targets.rows.length) {
+    throw protocolError("native construction-center duplicate target");
+  }
+  const activePlanetName = boundedReadModelText(source.activePlanetName, "native construction-center active planet name", 256, 1);
+  const centers = normalizeReadModelRows(source.centers, "native construction-center centers", 64, (row, label) => {
+    const entry = exactObject(row, ["entityId", "planetId", "planetName", "machineCount", "status"], label);
+    const planetId = opaqueId(entry.planetId, `${label}.planetId`);
+    const planetName = boundedReadModelText(entry.planetName, `${label}.planetName`, 256, 1);
+    if (planetId !== activePlanetId || planetName !== activePlanetName) throw protocolError(`${label} planet binding`);
+    return {
+      entityId: opaqueId(entry.entityId, `${label}.entityId`),
+      planetId,
+      planetName,
+      machineCount: safeInteger(entry.machineCount, `${label}.machineCount`),
+      status: oneOf(entry.status, ["game-paused", "automation-paused", "working", "idle"], `${label}.status`),
+    };
+  });
+  if (new Set(centers.rows.map((row) => row.entityId)).size !== centers.rows.length) {
+    throw protocolError("native construction-center duplicate center");
+  }
+  const jobs = normalizeReadModelRows(source.jobs, "native construction-center jobs", 64, (row, label) => {
+    const entry = exactObject(row, [
+      "entityId", "targetId", "targetName", "stepIndex", "stepCount", "elapsedSeconds", "inventory",
+    ], label);
+    const stepIndex = safeInteger(entry.stepIndex, `${label}.stepIndex`);
+    const stepCount = safeInteger(entry.stepCount, `${label}.stepCount`);
+    if (stepIndex > stepCount) throw protocolError(`${label} step binding`);
+    return {
+      entityId: opaqueId(entry.entityId, `${label}.entityId`),
+      targetId: opaqueId(entry.targetId, `${label}.targetId`),
+      targetName: boundedReadModelText(entry.targetName, `${label}.targetName`, 256, 1),
+      stepIndex,
+      stepCount,
+      elapsedSeconds: finiteNumber(entry.elapsedSeconds, `${label}.elapsedSeconds`),
+      inventory: normalizeConstructionCenterNamedQuantityRows(entry.inventory, `${label}.inventory`, 256),
+    };
+  });
+  if (new Set(jobs.rows.map((row) => row.entityId)).size !== jobs.rows.length) {
+    throw protocolError("native construction-center duplicate job");
+  }
+  const visibleTargets = new Map(targets.rows.map((row) => [row.targetId, row]));
+  const visibleCenters = new Set(centers.rows.map((row) => row.entityId));
+  for (const job of jobs.rows) {
+    const target = visibleTargets.get(job.targetId);
+    if ((!targets.truncated && (!target || target.name !== job.targetName)) ||
+        (!centers.truncated && !visibleCenters.has(job.entityId))) {
+      throw protocolError("native construction-center job directory binding");
+    }
+  }
+  const materials = normalizeConstructionCenterNamedQuantityRows(source.materials, "native construction-center materials", 256);
+  const quantumBuffer = normalizeConstructionCenterNamedQuantityRows(
+    source.quantumBuffer,
+    "native construction-center quantum buffer",
+    256,
+    true,
+  );
+  if (!centers.truncated && quantumBuffer.rows.some((row) => !visibleCenters.has(row.entityId))) {
+    throw protocolError("native construction-center quantum center binding");
+  }
+  const destroyedByproducts = normalizeConstructionCenterNamedQuantityRows(
+    source.destroyedByproducts,
+    "native construction-center destroyed byproducts",
+    256,
+  );
+  const lastCraftedId = nullableReadModelId(source.lastCraftedId, "native construction-center last crafted ID");
+  const lastCraftedName = source.lastCraftedName === null
+    ? null
+    : boundedReadModelText(source.lastCraftedName, "native construction-center last crafted name", 256, 1);
+  if ((lastCraftedId === null) !== (lastCraftedName === null) ||
+      lastCraftedId !== null && !targets.truncated &&
+        visibleTargets.get(lastCraftedId)?.name !== lastCraftedName) {
+    throw protocolError("native construction-center last crafted binding");
+  }
+  const cycleSeconds = finiteNumber(source.cycleSeconds, "native construction-center cycle seconds", Number.EPSILON);
+  const materialSeconds = finiteNumber(source.materialSeconds, "native construction-center material seconds", Number.EPSILON);
+  if (Math.abs(materialSeconds - cycleSeconds / 50) > Number.EPSILON) {
+    throw protocolError("native construction-center timing binding");
+  }
+  return {
+    schema: "construction-center-workspace-v1",
+    registryFingerprint: "7df8cf3a",
+    readOnly: true,
+    activePlanetId,
+    activePlanetName,
+    paused: boolean(source.paused, "native construction-center paused"),
+    enabled: boolean(source.enabled, "native construction-center enabled"),
+    quantumSourceEnabled: boolean(source.quantumSourceEnabled, "native construction-center quantum source"),
+    quantumNetworkEnabled: boolean(source.quantumNetworkEnabled, "native construction-center quantum network"),
+    totalCrafted: safeInteger(source.totalCrafted, "native construction-center total crafted"),
+    lastCraftedId,
+    lastCraftedName,
+    stockLimit: safeInteger(source.stockLimit, "native construction-center stock limit", 1),
+    cycleSeconds,
+    materialSeconds,
+    targets,
+    centers,
+    jobs,
+    materials,
+    quantumBuffer,
+    destroyedByproducts,
+    limits: expectedLimits,
+  };
+}
+
 function normalizeFactoryConstruction(value, activePlanetId) {
-  const source = exactObject(value, ["schema", "activePlanetId", "queue", "automation"], "native factory construction");
+  const source = exactObject(value, ["schema", "activePlanetId", "queue", "nativeCenterWorkspace", "automation"], "native factory construction");
   if (source.schema !== "factory-read-model-v1" ||
       opaqueId(source.activePlanetId, "native factory construction active planet") !== activePlanetId) {
     throw protocolError("native factory construction identity");
@@ -1935,6 +2140,7 @@ function normalizeFactoryConstruction(value, activePlanetId) {
     schema: "factory-read-model-v1",
     activePlanetId,
     queue,
+    nativeCenterWorkspace: normalizeNativeConstructionCenterWorkspace(source.nativeCenterWorkspace, activePlanetId),
     automation: {
       enabled: boolean(automationSource.enabled, "native factory automation enabled"),
       quantumSourceEnabled: boolean(automationSource.quantumSourceEnabled, "native factory automation quantum source"),

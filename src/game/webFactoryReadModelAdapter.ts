@@ -458,6 +458,7 @@ export function createConstructionSummaryReadModel(state: GameState): Constructi
     schema: FACTORY_READ_MODEL_SCHEMA,
     activePlanetId: state.activePlanetId,
     queue: constructionQueueRows(state),
+    nativeCenterWorkspace: null,
     automation: {
       enabled: state.constructionAutomation.enabled,
       quantumSourceEnabled: state.constructionAutomation.quantumSourceEnabled === true,

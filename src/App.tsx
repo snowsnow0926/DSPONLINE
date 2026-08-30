@@ -51,6 +51,7 @@ import { ItemReferenceActionsProvider } from "./components/ItemReference";
 import { NativeResourceRail } from "./components/NativeResourceRail";
 import { NativeConstructionDock } from "./components/NativeConstructionDock";
 import { NativeBlueprintWorkspace } from "./components/NativeBlueprintWorkspace";
+import { NativeConstructionCenterWorkspace } from "./components/NativeConstructionCenterWorkspace";
 import {
   NativeFactoryInspectorPanel,
   type NativeStationConfigurationUiAction,
@@ -641,6 +642,7 @@ import {
   type FactoryInteractionRows,
 } from "./game/nativeFactoryInteractionFrame";
 import { selectNativeAuthoritativeFactoryWorkspaceFrame } from "./game/nativeFactoryWorkspaceFrame";
+import { selectNativeConstructionCenterWorkspaceFrame } from "./game/nativeConstructionCenterWorkspace";
 import {
   FACTORY_READ_MODEL_LIMITS,
   FACTORY_READ_MODEL_SCHEMA,
@@ -3201,6 +3203,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     () => selectNativeAuthoritativeFactoryWorkspaceFrame(nativeFactoryThinViewSnapshot, {
       enabled: nativeFactoryThinViewMode === "native-authoritative" && nativeFactoryProjectionRouteReady,
       sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
+      runId: nativePlayerAuthorityActiveFrame?.runId ?? null,
       expectedRevision: factoryThinViewExpectedRevision,
       activePlanetId: nativeFactoryProjectionPlanetId,
     }),
@@ -3210,9 +3213,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       nativeFactoryProjectionRouteReady,
       nativeFactoryThinViewMode,
       nativeFactoryThinViewSnapshot,
+      nativePlayerAuthorityActiveFrame?.runId,
       nativePlayerAuthorityActiveFrame?.sessionId,
     ],
   );
+  const nativeConstructionCenterWorkspaceFrame = useMemo(
+    () => selectNativeConstructionCenterWorkspaceFrame(nativeAuthoritativeFactoryWorkspaceFrame),
+    [nativeAuthoritativeFactoryWorkspaceFrame],
+  );
+  const nativeConstructionCenterReadStatus = nativeConstructionCenterWorkspaceFrame
+    ? "ready" as const
+    : nativeFactoryThinViewSnapshot.status === "ready" || nativeFactoryThinViewSnapshot.status === "unavailable"
+      ? "unavailable" as const
+      : "loading" as const;
   const nativePlayerAuthorityMacroControllerRef = useRef<
     NativePlayerAuthorityMacroController | null | undefined
   >(undefined);
@@ -3318,6 +3331,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     revision: factoryThinViewExpectedRevision,
     activePlanetId: nativeFactoryProjectionPlanetId,
     queue: { rows: [], totalCount: 0, truncated: false },
+    nativeCenterWorkspace: null,
     automation: {
       enabled: false,
       quantumSourceEnabled: false,
@@ -18256,7 +18270,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           typeof desktopBridge?.setNativePlayerAuthorityPaused === "function" &&
           nativePlayerAuthorityClockSnapshot.currentFrame?.schemaVersion === 1
         )}
-        constructionCenterUnavailable={nativePlayerAuthorityOwnsRuntime}
+        constructionCenterVisible={nativePlayerAuthorityOwnsRuntime || game.entities.some((entity) => entity.buildingId === "construction_center")}
         activeWorkspace={headerActiveWorkspace}
         onReturnToMenu={returnToMenuSafely}
         onOpenCampaign={() => {
@@ -18270,7 +18284,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           setNotice("新版手机界面已启用，可在更多工作区切回经典界面");
         }}
         onOpenConstructionCenter={() => {
-          if (rejectLegacyFactoryInteractionWhileNative("建筑制造中心")) return;
+          if (!nativePlayerAuthorityOwnsRuntime && rejectLegacyFactoryInteractionWhileNative("建筑制造中心")) return;
           if (constructionCenterOpen) {
             closeAllWorkspaces();
             setNotice(null);
@@ -19513,7 +19527,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         onEntitySearchRequest={updateCommandPaletteEntitySearchRequest}
       />
       <Suspense fallback={<WorkspaceLoading />}>
-        {constructionCenterOpen && !nativePlayerAuthorityOwnsRuntime ? (
+        {constructionCenterOpen ? nativePlayerAuthorityOwnsRuntime ? (
+          <NativeConstructionCenterWorkspace
+            open
+            frame={nativeConstructionCenterWorkspaceFrame}
+            readStatus={nativeConstructionCenterReadStatus}
+            onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setConstructionCenterOpen(false)}
+          />
+        ) : (
           <ConstructionCenterWorkspace
             open
             game={game}

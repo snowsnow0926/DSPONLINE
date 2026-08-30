@@ -3,6 +3,7 @@ import { CAMPAIGN_CHAPTERS, CAMPAIGN_TASKS } from "../game/campaign";
 import { PLANET_TEMPLATES, STAR_CLASS_TEMPLATES } from "../game/galaxyCatalog";
 import { ACHIEVEMENTS } from "../game/progression";
 import { registerCatalogEnglish } from "./legacyTranslations";
+import { PLANET_NAMES_EN } from "./planetNames";
 
 const ITEM_NAMES_EN: Record<string, string> = {
   iron_ore: "Iron Ore",
@@ -365,31 +366,6 @@ const TECHNOLOGY_UNLOCKS_EN: Record<string, string> = {
   "量子物流塔接入": "Quantum Logistics Tower Access",
   "全宇宙共享库存": "Universal Shared Inventory",
   "量子网络全局吞吐": "Quantum Network Global Throughput",
-};
-
-const PLANET_NAMES_EN: Record<string, string> = {
-  home: "Clearwater I",
-  ashen: "Cinderfield II",
-  giant: "Azurewind III",
-  frost: "Frostplain I",
-  boreal_giant: "Deepblue II",
-  magnetar: "Polar Night I",
-  verdant: "Verdant Ring I",
-  pelagic: "Pelagic Deep II",
-  aurora_giant: "Skyvault III",
-  dune: "Red Dune I",
-  cinder: "Ashfall II",
-  ember_giant: "Redstorm III",
-  crystal: "Crystal Vault I",
-  prairie: "Cloudpasture II",
-  sirius_giant: "Silver Crown III",
-  salt: "White Salt I",
-  obsidian: "Obsidian II",
-  white_giant: "Pale Giant III",
-  tempest: "Tempest I",
-  inferno: "Inferno Core II",
-  abyss: "Abyss III",
-  azure_giant: "Azure Vault IV",
 };
 
 const STAR_SYSTEM_NAMES_EN: Record<string, string> = {

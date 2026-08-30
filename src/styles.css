@@ -12897,7 +12897,13 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   padding: 11px;
 }
 
-.star-planet-list > button {
+.star-planet-entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 48px;
+  gap: 6px;
+}
+
+.star-planet-entry__travel {
   display: grid;
   width: 100%;
   min-height: 108px;
@@ -12914,22 +12920,22 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   text-align: left;
 }
 
-.star-planet-list > button:hover:not(:disabled),
-.star-planet-list > button.active {
+.star-planet-entry__travel:hover:not(:disabled),
+.star-planet-entry__travel.active {
   border-color: color-mix(in srgb, var(--system-color) 70%, var(--line));
   background: #18211d;
 }
 
-.star-planet-list > button:disabled {
+.star-planet-entry__travel:disabled {
   cursor: default;
   opacity: 0.46;
 }
 
-.star-planet-list > button.planet-uncolonized:disabled {
+.star-planet-entry__travel.planet-uncolonized:disabled {
   opacity: 0.92;
 }
 
-.star-planet-list > button > i {
+.star-planet-entry__travel > i {
   display: grid;
   grid-row: 1;
   width: 28px;
@@ -12938,7 +12944,7 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   font-style: normal;
 }
 
-.star-planet-list > button > span {
+.star-planet-entry__travel > span {
   display: flex;
   min-width: 0;
   grid-row: 1;
@@ -12946,27 +12952,27 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   gap: 2px;
 }
 
-.star-planet-list > button strong {
+.star-planet-entry__travel strong {
   overflow: hidden;
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.star-planet-list > button small,
-.star-planet-list > button em,
-.star-planet-list > button p {
+.star-planet-entry__travel small,
+.star-planet-entry__travel em,
+.star-planet-entry__travel p {
   color: var(--muted);
   font-size: 8px;
   font-style: normal;
 }
 
-.star-planet-list > button > em {
+.star-planet-entry__travel > em {
   grid-row: 1;
   white-space: nowrap;
 }
 
-.star-planet-list > button > p {
+.star-planet-entry__travel > p {
   min-width: 0;
   grid-column: 2 / -1;
   grid-row: 2;
@@ -12976,7 +12982,7 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   white-space: nowrap;
 }
 
-.star-planet-list > button > .star-planet-profile {
+.star-planet-entry__travel > .star-planet-profile {
   min-width: 0;
   grid-column: 2 / -1;
   grid-row: 3;
@@ -12987,7 +12993,7 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   white-space: nowrap;
 }
 
-.star-planet-list > button > .star-planet-traits {
+.star-planet-entry__travel > .star-planet-traits {
   display: grid;
   min-width: 0;
   grid-column: 2 / -1;
@@ -13013,11 +13019,182 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   white-space: nowrap;
 }
 
-.star-planet-list > button .star-planet-traits strong {
+.star-planet-entry__travel .star-planet-traits strong {
   overflow: visible;
   color: #b7d9cf;
   font-size: 7px;
   text-overflow: clip;
+}
+
+.star-planet-entry__reset {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 5px;
+  border: 1px solid color-mix(in srgb, var(--coral) 45%, var(--line));
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--coral) 8%, var(--surface));
+  color: color-mix(in srgb, var(--coral) 78%, var(--text));
+  cursor: pointer;
+  font-size: 8px;
+}
+
+.star-planet-entry__reset:hover {
+  border-color: color-mix(in srgb, var(--coral) 72%, var(--line));
+  background: color-mix(in srgb, var(--coral) 15%, var(--surface));
+}
+
+.planet-reset-dialog {
+  --accessible-dialog-max-inline-size: 48rem;
+  border-color: color-mix(in srgb, var(--coral) 52%, var(--theme-border-strong));
+}
+
+.planet-reset-dialog__steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 14px;
+}
+
+.planet-reset-dialog__steps > span {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--theme-border-strong);
+  border-radius: 5px;
+  color: var(--theme-text-muted);
+  font-weight: 700;
+}
+
+.planet-reset-dialog__steps > span small {
+  font-size: 0.72em;
+  font-weight: 500;
+}
+
+.planet-reset-dialog__steps > span.active {
+  border-color: color-mix(in srgb, var(--coral) 58%, var(--theme-border-strong));
+  background: color-mix(in srgb, var(--coral) 10%, var(--theme-surface-raised));
+  color: var(--theme-text);
+}
+
+.planet-reset-dialog__steps > span.complete {
+  border-color: var(--theme-accent-border);
+  color: var(--theme-accent);
+}
+
+.planet-reset-dialog__summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 14px;
+}
+
+.planet-reset-dialog__summary > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  padding: 9px 10px;
+  border: 1px solid var(--theme-border);
+  border-radius: 5px;
+  background: var(--theme-surface-soft);
+}
+
+.planet-reset-dialog__summary strong {
+  overflow: hidden;
+  color: var(--theme-text);
+  font-size: 1.05em;
+  text-overflow: ellipsis;
+}
+
+.planet-reset-dialog__summary small,
+.planet-reset-dialog__name small {
+  color: var(--theme-text-muted);
+}
+
+.planet-reset-dialog__scope {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.planet-reset-dialog__scope section {
+  padding: 11px;
+  border: 1px solid var(--theme-border);
+  border-radius: 5px;
+  background: var(--theme-surface-soft);
+}
+
+.planet-reset-dialog__scope strong,
+.planet-reset-dialog__warning {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.planet-reset-dialog__scope p,
+.planet-reset-dialog__warning p {
+  margin: 6px 0 0;
+  color: var(--theme-text-muted);
+  font-size: 0.86em;
+}
+
+.planet-reset-dialog__warning,
+.planet-reset-dialog__unavailable {
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--coral) 55%, var(--theme-border));
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--coral) 9%, var(--theme-surface-soft));
+  color: color-mix(in srgb, var(--coral) 68%, var(--theme-text));
+}
+
+.planet-reset-dialog__unavailable {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.planet-reset-dialog__name {
+  display: grid;
+  gap: 8px;
+}
+
+.planet-reset-dialog__name > span {
+  color: var(--theme-text-soft);
+}
+
+.planet-reset-dialog__name input {
+  width: 100%;
+  min-height: 44px;
+  box-sizing: border-box;
+  padding: 0 12px;
+  border: 1px solid var(--theme-border-strong);
+  border-radius: 5px;
+  background: var(--theme-control);
+  color: var(--theme-text);
+}
+
+.planet-reset-dialog__name input[aria-invalid="true"] {
+  border-color: color-mix(in srgb, var(--coral) 70%, var(--theme-border-strong));
+}
+
+.planet-reset-dialog__confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border-color: color-mix(in srgb, var(--coral) 70%, var(--theme-border-strong));
+  background: color-mix(in srgb, var(--coral) 18%, var(--theme-surface-raised));
+  color: var(--theme-text);
+}
+
+.planet-reset-dialog__confirm:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
 }
 
 .planet-colony-requirements {
@@ -18026,8 +18203,13 @@ select {
     height: 36px;
   }
 
-  .star-planet-list > button {
+  .star-planet-entry__travel {
     min-height: 104px;
+  }
+
+  .planet-reset-dialog__summary,
+  .planet-reset-dialog__scope {
+    grid-template-columns: 1fr;
   }
 
   .recipe-header {

@@ -309,6 +309,10 @@ React Flow 只负责可视节点、边、视口和交互；真实生产库存与
 
 `GameState.planetViewports` 按 `PlanetId` 保存 React Flow 的 `x/y/zoom`。离开行星和 `onMoveEnd` 更新当前记录，返回时恢复目标记录；书签、设备定位和网络定位属于显式视角命令，可以覆盖恢复结果。瞬时 React Flow 对象仍不进入存档。
 
+`resetPlanetFactory()` 是星图“重置星球工厂”的唯一领域命令。UI 中的三次确认只是交互防线，命令边界仍会重新验证行星存在、已殖民且确有可清理内容。提交使用定向 copy-on-write：删除目标星球非矿脉实体、传送带、物资托盘、本地施工/手搓/生产计划、画布标记和统计；按既有航线取消规则终止所有触及目标星球的物流航线、退回可保留站点的翘曲器，并清理外星实体中指向已删站点的 peer、调度游标和量子过渡桥。天然资源节点以原 ID、位置、资源类型、`resourceRemaining`、`resourceCapacity` 和 `resourceDepletionRemainder` 重建为未安装状态，因此重置不刷新矿储。科研、戴森工程、量子仓库、全局施工库存、随身舰队、蓝图、星球元数据和殖民状态不变。
+
+星球重置不得通过普通 `copyState()` 复制整份终局档，否则删除前后两份超大工厂会同时驻留堆内存。`FactoryGame.commitGame(..., { clearHistory: true })` 将该命令标记为不可撤销，发布新状态前清空撤销/重做栈，防止逆补丁继续强引用整颗已删星球。全局滚动产率历史不能安全分离单星球贡献，所以重置时整体清空并从当前模拟时刻重新采样，不回退 `totalProduced` 或任何累计终局进度。
+
 殖民费用沿用行星档案中的 `colonyCost`，但 `getColonizationRequirements()` 为每项成本派生 `planet-tray` 或 `portable-fleet` 来源。`colonizePlanet()` 只在全部成本一次性验证成功后复制状态并统一扣料，因此不会在缺船或缺运输机时先扣普通材料。
 
 `GameState.planetTrayItemLimits` 按行星保存单种物资上限。普通自动入库命令先计算剩余容量，只移动可容纳的整数数量；设备回收、配方切换、线路取消以及玩家主动放下光标整组载荷属于保护性返还，不受上限截断，避免降低上限或配送枢纽满仓后销毁、截断或卡住既有物资。

@@ -115,6 +115,7 @@ import {
   getConstructionQuickCraftPlan,
   getMaterialDeliverySlotChangeCheck,
   getOrbitalCargoPortClearCheck,
+  getPlanetFactoryResetPreview,
   getRecursiveHandcraftPlan,
   MIN_CANVAS_REGION_SIZE,
   getEntityOutputCapacity,
@@ -167,6 +168,7 @@ import {
   removeEntities,
   removeSprayCoater,
   removeQueuedTechnology,
+  resetPlanetFactory,
   resumePausedResearch,
   selectTechnology,
   setBeltPriority,
@@ -5330,13 +5332,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
     if ("vibrate" in navigator && typeof navigator.vibrate === "function") navigator.vibrate(tone === "warning" ? [12, 18, 12] : 10);
   }, []);
 
-  const commitGame = useCallback((updater: (current: GameState) => GameState): boolean => {
+  const commitGame = useCallback((
+    updater: (current: GameState) => GameState,
+    options: { clearHistory?: boolean } = {},
+  ): boolean => {
     if (rejectPlayerStateEditDuringPrimarySave()) return false;
     const current = gameRef.current;
     const next = updater(current);
     if (next === current) return false;
-    const recorded = gameHistoryRef.current.record(current, next);
-    if (!recorded) return false;
+    let recorded: GameState;
+    if (options.clearHistory) {
+      // Planet reset is intentionally non-undoable. Retaining its inverse patch
+      // would keep an entire deleted endgame planet alive in memory.
+      gameHistoryRef.current.clear();
+      recorded = next;
+    } else {
+      const historyState = gameHistoryRef.current.record(current, next);
+      if (!historyState) return false;
+      recorded = historyState;
+    }
     factoryAlertsGenerationRef.current += 1;
     queueMicrotask(() => setFactoryAlertProjection(EMPTY_FACTORY_ALERT_PROJECTION));
     setHistoryRevision((revision) => revision + 1);
@@ -7742,6 +7756,55 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
   const onGenerationPriorityChange = useCallback((entityId: string, priority: PowerPriority) => {
     commitGame((current) => setEntityGenerationPriority(current, entityId, priority));
   }, [commitGame]);
+
+  const onResetPlanetFactory = useCallback((planetId: PlanetId): boolean => {
+    const current = gameRef.current;
+    const preview = getPlanetFactoryResetPreview(current, planetId);
+    const next = resetPlanetFactory(current, planetId);
+    if (next === current || !commitGame(() => next, { clearHistory: true })) return false;
+
+    if (current.activePlanetId === planetId) {
+      onMiningStop();
+      flowStore.getState().cancelConnection();
+      flowStore.setState({ connectionClickStartHandle: null });
+      clickConnectionPreviewRef.current = null;
+      clickConnectionSucceededRef.current = false;
+      setClickConnectionPreview(null);
+      setClickConnectionTone("pending");
+      setClickConnectionSnapPoint(null);
+      updateConnectionDraft(null);
+      setConnectionHint(null);
+      selectedEntityIdsRef.current = [];
+      selectedBeltIdRef.current = null;
+      selectedBeltIdsRef.current = [];
+      setSelectedEntityIds([]);
+      setSelectedBeltId(null);
+      setSelectedBeltIds([]);
+      setFocusedBeltNetworkId(null);
+      setProductionLineFocus(null);
+      setPlacement(null);
+      setBlueprintPlacementId(null);
+      setSelectionMode(false);
+      setRegionMode(false);
+      setRegionDraft(null);
+      setRegionResizePreview(null);
+      setSelectedRegionId(null);
+      regionPointerRef.current = null;
+      regionResizeRef.current = null;
+      batchConnectionModeRef.current = false;
+      batchConnectionsRef.current = [];
+      batchConnectionDraftRef.current = null;
+      batchConnectionDraftBaseRef.current = null;
+      setBatchConnectionMode(false);
+      setBatchConnections([]);
+      setBatchConnectionFailures([]);
+      setBatchConnectionFeedback(null);
+      setAutoLayoutUndo(null);
+    }
+    playTone("remove");
+    setNotice(`已永久重置${getPlanetDisplayName(next, planetId)}：删除 ${preview.buildingUnits + preview.extractorUnits} 台设备、${preview.beltConnections} 条传送带；天然资源剩余量与全局进度保持不变`);
+    return true;
+  }, [commitGame, onMiningStop, playTone, updateConnectionDraft]);
 
   const onPlanetChange = useCallback((planetId: PlanetId): boolean => {
     const current = gameRef.current;
@@ -13569,6 +13632,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             onAttachAllQuantumStations={handleAttachAllQuantumStations}
             onCollectorQuantumModeChange={handleAllOrbitalCollectorsQuantumMode}
             onQuantumItemCapacityChange={(itemId, value) => commitGame((current) => setQuantumLogisticsItemCapacity(current, itemId, value))}
+            onResetPlanetFactory={onResetPlanetFactory}
             onStationPriorityChange={(entityId: string, slotIndex: number, priority: LogisticsPriority) => commitGame((current) => setStationSlotPriority(current, entityId, slotIndex, priority))}
             onStationMinimumLoadChange={(entityId: string, slotIndex: number, minimumLoad: StationMinimumLoad) => commitGame((current) => setStationSlotMinimumLoad(current, entityId, slotIndex, minimumLoad))}
             onStationLimitsChange={(entityId: string, slotIndex: number, minStock: number, maxStock: number) => commitGame((current) => setStationSlotLimits(current, entityId, slotIndex, minStock, maxStock))}

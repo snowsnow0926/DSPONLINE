@@ -8271,6 +8271,260 @@ export function canColonizePlanet(state: GameState, planetId: PlanetId): boolean
   return getColonizationRequirements(state, planetId).status === "ready";
 }
 
+export interface PlanetFactoryResetPreview {
+  planetId: PlanetId;
+  allowed: boolean;
+  reason: string;
+  hasFactoryData: boolean;
+  entityRecords: number;
+  buildingUnits: number;
+  extractorUnits: number;
+  beltConnections: number;
+  trayItemTypes: number;
+  stationRoutes: number;
+  constructionOrders: number;
+  handcraftOrders: number;
+  constructionJobs: number;
+  productionPlans: number;
+  canvasMarkers: number;
+  naturalResourceNodes: number;
+}
+
+const DEFAULT_PLANET_FACTORY_VIEWPORT = { x: 510, y: 250, zoom: 0.84 } as const;
+
+function safeResetPreviewSum(values: Iterable<number>): number {
+  let total = 0;
+  for (const value of values) {
+    if (!Number.isFinite(value) || value <= 0) continue;
+    total = Math.min(Number.MAX_SAFE_INTEGER, total + Math.floor(value));
+  }
+  return total;
+}
+
+function stationRouteTouchesPlanet(
+  demand: FactoryEntity,
+  route: StationRoute,
+  planetId: PlanetId,
+  planetEntityIds: ReadonlySet<string>,
+): boolean {
+  return demand.planetId === planetId || planetEntityIds.has(route.peerId) ||
+    Boolean(route.vehicleStationId && planetEntityIds.has(route.vehicleStationId)) ||
+    (route.waypointStationIds ?? []).some((stationId) => planetEntityIds.has(stationId));
+}
+
+function hasConfiguredVeinFactoryState(entity: FactoryEntity): boolean {
+  return entity.kind === "vein" && (
+    entity.interactionLocked || entity.minerCount > 0 || Boolean(entity.extractorBuildingId) ||
+    Object.values(entity.inputs).some((amount) => (amount ?? 0) > 0) ||
+    Object.values(entity.outputs).some((amount) => (amount ?? 0) > 0) ||
+    Boolean(entity.sprayCoaterInstalled) || (entity.proliferatorPoints ?? 0) > 0 ||
+    entity.progress > 0 || entity.utilization > 0 || entity.productionRate > 0
+  );
+}
+
+function hasNonDefaultFactoryMetrics(metrics: GameState["metrics"] | undefined): boolean {
+  if (!metrics) return false;
+  return Object.entries(metrics).some(([key, value]) => key === "powerFactor"
+    ? Math.abs(value - 1) > EPSILON
+    : Math.abs(value) > EPSILON);
+}
+
+export function getPlanetFactoryResetPreview(state: GameState, planetId: PlanetId): PlanetFactoryResetPreview {
+  const planet = PLANET_LIST.find((candidate) => candidate.id === planetId);
+  const colonized = Boolean(planet && isPlanetColonized(state, planetId));
+  const planetEntities = state.entities.filter((entity) => entity.planetId === planetId);
+  const planetEntityIds = new Set(planetEntities.map((entity) => entity.id));
+  const removedEntityIds = new Set(planetEntities.filter((entity) => entity.kind !== "vein").map((entity) => entity.id));
+  const entityRecords = removedEntityIds.size;
+  const buildingUnits = safeResetPreviewSum(planetEntities
+    .filter((entity) => entity.kind !== "vein")
+    .map((entity) => entity.machineCount + entity.minerCount));
+  const extractorUnits = safeResetPreviewSum(planetEntities
+    .filter((entity) => entity.kind === "vein")
+    .map((entity) => entity.minerCount));
+  const beltConnections = state.belts.filter((belt) => belt.planetId === planetId ||
+    planetEntityIds.has(belt.source) || planetEntityIds.has(belt.target)).length;
+  const targetTray = planetId === state.activePlanetId ? state.tray : state.planetTrays[planetId] ?? {};
+  const trayItemTypes = Object.values(targetTray).filter((amount) => (amount ?? 0) > 0).length;
+  const stationRoutes = state.entities.reduce((count, demand) => count + (demand.stationRoutes ?? [])
+    .filter((route) => stationRouteTouchesPlanet(demand, route, planetId, planetEntityIds)).length, 0);
+  const constructionOrders = state.constructionQueue.filter((entry) => entry.planetId === planetId ||
+    Object.values(entry.placedEntityIdsByKey ?? {}).some((entityId) => removedEntityIds.has(entityId))).length;
+  const handcraftOrders = state.handcraftQueue.filter((entry) => entry.planetId === planetId).length;
+  const constructionJobs = Object.keys(state.constructionAutomation.jobs).filter((entityId) => removedEntityIds.has(entityId)).length;
+  const productionPlans = state.productionPlans.filter((plan) => plan.planetId === planetId).length;
+  const canvasMarkers = state.canvasBookmarks.filter((bookmark) => bookmark.planetId === planetId).length +
+    state.canvasRegions.filter((region) => region.planetId === planetId).length;
+  const viewport = state.planetViewports[planetId];
+  const viewportChanged = Boolean(viewport && (
+    Math.abs(viewport.x - DEFAULT_PLANET_FACTORY_VIEWPORT.x) > EPSILON ||
+    Math.abs(viewport.y - DEFAULT_PLANET_FACTORY_VIEWPORT.y) > EPSILON ||
+    Math.abs(viewport.zoom - DEFAULT_PLANET_FACTORY_VIEWPORT.zoom) > EPSILON
+  ));
+  const powerMetricsChanged = Object.values(state.powerGridMetrics[planetId] ?? {}).some((metrics) =>
+    hasNonDefaultFactoryMetrics(metrics) || metrics.connectedEntities > 0 || metrics.disconnectedEntities > 0 || metrics.generatorCount > 0);
+  const historyHasPlanetData = state.productionHistory.some((sample) =>
+    Boolean(sample.planetProductionPerMinute?.[planetId] || sample.planetConsumptionPerMinute?.[planetId]));
+  const cargoReferencesPlanetEntity = Boolean(state.cargo?.origin?.id && planetEntityIds.has(state.cargo.origin.id));
+  const hasFactoryData = entityRecords > 0 || extractorUnits > 0 || beltConnections > 0 || trayItemTypes > 0 ||
+    stationRoutes > 0 || constructionOrders > 0 || handcraftOrders > 0 || constructionJobs > 0 ||
+    productionPlans > 0 || canvasMarkers > 0 || viewportChanged || hasNonDefaultFactoryMetrics(state.planetMetrics[planetId]) ||
+    powerMetricsChanged || historyHasPlanetData || cargoReferencesPlanetEntity ||
+    planetEntities.some(hasConfiguredVeinFactoryState) ||
+    Boolean(state.timeWarp.controllerEntityId && planetEntityIds.has(state.timeWarp.controllerEntityId));
+
+  return {
+    planetId,
+    allowed: colonized,
+    reason: !planet ? "行星不存在" : !colonized ? "只能重置已经殖民的行星" : hasFactoryData ? "可以重置" : "该行星已经没有可清理的工厂内容",
+    hasFactoryData,
+    entityRecords,
+    buildingUnits,
+    extractorUnits,
+    beltConnections,
+    trayItemTypes,
+    stationRoutes,
+    constructionOrders,
+    handcraftOrders,
+    constructionJobs,
+    productionPlans,
+    canvasMarkers,
+    naturalResourceNodes: planetEntities.filter((entity) => entity.kind === "vein").length,
+  };
+}
+
+function resetNaturalResourceNode(entity: FactoryEntity): FactoryEntity {
+  const reset: FactoryEntity = {
+    id: entity.id,
+    kind: "vein",
+    planetId: entity.planetId,
+    position: { ...entity.position },
+    interactionLocked: false,
+    resourceId: entity.resourceId,
+    powerGridId: "grid-a",
+    powerPriority: 2,
+    machineCount: 0,
+    minerCount: 0,
+    inputs: {},
+    outputs: entity.resourceId ? { [entity.resourceId]: 0 } : {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+  };
+  if (entity.resourceRemaining !== undefined) reset.resourceRemaining = entity.resourceRemaining;
+  if (entity.resourceCapacity !== undefined) reset.resourceCapacity = entity.resourceCapacity;
+  if (entity.resourceDepletionRemainder !== undefined) reset.resourceDepletionRemainder = entity.resourceDepletionRemainder;
+  return reset;
+}
+
+/**
+ * Irreversibly removes player-owned factory state from one colonized planet.
+ * Natural resource identity and depletion are preserved; global progression,
+ * construction inventory, portable fleet, blueprints and metadata are not
+ * refunded or reset.
+ */
+export function resetPlanetFactory(state: GameState, planetId: PlanetId): GameState {
+  const preview = getPlanetFactoryResetPreview(state, planetId);
+  if (!preview.allowed || !preview.hasFactoryData) return state;
+
+  const planetEntityIds = new Set(state.entities.filter((entity) => entity.planetId === planetId).map((entity) => entity.id));
+  const removedEntityIds = new Set(state.entities
+    .filter((entity) => entity.planetId === planetId && entity.kind !== "vein")
+    .map((entity) => entity.id));
+  const planetTrays = Object.fromEntries(Object.entries(state.planetTrays).map(([candidatePlanetId, tray]) => [
+    candidatePlanetId,
+    { ...(candidatePlanetId === state.activePlanetId ? state.tray : tray) },
+  ])) as GameState["planetTrays"];
+  const entities = state.entities.map((entity) => entity.kind === "station" || entity.stationRoutes?.length
+    ? cloneFactoryEntity(entity)
+    : entity);
+  const next: GameState = {
+    ...state,
+    entities,
+    tray: { ...state.tray },
+    planetTrays,
+    cargo: state.cargo ? { ...state.cargo, origin: state.cargo.origin ? { ...state.cargo.origin } : undefined } : null,
+    constructionQueue: state.constructionQueue.filter((entry) => entry.planetId !== planetId &&
+      !Object.values(entry.placedEntityIdsByKey ?? {}).some((entityId) => removedEntityIds.has(entityId))),
+    handcraftQueue: state.handcraftQueue.filter((entry) => entry.planetId !== planetId),
+    productionPlans: state.productionPlans.filter((plan) => plan.planetId !== planetId),
+    productionHistory: [],
+    historyRecordedAt: state.elapsedSeconds,
+    canvasBookmarks: state.canvasBookmarks.filter((bookmark) => bookmark.planetId !== planetId),
+    canvasRegions: state.canvasRegions.filter((region) => region.planetId !== planetId),
+    planetViewports: {
+      ...state.planetViewports,
+      [planetId]: { ...DEFAULT_PLANET_FACTORY_VIEWPORT },
+    },
+    constructionAutomation: {
+      ...state.constructionAutomation,
+      jobs: Object.fromEntries(Object.entries(state.constructionAutomation.jobs)
+        .filter(([entityId]) => !removedEntityIds.has(entityId))),
+      ...(state.constructionAutomation.quantumMaterialBuffer ? {
+        quantumMaterialBuffer: Object.fromEntries(Object.entries(state.constructionAutomation.quantumMaterialBuffer)
+          .filter(([entityId]) => !removedEntityIds.has(entityId))),
+      } : {}),
+    },
+    planetMetrics: {
+      ...state.planetMetrics,
+      [planetId]: emptyMetrics(),
+    },
+    powerGridMetrics: {
+      ...state.powerGridMetrics,
+      [planetId]: Object.fromEntries(POWER_GRID_IDS.map((gridId) => [gridId, emptyPowerGridMetrics(gridId)])) as Record<PowerGridId, PowerGridMetrics>,
+    },
+    timeWarp: { ...state.timeWarp },
+  };
+
+  cancelStationRoutes(next, (demand, route) => stationRouteTouchesPlanet(demand, route, planetId, planetEntityIds));
+  next.entities = next.entities.flatMap((entity) => {
+    if (entity.planetId === planetId) return entity.kind === "vein" ? [resetNaturalResourceNode(entity)] : [];
+    let scrubbed = entity;
+    if (scrubbed.stationPeerId && removedEntityIds.has(scrubbed.stationPeerId)) {
+      scrubbed = { ...scrubbed, stationPeerId: undefined };
+    }
+    if (scrubbed.stationLastSupplyPeerBySlot) {
+      const filtered = Object.fromEntries(Object.entries(scrubbed.stationLastSupplyPeerBySlot)
+        .filter(([, entityId]) => !entityId || !removedEntityIds.has(entityId)));
+      if (Object.keys(filtered).length !== Object.keys(scrubbed.stationLastSupplyPeerBySlot).length) {
+        scrubbed = { ...scrubbed, stationLastSupplyPeerBySlot: filtered };
+      }
+    }
+    if (scrubbed.quantumTransition?.bridges.some((bridge) =>
+      removedEntityIds.has(bridge.sourceStationId) || removedEntityIds.has(bridge.targetStationId))) {
+      scrubbed = {
+        ...scrubbed,
+        quantumTransition: {
+          ...scrubbed.quantumTransition,
+          bridges: scrubbed.quantumTransition.bridges.filter((bridge) =>
+            !removedEntityIds.has(bridge.sourceStationId) && !removedEntityIds.has(bridge.targetStationId)),
+        },
+      };
+    }
+    return [scrubbed];
+  });
+  next.belts = state.belts.filter((belt) => belt.planetId !== planetId &&
+    !planetEntityIds.has(belt.source) && !planetEntityIds.has(belt.target));
+  next.planetTrays[planetId] = {};
+  if (next.activePlanetId === planetId) next.tray = {};
+  next.planetTrays[next.activePlanetId] = { ...next.tray };
+  if (next.cargo?.origin?.id && planetEntityIds.has(next.cargo.origin.id)) {
+    next.cargo = { ...next.cargo, origin: undefined };
+  }
+  if (next.timeWarp.controllerEntityId && removedEntityIds.has(next.timeWarp.controllerEntityId)) {
+    next.timeWarp.controllerEntityId = null;
+    next.timeWarp.enabled = false;
+    next.timeWarp.effectiveMultiplier = next.settings.simulationSpeed;
+    next.timeWarp.pendingSimulationSeconds = 0;
+    next.timeWarp.pendingWallSeconds = 0;
+    next.timeWarp.requiredPowerKw = 0;
+    next.timeWarp.allocatedPowerKw = 0;
+  }
+  if (next.activePlanetId === planetId) next.metrics = { ...next.planetMetrics[planetId] };
+  return pruneBlueprintVersions(next);
+}
+
 export function colonizePlanet(state: GameState, planetId: PlanetId): GameState {
   const requirements = getColonizationRequirements(state, planetId);
   if (requirements.status !== "ready") return state;

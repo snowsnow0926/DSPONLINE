@@ -46,6 +46,9 @@ describe("device-local English translations", () => {
     expect(translateLegacyText("玩家请求停止", "en")).toBe("Player Requested Stop");
     expect(translateLegacyText("放弃约 2 分钟 未结算时间并继续普通模拟", "en")).toBe("Abandon about 2 min of unsettled time and continue normal simulation");
     expect(translateLegacyText("拉线候选建筑同步高亮", "en")).toBe("Compatible Buildings Highlight While Connecting");
+    expect(translateLegacyText("第 3 / 3 次确认 · 重置澄海 I", "en")).toBe("Confirmation 3 of 3 · Reset Clearwater I");
+    expect(translateLegacyText("第三次确认并永久重置", "en")).toBe("Confirmation 3: Permanently Reset");
+    expect(translateLegacyText("已永久重置澄海 I：删除 2 台设备、1 条传送带；天然资源剩余量与全局进度保持不变", "en")).toContain("Permanently reset Clearwater I");
   });
 
   it("accepts late translations for lazy content", () => {

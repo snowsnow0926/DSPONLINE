@@ -2524,7 +2524,7 @@ test("stellar exploration unlocks remote planets and enables a warped logistics 
   await page.getByLabel("打开星图").click();
   const starMap = page.getByRole("dialog", { name: "星图" });
   await expect(starMap.locator(".star-system-card")).toHaveCount(8);
-  await expect(starMap.locator(".star-planet-list > button")).toHaveCount(22);
+  await expect(starMap.locator(".star-planet-entry__travel")).toHaveCount(22);
   await expect(starMap.locator(".star-system-card").filter({ has: page.getByText("蔚蓝王座", { exact: true }) })).toContainText("L☉");
   const borealis = starMap.locator(".star-system-card").filter({ has: page.getByText("北冕座", { exact: true }) });
   const neutron = starMap.locator(".star-system-card").filter({ has: page.getByText("赫卡忒", { exact: true }) });
@@ -2565,7 +2565,7 @@ test("stellar exploration unlocks remote planets and enables a warped logistics 
   await expect(starMap).toBeVisible();
   await expect(starMap.locator(".star-map-route").evaluate((element) => element.scrollWidth <= element.clientWidth)).resolves.toBe(true);
   await expect(starMap.locator(".star-system-card")).toHaveCount(8);
-  await expect(starMap.locator(".star-planet-list > button")).toHaveCount(22);
+  await expect(starMap.locator(".star-planet-entry__travel")).toHaveCount(22);
   await page.screenshot({ path: "artifacts/qa/stellar-map-390.png", fullPage: true });
 });
 

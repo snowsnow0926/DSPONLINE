@@ -152,6 +152,7 @@
 .mobile-detail-actionbar > button:only-child { grid-column: 1 / -1; }
 .mobile-detail-actionbar > button.primary { border-color: var(--theme-accent-border); background: var(--theme-accent-soft); color: var(--theme-text); }
 .mobile-detail-actionbar > button.warning { border-color: var(--theme-warning-border); color: var(--yellow); }
+.mobile-detail-actionbar > button.mobile-planet-reset-button { border-color: color-mix(in srgb, var(--coral) 58%, var(--theme-border-strong)); color: color-mix(in srgb, var(--coral) 72%, var(--theme-text)); }
 .mobile-detail-actionbar > button:disabled { opacity: .48; }
 
 /* Technology list -> detail. */

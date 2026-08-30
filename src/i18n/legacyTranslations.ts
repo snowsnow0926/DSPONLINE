@@ -138,6 +138,39 @@ const UI_EN: TranslationMap = {
   "导出": "Export",
   "应用": "Apply",
   "重置": "Reset",
+  "第一次确认：继续": "Confirmation 1: Continue",
+  "第二次确认：继续": "Confirmation 2: Continue",
+  "第三次确认并永久重置": "Confirmation 3: Permanently Reset",
+  "这是永久删除操作，不能撤销，也不会返还被删除的建筑、物料或在建资源。": "This permanently deletes factory data. It cannot be undone, and deleted buildings, materials, and in-progress resources will not be refunded.",
+  "取消并保留星球": "Cancel and Keep Planet",
+  "星球状态已变化或主存档正在保存，本次没有执行。请关闭弹窗后重试。": "The planet changed or the primary save is being written, so nothing was reset. Close this dialog and try again.",
+  "三次确认进度": "Three-confirmation Progress",
+  "范围": "Scope",
+  "后果": "Consequences",
+  "名称": "Name",
+  "建筑设备": "Buildings",
+  "采矿设备": "Mining Facilities",
+  "传送带线路": "Belt Connections",
+  "本地库存种类": "Local Item Types",
+  "相关物流航线": "Affected Logistics Routes",
+  "进行中队列": "Active Queues",
+  "将永久删除": "Permanently Deleted",
+  "全部玩家建筑、矿机、传送带、本地物资托盘、相关物流航线、施工与手搓队列、该星球的生产计划、画布标记和近期统计。": "All player buildings, miners, belts, the local material tray, affected logistics routes, construction and handcraft queues, this planet's production plans, canvas markers, and recent statistics.",
+  "明确保留": "Explicitly Preserved",
+  "个天然资源节点及其当前剩余量、星球殖民状态和名称标签，以及科研、戴森球、量子仓库、全局建筑库存和随身舰队。": "natural resource nodes and their current remaining reserves, colonization state and name metadata, plus research, the Dyson Sphere, quantum storage, global construction inventory, and carried fleet.",
+  "不会返还任何物品，也不能撤销。": "No items will be refunded, and this cannot be undone.",
+  "其他星球不会被重置；涉及本星球的跨星球航线会安全终止并清除悬空引用。": "Other planets will not be reset. Interplanetary routes involving this planet will be safely terminated and dangling references removed.",
+  "输入星球全名": "Enter the full planet name",
+  "完成第三次确认": "to complete the third confirmation",
+  "必须完全一致，不能省略或添加空格。": "It must match exactly, with no omitted or extra spaces.",
+  "名称匹配，可以执行最终重置。": "The name matches. The final reset can now run.",
+  "名称不匹配。": "The name does not match.",
+  "行星不存在": "Planet not found",
+  "只能重置已经殖民的行星": "Only colonized planets can be reset",
+  "可以重置": "Ready to reset",
+  "该行星已经没有可清理的工厂内容": "This planet has no factory content left to clear",
+  "重置星球工厂": "Reset Planet Factory",
+  "重置此星球工厂": "Reset this planet's factory",
   "恢复默认": "Restore defaults",
   "返回": "Back",
   "下一步": "Next",
@@ -2147,6 +2180,10 @@ function translateRequirementList(source: string): string {
 function translateDynamicSystemText(body: string): string {
   let match = body.match(/^(\d{4})年(\d{1,2})月(\d{1,2})日$/);
   if (match) return `${new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))).toLocaleDateString("en-US", { timeZone: "UTC", year: "numeric", month: "long", day: "numeric" })}`;
+  match = body.match(/^第 (\d+) \/ 3 次确认 · 重置(.+)$/);
+  if (match) return `Confirmation ${match[1]} of 3 · Reset ${translateCatalogName(match[2])}`;
+  match = body.match(/^已永久重置(.+)：删除 ([\d,.]+) 台设备、([\d,.]+) 条传送带；天然资源剩余量与全局进度保持不变$/);
+  if (match) return `Permanently reset ${translateCatalogName(match[1])}: removed ${match[2]} facilities and ${match[3]} belt connections; natural resource reserves and global progression were preserved.`;
   match = body.match(/^普通模式 · 主存档 · 修订 (\d+)$/);
   if (match) return `Normal mode · Primary save · Revision ${match[1]}`;
   match = body.match(/^排行榜正在等待新的普通模式主云修订完成复核（需高于修订 (\d+)）$/);

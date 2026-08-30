@@ -1245,11 +1245,15 @@ mod tests {
     fn station_item_options_are_stable_bounded_and_truncated_without_mutation() {
         let mut state = station_state(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
         let mut snapshot = state.catalog.snapshot.clone();
+        // Keep the configured `iron_ore` binding valid but place it exactly
+        // one row beyond the bounded catalog page. The projection must not
+        // reject or hide the current slot merely because that item is the
+        // 129th stable option.
         snapshot
             .items
-            .extend((0..MAX_STATION_ITEM_OPTIONS + 2).map(|index| {
+            .extend((0..MAX_STATION_ITEM_OPTIONS).map(|index| {
                 ItemDefinition {
-                    id: format!("item_{index:03}"),
+                    id: format!("a_item_{index:03}"),
                     name: format!("内置物品 {index:03}"),
                     kind: match index % 3 {
                         0 => "solid",
@@ -1274,12 +1278,20 @@ mod tests {
             &first["selection"]["entityRows"]["rows"][0]["stationConfiguration"]["itemOptions"];
         let rows = options["rows"].as_array().unwrap();
         assert_eq!(options["limit"], MAX_STATION_ITEM_OPTIONS);
-        assert_eq!(options["totalCount"], MAX_STATION_ITEM_OPTIONS + 3);
+        assert_eq!(options["totalCount"], MAX_STATION_ITEM_OPTIONS + 1);
         assert_eq!(options["truncated"], true);
         assert_eq!(rows.len(), MAX_STATION_ITEM_OPTIONS);
-        assert_eq!(rows[0]["itemId"], "iron_ore");
-        assert_eq!(rows[1]["itemId"], "item_000");
-        assert_eq!(rows[MAX_STATION_ITEM_OPTIONS - 1]["itemId"], "item_126");
+        assert_eq!(rows[0]["itemId"], "a_item_000");
+        assert_eq!(
+            rows[MAX_STATION_ITEM_OPTIONS - 1]["itemId"],
+            "a_item_127"
+        );
+        assert!(rows.iter().all(|row| row["itemId"] != "iron_ore"));
+        assert_eq!(
+            first["selection"]["entityRows"]["rows"][0]["stationConfiguration"]["slots"]
+                [2]["itemId"],
+            "iron_ore"
+        );
         assert!(rows.windows(2).all(|pair| {
             pair[0]["itemId"].as_str().unwrap() < pair[1]["itemId"].as_str().unwrap()
         }));

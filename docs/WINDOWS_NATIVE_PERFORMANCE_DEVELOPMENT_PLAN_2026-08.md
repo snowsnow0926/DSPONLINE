@@ -1546,13 +1546,13 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 
 本工作树已完成当前单机可安全自动化闭合的高价值实现；“Windows 三层计划全部完成”仍为 false。剩余项目需要新的架构阶段、真实多硬件长跑、签名/云凭据或生产发布授权，不能以本地短测替代。
 
-## 24. Rust 权威、薄 UI、活动物流与并行阶段继续开发（2026-08-29）
+## 24. Rust 权威、薄 UI、活动物流与并行阶段继续开发（2026-08-29～30）
 
 > 工作树：`D:/GameDev/DSPidle2-windows-native-complete`
 >
 > 分支：`codex/windows-native-plan-completion`
 >
-> 本节最近一次闭合验证的运行时代码 HEAD：`b1f6f2f`；仍是本地开发候选，未签名、未部署、未连接生产。GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 版本 1.2.3 均未改变，`authorityEligible=false` 继续保持关闭。
+> 本节当前代码 HEAD：`662d9cd`；当前源码的单元/Rust 门禁已经新跑，完整 release-style 门禁仍在收口，最近一次全套闭合基线仍为 `b1f6f2f`。它仍是本地开发候选，未签名、未部署、未连接生产。GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 版本 1.2.3 均未改变，`authorityEligible=false` 继续保持关闭。
 
 ### 24.1 当前完成度口径
 
@@ -1560,12 +1560,12 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 
 | 目标 | 估算进度 | 已闭合的主要切片 | 仍未闭合 |
 | --- | ---: | --- | --- |
-| Rust 唯一玩家可见权威 | 约 73% | main-owned 连续时钟、durable 命令回执、耐久暂停/继续和启动恢复、同 revision 投影、接管前完整覆盖门禁；公开存档/云/恢复边界已在 native ownership 下失败关闭；行星切换现在只提交 Rust 命令并等待 durable receipt 与同 revision 双投影确认；普通闭合配方、科研、火箭和太阳帆具备部分纯挂机守恒证书 | `authorityEligible=false`；完整 productive pure-idle/offline/time-warp、出口、合同、有限资源、公开主档写回和全部玩家命令覆盖仍不足；renderer/Worker 仍保留完整 GameState |
-| 完整薄 UI | 约 85% | 主画布、minimap、运行状态、Rust 行星导航、施工摘要/队列、选择与只读检查器、科研、配方、星际工业、量子库存、普通建筑/线路及库存交互、完整星图目录和戴森规划均可消费同 revision 有界 Rust 投影或提交最小意图；切星球会清理旧手势和全部行星局部状态；未覆盖功能在原生接管时失败关闭 | 蓝图、运营、银河、合同、部分空间站、MOD/燃料/批量/`energyMode`、完整科研生命周期和戴森几何仍未迁移；失败关闭不等于功能迁移完成，renderer 仍不是完整薄客户端 |
+| Rust 唯一玩家可见权威 | 约 74% | main-owned 连续时钟、durable 命令回执、耐久暂停/继续和启动恢复、同 revision 投影、接管前完整覆盖门禁；公开存档/云/恢复边界已在 native ownership 下失败关闭；行星切换、有限/无限科研完整生命周期、生产缓存和科技布局现在均提交 Rust 最小意图并等待 durable receipt；普通闭合配方、科研、火箭和太阳帆具备部分纯挂机守恒证书 | `authorityEligible=false`；完整 productive pure-idle/offline/time-warp、出口、合同、有限资源、公开主档写回和全部玩家命令覆盖仍不足；renderer/Worker 仍保留完整 GameState |
+| 完整薄 UI | 约 87% | 主画布、minimap、运行状态、Rust 行星导航、施工摘要/队列、选择与只读检查器、科研全生命周期与布局、配方、生产缓存、星际工业、量子库存、普通建筑/线路及库存交互、完整星图目录和戴森规划均可消费同 revision 有界 Rust 投影或提交最小意图；切星球会清理旧手势和全部行星局部状态；未覆盖功能在原生接管时失败关闭 | 蓝图、运营、银河、合同、部分空间站、MOD/燃料/批量/`energyMode` 和戴森完整几何仍未迁移；失败关闭不等于功能迁移完成，renderer 仍不是完整薄客户端 |
 | 真正 `O(active)` 物流 | 约 95% | 线路活动调度、本地/星际 ready 与 dispatch、peer directory、跨 revision demand queue、量子普通 flush/休眠 download、量子五秒上传和模式过渡均使用持久活动/待处理集合与反向唤醒；线路容量和量子合法性探测使用稳定分片；所有稀疏路径保留 75% 稠密退化和 MOD/失配失败关闭 | network parse/write 仍遍历部分库存键；活动请求分配为 `O(A log A)`；拓扑重编、连续生产、高扇出、自然稠密和 fail-closed 路径按语义仍会全扫，故整体物流尚不能标记 100% |
-| 全领域确定性原生并行 | 约 68% | 普通机器和线路内核外，已并行或复用矿脉、物流 readiness/congestion、线路容量预留、量子计划验证、施工、轨道终端、射线接收器、银河出口、任务指标、历史诊断与生产历史刷新；生产历史使用固定分片和原顺序提交；真实档 1/2/4/8 线程规范哈希一致 | 共享物料和状态的固定顺序写入、完整离线/纯挂机及若干跨域阶段仍串行；尚无跨 CPU、Windows 10/11、不同调度和 24 小时矩阵；显式 1 线程在新增线路切片上有约 1.53% 中位时间代价 |
-| 当前开发机可闭合工作 | 约 96% | 四个目标的高价值代码、安全边界、确定性测试和本机专项大多已闭合，当前已进入功能冻结门禁 | 只表示单机开发收口，不包含真实 24 小时、多硬件、杀毒软件、磁盘故障、安装签名和灰度 |
-| 四项目标综合代码 | 约 90% | 原生权威基础设施、薄 UI、活动物流、确定性并行、内存压缩、存档保护和耐久暂停均有可回归提交 | 不能等同玩家功能覆盖率或发布成熟度；剩余以跨域权威、完整命令覆盖和真实运行门禁为主 |
+| 全领域确定性原生并行 | 约 70% | 普通机器和线路内核外，已并行或复用矿脉、物流 readiness/congestion、线路容量预留与源快照、本地站缓冲、曲速器预留、量子计划验证、施工、轨道终端、射线接收器、银河出口、任务指标、历史诊断与生产历史刷新；所有新增阶段使用固定分片、私有输出和原顺序提交；当前统一 runtime 的真实档 1/2/4/8 矩阵再次得到相同规范/领域/守恒哈希 | 共享物料和状态的固定顺序写入、完整离线/纯挂机及若干跨域阶段仍串行；尚无跨 CPU、Windows 10/11、不同调度和 24 小时矩阵；显式 1 线程在较早线路切片上仍有约 1.53% 中位时间代价 |
+| 当前开发机可闭合工作 | 约 97% | 四个目标的高价值代码、安全边界、确定性测试和本机专项大多已闭合，当前已进入功能冻结门禁 | 只表示单机开发收口，不包含真实 24 小时、多硬件、杀毒软件、磁盘故障、安装签名和灰度 |
+| 四项目标综合代码 | 约 91% | 原生权威基础设施、薄 UI、活动物流、确定性并行、内存压缩、存档保护和耐久暂停均有可回归提交 | 不能等同玩家功能覆盖率或发布成熟度；剩余以跨域权威、完整命令覆盖和真实运行门禁为主 |
 | 可放心发布成熟度 | 约 60% | 本机类型、完整单元、native 边界、Rust core、真实大档确定性/内存专项、production build 和启动预算已有本 HEAD 新鲜结果 | 完整冻结门禁仍在执行；真实大档全进程 24 小时、多硬件、Defender/磁盘故障、安装/覆盖升级、签名和灰度均未完成 |
 
 ### 24.2 本轮关键实现
@@ -1609,19 +1609,25 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 37. `4f27a96`、`8b0b10c` 与 `c9f8879` 把玩家暂停/继续接入 main-owned Rust 耐久事务。renderer 只能提交 `{ paused: boolean }` 意图，不能提交 session、revision、deadline、checkpoint 或 command ID；main 先结清请求锚点前已经到期的模拟秒，再按 stage → WAL → checkpoint → change receipt → lease ACK 顺序提交暂停。暂停后无计时器，保存仍可读取同一已确认检查点，普通玩法命令保持关闭；继续使用新的主进程墙钟锚点，57 秒暂停时间不会变成待补算积压。相同请求和丢失回执按派生 ID 幂等恢复，进程在五个持久边界中的任一点退出都由 Rust 启动恢复；普通泛用命令在 TS、main broker 与 Rust 三层继续禁止修改 `paused`。如果暂停前最后一个普通 tick 的回执本身不确定，程序会失败关闭并明确要求重启恢复，不会切回旧 JavaScript 状态或用检查点主动回退画面。
 38. `2a6031c` 修复真实存档线程矩阵的施工守恒诊断误报。JavaScript oracle 仍原样调用 `advanceSimulationBudget`，但施工前后账本和模块私有 branded receipt 由 `offlineApproximation` 内部捕获、签发并立即消费；外部不能提交任意候选或取得收据，普通 `validateAggregateConservation` 无收据时仍失败关闭。矩阵 verifier 也改为任何非空守恒错误都直接失败，不能再把“四个线程一致报错”算成通过。纯模拟耗时与额外守恒扫描耗时分字段记录，避免美化 native/JS 比值。
 39. `b1f6f2f` 闭合 Rust 工厂库存投影与 Electron 严格过滤层之间遗漏的 `productionBufferLimit` 合同。新 Host 已返回该字段、TypeScript 也已声明，但旧过滤层会因多字段把整页拒绝；现在按 1,000～100,000,000 的游戏边界精确校验并透传，缺失、多余或越界仍失败关闭。首次 native 全套真实暴露该问题为 405 通过、1 失败、1 条件跳过；修复后定向边界 23/23、真实 Host 集成 1/1、完整 native 406 通过、1 条件跳过、0 失败。
+40. `53ebe6e` 将 `productionBufferLimit` 从只读投影补成 Rust 权威设置。renderer 只提交 1,000～100,000,000 的精确叶意图，Rust 重验当前 revision、单叶 patch shape、整数边界、同值和混合字段；该全局设置没有额外宣称 built-in catalog 限制。durable ACK 后 UI 才读取新投影。`2bb4fb6` 仅补齐该批测试的 rustfmt，没有修改运行语义。
+41. `8f2cd4c` 闭合 built-in catalog 下有限科研的开始、选择、暂停、恢复、取消、完成奖励与队列推进，以及无限科研的开始、切换、暂停/停止语义；所有 `matrix_research` 进度重置由 Rust 从最小意图确定性展开并可由通用 WAL 重放。stale、MOD、未知科技、依赖不满足、跨域夹带和展开后失败均保持源 revision/hash 不变。
+42. `e754293` 将科技树标准/精简布局改为 `settings.technologyLayout` 精确叶命令；Rust 在 built-in catalog、当前 revision、合法枚举、同值和混合字段上失败关闭，原生 UI 单飞等待 ACK，普通 Web 行为不变。整合审查发现“按整个 settings 根分流”会误拦生产缓存设置，最终改为按精确字段分流，并以既有生产缓存回归确认两者可共存。
+43. `cbe1a43` 把线路源快照探测按固定 1,024 行分片并行，1 worker 保留旧路径；最早缺失 symbol 错误、partial 边界和所有共享库存/线路写入仍按旧稳定 group 顺序提交。76.9 MB、80,674 实体、155,746 线路真实只读档的该阶段由 35.590 ms 降至 12.161 ms（2.93×，-65.8%）；dense/sparse 的 1/2/4/8 worker 状态、规范/领域哈希和守恒摘要与 JavaScript 严格一致。该数字只代表源快照阶段，不是整秒或整应用加速倍数。
+44. `388fdb6` 把本地物流站缓冲计划改为固定 1,024 站私有分片和原站序回放；重复物料槽、输入到输出、最早错误以及 legacy 已发生的 partial-mutation 边界保持不变，不能误写成“任何失败都不提交”。真实大档 1/8 worker 的该阶段中位由 45.338 ms 降至 27.857 ms（-38.6%，1.63×），完整状态、哈希与守恒一致；8 worker 峰值 1,249,038,336 B，未高于 1 worker 的 1,260,457,984 B。
+45. `06a4f58` 只把 `selected_indices=None` 时 legacy full-scan/fail-closed 曲速器路线预留的只读准备阶段改为固定 1,024 实体分片；正常 sparse ledger 不会因此重新全扫实体。1 worker 仍直走旧函数，多 worker 私有收集后按原实体/route 顺序串行回放，因此 IEEE-754 累加、首次 key 插入、Unicode/MOD/null/负零和共享写入边界不变。真实大档交错 1/8 worker 各三次共 6/6 与 JavaScript 及跨线程规范哈希一致；8 worker `local-dispatch` 由 37.304 ms 降至 30.513 ms（约 -18.2%），完整模拟秒由 467.32 ms 降至 460.55 ms（约 -1.45%）。
+46. 本轮为量子活动请求排序连续实现并测量了两套候选，逐值、BigUint、公平游标、dirty 集与 full-scan oracle 均通过，但性能门禁都失败并完整撤销。第一套在 4,096 个同物料请求上中位退化 9.90%，17 物料形状中位只改善 0.68%；第二套首轮同物料/17 物料分别为 +0.025%/-3.39%，确认轮分别为 +3.07%/-4.85%。`quantum_logistics.rs`、临时基准和测试计数器均恢复为零差异。该负向证据说明当前剩余 `O(A log A)` 不能只靠预计算排序 key 或小型基数排序消除，不能用“写过代码”提高 `O(active)` 完成度。
 
 ### 24.3 本 HEAD 新鲜验证
 
-- TypeScript：通过。
-- Vitest 首轮发现 4 个已经落后于现有安全能力的 App 源码契约断言，定向修正后 26/26；加入守恒诊断回归后的完整复跑为 294 文件通过、14 文件条件跳过，2,325 项通过、29 项跳过、0 失败。
-- Production build：2,034 modules，startup budget 通过。
-- 暂停/恢复 App、clock、controller 和命令源定向：4 文件、68/68 通过。Windows native/desktop JavaScript 首轮在新 Host 上真实发现 `productionBufferLimit` 合同漏项（405 通过、1 失败、1 个目录 symlink 权限条件跳过）；修复后完整复跑为 406 通过、1 条件跳过、0 失败。
-- Rust core：四线程 `599/599`、严格串行 `599/599`；Rust Host：四线程 `157/157`、严格串行 `157/157`；`cargo fmt --check` 与 clippy `--all-targets -D warnings` 通过。
-- Server/API/SQLite：主套件 384 通过、2 条件跳过，空间站 4/4；运维 56 通过、6 条 Linux-only 条件跳过，全部 0 失败。
-- Chromium E2E：433 通过、27 条件跳过、0 失败；durable E2E：7/7。两套命令均无首次失败复跑；它们运行时 runtime HEAD 为 `c9f8879`。之后的变更仅涉及 Vitest 契约、真实档诊断入口/门禁以及 Electron 工厂库存投影过滤层；Web 玩家推进逻辑未改变，但这仍不能冒充当前 HEAD 的完整 E2E 重跑。
+- 当前运行时代码 `06a4f58`（以及只改测试 lint 的 `662d9cd`）新跑 TypeScript：0 错误；完整 Vitest 为 294 文件通过、14 文件条件跳过、0 失败，2,336 项通过、29 项跳过、0 失败，总耗时 211.05 秒。科技布局/原生命令定向 20/20、Rust command 模块 67/67、生产缓存交叉回归 1/1、星际物流模块 53/53 也均通过。
+- 当前 production build：2,034 modules；startup 总 gzip 180,342 B、JavaScript 86,812 B、CSS 93,530 B、最大启动 JavaScript 58,974 B、menu 257,705 B、forbidden 0，预算通过。
+- 当前 Release Rust Host 以单 build job 编译通过；Windows native/desktop JavaScript 为 406 通过、1 个目录 symlink 权限不足 `EPERM` 条件跳过、0 失败，对应 junction 防护测试通过。
+- Rust `cargo fmt --check` 通过。Clippy 首轮只发现科研测试的一处不必要 clone，`662d9cd` 修复后 `--workspace --all-targets -D warnings` 通过，定向科研生命周期 1/1。16 test threads 的 workspace 运行在 core 中途复现本机 `0xc0000005`，没有断言失败汇总；按既定边界以单 build job、单 test thread 完整复验为 core 617/617、Host 157/157，总计 774/774、0 失败。该异常证据保留，不能写成 16 线程完整通过。
+- 当前 Server/API/SQLite 主套件 384 通过、2 条件跳过；空间站 4/4；运维 56 通过、6 条 Linux/systemd/权限条件跳过，全部 0 失败，且没有连接生产。
+- 当前 HEAD 首次完整 Chromium E2E 为 432 通过、27 条件跳过、1 失败、0 retry、0 flaky；durable E2E 为 7/7、0 retry、0 flaky。唯一失败是被动 WAL 一小时压力的 `longTaskCount <= 1` 得到 2；此前 450 次 pending/journal/head、零 checkpoint、零 transfer-checkpoint 和 WAL 小于 8 MiB 的功能/容量断言均已通过。首次失败不删除、不改写成全绿。随后只对该项做一次诊断复测为 1/1：WAL 1,839,996 B、transfer-checkpoint 0、耗时 898.70 ms、long task 1，说明更像并行 E2E 下的 JIT/GC/宿主调度抖动，但在完整门禁再次首轮通过前仍不能算 release-style 闭合。
 - 第三方许可证：125 个运行时包一致；根项目和 server 的 production dependency audit 均为 0 漏洞。
 - 原生行星导航、手势、只读检查器和 factory thin-view 定向：10 文件、64/64 通过。
-- 44,167,989 字节真实大档最终线程矩阵：实际 1/2/4/8 worker 为 4/4 complete，完整状态与 JavaScript oracle 严格一致，规范哈希均为 `02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c`，领域哈希均为 `c486e945446c2ff3e2f7abc640e035e22481a692c812453e281758d4f44e428b`，守恒摘要均为 `3eb2b180ca7a1314a584070edae44349614cdd2656406edd4389009e6d09bce7`，`conservationValidationFailure=null`。源文件大小、mtime 与 SHA-256 `f4d680c86b5528207753a96ba06df2b396af652c01da7c6e18dfb6c2e6551ee8` 前后不变；证据为 `artifacts/native-real-save-thread-matrix/2a6031c-2026-08-30-conservation-closed.json`。该矩阵在 `2a6031c` 生成；之后的 `b1f6f2f` 只修 Electron 投影过滤合同，没有修改 Rust core、Host 或真实档 benchmark。
+- 44,167,989 字节真实大档在当前 runtime/Release Host 上统一重跑实际 1/2/4/8 worker：4/4 complete，完整状态与 JavaScript oracle 严格一致，规范哈希均为 `02fe0a388c5883cc4af53598bead7603189299c27a04316ba8db9ed78699721c`，领域哈希均为 `c486e945446c2ff3e2f7abc640e035e22481a692c812453e281758d4f44e428b`，守恒摘要均为 `3eb2b180ca7a1314a584070edae44349614cdd2656406edd4389009e6d09bce7`，`conservationValidationFailure=null`。源文件 44,167,989 B、mtime 与 SHA-256 `f4d680c86b5528207753a96ba06df2b396af652c01da7c6e18dfb6c2e6551ee8` 前后不变；Release Host 也保持 SHA-256 `99905e8cd23f731fe8111da9df50a7c88a6e917bc9a76ce57d9fb4dce5d0824b`。证据为 `artifacts/native-real-save-thread-matrix/662d9cd-2026-08-30-final-runtime.json`。
 - 真实大档内存门禁：1/1 通过；精确 round trip 成立，输入文件 SHA-256 前后不变。量子专项 21/21、本地物流专项 34/34、当时完整 core 459/459 均通过。
 - Windows 高并发 Rust 测试仍保留两类未归因抖动：一次进程级 `0xc0000005`，一次 transition 并行矩阵失败；对应测试隔离运行通过，完整 core 串行通过。该证据不得删除，也不能用来宣称多硬件门禁已经完成。
 - 本轮没有完成 24 小时全进程长跑、多硬件矩阵、Defender/磁盘满/只读目录/覆盖升级、最终安装包构建、Authenticode 签名或真实云往返，因此不得复用旧包 SHA 或旧 final gate 作为本 HEAD 发布证据。
@@ -1635,7 +1641,7 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 ### 24.5 下一批开发顺序
 
 1. 扩展原生物料/命令覆盖，只有所有玩家可达规则、离线和时间扭曲都通过守恒与确定性门禁后才允许 `authorityEligible=true`。
-2. 科研、配方、星图、戴森只读面和全局行星切换第一阶段已迁移；下一步补齐托盘/手持物与建筑交互的原生命令，再迁移蓝图、运营、银河和空间站。完成前 renderer 仍不是完整薄 UI；当前失败关闭的按钮不能计作功能完成。
-3. 五秒量子上传预算已转为活动集合；下一步收敛施工量子需求、库存表解析/写回和模式过渡等跨域边界。继续用稳定 full-scan oracle 做 1/5/60 秒严格等价回归，不能把 `O(A log A)` 活动排序、连续生产、高扇出自然稠密或 fail-closed 场景包装成 `O(active)` 完成。
+2. 科研全生命周期、配方、托盘/手持物与普通建筑交互、星图、戴森只读面和全局行星切换已经迁移；下一步迁移蓝图、运营、银河、合同、剩余空间站、MOD/燃料/批量/`energyMode` 和戴森完整几何。完成前 renderer 仍不是完整薄 UI；当前失败关闭的按钮不能计作功能完成。
+3. 五秒量子上传预算已转为活动集合；下一步只接纳对同物料高扇出与多物料形状都不退化的新活动分配方案，并继续收敛施工量子需求、库存表解析/写回和模式过渡等跨域边界。继续用稳定 full-scan oracle 做 1/5/60 秒严格等价回归；两套排序候选已经用 A/B 证明不应保留，不能把 `O(A log A)`、连续生产、高扇出自然稠密或 fail-closed 场景包装成 `O(active)` 完成。
 4. 对剩余跨域只读探针实施固定分片私有输出、稳定顺序提交；共享浮点和物料写入只有在逐线程规范哈希一致时才并行。
 5. 在功能代码冻结后重新执行 server/API、完整 E2E、真实大档全进程峰值/吞吐/保存 P95、24 小时和多硬件矩阵；签名、云往返和发布仍交给独立 Release Agent。

@@ -12,6 +12,7 @@ const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const PROJECT_ROOT = path.dirname(path.dirname(SCRIPT_PATH));
 const SUPPORTED_THREADS = new Set(["auto", "1", "2", "4", "8"]);
 const SUPPORTED_SCENARIOS = new Set(["exact", "full"]);
+const SUPPORTED_EXACT_SECONDS = new Set(["1", "5", "60"]);
 const OUTPUT_TAIL_BYTES = 12 * 1024;
 const RUN_TIMEOUT_MS = 600_000;
 
@@ -41,6 +42,8 @@ const MANAGED_CHILD_ENV = Object.freeze([
   "DSP_NATIVE_CORE_THREADS",
   "DSP_NATIVE_CORE_BENCHMARK_OPEN_ONLY",
   "DSP_NATIVE_CORE_BENCHMARK_EXACT_ONLY",
+  "DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS",
+  "DSP_NATIVE_CORE_BENCHMARK_PROFILE_EQUIVALENCE",
   "NO_COLOR",
   "FORCE_COLOR",
 ]);
@@ -58,8 +61,12 @@ export function usageText() {
     "  --runs <n>          Independent Vitest processes (default: 5, range: 1..50)",
     "  --scenario <name>   exact or full (default: exact)",
     "  --threads <value>   DSP_NATIVE_CORE_THREADS: auto, 1, 2, 4, or 8 (default: auto)",
+    "  --seconds <value>   Exact advance seconds: 1, 5, or 60 (default: 1)",
     `  --sync-record-drop  Set only ${SYNC_RECORD_DROP_ENV}=1 in benchmark children`,
     "  --profile           Record native phase timings in every run",
+    "  --profile-equivalence",
+    "                      Record native and JavaScript hashes without requiring",
+    "                      them to equal; exact scenario only, for observer A/B",
     "",
     "The output path must not already exist. The fixture and binary are hashed before",
     "and after every run; any identity change aborts the remaining runs fail-closed.",
@@ -71,8 +78,10 @@ export function parseArgs(argv) {
     runs: 5,
     scenario: "exact",
     threads: "auto",
+    seconds: "1",
     syncRecordDrop: false,
     profile: false,
+    profileEquivalence: false,
   };
   const valueFlags = new Map([
     ["--binary", "binary"],
@@ -81,6 +90,7 @@ export function parseArgs(argv) {
     ["--runs", "runs"],
     ["--scenario", "scenario"],
     ["--threads", "threads"],
+    ["--seconds", "seconds"],
   ]);
   const seen = new Set();
   for (let index = 0; index < argv.length; index += 1) {
@@ -96,6 +106,12 @@ export function parseArgs(argv) {
       if (seen.has(argument)) throw new Error(`Duplicate argument: ${argument}`);
       seen.add(argument);
       options.profile = true;
+      continue;
+    }
+    if (argument === "--profile-equivalence") {
+      if (seen.has(argument)) throw new Error(`Duplicate argument: ${argument}`);
+      seen.add(argument);
+      options.profileEquivalence = true;
       continue;
     }
     const key = valueFlags.get(argument);
@@ -116,6 +132,15 @@ export function parseArgs(argv) {
   }
   if (!SUPPORTED_THREADS.has(String(options.threads))) {
     throw new Error("--threads must be one of: auto, 1, 2, 4, 8");
+  }
+  if (!SUPPORTED_EXACT_SECONDS.has(String(options.seconds))) {
+    throw new Error("--seconds must be one of: 1, 5, 60");
+  }
+  if (options.scenario !== "exact" && options.seconds !== "1") {
+    throw new Error("--seconds other than 1 requires --scenario exact");
+  }
+  if (options.profileEquivalence && options.scenario !== "exact") {
+    throw new Error("--profile-equivalence requires --scenario exact");
   }
   for (const key of ["binary", "fixture", "output"]) {
     if (!options[key]) throw new Error(`Missing required --${key}`);
@@ -259,11 +284,13 @@ export function buildChildEnvironment(parentEnvironment, options, platform = pro
     DSP_NATIVE_CORE_THREADS: String(options.threads),
     DSP_NATIVE_CORE_BENCHMARK_OPEN_ONLY: "0",
     DSP_NATIVE_CORE_BENCHMARK_EXACT_ONLY: options.scenario === "exact" ? "1" : "0",
+    DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS: String(options.seconds ?? "1"),
     NO_COLOR: "1",
     FORCE_COLOR: "0",
   });
   if (options.syncRecordDrop) child[SYNC_RECORD_DROP_ENV] = "1";
   if (options.profile) child.DSP_NATIVE_CORE_PROFILE = "1";
+  if (options.profileEquivalence) child.DSP_NATIVE_CORE_BENCHMARK_PROFILE_EQUIVALENCE = "1";
   return {
     environment: child,
     inheritedKeys: inheritedKeys.sort((left, right) => left.localeCompare(right)),
@@ -271,6 +298,7 @@ export function buildChildEnvironment(parentEnvironment, options, platform = pro
       ...MANAGED_CHILD_ENV,
       ...(options.syncRecordDrop ? [SYNC_RECORD_DROP_ENV] : []),
       ...(options.profile ? ["DSP_NATIVE_CORE_PROFILE"] : []),
+      ...(options.profileEquivalence ? ["DSP_NATIVE_CORE_BENCHMARK_PROFILE_EQUIVALENCE"] : []),
     ],
   };
 }
@@ -348,7 +376,13 @@ function validateSampler(phase, sampler) {
   return errors;
 }
 
-export function validateBenchmarkMarkers(markers, binaryIdentity, scenario, platform = process.platform) {
+export function validateBenchmarkMarkers(
+  markers,
+  binaryIdentity,
+  scenario,
+  platform = process.platform,
+  exactSeconds = 1,
+) {
   const markerErrors = [];
   const records = {};
   for (const marker of markers) {
@@ -369,7 +403,8 @@ export function validateBenchmarkMarkers(markers, binaryIdentity, scenario, plat
     if (!Object.hasOwn(records, label)) markerErrors.push(`${label}: required benchmark marker is missing`);
   }
 
-  const exactErrors = [];
+  const observerErrors = [];
+  const oracleErrors = [];
   const open = records.open?.nativeCore;
   const admission = records.admission?.nativeCoreAdmission;
   const exact = records.exact?.nativeCoreExactRealSaveAdvance;
@@ -378,37 +413,61 @@ export function validateBenchmarkMarkers(markers, binaryIdentity, scenario, plat
   const checkpoint = records.checkpoint?.nativeCoreIncrementalCheckpoint;
   const burst = records.burst?.nativeCoreExactBurst;
   if (!open) {
-    exactErrors.push("open: nativeCore payload is missing");
+    observerErrors.push("open: nativeCore payload is missing");
   } else {
     if (String(open.hostBinarySha256 ?? "").toLowerCase() !== binaryIdentity.sha256.toLowerCase()) {
-      exactErrors.push("open: host binary SHA-256 does not match the immutable binary identity");
+      observerErrors.push("open: host binary SHA-256 does not match the immutable binary identity");
     }
-    if (open.exactRoundTrip !== true) exactErrors.push("open: canonical round-trip is not exact");
+    if (open.exactRoundTrip !== true) observerErrors.push("open: canonical round-trip is not exact");
   }
   if (!admission) {
-    exactErrors.push("admission: nativeCoreAdmission payload is missing");
+    observerErrors.push("admission: nativeCoreAdmission payload is missing");
   } else if (admission.supported !== true) {
-    exactErrors.push(`admission: native exact scope rejected (${admission.reason ?? "unknown"})`);
+    observerErrors.push(`admission: native exact scope rejected (${admission.reason ?? "unknown"})`);
   }
   if (!exact) {
-    exactErrors.push("exact: nativeCoreExactRealSaveAdvance payload is missing");
-  } else if (exact.exactState !== true
-    || !Array.isArray(exact.fieldMismatches)
-    || exact.fieldMismatches.length !== 0) {
-    exactErrors.push("exact: one-second native state differs from the JavaScript authority state");
+    observerErrors.push("exact: nativeCoreExactRealSaveAdvance payload is missing");
+  } else {
+    if (!Array.isArray(exact.fieldMismatches)) {
+      observerErrors.push("exact: field mismatch evidence is missing");
+    }
+    if (exact.simulationSeconds !== Number(exactSeconds)) {
+      observerErrors.push(
+      `exact: simulationSeconds ${exact.simulationSeconds ?? "missing"} differs from requested ${exactSeconds}`,
+      );
+    }
+    for (const field of [
+      "canonicalSha256",
+      "expectedCanonicalSha256",
+      "domainSha256",
+      "conservationSummarySha256",
+    ]) {
+      if (!/^[a-f0-9]{64}$/.test(exact[field] ?? "")) {
+        observerErrors.push(`exact: ${field} is missing or invalid`);
+      }
+    }
+    if (exact.conservationCaptureFailure !== null || exact.conservationValidationFailure !== null) {
+      observerErrors.push("exact: aggregate conservation validation failed");
+    }
+    if (exact.exactState !== true
+      || !Array.isArray(exact.fieldMismatches)
+      || exact.fieldMismatches.length !== 0
+      || exact.canonicalSha256 !== exact.expectedCanonicalSha256) {
+      oracleErrors.push("exact: native state differs from the JavaScript authority state");
+    }
   }
   if (scenario === "full") {
-    if (!integrated) exactErrors.push("integrated: nativeCoreIntegratedDiagnostics payload is missing");
-    else if (integrated.exactState !== true) exactErrors.push("integrated: advance/proof state is not exact");
-    if (!durable) exactErrors.push("durable: nativeCoreDurableAuthority payload is missing");
+    if (!integrated) observerErrors.push("integrated: nativeCoreIntegratedDiagnostics payload is missing");
+    else if (integrated.exactState !== true) oracleErrors.push("integrated: advance/proof state is not exact");
+    if (!durable) observerErrors.push("durable: nativeCoreDurableAuthority payload is missing");
     else if (durable.exactState !== true || durable.duplicateRetry !== true) {
-      exactErrors.push("durable: authority state or duplicate retry is not exact");
+      oracleErrors.push("durable: authority state or duplicate retry is not exact");
     }
-    if (!checkpoint) exactErrors.push("checkpoint: nativeCoreIncrementalCheckpoint payload is missing");
-    else if (checkpoint.exactState !== true) exactErrors.push("checkpoint: checkpoint state is not exact");
-    if (!burst) exactErrors.push("burst: nativeCoreExactBurst payload is missing");
+    if (!checkpoint) observerErrors.push("checkpoint: nativeCoreIncrementalCheckpoint payload is missing");
+    else if (checkpoint.exactState !== true) oracleErrors.push("checkpoint: checkpoint state is not exact");
+    if (!burst) observerErrors.push("burst: nativeCoreExactBurst payload is missing");
     else if (burst.exactState !== true || burst.steps !== 3) {
-      exactErrors.push("burst: three-step native state differs from JavaScript authority");
+      oracleErrors.push("burst: three-step native state differs from JavaScript authority");
     }
   }
 
@@ -422,10 +481,18 @@ export function validateBenchmarkMarkers(markers, binaryIdentity, scenario, plat
   return {
     records,
     markerValid: markerErrors.length === 0,
-    exactValid: markerErrors.length === 0 && exactErrors.length === 0,
+    observerValid: markerErrors.length === 0 && observerErrors.length === 0,
+    oracleEqual: markerErrors.length === 0 && observerErrors.length === 0 && oracleErrors.length === 0,
+    exactValid: markerErrors.length === 0 && observerErrors.length === 0 && oracleErrors.length === 0,
     samplerRequired,
     samplerValid: samplerErrors.length === 0,
-    errors: { marker: markerErrors, exact: exactErrors, sampler: samplerErrors },
+    errors: {
+      marker: markerErrors,
+      observer: observerErrors,
+      oracle: oracleErrors,
+      exact: [...observerErrors, ...oracleErrors],
+      sampler: samplerErrors,
+    },
   };
 }
 
@@ -486,6 +553,10 @@ export function runStress(options, dependencies = {}) {
   const spawnVitest = dependencies.spawnVitest ?? defaultSpawnVitest;
   const now = dependencies.now ?? (() => Date.now());
   const platform = dependencies.platform ?? process.platform;
+  const exactSeconds = String(options.seconds ?? "1");
+  const validationMode = options.profileEquivalence
+    ? "profile-observer-equivalence"
+    : "strict-oracle-equality";
   const logger = dependencies.logger ?? (() => {});
   const initialBinary = identity(options.binary);
   const initialFixture = identity(options.fixture);
@@ -499,7 +570,7 @@ export function runStress(options, dependencies = {}) {
   let abortReason = null;
 
   for (let sequence = 1; sequence <= options.runs; sequence += 1) {
-    logger(`[${sequence}/${options.runs}] ${options.scenario} threads=${options.threads}`);
+    logger(`[${sequence}/${options.runs}] ${options.scenario} seconds=${exactSeconds} threads=${options.threads}`);
     const binaryBefore = safeIdentity(identity, options.binary);
     const fixtureBefore = safeIdentity(identity, options.fixture);
     if (!sameIdentity(initialBinary, binaryBefore.value)) {
@@ -538,9 +609,18 @@ export function runStress(options, dependencies = {}) {
     const stderr = String(processResult.stderr ?? "");
     const markers = parseBenchmarkMarkers(stdout, stderr);
     const profileMarkers = options.profile ? parseProfileMarkers(stdout, stderr) : [];
-    const benchmark = validateBenchmarkMarkers(markers, initialBinary, options.scenario, platform);
+    const benchmark = validateBenchmarkMarkers(
+      markers,
+      initialBinary,
+      options.scenario,
+      platform,
+      exactSeconds,
+    );
     const exitedZero = processResult.status === 0 && !processResult.error;
-    const passed = exitedZero && benchmark.exactValid && benchmark.samplerValid
+    const requestedValidationValid = options.profileEquivalence
+      ? benchmark.observerValid
+      : benchmark.exactValid;
+    const passed = exitedZero && requestedValidationValid && benchmark.samplerValid
       && binaryUnchanged && fixtureUnchanged;
     const timedOut = processResult.error?.code === "ETIMEDOUT";
     const processStatus = passed
@@ -564,7 +644,11 @@ export function runStress(options, dependencies = {}) {
       nativeProfileMarkers: profileMarkers,
       benchmarkValidation: {
         markerValid: benchmark.markerValid,
+        observerValid: benchmark.observerValid,
+        oracleEqual: benchmark.oracleEqual,
         exactValid: benchmark.exactValid,
+        requestedValidationValid,
+        validationMode,
         samplerRequired: benchmark.samplerRequired,
         samplerValid: benchmark.samplerValid,
         errors: benchmark.errors,
@@ -608,11 +692,13 @@ export function runStress(options, dependencies = {}) {
     && samples.every((sample) => sample.process.exitCode === 0 && sample.process.error === null);
   const allRunsExact = allRequestedRunsCompleted
     && samples.every((sample) => sample.benchmarkValidation.exactValid === true);
+  const allRequestedValidationValid = allRequestedRunsCompleted
+    && samples.every((sample) => sample.benchmarkValidation.requestedValidationValid === true);
   const allSamplersValid = allRequestedRunsCompleted
     && samples.every((sample) => sample.benchmarkValidation.samplerValid === true);
   const allRunInputsImmutable = allRequestedRunsCompleted
     && samples.every((sample) => sample.immutableInputs.binaryUnchanged && sample.immutableInputs.fixtureUnchanged);
-  const completed = allProcessesExitedZero && allRunsExact && allSamplersValid
+  const completed = allProcessesExitedZero && allRequestedValidationValid && allSamplersValid
     && allRunInputsImmutable && binaryUnchanged && fixtureUnchanged && !abortReason;
   const completedAtMs = now();
   return {
@@ -627,9 +713,12 @@ export function runStress(options, dependencies = {}) {
       runs: options.runs,
       scenario: options.scenario,
       threads: String(options.threads),
+      seconds: exactSeconds,
       timeoutMsPerRun: RUN_TIMEOUT_MS,
       syncRecordDrop: options.syncRecordDrop,
       profile: options.profile,
+      profileEquivalence: options.profileEquivalence ?? false,
+      validationMode,
       childEnvironment: {
         inheritedAllowlist: [...CHILD_ENV_ALLOWLIST],
         inheritedKeysPresent: childEnvironment.inheritedKeys,
@@ -658,6 +747,7 @@ export function runStress(options, dependencies = {}) {
       allRequestedRunsCompleted,
       allProcessesExitedZero,
       allRunsExact,
+      allRequestedValidationValid,
       allSamplersValid,
       allRunInputsImmutable,
       binaryUnchanged,
@@ -788,9 +878,11 @@ export function main(argv = process.argv.slice(2)) {
             runs: options.runs,
             scenario: options.scenario,
             threads: String(options.threads),
+            seconds: String(options.seconds ?? "1"),
             timeoutMsPerRun: RUN_TIMEOUT_MS,
             syncRecordDrop: options.syncRecordDrop,
             profile: options.profile,
+            profileEquivalence: options.profileEquivalence ?? false,
           },
           validation: {
             requestedRuns: options.runs,

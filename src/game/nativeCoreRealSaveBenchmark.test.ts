@@ -20,6 +20,11 @@ import type { GameState } from "./types";
 const runBenchmark = process.env.DSP_RUN_NATIVE_CORE_BENCHMARK === "1";
 const benchmarkOpenOnly = process.env.DSP_NATIVE_CORE_BENCHMARK_OPEN_ONLY === "1";
 const benchmarkExactOnly = process.env.DSP_NATIVE_CORE_BENCHMARK_EXACT_ONLY === "1";
+const benchmarkProfileEquivalence = process.env.DSP_NATIVE_CORE_BENCHMARK_PROFILE_EQUIVALENCE === "1";
+const benchmarkExactSeconds = Number(process.env.DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS ?? "1");
+if (![1, 5, 60].includes(benchmarkExactSeconds)) {
+  throw new Error("DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS must be 1, 5, or 60");
+}
 const fixturePath = process.env.DSP_NATIVE_CORE_FIXTURE ||
   "C:\\Users\\WINDOWS\\Downloads\\dsp-idle-save-2026-08-24 (1).json\\dsp-idle-save-2026-08-24 (1).json";
 const require = createRequire(import.meta.url);
@@ -376,7 +381,7 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     fs.rmSync(root, { recursive: true, force: true });
   });
 
-  it("loads the 80k entity / 155k belt fixture with exact v47 hash and bounded native memory", { timeout: 300_000 }, async () => {
+  it("loads the 80k entity / 155k belt fixture with exact v47 hash and bounded native memory", { timeout: 600_000 }, async () => {
     expect(fs.existsSync(fixturePath)).toBe(true);
     expect(fs.existsSync(binaryPath)).toBe(true);
     const hostBinaryBytes = (require("node:fs") as { readFileSync(path: string): Uint8Array })
@@ -519,8 +524,8 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         sessionId: opened.sessionId,
         request: {
           baseRevision: resumed.revision,
-          simulationSeconds: 1,
-          wallSeconds: 1,
+          simulationSeconds: benchmarkExactSeconds,
+          wallSeconds: benchmarkExactSeconds,
           includeDiagnostics: false,
         },
       });
@@ -562,7 +567,12 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         state: expected,
         conservationFailure: conservationValidationFailure,
         exactAdvanceDurationMs: jsAdvanceDurationMs,
-      } = advanceExactSimulationForConservationDiagnostic(expectedInitial, 1, 1, jsProfiler);
+      } = advanceExactSimulationForConservationDiagnostic(
+        expectedInitial,
+        benchmarkExactSeconds,
+        benchmarkExactSeconds,
+        jsProfiler,
+      );
       const jsAdvanceAndConservationDurationMs = performance.now() - jsDiagnosticStartedAt;
       const conservationSummary = aggregateConservationSummary(expected);
       const expectedFields = Object.fromEntries(Object.entries(JSON.parse(JSON.stringify(expected)) as Record<string, unknown>)
@@ -603,6 +613,7 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
       logBenchmarkRecord("exact", {
         nativeCoreExactRealSaveAdvance: {
           exactState: advancedSummary.canonicalSha256 === stableCanonicalSha256(expected),
+          simulationSeconds: benchmarkExactSeconds,
           revision: advancedSummary.revision,
           expectedRevision: resumed.revision + 1,
           canonicalSha256: advancedSummary.canonicalSha256,
@@ -638,11 +649,15 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         },
       });
       if (client.stderrTail?.trim()) console.log(client.stderrTail.trim());
-      expect(advancedSummary.canonicalFields).toEqual(expectedFields);
+      if (!benchmarkProfileEquivalence) {
+        expect(advancedSummary.canonicalFields).toEqual(expectedFields);
+      }
       expect(advancedSummary.revision).toBe(resumed.revision + 1);
       expect(conservationSummary.captureFailure).toBeNull();
       expect(conservationValidationFailure).toBeNull();
-      expect(advancedSummary.canonicalSha256).toBe(stableCanonicalSha256(expected));
+      if (!benchmarkProfileEquivalence) {
+        expect(advancedSummary.canonicalSha256).toBe(stableCanonicalSha256(expected));
+      }
       if (benchmarkExactOnly) {
         await client.request({ operation: "coreClose", sessionId: opened.sessionId });
         return;

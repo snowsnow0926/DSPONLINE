@@ -1403,6 +1403,254 @@ struct BeltTransferProfiler {
     checkpoint: std::time::Instant,
 }
 
+#[derive(Debug)]
+struct BeltConflictProfileNode {
+    group_index: usize,
+    touched_entity_indices: Box<[u32]>,
+    candidate_route_count: u64,
+    quantum: bool,
+    opaque: bool,
+}
+
+#[derive(Debug)]
+struct BeltConflictProfilePlan {
+    nodes: Vec<BeltConflictProfileNode>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct BeltConflictProfileReport {
+    selected_groups: usize,
+    candidate_routes: u64,
+    component_count: usize,
+    parallel_component_count: usize,
+    serial_component_count: usize,
+    total_work_units: u64,
+    largest_component_work_units: u64,
+    parallel_work_units: u64,
+    serial_fallback_work_units: u64,
+    quantum_fallback_work_units: u64,
+    opaque_fallback_work_units: u64,
+    greedy_8_loads: [u64; 8],
+    greedy_8_serial_equivalent_work_units: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct BeltConflictComponent {
+    first_node_index: usize,
+    work_units: u64,
+    quantum: bool,
+    opaque: bool,
+}
+
+fn belt_conflict_find(parents: &mut [usize], mut index: usize) -> usize {
+    while parents[index] != index {
+        parents[index] = parents[parents[index]];
+        index = parents[index];
+    }
+    index
+}
+
+fn belt_conflict_union(parents: &mut [usize], left: usize, right: usize) {
+    let left_root = belt_conflict_find(parents, left);
+    let right_root = belt_conflict_find(parents, right);
+    if left_root == right_root {
+        return;
+    }
+    let (first, second) = if left_root < right_root {
+        (left_root, right_root)
+    } else {
+        (right_root, left_root)
+    };
+    parents[second] = first;
+}
+
+fn build_belt_conflict_profile_plan(
+    state: &CoreState,
+    entities: &[Value],
+    prepared_routes: &PreparedRoutes,
+    selection: &ActiveSelection,
+    groups: &[Group],
+) -> BeltConflictProfilePlan {
+    let mut nodes = Vec::with_capacity(selection.selected_groups(prepared_routes.groups.len()));
+    for group_index in selection.group_indices(prepared_routes.groups.len()) {
+        let mut touched_entity_indices = Vec::new();
+        let mut candidate_route_count = 0_u64;
+        let mut quantum = false;
+        let mut opaque = false;
+        let Some(prepared_group) = prepared_routes.groups.get(group_index) else {
+            nodes.push(BeltConflictProfileNode {
+                group_index,
+                touched_entity_indices: Box::default(),
+                candidate_route_count,
+                quantum,
+                opaque: true,
+            });
+            continue;
+        };
+        touched_entity_indices.push(prepared_group.source_index);
+        if entities
+            .get(expand_compact_index(prepared_group.source_index))
+            .and_then(Value::as_object)
+            .is_none()
+        {
+            opaque = true;
+        }
+        let item_id = state.symbols.resolve(prepared_group.item_symbol);
+        if item_id.is_none() {
+            opaque = true;
+        }
+        let Some(group) = groups.get(group_index) else {
+            nodes.push(BeltConflictProfileNode {
+                group_index,
+                touched_entity_indices: touched_entity_indices.into_boxed_slice(),
+                candidate_route_count,
+                quantum,
+                opaque: true,
+            });
+            continue;
+        };
+        for route_index in group
+            .first_candidate
+            .iter()
+            .chain(group.candidates.iter())
+            .map(|candidate| candidate.route_index)
+        {
+            candidate_route_count += 1;
+            let Some(route) = prepared_routes.routes.get(route_index) else {
+                opaque = true;
+                continue;
+            };
+            touched_entity_indices.push(route.target_index);
+            let Some(target) = entities
+                .get(route.target_index())
+                .and_then(Value::as_object)
+            else {
+                opaque = true;
+                continue;
+            };
+            if let Some(item_id) = item_id {
+                quantum |= crate::quantum_logistics::is_supply_endpoint(target, item_id);
+            }
+        }
+        touched_entity_indices.sort_unstable();
+        touched_entity_indices.dedup();
+        nodes.push(BeltConflictProfileNode {
+            group_index,
+            touched_entity_indices: touched_entity_indices.into_boxed_slice(),
+            candidate_route_count,
+            quantum,
+            opaque,
+        });
+    }
+    BeltConflictProfilePlan { nodes }
+}
+
+impl BeltConflictProfilePlan {
+    fn summarize(self, work_units_by_group: &[u64]) -> BeltConflictProfileReport {
+        let node_count = self.nodes.len();
+        let mut parents = (0..node_count).collect::<Vec<_>>();
+        let mut first_node_by_entity = HashMap::<u32, usize>::new();
+        for (node_index, node) in self.nodes.iter().enumerate() {
+            for entity_index in node.touched_entity_indices.iter().copied() {
+                if let Some(first_node_index) = first_node_by_entity.get(&entity_index).copied() {
+                    belt_conflict_union(&mut parents, node_index, first_node_index);
+                } else {
+                    first_node_by_entity.insert(entity_index, node_index);
+                }
+            }
+        }
+
+        let mut components_by_root = vec![None::<BeltConflictComponent>; node_count];
+        let mut candidate_routes = 0_u64;
+        for (node_index, node) in self.nodes.iter().enumerate() {
+            let root = belt_conflict_find(&mut parents, node_index);
+            let component = components_by_root[root].get_or_insert(BeltConflictComponent {
+                first_node_index: node_index,
+                ..BeltConflictComponent::default()
+            });
+            component.first_node_index = component.first_node_index.min(node_index);
+            component.work_units = component.work_units.saturating_add(
+                work_units_by_group
+                    .get(node.group_index)
+                    .copied()
+                    .unwrap_or_default(),
+            );
+            component.quantum |= node.quantum;
+            component.opaque |= node.opaque;
+            candidate_routes = candidate_routes.saturating_add(node.candidate_route_count);
+        }
+        let mut components = components_by_root.into_iter().flatten().collect::<Vec<_>>();
+        components.sort_by_key(|component| component.first_node_index);
+
+        let mut report = BeltConflictProfileReport {
+            selected_groups: node_count,
+            candidate_routes,
+            component_count: components.len(),
+            ..BeltConflictProfileReport::default()
+        };
+        let mut parallel_components = Vec::<(u64, usize)>::new();
+        for component in components {
+            report.total_work_units = report.total_work_units.saturating_add(component.work_units);
+            report.largest_component_work_units = report
+                .largest_component_work_units
+                .max(component.work_units);
+            if component.quantum || component.opaque {
+                report.serial_component_count += 1;
+                report.serial_fallback_work_units = report
+                    .serial_fallback_work_units
+                    .saturating_add(component.work_units);
+                if component.quantum {
+                    report.quantum_fallback_work_units = report
+                        .quantum_fallback_work_units
+                        .saturating_add(component.work_units);
+                }
+                if component.opaque {
+                    report.opaque_fallback_work_units = report
+                        .opaque_fallback_work_units
+                        .saturating_add(component.work_units);
+                }
+            } else {
+                report.parallel_component_count += 1;
+                report.parallel_work_units = report
+                    .parallel_work_units
+                    .saturating_add(component.work_units);
+                parallel_components.push((component.work_units, component.first_node_index));
+            }
+        }
+        parallel_components
+            .sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+        for (work_units, _) in parallel_components {
+            let worker_index = report
+                .greedy_8_loads
+                .iter()
+                .enumerate()
+                .min_by_key(|(index, load)| (**load, *index))
+                .map(|(index, _)| index)
+                .unwrap_or_default();
+            report.greedy_8_loads[worker_index] =
+                report.greedy_8_loads[worker_index].saturating_add(work_units);
+        }
+        report.greedy_8_serial_equivalent_work_units =
+            report.serial_fallback_work_units.saturating_add(
+                report
+                    .greedy_8_loads
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or_default(),
+            );
+        report
+    }
+}
+
+fn belt_conflict_share(numerator: u64, denominator: u64) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
 impl BeltTransferProfiler {
     fn new() -> Self {
         Self {
@@ -1418,6 +1666,42 @@ impl BeltTransferProfiler {
                 self.checkpoint.elapsed().as_secs_f64() * 1_000.0
             );
             self.checkpoint = std::time::Instant::now();
+        }
+    }
+
+    fn conflict_components(&self, pass: &'static str, report: &BeltConflictProfileReport) {
+        if self.enabled {
+            let loads = report
+                .greedy_8_loads
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tbelt-conflict-components\tpass={pass}\tgroups={}\tcandidate-routes={}\tcomponents={}\tparallel-components={}\tserial-components={}\ttotal-work={}\tlargest-work={}\tlargest-share={:.6}\tparallel-work={}\tparallel-share={:.6}\tserial-fallback-work={}\tserial-fallback-share={:.6}\tquantum-fallback-work={}\tquantum-fallback-share={:.6}\topaque-fallback-work={}\topaque-fallback-share={:.6}\tgreedy8-loads={}\tgreedy8-serial-equivalent-work={}\tgreedy8-serial-fraction={:.6}",
+                report.selected_groups,
+                report.candidate_routes,
+                report.component_count,
+                report.parallel_component_count,
+                report.serial_component_count,
+                report.total_work_units,
+                report.largest_component_work_units,
+                belt_conflict_share(report.largest_component_work_units, report.total_work_units),
+                report.parallel_work_units,
+                belt_conflict_share(report.parallel_work_units, report.total_work_units),
+                report.serial_fallback_work_units,
+                belt_conflict_share(report.serial_fallback_work_units, report.total_work_units),
+                report.quantum_fallback_work_units,
+                belt_conflict_share(report.quantum_fallback_work_units, report.total_work_units),
+                report.opaque_fallback_work_units,
+                belt_conflict_share(report.opaque_fallback_work_units, report.total_work_units),
+                loads,
+                report.greedy_8_serial_equivalent_work_units,
+                belt_conflict_share(
+                    report.greedy_8_serial_equivalent_work_units,
+                    report.total_work_units
+                ),
+            );
         }
     }
 
@@ -3658,10 +3942,21 @@ pub(crate) fn transfer_with_bandwidth(
     }
     profiler.mark("belt-transfer-candidate-scan");
 
+    let conflict_profile_plan = profiler.enabled.then(|| {
+        build_belt_conflict_profile_plan(state, entities, prepared_routes, &selection, groups)
+    });
+    let mut conflict_work_units = conflict_profile_plan
+        .as_ref()
+        .map(|_| vec![0_u64; prepared_routes.groups.len()]);
+    if conflict_profile_plan.is_some() {
+        profiler.mark("belt-conflict-plan-build");
+    }
+
     // These persistent scratch buffers retain the canonical candidate order;
     // cursor rotation and every floating point operation therefore remain
     // byte-for-byte equivalent across workspace reuse.
     for group_index in selection.group_indices(prepared_routes.groups.len()) {
+        let mut group_work_units = 1_u64;
         let group = &mut groups[group_index];
         let prepared_group = &prepared_routes.groups[group_index];
         let item_id = state
@@ -3670,6 +3965,7 @@ pub(crate) fn transfer_with_bandwidth(
             .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
         let Some(first_candidate) = group.first_candidate.take() else {
             if group.source_had_output || group.available > 0.0 {
+                group_work_units = group_work_units.saturating_add(1);
                 set_output(
                     entities[expand_compact_index(prepared_group.source_index)]
                         .as_object_mut()
@@ -3684,6 +3980,7 @@ pub(crate) fn transfer_with_bandwidth(
                 .copied()
                 .chain(group.inactive_routes.iter().copied())
             {
+                group_work_units = group_work_units.saturating_add(1);
                 let route = &routes[route_index];
                 post_actions[route_index] = BeltPostAction::Flow {
                     available: group.available,
@@ -3691,9 +3988,13 @@ pub(crate) fn transfer_with_bandwidth(
                     moved: 0.0,
                 };
             }
+            if let Some(work_units) = conflict_work_units.as_mut() {
+                work_units[group_index] = group_work_units;
+            }
             continue;
         };
         if group.candidates.is_empty() {
+            group_work_units = group_work_units.saturating_add(1);
             let route = &routes[first_candidate.route_index];
             let target_slot = route.target_slot();
             let free = target_free[target_slot];
@@ -3704,6 +4005,7 @@ pub(crate) fn transfer_with_bandwidth(
                 .floor()
                 .max(0.0);
             let moved = if requested > 0.0 {
+                group_work_units = group_work_units.saturating_add(1);
                 move_to_target(
                     state,
                     base,
@@ -3719,6 +4021,7 @@ pub(crate) fn transfer_with_bandwidth(
             };
             let available = (group.available - moved).max(0.0);
             if moved > 0.0 {
+                group_work_units = group_work_units.saturating_add(4);
                 record_material_movement(
                     changed_entity_indices,
                     expand_compact_index(prepared_group.source_index),
@@ -3741,6 +4044,7 @@ pub(crate) fn transfer_with_bandwidth(
                 )?;
             }
             if group.source_had_output || group.available > 0.0 {
+                group_work_units = group_work_units.saturating_add(1);
                 set_output(
                     entities[expand_compact_index(prepared_group.source_index)]
                         .as_object_mut()
@@ -3760,6 +4064,7 @@ pub(crate) fn transfer_with_bandwidth(
                 .copied()
                 .chain(group.inactive_routes.iter().copied())
             {
+                group_work_units = group_work_units.saturating_add(1);
                 let inactive_route = &routes[route_index];
                 post_actions[route_index] = BeltPostAction::Flow {
                     available,
@@ -3767,9 +4072,13 @@ pub(crate) fn transfer_with_bandwidth(
                     moved: 0.0,
                 };
             }
+            if let Some(work_units) = conflict_work_units.as_mut() {
+                work_units[group_index] = group_work_units;
+            }
             continue;
         }
         group.candidates.push(first_candidate);
+        group_work_units = group_work_units.saturating_add(group.candidates.len() as u64);
         group
             .candidates
             .sort_by_key(|candidate| routes[candidate.route_index].belt_sort_rank());
@@ -3780,6 +4089,7 @@ pub(crate) fn transfer_with_bandwidth(
             &[2, 1, 0]
         };
         for &priority in priorities {
+            group_work_units = group_work_units.saturating_add(group.candidates.len() as u64);
             usable_candidate_indices.clear();
             usable_candidate_indices.extend(group.candidates.iter().enumerate().filter_map(
                 |(index, candidate)| {
@@ -3797,6 +4107,7 @@ pub(crate) fn transfer_with_bandwidth(
                 continue;
             }
             if usable_candidate_indices.len() == 1 {
+                group_work_units = group_work_units.saturating_add(1);
                 let index = usable_candidate_indices[0];
                 let candidate = &mut group.candidates[index];
                 let route = &routes[candidate.route_index];
@@ -3808,6 +4119,7 @@ pub(crate) fn transfer_with_bandwidth(
                     .floor()
                     .max(0.0);
                 if requested > 0.0 {
+                    group_work_units = group_work_units.saturating_add(1);
                     let moved = move_to_target(
                         state,
                         base,
@@ -3821,6 +4133,7 @@ pub(crate) fn transfer_with_bandwidth(
                     if moved <= 0.0 {
                         continue;
                     }
+                    group_work_units = group_work_units.saturating_add(4);
                     record_material_movement(
                         changed_entity_indices,
                         expand_compact_index(prepared_group.source_index),
@@ -3856,6 +4169,8 @@ pub(crate) fn transfer_with_bandwidth(
             .max(0.0) as usize;
             let mut cursor = source_cursor % usable_candidate_indices.len();
             while available > 0.0 {
+                group_work_units =
+                    group_work_units.saturating_add(usable_candidate_indices.len() as u64);
                 active_candidate_indices.clear();
                 active_candidate_indices.extend(usable_candidate_indices.iter().copied().filter(
                     |&index| {
@@ -3873,6 +4188,7 @@ pub(crate) fn transfer_with_bandwidth(
                     .max(1.0);
                 let mut successful = 0;
                 for offset in 0..active_candidate_indices.len() {
+                    group_work_units = group_work_units.saturating_add(1);
                     if available <= 0.0 {
                         break;
                     }
@@ -3891,6 +4207,7 @@ pub(crate) fn transfer_with_bandwidth(
                     if requested <= 0.0 {
                         continue;
                     }
+                    group_work_units = group_work_units.saturating_add(1);
                     let moved = move_to_target(
                         state,
                         base,
@@ -3904,6 +4221,7 @@ pub(crate) fn transfer_with_bandwidth(
                     if moved <= 0.0 {
                         continue;
                     }
+                    group_work_units = group_work_units.saturating_add(4);
                     record_material_movement(
                         changed_entity_indices,
                         expand_compact_index(prepared_group.source_index),
@@ -3927,6 +4245,7 @@ pub(crate) fn transfer_with_bandwidth(
                     break;
                 }
             }
+            group_work_units = group_work_units.saturating_add(1);
             set_number(
                 entities[expand_compact_index(prepared_group.source_index)]
                     .as_object_mut()
@@ -3944,6 +4263,7 @@ pub(crate) fn transfer_with_bandwidth(
         // object shape; once a key existed (including a positive source that
         // was drained to zero), it must still be written back.
         if group.source_had_output || group.available > 0.0 {
+            group_work_units = group_work_units.saturating_add(1);
             set_output(
                 entities[expand_compact_index(prepared_group.source_index)]
                     .as_object_mut()
@@ -3953,6 +4273,7 @@ pub(crate) fn transfer_with_bandwidth(
             )?;
         }
         for candidate in &group.candidates {
+            group_work_units = group_work_units.saturating_add(1);
             let route = &routes[candidate.route_index];
             let free = target_free[route.target_slot()];
             post_actions[candidate.route_index] = BeltPostAction::Flow {
@@ -3967,6 +4288,7 @@ pub(crate) fn transfer_with_bandwidth(
             .copied()
             .chain(group.inactive_routes.iter().copied())
         {
+            group_work_units = group_work_units.saturating_add(1);
             let route = &routes[route_index];
             let free = target_free[route.target_slot()];
             post_actions[route_index] = BeltPostAction::Flow {
@@ -3975,8 +4297,23 @@ pub(crate) fn transfer_with_bandwidth(
                 moved: 0.0,
             };
         }
+        if let Some(work_units) = conflict_work_units.as_mut() {
+            work_units[group_index] = group_work_units;
+        }
     }
     profiler.mark("belt-transfer-stable-apply");
+    if let (Some(plan), Some(work_units)) = (conflict_profile_plan, conflict_work_units) {
+        let report = plan.summarize(&work_units);
+        profiler.conflict_components(
+            if reservation.is_some() {
+                "post-production"
+            } else {
+                "pre-production"
+            },
+            &report,
+        );
+        profiler.mark("belt-conflict-summary");
+    }
     pending_wake_group_indices.sort_unstable();
     pending_wake_group_indices.dedup();
     let mut pending_wakes = std::mem::take(pending_wake_group_indices);
@@ -4173,6 +4510,79 @@ pub(crate) fn aggregate_flow_from_state(state: &CoreState) -> anyhow::Result<Bel
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn conflict_node(
+        group_index: usize,
+        touched_entity_indices: &[u32],
+        quantum: bool,
+        opaque: bool,
+    ) -> BeltConflictProfileNode {
+        BeltConflictProfileNode {
+            group_index,
+            touched_entity_indices: touched_entity_indices.into(),
+            candidate_route_count: 1,
+            quantum,
+            opaque,
+        }
+    }
+
+    #[test]
+    fn conflict_profiler_joins_entity_owners_and_accounts_for_serial_fallbacks() {
+        let plan = BeltConflictProfilePlan {
+            nodes: vec![
+                conflict_node(0, &[0, 10], false, false),
+                conflict_node(1, &[1, 11], false, false),
+                conflict_node(2, &[2, 10], false, false),
+                conflict_node(3, &[3, 12], true, false),
+                conflict_node(4, &[4, 12], false, false),
+                conflict_node(5, &[5], false, true),
+            ],
+        };
+        let report = plan.summarize(&[10, 9, 5, 7, 3, 4]);
+
+        assert_eq!(
+            report,
+            BeltConflictProfileReport {
+                selected_groups: 6,
+                candidate_routes: 6,
+                component_count: 4,
+                parallel_component_count: 2,
+                serial_component_count: 2,
+                total_work_units: 38,
+                largest_component_work_units: 15,
+                parallel_work_units: 24,
+                serial_fallback_work_units: 14,
+                quantum_fallback_work_units: 10,
+                opaque_fallback_work_units: 4,
+                greedy_8_loads: [15, 9, 0, 0, 0, 0, 0, 0],
+                greedy_8_serial_equivalent_work_units: 29,
+            }
+        );
+    }
+
+    #[test]
+    fn conflict_profiler_greedy_eight_way_loads_are_stable_for_equal_components() {
+        let plan = BeltConflictProfilePlan {
+            nodes: (0..10)
+                .map(|index| conflict_node(index, &[index as u32], false, false))
+                .collect(),
+        };
+        let report = plan.summarize(&[2; 10]);
+
+        assert_eq!(report.component_count, 10);
+        assert_eq!(report.parallel_work_units, 20);
+        assert_eq!(report.serial_fallback_work_units, 0);
+        assert_eq!(report.greedy_8_loads, [4, 4, 2, 2, 2, 2, 2, 2]);
+        assert_eq!(report.greedy_8_serial_equivalent_work_units, 4);
+    }
+
+    #[test]
+    fn conflict_profiler_empty_plan_is_a_zero_report() {
+        assert_eq!(
+            BeltConflictProfilePlan { nodes: Vec::new() }.summarize(&[]),
+            BeltConflictProfileReport::default()
+        );
+    }
 
     #[test]
     fn material_movement_evidence_requires_real_flow_and_is_sorted_deduplicated() {

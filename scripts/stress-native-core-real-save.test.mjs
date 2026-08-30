@@ -24,6 +24,9 @@ import {
 
 const PROJECT_ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const SCRIPT = path.join(PROJECT_ROOT, "scripts", "stress-native-core-real-save.mjs");
+const SHA_A = "a".repeat(64);
+const SHA_B = "b".repeat(64);
+const SHA_C = "c".repeat(64);
 
 function temporaryDirectory(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-stress-test-"));
@@ -70,6 +73,13 @@ function benchmarkOutput(binarySha256, scenario = "exact", overrides = {}) {
     exact: {
       nativeCoreExactRealSaveAdvance: {
         exactState: true,
+        simulationSeconds: 1,
+        canonicalSha256: SHA_A,
+        expectedCanonicalSha256: SHA_A,
+        domainSha256: SHA_B,
+        conservationSummarySha256: SHA_C,
+        conservationCaptureFailure: null,
+        conservationValidationFailure: null,
         fieldMismatches: [],
         privatePeakSampler: validSampler({ pid: 200, samplerPid: 201 }),
       },
@@ -101,8 +111,10 @@ function stressOptions(paths, overrides = {}) {
     runs: 2,
     scenario: "exact",
     threads: "auto",
+    seconds: "1",
     syncRecordDrop: false,
     profile: false,
+    profileEquivalence: false,
     ...overrides,
   };
 }
@@ -147,16 +159,20 @@ test("parseArgs accepts only the bounded stability matrix", (t) => {
     "--fixture", paths.fixture,
     "--output", paths.output,
     "--runs", "50",
-    "--scenario", "full",
+    "--scenario", "exact",
     "--threads", "8",
+    "--seconds", "60",
     "--sync-record-drop",
     "--profile",
+    "--profile-equivalence",
   ]);
   assert.equal(parsed.runs, 50);
-  assert.equal(parsed.scenario, "full");
+  assert.equal(parsed.scenario, "exact");
   assert.equal(parsed.threads, "8");
+  assert.equal(parsed.seconds, "60");
   assert.equal(parsed.syncRecordDrop, true);
   assert.equal(parsed.profile, true);
+  assert.equal(parsed.profileEquivalence, true);
 });
 
 test("parseArgs rejects unsafe, ambiguous, or unbounded arguments", (t) => {
@@ -167,6 +183,9 @@ test("parseArgs rejects unsafe, ambiguous, or unbounded arguments", (t) => {
     [...base, "--runs", "51"],
     [...base, "--scenario", "open"],
     [...base, "--threads", "16"],
+    [...base, "--seconds", "2"],
+    [...base, "--scenario", "full", "--seconds", "5"],
+    [...base, "--scenario", "full", "--profile-equivalence"],
     [...base, "--env", "DSP_NATIVE_CORE_PROFILE=1"],
     [...base, "--output", `${paths.output}.duplicate`],
   ]) {
@@ -193,6 +212,7 @@ test("child environment uses a fixed allowlist and strips ambient DSP variables"
     LANG: "zh_CN.UTF-8",
     DSP_NATIVE_CORE_THREADS: "999",
     DSP_NATIVE_CORE_PROFILE: "1",
+    DSP_NATIVE_CORE_BENCHMARK_PROFILE_EQUIVALENCE: "ambient",
     [SYNC_RECORD_DROP_ENV]: "ambient",
     SECRET_TOKEN: "secret",
     NODE_OPTIONS: "--inspect",
@@ -201,7 +221,9 @@ test("child environment uses a fixed allowlist and strips ambient DSP variables"
   assert.equal(regular.environment.Path, parent.Path);
   assert.equal(regular.environment.TEMP, parent.TEMP);
   assert.equal(regular.environment.DSP_NATIVE_CORE_THREADS, "auto");
+  assert.equal(regular.environment.DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS, "1");
   assert.equal(regular.environment.DSP_NATIVE_CORE_PROFILE, undefined);
+  assert.equal(regular.environment.DSP_NATIVE_CORE_BENCHMARK_PROFILE_EQUIVALENCE, undefined);
   assert.equal(regular.environment.SECRET_TOKEN, undefined);
   assert.equal(regular.environment.NODE_OPTIONS, undefined);
   assert.equal(regular.environment[SYNC_RECORD_DROP_ENV], undefined);
@@ -216,6 +238,12 @@ test("child environment uses a fixed allowlist and strips ambient DSP variables"
   const profiled = buildChildEnvironment(parent, { ...options, profile: true }, "win32");
   assert.equal(profiled.environment.DSP_NATIVE_CORE_PROFILE, "1");
   assert.equal(profiled.managedKeys.filter((key) => key === "DSP_NATIVE_CORE_PROFILE").length, 1);
+
+  const legacyCaller = buildChildEnvironment(parent, { ...options, seconds: undefined }, "win32");
+  assert.equal(legacyCaller.environment.DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS, "1");
+
+  const observer = buildChildEnvironment(parent, { ...options, profileEquivalence: true }, "win32");
+  assert.equal(observer.environment.DSP_NATIVE_CORE_BENCHMARK_PROFILE_EQUIVALENCE, "1");
 });
 
 test("profile parser preserves ordered duplicate phase timings from both streams", () => {
@@ -282,6 +310,51 @@ test("full validation requires exact durable, checkpoint, burst, and Windows sam
   assert.equal(invalid.samplerValid, false);
 });
 
+test("exact validation fails when the child reports a different duration", (t) => {
+  const paths = fixturePaths(t);
+  const binary = fileIdentity(paths.binary);
+  const validation = validateBenchmarkMarkers(
+    parseBenchmarkMarkers(benchmarkOutput(binary.sha256)),
+    binary,
+    "exact",
+    "win32",
+    "5",
+  );
+  assert.equal(validation.exactValid, false);
+  assert.match(validation.errors.exact.join("\n"), /simulationSeconds 1 differs from requested 5/);
+});
+
+test("observer validation preserves a reported oracle divergence without calling it exact", (t) => {
+  const paths = fixturePaths(t);
+  const binary = fileIdentity(paths.binary);
+  const output = benchmarkOutput(binary.sha256, "exact", {
+    exact: {
+      nativeCoreExactRealSaveAdvance: {
+        exactState: false,
+        simulationSeconds: 60,
+        canonicalSha256: SHA_A,
+        expectedCanonicalSha256: SHA_B,
+        domainSha256: SHA_C,
+        conservationSummarySha256: SHA_C,
+        conservationCaptureFailure: null,
+        conservationValidationFailure: null,
+        fieldMismatches: ["dysonEngineering"],
+        privatePeakSampler: validSampler({ pid: 200, samplerPid: 201 }),
+      },
+    },
+  });
+  const validation = validateBenchmarkMarkers(
+    parseBenchmarkMarkers(output),
+    binary,
+    "exact",
+    "win32",
+    "60",
+  );
+  assert.equal(validation.observerValid, true);
+  assert.equal(validation.oracleEqual, false);
+  assert.equal(validation.exactValid, false);
+});
+
 test("all exact runs with valid samplers produce a completed report", (t) => {
   const paths = fixturePaths(t);
   const binary = fileIdentity(paths.binary);
@@ -309,6 +382,36 @@ test("all exact runs with valid samplers produce a completed report", (t) => {
   assert.ok(seenEnvironments.every(({ environment }) => environment.DSP_NATIVE_CORE_PROFILE === "1"));
   assert.ok(seenEnvironments.every(({ environment }) => environment.SECRET_TOKEN === undefined));
   assert.ok(report.runs.every((run) => run.nativeProfileMarkers[0]?.value === 123.5));
+});
+
+test("profile-equivalence mode completes on structurally valid divergent oracle evidence", (t) => {
+  const paths = fixturePaths(t);
+  const binary = fileIdentity(paths.binary);
+  const stdout = benchmarkOutput(binary.sha256, "exact", {
+    exact: {
+      nativeCoreExactRealSaveAdvance: {
+        exactState: false,
+        simulationSeconds: 60,
+        canonicalSha256: SHA_A,
+        expectedCanonicalSha256: SHA_B,
+        domainSha256: SHA_C,
+        conservationSummarySha256: SHA_C,
+        conservationCaptureFailure: null,
+        conservationValidationFailure: null,
+        fieldMismatches: ["dysonEngineering"],
+        privatePeakSampler: validSampler({ pid: 200, samplerPid: 201 }),
+      },
+    },
+  });
+  const report = runStress(
+    stressOptions(paths, { runs: 1, seconds: "60", profileEquivalence: true }),
+    deterministicDependencies(paths, () => ({ status: 0, signal: null, stdout, stderr: "" })),
+  );
+  assert.equal(report.status, "completed");
+  assert.equal(report.validation.allRunsExact, false);
+  assert.equal(report.validation.allRequestedValidationValid, true);
+  assert.equal(report.runs[0].benchmarkValidation.validationMode, "profile-observer-equivalence");
+  assert.equal(report.runs[0].benchmarkValidation.oracleEqual, false);
 });
 
 test("a failed child does not prevent later independent runs", (t) => {
@@ -375,6 +478,13 @@ test("invalid sampler fails the report while later runs still execute", (t) => {
         ? {
             nativeCoreExactRealSaveAdvance: {
               exactState: true,
+              simulationSeconds: 1,
+              canonicalSha256: SHA_A,
+              expectedCanonicalSha256: SHA_A,
+              domainSha256: SHA_B,
+              conservationSummarySha256: SHA_C,
+              conservationCaptureFailure: null,
+              conservationValidationFailure: null,
               fieldMismatches: [],
               privatePeakSampler: validSampler({ intervalSampleCount: 0 }),
             },

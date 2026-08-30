@@ -1,5 +1,9 @@
 # DSP极简网络项目现状
 
+> **Windows Rust 权威与薄 UI 继续开发（2026-08-30，未发布）**：独立工作树 `D:/GameDev/DSPidle2-windows-native-complete` 的当前产品代码推进到 `29988fa`，证据文档推进到 `9a6345f`。本批把建筑制造自动补足、量子仓库直供和单目标库存改为 Rust/Host 耐久语义命令；降低目标时按现有库存取消同目标任务并守恒退款，跨星球同物品且量子只能部分接收、又无法恢复 v47 原对象顺序时会在任何写入前失败关闭。建筑制造中心同时改为 built-in-only、同 session/run/revision/活动行星、最多 1 MiB 的只读薄 UI，renderer 不接完整 GameState、旧制造组件或写回调。开发中的两组 P1 与一组展示层 P2 均在合并前由独立审计发现并修复，没有用猜测或静默默认掩盖。
+>
+> 新鲜合并态专项为建筑制造命令 Core 5/5、Host 2/2，制造中心读模型 Rust 8/8，优化 Host 真实 Electron↔Rust integration 5/5，跨制造/蓝图/空间站 Node 29/29、Vitest 57/57，TypeScript、fmt 与差异检查通过；两批最终独立复审均为 P0/P1/P2 零。GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 版本 1.2.3 不变；`authorityEligible=false`，未签名、未部署、未连接生产，也未修改真实玩家存档。Lazy-scan 物流候选仍在冻结真实档 A/B，尚未证明收益、尚未合并；完整 Rust/Vitest/E2E/24 小时/多硬件冻结门禁也尚未执行。
+
 > **1.2.3 Windows 三层计划本地高价值收口候选（2026-08-28，未发布）**：最终运行时/打包提交为 `be80af000295a34208bdbee2a73cd42795eec999`，Build ID `1.2.3+be80af000295`。本轮在 E18 + e503 整合上补齐私有检查点 v2 的全 chunk SHA、v1 惰性升级、不确定 durable ACK 对账与失败关闭；线路稀疏热循环和 75% 稠密退化；session 私有 1 秒/1 分钟/10 分钟/1 小时、目标 24 小时生产历史；严格单 member `.json.gz` 原生导入；近似/精确 `advanceMode` 贯通；常驻 SoA/拓扑/路线/物流容量收紧，以及性能开发包缺省继承 `beta` 通道。公开 GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 版本 1.2.3 均未改变。
 >
 > 44,167,989 字节、45,904 实体、91,955 线路的只读玩家档上，冻结旧 Host 的估算常驻量为 133,730,449 B，超过正文 3 倍硬门禁 132,503,967 B，三轮都在精确 open 后按设计失败，故没有完整旧/新 full A/B。最终包内 Host 为 130,413,884 B，低于门禁 2,090,083 B；打开后 Private Bytes 中位降低 6.433%，拓扑索引降低 8.503%，但打开峰值只降低 0.508%，打开耗时反而慢 1.254%。候选自身 full stress 3/3、`1/2/4/8/auto × 3` 确定性矩阵 15/15，源文件 bytes、mtime 和 SHA-256 `f4d680c86b5528207753a96ba06df2b396af652c01da7c6e18dfb6c2e6551ee8` 不变。包内 exact 中位 1,260.54 ms，同轮 JavaScript 1,901.04 ms，约 1.508 倍吞吐；packaged auto 样本存在明显抖动，只作为哈希证据，不宣传固定多核收益。

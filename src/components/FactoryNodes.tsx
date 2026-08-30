@@ -59,6 +59,8 @@ import type { CanvasLod } from "../game/canvasPerformance";
 export interface FactoryNodeData extends Record<string, unknown> {
   /** The native runtime owns gameplay state; this card may only select and display it. */
   readOnly?: boolean;
+  /** Same-revision Rust projections may authorize one manual solid-vein mine intent. */
+  manualMiningEnabled?: boolean;
   /** Exact item handles may create one Rust-validated ordinary belt while every other card control stays read-only. */
   beltConnectionsEnabled?: boolean;
   /** Same-revision Rust inventory projections may remove material from a card, while configuration stays read-only. */
@@ -658,6 +660,7 @@ function VeinFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
   const remote = resourceId === "silicon_ore" || resourceId === "titanium_ore";
   const installing = !data.readOnly && placement === extractorId;
   const reserve = data.resourceReserve;
+  const manualMiningEnabled = !data.readOnly || Boolean(data.manualMiningEnabled);
 
   const install = (event: React.MouseEvent) => {
     if (data.readOnly || !installing) return;
@@ -706,16 +709,16 @@ function VeinFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
         <button
           className={`manual-mine nodrag nopan${mining ? " manual-mine--active" : ""}`}
           type="button"
-          disabled={data.readOnly}
+          disabled={!manualMiningEnabled}
           onPointerDown={(event) => {
-            if (data.readOnly) return;
+            if (!manualMiningEnabled) return;
             event.preventDefault();
             event.stopPropagation();
             data.onMiningStart(entity.id);
           }}
-          onPointerUp={data.readOnly ? undefined : data.onMiningStop}
-          onPointerCancel={data.readOnly ? undefined : data.onMiningStop}
-          title={data.readOnly ? `${resource.name}（只读）` : `长按采集${resource.name}`}
+          onPointerUp={manualMiningEnabled ? data.onMiningStop : undefined}
+          onPointerCancel={manualMiningEnabled ? data.onMiningStop : undefined}
+          title={manualMiningEnabled ? `长按采集${resource.name}` : `${resource.name}（只读）`}
         >
           <Hand size={16} />
           <span>{mining ? "采集中" : "采集"}</span>
@@ -1261,6 +1264,7 @@ function areNodeVisualPropsEqual(previous: NodeProps<FactoryFlowNode>, next: Nod
   return previous.id === next.id &&
     previous.selected === next.selected &&
     previous.data.readOnly === next.data.readOnly &&
+    previous.data.manualMiningEnabled === next.data.manualMiningEnabled &&
     previous.data.beltConnectionsEnabled === next.data.beltConnectionsEnabled &&
     previous.data.inventoryPickupEnabled === next.data.inventoryPickupEnabled &&
     previous.data.inventoryDepositEnabled === next.data.inventoryDepositEnabled &&

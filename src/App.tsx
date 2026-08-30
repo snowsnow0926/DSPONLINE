@@ -549,6 +549,7 @@ import {
   createNativeProjectedTechnologyLayoutCommand,
 } from "./game/nativeProjectedTechnologyCommands";
 import { createNativeProjectedActivePlanetCommand } from "./game/nativeProjectedPlanetNavigationCommands";
+import { createNativeProjectedManualMineCommand } from "./game/nativeProjectedManualMiningCommands";
 import {
   createNativeProjectedRecipeFocusItemCommand,
   createNativeProjectedRecipeFocusModeCommand,
@@ -2530,6 +2531,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     source: NativePlayerAuthorityCommandSource;
   } | null>(null);
   const nativePlayerAuthorityCommandInFlightRef = useRef(false);
+  const nativeManualMiningLastAttemptedFrameKeyRef = useRef<string | null>(null);
   const nativePlayerAuthorityPauseInFlightRef = useRef(false);
   const [nativePlayerAuthorityCommandPending, setNativePlayerAuthorityCommandPending] = useState(false);
   if (!nativePlayerAuthorityActiveFrame) {
@@ -11186,15 +11188,46 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setMiningEntityId(null);
   }, []);
 
+  const submitNativeManualMine = useCallback((entityId: string): boolean => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) return false;
+    const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+    const binding = nativePlayerAuthorityCommandBindingRef.current;
+    if (!frame || !binding ||
+        frame.sessionId !== binding.source.sessionId ||
+        frame.runId !== binding.source.runId ||
+        frame.revision !== binding.source.baseRevision) return false;
+    const entity = frame.entityById.get(entityId);
+    const resource = entity?.resourceId ? ITEMS[entity.resourceId] : undefined;
+    if (!entity || entity.kind !== "vein" || entity.planetId !== frame.planetId ||
+        !entity.resourceId || resource?.kind !== "solid") return false;
+    const frameKey = JSON.stringify([frame.sessionId, frame.runId, frame.revision]);
+    if (nativeManualMiningLastAttemptedFrameKeyRef.current === frameKey) return false;
+    // Consume this projected identity before dispatch. Even a rejected or
+    // transport-uncertain command must never be retried from the same frame.
+    nativeManualMiningLastAttemptedFrameKeyRef.current = frameKey;
+    return commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedManualMineCommand({ baseRevision, entityId })
+        : null);
+  }, [commitNativeProjectedCommand]);
+
   const onMiningStart = useCallback((entityId: string) => {
-    if (rejectLegacyFactoryInteractionWhileNative("手动采矿")) return;
     if (miningTimerRef.current != null) window.clearInterval(miningTimerRef.current);
     setMiningEntityId(entityId);
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      submitNativeManualMine(entityId);
+      miningTimerRef.current = window.setInterval(() => {
+        submitNativeManualMine(entityId);
+      }, 320);
+      return;
+    }
+    if (rejectLegacyFactoryInteractionWhileNative("手动采矿")) return;
     commitGame((current) => manualMine(current, entityId, 1));
     miningTimerRef.current = window.setInterval(() => {
       commitGame((current) => manualMine(current, entityId, 1));
     }, 320);
-  }, [commitGame, rejectLegacyFactoryInteractionWhileNative]);
+  }, [commitGame, rejectLegacyFactoryInteractionWhileNative, submitNativeManualMine]);
 
   useEffect(() => {
     window.addEventListener("pointerup", onMiningStop);
@@ -14044,6 +14077,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     !nativePlayerAuthorityCommandPending && Boolean(nativePlayerAuthorityCommandSource);
   const nativeEntityInventoryDepositEnabled = nativeEntityInventoryPickupEnabled &&
     nativeEntityInventoryProjectionBinding?.inventory.registryFingerprint === "7df8cf3a";
+  const nativeManualMiningEnabled = nativePlayerAuthorityOwnsRuntime &&
+    nativeAuthoritativeFactoryCanvasFrame !== null && nativePlayerAuthorityCommandSource !== null &&
+    nativeAuthoritativeFactoryCanvasFrame.sessionId === nativePlayerAuthorityCommandSource.sessionId &&
+    nativeAuthoritativeFactoryCanvasFrame.runId === nativePlayerAuthorityCommandSource.runId &&
+    nativeAuthoritativeFactoryCanvasFrame.revision === nativePlayerAuthorityCommandSource.baseRevision;
 
   const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "presentationSignature" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "acceptedInputItemIds" | "producedOutputItemIds" | "connectionDraft" | "connectionViewportFull" | "dynamicEffects" | "presentationVisible" | "alertActive" | "stackHidden" | "stackMarker" | "stackHalo" | "stackCount" | "stackGroupId" | "stackMembershipToken" | "stackMemberIds" | "stackAlertCount" | "stackCriticalAlertCount" | "stackGeometryHandlesRequired">>(() => {
     const technology = getTechnology(canvasGame.research.selectedTechId);
@@ -14051,6 +14089,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const planetProfile = getPlanetIndustrialProfile(canvasGame, factoryCanvasPlanetId);
     return {
       readOnly: nativePlayerAuthorityOwnsRuntime,
+      manualMiningEnabled: nativeManualMiningEnabled,
       beltConnectionsEnabled: nativeOrdinaryBeltConnectionEnabled,
       inventoryPickupEnabled: nativeEntityInventoryPickupEnabled,
       inventoryDepositEnabled: nativeEntityInventoryDepositEnabled,
@@ -14088,7 +14127,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       simulationMultiplier: getEffectiveSimulationMultiplier(canvasGame),
       extremeVisuals: extremeVisualsActive,
     };
-  }, [beltNodeIndex.activeEntityIds, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, extremeVisualsActive, factoryCanvasPlanetId, factoryRunStatusReadModel.paused, miningEntityId, nativeEntityInventoryDepositEnabled, nativeEntityInventoryPickupEnabled, nativeEntityInventoryProjectionBinding, nativeOrdinaryBeltConnectionEnabled, nativePlayerAuthorityOwnsRuntime, placement, placementCount, stableOnAddBuilding, stableOnDropCargo, stableOnDropDraggedItem, stableOnEnergyModeChange, stableOnFuelChange, stableOnInstallMiner, stableOnInteractionLockChange, stableOnMiningStart, stableOnMiningStop, stableOnPickInput, stableOnPickOutput, stableOnRecipeChange, stableOnStackActivate]);
+  }, [beltNodeIndex.activeEntityIds, canvasGame.cargo, canvasGame.dysonSphere, canvasGame.dysonSwarm, canvasGame.galaxy, canvasGame.paused, canvasGame.research.completedTechIds, canvasGame.research.progressByTech, canvasGame.research.selectedTechId, canvasGame.settings.difficulty, canvasGame.settings.simulationSpeed, canvasGame.timeWarp, extremeVisualsActive, factoryCanvasPlanetId, factoryRunStatusReadModel.paused, miningEntityId, nativeEntityInventoryDepositEnabled, nativeEntityInventoryPickupEnabled, nativeEntityInventoryProjectionBinding, nativeManualMiningEnabled, nativeOrdinaryBeltConnectionEnabled, nativePlayerAuthorityOwnsRuntime, placement, placementCount, stableOnAddBuilding, stableOnDropCargo, stableOnDropDraggedItem, stableOnEnergyModeChange, stableOnFuelChange, stableOnInstallMiner, stableOnInteractionLockChange, stableOnMiningStart, stableOnMiningStop, stableOnPickInput, stableOnPickOutput, stableOnRecipeChange, stableOnStackActivate]);
 
   const canvasNodeSemanticRevisionToken = createCanvasNodeSemanticRevisionToken([
     factoryCanvasPlanetId,
@@ -14428,6 +14467,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             cycleRatePerSecond,
             lod === "full" ? JSON.stringify(commonNodeData.cargo) : null,
             lod === "full" ? commonNodeData.inventoryPickupEnabled : null,
+            lod === "full" ? commonNodeData.manualMiningEnabled : null,
             lod === "full" ? commonNodeData.placement : null,
             lod === "full" ? commonNodeData.placementCount : null,
             lod === "full" && commonNodeData.miningEntityId === entity.id,
@@ -14465,6 +14505,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           ].join("|");
           if (previous?.data.visualSignature === visualSignature && previous.data.presentationSignature === presentationSignature &&
             previous.data.readOnly === commonNodeData.readOnly &&
+            previous.data.manualMiningEnabled === commonNodeData.manualMiningEnabled &&
             previous.data.inventoryPickupEnabled === commonNodeData.inventoryPickupEnabled &&
             previous.position.x === entity.position.x && previous.position.y === entity.position.y &&
             previous.selected === selected && previous.className === className && previous.draggable === nodeDraggable &&

@@ -6468,6 +6468,9 @@ impl CoreState {
         {
             bail!("native player-authority command contains an empty record patch")
         }
+        if crate::manual_mining::command_contains_intent(command) {
+            return crate::manual_mining::validate_command(self, command);
+        }
         if !command.added_entities.is_empty() {
             return validate_ordinary_building_placement(self, command);
         }
@@ -6785,6 +6788,7 @@ impl CoreState {
         let expanded_active_planet_intent;
         let expanded_research_transition_intent;
         let expanded_energy_exchanger_mode_intent;
+        let expanded_manual_mining_intent;
         let applied_command = if command_contains_active_planet_intent(command) {
             expanded_active_planet_intent = expand_active_planet_intent(self, command)?;
             &expanded_active_planet_intent
@@ -6796,6 +6800,9 @@ impl CoreState {
             expanded_energy_exchanger_mode_intent =
                 expand_energy_exchanger_mode_intent(self, command)?;
             &expanded_energy_exchanger_mode_intent
+        } else if crate::manual_mining::command_contains_intent(command) {
+            expanded_manual_mining_intent = crate::manual_mining::expand_intent(self, command)?;
+            &expanded_manual_mining_intent
         } else {
             command
         };

@@ -367,6 +367,33 @@ describe("FactoryNodes native-authority read-only boundary", () => {
     expectNoGameplayWrites(spies);
   });
 
+  it("opens only same-revision manual mining when the native capability flips", () => {
+    const spies = callbacks();
+    const entity = entityFixture("vein", undefined, { outputs: { iron_ore: 9 } });
+    const disabled = dataFixture(entity, spies);
+    const MemoVeinNode = NODE_TYPES.vein;
+    render(<MemoVeinNode {...nodeProps(disabled)} />);
+    expect(host.querySelector<HTMLButtonElement>(".manual-mine")?.disabled).toBe(true);
+
+    const enabled = { ...disabled, manualMiningEnabled: true };
+    render(<MemoVeinNode {...nodeProps(enabled)} />);
+    const manualMineButton = host.querySelector<HTMLButtonElement>(".manual-mine")!;
+    expect(manualMineButton.disabled).toBe(false);
+    act(() => {
+      manualMineButton.dispatchEvent(new Event("pointerdown", { bubbles: true, cancelable: true }));
+      manualMineButton.dispatchEvent(new Event("pointerup", { bubbles: true, cancelable: true }));
+    });
+
+    expect(spies.onMiningStart).toHaveBeenCalledOnce();
+    expect(spies.onMiningStart).toHaveBeenCalledWith(entity.id);
+    expect(spies.onMiningStop).toHaveBeenCalledOnce();
+    expect(host.querySelector<HTMLButtonElement>(".node-slot")?.disabled).toBe(true);
+    expectHandlesReadOnly();
+    expect(spies.onInstallMiner).not.toHaveBeenCalled();
+    expect(spies.onPickOutput).not.toHaveBeenCalled();
+    expect(spies.onInteractionLockChange).not.toHaveBeenCalled();
+  });
+
   it("keeps logistics input, output, drop and automatic handles inert", () => {
     const spies = callbacks();
     const entity = entityFixture("storage", "storage_mk1", {

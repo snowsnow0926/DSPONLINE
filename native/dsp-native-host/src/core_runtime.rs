@@ -8588,6 +8588,121 @@ mod tests {
     }
 
     #[test]
+    fn manual_mining_semantic_intent_survives_cold_wal_reopen() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = import_envelope();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                import_catalog(),
+            )
+            .unwrap();
+        let checkpoint = imported.checkpoint.clone();
+        let command = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "baseRevision": checkpoint.revision,
+            "topLevelChanges": [],
+            "changedEntities": [{
+                "id": "vein",
+                "changes": [{
+                    "path": ["manualMine"],
+                    "operation": "set",
+                    "value": 1
+                }]
+            }],
+            "addedEntities": [],
+            "removedEntityIds": [],
+            "changedBelts": [],
+            "addedBelts": [],
+            "removedBeltIds": []
+        }))
+        .unwrap();
+        let committed = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "manual-mine-before-cold-reopen".to_owned(),
+                    base_revision: checkpoint.revision,
+                    command: Some(command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        let live_summary = committed
+            .summary
+            .as_ref()
+            .expect("diagnostic commit must return the live summary");
+        assert_eq!(committed.revision, checkpoint.revision + 1);
+        registry
+            .export_v47(&store, &imported.session_id, "manual-mine-live", 100)
+            .unwrap();
+        let live: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/manual-mine-live.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(live["state"]["entities"][0]["outputs"]["iron_ore"], 4);
+        assert_eq!(live["state"]["manualMined"], 1);
+        assert_eq!(live["state"]["totalProduced"]["iron_ore"], 1);
+        let live_state = live["state"].clone();
+        let live_hash = live_summary.canonical_sha256.clone();
+
+        drop(registry);
+        drop(store);
+
+        let reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = CoreRegistry::default();
+        let reopened = reopened_registry
+            .open(
+                &reopened_store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                "builtin:test",
+                import_catalog(),
+            )
+            .unwrap();
+        assert_eq!(reopened.replayed_wal_entries, 1);
+        assert_eq!(reopened.replayed_revision, committed.revision);
+        assert_eq!(reopened.summary.revision, committed.revision);
+        assert_eq!(reopened.summary.canonical_sha256, live_hash);
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &reopened.session_id,
+                "manual-mine-replayed",
+                100,
+            )
+            .unwrap();
+        let replayed: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/manual-mine-replayed.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replayed["state"], live_state);
+        assert_eq!(
+            replayed["state"]["entities"][0]["outputs"]["iron_ore"],
+            live["state"]["entities"][0]["outputs"]["iron_ore"]
+        );
+        assert_eq!(
+            replayed["state"]["manualMined"],
+            live["state"]["manualMined"]
+        );
+        assert_eq!(
+            replayed["state"]["totalProduced"]["iron_ore"],
+            live["state"]["totalProduced"]["iron_ore"]
+        );
+    }
+
+    #[test]
     fn pause_only_wal_replay_preserves_checkpoint_bound_cold_history() {
         let root = tempdir().unwrap();
         let mut store = SaveStore::open(root.path()).unwrap();

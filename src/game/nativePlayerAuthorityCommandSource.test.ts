@@ -24,6 +24,7 @@ import {
   createSimulationCommandPatch,
   type SimulationCommandPatch,
 } from "./simulationRuntimeProtocol";
+import { createNativeProjectedManualMineCommand } from "./nativeProjectedManualMiningCommands";
 
 function activeFrame(
   revision = 10,
@@ -198,6 +199,25 @@ function stationSlotPatchFixture() {
 }
 
 describe("native player-authority command source", () => {
+  it("accepts one opaque manual-mining marker with the projected dirty receipt", async () => {
+    const patch = createNativeProjectedManualMineCommand({
+      baseRevision: 10,
+      entityId: "MOD-矿脉/Ω",
+    });
+    const harness = sourceHarness(patch, { topologyDirty: true });
+
+    const result = await harness.source.applyCommand(patch);
+
+    expect(result).toMatchObject({
+      previousRevision: 10,
+      revision: 11,
+      changedEntityIds: ["MOD-矿脉/Ω"],
+      changedBeltIds: [],
+      topologyDirty: true,
+    });
+    expect(harness.bridge.applyNativeCoreCommand).toHaveBeenCalledOnce();
+  });
+
   it("forwards real station-slot assignment/removal intent without dropping refund or removed rows", async () => {
     const fixture = stationSlotPatchFixture();
     const assignmentItem = fixture.assignmentPatch.changedEntities

@@ -5052,6 +5052,63 @@ mod tests {
         serde_json::to_vec(&envelope).unwrap()
     }
 
+    fn player_authority_station_slot_directory(primary_item_id: Option<&str>) -> Value {
+        Value::Array(
+            (0..5)
+                .map(|slot_index| {
+                    json!({
+                        "itemId": if slot_index == 0 { primary_item_id } else { None },
+                        "localMode": if slot_index == 0 { "supply" } else { "storage" },
+                        "remoteMode": if slot_index == 0 { "demand" } else { "storage" },
+                        "minimumLoad": 0.5,
+                        "minStock": 0,
+                        "maxStock": 0,
+                        "priority": 1,
+                        "routePolicy": "direct",
+                        "warperBudget": 2,
+                        "slotPayload": { "owner": "future:slot", "index": slot_index }
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    fn player_authority_station_slot_envelope() -> Vec<u8> {
+        let mut envelope: Value =
+            serde_json::from_slice(&player_authority_station_inventory_envelope()).unwrap();
+        envelope["state"]["quantumLogisticsNetwork"] = json!({
+            "enabled": true,
+            "inventory": { "iron_ore": "25000", "iron_ingot": "1234" },
+            "itemCapacities": { "iron_ore": "100000", "iron_ingot": "100000" },
+            "routingCursors": { "iron_ore": 17 },
+            "uploadRoutingCursors": { "iron_ingot": 23 }
+        });
+        let entities = envelope["state"]["entities"].as_array_mut().unwrap();
+        let target = entities
+            .iter_mut()
+            .find(|entity| entity["id"] == "station-ils")
+            .unwrap();
+        target["stationSlots"] = player_authority_station_slot_directory(Some("iron_ore"));
+        target["storedItemId"] = Value::from("iron_ore");
+        target["stationMode"] = Value::from("demand");
+        target["stationMinimumLoad"] = Value::from(0.5);
+        target["outputs"] = json!({ "iron_ore": 3 });
+        target["quantumMaterialBuffer"] = json!({ "hydrogen": 123 });
+        let peer = entities
+            .iter_mut()
+            .find(|entity| entity["id"] == "station-peer")
+            .unwrap();
+        peer["stationSlots"] = player_authority_station_slot_directory(Some("iron_ore"));
+        peer["storedItemId"] = Value::from("iron_ore");
+        peer["stationMode"] = Value::from("demand");
+        peer["stationMinimumLoad"] = Value::from(0.5);
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        serde_json::to_vec(&envelope).unwrap()
+    }
+
     fn player_authority_fixture() -> (
         tempfile::TempDir,
         SaveStore,
@@ -5084,6 +5141,19 @@ mod tests {
     ) {
         player_authority_fixture_from_parts(
             player_authority_station_inventory_envelope(),
+            player_authority_station_inventory_catalog(),
+        )
+    }
+
+    fn player_authority_station_slot_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        player_authority_fixture_from_parts(
+            player_authority_station_slot_envelope(),
             player_authority_station_inventory_catalog(),
         )
     }
@@ -5572,6 +5642,36 @@ mod tests {
                         "path": ["stationWarperInventory", "intent"],
                         "operation": "set",
                         "value": { "delta": 20 }
+                    }]
+                }],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn player_authority_station_slot_item_intent_command(
+        base_revision: u64,
+        command_id: &str,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [],
+                "changedEntities": [{
+                    "id": "station-ils",
+                    "changes": [{
+                        "path": ["stationSlotItem", "intent"],
+                        "operation": "set",
+                        "value": { "slotIndex": 0, "itemId": "iron_ingot" }
                     }]
                 }],
                 "addedEntities": [],
@@ -9369,6 +9469,285 @@ mod tests {
         )
         .unwrap();
         assert_eq!(replayed["state"], live_state);
+    }
+
+    #[test]
+    fn station_slot_semantic_intents_survive_host_generic_wal_cold_reopen() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = player_authority_station_slot_envelope();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_station_inventory_catalog(),
+            )
+            .unwrap();
+        let checkpoint = imported.checkpoint.clone();
+        let mode_command = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "baseRevision": checkpoint.revision,
+            "topLevelChanges": [],
+            "changedEntities": [{
+                "id": "station-ils",
+                "changes": [{
+                    "path": ["stationSlotMode", "intent"],
+                    "operation": "set",
+                    "value": { "slotIndex": 0, "scope": "remote", "mode": "storage" }
+                }]
+            }],
+            "addedEntities": [],
+            "removedEntityIds": [],
+            "changedBelts": [],
+            "addedBelts": [],
+            "removedBeltIds": []
+        }))
+        .unwrap();
+        let mode = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "station-slot-mode-before-cold-reopen".to_owned(),
+                    base_revision: checkpoint.revision,
+                    command: Some(mode_command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        let item_command = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "baseRevision": mode.revision,
+            "topLevelChanges": [],
+            "changedEntities": [{
+                "id": "station-ils",
+                "changes": [{
+                    "path": ["stationSlotItem", "intent"],
+                    "operation": "set",
+                    "value": { "slotIndex": 0, "itemId": "iron_ingot" }
+                }]
+            }],
+            "addedEntities": [],
+            "removedEntityIds": [],
+            "changedBelts": [],
+            "addedBelts": [],
+            "removedBeltIds": []
+        }))
+        .unwrap();
+        let item = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "station-slot-item-before-cold-reopen".to_owned(),
+                    base_revision: mode.revision,
+                    command: Some(item_command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        let live_summary = item.summary.as_ref().unwrap();
+        assert_eq!(item.revision, checkpoint.revision + 2);
+
+        let wal = store
+            .read_wal(&checkpoint.slot, checkpoint.revision)
+            .unwrap();
+        assert_eq!(wal.len(), 2);
+        let mode_payload = serde_json::to_string(&wal[0].payload).unwrap();
+        let item_payload = serde_json::to_string(&wal[1].payload).unwrap();
+        assert!(mode_payload.contains("stationSlotMode"));
+        assert!(!mode_payload.contains("stationRoutes"));
+        assert!(!mode_payload.contains("stationWarpers"));
+        assert!(item_payload.contains("stationSlotItem"));
+        assert!(!item_payload.contains("stationSlots"));
+        assert!(!item_payload.contains("stationProgress"));
+        assert!(!item_payload.contains("planetTrays"));
+        assert!(!item_payload.contains("quantumLogisticsNetwork"));
+
+        registry
+            .export_v47(&store, &imported.session_id, "station-slot-live", 100)
+            .unwrap();
+        let live: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/station-slot-live.json")).unwrap(),
+        )
+        .unwrap();
+        let station = live["state"]["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["id"] == "station-ils")
+            .unwrap();
+        let peer = live["state"]["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["id"] == "station-peer")
+            .unwrap();
+        assert_eq!(station["stationSlots"][0]["itemId"], "iron_ingot");
+        assert_eq!(station["stationSlots"][0]["remoteMode"], "supply");
+        assert_eq!(station["storedItemId"], "iron_ingot");
+        assert_eq!(station["stationMode"], "supply");
+        assert_eq!(station["stationProgress"], 0);
+        assert_eq!(station["stationWarpers"], 1);
+        assert_eq!(station["outputs"]["iron_ore"], 0);
+        assert_eq!(station["quantumMaterialBuffer"], json!({ "hydrogen": 123 }));
+        assert_eq!(
+            station["stationSlots"][0]["slotPayload"],
+            json!({ "owner": "future:slot", "index": 0 })
+        );
+        assert_eq!(peer["stationRoutes"], json!([]));
+        assert_eq!(peer["stationProgress"], 0);
+        assert_eq!(
+            live["state"]["portableFleet"],
+            json!({
+                "logistics_drone": 3,
+                "logistics_vessel": 2
+            })
+        );
+        assert_eq!(
+            live["state"]["quantumLogisticsNetwork"],
+            json!({
+                "enabled": true,
+                "inventory": { "iron_ore": "25000", "iron_ingot": "1234" },
+                "itemCapacities": { "iron_ore": "100000", "iron_ingot": "100000" },
+                "routingCursors": { "iron_ore": 17 },
+                "uploadRoutingCursors": { "iron_ingot": 23 }
+            })
+        );
+        let live_state = live["state"].clone();
+        let live_hash = live_summary.canonical_sha256.clone();
+
+        drop(registry);
+        drop(store);
+        let reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = CoreRegistry::default();
+        let reopened = reopened_registry
+            .open(
+                &reopened_store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_station_inventory_catalog(),
+            )
+            .unwrap();
+        assert_eq!(reopened.replayed_wal_entries, 2);
+        assert_eq!(reopened.replayed_revision, item.revision);
+        assert_eq!(reopened.summary.canonical_sha256, live_hash);
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &reopened.session_id,
+                "station-slot-replayed",
+                100,
+            )
+            .unwrap();
+        let replayed: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/station-slot-replayed.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replayed["state"], live_state);
+    }
+
+    #[test]
+    fn station_slot_item_intent_is_atomic_across_host_durable_boundaries() {
+        let (_clean_root, mut clean_store, mut clean_registry, clean_session, checkpoint) =
+            player_authority_station_slot_fixture();
+        let clean = clean_registry
+            .commit_player_authority_command(
+                &mut clean_store,
+                &clean_session,
+                player_authority_station_slot_item_intent_command(
+                    checkpoint.revision,
+                    "station-slot-item-boundary",
+                ),
+            )
+            .unwrap();
+        assert_eq!(clean.changed_entity_ids, ["station-ils", "station-peer"]);
+        assert!(clean.changed_belt_ids.is_empty());
+        assert!(clean.topology_dirty);
+
+        for fault in [
+            PlayerAuthorityCommandFault::AfterStage,
+            PlayerAuthorityCommandFault::AfterWal,
+            PlayerAuthorityCommandFault::AfterCheckpoint,
+            PlayerAuthorityCommandFault::AfterReceipt,
+            PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
+        ] {
+            let (_root, mut store, mut registry, session_id, checkpoint) =
+                player_authority_station_slot_fixture();
+            let before = registry.status(&session_id).unwrap();
+            let request = || {
+                player_authority_station_slot_item_intent_command(
+                    checkpoint.revision,
+                    "station-slot-item-boundary",
+                )
+            };
+            let error = registry
+                .commit_player_authority_command_internal(
+                    &mut store,
+                    &session_id,
+                    request(),
+                    PlayerAuthorityCommandKind::Gameplay,
+                    fault,
+                )
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("lost response"),
+                "{fault:?}: {error:#}"
+            );
+            if fault == PlayerAuthorityCommandFault::AfterStage {
+                let after = registry.status(&session_id).unwrap();
+                assert_eq!(after.revision, before.revision);
+                assert_eq!(after.canonical_sha256, before.canonical_sha256);
+            }
+
+            drop(registry);
+            let published = store.recover("normal-main").unwrap().unwrap();
+            let mut reopened = CoreRegistry::default();
+            let opened = reopened
+                .open(
+                    &store,
+                    "normal-main",
+                    published.generation,
+                    &published.root_hash,
+                    published.revision,
+                    &published.registry_fingerprint,
+                    player_authority_station_inventory_catalog(),
+                )
+                .unwrap();
+            let recovered = reopened
+                .commit_player_authority_command(&mut store, &opened.session_id, request())
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
+            assert!(recovered.duplicate, "{fault:?}");
+            assert_eq!(recovered.revision, clean.revision, "{fault:?}");
+            assert_eq!(
+                recovered.summary.canonical_sha256, clean.summary.canonical_sha256,
+                "{fault:?}"
+            );
+            assert!(
+                recovered
+                    .changed_entity_ids
+                    .iter()
+                    .any(|id| id == "station-ils"),
+                "{fault:?}"
+            );
+            assert!(recovered.changed_belt_ids.is_empty(), "{fault:?}");
+            assert!(recovered.topology_dirty, "{fault:?}");
+            let lease = store.require_exact_realtime_lease().unwrap();
+            assert_eq!(lease.acknowledged.revision, recovered.revision, "{fault:?}");
+            assert!(lease.pending_command.is_none(), "{fault:?}");
+        }
     }
 
     #[test]

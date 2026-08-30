@@ -90,7 +90,6 @@ describe("production statistics rolling buckets", () => {
       history.push({
         ...sample(second, 60),
         pureIdleReplication: {
-          totalProduced: { universe_matrix: String(second * 10) },
           researchInvestmentByItem: { universe_matrix: String(second * 2) },
           structurePointsBySystem: { helios: second },
           shellSailsBySystem: { helios: second * 3 },
@@ -101,7 +100,6 @@ describe("production statistics rolling buckets", () => {
 
     expect(history.some((entry) => getProductionHistorySampleDuration(entry) > 1)).toBe(true);
     expect(history.at(-1)?.pureIdleReplication).toEqual({
-      totalProduced: { universe_matrix: "1800" },
       researchInvestmentByItem: { universe_matrix: "360" },
       structurePointsBySystem: { helios: 180 },
       shellSailsBySystem: { helios: 540 },

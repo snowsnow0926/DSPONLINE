@@ -1561,7 +1561,6 @@ export interface ProductionHistorySample {
 }
 
 export interface PureIdleReplicationTelemetry {
-  totalProduced: Partial<Record<ItemId, DecimalIntegerString>>;
   researchInvestmentByItem: Partial<Record<ItemId, DecimalIntegerString>>;
   structurePointsBySystem: Partial<Record<StarSystemId, number>>;
   shellSailsBySystem: Partial<Record<StarSystemId, number>>;

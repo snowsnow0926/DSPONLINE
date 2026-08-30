@@ -17,18 +17,9 @@ function decimal(value: bigint): DecimalIntegerString {
 export function capturePureIdleReplicationTelemetry(
   state: GameState,
 ): PureIdleReplicationTelemetry | undefined {
-  const totalProduced: Partial<Record<ItemId, DecimalIntegerString>> = {};
-  for (const [itemId, raw] of Object.entries(state.totalProduced) as Array<[ItemId, number | undefined]>) {
-    if (!Number.isFinite(raw) || (raw ?? 0) < 0) return undefined;
-    // BigInt(number) preserves the integer represented by the runtime Number,
-    // including endgame totals above Number.MAX_SAFE_INTEGER. The original
-    // Number may already be approximate, but the telemetry itself no longer
-    // introduces another unsafe subtraction.
-    totalProduced[itemId] = decimal(BigInt(Math.floor(raw ?? 0)));
-  }
-
   const researchInvestmentByItem: Partial<Record<ItemId, DecimalIntegerString>> = {};
   const addResearch = (itemId: ItemId, amount: bigint): void => {
+    if (itemId !== "universe_matrix") return;
     researchInvestmentByItem[itemId] = decimal(
       BigInt(researchInvestmentByItem[itemId] ?? "0") + amount,
     );
@@ -71,7 +62,6 @@ export function capturePureIdleReplicationTelemetry(
     shellSailsBySystem[systemId] = Math.floor(plan.shellSails);
   }
   return {
-    totalProduced,
     researchInvestmentByItem,
     structurePointsBySystem,
     shellSailsBySystem,

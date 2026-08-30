@@ -201,7 +201,7 @@ export function TimeWarpIdleOverlay({
         <p className="time-warp-idle-lead">{continueAvailable
           ? "当前恢复记录未通过安全校验，未结算候选不会覆盖主存档。"
           : replication
-            ? "已锁定开始前最近 60 个模拟秒（不足时 30 秒）的真实正向产出；只复制白矩阵、小型运载火箭、太阳帆、科研与对应戴森终局事件，不再复制矿物或中间材料，也不消耗原料。"
+            ? "已锁定开始前最近 60 个模拟秒（不足时 30 秒）的真实终端事件；白矩阵只直传科研，火箭和壳面帆只直结戴森进度。不会向量子仓库、行星托盘、机器缓存或其他玩家库存生成物品；没有接收目标的通道直接停止。"
           : conservativeOnly
             ? macroSummary?.validationFailures
               ? "精确校准未能形成完整证书；系统仅提交已验证前缀，未获证明的尾段保持冻结，主存档不会被不完整候选覆盖。"

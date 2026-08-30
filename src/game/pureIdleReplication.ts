@@ -3,7 +3,6 @@ import {
   advanceDysonRocketMacroInPlace,
   refreshDysonGenerationSnapshot,
 } from "./engine";
-import { addQuantumInteger } from "./quantumLogisticsNetwork";
 import { advanceResearchReplicationInPlace } from "./researchMacro";
 import type {
   GameState,
@@ -15,22 +14,16 @@ import type {
 const MICROS_PER_SECOND = 1_000_000;
 export const PURE_IDLE_REPLICATION_PREFERRED_WINDOW_SECONDS = 60;
 export const PURE_IDLE_REPLICATION_MINIMUM_WINDOW_SECONDS = 30;
-export const PURE_IDLE_REPLICATION_ALGORITHM_VERSION = "pure-idle-replication-v2-endgame-output";
+export const PURE_IDLE_REPLICATION_ALGORITHM_VERSION = "pure-idle-replication-v3-terminal-direct-settlement";
 /**
- * Replication is an endgame reward, not a second unrestricted warehouse.
- * Only player-facing terminal products are credited as materials; research
- * investment and actual Dyson launch/absorption events remain independent
- * terminal counters below.
+ * Replication settles only already-observed terminal events. It never creates
+ * an item that the player can withdraw from a tray, machine or quantum store.
+ * White matrices go straight into research; rocket and sail events go straight
+ * into the selected per-system Dyson plans. An unavailable sink discards that
+ * interval instead of banking a material for later use.
  */
-export const PURE_IDLE_REPLICATION_ENDGAME_MATERIAL_IDS = [
-  "universe_matrix",
-  "small_carrier_rocket",
-  "solar_sail",
-] as const satisfies readonly ItemId[];
-
 export interface PureIdleReplicationContract {
   windowSeconds: number;
-  materialByItem: Partial<Record<ItemId, bigint>>;
   researchByItem: Partial<Record<ItemId, bigint>>;
   rocketsBySystem: Partial<Record<StarSystemId, bigint>>;
   sailsBySystem: Partial<Record<StarSystemId, bigint>>;
@@ -41,8 +34,7 @@ export type PureIdleReplicationReadiness =
   | { ok: false; coveredSeconds: number; reason: string };
 
 export interface PureIdleReplicationApplication {
-  creditedMaterials: Partial<Record<ItemId, bigint>>;
-  creditedResearch: bigint;
+  settledWhiteMatrixResearch: bigint;
   launchedRockets: number;
   absorbedSails: number;
 }
@@ -98,22 +90,12 @@ export function getPureIdleReplicationReadiness(
   }
   const start = selected.start.pureIdleReplication!;
   const end = selected.end.pureIdleReplication!;
-  const materialByItem: Partial<Record<ItemId, bigint>> = {};
-  for (const itemId of PURE_IDLE_REPLICATION_ENDGAME_MATERIAL_IDS) {
-    const delta = positiveDecimalDelta(end.totalProduced[itemId], start.totalProduced[itemId]);
-    if (delta > 0n) materialByItem[itemId] = delta;
-  }
   const researchByItem: Partial<Record<ItemId, bigint>> = {};
-  for (const itemId of new Set<ItemId>([
-    ...Object.keys(start.researchInvestmentByItem),
-    ...Object.keys(end.researchInvestmentByItem),
-  ] as ItemId[])) {
-    const delta = positiveDecimalDelta(
-      end.researchInvestmentByItem[itemId],
-      start.researchInvestmentByItem[itemId],
-    );
-    if (delta > 0n) researchByItem[itemId] = delta;
-  }
+  const whiteMatrixResearch = positiveDecimalDelta(
+    end.researchInvestmentByItem.universe_matrix,
+    start.researchInvestmentByItem.universe_matrix,
+  );
+  if (whiteMatrixResearch > 0n) researchByItem.universe_matrix = whiteMatrixResearch;
   const rocketsBySystem: Partial<Record<StarSystemId, bigint>> = {};
   const sailsBySystem: Partial<Record<StarSystemId, bigint>> = {};
   for (const system of STAR_SYSTEM_LIST) {
@@ -128,7 +110,7 @@ export function getPureIdleReplicationReadiness(
     if (rocketDelta > 0n) rocketsBySystem[system.id] = rocketDelta;
     if (sailDelta > 0n) sailsBySystem[system.id] = sailDelta;
   }
-  const totalPositive = [materialByItem, researchByItem, rocketsBySystem, sailsBySystem]
+  const totalPositive = [researchByItem, rocketsBySystem, sailsBySystem]
     .some((record) => Object.values(record).some((value) => (value ?? 0n) > 0n));
   if (!totalPositive) {
     return {
@@ -141,7 +123,6 @@ export function getPureIdleReplicationReadiness(
     ok: true,
     contract: {
       windowSeconds: selected.seconds,
-      materialByItem,
       researchByItem,
       rocketsBySystem,
       sailsBySystem,
@@ -165,13 +146,6 @@ function safeIntegerNumber(value: bigint): number {
   return Number(value > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : value);
 }
 
-function addRuntimeCounter(current: number | undefined, amount: bigint): number {
-  const baseline = typeof current === "number" && Number.isFinite(current) && current > 0 ? current : 0;
-  const increment = Number(amount);
-  if (!Number.isFinite(increment) || baseline + increment >= Number.MAX_VALUE) return Number.MAX_VALUE;
-  return Math.max(baseline, Math.floor(baseline + increment));
-}
-
 export function advancePureIdleReplicationInPlace(
   state: GameState,
   contract: PureIdleReplicationContract,
@@ -180,19 +154,6 @@ export function advancePureIdleReplicationInPlace(
 ): PureIdleReplicationApplication {
   const simulationMicros = BigInt(Math.max(0, Math.floor(simulationSeconds * MICROS_PER_SECOND)));
   const windowMicros = BigInt(Math.max(1, Math.floor(contract.windowSeconds * MICROS_PER_SECOND)));
-  const creditedMaterials: Partial<Record<ItemId, bigint>> = {};
-  state.quantumLogisticsNetwork.enabled = true;
-  for (const [itemId, perWindow] of Object.entries(contract.materialByItem) as Array<[ItemId, bigint | undefined]>) {
-    const amount = scaledAmount(perWindow ?? 0n, simulationMicros, windowMicros, `material:${itemId}`, remainders);
-    if (amount <= 0n) continue;
-    creditedMaterials[itemId] = amount;
-    state.quantumLogisticsNetwork.inventory[itemId] = addQuantumInteger(
-      state.quantumLogisticsNetwork.inventory[itemId],
-      amount,
-    );
-    state.totalProduced[itemId] = addRuntimeCounter(state.totalProduced[itemId], amount);
-  }
-
   const researchBudgets: Partial<Record<ItemId, bigint>> = {};
   for (const [itemId, perWindow] of Object.entries(contract.researchByItem) as Array<[ItemId, bigint | undefined]>) {
     const amount = scaledAmount(perWindow ?? 0n, simulationMicros, windowMicros, `research:${itemId}`, remainders);
@@ -222,8 +183,7 @@ export function advancePureIdleReplicationInPlace(
   );
   refreshDysonGenerationSnapshot(state);
   return {
-    creditedMaterials,
-    creditedResearch: research.consumed,
+    settledWhiteMatrixResearch: research.consumed,
     launchedRockets,
     absorbedSails,
   };

@@ -35,29 +35,15 @@ function unlock(state: GameState, total = 201): void {
 }
 
 function telemetry({
-  iron = 0,
-  white = 0,
-  rocketItems = 0,
-  sailItems = 0,
   research = 0,
   rockets = 0,
   sails = 0,
 }: {
-  iron?: number;
-  white?: number;
-  rocketItems?: number;
-  sailItems?: number;
   research?: number;
   rockets?: number;
   sails?: number;
 }): PureIdleReplicationTelemetry {
   return {
-    totalProduced: {
-      iron_ingot: String(iron),
-      universe_matrix: String(white),
-      small_carrier_rocket: String(rocketItems),
-      solar_sail: String(sailItems),
-    },
     researchInvestmentByItem: { universe_matrix: String(research) },
     structurePointsBySystem: { helios: rockets },
     shellSailsBySystem: { helios: sails },
@@ -91,8 +77,8 @@ function replicationState(windowSeconds = 60): GameState {
   state.dysonSphere.totalSailsAbsorbed = 5;
   state.endgame.activeInfiniteResearchId = "matrix_compression";
   state.productionHistory = [
-    sample(0, telemetry({ iron: 100, white: 10, rocketItems: 20, sailItems: 40, research: 1_000, rockets: 10, sails: 2 })),
-    sample(windowSeconds, telemetry({ iron: 160, white: 30, rocketItems: 26, sailItems: 52, research: 1_120, rockets: 14, sails: 5 })),
+    sample(0, telemetry({ research: 1_000, rockets: 10, sails: 2 })),
+    sample(windowSeconds, telemetry({ research: 1_120, rockets: 14, sails: 5 })),
   ];
   state.historyRecordedAt = windowSeconds;
   state.elapsedSeconds = windowSeconds;
@@ -121,56 +107,68 @@ describe("pure-idle production replication", () => {
     if (!unavailable.ok) expect(unavailable.reason).toContain("至少 30");
   });
 
-  it("keeps endgame totals above the safe-integer boundary usable and monotonic", () => {
+  it("leaves physical production totals above the safe-integer boundary untouched", () => {
     const state = replicationState();
     const huge = 19_600_000_000_000_000;
     state.totalProduced.universe_matrix = huge;
-    state.productionHistory = [
-      sample(0, {
-        ...telemetry({}),
-        totalProduced: { universe_matrix: "19599999999999900" },
-      }),
-      sample(60, {
-        ...telemetry({}),
-        totalProduced: { universe_matrix: "19600000000000000" },
-      }),
-    ];
+    const beforeProgress = BigInt(state.endgame.infiniteResearch.matrix_compression.progress);
     const session = createPureIdleMacroSession(state, "replication");
     advancePureIdleMacroSession(session, 60);
-    expect(state.totalProduced.universe_matrix).toBeGreaterThanOrEqual(huge);
-    expect(BigInt(state.quantumLogisticsNetwork.inventory.universe_matrix ?? "0")).toBe(100n);
+    expect(state.totalProduced.universe_matrix).toBe(huge);
+    expect(state.quantumLogisticsNetwork.inventory.universe_matrix).toBeUndefined();
+    expect(BigInt(state.endgame.infiniteResearch.matrix_compression.progress)).toBeGreaterThan(beforeProgress);
   });
 
-  it("captures huge runtime counters and finite-tech completion monotonically", () => {
+  it("captures white-matrix research monotonically without material-production telemetry", () => {
     const state = createInitialState(undefined, false);
     state.totalProduced.universe_matrix = 19_600_000_000_000_000;
     state.research.progressByTech.electromagnetism = { electromagnetic_matrix: 4 };
+    state.endgame.infiniteResearch.matrix_compression.progress = "4";
     const before = capturePureIdleReplicationTelemetry(state)!;
-    expect(before.totalProduced.universe_matrix).toBe("19600000000000000");
-    expect(before.researchInvestmentByItem.electromagnetic_matrix).toBe("4");
+    expect(before.researchInvestmentByItem.electromagnetic_matrix).toBeUndefined();
+    expect(before.researchInvestmentByItem.universe_matrix).toBe("4");
 
     state.research.progressByTech.electromagnetism = {};
     state.research.completedTechIds.push("electromagnetism");
+    state.endgame.infiniteResearch.matrix_compression.progress = "8";
     const after = capturePureIdleReplicationTelemetry(state)!;
-    expect(BigInt(after.researchInvestmentByItem.electromagnetic_matrix ?? "0")).toBeGreaterThanOrEqual(
-      BigInt(before.researchInvestmentByItem.electromagnetic_matrix ?? "0"),
+    expect(BigInt(after.researchInvestmentByItem.universe_matrix ?? "0")).toBeGreaterThanOrEqual(
+      BigInt(before.researchInvestmentByItem.universe_matrix ?? "0"),
     );
   });
 
-  it("copies only terminal materials plus research, rockets and sails without debiting source inventory", () => {
+  it("settles research, rockets and sails directly while preserving every player inventory", () => {
     const state = replicationState();
     state.tray.iron_ore = 77;
+    state.planetTrays.home = { ...state.planetTrays.home, universe_matrix: 9, small_carrier_rocket: 8, solar_sail: 7 };
+    state.quantumLogisticsNetwork.enabled = false;
+    state.quantumLogisticsNetwork.inventory = {
+      universe_matrix: "11",
+      small_carrier_rocket: "22",
+      solar_sail: "33",
+      iron_ingot: "44",
+    };
+    state.constructionAutomation.quantumMaterialBuffer = {
+      untouched: { universe_matrix: 5, small_carrier_rocket: 4, solar_sail: 3 },
+    };
+    const trayBefore = structuredClone(state.tray);
+    const planetTraysBefore = structuredClone(state.planetTrays);
+    const quantumBefore = structuredClone(state.quantumLogisticsNetwork);
+    const constructionBuffersBefore = structuredClone(state.constructionAutomation.quantumMaterialBuffer);
+    const entitiesBefore = structuredClone(state.entities);
+    const producedBefore = structuredClone(state.totalProduced);
     const beforeProgress = BigInt(state.endgame.infiniteResearch.matrix_compression.progress);
     const session = createPureIdleMacroSession(state, "replication");
     expect(session.settledWallSeconds).toBe(0);
     const summary = advancePureIdleMacroSession(session, 60);
     expect(summary.algorithmVersion).toBe(PURE_IDLE_REPLICATION_ALGORITHM_VERSION);
     expect(summary.minimumEfficiency).toBe(1);
-    expect(state.tray.iron_ore).toBe(77);
-    expect(BigInt(state.quantumLogisticsNetwork.inventory.iron_ingot ?? "0")).toBe(0n);
-    expect(BigInt(state.quantumLogisticsNetwork.inventory.universe_matrix ?? "0")).toBeGreaterThan(0n);
-    expect(BigInt(state.quantumLogisticsNetwork.inventory.small_carrier_rocket ?? "0")).toBeGreaterThan(0n);
-    expect(BigInt(state.quantumLogisticsNetwork.inventory.solar_sail ?? "0")).toBeGreaterThan(0n);
+    expect(state.tray).toEqual(trayBefore);
+    expect(state.planetTrays).toEqual(planetTraysBefore);
+    expect(state.quantumLogisticsNetwork).toEqual(quantumBefore);
+    expect(state.constructionAutomation.quantumMaterialBuffer).toEqual(constructionBuffersBefore);
+    expect(state.entities).toEqual(entitiesBefore);
+    expect(state.totalProduced).toEqual(producedBefore);
     expect(BigInt(state.endgame.infiniteResearch.matrix_compression.progress)).toBeGreaterThan(beforeProgress);
     expect(state.dysonPlans.helios.structurePoints).toBeGreaterThan(14);
     expect(state.dysonPlans.helios.shellSails).toBeGreaterThan(5);
@@ -186,15 +184,46 @@ describe("pure-idle production replication", () => {
 
     const summary = advancePureIdleMacroSession(session, 60);
 
-    // Intermediate iron is deliberately excluded. The locked sample produced
-    // 20 white matrices in 60 simulation seconds, so one real minute at 15x
-    // copies exactly 300 terminal matrices.
+    // The locked sample uploaded 120 white matrices into research in 60
+    // simulation seconds, so one real minute at 15x directly uploads 1,800.
     expect(BigInt(state.quantumLogisticsNetwork.inventory.iron_ingot ?? "0")).toBe(0n);
-    expect(BigInt(state.quantumLogisticsNetwork.inventory.universe_matrix ?? "0")).toBe(300n);
+    expect(BigInt(state.quantumLogisticsNetwork.inventory.universe_matrix ?? "0")).toBe(0n);
+    expect(state.totalProduced.universe_matrix).toBe(30);
     expect(summary.actualMultiplier).toBe(15);
     expect(summary.settledSimulationSeconds).toBe(900);
-    expect(summary.current.whiteMatrixProduced - summary.baseline.whiteMatrixProduced).toBe(300);
+    expect(summary.current.whiteMatrixProduced - summary.baseline.whiteMatrixProduced).toBe(1_800);
     expect(summary.current.rocketsLaunched - summary.baseline.rocketsLaunched).toBe(60);
+  });
+
+  it("discards white-matrix settlement when no research sink exists instead of banking it", () => {
+    const state = replicationState();
+    state.endgame.activeInfiniteResearchId = null;
+    state.research.selectedTechId = null;
+    const quantumBefore = structuredClone(state.quantumLogisticsNetwork);
+    const session = createPureIdleMacroSession(state, "replication");
+    const initialSummary = advancePureIdleMacroSession(session, 0);
+    expect(initialSummary.ratePerSimulationSecond.whiteMatrixProduced).toBe(0);
+    expect(initialSummary.limitingReason).toContain("未结算且未入库");
+    const summary = advancePureIdleMacroSession(session, 60);
+
+    expect(summary.current.whiteMatrixProduced).toBe(summary.baseline.whiteMatrixProduced);
+    expect(summary.ratePerSimulationSecond.whiteMatrixProduced).toBe(0);
+    expect(summary.minimumEfficiency).toBe(0);
+    expect(summary.limitingReason).toContain("未结算且未入库");
+    expect(state.quantumLogisticsNetwork).toEqual(quantumBefore);
+    expect(state.dysonPlans.helios.structurePoints).toBeGreaterThan(14);
+    expect(state.dysonPlans.helios.shellSails).toBeGreaterThan(5);
+  });
+
+  it("does not become ready from physical item production without a terminal event", () => {
+    const state = replicationState();
+    state.totalProduced.universe_matrix = (state.totalProduced.universe_matrix ?? 0) + 1_000_000;
+    state.totalProduced.small_carrier_rocket = 1_000_000;
+    state.totalProduced.solar_sail = 1_000_000;
+    state.productionHistory = [sample(0, telemetry({})), sample(60, telemetry({}))];
+    const readiness = getPureIdleReplicationReadiness(state.productionHistory);
+    expect(readiness.ok).toBe(false);
+    if (!readiness.ok) expect(readiness.reason).toContain("没有记录到可复制的正向产出");
   });
 
   it("keeps the construction megastructure recursively manufacturing from real stock", () => {

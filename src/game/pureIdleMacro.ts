@@ -152,6 +152,8 @@ export interface PureIdleMacroSession {
   replicationContract?: PureIdleReplicationContract;
   /** Integer fractional carries make segmented replication deterministic. */
   replicationRemainders: Record<string, bigint>;
+  /** Runtime-only direct white-matrix research upload for overlay reporting. */
+  replicationWhiteMatrixUploaded?: bigint;
   baseline: PureIdleTerminalSnapshot;
   baselineResearch: ResearchMacroStatus;
   calibrationRate: PureIdleRateSnapshot;
@@ -288,6 +290,23 @@ export function capturePureIdleTerminalSnapshot(state: GameState): PureIdleTermi
   };
 }
 
+function replicationTerminalSnapshot(session: PureIdleMacroSession): PureIdleTerminalSnapshot {
+  const snapshot = capturePureIdleTerminalSnapshot(session.candidate);
+  if (session.mode !== "replication") return snapshot;
+  const uploaded = Number(session.replicationWhiteMatrixUploaded ?? 0n);
+  snapshot.whiteMatrixProduced = !Number.isFinite(uploaded) ||
+    session.baseline.whiteMatrixProduced + uploaded >= Number.MAX_VALUE
+    ? Number.MAX_VALUE
+    : Math.max(session.baseline.whiteMatrixProduced, Math.floor(session.baseline.whiteMatrixProduced + uploaded));
+  return snapshot;
+}
+
+function replicationRate(value: bigint, simulationSeconds: number): number {
+  if (simulationSeconds <= 1e-9 || value <= 0n) return 0;
+  const bounded = value > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : value;
+  return Number(bounded) / simulationSeconds;
+}
+
 function rateBetween(
   start: PureIdleTerminalSnapshot,
   end: PureIdleTerminalSnapshot,
@@ -373,21 +392,29 @@ function terminalLines(session: PureIdleMacroSession): PureIdleLineStatus[] {
   const currentRate = session.currentRate;
   if (session.mode === "replication") {
     return [
-      line("white-matrix", "白矩阵", currentRate.whiteMatrixProduced, currentRate.whiteMatrixProduced,
-        0, "universe_matrix", currentRate.whiteMatrixProduced > 1e-9,
-        "统计窗口没有白矩阵正向产出"),
-      line("dyson-rockets", "小型运载火箭", currentRate.rocketsLaunched, currentRate.rocketsLaunched,
-        0, "small_carrier_rocket", currentRate.rocketsLaunched > 1e-9,
+      line("white-matrix", "白矩阵科研上传", session.calibrationRate.whiteMatrixProduced, currentRate.whiteMatrixProduced,
+        0, "universe_matrix", session.calibrationRate.whiteMatrixProduced > 1e-9,
+        "统计窗口没有白矩阵科研上传"),
+      line("dyson-rockets", "小型运载火箭", session.calibrationRate.rocketsLaunched, currentRate.rocketsLaunched,
+        0, "small_carrier_rocket", session.calibrationRate.rocketsLaunched > 1e-9,
         "统计窗口没有火箭发射"),
-      line("solar-sails", "太阳帆吸收", currentRate.sailsAbsorbed, currentRate.sailsAbsorbed,
-        0, "solar_sail", currentRate.sailsAbsorbed > 1e-9,
+      line("solar-sails", "太阳帆吸收", session.calibrationRate.sailsAbsorbed, currentRate.sailsAbsorbed,
+        0, "solar_sail", session.calibrationRate.sailsAbsorbed > 1e-9,
         "统计窗口没有太阳帆吸收"),
-      line("dyson-structure", "戴森结构点", currentRate.structurePoints, currentRate.structurePoints,
-        0, undefined, currentRate.structurePoints > 1e-9,
+      line("dyson-structure", "戴森结构点", session.calibrationRate.structurePoints, currentRate.structurePoints,
+        0, undefined, session.calibrationRate.structurePoints > 1e-9,
         "统计窗口没有戴森结构增长"),
     ].map((entry) => ({
       ...entry,
-      reason: entry.efficiency === null ? entry.reason : "按已锁定统计产率直接复制",
+      reason: entry.efficiency === null
+        ? entry.reason
+        : entry.efficiency <= 1e-9
+          ? entry.id === "white-matrix"
+            ? "当前没有可接收白矩阵的科研目标，本段未结算且未入库"
+            : entry.id === "solar-sails"
+              ? "当前没有可接收太阳帆的戴森壳，本段未结算且未入库"
+              : "当前没有可接收火箭的戴森计划，本段未结算且未入库"
+        : "按已锁定统计产率直接结算到终端，不生成库存物品",
     }));
   }
   const extrapolatesWhiteMatrix = session.contract.deltas.some((delta) =>
@@ -482,7 +509,9 @@ export function summarizePureIdleMacroSession(session: PureIdleMacroSession): Pu
   const running = lines.filter((entry): entry is PureIdleLineStatus & { efficiency: number } => entry.efficiency !== null);
   const minimum = running.length > 0 ? Math.min(...running.map((entry) => entry.efficiency)) : null;
   const limiting = session.mode === "replication"
-    ? `按最近 ${Math.floor(session.replicationContract?.windowSeconds ?? 0)} 个模拟秒复制白矩阵、火箭、太阳帆与科研等终局成果；不消耗原料，也不复制普通库存`
+    ? minimum !== null && minimum <= 1e-9
+      ? lines.find((entry) => entry.efficiency === minimum)?.reason ?? "当前没有可接收的科研或戴森终端目标"
+      : `按最近 ${Math.floor(session.replicationContract?.windowSeconds ?? 0)} 个模拟秒直结白矩阵科研、火箭和壳面帆；不消耗原料，也不生成任何库存物品`
     : minimum === null
     ? "终局产线尚未在校准窗口运行"
     : lines.find((entry) => entry.efficiency === minimum)?.reason ?? "供给稳定";
@@ -507,7 +536,7 @@ export function summarizePureIdleMacroSession(session: PureIdleMacroSession): Pu
     nextValidationAtWallSeconds: session.nextValidationAtWallSeconds,
     boundaryCorrections: session.boundaryCorrections,
     baseline: session.baseline,
-    current: capturePureIdleTerminalSnapshot(session.candidate),
+    current: replicationTerminalSnapshot(session),
     ratePerSimulationSecond: session.currentRate,
     terminalLines: lines,
     minimumEfficiency: minimum,
@@ -851,7 +880,7 @@ export function createReplicationPureIdleMacroSession(state: GameState): PureIdl
       .reduce<bigint>((sum, value) => sum + (value ?? 0n), 0n);
   const rate: PureIdleRateSnapshot = {
     dysonGenerationKw: 0,
-    whiteMatrixProduced: pureIdleReplicationRatePerSecond(contract, contract.materialByItem.universe_matrix),
+    whiteMatrixProduced: pureIdleReplicationRatePerSecond(contract, contract.researchByItem.universe_matrix),
     rocketsLaunched: pureIdleReplicationRatePerSecond(contract, total(contract.rocketsBySystem)),
     sailsAbsorbed: pureIdleReplicationRatePerSecond(contract, total(contract.sailsBySystem)),
     structurePoints: pureIdleReplicationRatePerSecond(contract, total(contract.rocketsBySystem)),
@@ -860,6 +889,9 @@ export function createReplicationPureIdleMacroSession(state: GameState): PureIdl
     activityDelivered: {},
   };
   const baseline = capturePureIdleTerminalSnapshot(state);
+  const baselineResearch = captureResearchMacroStatus(state);
+  const currentRate = cloneRate(rate);
+  if (baselineResearch.kind === "none") currentRate.whiteMatrixProduced = 0;
   const macroContract: PureIdleAffineContract = {
     deltas: [],
     calibrationSeconds: contract.windowSeconds,
@@ -885,10 +917,11 @@ export function createReplicationPureIdleMacroSession(state: GameState): PureIdl
     rocketLaunchRemaindersBySystem: {},
     replicationContract: contract,
     replicationRemainders: {},
+    replicationWhiteMatrixUploaded: 0n,
     baseline,
-    baselineResearch: captureResearchMacroStatus(state),
+    baselineResearch,
     calibrationRate: cloneRate(rate),
-    currentRate: cloneRate(rate),
+    currentRate,
     settledWallSeconds: 0,
     settledSimulationSeconds: 0,
     contractVersion: 1,
@@ -1124,6 +1157,16 @@ function advanceReplicationSession(
     simulationSeconds,
     session.replicationRemainders,
   );
+  session.replicationWhiteMatrixUploaded = (session.replicationWhiteMatrixUploaded ?? 0n) +
+    application.settledWhiteMatrixResearch;
+  session.currentRate = {
+    ...session.currentRate,
+    whiteMatrixProduced: replicationRate(application.settledWhiteMatrixResearch, simulationSeconds),
+    rocketsLaunched: simulationSeconds > 1e-9 ? application.launchedRockets / simulationSeconds : 0,
+    structurePoints: simulationSeconds > 1e-9 ? application.launchedRockets / simulationSeconds : 0,
+    sailsAbsorbed: simulationSeconds > 1e-9 ? application.absorbedSails / simulationSeconds : 0,
+    shellSails: simulationSeconds > 1e-9 ? application.absorbedSails / simulationSeconds : 0,
+  };
   throwIfMacroInterrupted(options);
   session.candidate.elapsedSeconds += simulationSeconds;
   // Do not let the first ordinary post-idle sample pretend it covered the
@@ -1134,7 +1177,7 @@ function advanceReplicationSession(
   session.settledSimulationSeconds += simulationSeconds;
   session.actualMultiplier = multiplier;
   session.phase = "running";
-  session.lastValidationReason = `统计产率复制：终局材料 ${Object.keys(application.creditedMaterials).length} 类，科研 ${application.creditedResearch.toString()}，火箭 ${application.launchedRockets.toLocaleString("zh-CN")}，壳面帆 ${application.absorbedSails.toLocaleString("zh-CN")}${constructionCompleted > 0 ? `；建筑制造递归完成 ${constructionCompleted.toLocaleString("zh-CN")} 件` : ""}`;
+  session.lastValidationReason = `统计产率终端直结：白矩阵科研 ${application.settledWhiteMatrixResearch.toString()}，火箭 ${application.launchedRockets.toLocaleString("zh-CN")}，壳面帆 ${application.absorbedSails.toLocaleString("zh-CN")}；虚空物品零写入${constructionCompleted > 0 ? `；建筑制造递归完成 ${constructionCompleted.toLocaleString("zh-CN")} 件（消耗真实物资）` : ""}`;
   session.computationDurationMs = Math.max(0, macroNow() - startedAt);
   return summarizePureIdleMacroSession(session);
 }

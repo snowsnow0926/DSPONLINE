@@ -401,7 +401,6 @@ function copyState(state: GameState): GameState {
       inventory: { ...sample.inventory },
       pureIdleReplication: sample.pureIdleReplication
         ? {
-          totalProduced: { ...sample.pureIdleReplication.totalProduced },
           researchInvestmentByItem: { ...sample.pureIdleReplication.researchInvestmentByItem },
           structurePointsBySystem: { ...sample.pureIdleReplication.structurePointsBySystem },
           shellSailsBySystem: { ...sample.pureIdleReplication.shellSailsBySystem },
@@ -3649,10 +3648,11 @@ function launchDysonStructure(state: GameState, systemId: StarSystemId, amount: 
 }
 
 /**
- * Closed event-domain entry used by the pure-idle macro engine. Material
- * ownership is validated and credited by the caller before this function is
- * invoked; this boundary only commits an already funded integer launch plan
- * through the same per-system reconciliation as the exact silo path.
+ * Closed event-domain entry used by the pure-idle macro engine. Conservative
+ * callers validate material ownership first; the explicitly non-conserving
+ * replication mode supplies a player-authorized terminal-only event budget.
+ * This boundary never creates rocket items and commits only the integer launch
+ * plan through the same per-system reconciliation as the exact silo path.
  */
 export function advanceDysonRocketMacroInPlace(
   state: GameState,

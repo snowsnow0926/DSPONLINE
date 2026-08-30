@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
@@ -11,6 +11,16 @@ use crate::state::CoreState;
 const EPSILON: f64 = 0.0001;
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 const CONSTRUCTION_RECEIPT_HISTORY_LIMIT: usize = 64;
+const CONSTRUCTION_MAX_ITERATIONS_PER_SECOND: f64 = 256.0;
+const CONSTRUCTION_MAX_PLAN_BUILDS_PER_SECOND: f64 = 24.0;
+const CONSTRUCTION_EXTENDED_STACK_THRESHOLD: f64 = 1_000_000.0;
+const CONSTRUCTION_EXTENDED_MAX_ITERATIONS_PER_SECOND: f64 = 512.0;
+const CONSTRUCTION_EXTENDED_MAX_PLAN_BUILDS_PER_SECOND: f64 = 512.0;
+const CONSTRUCTION_MAX_FAIR_BATCH_JOBS: f64 = 4_096.0;
+const CONSTRUCTION_EXTENDED_MAX_FAIR_BATCH_JOBS: f64 = 1_000_000.0;
+const CONSTRUCTION_QUANTUM_PREFETCH_SECONDS: f64 = 5.0;
+const CONSTRUCTION_QUANTUM_PREFETCH_MAX_JOBS: f64 = 10_000_000.0;
+const CONSTRUCTION_QUANTUM_EXTENDED_PREFETCH_MAX_JOBS: f64 = 100_000_000.0;
 
 #[derive(Debug, Clone)]
 enum Step {
@@ -1766,6 +1776,18 @@ struct RepeatableBatch {
     cycle_start_inventory: BTreeMap<String, f64>,
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedConstructionPlan {
+    plan: crate::construction_planner::Plan,
+    batch: Option<RepeatableBatch>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ConstructionComputeBudget {
+    remaining_iterations: usize,
+    remaining_plan_builds: usize,
+}
+
 fn safe_multiply(left: f64, right: f64) -> f64 {
     let left = floor_amount(left);
     let right = floor_amount(right);
@@ -1775,6 +1797,16 @@ fn safe_multiply(left: f64, right: f64) -> f64 {
         MAX_SAFE_INTEGER
     } else {
         left * right
+    }
+}
+
+fn safe_add(left: f64, right: f64) -> f64 {
+    let left = floor_amount(left).max(0.0).min(MAX_SAFE_INTEGER);
+    let right = floor_amount(right).max(0.0).min(MAX_SAFE_INTEGER);
+    if left > MAX_SAFE_INTEGER - right {
+        MAX_SAFE_INTEGER
+    } else {
+        left + right
     }
 }
 
@@ -2162,9 +2194,10 @@ fn try_build_stable_cycle(
     planet_id: &str,
     target: &crate::construction_planner::Target,
     first: &RepeatableBatch,
+    remaining_plan_builds: &mut usize,
 ) -> anyhow::Result<Option<RepeatableBatch>> {
     const MAX_PROBE_JOBS: usize = 8;
-    if first.jobs_per_cycle != 1 {
+    if first.jobs_per_cycle != 1 || *remaining_plan_builds < 1 {
         return Ok(None);
     }
 
@@ -2210,6 +2243,10 @@ fn try_build_stable_cycle(
             .and_then(Value::as_object)
             .unwrap_or(&empty);
         let inventory = crate::construction_planner::inventory_from_sources(planet_tray, quantum);
+        if *remaining_plan_builds < 1 {
+            return Ok(None);
+        }
+        *remaining_plan_builds -= 1;
         let Some(next_plan) =
             crate::construction_planner::build_plan(state, &planning_base, target, inventory)
         else {
@@ -2236,6 +2273,90 @@ fn try_build_stable_cycle(
         current = next;
     }
     Ok(None)
+}
+
+fn direct_cached_plan_is_valid(
+    base: &Map<String, Value>,
+    buffers: &Map<String, Value>,
+    entity_id: &str,
+    planet_id: &str,
+    resolved: &ResolvedConstructionPlan,
+) -> bool {
+    let Some(batch) = resolved.batch.as_ref() else {
+        return false;
+    };
+    let empty = Map::new();
+    let quantum = buffers
+        .get(entity_id)
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    batch_maximum_cycles_for_stock(base, planet_id, batch, quantum) >= 1.0
+        && (batch.jobs_per_cycle <= 1 || construction_cycle_state_matches(base, planet_id, batch))
+}
+
+fn take_valid_direct_cached_plan(
+    cache: &mut HashMap<String, ResolvedConstructionPlan>,
+    target_id: &str,
+    base: &Map<String, Value>,
+    buffers: &Map<String, Value>,
+    entity_id: &str,
+    planet_id: &str,
+) -> Option<ResolvedConstructionPlan> {
+    if let Some(resolved) = cache.get(target_id)
+        && direct_cached_plan_is_valid(base, buffers, entity_id, planet_id, resolved)
+    {
+        return Some(resolved.clone());
+    }
+    cache.remove(target_id);
+    None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_resolved_construction_plan(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    automation: &Map<String, Value>,
+    jobs: &Map<String, Value>,
+    buffers: &Map<String, Value>,
+    entity_id: &str,
+    planet_id: &str,
+    target: &crate::construction_planner::Target,
+    remaining_plan_builds: &mut usize,
+) -> anyhow::Result<Option<ResolvedConstructionPlan>> {
+    if *remaining_plan_builds < 1 {
+        return Ok(None);
+    }
+    *remaining_plan_builds -= 1;
+    let empty = Map::new();
+    let planet_tray = tray(base, planet_id)
+        .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
+    let quantum = buffers
+        .get(entity_id)
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    let inventory = crate::construction_planner::inventory_from_sources(planet_tray, quantum);
+    let Some(plan) = crate::construction_planner::build_plan(state, base, target, inventory) else {
+        return Ok(None);
+    };
+    let mut batch = analyze_repeatable_plan(state, base, target, &plan)?;
+    if let Some(base_batch) = batch.clone()
+        && !batch_can_repeat(base, planet_id, &base_batch)
+        && active_target_count(state, base, automation, jobs) == 1
+    {
+        batch = try_build_stable_cycle(
+            state,
+            base,
+            automation,
+            buffers,
+            entity_id,
+            planet_id,
+            target,
+            &base_batch,
+            remaining_plan_builds,
+        )?
+        .or(Some(base_batch));
+    }
+    Ok(Some(ResolvedConstructionPlan { plan, batch }))
 }
 
 fn consume_combined_item(
@@ -2490,33 +2611,15 @@ fn try_run_repeatable_batch(
     entity_id: &str,
     planet_id: &str,
     target: &crate::construction_planner::Target,
-    plan: &crate::construction_planner::Plan,
+    batch: &RepeatableBatch,
     remaining_work: f64,
     machine_count: f64,
+    max_fair_batch_jobs: f64,
 ) -> anyhow::Result<Option<(f64, f64)>> {
-    if target.output_amount < 1.0 {
+    if target.output_amount < 1.0 || batch.work_seconds <= EPSILON {
         return Ok(None);
     }
     let active_targets = active_target_count(state, base, automation, jobs).max(1);
-    let Some(mut batch) = analyze_repeatable_plan(state, base, target, plan)? else {
-        return Ok(None);
-    };
-    if batch.work_seconds <= EPSILON {
-        return Ok(None);
-    }
-    if !batch_can_repeat(base, planet_id, &batch)
-        && active_targets == 1
-        && let Some(stable) = try_build_stable_cycle(
-            state, base, automation, buffers, entity_id, planet_id, target, &batch,
-        )?
-    {
-        batch = stable;
-    }
-    if !batch_can_repeat(base, planet_id, &batch)
-        || !construction_cycle_state_matches(base, planet_id, &batch)
-    {
-        return Ok(None);
-    }
     let target_stock = automation
         .get("targetStock")
         .and_then(Value::as_object)
@@ -2545,37 +2648,40 @@ fn try_run_repeatable_batch(
     } else {
         &empty
     };
-    let cycles_for_stock = batch_maximum_cycles_for_stock(base, planet_id, &batch, quantum);
-    let can_repeat = active_targets == 1 && jobs.is_empty();
-    let high_load = machine_count >= 10_000.0 || remaining_work > 256.0;
-    if !can_repeat && !high_load {
+    let cycles_for_stock = batch_maximum_cycles_for_stock(base, planet_id, batch, quantum);
+    if cycles_for_stock < 1.0 {
         return Ok(None);
     }
-    let max_fair_jobs: f64 = if active_targets > 1 && machine_count >= 1_000_000.0 {
-        1_000_000.0
-    } else {
-        4_096.0
-    };
-    let fair_share = max_fair_jobs.min((jobs_for_work / active_targets as f64).ceil().max(1.0));
+    let repeatable = batch_can_repeat(base, planet_id, batch);
+    let can_repeat = active_targets == 1 && jobs.is_empty() && repeatable;
+    let high_load = machine_count >= 10_000.0 || remaining_work > 256.0;
+    let can_fair_batch = high_load && repeatable;
+    let fair_share =
+        max_fair_batch_jobs.min((jobs_for_work / active_targets as f64).ceil().max(1.0));
     let jobs_per_cycle = batch.jobs_per_cycle.max(1) as f64;
+    if batch.jobs_per_cycle > 1 && !construction_cycle_state_matches(base, planet_id, batch) {
+        return Ok(None);
+    }
     let cycles_for_target = (jobs_for_target / jobs_per_cycle).floor();
     // Keep the same conservative work guard as the JavaScript oracle for a
     // proven multi-job cycle. It may leave a small amount of work unused, but
     // cannot over-credit a construction bucket.
     let cycles_for_work = (jobs_for_work / jobs_per_cycle).floor();
-    let cycles = cycles_for_target
-        .min(cycles_for_work)
-        .min(cycles_for_stock)
-        .min(if can_repeat {
-            MAX_SAFE_INTEGER
-        } else {
-            (fair_share / jobs_per_cycle).floor()
-        });
+    let cycles = if can_repeat {
+        cycles_for_target.min(cycles_for_work).min(cycles_for_stock)
+    } else if can_fair_batch {
+        cycles_for_target
+            .min(cycles_for_work)
+            .min(cycles_for_stock)
+            .min((fair_share / jobs_per_cycle).floor())
+    } else {
+        1.0
+    };
     if cycles < 1.0 {
         return Ok(None);
     }
     let completed = apply_repeatable_batch(
-        base, automation, buffers, entity_id, planet_id, target, &batch, cycles,
+        base, automation, buffers, entity_id, planet_id, target, batch, cycles,
     )?;
     if completed < 1.0 {
         return Ok(None);
@@ -3118,278 +3224,405 @@ pub(crate) fn run_centers(
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
     let mut wake_centers = BTreeSet::new();
-    for &entity_index in &selected_center_indices {
-        if entity_index >= entities.len() {
-            bail!("native construction center index is outside the entity table");
-        }
-        let snapshot = entities[entity_index]
-            .as_object()
-            .ok_or_else(|| anyhow!("native construction entity is invalid"))?
-            .clone();
-        if string_at(&snapshot, "buildingId") != Some("construction_center") {
-            bail!("native construction center index is stale");
-        }
-        let entity_id = string_at(&snapshot, "id").unwrap_or_default().to_owned();
-        let planet_id = string_at(&snapshot, "planetId")
-            .unwrap_or_default()
-            .to_owned();
-        let power_factor_entity = runtime
-            .power_factor_entity(entity_index)
-            .unwrap_or(entity_index);
-        let power_factor = power_factors
-            .get(&power_factor_entity)
+    let selected_center_indices = selected_center_indices.into_iter().collect::<HashSet<_>>();
+    let mut centers_by_planet = vec![Vec::<usize>::new(); state.catalog.planets.len()];
+    for &entity_index in center_indices {
+        let planet_index = state
+            .factory_topology
+            .entity_planet_indices
+            .get(entity_index)
             .copied()
-            .unwrap_or(0.0);
-        let demand_was_power_blocked = snapshot
-            .get("powerFactor")
-            .and_then(Value::as_f64)
-            .is_some_and(|factor| factor <= EPSILON);
-        let center = entities[entity_index]
-            .as_object_mut()
-            .ok_or_else(|| anyhow!("native construction center is invalid"))?;
-        if power_factors.contains_key(&power_factor_entity) {
-            set_number(
-                center,
-                "powerFactor",
-                (power_factor * 10_000.0).round() / 10_000.0,
-            )?;
-        } else {
-            center.remove("powerFactor");
-        }
-        let demand_is_power_blocked = center
-            .get("powerFactor")
-            .and_then(Value::as_f64)
-            .is_some_and(|factor| factor <= EPSILON);
-        if demand_was_power_blocked != demand_is_power_blocked {
-            wake_centers.insert(entity_index);
-        }
-        if !enabled || power_factor <= EPSILON {
-            set_number(center, "utilization", 0.0)?;
-            set_number(center, "productionRate", 0.0)?;
-            set_number(center, "progress", 0.0)?;
-            runtime.finish_center(base, entity_index, false, false, false);
+            .unwrap_or(usize::MAX);
+        let centers = centers_by_planet
+            .get_mut(planet_index)
+            .ok_or_else(|| anyhow!("native construction center planet topology is unknown"))?;
+        centers.push(entity_index);
+    }
+    for planet_center_indices in centers_by_planet {
+        if planet_center_indices.is_empty() {
             continue;
         }
-        let mut job = jobs
-            .remove(&entity_id)
-            .and_then(|value| value.as_object().cloned());
-        let mut wait_for_planet_inventory = false;
-        let mut wait_for_planner_cursor = false;
-        let machine_count = finite_number(center.get("machineCount")).max(1.0);
-        let mut remaining_work = seconds.max(0.0) * machine_count * power_factor;
-        let mut completed = 0.0;
-        let mut worked = false;
-        let mut remaining_iterations = (seconds.max(0.0) * 512.0).ceil().max(1.0) as usize;
-        while remaining_work > EPSILON && remaining_iterations > 0 {
-            remaining_iterations -= 1;
-            if job.is_none() {
-                let Some(target) = select_target(state, base, &automation, &jobs) else {
-                    let buffered = buffers
+        let active_target_count_for_budget = active_target_count(state, base, &automation, &jobs);
+        let extended_budget = active_target_count_for_budget > 1
+            && planet_center_indices.iter().any(|&entity_index| {
+                entities
+                    .get(entity_index)
+                    .and_then(Value::as_object)
+                    .map(|center| finite_number(center.get("machineCount")))
+                    .unwrap_or(0.0)
+                    >= CONSTRUCTION_EXTENDED_STACK_THRESHOLD
+            });
+        let max_iterations_per_second = if extended_budget {
+            CONSTRUCTION_EXTENDED_MAX_ITERATIONS_PER_SECOND
+        } else {
+            CONSTRUCTION_MAX_ITERATIONS_PER_SECOND
+        };
+        let max_plan_builds_per_second = if extended_budget {
+            CONSTRUCTION_EXTENDED_MAX_PLAN_BUILDS_PER_SECOND
+        } else {
+            CONSTRUCTION_MAX_PLAN_BUILDS_PER_SECOND
+        };
+        let max_fair_batch_jobs = if extended_budget {
+            CONSTRUCTION_EXTENDED_MAX_FAIR_BATCH_JOBS
+        } else {
+            CONSTRUCTION_MAX_FAIR_BATCH_JOBS
+        };
+        let mut remaining_iteration_pool = (seconds.max(0.0) * max_iterations_per_second)
+            .ceil()
+            .max(1.0) as usize;
+        let mut remaining_plan_build_pool = (seconds.max(0.0) * max_plan_builds_per_second)
+            .ceil()
+            .max(1.0) as usize;
+        let center_count = planet_center_indices.len();
+        for (center_position, &entity_index) in planet_center_indices.iter().enumerate() {
+            let centers_remaining = center_count - center_position;
+            let allocated_iterations = if remaining_iteration_pool == 0 {
+                0
+            } else {
+                remaining_iteration_pool
+                    .min(remaining_iteration_pool.div_ceil(centers_remaining).max(1))
+            };
+            let allocated_plan_builds = if remaining_plan_build_pool == 0 {
+                0
+            } else {
+                remaining_plan_build_pool
+                    .min(remaining_plan_build_pool.div_ceil(centers_remaining).max(1))
+            };
+            remaining_iteration_pool -= allocated_iterations;
+            remaining_plan_build_pool -= allocated_plan_builds;
+            let mut budget = ConstructionComputeBudget {
+                remaining_iterations: allocated_iterations,
+                remaining_plan_builds: allocated_plan_builds,
+            };
+            if !selected_center_indices.contains(&entity_index) {
+                remaining_iteration_pool += budget.remaining_iterations;
+                remaining_plan_build_pool += budget.remaining_plan_builds;
+                continue;
+            }
+            if entity_index >= entities.len() {
+                bail!("native construction center index is outside the entity table");
+            }
+            let snapshot = entities[entity_index]
+                .as_object()
+                .ok_or_else(|| anyhow!("native construction entity is invalid"))?
+                .clone();
+            if string_at(&snapshot, "buildingId") != Some("construction_center") {
+                bail!("native construction center index is stale");
+            }
+            let entity_id = string_at(&snapshot, "id").unwrap_or_default().to_owned();
+            let planet_id = string_at(&snapshot, "planetId")
+                .unwrap_or_default()
+                .to_owned();
+            let power_factor_entity = runtime
+                .power_factor_entity(entity_index)
+                .unwrap_or(entity_index);
+            let power_factor = power_factors
+                .get(&power_factor_entity)
+                .copied()
+                .unwrap_or(0.0);
+            let demand_was_power_blocked = snapshot
+                .get("powerFactor")
+                .and_then(Value::as_f64)
+                .is_some_and(|factor| factor <= EPSILON);
+            let center = entities[entity_index]
+                .as_object_mut()
+                .ok_or_else(|| anyhow!("native construction center is invalid"))?;
+            if power_factors.contains_key(&power_factor_entity) {
+                set_number(
+                    center,
+                    "powerFactor",
+                    (power_factor * 10_000.0).round() / 10_000.0,
+                )?;
+            } else {
+                center.remove("powerFactor");
+            }
+            let demand_is_power_blocked = center
+                .get("powerFactor")
+                .and_then(Value::as_f64)
+                .is_some_and(|factor| factor <= EPSILON);
+            if demand_was_power_blocked != demand_is_power_blocked {
+                wake_centers.insert(entity_index);
+            }
+            if !enabled || power_factor <= EPSILON {
+                set_number(center, "utilization", 0.0)?;
+                set_number(center, "productionRate", 0.0)?;
+                set_number(center, "progress", 0.0)?;
+                runtime.finish_center(base, entity_index, false, false, false);
+                remaining_iteration_pool += budget.remaining_iterations;
+                remaining_plan_build_pool += budget.remaining_plan_builds;
+                continue;
+            }
+            let mut job = jobs
+                .remove(&entity_id)
+                .and_then(|value| value.as_object().cloned());
+            let mut wait_for_planet_inventory = false;
+            let mut wait_for_planner_cursor = false;
+            let machine_count = finite_number(center.get("machineCount")).max(1.0);
+            let mut remaining_work = seconds.max(0.0) * machine_count * power_factor;
+            let mut completed = 0.0;
+            let mut worked = false;
+            let mut plan_budget_exhausted = false;
+            let mut direct_resolved_by_target = HashMap::<String, ResolvedConstructionPlan>::new();
+            while remaining_work > EPSILON && budget.remaining_iterations > 0 {
+                budget.remaining_iterations -= 1;
+                if job.is_none() {
+                    let Some(target) = select_target(state, base, &automation, &jobs) else {
+                        let buffered = buffers
+                            .get(&entity_id)
+                            .and_then(Value::as_object)
+                            .is_some_and(|inventory| !inventory.is_empty());
+                        refund_quantum_buffer(base, &mut buffers, &entity_id, &planet_id)?;
+                        if buffered {
+                            wake_centers.insert(entity_index);
+                        }
+                        break;
+                    };
+                    let has_direct_buffer = buffers
                         .get(&entity_id)
                         .and_then(Value::as_object)
-                        .is_some_and(|inventory| !inventory.is_empty());
-                    refund_quantum_buffer(base, &mut buffers, &entity_id, &planet_id)?;
-                    if buffered {
-                        wake_centers.insert(entity_index);
+                        .is_some_and(|buffer| !buffer.is_empty());
+                    let cached_direct = has_direct_buffer
+                        .then(|| {
+                            take_valid_direct_cached_plan(
+                                &mut direct_resolved_by_target,
+                                &target.id,
+                                base,
+                                &buffers,
+                                &entity_id,
+                                &planet_id,
+                            )
+                        })
+                        .flatten();
+                    let resolved = if let Some(cached) = cached_direct {
+                        cached
+                    } else {
+                        if budget.remaining_plan_builds < 1 {
+                            plan_budget_exhausted = true;
+                            break;
+                        }
+                        let Some(resolved) = build_resolved_construction_plan(
+                            state,
+                            base,
+                            &automation,
+                            &jobs,
+                            &buffers,
+                            &entity_id,
+                            &planet_id,
+                            &target,
+                            &mut budget.remaining_plan_builds,
+                        )?
+                        else {
+                            wait_for_planet_inventory = true;
+                            wait_for_planner_cursor = true;
+                            break;
+                        };
+                        if has_direct_buffer
+                            && resolved.batch.as_ref().is_some_and(|batch| {
+                                batch.jobs_per_cycle > 1
+                                    || batch_can_repeat(base, &planet_id, batch)
+                            })
+                        {
+                            direct_resolved_by_target.insert(target.id.clone(), resolved.clone());
+                        }
+                        resolved
+                    };
+                    if resolved.plan.steps.is_empty() {
+                        wait_for_planet_inventory = true;
+                        wait_for_planner_cursor = true;
+                        break;
                     }
-                    break;
+                    let target_count = crate::construction_planner::targets(state).len().max(1);
+                    set_number(
+                        &mut automation,
+                        "cursor",
+                        ((target.index + 1) % target_count) as f64,
+                    )?;
+                    if let Some(batch) = resolved.batch.as_ref() {
+                        if let Some((used_work, batch_completed)) = try_run_repeatable_batch(
+                            state,
+                            base,
+                            &mut automation,
+                            &jobs,
+                            &mut buffers,
+                            &entity_id,
+                            &planet_id,
+                            &target,
+                            batch,
+                            remaining_work,
+                            machine_count,
+                            max_fair_batch_jobs,
+                        )? {
+                            wake_centers.insert(entity_index);
+                            remaining_work = (remaining_work - used_work).max(0.0);
+                            completed += batch_completed;
+                            receipt.record_completion(
+                                (!matches!(
+                                    target.id.as_str(),
+                                    "logistics_drone" | "logistics_vessel"
+                                ))
+                                .then_some(target.id.as_str()),
+                                batch_completed,
+                            );
+                            worked = true;
+                            set_number(center, "progress", 0.0)?;
+                            continue;
+                        }
+                    }
+                    job = planned_job_value(&target, resolved.plan)
+                        .as_object()
+                        .cloned();
+                    wake_centers.insert(entity_index);
+                }
+                let current_job = job
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("native construction job could not be planned"))?;
+                let steps = current_job
+                    .get("steps")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("native construction job steps are missing"))?;
+                let step_index = floor_amount(finite_number(current_job.get("stepIndex"))) as usize;
+                let Some(step_value) = steps.get(step_index) else {
+                    job = None;
+                    wake_centers.insert(entity_index);
+                    continue;
                 };
-                let empty_quantum = Map::new();
-                let quantum = buffers
-                    .get(&entity_id)
-                    .and_then(Value::as_object)
-                    .unwrap_or(&empty_quantum);
-                let planet_tray = tray(base, &planet_id)
-                    .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
-                let inventory =
-                    crate::construction_planner::inventory_from_sources(planet_tray, quantum);
-                let Some(plan) =
-                    crate::construction_planner::build_plan(state, base, &target, inventory)
-                else {
+                let step = parse_step(step_value)?;
+                let requirements = requirements(state, &step)?;
+                let inputs_available = {
+                    let job_inventory = current_job
+                        .get("inventory")
+                        .and_then(Value::as_object)
+                        .ok_or_else(|| anyhow!("native construction job inventory is missing"))?;
+                    let empty_quantum = Map::new();
+                    let quantum = buffers
+                        .get(&entity_id)
+                        .and_then(Value::as_object)
+                        .unwrap_or(&empty_quantum);
+                    let planet_tray = tray(base, &planet_id)
+                        .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
+                    requirements_available(job_inventory, planet_tray, quantum, &requirements)
+                };
+                if !inputs_available {
+                    // This is the exact transition that creates a direct quantum
+                    // demand for a previously sleeping center. Retained positive
+                    // demands need no repeated global scan; the center remains in
+                    // the active set until a later probe proves it quiescent.
+                    wake_centers.insert(entity_index);
+                    if repair_job(state, base, &buffers, &entity_id, &planet_id, current_job)? {
+                        continue;
+                    }
                     wait_for_planet_inventory = true;
-                    wait_for_planner_cursor = true;
                     break;
-                };
-                let target_count = crate::construction_planner::targets(state).len().max(1);
-                set_number(
-                    &mut automation,
-                    "cursor",
-                    ((target.index + 1) % target_count) as f64,
-                )?;
-                if let Some((used_work, batch_completed)) = try_run_repeatable_batch(
-                    state,
+                }
+                let reservation = reserve_requirements(
                     base,
-                    &mut automation,
-                    &jobs,
                     &mut buffers,
                     &entity_id,
                     &planet_id,
-                    &target,
-                    &plan,
-                    remaining_work,
-                    machine_count,
+                    current_job,
+                    &requirements,
+                )?;
+                if !reservation.available {
+                    wake_centers.insert(entity_index);
+                    wait_for_planet_inventory = true;
+                    break;
+                }
+                if reservation.changed {
+                    wake_centers.insert(entity_index);
+                }
+                let duration = step_duration(state, base, &step)?;
+                let elapsed = finite_number(current_job.get("elapsedSeconds"));
+                let needed = (duration - elapsed).max(0.0);
+                let used = remaining_work.min(needed);
+                let next_elapsed = ((elapsed + used) * 1_000_000.0).round() / 1_000_000.0;
+                set_number(current_job, "elapsedSeconds", next_elapsed)?;
+                remaining_work -= used;
+                worked |= used > EPSILON;
+                set_number(
+                    center,
+                    "progress",
+                    ((next_elapsed / duration).min(1.0) * 1_000_000.0).round() / 1_000_000.0,
+                )?;
+                if next_elapsed + EPSILON < duration {
+                    break;
+                }
+                if !complete_step(
+                    state,
+                    base,
+                    &mut automation,
+                    &mut buffers,
+                    &entity_id,
+                    &planet_id,
+                    current_job,
+                    &step,
                 )? {
                     wake_centers.insert(entity_index);
-                    remaining_work = (remaining_work - used_work).max(0.0);
-                    completed += batch_completed;
-                    receipt.record_completion(
-                        (!matches!(target.id.as_str(), "logistics_drone" | "logistics_vessel"))
-                            .then_some(target.id.as_str()),
-                        batch_completed,
-                    );
-                    worked = true;
-                    set_number(center, "progress", 0.0)?;
-                    continue;
+                    break;
                 }
-                job = planned_job_value(&target, plan).as_object().cloned();
                 wake_centers.insert(entity_index);
-            }
-            let current_job = job
-                .as_mut()
-                .ok_or_else(|| anyhow!("native construction job could not be planned"))?;
-            let steps = current_job
-                .get("steps")
-                .and_then(Value::as_array)
-                .cloned()
-                .ok_or_else(|| anyhow!("native construction job steps are missing"))?;
-            let step_index = floor_amount(finite_number(current_job.get("stepIndex"))) as usize;
-            let Some(step_value) = steps.get(step_index) else {
-                job = None;
-                wake_centers.insert(entity_index);
-                continue;
-            };
-            let step = parse_step(step_value)?;
-            let requirements = requirements(state, &step)?;
-            let inputs_available = {
-                let job_inventory = current_job
-                    .get("inventory")
-                    .and_then(Value::as_object)
-                    .ok_or_else(|| anyhow!("native construction job inventory is missing"))?;
-                let empty_quantum = Map::new();
-                let quantum = buffers
-                    .get(&entity_id)
-                    .and_then(Value::as_object)
-                    .unwrap_or(&empty_quantum);
-                let planet_tray = tray(base, &planet_id)
-                    .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
-                requirements_available(job_inventory, planet_tray, quantum, &requirements)
-            };
-            if !inputs_available {
-                // This is the exact transition that creates a direct quantum
-                // demand for a previously sleeping center. Retained positive
-                // demands need no repeated global scan; the center remains in
-                // the active set until a later probe proves it quiescent.
-                wake_centers.insert(entity_index);
-                if repair_job(state, base, &buffers, &entity_id, &planet_id, current_job)? {
-                    continue;
+                if let Step::Building { construction_id } = &step {
+                    let output_amount = state
+                        .catalog
+                        .constructions
+                        .get(construction_id)
+                        .map(|definition| definition.output_amount)
+                        .unwrap_or(0.0);
+                    completed += output_amount;
+                    receipt.record_completion(Some(construction_id), output_amount);
+                } else if let Step::Fleet { amount, .. } = &step {
+                    completed += amount;
+                    receipt.record_completion(None, *amount);
                 }
-                wait_for_planet_inventory = true;
-                break;
+                set_number(current_job, "stepIndex", step_index as f64 + 1.0)?;
+                set_number(current_job, "elapsedSeconds", 0.0)?;
+                set_number(center, "progress", 0.0)?;
+                if step_index + 1 >= steps.len() {
+                    job = None;
+                }
             }
-            let reservation = reserve_requirements(
-                base,
-                &mut buffers,
-                &entity_id,
-                &planet_id,
-                current_job,
-                &requirements,
-            )?;
-            if !reservation.available {
-                wake_centers.insert(entity_index);
-                wait_for_planet_inventory = true;
-                break;
-            }
-            if reservation.changed {
-                wake_centers.insert(entity_index);
-            }
-            let duration = step_duration(state, base, &step)?;
-            let elapsed = finite_number(current_job.get("elapsedSeconds"));
-            let needed = (duration - elapsed).max(0.0);
-            let used = remaining_work.min(needed);
-            let next_elapsed = ((elapsed + used) * 1_000_000.0).round() / 1_000_000.0;
-            set_number(current_job, "elapsedSeconds", next_elapsed)?;
-            remaining_work -= used;
-            worked |= used > EPSILON;
             set_number(
                 center,
-                "progress",
-                ((next_elapsed / duration).min(1.0) * 1_000_000.0).round() / 1_000_000.0,
+                "utilization",
+                if worked || completed > 0.0 {
+                    power_factor
+                } else {
+                    0.0
+                },
             )?;
-            if next_elapsed + EPSILON < duration {
-                break;
+            set_number(
+                center,
+                "productionRate",
+                if seconds > EPSILON {
+                    (completed * 60.0 / seconds * 100.0).round() / 100.0
+                } else {
+                    0.0
+                },
+            )?;
+            let final_job_target = job
+                .as_ref()
+                .and_then(|job| string_at(job, "constructionId"))
+                .map(str::to_owned);
+            let final_job_present = job.is_some();
+            if let Some(job) = job {
+                jobs.insert(entity_id.clone(), Value::Object(job));
             }
-            if !complete_step(
-                state,
+            runtime.update_job_target(entity_index, final_job_target.as_deref());
+            let keep_active = worked
+                || completed > 0.0
+                || remaining_work > EPSILON
+                    && (budget.remaining_iterations == 0 || plan_budget_exhausted)
+                || (!wait_for_planet_inventory && final_job_present);
+            runtime.finish_center(
                 base,
-                &mut automation,
-                &mut buffers,
-                &entity_id,
-                &planet_id,
-                current_job,
-                &step,
-            )? {
-                wake_centers.insert(entity_index);
-                break;
-            }
-            wake_centers.insert(entity_index);
-            if let Step::Building { construction_id } = &step {
-                let output_amount = state
-                    .catalog
-                    .constructions
-                    .get(construction_id)
-                    .map(|definition| definition.output_amount)
-                    .unwrap_or(0.0);
-                completed += output_amount;
-                receipt.record_completion(Some(construction_id), output_amount);
-            } else if let Step::Fleet { amount, .. } = &step {
-                completed += amount;
-                receipt.record_completion(None, *amount);
-            }
-            set_number(current_job, "stepIndex", step_index as f64 + 1.0)?;
-            set_number(current_job, "elapsedSeconds", 0.0)?;
-            set_number(center, "progress", 0.0)?;
-            if step_index + 1 >= steps.len() {
-                job = None;
-            }
+                entity_index,
+                keep_active,
+                wait_for_planet_inventory,
+                wait_for_planner_cursor,
+            );
+            remaining_iteration_pool += budget.remaining_iterations;
+            remaining_plan_build_pool += budget.remaining_plan_builds;
         }
-        set_number(
-            center,
-            "utilization",
-            if worked || completed > 0.0 {
-                power_factor
-            } else {
-                0.0
-            },
-        )?;
-        set_number(
-            center,
-            "productionRate",
-            if seconds > EPSILON {
-                (completed * 60.0 / seconds * 100.0).round() / 100.0
-            } else {
-                0.0
-            },
-        )?;
-        let final_job_target = job
-            .as_ref()
-            .and_then(|job| string_at(job, "constructionId"))
-            .map(str::to_owned);
-        let final_job_present = job.is_some();
-        if let Some(job) = job {
-            jobs.insert(entity_id.clone(), Value::Object(job));
-        }
-        runtime.update_job_target(entity_index, final_job_target.as_deref());
-        let keep_active = worked
-            || completed > 0.0
-            || remaining_work > EPSILON && remaining_iterations == 0
-            || (!wait_for_planet_inventory && final_job_present);
-        runtime.finish_center(
-            base,
-            entity_index,
-            keep_active,
-            wait_for_planet_inventory,
-            wait_for_planner_cursor,
-        );
     }
     automation.insert("jobs".to_owned(), Value::Object(jobs));
     normalize_quantum_buffers(&mut buffers);
@@ -3423,8 +3656,202 @@ where
     runtime.indexed_try_map(centers, |index, center| probe(index, center))
 }
 
+#[allow(clippy::too_many_arguments)]
+fn quantum_prefetch_jobs(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    automation: &Map<String, Value>,
+    jobs: &Map<String, Value>,
+    center: &Map<String, Value>,
+    target: &crate::construction_planner::Target,
+    work_seconds: f64,
+    has_existing_job: bool,
+    power_factor: f64,
+) -> f64 {
+    let target_stock = automation
+        .get("targetStock")
+        .and_then(Value::as_object)
+        .map(|targets| floor_amount(finite_number(targets.get(&target.id))))
+        .unwrap_or(0.0);
+    let current = current_stock(base, &target.id) + pending_stock_in_jobs(state, jobs, &target.id);
+    let target_jobs = ((target_stock - current).max(0.0) / target.output_amount.max(1.0)).ceil();
+    let machine_count = floor_amount(finite_number(center.get("machineCount"))).max(1.0);
+    let work_jobs =
+        (machine_count * CONSTRUCTION_QUANTUM_PREFETCH_SECONDS * power_factor.clamp(0.0, 1.0)
+            / work_seconds.max(EPSILON))
+        .ceil()
+        .max(1.0);
+    let requested_jobs = (target_jobs + if has_existing_job { 1.0 } else { 0.0 }).max(1.0);
+    let prefetch_limit = if machine_count >= CONSTRUCTION_EXTENDED_STACK_THRESHOLD {
+        CONSTRUCTION_QUANTUM_EXTENDED_PREFETCH_MAX_JOBS
+    } else {
+        CONSTRUCTION_QUANTUM_PREFETCH_MAX_JOBS
+    };
+    prefetch_limit.min(requested_jobs.min(work_jobs).max(1.0))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn quantum_missing_for_batch(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    automation: &Map<String, Value>,
+    jobs: &Map<String, Value>,
+    center: &Map<String, Value>,
+    target: &crate::construction_planner::Target,
+    batch: &RepeatableBatch,
+    planet_tray: &Map<String, Value>,
+    job_inventory: &Map<String, Value>,
+    quantum: &Map<String, Value>,
+    has_existing_job: bool,
+    power_factor: f64,
+) -> BTreeMap<String, f64> {
+    let jobs_to_prefetch = quantum_prefetch_jobs(
+        state,
+        base,
+        automation,
+        jobs,
+        center,
+        target,
+        batch.work_seconds,
+        has_existing_job,
+        power_factor,
+    );
+    batch
+        .tray_costs
+        .iter()
+        .filter(|(item_id, _)| !matches!(item_id.as_str(), "logistics_drone" | "logistics_vessel"))
+        .filter_map(|(item_id, raw_amount)| {
+            let required = safe_multiply(*raw_amount, jobs_to_prefetch);
+            let available = safe_add(
+                safe_add(
+                    inventory_amount(planet_tray, item_id),
+                    inventory_amount(job_inventory, item_id),
+                ),
+                inventory_amount(quantum, item_id),
+            );
+            let amount = (required - available).max(0.0);
+            (amount > 0.0).then(|| (item_id.clone(), amount))
+        })
+        .collect()
+}
+
+fn remaining_job_plan(
+    job: &Map<String, Value>,
+    step_index: usize,
+) -> anyhow::Result<crate::construction_planner::Plan> {
+    let values = job
+        .get("steps")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native construction job steps are missing"))?;
+    let steps = values
+        .iter()
+        .skip(step_index)
+        .map(|value| {
+            Ok(match parse_step(value)? {
+                Step::Material {
+                    recipe_id,
+                    batches,
+                    output_item_id,
+                    output_amount,
+                } => crate::construction_planner::PlannedStep::Material {
+                    recipe_id,
+                    batches,
+                    output_item_id,
+                    output_amount,
+                },
+                Step::Building { construction_id } => {
+                    crate::construction_planner::PlannedStep::Building { construction_id }
+                }
+                Step::Fleet { item_id, amount } => {
+                    crate::construction_planner::PlannedStep::Fleet { item_id, amount }
+                }
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(crate::construction_planner::Plan {
+        steps,
+        decisions: Vec::new(),
+    })
+}
+
+fn no_job_quantum_missing_materials(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    automation: &Map<String, Value>,
+    jobs: &Map<String, Value>,
+    center: &Map<String, Value>,
+) -> anyhow::Result<BTreeMap<String, f64>> {
+    let Some(target) = select_target(state, base, automation, jobs) else {
+        return Ok(BTreeMap::new());
+    };
+    let entity_id = string_at(center, "id").unwrap_or_default();
+    let planet_id = string_at(center, "planetId").unwrap_or_default();
+    let empty = Map::new();
+    let planet_tray = tray(base, planet_id).unwrap_or(&empty);
+    let quantum = quantum_buffer(automation, entity_id).unwrap_or(&empty);
+    let mut virtual_quantum = quantum.clone();
+    let mut seed_missing = BTreeMap::<String, f64>::new();
+    let mut complete_plan = None;
+    for _ in 0..128 {
+        let inventory =
+            crate::construction_planner::inventory_from_sources(planet_tray, &virtual_quantum);
+        match crate::construction_planner::probe_plan(state, base, &target, inventory) {
+            crate::construction_planner::PlanOutcome::Ready(plan) => {
+                complete_plan = Some(plan);
+                break;
+            }
+            crate::construction_planner::PlanOutcome::RawShortage {
+                item_id,
+                current,
+                required,
+            } if !matches!(item_id.as_str(), "logistics_drone" | "logistics_vessel") => {
+                let amount = floor_amount((required - current).max(0.0));
+                if amount < 1.0 {
+                    break;
+                }
+                let accumulated = seed_missing.get(&item_id).copied().unwrap_or(0.0);
+                seed_missing.insert(item_id.clone(), safe_add(accumulated, amount));
+                let current_virtual = inventory_amount(&virtual_quantum, &item_id);
+                set_inventory_amount(
+                    &mut virtual_quantum,
+                    &item_id,
+                    safe_add(current_virtual, amount),
+                )?;
+            }
+            crate::construction_planner::PlanOutcome::RawShortage { .. }
+            | crate::construction_planner::PlanOutcome::Blocked => break,
+        }
+    }
+    let Some(plan) = complete_plan else {
+        return Ok(seed_missing);
+    };
+    let Some(batch) = analyze_repeatable_plan(state, base, &target, &plan)? else {
+        return Ok(seed_missing);
+    };
+    let power_factor = center
+        .get("powerFactor")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or(1.0)
+        .clamp(0.0, 1.0);
+    Ok(quantum_missing_for_batch(
+        state,
+        base,
+        automation,
+        jobs,
+        center,
+        &target,
+        &batch,
+        planet_tray,
+        &empty,
+        quantum,
+        false,
+        power_factor,
+    ))
+}
+
 fn probe_quantum_demands(
-    catalog: &RuntimeCatalog,
+    state: &CoreState,
     base: &Map<String, Value>,
     automation: &Map<String, Value>,
     jobs: &Map<String, Value>,
@@ -3441,42 +3868,86 @@ fn probe_quantum_demands(
     }
     let entity_id = string_at(center, "id").unwrap_or_default();
     let planet_id = string_at(center, "planetId").unwrap_or_default();
-    let Some(job) = jobs.get(entity_id).and_then(Value::as_object) else {
-        return Ok(Vec::new());
-    };
-    let step_index = floor_amount(finite_number(job.get("stepIndex"))) as usize;
-    let Some(step) = job
-        .get("steps")
-        .and_then(Value::as_array)
-        .and_then(|steps| steps.get(step_index))
-    else {
-        return Ok(Vec::new());
-    };
-    let step = parse_step(step)?;
-    let job_inventory = job
-        .get("inventory")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("native construction job inventory is missing"))?;
-    let empty = Map::new();
-    let planet_tray = tray(base, planet_id).unwrap_or(&empty);
-    let quantum = quantum_buffer(automation, entity_id).unwrap_or(&empty);
-    let mut missing = BTreeMap::<String, f64>::new();
-    for requirement in requirements_from_catalog(catalog, &step)? {
-        if matches!(
-            requirement.item_id.as_str(),
-            "logistics_drone" | "logistics_vessel"
-        ) {
-            continue;
+    let missing = if let Some(job) = jobs.get(entity_id).and_then(Value::as_object) {
+        let step_index = floor_amount(finite_number(job.get("stepIndex"))) as usize;
+        let Some(step) = job
+            .get("steps")
+            .and_then(Value::as_array)
+            .and_then(|steps| steps.get(step_index))
+        else {
+            return Ok(Vec::new());
+        };
+        let step = parse_step(step)?;
+        let job_inventory = job
+            .get("inventory")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native construction job inventory is missing"))?;
+        let empty = Map::new();
+        let planet_tray = tray(base, planet_id).unwrap_or(&empty);
+        let quantum = quantum_buffer(automation, entity_id).unwrap_or(&empty);
+        let power_factor = center
+            .get("powerFactor")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        if let Some(target) = string_at(job, "constructionId").and_then(|construction_id| {
+            crate::construction_planner::targets(state)
+                .into_iter()
+                .find(|target| target.id == construction_id)
+        }) {
+            let remaining_plan = remaining_job_plan(job, step_index)?;
+            if let Some(batch) = analyze_repeatable_plan(state, base, &target, &remaining_plan)? {
+                return Ok(quantum_missing_for_batch(
+                    state,
+                    base,
+                    automation,
+                    jobs,
+                    center,
+                    &target,
+                    &batch,
+                    planet_tray,
+                    job_inventory,
+                    quantum,
+                    true,
+                    power_factor,
+                )
+                .into_iter()
+                .filter_map(|(item_id, amount)| {
+                    let amount = floor_amount(amount) as u64;
+                    (amount > 0).then(|| QuantumDemand {
+                        key: format!("construction-direct:{entity_id}:{item_id}"),
+                        entity_index,
+                        active_row,
+                        entity_id: entity_id.to_owned(),
+                        item_id,
+                        amount,
+                    })
+                })
+                .collect());
+            }
         }
-        let required = floor_amount(requirement.amount);
-        let available = inventory_amount(job_inventory, &requirement.item_id)
-            + inventory_amount(planet_tray, &requirement.item_id)
-            + inventory_amount(quantum, &requirement.item_id);
-        let amount = (required - available).max(0.0);
-        if amount > 0.0 {
-            *missing.entry(requirement.item_id).or_default() += amount;
+        let mut missing = BTreeMap::<String, f64>::new();
+        for requirement in requirements_from_catalog(state.catalog.as_ref(), &step)? {
+            if matches!(
+                requirement.item_id.as_str(),
+                "logistics_drone" | "logistics_vessel"
+            ) {
+                continue;
+            }
+            let required = floor_amount(requirement.amount);
+            let available = inventory_amount(job_inventory, &requirement.item_id)
+                + inventory_amount(planet_tray, &requirement.item_id)
+                + inventory_amount(quantum, &requirement.item_id);
+            let amount = (required - available).max(0.0);
+            if amount > 0.0 {
+                *missing.entry(requirement.item_id).or_default() += amount;
+            }
         }
-    }
+        missing
+    } else {
+        no_job_quantum_missing_materials(state, base, automation, jobs, center)?
+    };
     Ok(missing
         .into_iter()
         .filter_map(|(item_id, amount)| {
@@ -3495,7 +3966,7 @@ fn probe_quantum_demands(
 
 fn collect_quantum_demands_with_runtime(
     runtime: &DeterministicRuntime,
-    catalog: &RuntimeCatalog,
+    state: &CoreState,
     base: &Map<String, Value>,
     automation: &Map<String, Value>,
     jobs: &Map<String, Value>,
@@ -3522,7 +3993,7 @@ fn collect_quantum_demands_with_runtime(
     // center wins a scarce item.
     let planned = plan_construction_center_probes(runtime, &centers, |index, center| {
         probe_quantum_demands(
-            catalog,
+            state,
             base,
             automation,
             jobs,
@@ -3540,7 +4011,7 @@ fn collect_quantum_demands_with_runtime(
 }
 
 struct QuantumDemandProbeInputs<'a> {
-    catalog: &'a RuntimeCatalog,
+    state: &'a CoreState,
     base: &'a Map<String, Value>,
     automation: &'a Map<String, Value>,
     jobs: &'a Map<String, Value>,
@@ -3568,7 +4039,7 @@ fn collect_quantum_demands_for_center_indices_with_runtime(
         .collect::<anyhow::Result<Vec<_>>>()?;
     let planned = plan_construction_center_probes(runtime, &centers, |index, center| {
         probe_quantum_demands(
-            inputs.catalog,
+            inputs.state,
             inputs.base,
             inputs.automation,
             inputs.jobs,
@@ -3608,7 +4079,7 @@ pub(crate) fn quantum_demands_for_center_indices(
     collect_quantum_demands_for_center_indices_with_runtime(
         deterministic_runtime(),
         &QuantumDemandProbeInputs {
-            catalog: state.catalog.as_ref(),
+            state,
             base,
             automation,
             jobs,
@@ -3639,7 +4110,7 @@ pub(crate) fn quantum_demands(
         .ok_or_else(|| anyhow!("native construction jobs are missing"))?;
     collect_quantum_demands_with_runtime(
         deterministic_runtime(),
-        state.catalog.as_ref(),
+        state,
         base,
         automation,
         jobs,
@@ -3919,7 +4390,7 @@ mod tests {
     fn quantum_probe_fixture(
         center_count: usize,
     ) -> (
-        RuntimeCatalog,
+        CoreState,
         Map<String, Value>,
         Map<String, Value>,
         Vec<Value>,
@@ -3961,7 +4432,9 @@ mod tests {
             "jobs": jobs,
             "quantumMaterialBuffer": buffers,
         }));
-        (catalog, base, automation, entities)
+        let mut state = crate::simple_factory::tests::fixture_state(&entities);
+        state.catalog = Arc::new(catalog);
+        (state, base, automation, entities)
     }
 
     fn demand_projection(
@@ -4154,6 +4627,109 @@ mod tests {
             runtime,
         )
         .expect("run active construction fixture")
+    }
+
+    fn install_long_build_job(base: &mut Map<String, Value>, entity_id: &str, step_count: usize) {
+        let steps = (0..step_count)
+            .map(|_| json!({ "kind": "building", "constructionId": "widget" }))
+            .collect::<Vec<_>>();
+        base["constructionAutomation"]["jobs"][entity_id] = json!({
+            "constructionId": "widget",
+            "steps": steps,
+            "stepIndex": 0,
+            "elapsedSeconds": 0,
+            "inventory": { "iron": step_count },
+        });
+    }
+
+    fn configure_center_machine_count(entities: &mut [Value], machine_count: u64) {
+        for entity in entities {
+            entity["machineCount"] = Value::from(machine_count);
+        }
+    }
+
+    #[test]
+    fn planet_budget_is_fair_between_centers_and_returns_an_idle_centers_share() {
+        let (state, mut base, mut entities, power, mut runtime) =
+            active_runtime_fixture(2, 400, 0, false);
+        configure_center_machine_count(&mut entities, 1_000);
+        for index in 0..2 {
+            install_long_build_job(&mut base, &format!("center-{index:05}"), 200);
+        }
+        let outcome =
+            run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 1.0);
+        assert_eq!(outcome.receipt.crafted, 256);
+        assert_eq!(finite_number(base["construction"].get("widget")), 256.0);
+        assert_eq!(
+            finite_number(
+                base["constructionAutomation"]["jobs"]["center-00000"]
+                    .as_object()
+                    .and_then(|job| job.get("stepIndex"))
+            ),
+            128.0
+        );
+        assert_eq!(
+            finite_number(
+                base["constructionAutomation"]["jobs"]["center-00001"]
+                    .as_object()
+                    .and_then(|job| job.get("stepIndex"))
+            ),
+            128.0
+        );
+
+        let (state, mut base, mut entities, mut power, mut runtime) =
+            active_runtime_fixture(2, 200, 0, false);
+        configure_center_machine_count(&mut entities, 1_000);
+        install_long_build_job(&mut base, "center-00001", 200);
+        power.insert(0, 0.0);
+        let outcome =
+            run_active_fixture(&state, &mut base, &mut entities, &power, &mut runtime, 1.0);
+        assert_eq!(outcome.receipt.crafted, 200);
+        assert_eq!(finite_number(base["construction"].get("widget")), 200.0);
+        assert!(
+            base["constructionAutomation"]["jobs"]
+                .as_object()
+                .is_some_and(Map::is_empty)
+        );
+    }
+
+    #[test]
+    fn construction_budget_is_identical_for_single_and_segmented_seconds() {
+        let (state, mut single_base, mut single_entities, power, mut single_runtime) =
+            active_runtime_fixture(1, 200, 0, false);
+        configure_center_machine_count(&mut single_entities, 1_000);
+        install_long_build_job(&mut single_base, "center-00000", 200);
+
+        let mut segmented_base = single_base.clone();
+        let mut segmented_entities = single_entities.clone();
+        let mut segmented_runtime =
+            ConstructionRuntime::build(&state, &segmented_base, &segmented_entities);
+        run_active_fixture(
+            &state,
+            &mut single_base,
+            &mut single_entities,
+            &power,
+            &mut single_runtime,
+            1.0,
+        );
+        for _ in 0..2 {
+            run_active_fixture(
+                &state,
+                &mut segmented_base,
+                &mut segmented_entities,
+                &power,
+                &mut segmented_runtime,
+                0.5,
+            );
+        }
+        assert_eq!(segmented_base, single_base);
+        assert_eq!(segmented_entities, single_entities);
+        assert_eq!(
+            serde_json::to_vec(&(&segmented_base, &segmented_entities))
+                .expect("segmented construction bytes"),
+            serde_json::to_vec(&(&single_base, &single_entities))
+                .expect("single construction bytes")
+        );
     }
 
     #[test]
@@ -5006,12 +5582,12 @@ mod tests {
 
     #[test]
     fn quantum_demand_probe_is_byte_identical_for_1_2_4_8_workers() {
-        let (catalog, base, automation, entities) =
+        let (state, base, automation, entities) =
             quantum_probe_fixture(crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257);
         let jobs = automation["jobs"].as_object().expect("construction jobs");
         let expected = collect_quantum_demands_with_runtime(
             &DeterministicRuntime::for_test(1),
-            &catalog,
+            &state,
             &base,
             &automation,
             jobs,
@@ -5033,7 +5609,7 @@ mod tests {
         for worker_limit in [1, 2, 4, 8] {
             let actual = collect_quantum_demands_with_runtime(
                 &DeterministicRuntime::for_test(worker_limit),
-                &catalog,
+                &state,
                 &base,
                 &automation,
                 jobs,
@@ -5046,15 +5622,86 @@ mod tests {
     }
 
     #[test]
+    fn no_job_quantum_prefetch_is_recursive_and_identical_for_1_2_4_8_workers() {
+        let (state, mut base, mut automation, entities) =
+            quantum_probe_fixture(crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257);
+        base.insert("construction".to_owned(), json!({ "widget": 0 }));
+        automation.insert("jobs".to_owned(), Value::Object(Map::new()));
+        automation.insert("targetStock".to_owned(), json!({ "widget": 1 }));
+        let jobs = automation["jobs"].as_object().expect("empty jobs");
+        let expected = collect_quantum_demands_with_runtime(
+            &DeterministicRuntime::for_test(1),
+            &state,
+            &base,
+            &automation,
+            jobs,
+            &entities,
+        )
+        .expect("serial no-job quantum prefetch");
+        let powered_center_count = entities
+            .iter()
+            .filter(|center| finite_number(center.get("powerFactor")) > EPSILON)
+            .count();
+        assert_eq!(expected.len(), powered_center_count * 2);
+        assert_eq!(
+            expected
+                .iter()
+                .filter(|demand| demand.entity_id == "center-00001")
+                .map(|demand| (demand.item_id.as_str(), demand.amount))
+                .collect::<Vec<_>>(),
+            vec![("copper", 3), ("iron", 6)]
+        );
+        let expected_bytes = demand_bytes(&expected);
+        for worker_limit in [1, 2, 4, 8] {
+            let actual = collect_quantum_demands_with_runtime(
+                &DeterministicRuntime::for_test(worker_limit),
+                &state,
+                &base,
+                &automation,
+                jobs,
+                &entities,
+            )
+            .expect("no-job quantum worker matrix");
+            assert_eq!(demand_bytes(&actual), expected_bytes);
+        }
+    }
+
+    #[test]
+    fn existing_job_quantum_prefetch_uses_remaining_batch_and_five_second_horizon() {
+        let (state, mut base, mut automation, mut entities) = quantum_probe_fixture(1);
+        base.insert("construction".to_owned(), json!({ "widget": 0 }));
+        automation.insert("targetStock".to_owned(), json!({ "widget": 100 }));
+        entities[0]["powerFactor"] = Value::from(1.0);
+        entities[0]["machineCount"] = Value::from(100);
+        let jobs = automation["jobs"].as_object().expect("existing job");
+        let demands = collect_quantum_demands_with_runtime(
+            &DeterministicRuntime::for_test(1),
+            &state,
+            &base,
+            &automation,
+            jobs,
+            &entities,
+        )
+        .expect("existing-job quantum prefetch");
+        assert_eq!(
+            demands
+                .iter()
+                .map(|demand| (demand.item_id.as_str(), demand.amount))
+                .collect::<Vec<_>>(),
+            vec![("copper", 300), ("iron", 698)]
+        );
+    }
+
+    #[test]
     fn indexed_quantum_demand_keeps_its_active_directory_row() {
-        let (catalog, base, automation, entities) = quantum_probe_fixture(10);
+        let (state, base, automation, entities) = quantum_probe_fixture(10);
         let jobs = automation["jobs"].as_object().expect("construction jobs");
         let center_indices = [0, 1, 2];
         let active_rows = [4, 9, 15];
         let demands = collect_quantum_demands_for_center_indices_with_runtime(
             &DeterministicRuntime::for_test(4),
             &QuantumDemandProbeInputs {
-                catalog: &catalog,
+                state: &state,
                 base: &base,
                 automation: &automation,
                 jobs,
@@ -5084,7 +5731,7 @@ mod tests {
 
     #[test]
     fn quantum_demand_parallel_failure_uses_lowest_center_and_keeps_sources_atomic() {
-        let (catalog, base, mut automation, entities) =
+        let (state, base, mut automation, entities) =
             quantum_probe_fixture(crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257);
         let jobs = automation["jobs"]
             .as_object_mut()
@@ -5101,7 +5748,7 @@ mod tests {
         for worker_limit in [1, 2, 4, 8] {
             let error = collect_quantum_demands_with_runtime(
                 &DeterministicRuntime::for_test(worker_limit),
-                &catalog,
+                &state,
                 &base,
                 &automation,
                 jobs,
@@ -5307,6 +5954,30 @@ mod tests {
             Some(9.0)
         );
 
+        let mut direct_cache = HashMap::from([(
+            "widget".to_owned(),
+            ResolvedConstructionPlan {
+                plan: crate::construction_planner::Plan {
+                    steps: Vec::new(),
+                    decisions: Vec::new(),
+                },
+                batch: Some(cycle.clone()),
+            },
+        )]);
+        let direct_buffers =
+            Map::from_iter([("center-a".to_owned(), json!({ "direct-marker": 1 }))]);
+        assert!(
+            take_valid_direct_cached_plan(
+                &mut direct_cache,
+                "widget",
+                &base,
+                &direct_buffers,
+                "center-a",
+                "planet-a",
+            )
+            .is_some()
+        );
+
         set_inventory_amount(
             tray_mut(&mut base, "planet-a").expect("planet tray"),
             "catalyst",
@@ -5314,5 +5985,46 @@ mod tests {
         )
         .expect("set cycle phase");
         assert!(!construction_cycle_state_matches(&base, "planet-a", &cycle));
+        assert!(
+            take_valid_direct_cached_plan(
+                &mut direct_cache,
+                "widget",
+                &base,
+                &direct_buffers,
+                "center-a",
+                "planet-a",
+            )
+            .is_none()
+        );
+        assert!(
+            direct_cache.is_empty(),
+            "an invalid phase must evict the cached plan"
+        );
+
+        let mut rebuilt_cycle = cycle;
+        rebuilt_cycle
+            .cycle_start_inventory
+            .insert("catalyst".to_owned(), 1.0);
+        direct_cache.insert(
+            "widget".to_owned(),
+            ResolvedConstructionPlan {
+                plan: crate::construction_planner::Plan {
+                    steps: Vec::new(),
+                    decisions: Vec::new(),
+                },
+                batch: Some(rebuilt_cycle),
+            },
+        );
+        assert!(
+            take_valid_direct_cached_plan(
+                &mut direct_cache,
+                "widget",
+                &base,
+                &direct_buffers,
+                "center-a",
+                "planet-a",
+            )
+            .is_some()
+        );
     }
 }

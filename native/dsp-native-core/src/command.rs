@@ -382,6 +382,8 @@ fn entity_change_is_projection_safe(change: &ValuePatch) -> bool {
                 | "storedEnergyMj"
                 | "orbitalCargoProgress"
                 | "orbitalCargoTotalUploaded"
+                | "blackHolePaused"
+                | "blackHoleActivationConfirmed"
                 | "blackHolePorts"
                 | "proliferatorBonusProgress"
         )
@@ -2456,6 +2458,194 @@ fn validate_entity_power_or_splitter_configuration_command(
         _ => bail!("native player-authority entity configuration field is not typed"),
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlackHolePauseIntent {
+    entity_id: String,
+    paused: bool,
+    confirm_activation: bool,
+}
+
+fn command_contains_black_hole_pause_intent(command: &SimulationCommandPatch) -> bool {
+    command.changed_entities.iter().any(|record| {
+        record
+            .changes
+            .iter()
+            .any(|change| path_matches(&change.path, &["blackHolePaused", "intent"]))
+    })
+}
+
+fn require_black_hole_pause_intent(
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<BlackHolePauseIntent> {
+    if command.changed_entities.len() != 1
+        || command.changed_entities[0].changes.len() != 1
+        || !command.top_level_changes.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority black-hole pause intent shape is invalid")
+    }
+    let record = &command.changed_entities[0];
+    let change = &record.changes[0];
+    if !path_matches(&change.path, &["blackHolePaused", "intent"]) || change.operation != "set" {
+        bail!("native player-authority black-hole pause intent path is invalid")
+    }
+    let intent = change
+        .value
+        .as_ref()
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority black-hole pause intent is invalid"))?;
+    if intent.len() != 2
+        || !intent.contains_key("paused")
+        || !intent.contains_key("confirmActivation")
+    {
+        bail!("native player-authority black-hole pause intent fields are invalid")
+    }
+    let paused = intent
+        .get("paused")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("native player-authority black-hole pause target is invalid"))?;
+    let confirm_activation = intent
+        .get("confirmActivation")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            anyhow!("native player-authority black-hole activation confirmation is invalid")
+        })?;
+    Ok(BlackHolePauseIntent {
+        entity_id: record.id.clone(),
+        paused,
+        confirm_activation,
+    })
+}
+
+fn validate_black_hole_pause_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    let intent = require_black_hole_pause_intent(command)?;
+    if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    {
+        bail!("native player-authority black-hole pause requires the built-in registry")
+    }
+    let active_planet_id = state
+        .base_value()
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority active planet is invalid"))?;
+    if !state
+        .catalog
+        .planets
+        .iter()
+        .any(|planet| planet.id == active_planet_id)
+    {
+        bail!("native player-authority active planet is not in the catalog")
+    }
+    let index = *state
+        .entity_index
+        .get(&intent.entity_id)
+        .ok_or_else(|| anyhow!("native player-authority black-hole entity is missing"))?;
+    let entity = state.parse_entity(index)?;
+    let object = entity
+        .as_object()
+        .ok_or_else(|| anyhow!("native player-authority black-hole entity is invalid"))?;
+    if object.get("planetId").and_then(Value::as_str) != Some(active_planet_id) {
+        bail!("native player-authority black-hole entity is not on the active planet")
+    }
+    if object.get("interactionLocked").and_then(Value::as_bool) != Some(false) {
+        bail!("native player-authority black-hole entity is locked or malformed")
+    }
+    if object.get("kind").and_then(Value::as_str) != Some("machine")
+        || object.get("buildingId").and_then(Value::as_str) != Some("micro_black_hole_connector")
+        || state
+            .catalog
+            .buildings
+            .get("micro_black_hole_connector")
+            .is_none_or(|building| building.kind != "machine")
+    {
+        bail!("native player-authority black-hole target is not the built-in connector")
+    }
+    let current_paused = object
+        .get("blackHolePaused")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("native player-authority black-hole paused state is invalid"))?;
+    let activation_confirmed = object
+        .get("blackHoleActivationConfirmed")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            anyhow!("native player-authority black-hole confirmation state is invalid")
+        })?;
+    if !intent.paused && !activation_confirmed && !intent.confirm_activation {
+        bail!("native player-authority black-hole first activation is not confirmed")
+    }
+    if current_paused == intent.paused && (intent.paused || activation_confirmed) {
+        bail!("native player-authority black-hole pause target is unchanged")
+    }
+    Ok(())
+}
+
+fn expand_black_hole_pause_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<SimulationCommandPatch> {
+    validate_black_hole_pause_command(state, command)?;
+    let intent = require_black_hole_pause_intent(command)?;
+    let index = *state
+        .entity_index
+        .get(&intent.entity_id)
+        .ok_or_else(|| anyhow!("native player-authority black-hole entity is missing"))?;
+    let entity = state.parse_entity(index)?;
+    let object = entity
+        .as_object()
+        .ok_or_else(|| anyhow!("native player-authority black-hole entity is invalid"))?;
+    let current_paused = object
+        .get("blackHolePaused")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("native player-authority black-hole paused state is invalid"))?;
+    let current_confirmed = object
+        .get("blackHoleActivationConfirmed")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            anyhow!("native player-authority black-hole confirmation state is invalid")
+        })?;
+    let target_confirmed = current_confirmed || (!intent.paused && intent.confirm_activation);
+    let mut changes = Vec::with_capacity(2);
+    if current_paused != intent.paused {
+        changes.push(ValuePatch {
+            path: vec![PathSegment::Key("blackHolePaused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(intent.paused)),
+        });
+    }
+    if current_confirmed != target_confirmed {
+        changes.push(ValuePatch {
+            path: vec![PathSegment::Key("blackHoleActivationConfirmed".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(target_confirmed)),
+        });
+    }
+    if changes.is_empty() {
+        bail!("native player-authority black-hole pause transition is empty")
+    }
+    Ok(SimulationCommandPatch {
+        protocol_version: command.protocol_version,
+        base_revision: command.base_revision,
+        top_level_changes: Vec::new(),
+        changed_entities: vec![RecordPatch {
+            id: intent.entity_id,
+            changes,
+        }],
+        added_entities: Vec::new(),
+        removed_entity_ids: Vec::new(),
+        changed_belts: Vec::new(),
+        added_belts: Vec::new(),
+        removed_belt_ids: Vec::new(),
+    })
 }
 
 fn station_slot_mode_change(change: &ValuePatch) -> Option<(usize, &str)> {
@@ -6849,6 +7039,9 @@ impl CoreState {
         if crate::manual_mining::command_contains_intent(command) {
             return crate::manual_mining::validate_command(self, command);
         }
+        if command_contains_black_hole_pause_intent(command) {
+            return validate_black_hole_pause_command(self, command);
+        }
         if !command.added_entities.is_empty() {
             return validate_ordinary_building_placement(self, command);
         }
@@ -7171,6 +7364,7 @@ impl CoreState {
         let expanded_energy_exchanger_mode_intent;
         let expanded_fuel_item_intent;
         let expanded_manual_mining_intent;
+        let expanded_black_hole_pause_intent;
         let applied_command = if command_contains_active_planet_intent(command) {
             expanded_active_planet_intent = expand_active_planet_intent(self, command)?;
             &expanded_active_planet_intent
@@ -7188,6 +7382,9 @@ impl CoreState {
         } else if crate::manual_mining::command_contains_intent(command) {
             expanded_manual_mining_intent = crate::manual_mining::expand_intent(self, command)?;
             &expanded_manual_mining_intent
+        } else if command_contains_black_hole_pause_intent(command) {
+            expanded_black_hole_pause_intent = expand_black_hole_pause_intent(self, command)?;
+            &expanded_black_hole_pause_intent
         } else {
             command
         };
@@ -13975,5 +14172,263 @@ mod tests {
                 .is_err()
         );
         assert_eq!(malformed_current.canonical_sha256().unwrap(), before);
+    }
+
+    fn player_black_hole_state_for_registry(registry_fingerprint: &str) -> CoreState {
+        let seed = player_command_state_for_registry(registry_fingerprint);
+        let mut catalog_value = serde_json::to_value(
+            player_command_catalog_for_registry(registry_fingerprint).snapshot,
+        )
+        .unwrap();
+        catalog_value["buildings"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "micro_black_hole_connector",
+                "kind": "machine",
+                "speed": 1,
+                "inputCapacity": 0,
+                "outputCapacity": 0
+            }));
+        let snapshot: CatalogSnapshot = serde_json::from_value(catalog_value).unwrap();
+        let catalog = RuntimeCatalog::validate(snapshot, registry_fingerprint).unwrap();
+        CoreState::from_public_v47_parts(
+            CoreCheckpointIdentity {
+                slot: "normal-main".to_owned(),
+                generation: 1,
+                root_hash: "b".repeat(64),
+                revision: 9,
+                state_version: 47,
+                mode: "normal".to_owned(),
+                registry_fingerprint: registry_fingerprint.to_owned(),
+                base_primary_checksum: "12345678".to_owned(),
+            },
+            seed.base_value().clone(),
+            vec![serde_json::json!({
+                "id": "black-hole-a",
+                "kind": "machine",
+                "planetId": "home",
+                "position": { "x": 7, "y": 8 },
+                "interactionLocked": false,
+                "buildingId": "micro_black_hole_connector",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "blackHolePaused": true,
+                "blackHoleActivationConfirmed": false,
+                "blackHolePorts": [
+                    { "index": 0, "currentItemId": "iron_ore", "totalDestroyed": "12345678901234567890" },
+                    { "index": 1, "totalDestroyed": "7" },
+                    { "index": 2, "totalDestroyed": "0" }
+                ],
+                "modPayload": { "mustSurvive": true }
+            })
+            .to_string()],
+            Vec::new(),
+            catalog,
+        )
+        .unwrap()
+    }
+
+    fn black_hole_pause_intent_command(
+        base_revision: u64,
+        paused: bool,
+        confirm_activation: bool,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(base_revision);
+        command.changed_entities = vec![RecordPatch {
+            id: "black-hole-a".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![
+                    PathSegment::Key("blackHolePaused".to_owned()),
+                    PathSegment::Key("intent".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(serde_json::json!({
+                    "paused": paused,
+                    "confirmActivation": confirm_activation
+                })),
+            }],
+        }];
+        command
+    }
+
+    #[test]
+    fn player_authority_black_hole_first_activation_pause_and_resume_match_javascript() {
+        let mut state =
+            player_black_hole_state_for_registry(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
+        let before = state.parse_entity(0).unwrap();
+        let ports = before["blackHolePorts"].clone();
+        let destroyed = before["blackHolePorts"][0]["totalDestroyed"].clone();
+        let mod_payload = before["modPayload"].clone();
+
+        let activated = state
+            .apply_player_authority_command(&black_hole_pause_intent_command(9, false, true))
+            .unwrap();
+        assert_eq!(activated.previous_revision, 9);
+        assert_eq!(activated.revision, 10);
+        assert_eq!(activated.changed_entity_ids, ["black-hole-a"]);
+        assert!(!activated.topology_dirty);
+        let entity = state.parse_entity(0).unwrap();
+        assert_eq!(entity["blackHolePaused"], false);
+        assert_eq!(entity["blackHoleActivationConfirmed"], true);
+        assert_eq!(entity["blackHolePorts"], ports);
+        assert_eq!(entity["blackHolePorts"][0]["totalDestroyed"], destroyed);
+        assert_eq!(entity["modPayload"], mod_payload);
+
+        state
+            .apply_player_authority_command(&black_hole_pause_intent_command(10, true, false))
+            .unwrap();
+        state
+            .apply_player_authority_command(&black_hole_pause_intent_command(11, false, false))
+            .unwrap();
+        let resumed = state.parse_entity(0).unwrap();
+        assert_eq!(resumed["blackHolePaused"], false);
+        assert_eq!(resumed["blackHoleActivationConfirmed"], true);
+        assert_eq!(resumed["blackHolePorts"], ports);
+    }
+
+    #[test]
+    fn player_authority_black_hole_confirmation_only_edge_matches_javascript() {
+        let mut state =
+            player_black_hole_state_for_registry(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
+        state
+            .apply_command(&entity_leaf_command(
+                9,
+                "black-hole-a",
+                "blackHolePaused",
+                Value::from(false),
+            ))
+            .unwrap();
+        let receipt = state
+            .apply_player_authority_command(&black_hole_pause_intent_command(10, false, true))
+            .unwrap();
+        assert_eq!(receipt.changed_entity_ids, ["black-hole-a"]);
+        let entity = state.parse_entity(0).unwrap();
+        assert_eq!(entity["blackHolePaused"], false);
+        assert_eq!(entity["blackHoleActivationConfirmed"], true);
+        assert_eq!(
+            entity["blackHolePorts"][0]["totalDestroyed"],
+            "12345678901234567890"
+        );
+    }
+
+    #[test]
+    fn player_authority_black_hole_intent_is_atomic_and_fails_closed() {
+        let commands = [
+            black_hole_pause_intent_command(8, false, true),
+            black_hole_pause_intent_command(9, false, false),
+            black_hole_pause_intent_command(9, true, false),
+        ];
+        for command in commands {
+            let mut state =
+                player_black_hole_state_for_registry(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut foreign_registry = player_black_hole_state_for_registry("pack:test");
+        let before = foreign_registry.canonical_sha256().unwrap();
+        assert!(
+            foreign_registry
+                .apply_player_authority_command(&black_hole_pause_intent_command(9, false, true))
+                .is_err()
+        );
+        assert_eq!(foreign_registry.canonical_sha256().unwrap(), before);
+
+        for (field, value) in [
+            ("interactionLocked", Value::from(true)),
+            ("planetId", Value::from("ashen")),
+            ("buildingId", Value::from("arc_smelter")),
+        ] {
+            let mut state =
+                player_black_hole_state_for_registry(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
+            state
+                .apply_command(&entity_leaf_command(9, "black-hole-a", field, value))
+                .unwrap();
+            let before = state.canonical_sha256().unwrap();
+            assert!(
+                state
+                    .apply_player_authority_command(&black_hole_pause_intent_command(
+                        10, false, true,
+                    ))
+                    .is_err()
+            );
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn player_authority_black_hole_intent_replays_identically_through_generic_wal_apply() {
+        let command = black_hole_pause_intent_command(9, false, true);
+        let durable = serde_json::to_string(&command).unwrap();
+        assert!(!durable.contains("blackHolePorts"));
+        assert!(!durable.contains("totalDestroyed"));
+        assert!(!durable.contains("blackHoleActivationConfirmed"));
+        let replayed: SimulationCommandPatch = serde_json::from_str(&durable).unwrap();
+        let mut live =
+            player_black_hole_state_for_registry(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
+        let mut replay = live.clone();
+        let live_receipt = live.apply_player_authority_command(&command).unwrap();
+        let replay_receipt = replay.apply_command(&replayed).unwrap();
+        assert_eq!(live_receipt, replay_receipt);
+        assert_eq!(
+            live.canonical_sha256().unwrap(),
+            replay.canonical_sha256().unwrap()
+        );
+        assert_eq!(
+            replay.parse_entity(0).unwrap()["blackHolePorts"][0]["totalDestroyed"],
+            "12345678901234567890"
+        );
+    }
+
+    #[test]
+    fn player_authority_black_hole_rejects_forged_or_mixed_intent_atomically() {
+        let mut extra_field = black_hole_pause_intent_command(9, false, true);
+        extra_field.changed_entities[0].changes[0].value = Some(serde_json::json!({
+            "paused": false,
+            "confirmActivation": true,
+            "blackHolePorts": []
+        }));
+        let mut direct_leaf = black_hole_pause_intent_command(9, false, true);
+        direct_leaf.changed_entities[0].changes[0].path =
+            vec![PathSegment::Key("blackHolePaused".to_owned())];
+        direct_leaf.changed_entities[0].changes[0].value = Some(Value::from(false));
+        let mut direct_confirmation = black_hole_pause_intent_command(9, false, true);
+        direct_confirmation.changed_entities[0].changes[0].path =
+            vec![PathSegment::Key("blackHoleActivationConfirmed".to_owned())];
+        direct_confirmation.changed_entities[0].changes[0].value = Some(Value::from(true));
+        let mut mixed = black_hole_pause_intent_command(9, false, true);
+        mixed.changed_entities[0].changes.push(ValuePatch {
+            path: vec![PathSegment::Key("blackHoleActivationConfirmed".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(true)),
+        });
+        let mut wrong_type = black_hole_pause_intent_command(9, false, true);
+        wrong_type.changed_entities[0].changes[0].value = Some(serde_json::json!({
+            "paused": false,
+            "confirmActivation": 1
+        }));
+        for command in [
+            extra_field,
+            direct_leaf,
+            direct_confirmation,
+            mixed,
+            wrong_type,
+        ] {
+            let mut state =
+                player_black_hole_state_for_registry(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
     }
 }

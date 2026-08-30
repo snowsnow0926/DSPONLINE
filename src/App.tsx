@@ -519,6 +519,7 @@ import {
   createNativeProjectedStationWarperBudgetCommand,
 } from "./game/nativeProjectedPlayerCommands";
 import { createNativeProjectedBeltPriorityCommand } from "./game/nativeProjectedBeltCommands";
+import { createNativeProjectedBlackHolePausedCommand } from "./game/nativeProjectedBlackHoleCommands";
 import {
   createNativeProjectedEnergyExchangerModeCommand,
   createNativeProjectedEntityPowerPriorityCommand,
@@ -17032,6 +17033,58 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     );
     if (!accepted) setNotice("Rust 没有接受这次燃料类型命令；存档未改变");
   }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
+  const changeNativeBlackHolePaused = useCallback((
+    entityId: string,
+    paused: boolean,
+  ): void => {
+    void (async () => {
+      if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+        setNotice("Windows 原生权威正在确认上一项操作；本次微型黑洞启停未提交");
+        return;
+      }
+      const binding = nativeEntityConfigurationProjectionBinding;
+      if (!binding || binding.entity.id !== entityId ||
+          binding.entity.buildingId !== "micro_black_hole_connector" ||
+          typeof binding.entity.blackHolePaused !== "boolean" ||
+          typeof binding.entity.blackHoleActivationConfirmed !== "boolean") {
+        setNotice("原生微型黑洞投影不完整；本次启停未提交");
+        return;
+      }
+      let confirmActivation = false;
+      if (!paused && !binding.entity.blackHoleActivationConfirmed) {
+        if (!await gameDialog.confirm("即将启动当前行星上的微型黑洞连接装置。输入物资将被永久销毁且无法找回。", { danger: true, confirmLabel: "继续确认" })) return;
+        if (!await gameDialog.confirm("请再次确认：启动后，传送带送入的物资不会进入任何库存，也无法恢复。", { danger: true, confirmLabel: "确认启动" })) return;
+        confirmActivation = true;
+      }
+      const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+      const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+      if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current ||
+          !routeIdentity || !commandSource ||
+          binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+          binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+          commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+          commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+          selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+          selectedBeltIdRef.current !== null) {
+        setNotice("原生微型黑洞选择、session 或 revision 已变化；本次启停未提交");
+        return;
+      }
+      const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+        baseRevision === binding.revision
+          ? createNativeProjectedBlackHolePausedCommand({
+            baseRevision,
+            entityId,
+            paused,
+            confirmActivation,
+          })
+          : null,
+        (receipt) => setNotice(
+          `已由 Rust ${paused ? "暂停" : "启动"}微型黑洞 · durable revision ${receipt.revision}`,
+        ),
+      );
+      if (!accepted) setNotice("Rust 没有接受这次微型黑洞启停命令；存档未改变");
+    })();
+  }, [commitNativeProjectedCommand, gameDialog, nativeEntityConfigurationProjectionBinding]);
   const selectedBelts = factoryInteractionRows.selectedBelts;
   const dockBeltTier = nativePlayerAuthorityOwnsRuntime
     ? nativeBeltPlacementTier ?? beltTier
@@ -18784,6 +18837,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           onSplitterDistributionModeChange={changeNativeSplitterDistributionMode}
           onEnergyExchangerModeChange={changeNativeEnergyExchangerMode}
           onFuelItemChange={changeNativeFuelItem}
+          onBlackHolePausedChange={changeNativeBlackHolePaused}
           onBeltLaneCountChange={(beltId, targetLanes) => void changeNativeOrdinaryBeltLanes(beltId, targetLanes)}
           onBeltPriorityChange={changeNativeOrdinaryBeltPriority}
           onRemoveBelt={(beltId) => void removeNativeOrdinaryBelt(beltId)}

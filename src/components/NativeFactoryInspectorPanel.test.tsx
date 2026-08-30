@@ -89,7 +89,7 @@ describe("NativeFactoryInspectorPanel", () => {
     const remove = vi.fn();
     const stack = vi.fn();
     const lock = vi.fn();
-    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi()} entityConfiguration={null} pending={false} onEntityLockChange={lock} onRemoveEntity={remove} onStackCountChange={stack} onEntityPowerPriorityChange={vi.fn()} onSplitterDistributionModeChange={vi.fn()} onEnergyExchangerModeChange={vi.fn()} onFuelItemChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
+    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi()} entityConfiguration={null} pending={false} onEntityLockChange={lock} onRemoveEntity={remove} onStackCountChange={stack} onEntityPowerPriorityChange={vi.fn()} onSplitterDistributionModeChange={vi.fn()} onEnergyExchangerModeChange={vi.fn()} onFuelItemChange={vi.fn()} onBlackHolePausedChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
     expect(host.textContent).toContain("MOD/建筑-一");
     expect(host.textContent).toContain("MOD/输入");
     const button = host.querySelector<HTMLButtonElement>('[data-native-construction-removal] button')!;
@@ -105,9 +105,61 @@ describe("NativeFactoryInspectorPanel", () => {
   });
 
   it("fails closed for a mismatched revision and never exposes the removal action", () => {
-    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi({ revision: 9 })} entityConfiguration={null} pending={false} onEntityLockChange={vi.fn()} onRemoveEntity={vi.fn()} onStackCountChange={vi.fn()} onEntityPowerPriorityChange={vi.fn()} onSplitterDistributionModeChange={vi.fn()} onEnergyExchangerModeChange={vi.fn()} onFuelItemChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
+    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi({ revision: 9 })} entityConfiguration={null} pending={false} onEntityLockChange={vi.fn()} onRemoveEntity={vi.fn()} onStackCountChange={vi.fn()} onEntityPowerPriorityChange={vi.fn()} onSplitterDistributionModeChange={vi.fn()} onEnergyExchangerModeChange={vi.fn()} onFuelItemChange={vi.fn()} onBlackHolePausedChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
     expect(host.textContent).toContain("正在核对原生检查摘要");
     expect(host.querySelector("[data-native-construction-removal]")).toBeNull();
+  });
+
+  it("routes micro black-hole start and pause only from the pinned native entity", () => {
+    const toggle = vi.fn();
+    const blackHoleEntity = {
+      ...entity,
+      entityId: "black-hole-a",
+      buildingId: "micro_black_hole_connector",
+      recipeId: null,
+    };
+    const renderBlackHole = (paused: boolean, confirmed: boolean, pending = false) => root.render(
+      <NativeFactoryInspectorPanel
+        inspector={inspector({ entity: blackHoleEntity })}
+        multiSelection={multi({ entityRows: { rows: [blackHoleEntity], totalCount: 1, truncated: false } })}
+        entityConfiguration={configuration(projectedEntity({
+          id: "black-hole-a",
+          buildingId: "micro_black_hole_connector",
+          recipeId: undefined,
+          blackHolePaused: paused,
+          blackHoleActivationConfirmed: confirmed,
+        }))}
+        pending={pending}
+        onEntityLockChange={vi.fn()}
+        onRemoveEntity={vi.fn()}
+        onStackCountChange={vi.fn()}
+        onEntityPowerPriorityChange={vi.fn()}
+        onSplitterDistributionModeChange={vi.fn()}
+        onEnergyExchangerModeChange={vi.fn()}
+        onFuelItemChange={vi.fn()}
+        onBlackHolePausedChange={toggle}
+        onBeltLaneCountChange={vi.fn()}
+        onBeltPriorityChange={vi.fn()}
+        onRemoveBelt={vi.fn()}
+      />,
+    );
+
+    act(() => renderBlackHole(true, false));
+    let button = host.querySelector<HTMLButtonElement>('[data-native-black-hole-paused] button')!;
+    expect(button.textContent).toContain("启动微型黑洞");
+    expect(host.textContent).toContain("尚未确认");
+    act(() => button.click());
+    expect(toggle).toHaveBeenLastCalledWith("black-hole-a", false);
+
+    act(() => renderBlackHole(false, true));
+    button = host.querySelector<HTMLButtonElement>('[data-native-black-hole-paused] button')!;
+    expect(button.textContent).toContain("暂停销毁");
+    act(() => button.click());
+    expect(toggle).toHaveBeenLastCalledWith("black-hole-a", true);
+
+    act(() => renderBlackHole(false, true, true));
+    expect(host.querySelector<HTMLButtonElement>('[data-native-black-hole-paused] button')!.disabled)
+      .toBe(true);
   });
 
   it("routes one ordinary belt priority action and disables the current value", () => {
@@ -147,6 +199,7 @@ describe("NativeFactoryInspectorPanel", () => {
       onSplitterDistributionModeChange={vi.fn()}
       onEnergyExchangerModeChange={vi.fn()}
       onFuelItemChange={vi.fn()}
+      onBlackHolePausedChange={vi.fn()}
       onBeltLaneCountChange={lanes}
       onBeltPriorityChange={priority}
       onRemoveBelt={removeBelt}
@@ -192,6 +245,7 @@ describe("NativeFactoryInspectorPanel", () => {
       onSplitterDistributionModeChange={vi.fn()}
       onEnergyExchangerModeChange={vi.fn()}
       onFuelItemChange={vi.fn()}
+      onBlackHolePausedChange={vi.fn()}
       onBeltLaneCountChange={vi.fn()}
       onBeltPriorityChange={vi.fn()}
       onRemoveBelt={vi.fn()}
@@ -237,6 +291,7 @@ describe("NativeFactoryInspectorPanel", () => {
         onSplitterDistributionModeChange={mode}
         onEnergyExchangerModeChange={vi.fn()}
         onFuelItemChange={vi.fn()}
+        onBlackHolePausedChange={vi.fn()}
         onBeltLaneCountChange={vi.fn()}
         onBeltPriorityChange={vi.fn()}
         onRemoveBelt={vi.fn()}
@@ -297,6 +352,7 @@ describe("NativeFactoryInspectorPanel", () => {
         onSplitterDistributionModeChange={vi.fn()}
         onEnergyExchangerModeChange={mode}
         onFuelItemChange={vi.fn()}
+        onBlackHolePausedChange={vi.fn()}
         onBeltLaneCountChange={vi.fn()}
         onBeltPriorityChange={vi.fn()}
         onRemoveBelt={vi.fn()}
@@ -357,6 +413,7 @@ describe("NativeFactoryInspectorPanel", () => {
         onSplitterDistributionModeChange={vi.fn()}
         onEnergyExchangerModeChange={vi.fn()}
         onFuelItemChange={fuel}
+        onBlackHolePausedChange={vi.fn()}
         onBeltLaneCountChange={vi.fn()}
         onBeltPriorityChange={vi.fn()}
         onRemoveBelt={vi.fn()}

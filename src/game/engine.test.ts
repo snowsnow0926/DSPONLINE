@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import stationFleetConservationFixture from "../../tests/fixtures/synthetic/station-fleet-conservation-v1.json";
 import {
   addUnitToEntityGroup,
   DYSON_SHELL_CAPACITY_PER_STRUCTURE,
@@ -3762,6 +3763,71 @@ describe("factory simulation", () => {
     const blocked = setStationFleetTarget(unloaded.state, station.id, "drone", 0);
     expect(blocked).toMatchObject({ final: 2, busy: 2, reason: "busy-vehicles" });
     expect(blocked.state).toBe(unloaded.state);
+  });
+
+  it("keeps station fleet targets conserved against the portable fleet cross-language fixture", () => {
+    const createFixtureState = () => {
+      let state = createInitialState();
+      state.research.completedTechIds.push("interstellar_logistics");
+      state.construction.interstellar_logistics_station = 2;
+      state = placeBuilding(state, "interstellar_logistics_station", { x: 0, y: 0 });
+      state = placeBuilding(state, "interstellar_logistics_station", { x: 300, y: 0 });
+      const [station, peer] = state.entities.filter((entity) => entity.buildingId === "interstellar_logistics_station");
+      station.id = stationFleetConservationFixture.targetStationId;
+      peer.id = stationFleetConservationFixture.peerStationId;
+      station.stationDrones = stationFleetConservationFixture.station.stationDrones;
+      station.stationVessels = stationFleetConservationFixture.station.stationVessels;
+      station.stationProgress = stationFleetConservationFixture.station.stationProgress;
+      station.stationPeerId = peer.id;
+      peer.stationProgress = stationFleetConservationFixture.peer.stationProgress;
+      peer.stationRoutes = structuredClone(stationFleetConservationFixture.busyRoutes) as NonNullable<typeof peer.stationRoutes>;
+      state.portableFleet = { ...stationFleetConservationFixture.portableFleet };
+      state.tray.logistics_drone = stationFleetConservationFixture.traySentinel.logistics_drone;
+      state.tray.logistics_vessel = stationFleetConservationFixture.traySentinel.logistics_vessel;
+      return state;
+    };
+
+    for (const testCase of stationFleetConservationFixture.cases) {
+      const state = createFixtureState();
+      const itemId = testCase.itemId as keyof typeof state.portableFleet;
+      const initialStationCount = testCase.kind === "drone"
+        ? stationFleetConservationFixture.station.stationDrones
+        : stationFleetConservationFixture.station.stationVessels;
+      const initialPortableCount = state.portableFleet[itemId];
+      const routesBefore = structuredClone(stationFleetConservationFixture.busyRoutes);
+      const result = setRemoteStationFleetTarget(
+        state,
+        stationFleetConservationFixture.targetStationId,
+        testCase.kind as "drone" | "vessel",
+        testCase.requested,
+      );
+
+      expect(result, testCase.name).toMatchObject({
+        busy: testCase.expected.busy,
+        final: testCase.expected.final,
+        loaded: testCase.expected.loaded,
+        unloaded: testCase.expected.unloaded,
+        shortfall: testCase.expected.shortfall,
+        reason: testCase.expected.reason,
+      });
+      expect(result.state.portableFleet[itemId], testCase.name).toBe(testCase.expected.portableFleetAfter);
+      expect(result.final + result.state.portableFleet[itemId], testCase.name)
+        .toBe(initialStationCount + initialPortableCount);
+      expect(result.state.tray.logistics_drone, testCase.name)
+        .toBe(stationFleetConservationFixture.traySentinel.logistics_drone);
+      expect(result.state.tray.logistics_vessel, testCase.name)
+        .toBe(stationFleetConservationFixture.traySentinel.logistics_vessel);
+
+      const station = result.state.entities.find((entity) => entity.id === stationFleetConservationFixture.targetStationId)!;
+      const peer = result.state.entities.find((entity) => entity.id === stationFleetConservationFixture.peerStationId)!;
+      expect(station.stationProgress, testCase.name).toBe(0);
+      expect(peer.stationProgress, testCase.name).toBe(0);
+      expect(peer.stationRoutes, testCase.name).toEqual(routesBefore);
+      expect(state.entities.find((entity) => entity.id === station.id)?.stationProgress, testCase.name)
+        .toBe(stationFleetConservationFixture.station.stationProgress);
+      expect(state.entities.find((entity) => entity.id === peer.id)?.stationProgress, testCase.name)
+        .toBe(stationFleetConservationFixture.peer.stationProgress);
+    }
   });
 
   it("uses both station fleets without reserving a vehicle or cargo twice", () => {

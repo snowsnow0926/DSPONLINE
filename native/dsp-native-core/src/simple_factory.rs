@@ -771,6 +771,39 @@ fn allocate_power_by_priority(
     allocated
 }
 
+fn power_generation_capacity_in_js_order(runtime: &GridRuntime) -> (f64, f64) {
+    // JavaScript accumulates each source class independently while scanning
+    // entities, then performs these exact left-associated additions. Keeping
+    // the class totals separate matters above 2^53: mixing a small renewable
+    // term into every large ray-receiver term can change the saved value by
+    // one ULP even when every individual probe is identical.
+    let mut base_generation_kw = runtime.wind_generation_kw;
+    base_generation_kw += runtime.solar_generation_kw;
+    base_generation_kw += runtime.geothermal_generation_kw;
+    base_generation_kw += runtime.ray_generation_kw;
+
+    // calculatePower() likewise reduces the three dispatch classes
+    // independently, preserving entity order inside each class, before it
+    // adds exchanger, fuel, and accumulator capacity to the base in order.
+    let mut exchanger_capacity_kw = 0.0;
+    let mut fuel_capacity_kw = 0.0;
+    let mut accumulator_capacity_kw = 0.0;
+    for candidate in &runtime.dispatch_candidates {
+        match candidate.kind {
+            DispatchKind::Exchanger => exchanger_capacity_kw += candidate.capacity,
+            DispatchKind::Thermal | DispatchKind::Fusion | DispatchKind::ArtificialStar => {
+                fuel_capacity_kw += candidate.capacity;
+            }
+            DispatchKind::Accumulator => accumulator_capacity_kw += candidate.capacity,
+        }
+    }
+    let mut generation_kw = base_generation_kw;
+    generation_kw += exchanger_capacity_kw;
+    generation_kw += fuel_capacity_kw;
+    generation_kw += accumulator_capacity_kw;
+    (base_generation_kw, generation_kw)
+}
+
 fn probe_power_source(
     state: &CoreState,
     entities: &[Value],
@@ -4305,12 +4338,8 @@ fn simulate_step(
             .flat_map(|group| group.iter())
             .map(|consumer| consumer.demand_kw)
             .sum::<f64>();
-        let dispatch_capacity = runtime
-            .dispatch_candidates
-            .iter()
-            .map(|candidate| candidate.capacity)
-            .sum::<f64>();
-        runtime.generation_kw = runtime.base_generation_kw + dispatch_capacity;
+        (runtime.base_generation_kw, runtime.generation_kw) =
+            power_generation_capacity_in_js_order(runtime);
         runtime.regular_supplied_kw = connected_demand.min(runtime.generation_kw);
         runtime.supplied_kw = runtime.regular_supplied_kw;
         runtime.demand_kw = connected_demand + runtime.disconnected_demand_kw;
@@ -6919,6 +6948,74 @@ pub(crate) mod tests {
         });
 
         assert_eq!(observed, vec![(7, None), (3, None), (11, None), (5, None)]);
+    }
+
+    #[test]
+    fn power_generation_groups_base_sources_in_javascript_order() {
+        let mut runtime = GridRuntime {
+            wind_generation_kw: 5_571_240.0,
+            solar_generation_kw: f64::from_bits(0x4185_4d74_0ccc_cccd),
+            geothermal_generation_kw: 1_883_520.0,
+            ..GridRuntime::default()
+        };
+        let ray_term = f64::from_bits(0x42b4_92a1_1098_0001);
+
+        // Minimal real-shape differential: the old Rust path encountered the
+        // three renewable classes and then three huge ray rows in entity
+        // order. JavaScript accumulates the ray rows separately first.
+        let mut mixed_entity_order = 0.0;
+        mixed_entity_order += runtime.geothermal_generation_kw;
+        mixed_entity_order += runtime.wind_generation_kw;
+        mixed_entity_order += runtime.solar_generation_kw;
+        for _ in 0..3 {
+            mixed_entity_order += ray_term;
+            runtime.ray_generation_kw += ray_term;
+        }
+
+        let (base_generation_kw, generation_kw) = power_generation_capacity_in_js_order(&runtime);
+        assert_eq!(mixed_entity_order.to_bits(), 0x42ce_dbf3_269b_54ce);
+        assert_eq!(base_generation_kw.to_bits(), 0x42ce_dbf3_269b_54cf);
+        assert_eq!(generation_kw.to_bits(), base_generation_kw.to_bits());
+    }
+
+    #[test]
+    fn power_generation_adds_dispatch_classes_in_javascript_order() {
+        let mut runtime = GridRuntime {
+            wind_generation_kw: 18_014_398_509_481_984.0,
+            ..GridRuntime::default()
+        };
+        runtime.dispatch_candidates = vec![
+            PowerCandidate {
+                entity_index: 0,
+                capacity: 1.0,
+                priority: 1,
+                kind: DispatchKind::Accumulator,
+            },
+            PowerCandidate {
+                entity_index: 1,
+                capacity: 1.0,
+                priority: 1,
+                kind: DispatchKind::Thermal,
+            },
+            PowerCandidate {
+                entity_index: 2,
+                capacity: 1.0,
+                priority: 1,
+                kind: DispatchKind::Exchanger,
+            },
+        ];
+
+        let mixed_dispatch_capacity = runtime
+            .dispatch_candidates
+            .iter()
+            .map(|candidate| candidate.capacity)
+            .sum::<f64>();
+        let legacy_generation_kw = runtime.wind_generation_kw + mixed_dispatch_capacity;
+        let (base_generation_kw, generation_kw) = power_generation_capacity_in_js_order(&runtime);
+
+        assert_eq!(base_generation_kw.to_bits(), 0x4350_0000_0000_0000);
+        assert_eq!(legacy_generation_kw.to_bits(), 0x4350_0000_0000_0001);
+        assert_eq!(generation_kw.to_bits(), 0x4350_0000_0000_0000);
     }
 
     #[test]

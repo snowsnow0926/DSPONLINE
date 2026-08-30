@@ -26,9 +26,9 @@ describe("native blueprint workspace App integration", () => {
     expect(app).toMatch(/onSelectBlueprint=\{setNativeBlueprintSelectedId\}/);
   });
 
-  it("renders the native projection under authority and retains the legacy Web branch only outside authority", () => {
-    expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeBlueprintWorkspace[\s\S]*?: <BlueprintWorkspace/);
-    const nativeTag = app.match(/nativePlayerAuthorityOwnsRuntime \? (<NativeBlueprintWorkspace[\s\S]*?\/>)/)?.[1] ?? "";
+  it("keeps the native editor owner mounted through authority handoff and admits legacy only after reconciliation", () => {
+    expect(app).toMatch(/<NativeBlueprintWorkspace[\s\S]*?open=\{blueprintsOpen && \(nativePlayerAuthorityOwnsRuntime \|\|[\s\S]*?nativeBlueprintRenamePendingIdentity !== null \|\| nativeBlueprintRenameResolution !== null\)\}/);
+    const nativeTag = app.match(/(\n\s*<NativeBlueprintWorkspace[\s\S]*?\/>)/)?.[1] ?? "";
     expect(nativeTag).toContain("status={nativeBlueprintWorkspaceSnapshot.status}");
     expect(nativeTag).toContain("frame={nativeBlueprintWorkspaceFrame}");
     expect(nativeTag).toContain("latestIdentity={nativeFactoryInventoryIdentity}");
@@ -42,7 +42,7 @@ describe("native blueprint workspace App integration", () => {
     expect(nativeTag).toContain("onConsumeRenameResolution={consumeNativeBlueprintRenameResolution}");
     expect(nativeTag).toContain("commandPending={nativePlayerAuthorityCommandPending}");
     expect(nativeTag).not.toMatch(/\bgame=|onDeploy=|onRemove=|onRename=|onTransform=|onFund|onCancel=|onExport=|onImport=/);
-    expect(app).toMatch(/: <BlueprintWorkspace[\s\S]*?game=\{game\}[\s\S]*?onDeploy=\{deployBlueprint\}/);
+    expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace[\s\S]*?game=\{game\}[\s\S]*?onDeploy=\{deployBlueprint\}/);
   });
 
   it("keeps the native component detached from GameState and every blueprint mutation except rename", () => {
@@ -62,6 +62,9 @@ describe("native blueprint workspace App integration", () => {
     expect(commandBlock).toMatch(/commitNativeProjectedCommand\(command\.baseRevision/);
     expect(commandBlock).toMatch(/acknowledgeNativeBlueprintRename\(current, submissionId, receipt\)/);
     expect(commandBlock).toMatch(/settleNativeBlueprintRenameFailure\(current, submissionId, failure\)/);
+    expect(app).toMatch(/entry\.source\.reconcileCommand\(entry\.command\)/);
+    expect(app).toMatch(/outcome\.status === "committed"[\s\S]*?acknowledgeNativeBlueprintRename/);
+    expect(app).toMatch(/outcome\.status === "not-committed"[\s\S]*?settleNativeBlueprintRenameFailure/);
     expect(commandBlock).toMatch(/status: "accepted",[\s\S]*?submissionId,[\s\S]*?commandRevision: command\.baseRevision/);
     expect(commandBlock).not.toMatch(/\bgameRef\b|\bgame\.|blueprintVersions|constructionQueue|entities|belts|nextId/);
 

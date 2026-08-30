@@ -19,6 +19,7 @@ const COMMAND_KEYS = Object.freeze([
   "removedEntityIds", "changedBelts", "addedBelts", "removedBeltIds",
 ]);
 const MAX_DURABLE_COMMAND_BYTES = 1_750_000;
+const MAX_RECONCILIATION_RECEIPTS = 64;
 
 class NativePlayerAuthorityCommandBrokerError extends Error {
   constructor(message, code, cause) {
@@ -90,11 +91,21 @@ function normalizeRequest(value) {
   });
 }
 
-function assertActiveSnapshot(snapshot, request, label) {
-  if (!isRecord(snapshot) || snapshot.phase !== "active" || snapshot.sessionId !== request.sessionId ||
+function assertBoundSnapshot(snapshot, request, label) {
+  if (!isRecord(snapshot) || snapshot.sessionId !== request.sessionId ||
       !Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0) {
     throw brokerError(
       `native player-authority ${label} is not bound to the active session`,
+      "NATIVE_PLAYER_AUTHORITY_COMMAND_UNAVAILABLE",
+    );
+  }
+}
+
+function assertActiveSnapshot(snapshot, request, label) {
+  assertBoundSnapshot(snapshot, request, label);
+  if (snapshot.phase !== "active") {
+    throw brokerError(
+      `native player-authority ${label} is not active`,
       "NATIVE_PLAYER_AUTHORITY_COMMAND_UNAVAILABLE",
     );
   }
@@ -142,6 +153,8 @@ class NativePlayerAuthorityCommandBroker {
     this.runtime = options.runtime;
     this.isTrustedRendererOwner = options.isTrustedRendererOwner;
     this.onCommittedCommand = options.onCommittedCommand ?? (() => undefined);
+    this.pendingReconciliationKeys = new Set();
+    this.reconciliationReceipts = new Map();
   }
 
   ownsSession(sessionId) {
@@ -169,6 +182,16 @@ class NativePlayerAuthorityCommandBroker {
         "NATIVE_PLAYER_AUTHORITY_COMMAND_REVISION_MISMATCH",
       );
     }
+    const reconciliationKey = `${request.sessionId}\0${request.commandId}`;
+    this.pendingReconciliationKeys.add(reconciliationKey);
+    try {
+      return await this.commitNormalized(rendererOwnerId, request);
+    } finally {
+      this.pendingReconciliationKeys.delete(reconciliationKey);
+    }
+  }
+
+  async commitNormalized(rendererOwnerId, request) {
     const result = await this.runtime.commitCommand({
       commandId: request.commandId,
       baseRevision: request.baseRevision,
@@ -197,6 +220,19 @@ class NativePlayerAuthorityCommandBroker {
         "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
       );
     }
+    const rendererReceipt = Object.freeze({
+      previousRevision: request.baseRevision,
+      revision: result.revision,
+      changedEntityIds,
+      changedBeltIds,
+      topologyDirty: result.topologyDirty,
+    });
+    const reconciliationKey = `${request.sessionId}\0${request.commandId}`;
+    this.reconciliationReceipts.delete(reconciliationKey);
+    this.reconciliationReceipts.set(reconciliationKey, rendererReceipt);
+    while (this.reconciliationReceipts.size > MAX_RECONCILIATION_RECEIPTS) {
+      this.reconciliationReceipts.delete(this.reconciliationReceipts.keys().next().value);
+    }
     try {
       this.onCommittedCommand(Object.freeze({
         sessionId: request.sessionId,
@@ -215,12 +251,56 @@ class NativePlayerAuthorityCommandBroker {
         "NATIVE_PLAYER_AUTHORITY_COMMAND_RENDERER_UNTRUSTED",
       );
     }
+    return rendererReceipt;
+  }
+
+  /**
+   * Read-only reconciliation for a renderer response that was lost after
+   * dispatch. The exact command is normalized only to derive the main-owned
+   * durable ID; this path never calls commitCommand and therefore cannot
+   * execute or retry gameplay state.
+   */
+  reconcile(rendererOwnerId, rawRequest) {
+    if (!this.isTrustedRendererOwner(rendererOwnerId)) {
+      throw brokerError(
+        "native player-authority command reconciliation caller is not trusted",
+        "NATIVE_PLAYER_AUTHORITY_COMMAND_RENDERER_UNTRUSTED",
+      );
+    }
+    const request = normalizeRequest(rawRequest);
+    const current = this.runtime.snapshot();
+    assertBoundSnapshot(current, request, "reconciliation runtime");
+    const reconciliationKey = `${request.sessionId}\0${request.commandId}`;
+    const receipt = this.reconciliationReceipts.get(reconciliationKey);
+    if (receipt) {
+      return Object.freeze({ status: "committed", receipt });
+    }
+    if (this.pendingReconciliationKeys.has(reconciliationKey)) {
+      return Object.freeze({
+        status: "pending",
+        baseRevision: request.baseRevision,
+        currentRevision: current.revision,
+      });
+    }
+    if (current.phase !== "active" || current.inFlight || (current.queuedCommands ?? 0) > 0) {
+      return Object.freeze({
+        status: "pending",
+        baseRevision: request.baseRevision,
+        currentRevision: current.revision,
+      });
+    }
+    if (!current.inFlight && (current.queuedCommands ?? 0) === 0 &&
+        current.revision === request.baseRevision) {
+      return Object.freeze({
+        status: "not-committed",
+        baseRevision: request.baseRevision,
+        currentRevision: current.revision,
+      });
+    }
     return Object.freeze({
-      previousRevision: request.baseRevision,
-      revision: result.revision,
-      changedEntityIds,
-      changedBeltIds,
-      topologyDirty: result.topologyDirty,
+      status: "conflict",
+      baseRevision: request.baseRevision,
+      currentRevision: current.revision,
     });
   }
 }

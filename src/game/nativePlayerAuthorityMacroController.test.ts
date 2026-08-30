@@ -109,6 +109,7 @@ function commandSource(
     runId: "macro-controller-run",
     baseRevision,
     applyCommand,
+    reconcileCommand: vi.fn(async () => Object.freeze({ status: "unavailable" as const })),
   };
 }
 

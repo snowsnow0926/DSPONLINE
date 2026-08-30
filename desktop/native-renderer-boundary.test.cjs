@@ -1656,7 +1656,9 @@ test("Electron main uses the dedicated native renderer boundary", () => {
     .map((match) => match[1]);
   const preloadChannels = [...preload.matchAll(/invokeNative\("(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  assert.equal(mainChannels.length, 52);
+  assert.equal(mainChannels.length, 53);
+  assert.ok(mainChannels.includes("desktop:native-core-reconcile-command"));
+  assert.ok(preloadChannels.includes("desktop:native-core-reconcile-command"));
   assert.ok(mainChannels.includes("desktop:native-player-authority-set-paused"));
   assert.ok(preloadChannels.includes("desktop:native-player-authority-set-paused"));
   assert.ok(mainChannels.includes("desktop:native-player-authority-checkpoint"));

@@ -25,8 +25,10 @@ test("preload exposes bounded clock reads plus intent-only pause control", () =>
   assert.match(subscription, /ipcRenderer\.removeListener\("desktop:native-player-authority-state-changed", handler\)/);
   assert.doesNotMatch(subscription, /removeAllListeners|\.send\(|\.postMessage\(|\.invoke\(/);
   assert.doesNotMatch(preload, /activateNativePlayerAuthority|commitNativePlayerAuthority|retryNativePlayerAuthority|shutdownNativePlayerAuthority/);
+  assert.match(preload, /reconcileNativeCoreCommand:\s*\(request\) => invokeNative\("desktop:native-core-reconcile-command"/);
 
   assert.match(desktopTypes, /getNativePlayerAuthorityState\?:\s*\(\) => Promise<DesktopNativePlayerAuthorityState>/);
+  assert.match(desktopTypes, /reconcileNativeCoreCommand\?:[\s\S]*?Promise<DesktopNativeCoreCommandReconciliationResult>/);
   assert.match(desktopTypes, /onNativePlayerAuthorityState\?:[\s\S]*?\) => \(\) => void/);
   assert.match(desktopTypes, /setNativePlayerAuthorityPaused\?:[\s\S]*?request:\s*\{ readonly paused: boolean \}[\s\S]*?Promise<DesktopNativePlayerAuthorityClockState>/);
   assert.match(desktopTypes, /interface DesktopNativePlayerAuthorityClockState[\s\S]*?schemaVersion:\s*1[\s\S]*?lastErrorCode:\s*string \| null/);

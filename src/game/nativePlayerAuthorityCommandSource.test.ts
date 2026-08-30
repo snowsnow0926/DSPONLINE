@@ -481,6 +481,74 @@ describe("native player-authority command source", () => {
     });
   });
 
+  it("reconciles a lost response through the read-only main receipt path without resending", async () => {
+    const patch = metadataPatch();
+    const frame = activeFrame();
+    const receipt = receiptForPatch(patch, false);
+    const bridge = {
+      getNativePlayerAuthorityState: vi.fn(async () => frame),
+      applyNativeCoreCommand: vi.fn(async () => { throw new Error("lost IPC reply"); }),
+      reconcileNativeCoreCommand: vi.fn(async () => ({ status: "committed" as const, receipt })),
+    } satisfies Pick<
+      DesktopBridge,
+      "getNativePlayerAuthorityState" | "applyNativeCoreCommand" | "reconcileNativeCoreCommand"
+    >;
+    const source = createNativePlayerAuthorityCommandSource(bridge, frame)!;
+    await expect(source.applyCommand(patch)).rejects.toMatchObject({
+      code: "NATIVE_PLAYER_AUTHORITY_COMMAND_TRANSPORT_UNCERTAIN",
+    });
+    await expect(source.reconcileCommand(patch)).resolves.toEqual({
+      status: "committed",
+      receipt,
+    });
+    expect(bridge.applyNativeCoreCommand).toHaveBeenCalledTimes(1);
+    expect(bridge.reconcileNativeCoreCommand).toHaveBeenCalledTimes(1);
+    expect(bridge.reconcileNativeCoreCommand).toHaveBeenCalledWith({
+      sessionId: frame.sessionId,
+      command: patch,
+    });
+  });
+
+  it("fails closed for unavailable, absent, conflicting, or malformed reconciliation receipts", async () => {
+    const patch = metadataPatch();
+    const frame = activeFrame();
+    const withoutBridge = sourceHarness(patch).source;
+    await expect(withoutBridge.reconcileCommand(patch)).resolves.toEqual({ status: "unavailable" });
+
+    for (const expected of [
+      { status: "pending" as const, baseRevision: 10, currentRevision: 10 },
+      { status: "not-committed" as const, baseRevision: 10, currentRevision: 10 },
+      { status: "conflict" as const, baseRevision: 10, currentRevision: 12 },
+    ]) {
+      const bridge = {
+        getNativePlayerAuthorityState: vi.fn(async () => frame),
+        applyNativeCoreCommand: vi.fn(async () => receiptForPatch(patch, false)),
+        reconcileNativeCoreCommand: vi.fn(async () => expected),
+      } satisfies Pick<
+        DesktopBridge,
+        "getNativePlayerAuthorityState" | "applyNativeCoreCommand" | "reconcileNativeCoreCommand"
+      >;
+      const source = createNativePlayerAuthorityCommandSource(bridge, frame)!;
+      await expect(source.reconcileCommand(patch)).resolves.toEqual(expected);
+      expect(bridge.applyNativeCoreCommand).not.toHaveBeenCalled();
+    }
+
+    const malformedBridge = {
+      getNativePlayerAuthorityState: vi.fn(async () => frame),
+      applyNativeCoreCommand: vi.fn(async () => receiptForPatch(patch, false)),
+      reconcileNativeCoreCommand: vi.fn(async () => ({
+        status: "committed" as const,
+        receipt: { ...receiptForPatch(patch, false), revision: 99 },
+      })),
+    } satisfies Pick<
+      DesktopBridge,
+      "getNativePlayerAuthorityState" | "applyNativeCoreCommand" | "reconcileNativeCoreCommand"
+    >;
+    await expect(
+      createNativePlayerAuthorityCommandSource(malformedBridge, frame)!.reconcileCommand(patch),
+    ).rejects.toMatchObject({ code: "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID" });
+  });
+
   it("rejects extra, discontinuous, forged, unstable, duplicate, or topology-mismatched receipts", async () => {
     const fixture = stationSlotPatchFixture();
     const patch = fixture.removalPatch;

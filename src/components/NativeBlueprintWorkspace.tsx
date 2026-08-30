@@ -221,6 +221,14 @@ export function NativeBlueprintWorkspace({
     : null;
 
   useEffect(() => {
+    if (open) return;
+    renameCompositionRef.current = false;
+    setRenameEditor((current) => current?.composing
+      ? { ...current, composing: false }
+      : current);
+  }, [open]);
+
+  useEffect(() => {
     if (!renameEditor || !resolution ||
         renameEditor.acceptedSubmissionId !== resolution.submissionId ||
         !sameRenameIdentity(renameEditor.identity, resolution)) return;

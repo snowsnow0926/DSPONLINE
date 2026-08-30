@@ -230,6 +230,118 @@ test("a durable command retires main-only cleanup even when its renderer disappe
   assert.equal(observed[0].revision, 18);
 });
 
+test("lost renderer response is reconciled from the main receipt without executing again", async () => {
+  let trusted = true;
+  let trustChecks = 0;
+  const { broker, calls, setSnapshot } = brokerFixture({
+    isTrustedRendererOwner: () => {
+      trustChecks += 1;
+      return trusted && trustChecks !== 2;
+    },
+  });
+  const request = { sessionId: "core-1", command: command() };
+  await assert.rejects(
+    broker.commit(7, request),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_COMMAND_RENDERER_UNTRUSTED",
+  );
+  trusted = true;
+  setSnapshot(snapshot(18, { phase: "uncertain", lastErrorCode: "TRANSPORT_UNCERTAIN" }));
+  const reconciled = broker.reconcile(7, request);
+  assert.deepEqual(reconciled, {
+    status: "committed",
+    receipt: {
+      previousRevision: 17,
+      revision: 18,
+      changedEntityIds: ["entity-a", "entity-z"],
+      changedBeltIds: ["belt-a"],
+      topologyDirty: false,
+    },
+  });
+  assert.equal(calls.length, 1, "receipt reconciliation must not call commitCommand again");
+});
+
+test("read-only reconciliation distinguishes pending, definitely absent and conflicting clocks", async () => {
+  let release;
+  const pendingResult = new Promise((resolve) => { release = resolve; });
+  const pendingFixture = brokerFixture({ commit: () => pendingResult });
+  const request = { sessionId: "core-1", command: command() };
+  const commit = pendingFixture.broker.commit(7, request);
+  await Promise.resolve();
+  assert.deepEqual(pendingFixture.broker.reconcile(7, request), {
+    status: "pending",
+    baseRevision: 17,
+    currentRevision: 17,
+  });
+  assert.equal(pendingFixture.calls.length, 1);
+  release(commandResult({ baseRevision: 17 }));
+  await commit;
+
+  const absent = brokerFixture();
+  assert.deepEqual(absent.broker.reconcile(7, request), {
+    status: "not-committed",
+    baseRevision: 17,
+    currentRevision: 17,
+  });
+  assert.equal(absent.calls.length, 0);
+
+  const conflict = brokerFixture({ snapshot: snapshot(19) });
+  assert.deepEqual(conflict.broker.reconcile(7, request), {
+    status: "conflict",
+    baseRevision: 17,
+    currentRevision: 19,
+  });
+  assert.equal(conflict.calls.length, 0);
+
+  const unsettled = brokerFixture({
+    snapshot: snapshot(17, { phase: "uncertain", lastErrorCode: "TRANSPORT_UNCERTAIN" }),
+  });
+  assert.deepEqual(unsettled.broker.reconcile(7, request), {
+    status: "pending",
+    baseRevision: 17,
+    currentRevision: 17,
+  });
+  assert.equal(unsettled.calls.length, 0);
+});
+
+test("read-only reconciliation retains only the latest 64 bounded receipts", async () => {
+  const { broker, calls } = brokerFixture();
+  const requests = [];
+  for (let baseRevision = 17; baseRevision < 82; baseRevision += 1) {
+    const request = { sessionId: "core-1", command: command(baseRevision) };
+    requests.push(request);
+    await broker.commit(7, request);
+  }
+  assert.equal(calls.length, 65);
+  assert.deepEqual(broker.reconcile(7, requests[0]), {
+    status: "conflict",
+    baseRevision: 17,
+    currentRevision: 82,
+  });
+  assert.deepEqual(broker.reconcile(7, requests.at(-1)), {
+    status: "committed",
+    receipt: {
+      previousRevision: 81,
+      revision: 82,
+      changedEntityIds: ["entity-a", "entity-z"],
+      changedBeltIds: ["belt-a"],
+      topologyDirty: false,
+    },
+  });
+});
+
+test("untrusted or malformed reconciliation never reaches the runtime command path", () => {
+  const { broker, calls } = brokerFixture();
+  assert.throws(
+    () => broker.reconcile(8, { sessionId: "core-1", command: command() }),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_COMMAND_RENDERER_UNTRUSTED",
+  );
+  assert.throws(
+    () => broker.reconcile(7, { sessionId: "core-1", command: { ...command(), extra: true } }),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_COMMAND_REQUEST_INVALID",
+  );
+  assert.equal(calls.length, 0);
+});
+
 test("identical lost-response retry derives the same durable command ID", async () => {
   const ids = [];
   const { broker, setSnapshot } = brokerFixture({
@@ -351,8 +463,11 @@ test("routing remains captured after the authority runtime becomes uncertain", (
 
 test("desktop command IPC routes a captured authority session through the main-only broker", () => {
   const main = readFileSync("desktop/main.cjs", "utf8");
+  const preload = readFileSync("desktop/preload.cjs", "utf8");
   assert.match(main, /new NativePlayerAuthorityCommandBroker\(\{[\s\S]*?runtime:\s*nativePlayerAuthorityRuntime/);
   assert.match(main, /nativePlayerAuthorityCommandBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityCommandBroker\.commit\(ownerId, request\)/);
   assert.match(main, /const ownerId = requireTrustedNativeSender\(event\);[\s\S]*?nativePlayerAuthorityCommandBroker/);
-  assert.doesNotMatch(readFileSync("desktop/preload.cjs", "utf8"), /playerAuthorityCommandBroker|main-player-authority/);
+  assert.match(main, /desktop:native-core-reconcile-command[\s\S]*?nativePlayerAuthorityCommandBroker\.reconcile\(ownerId, request\)/);
+  assert.match(preload, /reconcileNativeCoreCommand:[\s\S]*?desktop:native-core-reconcile-command/);
+  assert.doesNotMatch(preload, /playerAuthorityCommandBroker|main-player-authority/);
 });

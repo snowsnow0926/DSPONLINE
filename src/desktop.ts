@@ -370,6 +370,8 @@ export interface DesktopBridge {
   getNativeCoreCommandPaletteEntitySearch?: (request: DesktopNativeCoreCommandPaletteEntitySearchRequest) => Promise<DesktopNativeCoreCommandPaletteEntitySearchResult>;
   requestNativeCoreProjectionTransfer?: (request: DesktopNativeCoreProjectionTransferRequest) => Promise<DesktopNativeCoreProjectionTransferResult>;
   applyNativeCoreCommand: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandResult>;
+  /** Read-only lookup after a dispatched command lost its renderer response. */
+  reconcileNativeCoreCommand?: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandReconciliationResult>;
   advanceNativeCore: (request: DesktopNativeCoreAdvanceRequest) => Promise<DesktopNativeCoreAdvanceResult>;
   commitNativeCoreOperation: (request: DesktopNativeCoreCommitOperationRequest) => Promise<DesktopNativeCoreCommitOperationResult>;
   checkpointNativeCore: (request: DesktopNativeCoreCheckpointRequest) => Promise<DesktopNativeCoreCheckpointResult>;
@@ -2544,6 +2546,17 @@ export interface DesktopNativeCoreCommandResult {
   changedBeltIds: string[];
   topologyDirty: boolean;
 }
+
+export type DesktopNativeCoreCommandReconciliationResult =
+  | {
+    status: "committed";
+    receipt: DesktopNativeCoreCommandResult;
+  }
+  | {
+    status: "pending" | "not-committed" | "conflict";
+    baseRevision: number;
+    currentRevision: number;
+  };
 
 export interface DesktopNativeCoreAdvanceRequest extends DesktopNativeCoreSessionRequest {
   baseRevision: number;

@@ -412,10 +412,22 @@ pub(crate) struct LocalPeerDirectory {
     /// Opaque/MOD route shapes or an inexact immutable directory retain the
     /// legacy complete station order. Once observed, the cache stays closed.
     dispatch_full_scan_required: bool,
-    /// Local station rows that had usable power at the previous successful
-    /// dispatch boundary. A false -> true edge wakes the exact paired demand
-    /// rows even when no inventory changed in that step.
-    powered_dispatch_station_indices: Vec<usize>,
+    /// Last successfully committed local-station power state, indexed by the
+    /// immutable `station_indices` rank. Keeping one byte per stable rank
+    /// avoids rebuilding and replacing a full powered-station snapshot at
+    /// every dispatch boundary.
+    powered_dispatch_station_state: Box<[u8]>,
+    /// Fixed-capacity transactional journal. Entries encode
+    /// `(station_rank << 1) | powered`; only the prefix ending at
+    /// `dispatch_power_transition_count` is live. The journal is staged before
+    /// dispatch and applied only after the complete dispatch candidate
+    /// succeeds, so a rejected candidate cannot advance the resident bits.
+    dispatch_power_transition_journal: Box<[usize]>,
+    dispatch_power_transition_count: usize,
+    /// Reused dependency buffer for false -> true power edges. Dependency
+    /// expansion and persisted-rank sorting deliberately retain the existing
+    /// dispatch semantics; only the full powered snapshot is removed here.
+    dispatch_power_wake_dependencies: Vec<usize>,
     runtime_reset_station_indices: Vec<usize>,
     local_congestion_reset_station_indices: Vec<usize>,
     interstellar_congestion_reset_station_indices: Vec<usize>,
@@ -453,6 +465,31 @@ pub(crate) struct LocalDispatchScan {
     pub total_demand_rows: usize,
     pub dense_fallback: bool,
     pub directory_fallback: bool,
+    pub power_map_rows: usize,
+    pub power_state_rows: usize,
+    pub power_transition_rows: usize,
+    pub power_recovery_rows: usize,
+    pub invalid_power_rows: usize,
+    pub power_state_commit_allowed: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct LocalDispatchPowerPlan {
+    power_map_rows: usize,
+    power_state_rows: usize,
+    transition_rows: usize,
+    recovery_rows: usize,
+    invalid_power_rows: usize,
+    directory_fallback: bool,
+    commit_power_state: bool,
+}
+
+fn encode_dispatch_power_transition(rank: usize, powered: bool) -> Option<usize> {
+    rank.checked_mul(2)?.checked_add(usize::from(powered))
+}
+
+fn decode_dispatch_power_transition(encoded: usize) -> (usize, bool) {
+    (encoded >> 1, encoded & 1 != 0)
 }
 
 impl LocalPeerDirectory {
@@ -465,13 +502,16 @@ impl LocalPeerDirectory {
                 + self.ready_station_indices.capacity()
                 + self.pending_readiness_station_indices.capacity()
                 + self.pending_dispatch_demand_indices.capacity()
-                + self.powered_dispatch_station_indices.capacity()
+                + self.dispatch_power_wake_dependencies.capacity()
                 + self.runtime_reset_station_indices.capacity()
                 + self.local_congestion_reset_station_indices.capacity()
                 + self
                     .interstellar_congestion_reset_station_indices
                     .capacity())
                 * std::mem::size_of::<usize>();
+        let dispatch_power_state_bytes = self.powered_dispatch_station_state.len()
+            * std::mem::size_of::<u8>()
+            + self.dispatch_power_transition_journal.len() * std::mem::size_of::<usize>();
         let planet_item_bytes = self
             .by_planet_item
             .values()
@@ -502,7 +542,11 @@ impl LocalPeerDirectory {
                 * (std::mem::size_of::<(usize, usize)>() + std::mem::size_of::<u8>())
             + self.station_ranks.capacity()
                 * (std::mem::size_of::<(usize, usize)>() + std::mem::size_of::<u8>());
-        (station_index_bytes + planet_item_bytes + slot_bytes + hash_entry_bytes) as u64
+        (station_index_bytes
+            + dispatch_power_state_bytes
+            + planet_item_bytes
+            + slot_bytes
+            + hash_entry_bytes) as u64
     }
 
     fn has_local_routes(&self) -> bool {
@@ -591,9 +635,20 @@ impl LocalPeerDirectory {
         changed_station_indices: &[usize],
         target: &mut Vec<usize>,
     ) -> bool {
+        self.append_dispatch_demand_dependencies_from_iter(
+            changed_station_indices.iter().copied(),
+            target,
+        )
+    }
+
+    fn append_dispatch_demand_dependencies_from_iter(
+        &self,
+        changed_station_indices: impl IntoIterator<Item = usize>,
+        target: &mut Vec<usize>,
+    ) -> bool {
         let mut dependency_keys = Vec::new();
         let mut seen_dependency_keys = HashSet::new();
-        for &station_index in changed_station_indices {
+        for station_index in changed_station_indices {
             if !self.station_ranks.contains_key(&station_index) {
                 continue;
             }
@@ -784,44 +839,84 @@ impl LocalPeerDirectory {
     }
 
     fn plan_dispatch_power_wakes(
-        &self,
+        &mut self,
         powers: &HashMap<usize, f64>,
-    ) -> (Vec<usize>, Vec<usize>, bool) {
-        let mut next_powered = powers
-            .iter()
-            .filter_map(|(station_index, power)| {
-                (*power > EPSILON && self.station_ranks.contains_key(station_index))
-                    .then_some(*station_index)
-            })
-            .collect::<Vec<_>>();
-        next_powered
-            .sort_by_key(|index| self.station_ranks.get(index).copied().unwrap_or(usize::MAX));
-        next_powered.dedup();
-        let mut directory_fallback = self
-            .powered_dispatch_station_indices
-            .iter()
-            .any(|index| !self.station_ranks.contains_key(index));
-        let recovered = next_powered
-            .iter()
-            .copied()
-            .filter(|index| {
-                self.powered_dispatch_station_indices
+    ) -> LocalDispatchPowerPlan {
+        let state_rows = self.station_indices.len();
+        let mut dependencies = std::mem::take(&mut self.dispatch_power_wake_dependencies);
+        dependencies.clear();
+        self.dispatch_power_transition_count = 0;
+
+        let storage_is_exact = self.powered_dispatch_station_state.len() == state_rows
+            && self.dispatch_power_transition_journal.len() == state_rows
+            && self.station_ranks.len() == state_rows;
+        let mut invalid_power_rows = usize::from(!storage_is_exact);
+        let mut recovery_rows = 0usize;
+
+        if storage_is_exact {
+            for (rank, &station_index) in self.station_indices.iter().enumerate() {
+                let rank_is_exact = self.station_ranks.get(&station_index) == Some(&rank);
+                let current = self.powered_dispatch_station_state[rank];
+                let next = match powers.get(&station_index).copied() {
+                    Some(power) if power.is_finite() => u8::from(power > EPSILON),
+                    Some(_) => {
+                        invalid_power_rows += 1;
+                        0
+                    }
+                    None => 0,
+                };
+                let Some(encoded) = encode_dispatch_power_transition(rank, next != 0) else {
+                    invalid_power_rows += 1;
+                    continue;
+                };
+                if !rank_is_exact || current > 1 {
+                    invalid_power_rows += 1;
+                    continue;
+                }
+                if next == current {
+                    continue;
+                }
+                let journal_index = self.dispatch_power_transition_count;
+                self.dispatch_power_transition_journal[journal_index] = encoded;
+                self.dispatch_power_transition_count += 1;
+                recovery_rows += usize::from(next != 0);
+            }
+        }
+
+        let commit_power_state = storage_is_exact && invalid_power_rows == 0;
+        let mut directory_fallback = !commit_power_state;
+        if commit_power_state {
+            let recovered_station_indices = self.dispatch_power_transition_journal
+                [..self.dispatch_power_transition_count]
+                .iter()
+                .filter_map(|encoded| {
+                    let (rank, powered) = decode_dispatch_power_transition(*encoded);
+                    powered.then(|| self.station_indices[rank])
+                });
+            directory_fallback |= !self.append_dispatch_demand_dependencies_from_iter(
+                recovered_station_indices,
+                &mut dependencies,
+            );
+            dependencies
+                .sort_by_key(|index| self.station_ranks.get(index).copied().unwrap_or(usize::MAX));
+            dependencies.dedup();
+            directory_fallback |= dependencies.iter().any(|index| {
+                self.local_waiting_station_indices
                     .binary_search(index)
                     .is_err()
-            })
-            .collect::<Vec<_>>();
-        let mut dependencies = Vec::new();
-        directory_fallback |=
-            !self.append_dispatch_demand_dependencies(&recovered, &mut dependencies);
-        dependencies
-            .sort_by_key(|index| self.station_ranks.get(index).copied().unwrap_or(usize::MAX));
-        dependencies.dedup();
-        directory_fallback |= dependencies.iter().any(|index| {
-            self.local_waiting_station_indices
-                .binary_search(index)
-                .is_err()
-        });
-        (next_powered, dependencies, directory_fallback)
+            });
+        }
+        self.dispatch_power_wake_dependencies = dependencies;
+
+        LocalDispatchPowerPlan {
+            power_map_rows: powers.len(),
+            power_state_rows: state_rows,
+            transition_rows: self.dispatch_power_transition_count,
+            recovery_rows,
+            invalid_power_rows,
+            directory_fallback,
+            commit_power_state,
+        }
     }
 
     fn dispatch_scan_indices(
@@ -874,19 +969,44 @@ impl LocalPeerDirectory {
             total_demand_rows,
             dense_fallback,
             directory_fallback,
+            power_map_rows: 0,
+            power_state_rows: 0,
+            power_transition_rows: 0,
+            power_recovery_rows: 0,
+            invalid_power_rows: 0,
+            power_state_commit_allowed: false,
         };
         (selected, scan)
     }
 
     fn commit_dispatch(
         &mut self,
-        next_powered: Vec<usize>,
+        power_plan: LocalDispatchPowerPlan,
         activated_local_demands: &[usize],
-        directory_fallback: bool,
+        mut directory_fallback: bool,
     ) {
+        let journal_prefix = &self.dispatch_power_transition_journal[..self
+            .dispatch_power_transition_count
+            .min(self.dispatch_power_transition_journal.len())];
+        let journal_is_exact = power_plan.commit_power_state
+            && power_plan.transition_rows == self.dispatch_power_transition_count
+            && self.dispatch_power_transition_count <= self.dispatch_power_transition_journal.len()
+            && journal_prefix.iter().all(|encoded| {
+                decode_dispatch_power_transition(*encoded).0
+                    < self.powered_dispatch_station_state.len()
+            });
+        if journal_is_exact {
+            for encoded in journal_prefix {
+                let (rank, powered) = decode_dispatch_power_transition(*encoded);
+                self.powered_dispatch_station_state[rank] = u8::from(powered);
+            }
+        } else if power_plan.commit_power_state {
+            directory_fallback = true;
+        }
+        self.dispatch_power_transition_count = 0;
+        self.dispatch_power_wake_dependencies.clear();
         self.pending_dispatch_demand_indices.clear();
         self.dispatch_all_pending = false;
-        self.powered_dispatch_station_indices = next_powered;
         if directory_fallback {
             self.force_full_dispatch();
         }
@@ -1268,7 +1388,10 @@ fn build_peer_directory(
         pending_dispatch_demand_indices: Vec::new(),
         dispatch_all_pending: true,
         dispatch_full_scan_required,
-        powered_dispatch_station_indices: Vec::new(),
+        powered_dispatch_station_state: vec![0; station_indices.len()].into_boxed_slice(),
+        dispatch_power_transition_journal: vec![0; station_indices.len()].into_boxed_slice(),
+        dispatch_power_transition_count: 0,
+        dispatch_power_wake_dependencies: Vec::new(),
         // A newly imported/rebuilt directory cannot prove which station was
         // active in the previous JS/native step. Clear every persisted runtime
         // display once; successful native steps replace this with the exact
@@ -2247,7 +2370,12 @@ fn dispatch_for_indices<L: LocalDispatchLedger + ?Sized>(
                         )
                     };
                     if free_vehicles < 1.0
-                        || powers.get(&owner_index).copied().unwrap_or(0.0) <= EPSILON
+                        || powers
+                            .get(&owner_index)
+                            .copied()
+                            .filter(|power| power.is_finite())
+                            .unwrap_or(0.0)
+                            <= EPSILON
                     {
                         continue;
                     }
@@ -2376,10 +2504,18 @@ fn dispatch_with_ledger_mode<L: LocalDispatchLedger + ?Sized>(
     ledger: &mut L,
     force_full_scan: bool,
 ) -> anyhow::Result<LocalDispatchScan> {
-    let (next_powered, power_wakes, power_directory_fallback) =
-        directory.plan_dispatch_power_wakes(powers);
-    let (dispatch_indices, scan) =
-        directory.dispatch_scan_indices(&power_wakes, power_directory_fallback, force_full_scan);
+    let power_plan = directory.plan_dispatch_power_wakes(powers);
+    let (dispatch_indices, mut scan) = directory.dispatch_scan_indices(
+        &directory.dispatch_power_wake_dependencies,
+        power_plan.directory_fallback,
+        force_full_scan,
+    );
+    scan.power_map_rows = power_plan.power_map_rows;
+    scan.power_state_rows = power_plan.power_state_rows;
+    scan.power_transition_rows = power_plan.transition_rows;
+    scan.power_recovery_rows = power_plan.recovery_rows;
+    scan.invalid_power_rows = power_plan.invalid_power_rows;
+    scan.power_state_commit_allowed = power_plan.commit_power_state;
     let activated_local_demands = dispatch_for_indices(
         state,
         base,
@@ -2392,7 +2528,7 @@ fn dispatch_with_ledger_mode<L: LocalDispatchLedger + ?Sized>(
     // The pending and power caches are candidate-local runtime state. Install
     // their next values only after every JSON/ledger mutation above succeeds.
     directory.commit_dispatch(
-        next_powered,
+        power_plan,
         &activated_local_demands,
         scan.directory_fallback,
     );
@@ -4444,41 +4580,359 @@ mod tests {
         let (initial, initial_scan) = directory.dispatch_scan_indices(&[], false, false);
         assert_eq!(initial, vec![1, 2, 3]);
         assert_eq!(initial_scan.selected_station_rows, 3);
-        directory.commit_dispatch(Vec::new(), &[], false);
+        directory.commit_dispatch(LocalDispatchPowerPlan::default(), &[], false);
 
         // A source-side inventory/vehicle change expands to all matching
         // demands in persisted entity order.
         directory.wake_ready_from_changed_stations(&[0]);
         let (source_wake, _) = directory.dispatch_scan_indices(&[], false, false);
         assert_eq!(source_wake, vec![1, 2, 3]);
-        directory.commit_dispatch(Vec::new(), &[], false);
+        directory.commit_dispatch(LocalDispatchPowerPlan::default(), &[], false);
 
         // A demand-side capacity release only wakes that demand.
         directory.wake_ready_from_changed_stations(&[2]);
         let (capacity_wake, _) = directory.dispatch_scan_indices(&[], false, false);
         assert_eq!(capacity_wake, vec![2]);
-        directory.commit_dispatch(Vec::new(), &[], false);
+        directory.commit_dispatch(LocalDispatchPowerPlan::default(), &[], false);
 
         // No inventory wake is needed for a grid recovery. The successful
         // dispatch boundary remembers power separately from the demand queue.
         let off = HashMap::from([(0, 0.0), (1, 0.0), (2, 0.0), (3, 0.0)]);
-        let (off_powered, off_wakes, off_fallback) = directory.plan_dispatch_power_wakes(&off);
-        assert!(off_powered.is_empty());
-        assert!(off_wakes.is_empty());
-        assert!(!off_fallback);
-        directory.commit_dispatch(off_powered, &[], false);
+        let off_plan = directory.plan_dispatch_power_wakes(&off);
+        assert_eq!(off_plan.transition_rows, 0);
+        assert!(directory.dispatch_power_wake_dependencies.is_empty());
+        assert!(!off_plan.directory_fallback);
+        directory.commit_dispatch(off_plan, &[], false);
         let on = HashMap::from([(0, 1.0), (1, 1.0), (2, 1.0), (3, 1.0)]);
-        let (on_powered, on_wakes, on_fallback) = directory.plan_dispatch_power_wakes(&on);
-        assert_eq!(on_wakes, vec![1, 2, 3]);
-        assert!(!on_fallback);
-        let (recovered, _) = directory.dispatch_scan_indices(&on_wakes, false, false);
+        let on_plan = directory.plan_dispatch_power_wakes(&on);
+        assert_eq!(on_plan.transition_rows, 4);
+        assert_eq!(on_plan.recovery_rows, 4);
+        assert_eq!(directory.dispatch_power_wake_dependencies, vec![1, 2, 3]);
+        assert!(!on_plan.directory_fallback);
+        let (recovered, _) = directory.dispatch_scan_indices(
+            &directory.dispatch_power_wake_dependencies,
+            false,
+            false,
+        );
         assert_eq!(recovered, vec![1, 2, 3]);
-        directory.commit_dispatch(on_powered, &[], false);
+        directory.commit_dispatch(on_plan, &[], false);
 
         // Storage-only writes have no local dispatch dependency.
         directory.wake_ready_from_changed_stations(&[9]);
         let (storage_wake, _) = directory.dispatch_scan_indices(&[], false, false);
         assert!(storage_wake.is_empty());
+    }
+
+    #[test]
+    fn dispatch_power_state_matches_snapshot_oracle_without_replacing_resident_storage() {
+        let source = sparse_readiness_matrix(16, 3);
+        let state = route_fixture_state(&source);
+        let mut directory =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        let state_storage = directory.powered_dispatch_station_state.as_ptr();
+        let journal_storage = directory.dispatch_power_transition_journal.as_ptr();
+        let mut oracle_powered = Vec::<usize>::new();
+
+        let sequences = [
+            HashMap::from_iter((0..16).map(|index| (index, 0.0))),
+            HashMap::from_iter(
+                (0..16).map(|index| (index, if matches!(index, 0 | 2 | 7) { 1.0 } else { 0.0 })),
+            ),
+            HashMap::from_iter(
+                (0..16).map(|index| (index, if matches!(index, 0 | 2 | 7) { 1.0 } else { 0.0 })),
+            ),
+            HashMap::from([(0, 1.0), (7, 1.0)]),
+            HashMap::from_iter((0..16).map(|index| (index, 1.0))),
+        ];
+
+        for powers in sequences {
+            let mut next_powered = powers
+                .iter()
+                .filter_map(|(station_index, power)| {
+                    (*power > EPSILON && directory.station_ranks.contains_key(station_index))
+                        .then_some(*station_index)
+                })
+                .collect::<Vec<_>>();
+            next_powered.sort_by_key(|index| directory.station_ranks[index]);
+            let recovered = next_powered
+                .iter()
+                .copied()
+                .filter(|index| oracle_powered.binary_search(index).is_err())
+                .collect::<Vec<_>>();
+            let mut expected_wakes = Vec::new();
+            assert!(directory.append_dispatch_demand_dependencies(&recovered, &mut expected_wakes));
+            expected_wakes.sort_by_key(|index| directory.station_ranks[index]);
+            expected_wakes.dedup();
+
+            let plan = directory.plan_dispatch_power_wakes(&powers);
+            assert!(plan.commit_power_state);
+            assert!(!plan.directory_fallback);
+            assert_eq!(plan.power_map_rows, powers.len());
+            assert_eq!(plan.power_state_rows, 16);
+            assert_eq!(plan.recovery_rows, recovered.len());
+            assert_eq!(directory.dispatch_power_wake_dependencies, expected_wakes);
+            assert_eq!(
+                directory.powered_dispatch_station_state.as_ptr(),
+                state_storage
+            );
+            assert_eq!(
+                directory.dispatch_power_transition_journal.as_ptr(),
+                journal_storage
+            );
+
+            directory.commit_dispatch(plan, &[], false);
+            for (rank, station_index) in directory.station_indices.iter().copied().enumerate() {
+                assert_eq!(
+                    directory.powered_dispatch_station_state[rank] != 0,
+                    next_powered.binary_search(&station_index).is_ok()
+                );
+            }
+            oracle_powered = next_powered;
+        }
+
+        let dependency_storage = directory.dispatch_power_wake_dependencies.as_ptr();
+        let dependency_capacity = directory.dispatch_power_wake_dependencies.capacity();
+        assert!(
+            dependency_capacity > 0,
+            "the recovery warm-up must allocate once"
+        );
+        let unchanged = HashMap::from_iter((0..16).map(|index| (index, 1.0)));
+        let steady_plan = directory.plan_dispatch_power_wakes(&unchanged);
+        assert_eq!(steady_plan.transition_rows, 0);
+        assert_eq!(steady_plan.recovery_rows, 0);
+        assert!(directory.dispatch_power_wake_dependencies.is_empty());
+        assert_eq!(
+            directory.dispatch_power_wake_dependencies.as_ptr(),
+            dependency_storage
+        );
+        assert_eq!(
+            directory.dispatch_power_wake_dependencies.capacity(),
+            dependency_capacity
+        );
+        assert_eq!(
+            directory.powered_dispatch_station_state.as_ptr(),
+            state_storage
+        );
+        assert_eq!(
+            directory.dispatch_power_transition_journal.as_ptr(),
+            journal_storage
+        );
+    }
+
+    #[test]
+    fn dispatch_power_journal_bounds_and_encoding_fail_closed() {
+        assert_eq!(encode_dispatch_power_transition(0, false), Some(0));
+        assert_eq!(encode_dispatch_power_transition(0, true), Some(1));
+        let max_rank = usize::MAX >> 1;
+        assert_eq!(
+            encode_dispatch_power_transition(max_rank, false),
+            Some(usize::MAX - 1)
+        );
+        assert_eq!(
+            encode_dispatch_power_transition(max_rank, true),
+            Some(usize::MAX)
+        );
+        assert_eq!(encode_dispatch_power_transition(max_rank + 1, false), None);
+        assert_eq!(encode_dispatch_power_transition(max_rank + 1, true), None);
+        assert_eq!(
+            decode_dispatch_power_transition(usize::MAX),
+            (max_rank, true)
+        );
+
+        let source = route_matrix(2, &[], 0.0, 8.0);
+        let state = route_fixture_state(&source);
+        let mut directory =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        directory.dispatch_power_transition_journal = vec![0; 1].into_boxed_slice();
+        let before = directory.powered_dispatch_station_state.clone();
+        let plan = directory.plan_dispatch_power_wakes(&route_powers(2, 1.0));
+        assert!(plan.directory_fallback);
+        assert!(!plan.commit_power_state);
+        assert_eq!(plan.invalid_power_rows, 1);
+        assert_eq!(plan.transition_rows, 0);
+        assert!(directory.dispatch_power_wake_dependencies.is_empty());
+        directory.commit_dispatch(plan, &[], true);
+        assert_eq!(directory.powered_dispatch_station_state, before);
+    }
+
+    #[test]
+    fn dispatch_power_rank_or_order_drift_fails_closed_without_bit_commit() {
+        let source = route_matrix(2, &[], 0.0, 8.0);
+        let state = route_fixture_state(&source);
+        let powers = route_powers(2, 1.0);
+
+        let mut rank_drift =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        let mut drifted_ranks = (*rank_drift.station_ranks).clone();
+        drifted_ranks.insert(0, 1);
+        drifted_ranks.insert(1, 0);
+        rank_drift.station_ranks = Arc::new(drifted_ranks);
+        let before = rank_drift.powered_dispatch_station_state.clone();
+        let rank_plan = rank_drift.plan_dispatch_power_wakes(&powers);
+        assert!(rank_plan.directory_fallback);
+        assert!(!rank_plan.commit_power_state);
+        assert_eq!(rank_plan.invalid_power_rows, 2);
+        let (rank_indices, rank_scan) = rank_drift.dispatch_scan_indices(
+            &rank_drift.dispatch_power_wake_dependencies,
+            rank_plan.directory_fallback,
+            false,
+        );
+        assert_eq!(rank_indices, vec![0, 1]);
+        assert!(rank_scan.directory_fallback);
+        rank_drift.commit_dispatch(rank_plan, &[], rank_scan.directory_fallback);
+        assert_eq!(rank_drift.powered_dispatch_station_state, before);
+
+        let mut order_drift =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        Arc::make_mut(&mut order_drift.station_indices).swap(0, 1);
+        let before = order_drift.powered_dispatch_station_state.clone();
+        let order_plan = order_drift.plan_dispatch_power_wakes(&powers);
+        assert!(order_plan.directory_fallback);
+        assert!(!order_plan.commit_power_state);
+        assert_eq!(order_plan.invalid_power_rows, 2);
+        order_drift.commit_dispatch(order_plan, &[], true);
+        assert_eq!(order_drift.powered_dispatch_station_state, before);
+
+        let mut topology_drift =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        topology_drift.station_indices = Arc::from([0, 1, 2]);
+        let before = topology_drift.powered_dispatch_station_state.clone();
+        let topology_plan = topology_drift.plan_dispatch_power_wakes(&powers);
+        assert!(topology_plan.directory_fallback);
+        assert!(!topology_plan.commit_power_state);
+        assert_eq!(topology_plan.invalid_power_rows, 1);
+        assert_eq!(topology_plan.transition_rows, 0);
+        topology_drift.commit_dispatch(topology_plan, &[], true);
+        assert_eq!(topology_drift.powered_dispatch_station_state, before);
+    }
+
+    #[test]
+    fn dispatch_power_state_topology_rebuild_resets_rank_storage_once() {
+        let source = route_matrix(2, &[], 0.0, 8.0);
+        let state = route_fixture_state(&source);
+        let mut directory =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+        let initial_plan = directory.plan_dispatch_power_wakes(&route_powers(2, 1.0));
+        assert_eq!(initial_plan.transition_rows, 2);
+        directory.commit_dispatch(initial_plan, &[], false);
+        assert_eq!(directory.powered_dispatch_station_state.as_ref(), &[1, 1]);
+
+        let rebuilt_source = route_matrix(3, &[], 0.0, 8.0);
+        let rebuilt_state = route_fixture_state(&rebuilt_source);
+        let mut retained = Arc::new(directory);
+        refresh_step_directory_after_topology_change(
+            &rebuilt_source,
+            &rebuilt_state.factory_topology.station_indices,
+            true,
+            &mut retained,
+        )
+        .unwrap();
+        let rebuilt = Arc::make_mut(&mut retained);
+        assert_eq!(rebuilt.powered_dispatch_station_state.as_ref(), &[0, 0, 0]);
+        assert_eq!(rebuilt.dispatch_power_transition_journal.len(), 3);
+        assert_eq!(rebuilt.dispatch_power_transition_count, 0);
+
+        let rebuilt_plan = rebuilt.plan_dispatch_power_wakes(&route_powers(3, 1.0));
+        assert_eq!(rebuilt_plan.power_state_rows, 3);
+        assert_eq!(rebuilt_plan.transition_rows, 3);
+        assert_eq!(rebuilt_plan.recovery_rows, 3);
+        rebuilt.commit_dispatch(rebuilt_plan, &[], false);
+        assert_eq!(rebuilt.powered_dispatch_station_state.as_ref(), &[1, 1, 1]);
+    }
+
+    #[test]
+    fn non_finite_power_after_committed_on_permanently_closes_dispatch() {
+        let source = route_matrix(2, &[], 0.0, 8.0);
+        let state = route_fixture_state(&source);
+        let mut directory =
+            prepare_step_directory(&source, &state.factory_topology.station_indices).unwrap();
+
+        let on_plan = directory.plan_dispatch_power_wakes(&route_powers(2, 1.0));
+        assert_eq!(on_plan.transition_rows, 2);
+        assert_eq!(on_plan.recovery_rows, 2);
+        assert!(on_plan.commit_power_state);
+        directory.commit_dispatch(on_plan, &[], false);
+        assert_eq!(directory.powered_dispatch_station_state.as_ref(), &[1, 1]);
+        assert!(!directory.dispatch_full_scan_required);
+
+        let non_finite = HashMap::from([(0, f64::NAN), (1, f64::INFINITY)]);
+        let invalid_plan = directory.plan_dispatch_power_wakes(&non_finite);
+        assert_eq!(invalid_plan.transition_rows, 2);
+        assert_eq!(invalid_plan.recovery_rows, 0);
+        assert_eq!(invalid_plan.invalid_power_rows, 2);
+        assert!(invalid_plan.directory_fallback);
+        assert!(!invalid_plan.commit_power_state);
+        let (invalid_indices, invalid_scan) = directory.dispatch_scan_indices(
+            &directory.dispatch_power_wake_dependencies,
+            invalid_plan.directory_fallback,
+            false,
+        );
+        assert_eq!(invalid_indices, vec![0, 1]);
+        assert!(invalid_scan.directory_fallback);
+        directory.commit_dispatch(invalid_plan, &[], invalid_scan.directory_fallback);
+        assert_eq!(directory.powered_dispatch_station_state.as_ref(), &[1, 1]);
+        assert!(directory.dispatch_full_scan_required);
+
+        // The rejected power sample cannot manufacture a later recovery edge.
+        // The permanent directory fallback must still retain the full scan.
+        let finite_on_plan = directory.plan_dispatch_power_wakes(&route_powers(2, 1.0));
+        assert_eq!(finite_on_plan.transition_rows, 0);
+        assert_eq!(finite_on_plan.recovery_rows, 0);
+        assert_eq!(finite_on_plan.invalid_power_rows, 0);
+        assert!(!finite_on_plan.directory_fallback);
+        assert!(finite_on_plan.commit_power_state);
+        let (finite_on_indices, finite_on_scan) = directory.dispatch_scan_indices(
+            &directory.dispatch_power_wake_dependencies,
+            finite_on_plan.directory_fallback,
+            false,
+        );
+        assert_eq!(finite_on_indices, vec![0, 1]);
+        assert!(finite_on_scan.directory_fallback);
+    }
+
+    #[test]
+    fn dispatch_non_finite_power_and_opaque_mod_routes_fail_closed() {
+        let source = route_matrix(2, &[], 0.0, 8.0);
+        let state = route_fixture_state(&source);
+        let mut base = route_fixture_base();
+        let mut entities = source.clone();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        let before = directory.powered_dispatch_station_state.clone();
+        let scan = dispatch(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            &HashMap::from([(0, f64::NAN), (1, f64::NAN)]),
+            &mut directory,
+            &mut ledger,
+        )
+        .unwrap();
+        assert!(scan.directory_fallback);
+        assert_eq!(scan.invalid_power_rows, 2);
+        assert!(!scan.power_state_commit_allowed);
+        assert_eq!(directory.powered_dispatch_station_state, before);
+        assert!(entities[1]["stationRoutes"].as_array().unwrap().is_empty());
+
+        let mut opaque = source;
+        opaque[1]["stationRoutes"] = json!([{
+            "scope": "mod:wormhole/local",
+            "mod:payload": { "signedZero": -0.0, "text": "保持" }
+        }]);
+        let mut opaque_directory =
+            prepare_step_directory(&opaque, &(0..2).collect::<Vec<_>>()).unwrap();
+        let opaque_plan = opaque_directory.plan_dispatch_power_wakes(&route_powers(2, 1.0));
+        assert!(opaque_plan.commit_power_state);
+        assert_eq!(opaque_plan.invalid_power_rows, 0);
+        let (opaque_indices, opaque_scan) = opaque_directory.dispatch_scan_indices(
+            &opaque_directory.dispatch_power_wake_dependencies,
+            opaque_plan.directory_fallback,
+            false,
+        );
+        assert_eq!(opaque_indices, vec![0, 1]);
+        assert!(opaque_scan.directory_fallback);
     }
 
     #[test]
@@ -4573,6 +5027,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(recovered_scan.selected_station_rows, 1);
+        assert_eq!(recovered_scan.power_map_rows, 2);
+        assert_eq!(recovered_scan.power_state_rows, 2);
+        assert_eq!(recovered_scan.power_transition_rows, 2);
+        assert_eq!(recovered_scan.power_recovery_rows, 2);
+        assert_eq!(recovered_scan.invalid_power_rows, 0);
+        assert!(recovered_scan.power_state_commit_allowed);
         assert_eq!(
             power_entities[1]["stationRoutes"].as_array().unwrap().len(),
             1
@@ -4660,7 +5120,7 @@ mod tests {
             &ledger,
         )
         .unwrap();
-        directory.commit_dispatch(Vec::new(), &[], false);
+        directory.commit_dispatch(LocalDispatchPowerPlan::default(), &[], false);
 
         base["research"]["completedTechIds"] = json!(["logistics_capacity_1"]);
         let (_, signature_scan) = ready_station_indices_with_scan(
@@ -4692,7 +5152,7 @@ mod tests {
         let source = route_matrix(2, &[], 0.0, 8.0);
         let state = route_fixture_state(&source);
         let mut base = route_fixture_base();
-        let mut entities = source;
+        let mut entities = source.clone();
         entities[1]["stationLastSupplyPeerBySlot"] = Value::Null;
         let mut directory =
             prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
@@ -4700,7 +5160,7 @@ mod tests {
         let mut ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
         let pending_before = directory.pending_dispatch_demand_indices.clone();
         let all_before = directory.dispatch_all_pending;
-        let powered_before = directory.powered_dispatch_station_indices.clone();
+        let powered_before = directory.powered_dispatch_station_state.clone();
         let routes_before = directory.local_route_demand_indices.clone();
 
         let error = dispatch(
@@ -4715,8 +5175,55 @@ mod tests {
         assert_eq!(error.to_string(), "native local fairness record is missing");
         assert_eq!(directory.pending_dispatch_demand_indices, pending_before);
         assert_eq!(directory.dispatch_all_pending, all_before);
-        assert_eq!(directory.powered_dispatch_station_indices, powered_before);
+        assert_eq!(directory.powered_dispatch_station_state, powered_before);
+        assert_eq!(directory.dispatch_power_transition_count, 2);
         assert_eq!(directory.local_route_demand_indices, routes_before);
+
+        // A subsequent candidate must overwrite, rather than consume, the
+        // failed candidate's staged on-transitions. Reuse the directory but a
+        // fresh candidate state because the caller discards failed entity/base
+        // mutations as one transaction.
+        let mut retry_base = route_fixture_base();
+        let mut retry_entities = source.clone();
+        let retry_activity = crate::interstellar_logistics::prepare_route_activity(&retry_entities);
+        let mut retry_ledger =
+            StationRouteLedger::build(&state, &retry_entities, &directory, &retry_activity);
+        let off_scan = dispatch(
+            &state,
+            retry_base.as_object_mut().unwrap(),
+            &mut retry_entities,
+            &route_powers(2, 0.0),
+            &mut directory,
+            &mut retry_ledger,
+        )
+        .unwrap();
+        assert_eq!(off_scan.power_transition_rows, 0);
+        assert_eq!(off_scan.power_recovery_rows, 0);
+        assert_eq!(directory.dispatch_power_transition_count, 0);
+        assert_eq!(directory.powered_dispatch_station_state.as_ref(), &[0, 0]);
+        assert!(
+            retry_entities[1]["stationRoutes"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        let on_scan = dispatch(
+            &state,
+            retry_base.as_object_mut().unwrap(),
+            &mut retry_entities,
+            &route_powers(2, 1.0),
+            &mut directory,
+            &mut retry_ledger,
+        )
+        .unwrap();
+        assert_eq!(on_scan.power_transition_rows, 2);
+        assert_eq!(on_scan.power_recovery_rows, 2);
+        assert_eq!(directory.powered_dispatch_station_state.as_ref(), &[1, 1]);
+        assert_eq!(
+            retry_entities[1]["stationRoutes"].as_array().unwrap().len(),
+            1
+        );
     }
 
     fn run_route_step(
@@ -5038,7 +5545,7 @@ mod tests {
         .unwrap();
         // Model the prior successful dispatch boundary so this assertion
         // observes the route-completion wake rather than the initial all-wake.
-        directory.commit_dispatch(Vec::new(), &[], false);
+        directory.commit_dispatch(LocalDispatchPowerPlan::default(), &[], false);
         let powers = route_powers(entities.len(), 1.0);
 
         let changed = advance_routes(

@@ -5266,13 +5266,19 @@ fn simulate_step(
     )?;
     if profile_enabled {
         eprintln!(
-            "DSP_NATIVE_CORE_PROFILE\tlocal-dispatch-active\t{}/{}\tdemands={}/{}\tdense={}\tdirectory-fallback={}",
+            "DSP_NATIVE_CORE_PROFILE\tlocal-dispatch-active\t{}/{}\tdemands={}/{}\tdense={}\tdirectory-fallback={}\tpower-map={}\tpower-state={}\tpower-transitions={}\tpower-recoveries={}\tinvalid-power={}\tpower-commit={}",
             local_dispatch_scan.selected_station_rows,
             local_dispatch_scan.total_station_rows,
             local_dispatch_scan.selected_demand_rows,
             local_dispatch_scan.total_demand_rows,
             local_dispatch_scan.dense_fallback,
             local_dispatch_scan.directory_fallback,
+            local_dispatch_scan.power_map_rows,
+            local_dispatch_scan.power_state_rows,
+            local_dispatch_scan.power_transition_rows,
+            local_dispatch_scan.power_recovery_rows,
+            local_dispatch_scan.invalid_power_rows,
+            local_dispatch_scan.power_state_commit_allowed,
         );
     }
     profile_mark!("local-dispatch");

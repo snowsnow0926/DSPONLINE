@@ -1,5 +1,5 @@
-import { CircuitBoard, Layers3, LockKeyhole, Minus, Plus, Route, Trash2 } from "lucide-react";
-import { CONSTRUCTION, ITEMS } from "../game/content";
+import { CircuitBoard, Flame, Layers3, LockKeyhole, Minus, Plus, Route, Trash2 } from "lucide-react";
+import { CONSTRUCTION, FUEL_ENERGY_MJ, ITEMS } from "../game/content";
 import type {
   FactoryInspectorSummaryReadModel,
   FactoryMultiSelectionSummaryReadModel,
@@ -10,13 +10,14 @@ import type {
 import {
   canNativeProjectedEnergyExchangerModeChange,
   getNativeProjectedEnergyExchangerMode,
+  getNativeProjectedFuelItemConfiguration,
   getNativeProjectedPowerPriority,
   getNativeProjectedSplitterDistributionMode,
   type NativeProjectedEnergyExchangerMode,
   type NativeProjectedEntityConfigurationBinding,
   type NativeProjectedSplitterDistributionMode,
 } from "../game/nativeProjectedEntityConfigurationCommands";
-import type { PowerPriority } from "../game/types";
+import type { ItemId, PowerPriority } from "../game/types";
 import { QuantityValue } from "./QuantityValue";
 
 interface NativeFactoryInspectorPanelProps {
@@ -36,6 +37,7 @@ interface NativeFactoryInspectorPanelProps {
     entityId: string,
     targetMode: NativeProjectedEnergyExchangerMode,
   ) => void;
+  onFuelItemChange: (entityId: string, targetItemId: ItemId) => void;
   onBeltLaneCountChange: (beltId: string, targetLanes: number) => void;
   onBeltPriorityChange: (beltId: string, targetPriority: 0 | 1 | 2) => void;
   onRemoveBelt: (beltId: string) => void;
@@ -72,6 +74,7 @@ function NativeEntitySummary({
   onPowerPriorityChange,
   onSplitterDistributionModeChange,
   onEnergyExchangerModeChange,
+  onFuelItemChange,
 }: {
   entity: SelectedEntityReadModel;
   configuration: NativeProjectedEntityConfigurationBinding | null;
@@ -88,6 +91,7 @@ function NativeEntitySummary({
     entityId: string,
     targetMode: NativeProjectedEnergyExchangerMode,
   ) => void;
+  onFuelItemChange: (entityId: string, targetItemId: ItemId) => void;
 }) {
   const label = entity.buildingId
     ? constructionNames.get(entity.buildingId) ?? entity.buildingId
@@ -96,6 +100,7 @@ function NativeEntitySummary({
   const splitterDistributionMode = getNativeProjectedSplitterDistributionMode(configuration);
   const energyExchangerMode = getNativeProjectedEnergyExchangerMode(configuration);
   const energyExchangerSwitchable = canNativeProjectedEnergyExchangerModeChange(configuration);
+  const fuelConfiguration = getNativeProjectedFuelItemConfiguration(configuration);
   return <>
     <section className="inspector-content native-factory-inspector__entity" aria-label="Windows 原生建筑摘要">
       <div className="inspector-identity"><i className="building-mark"><CircuitBoard size={18} /></i><div><span>Windows 原生建筑</span><strong>{label}</strong></div></div>
@@ -170,6 +175,27 @@ function NativeEntitySummary({
           onClick={() => onEnergyExchangerModeChange(entity.entityId, mode)}
         >{mode === "charge" ? "空蓄电器充电" : "满蓄电器放电"}</button>)}
       </div>
+    </section>}
+    {fuelConfiguration === null ? null : <section
+      className="native-inspector-safe-actions"
+      data-native-fuel-item="ordinary-single-v1"
+    >
+      <strong><Flame size={14} />Rust 燃料类型</strong>
+      <p>只提交目标燃料 ID。Rust 会按最新 revision 原子返还输入缓存、回收相邻线路、返还传送带并重置出力；界面不会预先改写。</p>
+      <label>
+        <span>当前燃料</span>
+        <select
+          aria-label="Windows 原生燃料类型"
+          value={fuelConfiguration.currentItemId ?? ""}
+          disabled={pending}
+          onChange={(event) => onFuelItemChange(entity.entityId, event.target.value as ItemId)}
+        >
+          <option value="" disabled>选择燃料</option>
+          {fuelConfiguration.itemIds.map((itemId) => <option value={itemId} key={itemId}>
+            {itemLabel(itemId)} · {FUEL_ENERGY_MJ[itemId]} MJ
+          </option>)}
+        </select>
+      </label>
     </section>}
     <section className="native-inspector-safe-actions" data-native-construction-stack="ordinary-single-v1">
       <strong>Rust 建筑堆叠</strong>
@@ -279,6 +305,7 @@ export function NativeFactoryInspectorPanel({
   onEntityPowerPriorityChange,
   onSplitterDistributionModeChange,
   onEnergyExchangerModeChange,
+  onFuelItemChange,
   onBeltLaneCountChange,
   onBeltPriorityChange,
   onRemoveBelt,
@@ -297,7 +324,9 @@ export function NativeFactoryInspectorPanel({
     entityConfiguration.activePlanetId === projectionIdentity.planetId &&
     entityConfiguration.entity.id === inspector.entity.entityId &&
     entityConfiguration.entity.planetId === inspector.entity.planetId &&
+    entityConfiguration.entity.kind === inspector.entity.kind &&
     entityConfiguration.entity.buildingId === (inspector.entity.buildingId ?? undefined) &&
+    (entityConfiguration.entity.fuelItemId ?? null) === inspector.entity.fuelItemId &&
     entityConfiguration.entity.interactionLocked === inspector.entity.interactionLocked
     ? entityConfiguration
     : null;
@@ -323,6 +352,7 @@ export function NativeFactoryInspectorPanel({
       onPowerPriorityChange={onEntityPowerPriorityChange}
       onSplitterDistributionModeChange={onSplitterDistributionModeChange}
       onEnergyExchangerModeChange={onEnergyExchangerModeChange}
+      onFuelItemChange={onFuelItemChange}
     />;
   } else if (inspector.belt && !inspector.entity) {
     content = <NativeBeltSummary belt={inspector.belt} pending={pending} onLaneCountChange={onBeltLaneCountChange} onPriorityChange={onBeltPriorityChange} onRemove={onRemoveBelt} />;

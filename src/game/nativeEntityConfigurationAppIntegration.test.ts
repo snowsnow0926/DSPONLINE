@@ -33,7 +33,8 @@ describe("native entity configuration App integration", () => {
     expect(handlers).toMatch(/commitNativeProjectedCommand\(binding\.revision,[\s\S]*?createNativeProjectedEntityPowerPriorityCommand\(binding, targetPriority\)/);
     expect(handlers).toMatch(/commitNativeProjectedCommand\(binding\.revision,[\s\S]*?createNativeProjectedSplitterDistributionModeCommand\(binding, targetMode\)/);
     expect(handlers).toMatch(/commitNativeProjectedCommand\(binding\.revision,[\s\S]*?createNativeProjectedEnergyExchangerModeCommand\(binding, targetMode\)/);
-    expect(handlers).not.toMatch(/commitGame|gameRef\.current|setPowerPriority|setSplitterMode/);
+    expect(handlers).toMatch(/commitNativeProjectedCommand\(binding\.revision,[\s\S]*?createNativeProjectedFuelItemCommand\(binding, targetItemId\)/);
+    expect(handlers).not.toMatch(/commitGame|gameRef\.current|setPowerPriority|setSplitterMode|setFuelItem/);
     expect(app).toMatch(/Never install or predict the projected edit locally[\s\S]*?nativePlayerAuthorityClockRef\.current\?\.refresh\(\)/);
   });
 
@@ -44,10 +45,13 @@ describe("native entity configuration App integration", () => {
     expect(inspector).toMatch(/\(\["balanced", "priority"\] as const\)\.map/);
     expect(inspector).toMatch(/data-native-energy-exchanger-mode="ordinary-single-v1"/);
     expect(inspector).toMatch(/\(\["charge", "discharge"\] as const\)\.map/);
+    expect(inspector).toMatch(/data-native-fuel-item="ordinary-single-v1"/);
+    expect(inspector).toMatch(/fuelConfiguration\.itemIds\.map/);
     expect(app).toMatch(/entityConfiguration=\{nativeEntityConfigurationProjectionBinding\}/);
     expect(app).toMatch(/onEntityPowerPriorityChange=\{changeNativeEntityPowerPriority\}/);
     expect(app).toMatch(/onSplitterDistributionModeChange=\{changeNativeSplitterDistributionMode\}/);
     expect(app).toMatch(/onEnergyExchangerModeChange=\{changeNativeEnergyExchangerMode\}/);
-    expect(inspector).not.toMatch(/fuelItemId|stationSlots/);
+    expect(app).toMatch(/onFuelItemChange=\{changeNativeFuelItem\}/);
+    expect(inspector).not.toMatch(/stationSlots/);
   });
 });

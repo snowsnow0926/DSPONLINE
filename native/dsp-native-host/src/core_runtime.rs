@@ -4446,6 +4446,72 @@ mod tests {
         catalog
     }
 
+    fn player_authority_fuel_catalog() -> Value {
+        let mut catalog = player_authority_catalog();
+        catalog["items"].as_array_mut().unwrap().extend([
+            json!({ "id": "coal", "name": "coal", "kind": "solid", "fuelEnergyMj": 2.7 }),
+            json!({ "id": "fire_ice", "name": "fire_ice", "kind": "solid", "fuelEnergyMj": 4.8 }),
+            json!({ "id": "crude_oil", "name": "crude_oil", "kind": "fluid", "fuelEnergyMj": 4.0 }),
+            json!({ "id": "energetic_graphite", "name": "energetic_graphite", "kind": "solid", "fuelEnergyMj": 6.3 }),
+            json!({ "id": "refined_oil", "name": "refined_oil", "kind": "fluid", "fuelEnergyMj": 4.4 }),
+            json!({ "id": "hydrogen", "name": "hydrogen", "kind": "fluid", "fuelEnergyMj": 8.0 }),
+            json!({ "id": "hydrogen_fuel_rod", "name": "hydrogen_fuel_rod", "kind": "solid", "fuelEnergyMj": 54.0 }),
+            json!({ "id": "deuteron_fuel_rod", "name": "deuteron_fuel_rod", "kind": "solid", "fuelEnergyMj": 600.0 }),
+            json!({ "id": "antimatter_fuel_rod", "name": "antimatter_fuel_rod", "kind": "solid", "fuelEnergyMj": 7_200.0 }),
+            json!({ "id": "logistics_drone", "name": "logistics_drone", "kind": "solid" }),
+        ]);
+        catalog["buildings"].as_array_mut().unwrap().push(json!({
+            "id": "thermal_power_plant",
+            "kind": "power",
+            "speed": 1,
+            "inputCapacity": 120,
+            "outputCapacity": 0,
+            "powerGenerationKw": 2_160,
+            "fuelItemIds": [
+                "coal",
+                "fire_ice",
+                "crude_oil",
+                "energetic_graphite",
+                "refined_oil",
+                "hydrogen",
+                "hydrogen_fuel_rod",
+                "deuteron_fuel_rod",
+                "antimatter_fuel_rod"
+            ],
+            "fuelEfficiency": 0.8
+        }));
+        catalog["recipes"].as_array_mut().unwrap().push(json!({
+            "id": "energetic_graphite",
+            "buildingId": "arc_smelter",
+            "duration": 2,
+            "requiredTechId": "energy_matrix",
+            "inputs": [{ "itemId": "coal", "amount": 2 }],
+            "outputs": [{ "itemId": "energetic_graphite", "amount": 1 }]
+        }));
+        catalog["constructions"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "thermal_power_plant",
+                "outputAmount": 1,
+                "requiredTechId": "thermal_power",
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+            }));
+        catalog["technologies"].as_array_mut().unwrap().extend([
+            json!({
+                "id": "thermal_power",
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }],
+                "prerequisites": []
+            }),
+            json!({
+                "id": "energy_matrix",
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }],
+                "prerequisites": ["thermal_power"]
+            }),
+        ]);
+        catalog
+    }
+
     fn player_authority_macro_catalog() -> Value {
         let mut catalog = player_authority_catalog();
         catalog["buildings"].as_array_mut().unwrap().extend([
@@ -4770,6 +4836,78 @@ mod tests {
         .into_bytes()
     }
 
+    fn player_authority_fuel_envelope() -> Vec<u8> {
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["tray"]["coal"] = Value::from(7);
+        envelope["state"]["portableFleet"]["logistics_drone"] = Value::from(20);
+        envelope["state"]["research"]["completedTechIds"] =
+            json!(["thermal_power", "energy_matrix"]);
+        envelope["state"]["entities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "thermal-a",
+                "kind": "power",
+                "planetId": "home",
+                "position": { "x": 7, "y": 2 },
+                "interactionLocked": false,
+                "buildingId": "thermal_power_plant",
+                "powerGridId": "grid-a",
+                "generationPriority": 1,
+                "fuelItemId": "coal",
+                "fuelRemainingMj": 3.25,
+                "machineCount": 2,
+                "minerCount": 0,
+                "inputs": { "coal": 2.4, "logistics_drone": 1.9 },
+                "outputs": { "iron_ingot": 4 },
+                "progress": 0.75,
+                "powerInputKw": 19,
+                "powerOutputKw": 1_700,
+                "routingCursor": 0,
+                "utilization": 0.5,
+                "productionRate": 0.25
+            }));
+        envelope["state"]["belts"] = json!([
+            {
+                "id": "belt-fuel-in",
+                "planetId": "home",
+                "source": "vein",
+                "target": "thermal-a",
+                "itemId": "coal",
+                "lanes": 2,
+                "tier": 1,
+                "sorterTier": 1,
+                "progress": 0,
+                "priority": 1,
+                "stackSize": 1,
+                "monitorEnabled": false,
+                "routeMode": "auto",
+                "lastFlow": 0
+            },
+            {
+                "id": "belt-fuel-out",
+                "planetId": "home",
+                "source": "thermal-a",
+                "target": "vein",
+                "itemId": "coal",
+                "lanes": 3,
+                "tier": 1,
+                "sorterTier": 1,
+                "progress": 0,
+                "priority": 1,
+                "stackSize": 1,
+                "monitorEnabled": false,
+                "routeMode": "auto",
+                "lastFlow": 0
+            }
+        ]);
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        serde_json::to_vec(&envelope).unwrap()
+    }
+
     fn player_authority_fixture() -> (
         tempfile::TempDir,
         SaveStore,
@@ -4778,6 +4916,19 @@ mod tests {
         ExactRealtimeCheckpoint,
     ) {
         player_authority_fixture_from_bytes(import_envelope())
+    }
+
+    fn player_authority_fuel_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        player_authority_fixture_from_parts(
+            player_authority_fuel_envelope(),
+            player_authority_fuel_catalog(),
+        )
     }
 
     fn player_authority_belt_fixture() -> (
@@ -5183,6 +5334,36 @@ mod tests {
                         "path": ["position", "x"],
                         "operation": "set",
                         "value": x
+                    }]
+                }],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn player_authority_fuel_item_command(
+        base_revision: u64,
+        command_id: &str,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [],
+                "changedEntities": [{
+                    "id": "thermal-a",
+                    "changes": [{
+                        "path": ["fuelItemId"],
+                        "operation": "set",
+                        "value": "energetic_graphite"
                     }]
                 }],
                 "addedEntities": [],
@@ -8585,6 +8766,235 @@ mod tests {
         let recovered = store.recover("normal-main").unwrap().unwrap();
         assert_eq!(recovered.generation, imported.checkpoint.generation);
         assert_eq!(recovered.root_hash, imported.checkpoint.root_hash);
+    }
+
+    #[test]
+    fn player_authority_fuel_item_ack_publishes_one_same_revision_projection() {
+        let (_root, mut store, mut registry, session_id, checkpoint) =
+            player_authority_fuel_fixture();
+        let committed = registry
+            .commit_player_authority_command(
+                &mut store,
+                &session_id,
+                player_authority_fuel_item_command(checkpoint.revision, "fuel-item-authority-ack"),
+            )
+            .unwrap();
+        assert_eq!(committed.base_revision, checkpoint.revision);
+        assert_eq!(committed.revision, checkpoint.revision + 1);
+        assert_eq!(committed.changed_entity_ids, ["thermal-a"]);
+        assert_eq!(
+            committed.changed_belt_ids,
+            ["belt-fuel-in", "belt-fuel-out"]
+        );
+        assert!(committed.topology_dirty);
+        let lease = store.require_exact_realtime_lease().unwrap();
+        assert!(lease.pending_command.is_none());
+        assert_eq!(
+            lease.acknowledged.command_id.as_deref(),
+            Some("fuel-item-authority-ack")
+        );
+        assert_eq!(lease.acknowledged.revision, committed.revision);
+        assert_eq!(
+            lease.acknowledged.proof.canonical_sha256,
+            committed.summary.canonical_sha256
+        );
+
+        let projection = registry
+            .factory_read_model_projection(&session_id, &["thermal-a".to_owned()], &[])
+            .unwrap();
+        assert_eq!(projection["revision"], committed.revision);
+        assert_eq!(
+            projection["selection"]["entityRows"]["rows"][0]["fuelItemId"],
+            "energetic_graphite"
+        );
+        assert_eq!(
+            projection["selection"]["entityRows"]["rows"][0]["inputItems"]["totalCount"],
+            0
+        );
+        assert_eq!(projection["shell"]["beltCount"], 0);
+    }
+
+    #[test]
+    fn staged_fuel_item_intent_recovers_to_ack_and_same_revision_projection() {
+        let (root, mut store, mut registry, session_id, checkpoint) =
+            player_authority_fuel_fixture();
+        let before = registry.status(&session_id).unwrap();
+        let error = registry
+            .commit_player_authority_command_internal(
+                &mut store,
+                &session_id,
+                player_authority_fuel_item_command(
+                    checkpoint.revision,
+                    "fuel-item-staged-recovery",
+                ),
+                PlayerAuthorityCommandKind::Gameplay,
+                PlayerAuthorityCommandFault::AfterStage,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("lost response"));
+        assert_eq!(
+            registry.status(&session_id).unwrap().revision,
+            checkpoint.revision
+        );
+        assert_eq!(
+            registry.status(&session_id).unwrap().canonical_sha256,
+            before.canonical_sha256
+        );
+        assert!(
+            store
+                .require_exact_realtime_lease()
+                .unwrap()
+                .pending_command
+                .is_some()
+        );
+        drop(registry);
+        drop(store);
+
+        let mut reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = resumable_player_authority_registry_for_test();
+        let recovered = reopened_registry
+            .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+            .unwrap()
+            .expect("staged fuel intent must recover");
+        assert_eq!(recovered.revision, checkpoint.revision + 1);
+        assert_eq!(
+            recovered.command_id.as_deref(),
+            Some("fuel-item-staged-recovery")
+        );
+        assert_eq!(recovered.changed_entity_ids, ["thermal-a"]);
+        assert!(recovered.topology_dirty);
+        assert!(
+            reopened_store
+                .require_exact_realtime_lease()
+                .unwrap()
+                .pending_command
+                .is_none()
+        );
+        let projection = reopened_registry
+            .factory_read_model_projection(&recovered.session_id, &["thermal-a".to_owned()], &[])
+            .unwrap();
+        assert_eq!(projection["revision"], recovered.revision);
+        assert_eq!(
+            projection["selection"]["entityRows"]["rows"][0]["fuelItemId"],
+            "energetic_graphite"
+        );
+        assert_eq!(projection["shell"]["beltCount"], 0);
+    }
+
+    #[test]
+    fn fuel_item_semantic_intent_survives_generic_cold_wal_reopen() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = player_authority_fuel_envelope();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_fuel_catalog(),
+            )
+            .unwrap();
+        let checkpoint = imported.checkpoint.clone();
+        let command = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "baseRevision": checkpoint.revision,
+            "topLevelChanges": [],
+            "changedEntities": [{
+                "id": "thermal-a",
+                "changes": [{
+                    "path": ["fuelItemId"],
+                    "operation": "set",
+                    "value": "energetic_graphite"
+                }]
+            }],
+            "addedEntities": [],
+            "removedEntityIds": [],
+            "changedBelts": [],
+            "addedBelts": [],
+            "removedBeltIds": []
+        }))
+        .unwrap();
+        let committed = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "fuel-item-before-cold-reopen".to_owned(),
+                    base_revision: checkpoint.revision,
+                    command: Some(command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        let live_summary = committed
+            .summary
+            .as_ref()
+            .expect("diagnostic commit must return the live summary");
+        assert_eq!(committed.revision, checkpoint.revision + 1);
+        registry
+            .export_v47(&store, &imported.session_id, "fuel-item-live", 100)
+            .unwrap();
+        let live: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/fuel-item-live.json")).unwrap(),
+        )
+        .unwrap();
+        let thermal = live["state"]["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["id"] == "thermal-a")
+            .unwrap();
+        assert_eq!(thermal["fuelItemId"], "energetic_graphite");
+        assert_eq!(thermal["inputs"], json!({}));
+        assert_eq!(thermal["outputs"], json!({ "iron_ingot": 4 }));
+        assert_eq!(thermal["fuelRemainingMj"], 3.25);
+        assert_eq!(thermal["powerOutputKw"], 0);
+        assert_eq!(thermal["powerInputKw"], 19);
+        assert_eq!(live["state"]["tray"]["coal"], 9);
+        assert_eq!(live["state"]["portableFleet"]["logistics_drone"], 21);
+        assert_eq!(live["state"]["construction"]["conveyor_belt_mk1"], 9);
+        assert_eq!(live["state"]["belts"], json!([]));
+        let live_state = live["state"].clone();
+        let live_hash = live_summary.canonical_sha256.clone();
+
+        drop(registry);
+        drop(store);
+
+        let reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = CoreRegistry::default();
+        let reopened = reopened_registry
+            .open(
+                &reopened_store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_fuel_catalog(),
+            )
+            .unwrap();
+        assert_eq!(reopened.replayed_wal_entries, 1);
+        assert_eq!(reopened.replayed_revision, committed.revision);
+        assert_eq!(reopened.summary.revision, committed.revision);
+        assert_eq!(reopened.summary.canonical_sha256, live_hash);
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &reopened.session_id,
+                "fuel-item-replayed",
+                100,
+            )
+            .unwrap();
+        let replayed: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/fuel-item-replayed.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replayed["state"], live_state);
     }
 
     #[test]

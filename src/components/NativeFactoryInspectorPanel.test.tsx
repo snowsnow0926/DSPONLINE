@@ -89,7 +89,7 @@ describe("NativeFactoryInspectorPanel", () => {
     const remove = vi.fn();
     const stack = vi.fn();
     const lock = vi.fn();
-    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi()} entityConfiguration={null} pending={false} onEntityLockChange={lock} onRemoveEntity={remove} onStackCountChange={stack} onEntityPowerPriorityChange={vi.fn()} onSplitterDistributionModeChange={vi.fn()} onEnergyExchangerModeChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
+    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi()} entityConfiguration={null} pending={false} onEntityLockChange={lock} onRemoveEntity={remove} onStackCountChange={stack} onEntityPowerPriorityChange={vi.fn()} onSplitterDistributionModeChange={vi.fn()} onEnergyExchangerModeChange={vi.fn()} onFuelItemChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
     expect(host.textContent).toContain("MOD/建筑-一");
     expect(host.textContent).toContain("MOD/输入");
     const button = host.querySelector<HTMLButtonElement>('[data-native-construction-removal] button')!;
@@ -105,7 +105,7 @@ describe("NativeFactoryInspectorPanel", () => {
   });
 
   it("fails closed for a mismatched revision and never exposes the removal action", () => {
-    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi({ revision: 9 })} entityConfiguration={null} pending={false} onEntityLockChange={vi.fn()} onRemoveEntity={vi.fn()} onStackCountChange={vi.fn()} onEntityPowerPriorityChange={vi.fn()} onSplitterDistributionModeChange={vi.fn()} onEnergyExchangerModeChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
+    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi({ revision: 9 })} entityConfiguration={null} pending={false} onEntityLockChange={vi.fn()} onRemoveEntity={vi.fn()} onStackCountChange={vi.fn()} onEntityPowerPriorityChange={vi.fn()} onSplitterDistributionModeChange={vi.fn()} onEnergyExchangerModeChange={vi.fn()} onFuelItemChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
     expect(host.textContent).toContain("正在核对原生检查摘要");
     expect(host.querySelector("[data-native-construction-removal]")).toBeNull();
   });
@@ -146,6 +146,7 @@ describe("NativeFactoryInspectorPanel", () => {
       onEntityPowerPriorityChange={vi.fn()}
       onSplitterDistributionModeChange={vi.fn()}
       onEnergyExchangerModeChange={vi.fn()}
+      onFuelItemChange={vi.fn()}
       onBeltLaneCountChange={lanes}
       onBeltPriorityChange={priority}
       onRemoveBelt={removeBelt}
@@ -190,6 +191,7 @@ describe("NativeFactoryInspectorPanel", () => {
       onEntityPowerPriorityChange={priority}
       onSplitterDistributionModeChange={vi.fn()}
       onEnergyExchangerModeChange={vi.fn()}
+      onFuelItemChange={vi.fn()}
       onBeltLaneCountChange={vi.fn()}
       onBeltPriorityChange={vi.fn()}
       onRemoveBelt={vi.fn()}
@@ -234,6 +236,7 @@ describe("NativeFactoryInspectorPanel", () => {
         onEntityPowerPriorityChange={vi.fn()}
         onSplitterDistributionModeChange={mode}
         onEnergyExchangerModeChange={vi.fn()}
+        onFuelItemChange={vi.fn()}
         onBeltLaneCountChange={vi.fn()}
         onBeltPriorityChange={vi.fn()}
         onRemoveBelt={vi.fn()}
@@ -293,6 +296,7 @@ describe("NativeFactoryInspectorPanel", () => {
         onEntityPowerPriorityChange={vi.fn()}
         onSplitterDistributionModeChange={vi.fn()}
         onEnergyExchangerModeChange={mode}
+        onFuelItemChange={vi.fn()}
         onBeltLaneCountChange={vi.fn()}
         onBeltPriorityChange={vi.fn()}
         onRemoveBelt={vi.fn()}
@@ -315,5 +319,83 @@ describe("NativeFactoryInspectorPanel", () => {
     buttons = [...host.querySelectorAll<HTMLButtonElement>("[data-native-energy-exchanger-mode] button")];
     expect(buttons.every((button) => button.disabled)).toBe(true);
     expect(host.textContent).toContain("必须先放空");
+  });
+
+  it("routes one built-in fuel intent, stays projected, and blocks pending or MOD rows", () => {
+    const fuel = vi.fn();
+    const thermal = projectedEntity({
+      id: "thermal-a",
+      kind: "power",
+      buildingId: "thermal_power_plant",
+      recipeId: undefined,
+      powerPriority: undefined,
+      fuelItemId: "coal",
+      fuelRemainingMj: 3.25,
+      inputs: { coal: 4 },
+      powerOutputKw: 2_100,
+    });
+    const thermalSummary = {
+      ...entity,
+      entityId: thermal.id,
+      kind: thermal.kind,
+      buildingId: thermal.buildingId ?? null,
+      recipeId: null,
+      fuelItemId: thermal.fuelItemId ?? null,
+      machineCount: 1,
+      inputItems: { rows: [{ itemId: "coal", amount: 4 }], totalCount: 1, truncated: false },
+    };
+    const render = (projected: FactoryEntity, pending = false) => act(() => root.render(
+      <NativeFactoryInspectorPanel
+        inspector={inspector({ entity: thermalSummary })}
+        multiSelection={multi({ entityRows: { rows: [thermalSummary], totalCount: 1, truncated: false } })}
+        entityConfiguration={configuration(projected)}
+        pending={pending}
+        onEntityLockChange={vi.fn()}
+        onRemoveEntity={vi.fn()}
+        onStackCountChange={vi.fn()}
+        onEntityPowerPriorityChange={vi.fn()}
+        onSplitterDistributionModeChange={vi.fn()}
+        onEnergyExchangerModeChange={vi.fn()}
+        onFuelItemChange={fuel}
+        onBeltLaneCountChange={vi.fn()}
+        onBeltPriorityChange={vi.fn()}
+        onRemoveBelt={vi.fn()}
+      />,
+    ));
+
+    render(thermal);
+    let select = host.querySelector<HTMLSelectElement>("[data-native-fuel-item] select")!;
+    expect(select.value).toBe("coal");
+    expect([...select.options].map((option) => option.value)).toEqual([
+      "",
+      "coal",
+      "fire_ice",
+      "crude_oil",
+      "energetic_graphite",
+      "refined_oil",
+      "hydrogen",
+      "hydrogen_fuel_rod",
+      "deuteron_fuel_rod",
+      "antimatter_fuel_rod",
+    ]);
+    act(() => {
+      select.value = "fire_ice";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(fuel).toHaveBeenCalledWith("thermal-a", "fire_ice");
+    expect(thermal.fuelItemId).toBe("coal");
+
+    render(thermal, true);
+    select = host.querySelector<HTMLSelectElement>("[data-native-fuel-item] select")!;
+    expect(select.disabled).toBe(true);
+
+    render({ ...thermal, fuelItemId: "fire_ice" });
+    expect(host.querySelector("[data-native-fuel-item]")).toBeNull();
+
+    render({
+      ...thermal,
+      buildingId: "MOD/fuel-generator" as FactoryEntity["buildingId"],
+    });
+    expect(host.querySelector("[data-native-fuel-item]")).toBeNull();
   });
 });

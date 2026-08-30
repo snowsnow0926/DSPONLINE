@@ -4,8 +4,10 @@ import {
   canNativeProjectedEnergyExchangerModeChange,
   createNativeProjectedEnergyExchangerModeCommand,
   createNativeProjectedEntityPowerPriorityCommand,
+  createNativeProjectedFuelItemCommand,
   createNativeProjectedSplitterDistributionModeCommand,
   getNativeProjectedEnergyExchangerMode,
+  getNativeProjectedFuelItemConfiguration,
   getNativeProjectedPowerPriority,
   getNativeProjectedSplitterDistributionMode,
   type NativeProjectedEntityConfigurationBinding,
@@ -203,6 +205,101 @@ describe("native projected entity configuration commands", () => {
         .toThrow(TypeError);
     }
     expect(() => createNativeProjectedEnergyExchangerModeCommand(exchanger(), "auto" as "charge"))
+      .toThrow(TypeError);
+  });
+
+  it("builds only one fuel item intent from the pinned built-in generator row", () => {
+    const thermal = binding({
+      entity: entity({
+        id: "thermal-a",
+        kind: "power",
+        buildingId: "thermal_power_plant",
+        recipeId: undefined,
+        powerPriority: undefined,
+        fuelItemId: "coal",
+        inputs: { coal: 7, logistics_drone: 2 },
+        outputs: { iron_ingot: 4 },
+        fuelRemainingMj: 3.25,
+        powerOutputKw: 2_100,
+      }),
+    });
+    expect(getNativeProjectedFuelItemConfiguration(thermal)).toEqual({
+      currentItemId: "coal",
+      itemIds: [
+        "coal",
+        "fire_ice",
+        "crude_oil",
+        "energetic_graphite",
+        "refined_oil",
+        "hydrogen",
+        "hydrogen_fuel_rod",
+        "deuteron_fuel_rod",
+        "antimatter_fuel_rod",
+      ],
+    });
+    expect(createNativeProjectedFuelItemCommand(thermal, "fire_ice")).toEqual({
+      protocolVersion: 1,
+      baseRevision: 73,
+      topLevelChanges: [],
+      changedEntities: [{
+        id: "thermal-a",
+        changes: [{ path: ["fuelItemId"], operation: "set", value: "fire_ice" }],
+      }],
+      addedEntities: [],
+      removedEntityIds: [],
+      changedBelts: [],
+      addedBelts: [],
+      removedBeltIds: [],
+    });
+    expect(createNativeProjectedFuelItemCommand(thermal, "coal")).toBeNull();
+  });
+
+  it("keeps unselected built-in generators reachable and fails closed for illegal fuel pairs", () => {
+    const generator = (
+      buildingId: FactoryEntity["buildingId"],
+      fuelItemId?: FactoryEntity["fuelItemId"],
+    ) => binding({
+      entity: entity({
+        id: "fuel-a",
+        kind: "power",
+        buildingId,
+        recipeId: undefined,
+        powerPriority: undefined,
+        fuelItemId,
+      }),
+    });
+    const unselected = generator("thermal_power_plant");
+    expect(getNativeProjectedFuelItemConfiguration(unselected)?.currentItemId).toBeNull();
+    expect(createNativeProjectedFuelItemCommand(unselected, "coal"))
+      .toMatchObject({
+        baseRevision: 73,
+        changedEntities: [{
+          id: "fuel-a",
+          changes: [{ path: ["fuelItemId"], operation: "set", value: "coal" }],
+        }],
+      });
+
+    const fusion = generator("mini_fusion_power_plant", "deuteron_fuel_rod");
+    expect(getNativeProjectedFuelItemConfiguration(fusion)?.itemIds)
+      .toEqual(["deuteron_fuel_rod"]);
+    expect(() => createNativeProjectedFuelItemCommand(fusion, "coal")).toThrow(TypeError);
+    const star = generator("artificial_star", "antimatter_fuel_rod");
+    expect(getNativeProjectedFuelItemConfiguration(star)?.itemIds)
+      .toEqual(["antimatter_fuel_rod"]);
+
+    for (const unsupported of [
+      generator("mini_fusion_power_plant", "coal"),
+      generator("artificial_star", "deuteron_fuel_rod"),
+      generator("solar_panel"),
+      generator("MOD/fuel-generator" as FactoryEntity["buildingId"], "coal"),
+      binding({ entity: entity({ kind: "machine", buildingId: "thermal_power_plant", fuelItemId: "coal" }) }),
+      binding({ entity: entity({ kind: "power", buildingId: "thermal_power_plant", fuelItemId: "coal", interactionLocked: true }) }),
+      binding({ entity: entity({ kind: "power", buildingId: "thermal_power_plant", fuelItemId: "coal", planetId: "ashen" }) }),
+    ]) {
+      expect(getNativeProjectedFuelItemConfiguration(unsupported)).toBeNull();
+      expect(() => createNativeProjectedFuelItemCommand(unsupported, "coal")).toThrow(TypeError);
+    }
+    expect(() => createNativeProjectedFuelItemCommand(unselected, "iron_ingot"))
       .toThrow(TypeError);
   });
 });

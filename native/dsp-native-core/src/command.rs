@@ -88,6 +88,20 @@ const BUILTIN_POWER_PRIORITY_BUILDINGS: &[&str] = &[
     "vertical_launching_silo",
 ];
 
+const BUILTIN_THERMAL_FUEL_ITEMS: &[&str] = &[
+    "coal",
+    "fire_ice",
+    "crude_oil",
+    "energetic_graphite",
+    "refined_oil",
+    "hydrogen",
+    "hydrogen_fuel_rod",
+    "deuteron_fuel_rod",
+    "antimatter_fuel_rod",
+];
+const BUILTIN_FUSION_FUEL_ITEMS: &[&str] = &["deuteron_fuel_rod"];
+const BUILTIN_ARTIFICIAL_STAR_FUEL_ITEMS: &[&str] = &["antimatter_fuel_rod"];
+
 const UNSUPPORTED_ORDINARY_PLACEMENT_BUILDINGS: &[&str] = &[
     "galactic_material_exporter",
     "geothermal_power_station",
@@ -1919,6 +1933,370 @@ fn expand_energy_exchanger_mode_intent(
     );
     if entity_changes.is_empty() {
         bail!("native player-authority energy exchanger transition is empty")
+    }
+    Ok(SimulationCommandPatch {
+        protocol_version: command.protocol_version,
+        base_revision: command.base_revision,
+        top_level_changes,
+        changed_entities: vec![RecordPatch {
+            id: entity_id,
+            changes: entity_changes,
+        }],
+        added_entities: Vec::new(),
+        removed_entity_ids: Vec::new(),
+        changed_belts: Vec::new(),
+        added_belts: Vec::new(),
+        removed_belt_ids,
+    })
+}
+
+fn command_contains_fuel_item_intent(command: &SimulationCommandPatch) -> bool {
+    command.changed_entities.iter().any(|record| {
+        record
+            .changes
+            .iter()
+            .any(|change| path_matches(&change.path, &["fuelItemId"]))
+    })
+}
+
+fn builtin_fuel_items_for_building(building_id: &str) -> Option<&'static [&'static str]> {
+    match building_id {
+        "thermal_power_plant" => Some(BUILTIN_THERMAL_FUEL_ITEMS),
+        "mini_fusion_power_plant" => Some(BUILTIN_FUSION_FUEL_ITEMS),
+        "artificial_star" => Some(BUILTIN_ARTIFICIAL_STAR_FUEL_ITEMS),
+        _ => None,
+    }
+}
+
+fn builtin_fuel_building_technology(building_id: &str) -> Option<&'static str> {
+    match building_id {
+        "thermal_power_plant" => Some("thermal_power"),
+        "mini_fusion_power_plant" => Some("fusion_power"),
+        "artificial_star" => Some("artificial_star"),
+        _ => None,
+    }
+}
+
+fn builtin_fuel_item_definition(item_id: &str) -> Option<(&'static str, f64)> {
+    match item_id {
+        "coal" => Some(("solid", 2.7)),
+        "fire_ice" => Some(("solid", 4.8)),
+        "crude_oil" => Some(("fluid", 4.0)),
+        "energetic_graphite" => Some(("solid", 6.3)),
+        "refined_oil" => Some(("fluid", 4.4)),
+        "hydrogen" => Some(("fluid", 8.0)),
+        "hydrogen_fuel_rod" => Some(("solid", 54.0)),
+        "deuteron_fuel_rod" => Some(("solid", 600.0)),
+        "antimatter_fuel_rod" => Some(("solid", 7_200.0)),
+        _ => None,
+    }
+}
+
+fn builtin_fuel_item_unlock(item_id: &str) -> Option<(&'static str, &'static str)> {
+    match item_id {
+        "energetic_graphite" => Some(("energy_matrix", "energetic_graphite")),
+        "refined_oil" | "hydrogen" => Some(("high_efficiency_plasma_control", "plasma_refining")),
+        "hydrogen_fuel_rod" => Some(("fractionation", "hydrogen_fuel_rod")),
+        "deuteron_fuel_rod" => Some(("miniature_particle_collider", "deuteron_fuel_rod")),
+        "antimatter_fuel_rod" => Some(("antimatter", "antimatter_fuel_rod")),
+        _ => None,
+    }
+}
+
+fn validated_fuel_item_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<(String, Value, String)> {
+    if command.changed_entities.len() != 1
+        || command.changed_entities[0].changes.len() != 1
+        || !command.top_level_changes.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority fuel item command shape is invalid")
+    }
+    if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    {
+        bail!("native player-authority fuel item commands require the built-in catalog")
+    }
+    let record = &command.changed_entities[0];
+    let target = require_exact_set_patch(&record.changes, &["fuelItemId"])?
+        .as_str()
+        .ok_or_else(|| anyhow!("native player-authority fuel item target is invalid"))?
+        .to_owned();
+    let index = *state
+        .entity_index
+        .get(&record.id)
+        .ok_or_else(|| anyhow!("native player-authority fuel building is missing"))?;
+    let entity = state.parse_entity(index)?;
+    let object = entity
+        .as_object()
+        .ok_or_else(|| anyhow!("native player-authority fuel building is invalid"))?;
+    let building_id = object
+        .get("buildingId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority fuel building ID is missing"))?;
+    let builtin_fuel_items = builtin_fuel_items_for_building(building_id).ok_or_else(|| {
+        anyhow!("native player-authority fuel target is not a built-in generator")
+    })?;
+    if object.get("kind").and_then(Value::as_str) != Some("power")
+        || !builtin_fuel_items.contains(&target.as_str())
+    {
+        bail!("native player-authority building and fuel combination is invalid")
+    }
+    let active_planet_id = state
+        .base_value()
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority active planet is missing"))?;
+    if object.get("planetId").and_then(Value::as_str) != Some(active_planet_id) {
+        bail!("native player-authority fuel building is not on the active planet")
+    }
+    if object
+        .get("interactionLocked")
+        .is_some_and(|locked| locked.as_bool() != Some(false))
+    {
+        bail!("native player-authority fuel building is locked or malformed")
+    }
+    if let Some(current) = object.get("fuelItemId").filter(|value| !value.is_null()) {
+        let current = current
+            .as_str()
+            .filter(|item_id| builtin_fuel_items.contains(item_id))
+            .ok_or_else(|| anyhow!("native player-authority current fuel item is invalid"))?;
+        if current == target {
+            bail!("native player-authority fuel item target is unchanged")
+        }
+    }
+    if state
+        .catalog
+        .buildings
+        .get(building_id)
+        .filter(|building| {
+            building.kind == "power"
+                && building.power_generation_kw.is_finite()
+                && building.power_generation_kw > 0.0
+                && building.input_capacity.is_finite()
+                && building.input_capacity > 0.0
+                && building
+                    .fuel_item_ids
+                    .iter()
+                    .map(String::as_str)
+                    .eq(builtin_fuel_items.iter().copied())
+        })
+        .is_none()
+    {
+        bail!("native player-authority fuel building catalog is invalid")
+    }
+    let required_building_technology = builtin_fuel_building_technology(building_id)
+        .expect("built-in fuel building has a technology mapping");
+    if state
+        .catalog
+        .constructions
+        .get(building_id)
+        .filter(|construction| {
+            construction.required_tech_id.as_deref() == Some(required_building_technology)
+        })
+        .is_none()
+    {
+        bail!("native player-authority fuel construction catalog is invalid")
+    }
+    if !state
+        .catalog
+        .technologies
+        .contains_key(required_building_technology)
+        || !technology_is_completed(state, required_building_technology)
+    {
+        bail!("native player-authority fuel building technology is locked")
+    }
+    let (expected_kind, expected_energy_mj) =
+        builtin_fuel_item_definition(&target).expect("built-in fuel item has a catalog definition");
+    if state
+        .catalog
+        .items
+        .get(&target)
+        .filter(|item| {
+            item.kind == expected_kind
+                && item.fuel_energy_mj.to_bits() == expected_energy_mj.to_bits()
+        })
+        .is_none()
+    {
+        bail!("native player-authority fuel item catalog is invalid")
+    }
+    if let Some((required_technology, recipe_id)) = builtin_fuel_item_unlock(&target) {
+        let recipe = state.catalog.recipes.get(recipe_id).filter(|recipe| {
+            recipe.required_tech_id.as_deref() == Some(required_technology)
+                && recipe.outputs.iter().any(|output| {
+                    output.item_id == target && output.amount.is_finite() && output.amount > 0.0
+                })
+        });
+        if !state.catalog.technologies.contains_key(required_technology)
+            || !technology_is_completed(state, required_technology)
+            || recipe.is_none()
+        {
+            bail!("native player-authority fuel item is missing or locked")
+        }
+    }
+    let machine_count = safe_json_integer(object.get("machineCount"), "fuel building count")?;
+    if machine_count == 0 {
+        bail!("native player-authority fuel building count is empty")
+    }
+    if let Some(fuel_remaining_mj) = object.get("fuelRemainingMj")
+        && finite_json_number(Some(fuel_remaining_mj), "fuel chamber energy")? < 0.0
+    {
+        bail!("native player-authority fuel chamber energy is negative")
+    }
+    if let Some(power_output_kw) = object.get("powerOutputKw")
+        && finite_json_number(Some(power_output_kw), "fuel building power output")? < 0.0
+    {
+        bail!("native player-authority fuel building power output is negative")
+    }
+    let inputs = object
+        .get("inputs")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority fuel inputs are invalid"))?;
+    for (item_id, amount) in inputs {
+        if !state.catalog.items.contains_key(item_id) {
+            bail!("native player-authority fuel input item is unknown")
+        }
+        if finite_json_number(Some(amount), "fuel input inventory")? < 0.0 {
+            bail!("native player-authority fuel input inventory is negative")
+        }
+    }
+    Ok((record.id.clone(), entity, target))
+}
+
+fn validate_fuel_item_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    validated_fuel_item_intent(state, command).map(|_| ())
+}
+
+fn add_fuel_refund_to_tray(
+    base: &mut Map<String, Value>,
+    item_id: &str,
+    amount: &Value,
+) -> anyhow::Result<()> {
+    let amount = finite_json_number(Some(amount), "fuel input refund")?;
+    if amount < 0.0 {
+        bail!("native player-authority fuel input refund is negative")
+    }
+    let target = if matches!(item_id, "logistics_drone" | "logistics_vessel") {
+        base.entry("portableFleet".to_owned())
+            .or_insert_with(|| serde_json::json!({ "logistics_drone": 0, "logistics_vessel": 0 }))
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("native player-authority portable fleet is invalid"))?
+    } else {
+        base.get_mut("tray")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native player-authority active tray is invalid"))?
+    };
+    let current = match target.get(item_id) {
+        Some(value) => finite_json_number(Some(value), "fuel refund inventory")?,
+        None => 0.0,
+    };
+    if current < 0.0 {
+        bail!("native player-authority fuel refund inventory is negative")
+    }
+    let next = (current + amount + PLAYER_ENERGY_EPSILON).floor();
+    if !next.is_finite() || next > MAX_JAVASCRIPT_SAFE_INTEGER as f64 {
+        bail!("native player-authority fuel input refund overflows")
+    }
+    target.insert(item_id.to_owned(), Value::from(next as u64));
+    Ok(())
+}
+
+fn expand_fuel_item_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<SimulationCommandPatch> {
+    let (entity_id, before_entity, target) = validated_fuel_item_intent(state, command)?;
+    let before_object = before_entity
+        .as_object()
+        .expect("fuel item intent validated the entity object");
+    let mut candidate_base = Value::Object(state.base_value().clone());
+    let candidate_base_object = candidate_base
+        .as_object_mut()
+        .expect("the native core base is an object");
+    for (item_id, amount) in before_object["inputs"]
+        .as_object()
+        .expect("fuel input inventory was validated")
+    {
+        add_fuel_refund_to_tray(candidate_base_object, item_id, amount)?;
+    }
+
+    let mut removed_belt_ids = Vec::new();
+    let mut belt_refunds = BTreeMap::<&'static str, u64>::new();
+    for belt_index in 0..state.belts.ids.len() {
+        let belt = state.parse_belt(belt_index)?;
+        let object = belt
+            .as_object()
+            .ok_or_else(|| anyhow!("native player-authority incident fuel belt is invalid"))?;
+        if object.get("source").and_then(Value::as_str) != Some(entity_id.as_str())
+            && object.get("target").and_then(Value::as_str) != Some(entity_id.as_str())
+        {
+            continue;
+        }
+        let belt_id = object
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("native player-authority incident fuel belt ID is invalid"))?;
+        let lanes = safe_json_integer(object.get("lanes"), "incident fuel belt lanes")?;
+        if lanes == 0 {
+            bail!("native player-authority incident fuel belt lanes are empty")
+        }
+        let tier = safe_json_integer(object.get("tier"), "incident fuel belt tier")?
+            .try_into()
+            .map_err(|_| anyhow!("native player-authority incident fuel belt tier is invalid"))?;
+        let construction_id = builtin_belt_construction_id(state, tier)?;
+        let refund = belt_refunds.entry(construction_id).or_default();
+        *refund = refund
+            .checked_add(lanes)
+            .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+            .ok_or_else(|| anyhow!("native player-authority fuel belt refund overflows"))?;
+        removed_belt_ids.push(belt_id.to_owned());
+    }
+    let construction = candidate_base_object
+        .get_mut("construction")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native player-authority construction inventory is missing"))?;
+    for (construction_id, refund) in belt_refunds {
+        let current = normalized_construction_inventory(construction.get(construction_id))?;
+        let next = current
+            .checked_add(refund)
+            .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+            .ok_or_else(|| anyhow!("native player-authority fuel belt refund overflows"))?;
+        construction.insert(construction_id.to_owned(), Value::from(next));
+    }
+
+    let mut candidate_entity = before_entity.clone();
+    let candidate_object = candidate_entity
+        .as_object_mut()
+        .expect("fuel item intent validated the entity object");
+    candidate_object.insert("inputs".to_owned(), Value::Object(Map::new()));
+    candidate_object.insert("fuelItemId".to_owned(), Value::from(target.as_str()));
+    candidate_object.insert("powerOutputKw".to_owned(), Value::from(0));
+
+    let mut top_level_changes = Vec::new();
+    create_expected_value_patches(
+        &Value::Object(state.base_value().clone()),
+        &candidate_base,
+        Vec::new(),
+        &mut top_level_changes,
+    );
+    let mut entity_changes = Vec::new();
+    create_expected_value_patches(
+        &before_entity,
+        &candidate_entity,
+        Vec::new(),
+        &mut entity_changes,
+    );
+    if entity_changes.is_empty() {
+        bail!("native player-authority fuel item transition is empty")
     }
     Ok(SimulationCommandPatch {
         protocol_version: command.protocol_version,
@@ -6507,6 +6885,9 @@ impl CoreState {
         if command_contains_energy_exchanger_mode_intent(command) {
             return validate_energy_exchanger_mode_command(self, command);
         }
+        if command_contains_fuel_item_intent(command) {
+            return validate_fuel_item_command(self, command);
+        }
         if command.changed_entities.iter().any(|record| {
             record.changes.iter().any(|change| {
                 matches!(
@@ -6788,6 +7169,7 @@ impl CoreState {
         let expanded_active_planet_intent;
         let expanded_research_transition_intent;
         let expanded_energy_exchanger_mode_intent;
+        let expanded_fuel_item_intent;
         let expanded_manual_mining_intent;
         let applied_command = if command_contains_active_planet_intent(command) {
             expanded_active_planet_intent = expand_active_planet_intent(self, command)?;
@@ -6800,6 +7182,9 @@ impl CoreState {
             expanded_energy_exchanger_mode_intent =
                 expand_energy_exchanger_mode_intent(self, command)?;
             &expanded_energy_exchanger_mode_intent
+        } else if command_contains_fuel_item_intent(command) {
+            expanded_fuel_item_intent = expand_fuel_item_intent(self, command)?;
+            &expanded_fuel_item_intent
         } else if crate::manual_mining::command_contains_intent(command) {
             expanded_manual_mining_intent = crate::manual_mining::expand_intent(self, command)?;
             &expanded_manual_mining_intent
@@ -7675,6 +8060,161 @@ mod tests {
 
     fn energy_exchanger_mode_command(base_revision: u64, target: Value) -> SimulationCommandPatch {
         entity_leaf_command(base_revision, "exchanger-a", "energyMode", target)
+    }
+
+    fn player_fuel_catalog_for_registry(registry_fingerprint: &str) -> RuntimeCatalog {
+        let mut snapshot = serde_json::to_value(
+            player_command_catalog_for_registry(registry_fingerprint).snapshot,
+        )
+        .unwrap();
+        snapshot["items"].as_array_mut().unwrap().extend([
+            serde_json::json!({ "id": "coal", "kind": "solid", "fuelEnergyMj": 2.7 }),
+            serde_json::json!({ "id": "fire_ice", "kind": "solid", "fuelEnergyMj": 4.8 }),
+            serde_json::json!({ "id": "crude_oil", "kind": "fluid", "fuelEnergyMj": 4.0 }),
+            serde_json::json!({ "id": "energetic_graphite", "kind": "solid", "fuelEnergyMj": 6.3 }),
+            serde_json::json!({ "id": "refined_oil", "kind": "fluid", "fuelEnergyMj": 4.4 }),
+            serde_json::json!({ "id": "hydrogen", "kind": "fluid", "fuelEnergyMj": 8.0 }),
+            serde_json::json!({ "id": "hydrogen_fuel_rod", "kind": "solid", "fuelEnergyMj": 54.0 }),
+            serde_json::json!({ "id": "deuteron_fuel_rod", "kind": "solid", "fuelEnergyMj": 600.0 }),
+            serde_json::json!({ "id": "antimatter_fuel_rod", "kind": "solid", "fuelEnergyMj": 7_200.0 }),
+        ]);
+        snapshot["buildings"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "thermal_power_plant",
+                "kind": "power",
+                "speed": 1,
+                "inputCapacity": 120,
+                "outputCapacity": 0,
+                "powerGenerationKw": 2_160,
+                "fuelItemIds": BUILTIN_THERMAL_FUEL_ITEMS,
+                "fuelEfficiency": 0.8
+            }));
+        snapshot["recipes"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "energetic_graphite",
+                "buildingId": "arc_smelter",
+                "duration": 2,
+                "requiredTechId": "energy_matrix",
+                "inputs": [{ "itemId": "coal", "amount": 2 }],
+                "outputs": [{ "itemId": "energetic_graphite", "amount": 1 }]
+            }));
+        snapshot["constructions"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "thermal_power_plant",
+                "outputAmount": 1,
+                "requiredTechId": "thermal_power",
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+            }));
+        snapshot["technologies"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "energy_matrix",
+                "costs": [{ "itemId": "electromagnetic_matrix", "amount": 3 }],
+                "prerequisites": ["thermal_power"]
+            }));
+        RuntimeCatalog::validate(
+            serde_json::from_value(snapshot).unwrap(),
+            registry_fingerprint,
+        )
+        .unwrap()
+    }
+
+    fn player_fuel_entity() -> String {
+        serde_json::json!({
+            "id": "thermal-a",
+            "kind": "power",
+            "planetId": "home",
+            "position": { "x": 7.0, "y": 2.0 },
+            "interactionLocked": false,
+            "buildingId": "thermal_power_plant",
+            "powerGridId": "grid-a",
+            "generationPriority": 1,
+            "fuelItemId": "coal",
+            "fuelRemainingMj": 3.25,
+            "machineCount": 2,
+            "minerCount": 0,
+            "inputs": { "coal": 2.4, "logistics_drone": 1.9 },
+            "outputs": { "iron_ingot": 4 },
+            "progress": 0.75,
+            "powerInputKw": 19,
+            "powerOutputKw": 1_700,
+            "routingCursor": 0,
+            "utilization": 0.5,
+            "productionRate": 0.25
+        })
+        .to_string()
+    }
+
+    fn player_fuel_belt(id: &str, source: &str, target: &str, lanes: u64) -> String {
+        serde_json::json!({
+            "id": id,
+            "planetId": "home",
+            "source": source,
+            "target": target,
+            "itemId": "coal",
+            "lanes": lanes,
+            "tier": 1,
+            "sorterTier": 1,
+            "progress": 0,
+            "priority": 1,
+            "stackSize": 1,
+            "monitorEnabled": false,
+            "routeMode": "auto",
+            "lastFlow": 0
+        })
+        .to_string()
+    }
+
+    fn player_fuel_state_for_registry(registry_fingerprint: &str) -> CoreState {
+        let seed = player_command_state_for_registry(registry_fingerprint);
+        let mut base = seed.base_value().clone();
+        base.get_mut("tray")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert("coal".to_owned(), Value::from(7));
+        base["research"]["completedTechIds"] =
+            serde_json::json!(["thermal_power", "energy_matrix"]);
+        CoreState::from_public_v47_parts(
+            CoreCheckpointIdentity {
+                slot: "normal-main".to_owned(),
+                generation: 1,
+                root_hash: "a".repeat(64),
+                revision: 9,
+                state_version: 47,
+                mode: "normal".to_owned(),
+                registry_fingerprint: registry_fingerprint.to_owned(),
+                base_primary_checksum: "12345678".to_owned(),
+            },
+            base,
+            vec![
+                player_command_entity("smelter-a", "arc_smelter", 1.0, None),
+                player_command_entity("ejector-a", "em_rail_ejector", 3.0, Some("orbit-home-old")),
+                player_command_entity("ejector-b", "em_rail_ejector", 5.0, Some("orbit-home-old")),
+                player_fuel_entity(),
+            ],
+            vec![
+                player_command_belt(),
+                player_fuel_belt("belt-fuel-in", "smelter-a", "thermal-a", 2),
+                player_fuel_belt("belt-fuel-out", "thermal-a", "ejector-a", 3),
+            ],
+            player_fuel_catalog_for_registry(registry_fingerprint),
+        )
+        .unwrap()
+    }
+
+    fn player_fuel_state() -> CoreState {
+        player_fuel_state_for_registry(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT)
+    }
+
+    fn fuel_item_command(base_revision: u64, target: Value) -> SimulationCommandPatch {
+        entity_leaf_command(base_revision, "thermal-a", "fuelItemId", target)
     }
 
     fn player_technology_layout_state() -> CoreState {
@@ -10316,6 +10856,241 @@ mod tests {
             assert!(result.is_err());
             assert_eq!(state.revision, 9);
             assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn player_authority_fuel_item_matches_js_refunds_topology_and_power_reset() {
+        assert_eq!(
+            builtin_fuel_items_for_building("thermal_power_plant").unwrap(),
+            BUILTIN_THERMAL_FUEL_ITEMS
+        );
+        assert_eq!(
+            builtin_fuel_items_for_building("mini_fusion_power_plant").unwrap(),
+            ["deuteron_fuel_rod"]
+        );
+        assert_eq!(
+            builtin_fuel_items_for_building("artificial_star").unwrap(),
+            ["antimatter_fuel_rod"]
+        );
+
+        let command = fuel_item_command(9, Value::from("energetic_graphite"));
+        let durable = serde_json::to_string(&command).unwrap();
+        let durable_value: Value = serde_json::from_str(&durable).unwrap();
+        assert_eq!(
+            durable_value["changedEntities"],
+            serde_json::json!([{
+                "id": "thermal-a",
+                "changes": [{
+                    "path": ["fuelItemId"],
+                    "operation": "set",
+                    "value": "energetic_graphite"
+                }]
+            }])
+        );
+        assert_eq!(durable_value["topLevelChanges"], serde_json::json!([]));
+        assert_eq!(durable_value["removedBeltIds"], serde_json::json!([]));
+
+        let mut live = player_fuel_state();
+        let applied = live.apply_player_authority_command(&command).unwrap();
+        assert_eq!(applied.previous_revision, 9);
+        assert_eq!(applied.revision, 10);
+        assert_eq!(applied.changed_entity_ids, ["thermal-a"]);
+        assert_eq!(applied.changed_belt_ids, ["belt-fuel-in", "belt-fuel-out"]);
+        assert!(applied.topology_dirty);
+        let thermal = live
+            .parse_entity(*live.entity_index.get("thermal-a").unwrap())
+            .unwrap();
+        assert_eq!(thermal["fuelItemId"], "energetic_graphite");
+        assert_eq!(thermal["inputs"], serde_json::json!({}));
+        assert_eq!(thermal["outputs"], serde_json::json!({ "iron_ingot": 4 }));
+        assert_eq!(thermal["fuelRemainingMj"], 3.25);
+        assert_eq!(thermal["powerOutputKw"], 0);
+        assert_eq!(thermal["powerInputKw"], 19);
+        assert_eq!(live.base_value()["tray"]["coal"], 9);
+        assert_eq!(live.base_value()["tray"]["logistics_drone"], 0);
+        assert_eq!(live.base_value()["portableFleet"]["logistics_drone"], 21);
+        assert_eq!(live.base_value()["construction"]["conveyor_belt_mk1"], 10);
+        assert!(live.belt_index.contains_key("belt-priority"));
+        assert!(!live.belt_index.contains_key("belt-fuel-in"));
+        assert!(!live.belt_index.contains_key("belt-fuel-out"));
+
+        let live_hash = live.canonical_sha256().unwrap();
+        let replayed_command: SimulationCommandPatch = serde_json::from_str(&durable).unwrap();
+        let mut replayed = player_fuel_state();
+        replayed
+            .replay_operation(
+                9,
+                10,
+                Some(&replayed_command),
+                0.0,
+                0.0,
+                crate::CoreAdvanceMode::Exact,
+            )
+            .unwrap();
+        assert_eq!(replayed.canonical_sha256().unwrap(), live_hash);
+        assert_eq!(replayed.base_value(), live.base_value());
+        assert_eq!(
+            replayed
+                .parse_entity(*replayed.entity_index.get("thermal-a").unwrap())
+                .unwrap(),
+            thermal
+        );
+        assert!(replayed.belt_index.contains_key("belt-priority"));
+        assert!(!replayed.belt_index.contains_key("belt-fuel-in"));
+        assert!(!replayed.belt_index.contains_key("belt-fuel-out"));
+    }
+
+    #[test]
+    fn player_authority_fuel_item_fails_closed_for_forged_or_unsupported_intents() {
+        let mut extra_root = fuel_item_command(9, Value::from("energetic_graphite"));
+        extra_root.top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("paused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(true)),
+        });
+        let mut preexpanded = fuel_item_command(9, Value::from("energetic_graphite"));
+        preexpanded.removed_belt_ids.push("belt-fuel-in".to_owned());
+        let mut delete = fuel_item_command(9, Value::from("energetic_graphite"));
+        delete.changed_entities[0].changes[0].operation = "delete".to_owned();
+        delete.changed_entities[0].changes[0].value = None;
+        let mut batch = fuel_item_command(9, Value::from("energetic_graphite"));
+        batch.changed_entities.push(RecordPatch {
+            id: "smelter-a".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("fuelItemId".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from("coal")),
+            }],
+        });
+        let commands = [
+            fuel_item_command(8, Value::from("energetic_graphite")),
+            fuel_item_command(9, Value::from("coal")),
+            fuel_item_command(9, Value::from("iron_ingot")),
+            entity_leaf_command(9, "smelter-a", "fuelItemId", Value::from("coal")),
+            extra_root,
+            preexpanded,
+            delete,
+            batch,
+        ];
+        for command in commands {
+            let mut state = player_fuel_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        for (field, value) in [
+            ("interactionLocked", Value::from(true)),
+            ("planetId", Value::from("ashen")),
+            ("kind", Value::from("machine")),
+            ("buildingId", Value::from("mini_fusion_power_plant")),
+            ("fuelItemId", Value::from("iron_ingot")),
+        ] {
+            let mut state = player_fuel_state();
+            let index = *state.entity_index.get("thermal-a").unwrap();
+            let mut entity = state.parse_entity(index).unwrap();
+            entity[field] = value;
+            state.replace_entity_raw(index, Arc::<str>::from(entity.to_string()));
+            let before = state.canonical_sha256().unwrap();
+            assert!(
+                state
+                    .apply_player_authority_command(&fuel_item_command(
+                        9,
+                        Value::from("energetic_graphite"),
+                    ))
+                    .is_err()
+            );
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        for completed in [serde_json::json!([]), serde_json::json!(["thermal_power"])] {
+            let mut state = player_fuel_state();
+            state.base_value_mut()["research"]["completedTechIds"] = completed;
+            let before = state.canonical_sha256().unwrap();
+            assert!(
+                state
+                    .apply_player_authority_command(&fuel_item_command(
+                        9,
+                        Value::from("energetic_graphite"),
+                    ))
+                    .is_err()
+            );
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut unknown_input = player_fuel_state();
+        let index = *unknown_input.entity_index.get("thermal-a").unwrap();
+        let mut entity = unknown_input.parse_entity(index).unwrap();
+        entity["inputs"]["MOD/fuel"] = Value::from(1);
+        unknown_input.replace_entity_raw(index, Arc::<str>::from(entity.to_string()));
+        let before = unknown_input.canonical_sha256().unwrap();
+        assert!(
+            unknown_input
+                .apply_player_authority_command(&fuel_item_command(
+                    9,
+                    Value::from("energetic_graphite"),
+                ))
+                .is_err()
+        );
+        assert_eq!(unknown_input.revision, 9);
+        assert_eq!(unknown_input.canonical_sha256().unwrap(), before);
+
+        let mut modded = player_fuel_state_for_registry("modded-fuel-item-test");
+        let before = modded.canonical_sha256().unwrap();
+        assert!(
+            modded
+                .apply_player_authority_command(&fuel_item_command(
+                    9,
+                    Value::from("energetic_graphite"),
+                ))
+                .is_err()
+        );
+        assert_eq!(modded.revision, 9);
+        assert_eq!(modded.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_fuel_item_refund_overflow_is_atomic_for_live_and_wal() {
+        for overflow_target in ["tray", "portable-fleet", "belt-construction"] {
+            for replay in [false, true] {
+                let mut state = player_fuel_state();
+                match overflow_target {
+                    "tray" => {
+                        state.base_value_mut()["tray"]["coal"] =
+                            Value::from(MAX_JAVASCRIPT_SAFE_INTEGER);
+                    }
+                    "portable-fleet" => {
+                        state.base_value_mut()["portableFleet"]["logistics_drone"] =
+                            Value::from(MAX_JAVASCRIPT_SAFE_INTEGER);
+                    }
+                    "belt-construction" => {
+                        state.base_value_mut()["construction"]["conveyor_belt_mk1"] =
+                            Value::from(MAX_JAVASCRIPT_SAFE_INTEGER);
+                    }
+                    _ => unreachable!(),
+                }
+                let before = state.canonical_sha256().unwrap();
+                let command = fuel_item_command(9, Value::from("energetic_graphite"));
+                let result = if replay {
+                    state.replay_operation(
+                        9,
+                        10,
+                        Some(&command),
+                        0.0,
+                        0.0,
+                        crate::CoreAdvanceMode::Exact,
+                    )
+                } else {
+                    state.apply_player_authority_command(&command).map(|_| ())
+                };
+                assert!(result.is_err());
+                assert_eq!(state.revision, 9);
+                assert_eq!(state.canonical_sha256().unwrap(), before);
+            }
         }
     }
 

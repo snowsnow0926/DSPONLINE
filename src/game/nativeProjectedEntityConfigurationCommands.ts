@@ -2,7 +2,7 @@ import {
   SIMULATION_RUNTIME_PROTOCOL_VERSION,
   type SimulationCommandPatch,
 } from "./simulationRuntimeProtocol";
-import type { EnergyMode, FactoryEntity, PlanetId, PowerPriority } from "./types";
+import type { EnergyMode, FactoryEntity, ItemId, PlanetId, PowerPriority } from "./types";
 
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const MAX_LOGICAL_ID_BYTES = 256;
@@ -27,8 +27,33 @@ const BUILTIN_POWER_PRIORITY_BUILDINGS = new Set([
   "vertical_launching_silo",
 ]);
 
+const BUILTIN_THERMAL_FUEL_ITEMS = Object.freeze([
+  "coal",
+  "fire_ice",
+  "crude_oil",
+  "energetic_graphite",
+  "refined_oil",
+  "hydrogen",
+  "hydrogen_fuel_rod",
+  "deuteron_fuel_rod",
+  "antimatter_fuel_rod",
+] satisfies ItemId[]);
+const BUILTIN_FUEL_ITEMS_BY_BUILDING: Readonly<Partial<Record<
+  NonNullable<FactoryEntity["buildingId"]>,
+  readonly ItemId[]
+>>> = Object.freeze({
+  thermal_power_plant: BUILTIN_THERMAL_FUEL_ITEMS,
+  mini_fusion_power_plant: Object.freeze(["deuteron_fuel_rod"] satisfies ItemId[]),
+  artificial_star: Object.freeze(["antimatter_fuel_rod"] satisfies ItemId[]),
+});
+
 export type NativeProjectedSplitterDistributionMode = "balanced" | "priority";
 export type NativeProjectedEnergyExchangerMode = Exclude<EnergyMode, "auto">;
+
+export interface NativeProjectedFuelItemConfiguration {
+  readonly currentItemId: ItemId | null;
+  readonly itemIds: readonly ItemId[];
+}
 
 /**
  * One full entity row pinned into the bounded native canvas projection. The
@@ -102,6 +127,19 @@ export function canNativeProjectedEnergyExchangerModeChange(
   return Number.isFinite(storedEnergyMj) && Math.max(0, storedEnergyMj) <= ENERGY_EPSILON;
 }
 
+/** Returns only the three built-in generator catalogs and their exact legal fuels. */
+export function getNativeProjectedFuelItemConfiguration(
+  binding: NativeProjectedEntityConfigurationBinding | null,
+): NativeProjectedFuelItemConfiguration | null {
+  if (!binding || !validBindingBase(binding) || binding.entity.kind !== "power" ||
+      !binding.entity.buildingId) return null;
+  const itemIds = BUILTIN_FUEL_ITEMS_BY_BUILDING[binding.entity.buildingId];
+  if (!itemIds) return null;
+  const currentItemId = binding.entity.fuelItemId ?? null;
+  if (currentItemId !== null && !itemIds.includes(currentItemId)) return null;
+  return Object.freeze({ currentItemId, itemIds });
+}
+
 function emptyCommand(baseRevision: number): SimulationCommandPatch {
   return {
     protocolVersion: SIMULATION_RUNTIME_PROTOCOL_VERSION,
@@ -172,6 +210,27 @@ export function createNativeProjectedEnergyExchangerModeCommand(
   command.changedEntities = [{
     id: binding.entity.id,
     changes: [{ path: ["energyMode"], operation: "set", value: targetMode }],
+  }];
+  return command;
+}
+
+/**
+ * Builds only the requested fuel leaf. Rust derives input refunds, incident
+ * belt recovery, construction refunds and the power reset from its own row.
+ */
+export function createNativeProjectedFuelItemCommand(
+  binding: NativeProjectedEntityConfigurationBinding,
+  targetItemId: ItemId,
+): SimulationCommandPatch | null {
+  const configuration = getNativeProjectedFuelItemConfiguration(binding);
+  if (!configuration || !configuration.itemIds.includes(targetItemId)) {
+    throw new TypeError("原生燃料建筑或目标燃料无效或不受支持");
+  }
+  if (configuration.currentItemId === targetItemId) return null;
+  const command = emptyCommand(binding.revision);
+  command.changedEntities = [{
+    id: binding.entity.id,
+    changes: [{ path: ["fuelItemId"], operation: "set", value: targetItemId }],
   }];
   return command;
 }

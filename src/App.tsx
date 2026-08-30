@@ -522,6 +522,7 @@ import { createNativeProjectedBeltPriorityCommand } from "./game/nativeProjected
 import {
   createNativeProjectedEnergyExchangerModeCommand,
   createNativeProjectedEntityPowerPriorityCommand,
+  createNativeProjectedFuelItemCommand,
   createNativeProjectedSplitterDistributionModeCommand,
   type NativeProjectedEnergyExchangerMode,
   type NativeProjectedEntityConfigurationBinding,
@@ -16467,7 +16468,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         factoryMultiSelectionSummaryReadModel.entityRows.rows[0]?.entityId !== projected.id ||
         inspectorEntity.entityId !== projected.id || inspectorEntity.planetId !== projected.planetId ||
         inspectorEntity.kind !== projected.kind || inspectorEntity.interactionLocked !== projected.interactionLocked ||
-        inspectorEntity.buildingId !== (projected.buildingId ?? null) || projected.planetId !== identity.planetId) {
+        inspectorEntity.buildingId !== (projected.buildingId ?? null) ||
+        inspectorEntity.fuelItemId !== (projected.fuelItemId ?? null) || projected.planetId !== identity.planetId) {
       return null;
     }
     return Object.freeze({
@@ -17000,6 +17002,35 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       () => setNotice(`已由 Rust 将当前能量枢纽设为${targetMode === "charge" ? "空蓄电器充电" : "满蓄电器放电"}`),
     );
     if (!accepted) setNotice("Rust 没有接受这次能量枢纽模式命令；存档未改变");
+  }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
+  const changeNativeFuelItem = useCallback((
+    entityId: string,
+    targetItemId: ItemId,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次燃料类型未提交");
+      return;
+    }
+    const binding = nativeEntityConfigurationProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.id !== entityId || !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生燃料建筑选择、session 或 revision 已变化；本次燃料未提交");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+      baseRevision === binding.revision
+        ? createNativeProjectedFuelItemCommand(binding, targetItemId)
+        : null,
+      () => setNotice(`已由 Rust 将当前燃料切换为${ITEMS[targetItemId].name}`),
+    );
+    if (!accepted) setNotice("Rust 没有接受这次燃料类型命令；存档未改变");
   }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
   const selectedBelts = factoryInteractionRows.selectedBelts;
   const dockBeltTier = nativePlayerAuthorityOwnsRuntime
@@ -18752,6 +18783,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           onEntityPowerPriorityChange={changeNativeEntityPowerPriority}
           onSplitterDistributionModeChange={changeNativeSplitterDistributionMode}
           onEnergyExchangerModeChange={changeNativeEnergyExchangerMode}
+          onFuelItemChange={changeNativeFuelItem}
           onBeltLaneCountChange={(beltId, targetLanes) => void changeNativeOrdinaryBeltLanes(beltId, targetLanes)}
           onBeltPriorityChange={changeNativeOrdinaryBeltPriority}
           onRemoveBelt={(beltId) => void removeNativeOrdinaryBelt(beltId)}

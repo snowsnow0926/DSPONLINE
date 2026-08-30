@@ -219,6 +219,16 @@ pub enum ControlRequest {
         cursor: usize,
         limit: usize,
     },
+    CoreBlueprintWorkspaceProjection {
+        session_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        section: String,
+        blueprint_id: Option<String>,
+        #[serde(default)]
+        cursor: usize,
+        limit: usize,
+    },
     CoreConstructionPlacementContext {
         session_id: String,
         expected_revision: u64,
@@ -924,6 +934,41 @@ mod tests {
                 assert_eq!(cursor, 0);
             }
             _ => panic!("construction inventory defaults decoded as the wrong variant"),
+        }
+    }
+
+    #[test]
+    fn blueprint_workspace_protocol_preserves_revision_catalog_selector_and_page_identity() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreBlueprintWorkspaceProjection",
+            "sessionId": "core-blueprints",
+            "expectedRevision": 47,
+            "expectedRegistryFingerprint": "builtin:test",
+            "section": "detail",
+            "blueprintId": "蓝图-β",
+            "cursor": 0,
+            "limit": 32
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreBlueprintWorkspaceProjection {
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                section,
+                blueprint_id,
+                cursor,
+                limit,
+            } => {
+                assert_eq!(session_id, "core-blueprints");
+                assert_eq!(expected_revision, 47);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(section, "detail");
+                assert_eq!(blueprint_id.as_deref(), Some("蓝图-β"));
+                assert_eq!(cursor, 0);
+                assert_eq!(limit, 32);
+            }
+            _ => panic!("blueprint workspace operation decoded as the wrong variant"),
         }
     }
 

@@ -2974,6 +2974,27 @@ impl CoreRegistry {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn blueprint_workspace_projection(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        section: &str,
+        blueprint_id: Option<&str>,
+        cursor: usize,
+        limit: usize,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?.blueprint_workspace_projection(
+            expected_revision,
+            expected_registry_fingerprint,
+            section,
+            blueprint_id,
+            cursor,
+            limit,
+        )
+    }
+
     pub fn construction_placement_context(
         &self,
         session_id: &str,

@@ -50,6 +50,7 @@ import { FactoryRunStatus } from "./components/FactoryRunStatus";
 import { ItemReferenceActionsProvider } from "./components/ItemReference";
 import { NativeResourceRail } from "./components/NativeResourceRail";
 import { NativeConstructionDock } from "./components/NativeConstructionDock";
+import { NativeBlueprintWorkspace } from "./components/NativeBlueprintWorkspace";
 import {
   NativeFactoryInspectorPanel,
   type NativeStationConfigurationUiAction,
@@ -454,6 +455,11 @@ import {
   createNativePlayerAuthorityConstructionInventorySource,
   selectNativeConstructionInventoryFrame,
 } from "./game/nativeConstructionInventoryStore";
+import {
+  NativeBlueprintWorkspaceStore,
+  createNativePlayerAuthorityBlueprintWorkspaceSource,
+  selectNativeBlueprintWorkspaceFrame,
+} from "./game/nativeBlueprintWorkspaceStore";
 import {
   createNativeProjectedOrdinaryBuildingPlacementCommand,
   readVerifiedNativeConstructionPlacementContext,
@@ -1903,6 +1909,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const [orbitalStationOpen, setOrbitalStationOpen] = useState(false);
   const [orbitalStationInitialTab, setOrbitalStationInitialTab] = useState<StationTab | undefined>();
   const [blueprintsOpen, setBlueprintsOpen] = useState(false);
+  const [nativeBlueprintSelectedId, setNativeBlueprintSelectedId] = useState<string | null>(null);
+  const [nativeBlueprintLibraryCursor, setNativeBlueprintLibraryCursor] = useState(0);
+  const [nativeBlueprintQueueCursor, setNativeBlueprintQueueCursor] = useState(0);
   const [dysonPlannerOpen, setDysonPlannerOpen] = useState(false);
   const [nativeDysonSelectedSystemId, setNativeDysonSelectedSystemId] = useState<string | null>(null);
   const [operationsOpen, setOperationsOpen] = useState(false);
@@ -2634,6 +2643,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativeConstructionInventoryStore.getSnapshot,
     nativeConstructionInventoryStore.getSnapshot,
   );
+  const nativeBlueprintWorkspaceStoreRef = useRef<NativeBlueprintWorkspaceStore | null>(null);
+  if (nativeBlueprintWorkspaceStoreRef.current === null) {
+    nativeBlueprintWorkspaceStoreRef.current = new NativeBlueprintWorkspaceStore();
+  }
+  const nativeBlueprintWorkspaceStore = nativeBlueprintWorkspaceStoreRef.current;
+  const nativeBlueprintWorkspaceSnapshot = useSyncExternalStore(
+    nativeBlueprintWorkspaceStore.subscribe,
+    nativeBlueprintWorkspaceStore.getSnapshot,
+    nativeBlueprintWorkspaceStore.getSnapshot,
+  );
   // Once main proves that it owns this exact native session, its durable Rust
   // revision becomes the projection clock. A concurrently advancing legacy JS
   // mirror must never overwrite that revision. Uncertain/faulted phases retain
@@ -2728,6 +2747,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const nativeConstructionInventoryFrame = useMemo(() => nativeFactoryInventoryIdentity
     ? selectNativeConstructionInventoryFrame(nativeConstructionInventorySnapshot, nativeFactoryInventoryIdentity)
     : null, [nativeConstructionInventorySnapshot, nativeFactoryInventoryIdentity]);
+  const nativeBlueprintWorkspaceSource = useMemo(() => nativeFactoryInventoryIdentity
+    ? createNativePlayerAuthorityBlueprintWorkspaceSource(desktopBridge, nativeFactoryInventoryIdentity)
+    : null, [desktopBridge, nativeFactoryInventoryIdentity]);
+  const nativeBlueprintWorkspaceFrame = useMemo(() => nativeFactoryInventoryIdentity
+    ? selectNativeBlueprintWorkspaceFrame(nativeBlueprintWorkspaceSnapshot, nativeFactoryInventoryIdentity)
+    : null, [nativeBlueprintWorkspaceSnapshot, nativeFactoryInventoryIdentity]);
   const nativePlacementLabel = useMemo(() => nativePlacementBuildingId
     ? getConstructionDefinition(nativePlacementBuildingId)?.name ?? nativePlacementBuildingId
     : null, [nativePlacementBuildingId]);
@@ -3580,6 +3605,30 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [
     nativeConstructionInventorySource,
     nativeConstructionInventoryStore,
+    nativeFactoryInventoryIdentity,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    if (!blueprintsOpen || !nativePlayerAuthorityOwnsRuntime || !nativeFactoryInventoryIdentity ||
+        !nativeBlueprintWorkspaceSource || !nativePlayerAuthorityActiveFrame) {
+      nativeBlueprintWorkspaceStore.clear();
+      return;
+    }
+    void nativeBlueprintWorkspaceStore.refresh(
+      nativeBlueprintWorkspaceSource,
+      nativeFactoryInventoryIdentity,
+      nativeBlueprintSelectedId,
+      nativeBlueprintLibraryCursor,
+      nativeBlueprintQueueCursor,
+    ).catch(() => undefined);
+  }, [
+    blueprintsOpen,
+    nativeBlueprintLibraryCursor,
+    nativeBlueprintQueueCursor,
+    nativeBlueprintSelectedId,
+    nativeBlueprintWorkspaceSource,
+    nativeBlueprintWorkspaceStore,
     nativeFactoryInventoryIdentity,
     nativePlayerAuthorityActiveFrame,
     nativePlayerAuthorityOwnsRuntime,
@@ -8762,6 +8811,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     cancelNativeBuildingPlacement();
   }, [
     cancelNativeBuildingPlacement,
+    nativePlayerAuthorityActiveFrame?.runId,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    if (!nativePlayerAuthorityOwnsRuntime) return;
+    setBlueprintPlacementId(null);
+    setBlueprintAllowOverlap(false);
+  }, [
     nativePlayerAuthorityActiveFrame?.runId,
     nativePlayerAuthorityActiveFrame?.sessionId,
     nativePlayerAuthorityOwnsRuntime,
@@ -17362,11 +17420,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const dockBeltTier = nativePlayerAuthorityOwnsRuntime
     ? nativeBeltPlacementTier ?? beltTier
     : resolveConnectionBeltTier(game, beltTierMode, beltTier);
-  const blueprintEligibleIds = useMemo(() => selectedEntityIds.length === 0
+  const blueprintEligibleIds = useMemo(() => nativePlayerAuthorityOwnsRuntime || selectedEntityIds.length === 0
     ? []
     : getBlueprintEligibleEntityIds(game, selectedEntityIds),
-  [game, selectedEntityIds]);
-  const activeBlueprint = game.blueprints.find((blueprint) => blueprint.id === blueprintPlacementId) ?? null;
+  [game, nativePlayerAuthorityOwnsRuntime, selectedEntityIds]);
+  const activeBlueprint = nativePlayerAuthorityOwnsRuntime
+    ? null
+    : game.blueprints.find((blueprint) => blueprint.id === blueprintPlacementId) ?? null;
   const mobileActionEntity = useMemo(() => !nativePlayerAuthorityOwnsRuntime && mobileActionEntityId
     ? game.entities.find((entity) => entity.id === mobileActionEntityId) ?? null
     : null,
@@ -18947,7 +19007,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onAutoLayout={() => autoLayoutEntities()}
             onUndoAutoLayout={undoAutoLayout}
           /> : null}
-          {blueprintPlacementId ? <section className="canvas-placement-options nodrag nopan" aria-label={isEnglish ? "Blueprint placement options" : "蓝图放置选项"}>
+          {!nativePlayerAuthorityOwnsRuntime && blueprintPlacementId ? <section className="canvas-placement-options nodrag nopan" aria-label={isEnglish ? "Blueprint placement options" : "蓝图放置选项"}>
             <label>
               <input type="checkbox" checked={blueprintAllowOverlap} onChange={(event) => setBlueprintAllowOverlap(event.target.checked)} />
               <span><strong>{isEnglish ? "Allow overlapping placement" : "允许重叠放置"}</strong><small>{isEnglish ? "Only bypasses exact snapped-position collision" : "仅绕过完全相同吸附坐标的碰撞检查"}</small></span>
@@ -18987,8 +19047,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             model={factorySelectionToolbarReadModel}
             unsafeActionsEnabled={!nativePlayerAuthorityOwnsRuntime}
             eligibleCount={blueprintEligibleIds.length}
-            canUpgrade={canUpgradeEntities(game, selectedEntityIds)}
-            canUpgradeBelts={selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}
+            canUpgrade={!nativePlayerAuthorityOwnsRuntime && canUpgradeEntities(game, selectedEntityIds)}
+            canUpgradeBelts={!nativePlayerAuthorityOwnsRuntime && selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}
             onFocus={() => focusEntityIds(selectedEntityIds)}
             onAutoLayout={() => autoLayoutEntities(selectedEntityIds)}
             onCopy={copySelectionAsBlueprint}
@@ -19396,7 +19456,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       {!nativePlayerAuthorityOwnsRuntime ? <RuntimeRenderProfile id="onboarding">
       <OnboardingCoach game={panelGame} onAction={runOnboardingAction} compact={nextMobileShell} />
       </RuntimeRenderProfile> : null}
-      {!nativePlayerAuthorityOwnsRuntime ? <BlueprintWorkspace
+      {nativePlayerAuthorityOwnsRuntime ? <NativeBlueprintWorkspace
+        open={blueprintsOpen}
+        status={nativeBlueprintWorkspaceSnapshot.status}
+        frame={nativeBlueprintWorkspaceFrame}
+        onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setBlueprintsOpen(false)}
+        onSelectBlueprint={setNativeBlueprintSelectedId}
+        onLibraryCursorChange={(cursor) => {
+          setNativeBlueprintSelectedId(null);
+          setNativeBlueprintLibraryCursor(cursor);
+        }}
+        onQueueCursorChange={setNativeBlueprintQueueCursor}
+      /> : <BlueprintWorkspace
         open={blueprintsOpen}
         game={game}
         factoryHeadlineReadModel={factoryConstructionHeadlineReadModel}
@@ -19421,7 +19492,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         }}
         onExport={downloadBlueprint}
         onImport={importBlueprint}
-      /> : null}
+      />}
       <CommandPalette
         open={commandPaletteOpen}
         webEntities={nativePlayerAuthorityOwnsRuntime ? null : game.entities}

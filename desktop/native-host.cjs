@@ -33,6 +33,7 @@ const NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY =
   "native-core-player-authority-startup-recovery-v1";
 const NATIVE_FACTORY_INVENTORY_CAPABILITY = "native-core-factory-inventory-v1";
 const NATIVE_CONSTRUCTION_INVENTORY_CAPABILITY = "native-core-construction-inventory-v1";
+const NATIVE_BLUEPRINT_WORKSPACE_CAPABILITY = "native-core-blueprint-workspace-v1";
 const NATIVE_CONSTRUCTION_PLACEMENT_CONTEXT_CAPABILITY =
   "native-core-construction-placement-context-v1";
 const NATIVE_CONSTRUCTION_BELT_PLACEMENT_CONTEXT_CAPABILITY =
@@ -82,7 +83,7 @@ function normalizeNativeHostSpawnEnvironment(value = {}) {
 
 function encodeNativeProjectionTransfer({ sessionId, sequence, projectionType, result }) {
   if (!validLogicalId(sessionId, 128) || !Number.isSafeInteger(sequence) || sequence < 1 ||
-    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(projectionType) || !result || typeof result !== "object" ||
+    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "blueprint-workspace-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(projectionType) || !result || typeof result !== "object" ||
     result.schemaVersion !== (["viewport-v2", "stellar-industry-v2"].includes(projectionType) ? 2 : 1) || result.projectionType !== projectionType ||
     !Number.isSafeInteger(result.revision) || result.revision < 0) {
     throw new TypeError("native core projection transfer is invalid");
@@ -328,6 +329,10 @@ function validConstructionPlacementId(value) {
       const code = character.charCodeAt(0);
       return character.length === 1 && code >= 0xd800 && code <= 0xdfff;
     });
+}
+
+function validBlueprintWorkspaceId(value) {
+  return validConstructionPlacementId(value);
 }
 
 function exactObjectKeys(value, keys, label) {
@@ -1092,6 +1097,34 @@ class NativeCoreSessionRegistry {
       sessionId: request.sessionId,
       expectedRevision: request.expectedRevision,
       expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      cursor: request.cursor,
+      limit: request.limit,
+    });
+  }
+
+  blueprintWorkspaceProjection(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    exactObjectKeys(request, [
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "section",
+      "blueprintId", "cursor", "limit",
+    ], "native blueprint workspace projection request");
+    if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256) ||
+      !["library", "detail", "queue"].includes(request.section) ||
+      request.blueprintId !== null && !validBlueprintWorkspaceId(request.blueprintId) ||
+      (request.section === "detail") !== (request.blueprintId !== null) ||
+      !Number.isSafeInteger(request.cursor) || request.cursor < 0 || request.cursor > 4_096 ||
+      request.section === "detail" && request.cursor !== 0 ||
+      request.limit !== 32) {
+      throw new TypeError("native blueprint workspace projection request is invalid");
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreBlueprintWorkspaceProjection",
+      sessionId: request.sessionId,
+      expectedRevision: request.expectedRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      section: request.section,
+      blueprintId: request.blueprintId,
       cursor: request.cursor,
       limit: request.limit,
     });
@@ -2143,6 +2176,7 @@ module.exports = {
   MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
   NATIVE_FACTORY_INVENTORY_CAPABILITY,
   NATIVE_CONSTRUCTION_INVENTORY_CAPABILITY,
+  NATIVE_BLUEPRINT_WORKSPACE_CAPABILITY,
   NATIVE_CONSTRUCTION_BELT_PLACEMENT_CONTEXT_CAPABILITY,
   NATIVE_CONSTRUCTION_BELT_LANE_CONTEXT_CAPABILITY,
   NATIVE_CONSTRUCTION_BELT_REMOVAL_CONTEXT_CAPABILITY,

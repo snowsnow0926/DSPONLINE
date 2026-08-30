@@ -403,6 +403,38 @@ function normalizeConstructionInventoryContext(value, label) {
   };
 }
 
+function normalizeBlueprintWorkspaceContext(value, label) {
+  const source = exactObject(
+    value,
+    [
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "section",
+      "blueprintId", "cursor", "limit",
+    ],
+    label,
+  );
+  const section = oneOf(source.section, ["library", "detail", "queue"], `${label} section`);
+  const blueprintId = source.blueprintId === null
+    ? null
+    : blueprintOpaqueText(source.blueprintId, `${label} blueprint ID`, 512);
+  const cursor = safeInteger(source.cursor, `${label} cursor`);
+  if (cursor > 4_096 || (section === "detail") !== (blueprintId !== null) ||
+      section === "detail" && cursor !== 0 ||
+      source.limit !== 32) throw protocolError(`${label} selector`);
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} expected registry fingerprint`,
+      256,
+    ),
+    section,
+    blueprintId,
+    cursor,
+    limit: 32,
+  };
+}
+
 function normalizeConstructionPlacementContext(value, label) {
   const source = exactObject(
     value,
@@ -2242,6 +2274,414 @@ function normalizeCoreConstructionInventoryProjection(value, context) {
     nextCursor,
     truncated: expectedNextCursor !== null,
     limits: { rows: 256, projectionBytes: MAX_NATIVE_PROJECTION_BYTES },
+  };
+}
+
+function blueprintOpaqueText(value, label, maximumBytes) {
+  const result = opaqueId(value, label, maximumBytes);
+  if (/[\u0000-\u001f\u007f-\u009f]/u.test(result)) throw protocolError(label);
+  return result;
+}
+
+function blueprintDisplayText(value, label, maximumBytes) {
+  return blueprintOpaqueText(value, label, maximumBytes);
+}
+
+function normalizeBlueprintCounts(value, label) {
+  const source = exactObject(
+    value,
+    ["entities", "belts", "resourceAnchors", "externalPorts"],
+    label,
+  );
+  return {
+    entities: safeInteger(source.entities, `${label} entities`),
+    belts: safeInteger(source.belts, `${label} belts`),
+    resourceAnchors: safeInteger(source.resourceAnchors, `${label} resource anchors`),
+    externalPorts: safeInteger(source.externalPorts, `${label} external ports`),
+  };
+}
+
+function normalizeBlueprintRotation(value, label) {
+  if (![0, 90, 180, 270].includes(value)) throw protocolError(label);
+  return value;
+}
+
+function normalizeBlueprintSummary(value, label) {
+  const source = exactObject(
+    value,
+    ["id", "name", "revision", "rotation", "mirror", "counts", "detailStatus"],
+    label,
+  );
+  const counts = normalizeBlueprintCounts(source.counts, `${label} counts`);
+  const overDetailLimit = counts.entities > 512 || counts.belts > 1_024 ||
+    counts.resourceAnchors > 256 || counts.externalPorts > 256;
+  const detailStatus = oneOf(source.detailStatus, ["candidate", "truncated"], `${label} detail status`);
+  if ((detailStatus === "truncated") !== overDetailLimit) throw protocolError(`${label} detail status`);
+  return {
+    id: blueprintOpaqueText(source.id, `${label} ID`, 512),
+    name: blueprintDisplayText(source.name, `${label} name`, 256),
+    revision: safeInteger(source.revision, `${label} revision`, 1),
+    rotation: normalizeBlueprintRotation(source.rotation, `${label} rotation`),
+    mirror: oneOf(source.mirror, ["none", "horizontal"], `${label} mirror`),
+    counts,
+    detailStatus,
+  };
+}
+
+function normalizeSignedFinite(value, label) {
+  if (!Number.isFinite(value)) throw protocolError(label);
+  return value;
+}
+
+function normalizeBlueprintOffset(value, label) {
+  const source = exactObject(value, ["x", "y"], label);
+  return {
+    x: normalizeSignedFinite(source.x, `${label} x`),
+    y: normalizeSignedFinite(source.y, `${label} y`),
+  };
+}
+
+function normalizeBlueprintDetail(value, label) {
+  const source = exactObject(
+    value,
+    [
+      "summary", "status", "unsupportedReason", "entities", "belts",
+      "resourceAnchors", "externalPorts",
+    ],
+    label,
+  );
+  const summary = normalizeBlueprintSummary(source.summary, `${label} summary`);
+  const status = oneOf(source.status, ["supported", "truncated", "unsupported"], `${label} status`);
+  const expectedReason = status === "supported" ? null
+    : status === "truncated" ? summary.detailStatus === "truncated"
+      ? "detail-limits-exceeded"
+      : "projection-byte-budget-exceeded"
+      : "unproven-catalog-semantics";
+  if (source.unsupportedReason !== expectedReason || !Array.isArray(source.entities) ||
+      !Array.isArray(source.belts) || !Array.isArray(source.resourceAnchors) ||
+      !Array.isArray(source.externalPorts)) throw protocolError(`${label} status`);
+  if (status !== "supported" && (source.entities.length !== 0 || source.belts.length !== 0 ||
+      source.resourceAnchors.length !== 0 || source.externalPorts.length !== 0)) {
+    throw protocolError(`${label} unsupported payload`);
+  }
+  if (status === "supported" && (summary.detailStatus !== "candidate" ||
+      source.entities.length !== summary.counts.entities || source.belts.length !== summary.counts.belts ||
+      source.resourceAnchors.length !== summary.counts.resourceAnchors ||
+      source.externalPorts.length !== summary.counts.externalPorts)) {
+    throw protocolError(`${label} cardinality`);
+  }
+  if (status === "unsupported" && summary.detailStatus === "truncated") {
+    throw protocolError(`${label} unsupported status`);
+  }
+  const keys = new Set();
+  const entityKeys = new Set();
+  const entities = source.entities.map((row, index) => {
+    const rowSource = exactObject(
+      row,
+      [
+        "key", "buildingId", "buildingLabel", "offset", "machineCount", "recipeId",
+        "operationEnabledOnDeploy",
+      ],
+      `${label} entity[${index}]`,
+    );
+    const key = blueprintOpaqueText(rowSource.key, `${label} entity[${index}] key`, 512);
+    if (keys.has(key)) throw protocolError(`${label} duplicate detail key`);
+    keys.add(key);
+    entityKeys.add(key);
+    const recipeId = rowSource.recipeId === null ? null
+      : blueprintOpaqueText(rowSource.recipeId, `${label} entity[${index}] recipe ID`, 512);
+    const operationEnabledOnDeploy = rowSource.operationEnabledOnDeploy === null ? null
+      : boolean(rowSource.operationEnabledOnDeploy, `${label} entity[${index}] operation intent`);
+    const buildingId = blueprintOpaqueText(
+      rowSource.buildingId,
+      `${label} entity[${index}] building ID`,
+      512,
+    );
+    const machineCount = safeInteger(
+      rowSource.machineCount,
+      `${label} entity[${index}] machine count`,
+      1,
+    );
+    if (machineCount > 100_000_000 ||
+        operationEnabledOnDeploy !== null && buildingId !== "micro_black_hole_connector") {
+      throw protocolError(`${label} entity[${index}] semantics`);
+    }
+    return {
+      key,
+      buildingId,
+      buildingLabel: blueprintOpaqueText(rowSource.buildingLabel, `${label} entity[${index}] building label`, 512),
+      offset: normalizeBlueprintOffset(rowSource.offset, `${label} entity[${index}] offset`),
+      machineCount,
+      recipeId,
+      operationEnabledOnDeploy,
+    };
+  });
+  const resourceAnchors = source.resourceAnchors.map((row, index) => {
+    const rowSource = exactObject(
+      row,
+      ["key", "resourceId", "extractorBuildingId", "offset", "minerCount"],
+      `${label} resource anchor[${index}]`,
+    );
+    const key = blueprintOpaqueText(rowSource.key, `${label} resource anchor[${index}] key`, 512);
+    if (keys.has(key)) throw protocolError(`${label} duplicate detail key`);
+    keys.add(key);
+    const minerCount = safeInteger(rowSource.minerCount, `${label} resource anchor[${index}] miner count`, 1);
+    if (minerCount > 100_000_000) throw protocolError(`${label} resource anchor[${index}] miner count`);
+    return {
+      key,
+      resourceId: blueprintOpaqueText(rowSource.resourceId, `${label} resource anchor[${index}] item ID`, 512),
+      extractorBuildingId: blueprintOpaqueText(
+        rowSource.extractorBuildingId,
+        `${label} resource anchor[${index}] extractor ID`,
+        512,
+      ),
+      offset: normalizeBlueprintOffset(rowSource.offset, `${label} resource anchor[${index}] offset`),
+      minerCount,
+    };
+  });
+  const beltKeys = new Set();
+  const belts = source.belts.map((row, index) => {
+    const rowSource = exactObject(
+      row,
+      ["key", "sourceKey", "targetKey", "itemId", "lanes", "tier"],
+      `${label} belt[${index}]`,
+    );
+    const key = blueprintOpaqueText(rowSource.key, `${label} belt[${index}] key`, 512);
+    if (beltKeys.has(key)) throw protocolError(`${label} duplicate belt key`);
+    beltKeys.add(key);
+    const sourceKey = blueprintOpaqueText(rowSource.sourceKey, `${label} belt[${index}] source key`, 512);
+    const targetKey = blueprintOpaqueText(rowSource.targetKey, `${label} belt[${index}] target key`, 512);
+    if (!keys.has(sourceKey) || !keys.has(targetKey)) throw protocolError(`${label} belt endpoint`);
+    const lanes = safeInteger(rowSource.lanes, `${label} belt[${index}] lanes`, 1);
+    if (lanes > 4_096) throw protocolError(`${label} belt[${index}] lanes`);
+    const tier = safeInteger(rowSource.tier, `${label} belt[${index}] tier`, 1);
+    if (tier > 255) throw protocolError(`${label} belt[${index}] tier`);
+    return {
+      key,
+      sourceKey,
+      targetKey,
+      itemId: blueprintOpaqueText(rowSource.itemId, `${label} belt[${index}] item ID`, 512),
+      lanes,
+      tier,
+    };
+  });
+  const portKeys = new Set();
+  const externalPorts = source.externalPorts.map((row, index) => {
+    const rowSource = exactObject(
+      row,
+      ["key", "entityKey", "direction", "itemId", "offset"],
+      `${label} external port[${index}]`,
+    );
+    const key = blueprintOpaqueText(rowSource.key, `${label} external port[${index}] key`, 512);
+    if (portKeys.has(key)) throw protocolError(`${label} duplicate external port key`);
+    portKeys.add(key);
+    const entityKey = blueprintOpaqueText(rowSource.entityKey, `${label} external port[${index}] entity key`, 512);
+    if (!entityKeys.has(entityKey)) throw protocolError(`${label} external port entity`);
+    return {
+      key,
+      entityKey,
+      direction: oneOf(rowSource.direction, ["input", "output"], `${label} external port[${index}] direction`),
+      itemId: blueprintOpaqueText(rowSource.itemId, `${label} external port[${index}] item ID`, 512),
+      offset: normalizeBlueprintOffset(rowSource.offset, `${label} external port[${index}] offset`),
+    };
+  });
+  return { summary, status, unsupportedReason: expectedReason, entities, belts, resourceAnchors, externalPorts };
+}
+
+function normalizeBlueprintQueueRow(value, label) {
+  const source = exactObject(
+    value,
+    [
+      "id", "blueprintId", "blueprintVersionId", "blueprintRevision", "blueprintName",
+      "planetId", "planetName", "position", "rotation", "mirror", "queuedAt", "status",
+      "counts", "semanticStatus", "reservedConstructionTotal", "reservedFleetTotal",
+      "placedEntityCount", "actionable",
+    ],
+    label,
+  );
+  const blueprintVersionId = source.blueprintVersionId === null ? null
+    : blueprintOpaqueText(source.blueprintVersionId, `${label} version ID`, 512);
+  const planetName = source.planetName === null ? null
+    : blueprintDisplayText(source.planetName, `${label} planet name`, 256);
+  const counts = source.counts === null ? null : normalizeBlueprintCounts(source.counts, `${label} counts`);
+  const semanticStatus = oneOf(
+    source.semanticStatus,
+    ["catalog-backed", "truncated", "unsupported"],
+    `${label} semantic status`,
+  );
+  const overDetailLimit = counts !== null && (counts.entities > 512 || counts.belts > 1_024 ||
+    counts.resourceAnchors > 256 || counts.externalPorts > 256);
+  if (semanticStatus === "catalog-backed" && (counts === null || overDetailLimit) ||
+      semanticStatus === "truncated" && (counts === null || !overDetailLimit) ||
+      semanticStatus === "unsupported" && overDetailLimit) {
+    throw protocolError(`${label} semantic status`);
+  }
+  const queuedAt = finiteNumber(source.queuedAt, `${label} queued time`);
+  if (queuedAt < 0) throw protocolError(`${label} queued time`);
+  const placedEntityCount = safeInteger(source.placedEntityCount, `${label} placed entity count`);
+  if (counts !== null && placedEntityCount > counts.entities + counts.resourceAnchors) {
+    throw protocolError(`${label} placed entity count`);
+  }
+  if (source.actionable !== false) throw protocolError(`${label} actionable`);
+  return {
+    id: blueprintOpaqueText(source.id, `${label} ID`, 512),
+    blueprintId: blueprintOpaqueText(source.blueprintId, `${label} blueprint ID`, 512),
+    blueprintVersionId,
+    blueprintRevision: safeInteger(source.blueprintRevision, `${label} blueprint revision`, 1),
+    blueprintName: blueprintDisplayText(source.blueprintName, `${label} blueprint name`, 256),
+    planetId: blueprintOpaqueText(source.planetId, `${label} planet ID`, 512),
+    planetName,
+    position: normalizeBlueprintOffset(source.position, `${label} position`),
+    rotation: normalizeBlueprintRotation(source.rotation, `${label} rotation`),
+    mirror: oneOf(source.mirror, ["none", "horizontal"], `${label} mirror`),
+    queuedAt,
+    status: oneOf(source.status, ["pending-materials", "waiting-fleet"], `${label} status`),
+    counts,
+    semanticStatus,
+    reservedConstructionTotal: safeInteger(source.reservedConstructionTotal, `${label} reserved construction`),
+    reservedFleetTotal: safeInteger(source.reservedFleetTotal, `${label} reserved fleet`),
+    placedEntityCount,
+    actionable: false,
+  };
+}
+
+function normalizeCoreBlueprintWorkspaceProjection(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "revision", "stateVersion",
+    "registryFingerprint", "readOnly", "request", "counts", "page", "limits",
+  ], "native blueprint workspace projection");
+  if (source.schemaVersion !== 1 || source.projectionType !== "blueprint-workspace-v1" ||
+      source.source !== "native-core" || source.stateVersion !== 47 || source.readOnly !== true) {
+    throw protocolError("native blueprint workspace identity");
+  }
+  requireProjectionByteBudget(source, "native blueprint workspace projection");
+  const projectionContext = normalizeBlueprintWorkspaceContext(
+    context,
+    "native blueprint workspace context",
+  );
+  const revision = safeInteger(source.revision, "native blueprint workspace revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native blueprint workspace registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint) {
+    throw protocolError("native blueprint workspace identity binding");
+  }
+  const requestSource = exactObject(
+    source.request,
+    [
+      "expectedRevision", "expectedRegistryFingerprint", "section", "blueprintId",
+      "cursor", "limit",
+    ],
+    "native blueprint workspace request echo",
+  );
+  if (requestSource.expectedRevision !== projectionContext.expectedRevision ||
+      requestSource.expectedRegistryFingerprint !== projectionContext.expectedRegistryFingerprint ||
+      requestSource.section !== projectionContext.section ||
+      requestSource.blueprintId !== projectionContext.blueprintId ||
+      requestSource.cursor !== projectionContext.cursor || requestSource.limit !== 32) {
+    throw protocolError("native blueprint workspace request binding");
+  }
+  const countsSource = exactObject(source.counts, ["library", "queue"], "native blueprint workspace counts");
+  const counts = {
+    library: safeInteger(countsSource.library, "native blueprint workspace library count"),
+    queue: safeInteger(countsSource.queue, "native blueprint workspace queue count"),
+  };
+  if (counts.library > 4_096 || counts.queue > 4_096) throw protocolError("native blueprint workspace source count");
+  const pageSource = exactObject(
+    source.page,
+    ["cursor", "limit", "totalCount", "rows", "nextCursor", "truncated"],
+    "native blueprint workspace page",
+  );
+  const totalCount = safeInteger(pageSource.totalCount, "native blueprint workspace total count");
+  const expectedTotal = projectionContext.section === "library" ? counts.library
+    : projectionContext.section === "queue" ? counts.queue : totalCount;
+  const expectedPageCursor = totalCount === 0 ? 0
+    : projectionContext.cursor < totalCount ? projectionContext.cursor
+      : Math.floor((totalCount - 1) / 32) * 32;
+  if (pageSource.cursor !== expectedPageCursor || pageSource.limit !== 32 ||
+      !Array.isArray(pageSource.rows) ||
+      totalCount !== expectedTotal || projectionContext.section === "detail" && totalCount > 1) {
+    throw protocolError("native blueprint workspace page cardinality");
+  }
+  const rows = pageSource.rows.map((row, index) => projectionContext.section === "library"
+    ? normalizeBlueprintSummary(row, `native blueprint workspace library row[${index}]`)
+    : projectionContext.section === "detail"
+      ? normalizeBlueprintDetail(row, `native blueprint workspace detail row[${index}]`)
+      : normalizeBlueprintQueueRow(row, `native blueprint workspace queue row[${index}]`));
+  const expectedRows = Math.min(32, totalCount - expectedPageCursor);
+  if (rows.length !== expectedRows) throw protocolError("native blueprint workspace page cardinality");
+  const rowIds = new Set();
+  for (const row of rows) {
+    const id = projectionContext.section === "detail" ? row.summary.id : row.id;
+    if (rowIds.has(id)) throw protocolError("native blueprint workspace duplicate page ID");
+    rowIds.add(id);
+  }
+  if (projectionContext.section === "detail" && rows.length === 1 &&
+      rows[0].summary.id !== projectionContext.blueprintId) {
+    throw protocolError("native blueprint workspace detail selection");
+  }
+  const consumed = expectedPageCursor + rows.length;
+  const expectedNextCursor = consumed < totalCount ? consumed : null;
+  const nextCursor = pageSource.nextCursor === null ? null
+    : safeInteger(pageSource.nextCursor, "native blueprint workspace next cursor");
+  if (nextCursor !== expectedNextCursor ||
+      boolean(pageSource.truncated, "native blueprint workspace truncated") !== (nextCursor !== null)) {
+    throw protocolError("native blueprint workspace continuation");
+  }
+  const limitsSource = exactObject(
+    source.limits,
+    [
+      "pageRows", "sourceRows", "detailEntities", "detailBelts", "detailResourceAnchors",
+      "detailExternalPorts", "projectionBytes", "opaqueIdBytes", "nameBytes",
+    ],
+    "native blueprint workspace limits",
+  );
+  if (limitsSource.pageRows !== 32 || limitsSource.sourceRows !== 4_096 ||
+      limitsSource.detailEntities !== 512 || limitsSource.detailBelts !== 1_024 ||
+      limitsSource.detailResourceAnchors !== 256 || limitsSource.detailExternalPorts !== 256 ||
+      limitsSource.projectionBytes !== MAX_NATIVE_PROJECTION_BYTES ||
+      limitsSource.opaqueIdBytes !== 512 || limitsSource.nameBytes !== 256) {
+    throw protocolError("native blueprint workspace limits");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "blueprint-workspace-v1",
+    source: "native-core",
+    revision,
+    stateVersion: 47,
+    registryFingerprint,
+    readOnly: true,
+    request: {
+      expectedRevision: projectionContext.expectedRevision,
+      expectedRegistryFingerprint: projectionContext.expectedRegistryFingerprint,
+      section: projectionContext.section,
+      blueprintId: projectionContext.blueprintId,
+      cursor: projectionContext.cursor,
+      limit: 32,
+    },
+    counts,
+    page: {
+      cursor: expectedPageCursor,
+      limit: 32,
+      totalCount,
+      rows,
+      nextCursor,
+      truncated: nextCursor !== null,
+    },
+    limits: {
+      pageRows: 32,
+      sourceRows: 4_096,
+      detailEntities: 512,
+      detailBelts: 1_024,
+      detailResourceAnchors: 256,
+      detailExternalPorts: 256,
+      projectionBytes: MAX_NATIVE_PROJECTION_BYTES,
+      opaqueIdBytes: 512,
+      nameBytes: 256,
+    },
   };
 }
 
@@ -6322,6 +6762,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreFactoryReadModelProjection: normalizeCoreFactoryReadModelProjection,
   coreFactoryInventoryProjection: normalizeCoreFactoryInventoryProjection,
   coreConstructionInventoryProjection: normalizeCoreConstructionInventoryProjection,
+  coreBlueprintWorkspaceProjection: normalizeCoreBlueprintWorkspaceProjection,
   coreConstructionPlacementContext: normalizeCoreConstructionPlacementContext,
   coreConstructionBeltPlacementContext: normalizeCoreConstructionBeltPlacementContext,
   coreConstructionBeltLaneContext: normalizeCoreConstructionBeltLaneContext,

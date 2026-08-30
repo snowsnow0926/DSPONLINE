@@ -15,6 +15,11 @@ import {
   createNativeProjectedStationWarperBudgetCommand,
 } from "./nativeProjectedPlayerCommands";
 import {
+  createNativeStationFleetTargetIntentCommand,
+  createNativeStationWarperInventoryIntentCommand,
+  type NativeStationFleetKind,
+} from "./nativeStationInventoryIntentCommands";
+import {
   SIMULATION_RUNTIME_PROTOCOL_VERSION,
   type SimulationCommandPatch,
 } from "./simulationRuntimeProtocol";
@@ -42,6 +47,8 @@ export type NativeProjectedStationScalarIntent =
   | Readonly<{ field: "stationWarpEnabled" | "stationWarperAutoRefill" | "stationHubEnabled"; target: boolean }>
   | Readonly<{ field: "stationWarperTarget"; target: number }>
   | Readonly<{ field: "stationHubPriority"; target: LogisticsPriority }>;
+
+export type NativeProjectedStationInventoryAdjustment = -10 | -1 | 1 | 10 | "zero" | "capacity";
 
 function opaqueId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 512 && !value.includes("\0");
@@ -302,4 +309,79 @@ export function createNativeProjectedStationScalarCommand(
     addedBelts: [],
     removedBeltIds: [],
   };
+}
+
+function stationInventoryAdjustmentTarget(
+  current: number,
+  capacity: number,
+  adjustment: NativeProjectedStationInventoryAdjustment,
+): number {
+  if (!Number.isSafeInteger(current) || current < 0 || !Number.isSafeInteger(capacity) || capacity < current) {
+    throw new TypeError("原生物流站库存投影无效");
+  }
+  if (adjustment === "zero") return 0;
+  if (adjustment === "capacity") return capacity;
+  if (![-10, -1, 1, 10].includes(adjustment)) {
+    throw new TypeError("原生物流站数量调整无效");
+  }
+  if (adjustment < 0) return Math.max(0, current + adjustment);
+  return Math.min(Number.MAX_SAFE_INTEGER, current + adjustment);
+}
+
+/**
+ * Emits one fleet target marker derived only from the same-revision Rust row.
+ * Rust remains responsible for active routes, portable stock and capacity
+ * clamping; no renderer-computed inventory leaf is included.
+ */
+export function createNativeProjectedStationFleetAdjustmentCommand(
+  binding: NativeProjectedStationConfigurationBinding,
+  kind: NativeStationFleetKind,
+  adjustment: NativeProjectedStationInventoryAdjustment,
+): SimulationCommandPatch | null {
+  const configuration = requireWritableBinding(binding);
+  if (kind !== "drone" && kind !== "vessel") {
+    throw new TypeError("原生物流站舰队类型无效");
+  }
+  if (kind === "vessel" && configuration.stationType !== "interstellar") {
+    throw new TypeError("行星物流站不支持运输船");
+  }
+  const capacityPerBuilding = kind === "drone" ? 50 : 10;
+  const capacity = binding.entity.machineCount * capacityPerBuilding;
+  const current = kind === "drone" ? configuration.stationDrones : configuration.stationVessels;
+  if (current === null) throw new TypeError("原生物流站舰队投影无效");
+  const target = stationInventoryAdjustmentTarget(current, capacity, adjustment);
+  if (target === current) return null;
+  return createNativeStationFleetTargetIntentCommand(
+    binding.revision,
+    binding.entity.entityId,
+    kind,
+    target,
+  );
+}
+
+/**
+ * Emits one signed warper marker. Rust resolves the authoritative station,
+ * capacity and owning active-planet tray before applying any material move.
+ */
+export function createNativeProjectedStationWarperInventoryAdjustmentCommand(
+  binding: NativeProjectedStationConfigurationBinding,
+  adjustment: NativeProjectedStationInventoryAdjustment,
+): SimulationCommandPatch | null {
+  const configuration = requireWritableBinding(binding);
+  if (configuration.stationType !== "interstellar" || configuration.stationWarpers === null) {
+    throw new TypeError("行星物流站不支持站内翘曲器");
+  }
+  if (!configuration.spaceWarpUnlocked) {
+    throw new TypeError("空间翘曲科技尚未解锁");
+  }
+  const capacity = binding.entity.machineCount * 50;
+  const current = configuration.stationWarpers;
+  const target = stationInventoryAdjustmentTarget(current, capacity, adjustment);
+  const delta = target - current;
+  if (delta === 0) return null;
+  return createNativeStationWarperInventoryIntentCommand(
+    binding.revision,
+    binding.entity.entityId,
+    delta,
+  );
 }

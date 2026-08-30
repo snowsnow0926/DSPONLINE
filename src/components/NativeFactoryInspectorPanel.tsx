@@ -23,7 +23,11 @@ import {
   type NativeProjectedEjectorOrbitFrame,
   type NativeProjectedTimeWarpControllerBinding,
 } from "../game/nativeProjectedTimeWarpEjectorCommands";
-import type { NativeProjectedStationConfigurationBinding } from "../game/nativeProjectedStationConfigurationCommands";
+import type {
+  NativeProjectedStationConfigurationBinding,
+  NativeProjectedStationInventoryAdjustment,
+} from "../game/nativeProjectedStationConfigurationCommands";
+import type { NativeStationFleetKind } from "../game/nativeStationInventoryIntentCommands";
 import type { ItemId, LogisticsPriority, PowerPriority, StationMinimumLoad } from "../game/types";
 import { PowerValue } from "./PowerValue";
 import { QuantityValue } from "./QuantityValue";
@@ -72,6 +76,15 @@ export type NativeStationConfigurationUiAction =
   | Readonly<{ kind: "slot-route-policy"; slotIndex: number; target: NativeStationRoutePolicyReadModel }>
   | Readonly<{ kind: "slot-warper-budget"; slotIndex: number; target: number }>
   | Readonly<{
+      kind: "station-fleet-adjust";
+      fleetKind: NativeStationFleetKind;
+      adjustment: NativeProjectedStationInventoryAdjustment;
+    }>
+  | Readonly<{
+      kind: "station-warper-inventory-adjust";
+      adjustment: NativeProjectedStationInventoryAdjustment;
+    }>
+  | Readonly<{
       kind: "station-scalar";
       field: "stationWarpEnabled" | "stationWarperAutoRefill" | "stationHubEnabled";
       target: boolean;
@@ -118,22 +131,68 @@ function NativeStationConfiguration({
     if (writable) onChange?.(entity.entityId, action);
   };
   const interstellar = configuration.stationType === "interstellar";
+  const adjustmentLabel = (adjustment: NativeProjectedStationInventoryAdjustment) => {
+    if (adjustment === "zero") return "归零";
+    if (adjustment === "capacity") return "填满";
+    return adjustment > 0 ? `+${adjustment}` : String(adjustment);
+  };
+  const adjustments = [-10, -1, "zero", 1, 10, "capacity"] as const;
+  const fleetControl = (
+    label: string,
+    fleetKind: NativeStationFleetKind,
+    current: number,
+    capacity: number,
+  ) => <div className="native-station-inventory-control">
+    <strong>{label} {current} / {capacity}</strong>
+    <div className="native-inspector-stack-actions" role="group" aria-label={`Windows 原生${label}数量`}>
+      {adjustments.map((adjustment) => {
+        const decreasing = adjustment === "zero" || typeof adjustment === "number" && adjustment < 0;
+        const increasing = adjustment === "capacity" || typeof adjustment === "number" && adjustment > 0;
+        return <button
+          type="button"
+          key={adjustment}
+          disabled={!writable || decreasing && current === 0 || increasing && current >= capacity}
+          aria-label={`${label}${adjustmentLabel(adjustment)}`}
+          onClick={() => submit({ kind: "station-fleet-adjust", fleetKind, adjustment })}
+        >{adjustmentLabel(adjustment)}</button>;
+      })}
+    </div>
+  </div>;
+  const droneCapacity = entity.machineCount * 50;
+  const vesselCapacity = entity.machineCount * 10;
+  const warperCapacity = entity.machineCount * 50;
+  const stationWarpers = configuration.stationWarpers;
   return <section
     className="native-inspector-safe-actions native-station-configuration"
     data-native-station-configuration="bounded-no-material-v1"
   >
     <strong>Rust 物流站配置</strong>
-    <p>物品、收发模式、舰队和站内翘曲器仅显示；可写按钮只提交一个配置意图，等待 durable ACK 后再刷新。</p>
+    <p>物品与收发模式保持只读；舰队和站内翘曲器按钮只提交一个语义意图，由 Rust 按忙碌数量、容量和库存裁定，等待 durable ACK 后再刷新。</p>
     <dl className="metric-ledger">
       <div><dt>无人机</dt><dd>{configuration.stationDrones}</dd></div>
       <div><dt>运输船</dt><dd>{configuration.stationVessels ?? "-"}</dd></div>
       <div><dt>站内翘曲器</dt><dd>{configuration.stationWarpers ?? "-"}</dd></div>
     </dl>
-    <div className="native-inspector-stack-actions" role="group" aria-label="物流站舰队只读">
-      <button type="button" disabled aria-label="物流无人机只读">无人机 ±</button>
-      {interstellar ? <button type="button" disabled aria-label="物流运输船只读">运输船 ±</button> : null}
-      {interstellar ? <button type="button" disabled aria-label="站内翘曲器只读">翘曲器 ±</button> : null}
-    </div>
+    {fleetControl("物流无人机", "drone", configuration.stationDrones, droneCapacity)}
+    {interstellar && configuration.stationVessels !== null
+      ? fleetControl("物流运输船", "vessel", configuration.stationVessels, vesselCapacity)
+      : null}
+    {interstellar && stationWarpers !== null ? <div className="native-station-inventory-control">
+      <strong>站内翘曲器 {stationWarpers} / {warperCapacity}</strong>
+      <div className="native-inspector-stack-actions" role="group" aria-label="Windows 原生站内翘曲器数量">
+        {adjustments.map((adjustment) => {
+          const decreasing = adjustment === "zero" || typeof adjustment === "number" && adjustment < 0;
+          const increasing = adjustment === "capacity" || typeof adjustment === "number" && adjustment > 0;
+          return <button
+            type="button"
+            key={adjustment}
+            disabled={!writable || !configuration.spaceWarpUnlocked || decreasing && stationWarpers === 0 || increasing && stationWarpers >= warperCapacity}
+            aria-label={`站内翘曲器${adjustmentLabel(adjustment)}`}
+            onClick={() => submit({ kind: "station-warper-inventory-adjust", adjustment })}
+          >{adjustmentLabel(adjustment)}</button>;
+        })}
+      </div>
+    </div> : null}
     {interstellar ? <>
       <div className="native-inspector-stack-actions" role="group" aria-label="Windows 原生星际站开关">
         <button

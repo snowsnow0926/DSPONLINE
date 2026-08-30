@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { selectSettingsCategory } from "./settings-helpers";
 
-const RELEASE_NOTE_ID = "2026-08-30-v1.2.5";
+const RELEASE_NOTE_ID = "2026-08-31-v1.2.6";
 
 async function seedEnglishFactory(page: Page, mobileUi: "legacy" | "next" = "next") {
   await page.addInitScript(({ releaseNoteId, mobileUi }) => {
@@ -110,14 +110,13 @@ test("English light release notes are localized and persist dismissal", async ({
   });
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/?menu=1&lang=en");
-  const dialog = page.getByRole("dialog", { name: "Continuous Pure Idle, No-Rollback Recovery, and Blueprint Layout Fixes" });
+  const dialog = page.getByRole("dialog", { name: "Direct Endgame Settlement and Planet Factory Reset" });
   await expect(dialog).toBeVisible();
-  await expect(dialog).toContainText("1.2.5");
-  await expect(dialog).toContainText("Conservative pure idle uses independent terminal boundaries");
-  await expect(dialog).toContainText("Rate replication also advances construction");
-  await expect(dialog).toContainText("Simulation Worker faults recover in place");
-  await expect(dialog).toContainText("Automatic safeguards never roll the save backward");
-  await expect(dialog).toContainText("Dense blueprint details no longer overlap");
+  await expect(dialog).toContainText("1.2.6");
+  await expect(dialog).toContainText("Rate replication settles only terminal outcomes");
+  await expect(dialog).toContainText("Missing terminal targets create no deferred inventory");
+  await expect(dialog).toContainText("Reset one colonized planet from the star map");
+  await expect(dialog).toContainText("Natural resources and global progress are preserved");
   await expect(dialog).toContainText("Save and server formats remain compatible");
   expect(await visibleHanStrings(dialog)).toEqual([]);
   await dialog.getByRole("button", { name: "Got it" }).click();

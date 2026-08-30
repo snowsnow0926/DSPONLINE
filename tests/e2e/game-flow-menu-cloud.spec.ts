@@ -7,7 +7,7 @@ async function installTestBootstrap(page: Page) {
   await page.addInitScript(() => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     if (new URLSearchParams(window.location.search).get("releaseNotesTest") !== "1") {
-      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-30-v1.2.5");
+      window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-31-v1.2.6");
     }
   });
 }
@@ -1603,7 +1603,7 @@ test("dated release notes appear once and remain available from both settings sc
   const releaseNotes = page.locator(".release-notes-dialog");
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "纯挂机连续运行、无回档恢复与蓝图布局修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.5");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.6");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
   await expect(releaseNotes).toContainText("守恒纯挂机改为终局产出独立边界");
   await expect(releaseNotes).toContainText("产率复制挂机也会推进建筑制造");
@@ -1637,7 +1637,7 @@ test("dated release notes appear once and remain available from both settings sc
   await releaseNotes.getByRole("button", { name: "查看历史版本" }).click();
   await releaseNotes.getByRole("button", { name: "返回当前版本" }).click();
   await expect(releaseNotes).toHaveAttribute("aria-label", "纯挂机连续运行、无回档恢复与蓝图布局修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.5");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.6");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
   await page.screenshot({ path: "artifacts/qa/release-notes-2026-08-27-v123-1440.png", fullPage: true });
 
@@ -1676,7 +1676,7 @@ test("dated release notes appear once and remain available from both settings sc
 
   await releaseNotes.getByRole("button", { name: "我知道了" }).click();
   await expect(releaseNotes).toHaveCount(0);
-  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-08-30-v1.2.5");
+  await expect.poll(() => page.evaluate(() => window.localStorage.getItem("dsp-idle-network.release-notes.seen.v1"))).toBe("2026-08-31-v1.2.6");
   await page.reload();
   await expect(releaseNotes).toHaveCount(0);
 
@@ -1684,7 +1684,7 @@ test("dated release notes appear once and remain available from both settings sc
   await page.getByRole("button", { name: "查看2026年8月30日版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "纯挂机连续运行、无回档恢复与蓝图布局修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.5");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.6");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
   await releaseNotes.getByLabel("关闭版本更新记录").click();
 
@@ -1696,7 +1696,7 @@ test("dated release notes appear once and remain available from both settings sc
   await operations.getByRole("button", { name: "查看版本更新记录" }).click();
   await expect(releaseNotes).toBeVisible();
   await expect(releaseNotes).toHaveAttribute("aria-label", "纯挂机连续运行、无回档恢复与蓝图布局修复");
-  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.5");
+  await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.6");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
   await page.setViewportSize({ width: 844, height: 390 });
   await expect.poll(async () => releaseNotes.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);

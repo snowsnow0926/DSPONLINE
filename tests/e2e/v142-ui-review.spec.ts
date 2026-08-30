@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
-const RELEASE_NOTE_ID = "2026-08-30-v1.2.5";
+const RELEASE_NOTE_ID = "2026-08-31-v1.2.6";
 
 function uiReviewFixture() {
   return ({ releaseNoteId, fontScale }: { releaseNoteId: string; fontScale: number }) => {
@@ -520,13 +520,13 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   });
   const dialog = page.locator(".release-notes-dialog");
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveAttribute("aria-label", "纯挂机连续运行、无回档恢复与蓝图布局修复");
-  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.2.5");
-  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(6);
-  await expect(dialog).toContainText("守恒纯挂机改为终局产出独立边界");
-  await expect(dialog).toContainText("产率复制挂机也会推进建筑制造");
-  await expect(dialog).toContainText("模拟 Worker 故障可原地恢复");
-  await expect(dialog).toContainText("后台保护不再自动把存档回退");
+  await expect(dialog).toHaveAttribute("aria-label", "终局直结与星球工厂重置");
+  await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.2.6");
+  await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(5);
+  await expect(dialog).toContainText("产率复制只直结终局成果");
+  await expect(dialog).toContainText("没有终局目标就不生成延期库存");
+  await expect(dialog).toContainText("在星图重置一颗已殖民星球");
+  await expect(dialog).toContainText("天然资源与全局进度保持不变");
   await expect(dialog).toContainText("存档与服务器格式保持兼容");
   const close = dialog.getByRole("button", { name: /关闭/ }).first();
   const acknowledge = dialog.getByRole("button", { name: /我知道了|开始/ }).last();

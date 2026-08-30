@@ -13,7 +13,7 @@ test("star map resets one planet only after three confirmations", async ({ page 
   await page.addInitScript(({ rawSave }) => {
     window.sessionStorage.setItem("dsp-idle-network.test-bypass-menu", "1");
     window.localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-30-v1.2.5");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-31-v1.2.6");
     window.localStorage.setItem("dsp-idle-network.save.v1", rawSave);
   }, { rawSave });
   await page.goto("/");

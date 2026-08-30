@@ -27,6 +27,40 @@ export interface LocalizedReleaseNotesUiCopy {
   acknowledge: string;
 }
 
+const release126Copy = {
+  date: { "zh-CN": "2026年8月31日", en: "August 31, 2026" },
+  title: { "zh-CN": "终局直结与星球工厂重置", en: "Direct Endgame Settlement and Planet Factory Reset" },
+  summary: {
+    "zh-CN": "1.2.6 将产率复制挂机的收益直接结算到科研和逐恒星系戴森进度，不再向库存或量子仓库凭空写入物品；星图新增三次确认的星球工厂重置。重置只拆除所选星球的玩家工厂，不补满天然资源，也不改变全局进度。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
+    en: "Version 1.2.6 settles rate-replication idle gains directly into research and per-system Dyson progress instead of fabricating inventory, and adds a three-confirmation planet factory reset to the star map. Reset removes the chosen planet's player factory without refilling natural resources or changing global progression. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
+  },
+  directTitle: { "zh-CN": "产率复制只直结终局成果", en: "Rate replication settles only terminal outcomes" },
+  directDescription: {
+    "zh-CN": "锁定的统计窗口会直接推进真实白矩阵科研，以及对应恒星系的戴森结构和壳面吸收；不会把复制的材料、火箭或太阳帆写进行星托盘、机器缓存、施工缓存或量子仓库。",
+    en: "The locked statistical window advances actual white-matrix research and the matching system's Dyson structure and shell absorption directly. It never writes copied materials, rockets, or sails into planetary trays, machine buffers, construction buffers, or quantum storage.",
+  },
+  discardTitle: { "zh-CN": "没有终局目标就不生成延期库存", en: "Missing terminal targets create no deferred inventory" },
+  discardDescription: {
+    "zh-CN": "如果当前没有可接收的科研或对应戴森计划，该通道本段额度会直接舍弃；建筑制造巨构仍只消耗玩家真实拥有的材料。",
+    en: "If no current research or matching Dyson plan can receive a channel, that interval's credit is discarded. Construction megastructures continue to consume only real player-owned materials.",
+  },
+  resetTitle: { "zh-CN": "在星图重置一颗已殖民星球", en: "Reset one colonized planet from the star map" },
+  resetDescription: {
+    "zh-CN": "连续完成范围、不可撤销后果和精确星球名称三次确认后，游戏会永久删除该星球的建筑、采集设备、传送带、本地物资、队列及相关物流航线；不返料且不可撤销。",
+    en: "After three distinct confirmations, including typing the exact displayed planet name, the game permanently removes that planet's buildings, miners, belts, local stores, queues, and related logistics routes. The action gives no refunds and cannot be undone.",
+  },
+  preserveTitle: { "zh-CN": "天然资源与全局进度保持不变", en: "Natural resources and global progress are preserved" },
+  preserveDescription: {
+    "zh-CN": "矿脉身份、位置、类型、当前剩余储量和枯竭余数，以及殖民资料、科研、戴森工程、量子仓库、全局施工库存、随身舰队和蓝图均保留；重置不会补矿。",
+    en: "Vein identity, location, resource type, current remaining reserves, depletion remainder, colonization metadata, research, Dyson projects, quantum storage, global construction stock, portable fleet, and blueprints are preserved. Reset never refills ore.",
+  },
+  boundaryTitle: { "zh-CN": "存档与服务器格式保持兼容", en: "Save and server formats remain compatible" },
+  boundaryDescription: {
+    "zh-CN": "本版只调整结算命令和星图交互，不增加持久化字段，也不迁移云存档正文或生产数据库。",
+    en: "This release changes settlement commands and star-map interaction without adding persisted fields or migrating cloud payloads or the production database.",
+  },
+} as const;
+
 const release125Copy = {
   date: { "zh-CN": "2026年8月30日", en: "August 30, 2026" },
   title: { "zh-CN": "纯挂机连续运行、无回档恢复与蓝图布局修复", en: "Continuous Pure Idle, No-Rollback Recovery, and Blueprint Layout Fixes" },
@@ -823,6 +857,10 @@ function release123Message(locale: AppLocale, key: keyof typeof release123Copy):
   return release123Copy[key][locale];
 }
 
+function release126Message(locale: AppLocale, key: keyof typeof release126Copy): string {
+  return release126Copy[key][locale];
+}
+
 function release125Message(locale: AppLocale, key: keyof typeof release125Copy): string {
   return release125Copy[key][locale];
 }
@@ -865,6 +903,23 @@ function release1042Message(locale: AppLocale, key: keyof typeof release1042Copy
 
 /** Stable-key release copy; current text does not use the legacy DOM translation bridge. */
 export function getCurrentReleaseNotes(locale: AppLocale): LocalizedReleaseNoteRecord {
+  return {
+    id: "2026-08-31-v1.2.6",
+    date: release126Message(locale, "date"),
+    version: "1.2.6",
+    title: release126Message(locale, "title"),
+    summary: release126Message(locale, "summary"),
+    items: [
+      { id: "v126-terminal-direct-settlement", title: release126Message(locale, "directTitle"), description: release126Message(locale, "directDescription") },
+      { id: "v126-no-deferred-inventory", title: release126Message(locale, "discardTitle"), description: release126Message(locale, "discardDescription") },
+      { id: "v126-planet-factory-reset", title: release126Message(locale, "resetTitle"), description: release126Message(locale, "resetDescription") },
+      { id: "v126-reset-preservation-boundary", title: release126Message(locale, "preserveTitle"), description: release126Message(locale, "preserveDescription") },
+      { id: "v126-compatibility-boundary", title: release126Message(locale, "boundaryTitle"), description: release126Message(locale, "boundaryDescription") },
+    ],
+  };
+}
+
+export function getReleaseNotes125(locale: AppLocale): LocalizedReleaseNoteRecord {
   return {
     id: "2026-08-30-v1.2.5",
     date: release125Message(locale, "date"),

@@ -8,55 +8,48 @@ import type { AppLocale } from "./locale";
 export function getCurrentReleaseNotes(locale: AppLocale) {
   const english = locale === "en";
   return {
-    id: "2026-08-30-v1.2.5",
-    date: english ? "August 30, 2026" : "2026年8月30日",
-    version: "1.2.5",
-    title: english ? "Continuous Pure Idle, No-Rollback Recovery, and Blueprint Layout Fixes" : "纯挂机连续运行、无回档恢复与蓝图布局修复",
+    id: "2026-08-31-v1.2.6",
+    date: english ? "August 31, 2026" : "2026年8月31日",
+    version: "1.2.6",
+    title: english ? "Direct Endgame Settlement and Planet Factory Reset" : "终局直结与星球工厂重置",
     summary: english
-      ? "Version 1.2.5 keeps construction megastructures productive in both pure-idle modes and replaces the conservative mode's global stop with terminal-domain settlement: certified matrices, research, and rockets continue while ordinary materials keep their existing bounds. Failed simulation Workers are rebuilt without silently installing an older checkpoint, and dense blueprint detail layouts no longer overlap. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible."
-      : "1.2.5 让建筑制造巨构在两种纯挂机模式中持续工作，并把守恒模式从“一处边界耗尽就全停”改为按终局产出域独立结算：有闭合证书的白矩阵、科研和火箭继续，普通材料仍遵守原边界。模拟 Worker 故障会自动重建，不再静默安装旧检查点，并修复密集蓝图详细卡片错位。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
+      ? "Version 1.2.6 settles rate-replication idle gains directly into research and per-system Dyson progress instead of fabricating inventory, and adds a three-confirmation planet factory reset to the star map. Reset removes the chosen planet's player factory without refilling natural resources or changing global progression. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible."
+      : "1.2.6 将产率复制挂机的收益直接结算到科研和逐恒星系戴森进度，不再向库存或量子仓库凭空写入物品；星图新增三次确认的星球工厂重置。重置只拆除所选星球的玩家工厂，不补满天然资源，也不改变全局进度。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
     items: [
       {
-        id: "v125-conservative-continuity",
-        title: english ? "Conservative pure idle uses independent terminal boundaries" : "守恒纯挂机改为终局产出独立边界",
+        id: "v126-terminal-direct-settlement",
+        title: english ? "Rate replication settles only terminal outcomes" : "产率复制只直结终局成果",
         description: english
-          ? "Exhausting an ordinary-material, cache, or finite power-tail estimate no longer zeros every rate. Matrices, research, rockets, and construction proven closed by all three exact windows keep independent credit. Startup still requires the requested multiplier to be actually powered; no-power, missing same-grid proof, cross-grid borrowing, negative stores, and save-integrity failures remain blocked."
-          : "普通材料、缓存或有限供电尾段估算耗尽时，不再把全部产率清零；三个精确窗口已证明闭合的白矩阵、科研、火箭和建筑制造继续独立结算。启动时仍要求实际供电达到请求倍率；无电、缺少同电网证明、跨电网借电、负库存和存档完整性失败仍会阻止。",
+          ? "The locked statistical window advances actual white-matrix research and the matching system's Dyson structure and shell absorption directly. It never writes copied materials, rockets, or sails into planetary trays, machine buffers, construction buffers, or quantum storage."
+          : "锁定的统计窗口会直接推进真实白矩阵科研，以及对应恒星系的戴森结构和壳面吸收；不会把复制的材料、火箭或太阳帆写进行星托盘、机器缓存、施工缓存或量子仓库。",
       },
       {
-        id: "v125-replication-construction",
-        title: english ? "Rate replication also advances construction" : "产率复制挂机也会推进建筑制造",
+        id: "v126-no-deferred-inventory",
+        title: english ? "Missing terminal targets create no deferred inventory" : "没有终局目标就不生成延期库存",
         description: english
-          ? "Before copied endgame outputs are awarded, construction centers recursively consume the player's real inventory and advance active projects at the locked runtime power factor. No construction material is fabricated."
-          : "复制终局产出前，建筑制造中心会按锁定的实际供电倍率递归消耗玩家真实库存并推进正在施工的项目；不会凭空生成施工材料。",
+          ? "If no current research or matching Dyson plan can receive a channel, that interval's credit is discarded. Construction megastructures continue to consume only real player-owned materials."
+          : "如果当前没有可接收的科研或对应戴森计划，该通道本段额度会直接舍弃；建筑制造巨构仍只消耗玩家真实拥有的材料。",
       },
       {
-        id: "v125-worker-auto-resume",
-        title: english ? "Simulation Worker faults recover in place" : "模拟 Worker 故障可原地恢复",
+        id: "v126-planet-factory-reset",
+        title: english ? "Reset one colonized planet from the star map" : "在星图重置一颗已殖民星球",
         description: english
-          ? "Runtime failures, timeouts, and durable-recovery faults refund uncommitted idle time, rebuild the Worker, and resume from the current committed state. Content-pack validation errors remain separate and do not poison the runtime recovery path."
-          : "运行异常、超时和 durable 恢复故障会退还尚未提交的挂机时间，重建 Worker 并从当前已提交状态继续；内容包校验错误与运行故障分离，不再污染自动恢复。",
+          ? "After three distinct confirmations, including typing the exact displayed planet name, the game permanently removes that planet's buildings, miners, belts, local stores, queues, and related logistics routes. The action gives no refunds and cannot be undone."
+          : "连续完成范围、不可撤销后果和精确星球名称三次确认后，游戏会永久删除该星球的建筑、采集设备、传送带、本地物资、队列及相关物流航线；不返料且不可撤销。",
       },
       {
-        id: "v125-no-automatic-rollback",
-        title: english ? "Automatic safeguards never roll the save backward" : "后台保护不再自动把存档回退",
+        id: "v126-reset-preservation-boundary",
+        title: english ? "Natural resources and global progress are preserved" : "天然资源与全局进度保持不变",
         description: english
-          ? "Memory guards, Worker recovery, timeout handling, and pure-idle repair may stop or retry, but cannot install a historical authoritative checkpoint. Older checkpoints remain available only through an explicit player restore action."
-          : "内存保护、Worker 恢复、超时处理和纯挂机修复可以停止或重试，但不能安装历史权威检查点；旧检查点只允许玩家明确点击恢复时使用。",
+          ? "Vein identity, location, resource type, current remaining reserves, depletion remainder, colonization metadata, research, Dyson projects, quantum storage, global construction stock, portable fleet, and blueprints are preserved. Reset never refills ore."
+          : "矿脉身份、位置、类型、当前剩余储量和枯竭余数，以及殖民资料、科研、戴森工程、量子仓库、全局施工库存、随身舰队和蓝图均保留；重置不会补矿。",
       },
       {
-        id: "v125-blueprint-detail-layout",
-        title: english ? "Dense blueprint details no longer overlap" : "密集蓝图详细信息不再错位重叠",
-        description: english
-          ? "Detailed blueprint cards use natural-height rows and bounded overflow, keeping large counts, long parameters and port lists readable at dense desktop layouts and enlarged UI font scales."
-          : "蓝图详细卡片改用自然高度行布局和有界溢出；超大数量、长参数、端口列表以及放大界面字号时都能保持可读，不再相互覆盖。",
-      },
-      {
-        id: "v125-compatibility-boundary",
+        id: "v126-compatibility-boundary",
         title: english ? "Save and server formats remain compatible" : "存档与服务器格式保持兼容",
         description: english
-          ? "This release changes pure-idle settlement, runtime recovery, and blueprint presentation only. It does not migrate player state, cloud payloads, or the production database layout."
-          : "本版只调整纯挂机结算、运行时恢复和蓝图显示，不迁移玩家状态、云存档正文或生产数据库布局。",
+          ? "This release changes settlement commands and star-map interaction without adding persisted fields or migrating cloud payloads or the production database."
+          : "本版只调整结算命令和星图交互，不增加持久化字段，也不迁移云存档正文或生产数据库。",
       },
     ],
   } as const;

@@ -79,8 +79,8 @@ function performancePackageFixture() {
   return value;
 }
 
-test("source package is a 1.2.5 stable upgrade identity and retains an isolated performance build path", () => {
-  assert.equal(packageMetadata.version, "1.2.5");
+test("source package is a 1.2.6 stable upgrade identity and retains an isolated performance build path", () => {
+  assert.equal(packageMetadata.version, "1.2.6");
   assert.equal(validateStablePackageIdentity(packageMetadata, {
     requireBuildConfiguration: true,
     requireOfflineDefaults: true,
@@ -332,7 +332,7 @@ test("packaged identity verifier accepts only the dedicated executable and rejec
   fs.mkdirSync(resourcesDirectory, { recursive: true });
   fs.writeFileSync(path.join(source, "package.json"), JSON.stringify({
     name: "dsp-idle-network",
-    version: "1.2.5",
+    version: "1.2.6",
     desktopEditionId: PERFORMANCE_EDITION_IDENTITY.editionId,
     productName: PERFORMANCE_EDITION_IDENTITY.productName,
   }));

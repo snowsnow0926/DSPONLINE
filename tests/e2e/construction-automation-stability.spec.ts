@@ -237,7 +237,7 @@ test("pure idle survives an unresponsive slice and manual stop still restores in
   const timeWarpEntityId = timeWarpEntity.id;
   await page.addInitScript(() => {
     window.localStorage.setItem("dsp-idle-network.onboarding.v1", "dismissed");
-    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-30-v1.2.5");
+    window.localStorage.setItem("dsp-idle-network.release-notes.seen.v1", "2026-08-31-v1.2.6");
     const NativeWorker = window.Worker;
     const tracker = { delayTimeWarp: false, delayedRequests: 0, terminatedWorkers: 0, createdWorkers: 0 };
     Object.assign(window, { __timeWarpStopTracker: tracker });

@@ -8716,41 +8716,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, []);
 
   const commitGame = useCallback((updater: (current: GameState) => GameState): boolean => {
+    // `commitGame` is the legacy Web/PWA edit surface. Once Rust owns the
+    // player-visible runtime, never even evaluate an old JavaScript gameplay
+    // updater against the deliberately hollow renderer shell. Native controls
+    // must enter through `commitNativeProjectedCommand`, whose typed intent is
+    // re-derived from a same-revision Rust projection and validated again by
+    // the authority core.
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      setNotice("该旧操作尚未接入有类型的 Rust 权威命令；本次操作未应用");
+      return false;
+    }
     if (rejectPlayerStateEditDuringPrimarySave()) return false;
     const current = gameRef.current;
     const next = updater(current);
     if (next === current) return false;
-    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
-      const binding = nativePlayerAuthorityCommandBindingRef.current;
-      if (!binding || nativePlayerAuthorityCommandInFlightRef.current) {
-        setNotice("Windows 原生权威正在确认上一条命令或等待稳定 revision；本次操作未应用");
-        return false;
-      }
-      const command = createSimulationCommandPatch(current, next, binding.source.baseRevision);
-      if (!command) return false;
-      nativePlayerAuthorityCommandInFlightRef.current = true;
-      setNativePlayerAuthorityCommandPending(true);
-      void binding.source.applyCommand(command).then(() => {
-        // Main owns the durable receipt and pushes the next clock revision.
-        // The renderer deliberately does not install `next` or predict the
-        // command result; bounded projections will refresh from that revision.
-        invalidateFactoryAlertProjection();
-      }).catch((error: unknown) => {
-        const code = error && typeof error === "object" && "code" in error &&
-          typeof error.code === "string" ? error.code : "";
-        setNotice(code === "NATIVE_PLAYER_AUTHORITY_COMMAND_TRANSPORT_UNCERTAIN"
-          ? "原生玩家命令结果暂时无法确认；已停止重试并等待权威恢复，旧 JavaScript 状态未被安装"
-          : "原生玩家命令未通过权威校验；本次操作未应用");
-      }).finally(async () => {
-        try {
-          await nativePlayerAuthorityClockRef.current?.refresh();
-        } finally {
-          nativePlayerAuthorityCommandInFlightRef.current = false;
-          setNativePlayerAuthorityCommandPending(false);
-        }
-      });
-      return true;
-    }
     const recorded = gameHistoryRef.current.record(current, next);
     if (!recorded) return false;
     factoryAlertsGenerationRef.current += 1;

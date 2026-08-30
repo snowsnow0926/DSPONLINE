@@ -21,22 +21,27 @@ describe("native player-authority command App boundary", () => {
     expect(binding).toMatch(/createNativePlayerAuthorityCommandSource\([\s\S]*?desktopBridge[\s\S]*?nativePlayerAuthorityActiveFrame/);
   });
 
-  it("routes an accepted edit to Rust before any renderer history or state publication", () => {
+  it("rejects every legacy JavaScript edit before reading the shell or invoking its updater", () => {
     const app = readFileSync(resolve("src/App.tsx"), "utf8");
     const commit = app.slice(
       app.indexOf("const commitGame = useCallback"),
-      app.indexOf("useEffect(() => {", app.indexOf("const commitGame = useCallback")),
+      app.indexOf("const commitNativeProjectedCommand = useCallback"),
     );
     const nativeBranch = commit.indexOf("if (nativePlayerAuthorityOwnsRuntimeRef.current)");
+    const saveGuard = commit.indexOf("rejectPlayerStateEditDuringPrimarySave()");
+    const currentRead = commit.indexOf("const current = gameRef.current");
+    const updaterCall = commit.indexOf("const next = updater(current)");
     const historyRecord = commit.indexOf("gameHistoryRef.current.record");
 
     expect(nativeBranch).toBeGreaterThanOrEqual(0);
-    expect(historyRecord).toBeGreaterThan(nativeBranch);
-    expect(commit).toMatch(/createSimulationCommandPatch\(current, next, binding\.source\.baseRevision\)/);
-    expect(commit).toMatch(/binding\.source\.applyCommand\(command\)/);
-    expect(commit).toMatch(/does not install `next` or predict the[\s\S]*?bounded projections/);
-    expect(commit).toMatch(/\.finally\(async \(\) => \{[\s\S]*?try \{[\s\S]*?await nativePlayerAuthorityClockRef\.current\?\.refresh\(\)[\s\S]*?\} finally \{[\s\S]*?nativePlayerAuthorityCommandInFlightRef\.current = false/);
-    expect(commit.slice(nativeBranch, historyRecord)).not.toMatch(/publishRuntimeGame|gameRef\.current\s*=|setGame\(|gameHistoryRef\.current\.record/);
+    expect(saveGuard).toBeGreaterThan(nativeBranch);
+    expect(currentRead).toBeGreaterThan(saveGuard);
+    expect(updaterCall).toBeGreaterThan(currentRead);
+    expect(historyRecord).toBeGreaterThan(updaterCall);
+    expect(commit.slice(nativeBranch, saveGuard)).toMatch(/尚未接入有类型的 Rust 权威命令/);
+    expect(commit.slice(nativeBranch, saveGuard)).toMatch(/return false/);
+    expect(commit).not.toMatch(/createSimulationCommandPatch\(current, next|binding\.source\.applyCommand/);
+    expect(commit.slice(nativeBranch, historyRecord)).not.toMatch(/publishRuntimeGame|setGame\(|gameHistoryRef\.current\.record/);
   });
 
   it("builds direct projected edits from the exact bound revision without reading or predicting GameState", () => {

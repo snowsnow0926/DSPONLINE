@@ -31,6 +31,7 @@ const INTERSTELLAR_CONGESTION_DENSE_NUMERATOR: usize = 3;
 const INTERSTELLAR_CONGESTION_DENSE_DENOMINATOR: usize = 4;
 const ORBITAL_COLLECTOR_DENSE_NUMERATOR: usize = 3;
 const ORBITAL_COLLECTOR_DENSE_DENOMINATOR: usize = 4;
+const WARPER_RESERVATION_ROWS_PER_CHUNK: usize = 1_024;
 
 #[derive(Debug, Clone)]
 struct Slot {
@@ -1682,6 +1683,55 @@ fn legacy_warper_reservations(entities: &[Value]) -> HashMap<String, f64> {
     reserved_outgoing
 }
 
+fn legacy_warper_reservation_contributions(
+    entities: &[Value],
+    range: std::ops::Range<usize>,
+) -> Vec<(&str, f64)> {
+    let mut contributions = Vec::new();
+    for station in entities[range].iter().filter_map(Value::as_object) {
+        let Some(routes) = station.get("stationRoutes").and_then(Value::as_array) else {
+            continue;
+        };
+        for route in routes.iter().filter_map(Value::as_object) {
+            if string_at(route, "itemId") != Some("space_warper") {
+                continue;
+            }
+            let Some(source_id) = string_at(route, "peerId") else {
+                continue;
+            };
+            contributions.push((source_id, finite_number(route.get("cargo"))));
+        }
+    }
+    contributions
+}
+
+fn legacy_warper_reservations_with_runtime(
+    entities: &[Value],
+    runtime: &DeterministicRuntime,
+) -> HashMap<String, f64> {
+    // The serial path is deliberately the original implementation. Besides
+    // avoiding the chunk buffers for small saves, this keeps the one-worker
+    // execution path byte-for-byte equivalent to the pre-parallel code.
+    if runtime.worker_count_for_items(entities.len()) == 1 {
+        return legacy_warper_reservations(entities);
+    }
+
+    // Probing JSON rows is read-only. Each fixed ascending chunk owns its
+    // contribution buffer; the serial replay below retains the original
+    // entity/route order, including floating-point addition order and the
+    // first insertion of a peer id into the HashMap.
+    let chunks = runtime.ordered_chunk_map(
+        entities.len(),
+        WARPER_RESERVATION_ROWS_PER_CHUNK,
+        |_, range| legacy_warper_reservation_contributions(entities, range),
+    );
+    let mut reserved_outgoing = HashMap::<String, f64>::new();
+    for (source_id, cargo) in chunks.into_iter().flatten() {
+        *reserved_outgoing.entry(source_id.to_owned()).or_default() += cargo;
+    }
+    reserved_outgoing
+}
+
 fn planet_tray_warper_amount(base: &Map<String, Value>, planet_id: &str) -> f64 {
     let active_planet = base.get("activePlanetId").and_then(Value::as_str);
     (if active_planet == Some(planet_id) {
@@ -1830,7 +1880,7 @@ fn refill_station_warpers_with_scan<L: InterstellarDispatchLedger + ?Sized>(
         route_activity.take_warper_refill_indices(entities.len(), force_full_scan);
     let legacy_reservations = selected_indices
         .is_none()
-        .then(|| legacy_warper_reservations(entities));
+        .then(|| legacy_warper_reservations_with_runtime(entities, deterministic_runtime()));
     if legacy_reservations.is_some() {
         scan.reservation_rows_visited = entities.len();
     }
@@ -5367,6 +5417,150 @@ mod tests {
             "relay_planet": { "space_warper": 0.0 }
         });
         base.as_object().expect("warper base object").clone()
+    }
+
+    fn warper_reservation_bits(reservations: HashMap<String, f64>) -> Vec<(String, u64)> {
+        let mut rows = reservations
+            .into_iter()
+            .map(|(peer_id, cargo)| (peer_id, cargo.to_bits()))
+            .collect::<Vec<_>>();
+        rows.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        rows
+    }
+
+    fn dense_warper_reservation_rows(count: usize) -> Vec<Value> {
+        (0..count)
+            .map(|index| {
+                if index % 97 == 0 {
+                    return Value::Null;
+                }
+                let primary_cargo = match index % 8 {
+                    0 => 10_000_000_000_000_000.0,
+                    1 => 1.0,
+                    2 => -10_000_000_000_000_000.0,
+                    3 => -0.0,
+                    4 => 0.125,
+                    5 => -0.25,
+                    6 => 3.0,
+                    _ => 0.5,
+                };
+                json!({
+                    "id": format!("mod:星际站/{index:05}/Ω🚀"),
+                    "stationRoutes": [
+                        {
+                            "itemId": "space_warper",
+                            "peerId": format!("mod:来源/{:03}/Ω🚀", index % 19),
+                            "cargo": primary_cargo
+                        },
+                        {
+                            "itemId": "space_warper",
+                            "peerId": format!("mod:备用/{:03}/保持", index % 13),
+                            "cargo": if index % 5 == 0 { Value::Null } else { Value::from(0.75) }
+                        },
+                        {
+                            "itemId": "space_warper",
+                            "peerId": "mod:缺失数量/Ω"
+                        },
+                        {
+                            "itemId": "space_warper",
+                            "peerId": "mod:非数字数量/Ω",
+                            "cargo": "不是数字"
+                        },
+                        {
+                            "itemId": "iron_ore",
+                            "peerId": "mod:应忽略/Ω",
+                            "cargo": 999999
+                        },
+                        {
+                            "itemId": "space_warper",
+                            "peerId": null,
+                            "cargo": 123
+                        },
+                        null
+                    ],
+                    "mod:opaque": { "signedZero": -0.0, "text": "保持原样" }
+                })
+            })
+            .collect()
+    }
+
+    fn sparse_warper_reservation_rows(count: usize) -> Vec<Value> {
+        (0..count)
+            .map(|index| {
+                if index % 257 == 0 {
+                    json!({
+                        "id": format!("mod:稀疏站/{index:05}/Ω"),
+                        "stationRoutes": [{
+                            "itemId": "space_warper",
+                            "peerId": format!("mod:稀疏来源/{:02}/🚀", index % 7),
+                            "cargo": f64::from((index % 11) as u32) / 3.0
+                        }],
+                        "mod:opaque": { "signedZero": -0.0 }
+                    })
+                } else if index % 113 == 0 {
+                    json!({ "stationRoutes": "mod:opaque-route-container", "keep": "Ω" })
+                } else if index % 89 == 0 {
+                    Value::Null
+                } else {
+                    json!({
+                        "id": format!("dormant-machine-{index}"),
+                        "kind": "machine",
+                        "mod:opaque": { "signedZero": -0.0, "text": "保持原样" }
+                    })
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn warper_reservation_probe_is_bitwise_stable_for_dense_and_sparse_1_2_4_8_workers() {
+        for entities in [
+            dense_warper_reservation_rows(PARALLEL_MIN_ITEMS + 73),
+            sparse_warper_reservation_rows(PARALLEL_MIN_ITEMS + 211),
+        ] {
+            let source = serde_json::to_vec(&entities).unwrap();
+            let expected = warper_reservation_bits(legacy_warper_reservations(&entities));
+            for worker_count in [1, 2, 4, 8] {
+                let actual = warper_reservation_bits(legacy_warper_reservations_with_runtime(
+                    &entities,
+                    &DeterministicRuntime::for_test(worker_count),
+                ));
+                assert_eq!(actual, expected, "worker count {worker_count} diverged");
+                assert_eq!(
+                    serde_json::to_vec(&entities).unwrap(),
+                    source,
+                    "read-only reservation probes mutated their source"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn warper_reservation_probe_preserves_mod_missing_null_and_signed_zero_semantics() {
+        let entities = dense_warper_reservation_rows(PARALLEL_MIN_ITEMS + 1);
+        let expected = warper_reservation_bits(legacy_warper_reservations(&entities));
+        let actual = warper_reservation_bits(legacy_warper_reservations_with_runtime(
+            &entities,
+            &DeterministicRuntime::for_test(8),
+        ));
+        assert_eq!(actual, expected);
+
+        let reservations =
+            legacy_warper_reservations_with_runtime(&entities, &DeterministicRuntime::for_test(8));
+        assert_eq!(
+            reservations
+                .get("mod:缺失数量/Ω")
+                .map(|value| value.to_bits()),
+            Some(0.0_f64.to_bits())
+        );
+        assert_eq!(
+            reservations
+                .get("mod:非数字数量/Ω")
+                .map(|value| value.to_bits()),
+            Some(0.0_f64.to_bits())
+        );
+        assert!(reservations.keys().any(|peer_id| peer_id.contains("Ω🚀")));
+        assert!(!reservations.contains_key("mod:应忽略/Ω"));
     }
 
     #[test]

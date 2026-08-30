@@ -1053,7 +1053,7 @@ test.describe("1.2.3 pure-idle macro recovery", () => {
     expect(result.entityCountPreserved).toBe(true);
     expect(result.beltCountPreserved).toBe(true);
     expect(result.settledWallSeconds).toBe(30 * 24 * 60 * 60);
-    expect(result.algorithmVersion).toBe("pure-idle-macro-v10-final-conservation-gate");
+    expect(result.algorithmVersion).toBe("pure-idle-macro-v11-terminal-domain-boundaries");
     expect(result.complexityStrategy).toBe("fast");
     expect(result.conservativeOnly).toBe(true);
     expect(result.requestedMultiplier).toBeGreaterThanOrEqual(1);

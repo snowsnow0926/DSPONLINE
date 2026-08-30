@@ -43,7 +43,7 @@ import {
 import { isPureIdleReplicationUnlocked } from "./endgame";
 import type { GameState, IdleSettlementState, ItemId } from "./types";
 
-export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v10-final-conservation-gate";
+export const PURE_IDLE_MACRO_ALGORITHM_VERSION = "pure-idle-macro-v11-terminal-domain-boundaries";
 export const PURE_IDLE_MACRO_BUCKET_WALL_SECONDS = 30;
 export const PURE_IDLE_MACRO_VALIDATION_WALL_SECONDS = 10 * 60;
 export const PURE_IDLE_MACRO_CALIBRATION_SECONDS = 30;
@@ -414,6 +414,67 @@ function pureIdleContractProductionRate(contract: PureIdleAffineContract, itemId
   return delta && contract.calibrationSeconds > 0
     ? Math.max(0, Number(delta.delta) / contract.calibrationSeconds)
     : 0;
+}
+
+const PURE_IDLE_RELAXED_TERMINAL_ITEM_IDS = new Set<string>([
+  ...MATRIX_ITEM_IDS,
+  "small_carrier_rocket",
+]);
+
+function pureIdleContractItemId(path: readonly (string | number)[]): string | null {
+  if (path[0] === "totalProduced" && typeof path[1] === "string") return path[1];
+  if (path[0] === "entities" && (path[2] === "inputs" || path[2] === "outputs") &&
+    typeof path[3] === "string") return path[3];
+  if (path[0] === "tray" && typeof path[1] === "string") return path[1];
+  if (path[0] === "planetTrays" && typeof path[2] === "string") return path[2];
+  if (path[0] === "quantumLogisticsNetwork" && path[1] === "inventory" &&
+    typeof path[2] === "string") return path[2];
+  return null;
+}
+
+/**
+ * Pure idle is an explicit terminal-output mode. Once the three exact windows
+ * have proven a closed positive flow for matrix research or rockets, an
+ * unrelated ordinary-material/cache boundary must not zero that terminal
+ * domain. Startup still requires the requested multiplier to be powered and
+ * the three exact windows to issue closed terminal/construction certificates;
+ * a later finite-fuel/storage horizon estimate no longer globally zeros those
+ * independently certified domains. Ordinary materials remain bounded by the
+ * existing global and per-item horizons. This plan only changes cumulative
+ * terminal credit; inventories are still never replenished by the compact
+ * contract.
+ */
+export function createConservativePureIdleCreditSecondsByItem(
+  contract: PureIdleAffineContract,
+  remainingSimulationSecondsByItem: Readonly<Record<string, number>>,
+  requestedSimulationSeconds: number,
+  globallyCreditedSimulationSeconds: number,
+): Record<string, number> {
+  const requested = Math.max(0, requestedSimulationSeconds);
+  const globallyCredited = Math.max(0, Math.min(requested, globallyCreditedSimulationSeconds));
+  const itemIds = new Set<string>(Object.keys(remainingSimulationSecondsByItem));
+  for (const delta of contract.deltas) {
+    const itemId = pureIdleContractItemId(delta.path);
+    if (itemId) itemIds.add(itemId);
+  }
+  return Object.fromEntries([...itemIds].sort().map((itemId) => {
+    const remaining = remainingSimulationSecondsByItem[itemId];
+    const bounded = remaining === undefined
+      ? globallyCredited
+      : Math.min(globallyCredited, Math.max(0, remaining));
+    const steadyFactor = contract.steadyStateFactorsByItem?.[itemId] ?? 0;
+    const terminalCertified = PURE_IDLE_RELAXED_TERMINAL_ITEM_IDS.has(itemId) &&
+      steadyFactor > 1e-9 && pureIdleContractProductionRate(contract, itemId as ItemId) > 1e-9;
+    return [itemId, terminalCertified ? requested : bounded];
+  }));
+}
+
+function hasFullConservativeItemCredit(
+  creditedSecondsByItem: Readonly<Record<string, number>> | undefined,
+  itemId: string,
+  requestedSimulationSeconds: number,
+): boolean {
+  return (creditedSecondsByItem?.[itemId] ?? 0) + 1e-9 >= requestedSimulationSeconds;
 }
 
 export function summarizePureIdleMacroSession(session: PureIdleMacroSession): PureIdleMacroSummary {
@@ -1176,26 +1237,37 @@ export function advancePureIdleMacroSession(
         : Math.min(powerCreditedMacroSimulationSeconds, Math.max(0, session.conservativeRemainingSimulationSeconds))
       : powerCreditedMacroSimulationSeconds;
     const conservativeSimulationSecondsByItem = session.conservativeOnly
-      ? Object.fromEntries(Object.entries(session.conservativeRemainingSimulationSecondsByItem).map(([itemId, remaining]) => [
-        itemId,
-        Math.min(conservativeMacroSimulationSeconds, Math.max(0, remaining)),
-      ]))
+      ? createConservativePureIdleCreditSecondsByItem(
+        session.contract,
+        session.conservativeRemainingSimulationSecondsByItem,
+        macroSimulationSeconds,
+        conservativeMacroSimulationSeconds,
+      )
       : undefined;
+    const researchInputItemIds = Object.entries(session.researchLedger.inflowPerWindow)
+      .filter(([, amount]) => (amount ?? 0n) > 0n)
+      .map(([itemId]) => itemId);
     const conservativeResearchSimulationSeconds = session.conservativeOnly
-      ? MATRIX_ITEM_IDS.reduce((seconds, itemId) => {
-        const itemSeconds = conservativeSimulationSecondsByItem?.[itemId];
-        return itemSeconds === undefined ? seconds : Math.min(seconds, itemSeconds);
-      }, conservativeMacroSimulationSeconds)
+      ? researchInputItemIds.length > 0
+        ? researchInputItemIds.reduce((seconds, itemId) => {
+          const itemSeconds = conservativeSimulationSecondsByItem?.[itemId] ??
+            conservativeMacroSimulationSeconds;
+          return Math.min(seconds, itemSeconds);
+        }, macroSimulationSeconds)
+        : conservativeMacroSimulationSeconds
       : powerCreditedMacroSimulationSeconds;
+    const conservativeApplicationSimulationSeconds = session.conservativeOnly
+      ? Math.max(0, ...Object.values(conservativeSimulationSecondsByItem ?? {}))
+      : 0;
     const applied = macroWallSeconds <= 1e-9
       ? { ok: true as const, boundaryCorrections: 0 }
       : session.conservativeOnly
-        ? session.contract.deltas.length > 0 && conservativeMacroSimulationSeconds > 1e-9
+        ? session.contract.deltas.length > 0 && conservativeApplicationSimulationSeconds > 1e-9
           ? applyPureIdleLightweightContractInPlace(
             session.candidate,
             session.contract,
-            conservativeMacroSimulationSeconds,
-            multiplier > 0 ? conservativeMacroSimulationSeconds / multiplier : 0,
+            conservativeApplicationSimulationSeconds,
+            multiplier > 0 ? conservativeApplicationSimulationSeconds / multiplier : 0,
             {
               skipUnsafeIntegerPaths: true,
               integerRemainders: session.conservativeIntegerRemainders,
@@ -1278,32 +1350,52 @@ export function advancePureIdleMacroSession(
           );
         }
         let exhaustedItems = 0;
-        for (const [itemId, creditedSeconds] of Object.entries(conservativeSimulationSecondsByItem ?? {})) {
-          const beforeRemaining = session.conservativeRemainingSimulationSecondsByItem[itemId] ?? 0;
+        for (const [itemId, beforeRemaining] of Object.entries(
+          session.conservativeRemainingSimulationSecondsByItem,
+        )) {
+          const creditedSeconds = conservativeSimulationSecondsByItem?.[itemId] ?? 0;
           const afterRemaining = Math.max(0, beforeRemaining - creditedSeconds);
           session.conservativeRemainingSimulationSecondsByItem[itemId] = afterRemaining;
           if (beforeRemaining > 1e-9 && afterRemaining <= 1e-9) exhaustedItems += 1;
         }
-        const whiteMatrixStopped = (session.conservativeRemainingSimulationSecondsByItem.universe_matrix ?? 1) <= 1e-9;
-        if (conservativeMacroSimulationSeconds + 1e-9 < macroSimulationSeconds || whiteMatrixStopped) {
+        const powerBoundaryReachedConservative = powerCreditedMacroSimulationSeconds + 1e-9 < macroSimulationSeconds;
+        const ordinaryBoundaryReached = conservativeMacroSimulationSeconds + 1e-9 <
+          powerCreditedMacroSimulationSeconds;
+        const globalBoundaryReached = powerBoundaryReachedConservative || ordinaryBoundaryReached;
+        const whiteMatrixCredited = hasFullConservativeItemCredit(
+          conservativeSimulationSecondsByItem,
+          "universe_matrix",
+          macroSimulationSeconds,
+        );
+        const rocketCredited = hasFullConservativeItemCredit(
+          conservativeSimulationSecondsByItem,
+          "small_carrier_rocket",
+          macroSimulationSeconds,
+        );
+        if (globalBoundaryReached || !whiteMatrixCredited || !rocketCredited) {
           session.currentRate = {
-            dysonGenerationKw: 0,
-            whiteMatrixProduced: 0,
-            rocketsLaunched: 0,
-            sailsAbsorbed: 0,
-            structurePoints: 0,
-            shellSails: 0,
-            sailsInOrbit: 0,
-            activityDelivered: {},
+            ...session.currentRate,
+            dysonGenerationKw: globalBoundaryReached ? 0 : session.currentRate.dysonGenerationKw,
+            whiteMatrixProduced: whiteMatrixCredited ? session.currentRate.whiteMatrixProduced : 0,
+            rocketsLaunched: rocketCredited ? session.currentRate.rocketsLaunched : 0,
+            sailsAbsorbed: globalBoundaryReached ? 0 : session.currentRate.sailsAbsorbed,
+            structurePoints: rocketCredited ? session.currentRate.structurePoints : 0,
+            shellSails: globalBoundaryReached ? 0 : session.currentRate.shellSails,
+            sailsInOrbit: globalBoundaryReached ? 0 : session.currentRate.sailsInOrbit,
+            activityDelivered: globalBoundaryReached ? {} : session.currentRate.activityDelivered,
           };
         }
-        if (conservativeMacroSimulationSeconds + 1e-9 < macroSimulationSeconds) {
-          session.lastValidationReason = "30 秒样本的全局安全边界已耗尽；剩余尾段只推进时间";
+        if (powerBoundaryReachedConservative) {
+          session.lastValidationReason = "有限供电尾段估算已耗尽；启动三窗口已签发独立证书的白矩阵、科研、火箭与建筑制造继续，其他未证明领域冻结";
+        } else if (ordinaryBoundaryReached && (whiteMatrixCredited || rocketCredited)) {
+          session.lastValidationReason = "普通材料或缓存边界已耗尽；获闭合证书的白矩阵、科研、火箭与有电力授权的建筑制造继续";
+        } else if (ordinaryBoundaryReached) {
+          session.lastValidationReason = "30 秒样本的全局安全边界已耗尽；未获独立闭合证书的尾段只推进时间";
         } else if (exhaustedItems > 0) {
           session.lastValidationReason = `30 秒样本中 ${exhaustedItems} 类净消耗物料已到边界；相关物料停止外推，其他产线继续`;
         }
         const rocketSimulationSeconds = Math.min(
-          conservativeMacroSimulationSeconds,
+          macroSimulationSeconds,
           Math.max(0, conservativeSimulationSecondsByItem?.small_carrier_rocket ?? conservativeMacroSimulationSeconds),
         );
         const rocketDomain = advanceClosedRocketDomainInPlace(session, rocketSimulationSeconds);
@@ -1338,7 +1430,7 @@ export function advancePureIdleMacroSession(
           session.powerRemainingSimulationSeconds - powerCreditedMacroSimulationSeconds,
         );
       }
-      if (!powerBoundaryReached &&
+      if (!session.conservativeOnly && !powerBoundaryReached &&
         powerCreditedMacroSimulationSeconds + 1e-9 < macroSimulationSeconds) {
         session.currentRate = {
           dysonGenerationKw: 0,
@@ -1375,10 +1467,12 @@ export function advancePureIdleMacroSession(
     // still consumes real inputs, while the allocation revalidates center
     // count, grid, stack, priority, difficulty and controller every bucket.
     throwIfMacroInterrupted(options);
-    const constructionSeconds = isolatedConstructionPrefixSeconds +
-      (applied.ok
-        ? Math.max(0, powerCreditedMacroSimulationSeconds - (applied.exactSimulationSeconds ?? 0))
-        : 0);
+    const productiveConstructionSeconds = session.conservativeOnly
+      ? macroSimulationSeconds
+      : Math.max(0, powerCreditedMacroSimulationSeconds - (applied.exactSimulationSeconds ?? 0));
+    const constructionSeconds = isolatedConstructionPrefixSeconds + (applied.ok
+      ? productiveConstructionSeconds
+      : 0);
     const construction = advanceConstructionAutomationMacroWithReceiptInPlace(
       session.candidate,
       constructionSeconds,

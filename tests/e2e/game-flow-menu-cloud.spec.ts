@@ -1605,7 +1605,7 @@ test("dated release notes appear once and remain available from both settings sc
   await expect(releaseNotes).toHaveAttribute("aria-label", "纯挂机连续运行、无回档恢复与蓝图布局修复");
   await expect(releaseNotes.locator(".release-notes-version strong")).toHaveText("1.2.5");
   await expect(releaseNotes.locator(".release-notes-scroll li")).toHaveCount(6);
-  await expect(releaseNotes).toContainText("守恒纯挂机不再拒绝正在收敛的历史差额");
+  await expect(releaseNotes).toContainText("守恒纯挂机改为终局产出独立边界");
   await expect(releaseNotes).toContainText("产率复制挂机也会推进建筑制造");
   await expect(releaseNotes).toContainText("模拟 Worker 故障可原地恢复");
   await expect(releaseNotes).toContainText("后台保护不再自动把存档回退");

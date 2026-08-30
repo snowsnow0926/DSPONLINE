@@ -113,7 +113,7 @@ test("English light release notes are localized and persist dismissal", async ({
   const dialog = page.getByRole("dialog", { name: "Continuous Pure Idle, No-Rollback Recovery, and Blueprint Layout Fixes" });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("1.2.5");
-  await expect(dialog).toContainText("Conservative pure idle no longer rejects converging history");
+  await expect(dialog).toContainText("Conservative pure idle uses independent terminal boundaries");
   await expect(dialog).toContainText("Rate replication also advances construction");
   await expect(dialog).toContainText("Simulation Worker faults recover in place");
   await expect(dialog).toContainText("Automatic safeguards never roll the save backward");

@@ -137,7 +137,8 @@ export type PureIdleTakeoverFinalization =
   | { ok: false; message: string };
 
 let databasePromise: Promise<IDBDatabase> | null = null;
-let heldBrowserLease: { ownerToken: string; release: () => void } | null = null;
+let heldBrowserLease: { ownerToken: string; release: () => void; released: Promise<void> } | null = null;
+let pendingBrowserLeaseRelease: Promise<void> | null = null;
 
 /**
  * IndexedDB remains the durable source of truth. Web Locks adds a process
@@ -147,14 +148,37 @@ let heldBrowserLease: { ownerToken: string; release: () => void } | null = null;
 async function acquireBrowserLease(ownerToken: string): Promise<boolean> {
   if (heldBrowserLease?.ownerToken === ownerToken) return true;
   if (heldBrowserLease) return false;
+  // Resolving the lifetime promise below releases our JavaScript ownership
+  // synchronously, but the browser does not make the Web Lock available until
+  // the request callback has returned on a later microtask. A player who stops
+  // one pure-idle session and immediately starts another must wait for that
+  // *same-tab* release boundary instead of being told that another tab owns the
+  // save. This does not wait for, or bypass, a genuinely foreign tab's lock.
+  const ownRelease = pendingBrowserLeaseRelease;
+  if (ownRelease) {
+    // Chromium has occasionally kept the request promise pending long after
+    // the lifetime callback was released. Bound this optional coordination
+    // layer; the serialized IndexedDB heartbeat transaction below remains the
+    // authoritative cross-tab fence.
+    await Promise.race([
+      ownRelease,
+      new Promise<void>((resolve) => setTimeout(resolve, 500)),
+    ]);
+  }
   const locks = typeof navigator !== "undefined" ? navigator.locks : undefined;
   if (!locks) return true;
   return new Promise<boolean>((resolve) => {
     let resolved = false;
+    let markReleased!: () => void;
+    const released = new Promise<void>((finish) => { markReleased = finish; });
     void locks.request("dsp-idle-network.pure-idle.v1", { mode: "exclusive", ifAvailable: true }, (lock) => {
       if (!lock) {
         resolved = true;
-        resolve(false);
+        // If this page has just released its own session, a temporarily stale
+        // Web-Lock view must not make a second session impossible. Proceed to
+        // the IndexedDB compare-and-set below; a real foreign heartbeat still
+        // rejects ownership atomically.
+        resolve(Boolean(ownRelease));
         return;
       }
       let release!: () => void;
@@ -165,6 +189,7 @@ async function acquireBrowserLease(ownerToken: string): Promise<boolean> {
           if (heldBrowserLease?.ownerToken === ownerToken) heldBrowserLease = null;
           release();
         },
+        released,
       };
       resolved = true;
       resolve(true);
@@ -173,12 +198,20 @@ async function acquireBrowserLease(ownerToken: string): Promise<boolean> {
       // Browser lock support is optional. The durable IndexedDB lease still
       // provides cross-tab protection when a platform rejects Web Locks.
       if (!resolved) resolve(true);
+    }).finally(() => {
+      markReleased();
     });
   });
 }
 
 function releaseBrowserLease(ownerToken: string): void {
-  if (heldBrowserLease?.ownerToken === ownerToken) heldBrowserLease.release();
+  const lease = heldBrowserLease;
+  if (lease?.ownerToken !== ownerToken) return;
+  const releaseBarrier = lease.released.finally(() => {
+    if (pendingBrowserLeaseRelease === releaseBarrier) pendingBrowserLeaseRelease = null;
+  });
+  pendingBrowserLeaseRelease = releaseBarrier;
+  lease.release();
 }
 
 function randomToken(prefix: string): string {

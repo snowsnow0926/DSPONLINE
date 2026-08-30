@@ -31,13 +31,13 @@ const release125Copy = {
   date: { "zh-CN": "2026年8月30日", en: "August 30, 2026" },
   title: { "zh-CN": "纯挂机连续运行、无回档恢复与蓝图布局修复", en: "Continuous Pure Idle, No-Rollback Recovery, and Blueprint Layout Fixes" },
   summary: {
-    "zh-CN": "1.2.5 让建筑制造巨构在两种纯挂机模式中持续工作，只放行可证明正在收敛的既有戴森账本差额；模拟 Worker 故障会自动重建，不再静默安装旧检查点，并修复密集蓝图详细卡片错位。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
-    en: "Version 1.2.5 keeps construction megastructures productive in both pure-idle modes, accepts only pre-existing Dyson ledger drift that is measurably converging, rebuilds failed simulation Workers without silently installing an older checkpoint, and fixes dense blueprint detail layouts. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
+    "zh-CN": "1.2.5 让建筑制造巨构在两种纯挂机模式中持续工作，并把守恒模式从“一处边界耗尽就全停”改为按终局产出域独立结算：有闭合证书的白矩阵、科研和火箭继续，普通材料仍遵守原边界。模拟 Worker 故障会自动重建，不再静默安装旧检查点，并修复密集蓝图详细卡片错位。GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 保持兼容。",
+    en: "Version 1.2.5 keeps construction megastructures productive in both pure-idle modes and replaces the conservative mode's global stop with terminal-domain settlement: certified matrices, research, and rockets continue while ordinary materials keep their existing bounds. Failed simulation Workers are rebuilt without silently installing an older checkpoint, and dense blueprint detail layouts no longer overlap. GameState v47, save envelope v2, cloud schema v8, and SQLite layout v3 remain compatible.",
   },
-  conservativeTitle: { "zh-CN": "守恒纯挂机不再拒绝正在收敛的历史差额", en: "Conservative pure idle no longer rejects converging history" },
+  conservativeTitle: { "zh-CN": "守恒纯挂机改为终局产出独立边界", en: "Conservative pure idle uses independent terminal boundaries" },
   conservativeDescription: {
-    "zh-CN": "旧存档逐恒星系与全局戴森账本的差额，仅在符号不变且精确样本内持续缩小时放行；新出现、扩大或跨符号的差额仍会停止结算。建筑制造按样本实测供电和有限燃料/储能时长工作，不再因科研完成而整段失效。",
-    en: "A legacy per-system/global Dyson mismatch is accepted only when it keeps the same sign and shrinks during the exact sample. New, larger, or sign-crossing drift still stops settlement. Construction uses measured sample power and a finite fuel/storage horizon instead of being discarded when research completes.",
+    "zh-CN": "普通材料、缓存或有限供电尾段估算耗尽时，不再把全部产率清零；三个精确窗口已证明闭合的白矩阵、科研、火箭和建筑制造继续独立结算。启动时仍要求实际供电达到请求倍率；无电、缺少同电网证明、跨电网借电、负库存和存档完整性失败仍会阻止。",
+    en: "Exhausting an ordinary-material, cache, or finite power-tail estimate no longer zeros every rate. Matrices, research, rockets, and construction proven closed by all three exact windows keep independent credit. Startup still requires the requested multiplier to be actually powered; no-power, missing same-grid proof, cross-grid borrowing, negative stores, and save-integrity failures remain blocked.",
   },
   replicationTitle: { "zh-CN": "产率复制挂机也会推进建筑制造", en: "Rate replication also advances construction" },
   replicationDescription: {

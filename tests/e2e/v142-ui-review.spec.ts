@@ -523,7 +523,7 @@ test("release notes preserve close and acknowledge actions at 360 by 480 and 200
   await expect(dialog).toHaveAttribute("aria-label", "纯挂机连续运行、无回档恢复与蓝图布局修复");
   await expect(dialog.locator(".release-notes-version strong")).toHaveText("1.2.5");
   await expect(dialog.locator(".release-notes-scroll li")).toHaveCount(6);
-  await expect(dialog).toContainText("守恒纯挂机不再拒绝正在收敛的历史差额");
+  await expect(dialog).toContainText("守恒纯挂机改为终局产出独立边界");
   await expect(dialog).toContainText("产率复制挂机也会推进建筑制造");
   await expect(dialog).toContainText("模拟 Worker 故障可原地恢复");
   await expect(dialog).toContainText("后台保护不再自动把存档回退");

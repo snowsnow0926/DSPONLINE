@@ -5,6 +5,7 @@ import { hashGameState } from "./benchmark";
 import {
   applyPureIdleMacroFinalState,
   advancePureIdleMacroSession,
+  createConservativePureIdleCreditSecondsByItem,
   createConservativePureIdleMacroSession,
   createPureIdleMacroSession,
   PURE_IDLE_MACRO_ALGORITHM_VERSION,
@@ -719,6 +720,37 @@ function addSecondRocketSystemFixture(state: GameState, prefilledRockets = 1_000
 }
 
 describe("pure idle macro session", () => {
+  it("relaxes only certified terminal domains after an unrelated global boundary", () => {
+    const contract: PureIdleAffineContract = {
+      calibrationSeconds: 30,
+      calibrationWallSeconds: 2,
+      deltas: [
+        { path: ["totalProduced", "universe_matrix"], kind: "number", delta: 100, integer: true },
+        { path: ["totalProduced", "small_carrier_rocket"], kind: "number", delta: 20, integer: true },
+        { path: ["totalProduced", "iron_ingot"], kind: "number", delta: 500, integer: true },
+        { path: ["totalProduced", "copper_ingot"], kind: "number", delta: 400, integer: true },
+      ],
+      steadyStateFactorsByItem: {
+        universe_matrix: 0.95,
+        small_carrier_rocket: 0.9,
+        iron_ingot: 1,
+        copper_ingot: 1,
+      },
+    };
+
+    expect(createConservativePureIdleCreditSecondsByItem(
+      contract,
+      { copper_ingot: 100 },
+      9_000,
+      2_999,
+    )).toEqual({
+      copper_ingot: 100,
+      iron_ingot: 2_999,
+      small_carrier_rocket: 9_000,
+      universe_matrix: 9_000,
+    });
+  });
+
   it("binds stop settlement, completed research, and the original pause intent before serialization", () => {
     const baseline = pureIdleState();
     baseline.idleSettlement = {

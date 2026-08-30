@@ -4769,14 +4769,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
         pureIdleMacroRestartCountRef.current = 0;
         pureIdleMacroForceConservativeRef.current = false;
         setPureIdleRecoveryContinueState(false);
+        setNotice("正在建立纯挂机权威检查点…");
         void (async () => {
           const waitStartedAt = performance.now();
-          while (simulationSubmissionRef.current && performance.now() - waitStartedAt < 2_000) {
+          let slowSliceNoticeShown = false;
+          while (simulationSubmissionRef.current && performance.now() - waitStartedAt < 60_000) {
+            if (!slowSliceNoticeShown && performance.now() - waitStartedAt >= 2_000) {
+              slowSliceNoticeShown = true;
+              setNotice("终局工厂当前 Worker 切片正在收尾；完成后会自动进入纯挂机，无需再次点击…");
+            }
             await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
           }
           if (simulationSubmissionRef.current) {
             pureIdleMacroActiveRef.current = false;
-            setNotice("当前模拟切片仍在提交，请稍后再次开始纯挂机");
+            setNotice("当前 Worker 切片 60 秒内仍未提交；已保留进度并暂停，可立即重试纯挂机");
             return;
           }
           if (requestedMode === "replication") {
@@ -4825,6 +4831,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             setNotice("当前主存档尚未建立 durable 恢复基线，已阻止纯挂机；主存档未改变");
             return;
           }
+          setNotice("正在取得纯挂机恢复日志写入权…");
           const claim = await createPureIdleRecovery(
             checkpoint,
             mode,
@@ -4838,6 +4845,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             setNotice(claim.message);
             return;
           }
+          setNotice("正在写入并读回纯挂机开始检查点…");
           const saved = await persistPrimarySave(checkpoint);
           if (lifecycleExitStartedRef.current) return;
           if (!saved.success) {
@@ -4858,7 +4866,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes }:
             ? "正在启动产率复制挂机；直接读取既有统计，不执行 30 秒校准"
             : mode === "stable" ? "正在启动稳定宏观纯挂机" : "正在启动终局极限纯挂机");
           await initializePureIdleMacroClient(claim.record);
-        })();
+        })().catch((error) => {
+          // Startup owns no committed macro output yet. An unexpected browser,
+          // lock, or persistence exception must return the UI to an immediately
+          // retryable state instead of leaving a hidden active latch forever.
+          pureIdleMacroActiveRef.current = false;
+          pureIdleActiveRef.current = false;
+          pureIdleStopTargetRef.current = null;
+          setPureIdleActive(false);
+          setPureIdleStartedAt(null);
+          setPureIdleRecoveryContinueState(false);
+          setNotice(error instanceof Error
+            ? `纯挂机启动失败：${error.message}；主存档未改变，可立即重试`
+            : "纯挂机启动失败；主存档未改变，可立即重试");
+        });
         return;
       }
       if (!simulationWorkerRef.current || simulationWorkerDisabledRef.current) {

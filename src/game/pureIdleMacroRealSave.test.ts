@@ -19,7 +19,7 @@ const realSaveDescribe = fixturePath ? describe : describe.skip;
  *
  *   DSP_V120_REAL_PURE_IDLE_FIXTURE=<path> npx vitest run src/game/pureIdleMacroRealSave.test.ts
  */
-realSaveDescribe("1.2.3 real-save multi-system event-ledger pure-idle gate", () => {
+realSaveDescribe("1.2.5 real-save terminal-domain pure-idle gate", () => {
   it("extrapolates ordinary production and funded multi-system rockets without mutating the source", { timeout: 180_000 }, () => {
     const testStartedAt = performance.now();
     const beforeStat = statSync(fixturePath!);
@@ -86,7 +86,7 @@ realSaveDescribe("1.2.3 real-save multi-system event-ledger pure-idle gate", () 
     expect(result.summary.contractVersion).toBeGreaterThanOrEqual(1);
     const finalRocketDelta = result.state.dysonSphere.totalRocketsLaunched -
       checkpoint.dysonSphere.totalRocketsLaunched;
-    console.info("[pure-idle-v10-final-conservation-gate-real-save-settlement]", JSON.stringify({
+    console.info("[pure-idle-v11-terminal-domain-real-save-settlement]", JSON.stringify({
       contractDeltas: session.contract.deltas.length,
       rocketLedger: session.rocketLedger,
       rocketBoundarySeconds: session.contract.maximumSimulationSecondsByItem?.small_carrier_rocket,
@@ -99,6 +99,13 @@ realSaveDescribe("1.2.3 real-save multi-system event-ledger pure-idle gate", () 
       steadyStateItemCount: Object.keys(session.contract.steadyStateFactorsByItem ?? {}).length,
       universeMatrixSteadyFactor: session.contract.steadyStateFactorsByItem?.universe_matrix,
       minimumEfficiency: result.summary.minimumEfficiency,
+      contractMaximumSimulationSeconds: session.contract.maximumSimulationSeconds,
+      remainingSimulationSeconds: session.conservativeRemainingSimulationSeconds,
+      remainingSimulationSecondsByItem: session.conservativeRemainingSimulationSecondsByItem,
+      powerMaximumSimulationSeconds: session.powerTail.maximumSimulationSeconds,
+      powerRemainingSimulationSeconds: session.powerRemainingSimulationSeconds,
+      currentRate: session.currentRate,
+      terminalLines: result.summary.terminalLines,
     }));
     expect(result.summary.actualMultiplier).toBeGreaterThanOrEqual(1);
     expect(finalWhiteDelta).toBeGreaterThan(calibratedWhiteDelta);
@@ -133,7 +140,7 @@ realSaveDescribe("1.2.3 real-save multi-system event-ledger pure-idle gate", () 
       mtimeMs: afterStat.mtimeMs,
       hash: createHash("sha256").update(afterRaw, "utf8").digest("hex"),
     }).toEqual({ size: beforeStat.size, mtimeMs: beforeStat.mtimeMs, hash: sourceFileHash });
-    console.info("[pure-idle-v10-final-conservation-gate-real-save]", JSON.stringify({
+    console.info("[pure-idle-v11-terminal-domain-real-save]", JSON.stringify({
       sourceBytes: beforeStat.size,
       entityCount: checkpoint.entities.length,
       beltCount: checkpoint.belts.length,

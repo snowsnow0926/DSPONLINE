@@ -2818,6 +2818,7 @@ export function HeaderControls({
   runStatus,
   onReturnToMenu,
   onPauseToggle,
+  pauseControlAvailable = true,
   onOpenResources,
   onOpenInspector,
   onOpenRecipes,
@@ -2839,6 +2840,7 @@ export function HeaderControls({
   runStatus: FactoryRunStatusReadModel;
   onReturnToMenu: () => void;
   onPauseToggle: () => void;
+  pauseControlAvailable?: boolean;
   onOpenResources: () => void;
   onOpenInspector: () => void;
   onOpenRecipes: () => void;
@@ -2914,7 +2916,7 @@ export function HeaderControls({
         </div> : null}
         {game ? <button className={`mobile-toggle${game.cargo ? " mobile-toggle--cargo" : ""}`} type="button" onClick={onOpenResources} title={game.cargo ? "物资已拿起，打开物资托盘放下" : "物资托盘"} aria-label={game.cargo ? "物资已拿起，打开物资托盘" : "打开物资托盘"}><PackageOpen size={17} /></button> : null}
         <button className="mobile-toggle" type="button" onClick={onOpenInspector} title="检查器" aria-label="打开检查器"><PanelRight size={17} /></button>
-        <button type="button" onClick={onPauseToggle} disabled={nativeAuthority} title={nativeAuthority ? "Windows 原生暂停命令尚未接入" : `${runStatus.paused ? "继续模拟" : "暂停模拟"}（Space）`} aria-label={nativeAuthority ? "Windows 原生暂停命令暂不可用" : runStatus.paused ? "继续模拟" : "暂停模拟"} aria-keyshortcuts="Space">
+        <button type="button" onClick={onPauseToggle} disabled={!pauseControlAvailable} title={!pauseControlAvailable ? "Windows 原生暂停控制正在等待权威状态" : `${runStatus.paused ? "继续模拟" : "暂停模拟"}（Space）`} aria-label={!pauseControlAvailable ? "Windows 原生暂停控制暂不可用" : runStatus.paused ? "继续模拟" : "暂停模拟"} aria-keyshortcuts="Space">
           {runStatus.paused ? <Play size={17} /> : <Pause size={17} />}
         </button>
       </div>

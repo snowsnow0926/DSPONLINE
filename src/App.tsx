@@ -17763,6 +17763,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       <HeaderControls
         game={nativePlayerAuthorityOwnsRuntime ? null : game}
         runStatus={factoryRunStatusReadModel}
+        pauseControlAvailable={!nativePlayerAuthorityOwnsRuntime || (
+          typeof desktopBridge?.setNativePlayerAuthorityPaused === "function" &&
+          nativePlayerAuthorityClockSnapshot.currentFrame?.schemaVersion === 1
+        )}
         constructionCenterUnavailable={nativePlayerAuthorityOwnsRuntime}
         activeWorkspace={headerActiveWorkspace}
         onReturnToMenu={returnToMenuSafely}

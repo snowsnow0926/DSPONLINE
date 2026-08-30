@@ -14,11 +14,13 @@ describe("native header controls App integration", () => {
     expect(panels).toMatch(/game \? <>[\s\S]*?data-native-header-status="factory-run-status-v1"/);
   });
 
-  it("hides uncovered legacy destinations and disables pause in native mode", () => {
+  it("hides uncovered legacy destinations and exposes only the durable native pause control", () => {
     expect(panels).toMatch(/!nativeAuthority \? <button[^>]*header-settings-command/);
     expect(panels).toMatch(/!nativeAuthority \? <button[^>]*activeWorkspace === "galaxy"/);
     expect(panels).toMatch(/!nativeAuthority \? <button[^>]*activeWorkspace === "campaign"/);
-    expect(panels).toMatch(/disabled=\{nativeAuthority\}[\s\S]*?Windows 原生暂停命令尚未接入/);
+    expect(app).toMatch(/pauseControlAvailable=\{!nativePlayerAuthorityOwnsRuntime \|\| \([\s\S]*?setNativePlayerAuthorityPaused[\s\S]*?schemaVersion === 1/);
+    expect(panels).toMatch(/pauseControlAvailable = true[\s\S]*?disabled=\{!pauseControlAvailable\}/);
+    expect(panels).not.toMatch(/disabled=\{nativeAuthority\}[\s\S]*?Windows 原生暂停命令尚未接入/);
   });
 
   it("uses the bounded run status for shell pause state and suspends legacy diagnostics", () => {

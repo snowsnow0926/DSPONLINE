@@ -2852,13 +2852,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     let cancelled = false;
     let retryTimer: number | null = null;
     let retryDelayMs = 250;
+    let reconciliationAttempts = 0;
     const scheduleRetry = () => {
       if (cancelled) return;
+      if (reconciliationAttempts >= 8) {
+        setNotice("蓝图重命名的只读对账暂不可用；已停止轮询，将在权威状态变化后继续，绝不会重发命令");
+        return;
+      }
       retryTimer = window.setTimeout(runReconciliation, retryDelayMs);
       retryDelayMs = Math.min(retryDelayMs * 2, 5_000);
     };
     const runReconciliation = () => {
       if (cancelled) return;
+      reconciliationAttempts += 1;
       void entry.source.reconcileCommand(entry.command).then((outcome) => {
         if (cancelled) return;
         const current = nativeBlueprintRenamePendingIdentityRef.current;
@@ -2918,7 +2924,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       cancelled = true;
       if (retryTimer !== null) window.clearTimeout(retryTimer);
     };
-  }, [nativeBlueprintRenamePendingIdentity]);
+  }, [
+    nativeBlueprintRenamePendingIdentity,
+    nativePlayerAuthorityActiveFrame?.revision,
+    nativePlayerAuthorityActiveFrame?.runId,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityCommandPending,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
   const nativePlacementLabel = useMemo(() => nativePlacementBuildingId
     ? getConstructionDefinition(nativePlacementBuildingId)?.name ?? nativePlacementBuildingId
     : null, [nativePlacementBuildingId]);

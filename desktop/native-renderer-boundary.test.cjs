@@ -241,6 +241,44 @@ test("native command change receipts are stable ordered and duplicate-free", () 
   }
 });
 
+test("native command reconciliation results are exact, bounded and discriminated", () => {
+  const receipt = {
+    previousRevision: 17,
+    revision: 18,
+    changedEntityIds: ["entity-a", "entity-z"],
+    changedBeltIds: ["belt-a"],
+    topologyDirty: false,
+  };
+  assert.deepEqual(normalizeRendererNativeResult("coreCommandReconcile", {
+    status: "committed",
+    receipt,
+  }), { status: "committed", receipt });
+  for (const value of [
+    { status: "pending", baseRevision: 17, currentRevision: 17 },
+    { status: "not-committed", baseRevision: 17, currentRevision: 17 },
+    { status: "conflict", baseRevision: 17, currentRevision: 19 },
+  ]) {
+    assert.deepEqual(normalizeRendererNativeResult("coreCommandReconcile", value), value);
+  }
+  for (const invalid of [
+    { status: "committed", receipt, extra: true },
+    { status: "committed", receipt: { ...receipt, hostPath: SECRET_PATH } },
+    { status: "unknown", baseRevision: 17, currentRevision: 17 },
+    { status: "pending", baseRevision: 17, currentRevision: 17, path: SECRET_PATH },
+    { status: "not-committed", baseRevision: 17, currentRevision: 18 },
+    { status: "conflict", baseRevision: -1, currentRevision: 17 },
+  ]) {
+    assert.throws(
+      () => normalizeRendererNativeResult("coreCommandReconcile", invalid),
+      /native (?:core )?command/i,
+    );
+  }
+  assert.equal(serializeRendererNativeError(new Error("receipt lookup failed"), {
+    fallbackCode: "NATIVE_CORE_COMMAND_RECONCILE_FAILED",
+    message: "原生权威命令耐久收据对账失败",
+  }).code, "NATIVE_CORE_COMMAND_RECONCILE_FAILED");
+});
+
 function coreSummary(revision = 2) {
   return {
     revision,

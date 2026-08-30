@@ -62,7 +62,8 @@ const PRODUCTION_HISTORY_SAMPLE_OPTIONAL_KEYS = Object.freeze([
 // identities are allowed through the bridge.
 const PUBLIC_NATIVE_ERROR_CODES = new Set([
   "NATIVE_CORE_ADVANCE_FAILED", "NATIVE_CORE_CHECKPOINT_FAILED", "NATIVE_CORE_CLOSE_FAILED",
-  "NATIVE_CORE_COMMAND_FAILED", "NATIVE_CORE_COMMIT_FAILED", "NATIVE_CORE_COMPARE_FAILED",
+  "NATIVE_CORE_COMMAND_FAILED", "NATIVE_CORE_COMMAND_RECONCILE_FAILED",
+  "NATIVE_CORE_COMMIT_FAILED", "NATIVE_CORE_COMPARE_FAILED",
   "NATIVE_CORE_EXACT_REALTIME_RUST_LEASE_UNAVAILABLE",
   "NATIVE_CORE_EXACT_REALTIME_WRITER_FENCE_UNAVAILABLE", "NATIVE_CORE_OPEN_FAILED",
   "NATIVE_CORE_PROJECTION_FAILED", "NATIVE_CORE_PROJECTION_TIMEOUT", "NATIVE_CORE_SESSION_INVALID",
@@ -6485,6 +6486,40 @@ function normalizeCoreCommand(value) {
   return { previousRevision, revision, changedEntityIds, changedBeltIds, topologyDirty: boolean(source.topologyDirty, "native topology dirty flag") };
 }
 
+function normalizeCoreCommandReconcile(value) {
+  if (value && typeof value === "object" && !Array.isArray(value) &&
+      value.status === "committed") {
+    const source = exactObject(
+      value,
+      ["status", "receipt"],
+      "native core command reconciliation result",
+    );
+    return { status: "committed", receipt: normalizeCoreCommand(source.receipt) };
+  }
+  const source = exactObject(
+    value,
+    ["status", "baseRevision", "currentRevision"],
+    "native core command reconciliation result",
+  );
+  const status = oneOf(
+    source.status,
+    ["pending", "not-committed", "conflict"],
+    "native command reconciliation status",
+  );
+  const baseRevision = safeInteger(
+    source.baseRevision,
+    "native command reconciliation base revision",
+  );
+  const currentRevision = safeInteger(
+    source.currentRevision,
+    "native command reconciliation current revision",
+  );
+  if (status === "not-committed" && currentRevision !== baseRevision) {
+    throw protocolError("native command reconciliation absent revision");
+  }
+  return { status, baseRevision, currentRevision };
+}
+
 function normalizeBeltScheduler(value) {
   const keys = ["routeCount", "groupCount", "activeQueueEnabled", "initializationGroupChecks", "selectionGroupChecks", "carriedActiveGroups", "transferPasses", "reservationPasses", "fullScanPasses", "transferRouteChecks", "reservationRouteChecks", "reservationAllowanceEntries", "reservationCreditEntries", "stableRoutesSkipped", "wakeCount", "sleepCount", "changedBeltRecords", "writeBackPatchRecords", "writeBackWorkers"];
   const source = exactObject(value, keys, "native belt scheduler diagnostics");
@@ -6987,6 +7022,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreDysonWorkspaceProjection: normalizeCoreDysonWorkspaceProjection,
   coreCommandPaletteEntitySearchProjection: normalizeCoreCommandPaletteEntitySearchProjection,
   coreCommand: normalizeCoreCommand,
+  coreCommandReconcile: normalizeCoreCommandReconcile,
   coreAdvance: normalizeCoreAdvance,
   coreCommit: normalizeCoreCommit,
   coreCheckpoint: normalizeCoreCheckpoint,

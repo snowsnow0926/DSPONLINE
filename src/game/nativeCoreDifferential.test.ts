@@ -654,6 +654,31 @@ function utf8SameSourceFairnessState(): GameState {
   return state;
 }
 
+/** One sibling signal must wake every persisted row in its station/item group. */
+function flatOracleSiblingSignalState(): GameState {
+  const state = selectiveLegacyStationItemWakeState();
+  const sharedSink = state.entities.find((entity) => entity.id === "native_selective_item_shared_sink")!;
+  const independentSink = structuredClone(sharedSink);
+  independentSink.id = "native_sibling_signal_sink";
+  independentSink.position = { x: 1_820, y: 480 };
+  independentSink.inputs = { iron_ingot: 0 };
+  independentSink.outputs = { gear: 120 };
+  independentSink.progress = 0;
+  state.entities.push(independentSink);
+
+  const emptySibling = state.belts.find((belt) => belt.id === "native_selective_item_01_empty_iron")!;
+  const signalSibling = structuredClone(emptySibling);
+  signalSibling.id = "native_sibling_signal_route";
+  signalSibling.target = independentSink.id;
+  signalSibling.progress = 1;
+  signalSibling.totalTransferred = 0;
+  signalSibling.lastFlow = 0;
+  signalSibling.congestion = 0;
+  const emptySiblingIndex = state.belts.indexOf(emptySibling);
+  state.belts.splice(emptySiblingIndex, 0, signalSibling);
+  return state;
+}
+
 /**
  * Ninety-six independent legacy station source groups share no source state.
  * The only inventory writer is a real producer belt into station 000: the
@@ -887,10 +912,16 @@ function selectiveLegacyStationItemWakeState(): GameState {
   return state;
 }
 
-function forcedFullLogisticsAdvance(state: GameState, seconds: number): GameState {
+function forcedFullLogisticsAdvance(
+  state: GameState,
+  seconds: number,
+  profiler?: ReturnType<typeof createSimulationProfiler>,
+): GameState {
   const session = createSimulationAdvanceSession(state, seconds, {
     wallSeconds: seconds,
     indexedLogistics: false,
+    forceFlatRouteOracle: true,
+    profiler,
   });
   advanceSimulationSession(session, Number.MAX_SAFE_INTEGER);
   return completeSimulationAdvanceSession(session);
@@ -4012,7 +4043,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     await client.request({ operation: "coreClose", sessionId: opened.sessionId });
   }, 60_000);
 
-  it("uses UTF-8 byte order for an independent same-source one-item race in JS active, JS no-index fallback, and Rust", async () => {
+  it("uses UTF-8 byte order for an independent same-source one-item race in JS active, JS flat O(all), and Rust", async () => {
     const initial = utf8SameSourceFairnessState();
     const sourceId = initial.entities.find((entity) =>
       entity.id !== "native_shared_target_dormant_station" &&
@@ -4053,8 +4084,13 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       .toBe(zBeltId);
 
     const active = advanceSimulationBudget(initial, 1, 1);
-    const full = forcedFullLogisticsAdvance(initial, 1);
-    expect(canonicalSha256(active), "UTF-8 race JS active/no-index fallback canonical")
+    const flatProfiler = createSimulationProfiler();
+    const full = forcedFullLogisticsAdvance(initial, 1, flatProfiler);
+    expect(flatProfiler.beltRouteChecks, "flat oracle visits every persisted row in both transfer passes")
+      .toBe(initial.belts.length * 2);
+    expect(flatProfiler.beltStableRoutesSkipped, "flat oracle never reuses the dormant route filter")
+      .toBe(0);
+    expect(canonicalSha256(active), "UTF-8 race JS active/flat O(all) canonical")
       .toBe(canonicalSha256(full));
     const activeTransferred = Object.fromEntries(competingBeltIds.map((beltId) => [
       beltId,
@@ -4109,6 +4145,60 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         full.entities.find((entity) => entity.id === entityId)!)));
     expect(projection.belts, "UTF-8 race native bounded belts")
       .toEqual(JSON.parse(JSON.stringify(full.belts.filter((belt) => competingBeltIds.includes(belt.id)))));
+    await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+  }, 60_000);
+
+  it("keeps every sibling row awake when one legacy station item route has a signal", async () => {
+    const initial = flatOracleSiblingSignalState();
+    const sourceId = "native_selective_item_station";
+    const signalBeltId = "native_sibling_signal_route";
+    const emptySiblingBeltId = "native_selective_item_01_empty_iron";
+    const producerBeltId = "native_selective_item_02_producer";
+    expect(initial.entities.find((entity) => entity.id === sourceId)?.outputs.iron_ingot,
+      "sibling fixture source is empty").toBe(0);
+    expect([signalBeltId, emptySiblingBeltId].map((beltId) =>
+      initial.belts.find((belt) => belt.id === beltId)?.progress),
+      "only one sibling begins with a persisted signal").toEqual([1, 0]);
+
+    const active = advanceSimulationBudget(initial, 1, 1);
+    const sleepingBaseline = advanceSimulationBudget(selectiveLegacyStationItemWakeState(), 1, 1);
+    const flatProfiler = createSimulationProfiler();
+    const flat = forcedFullLogisticsAdvance(initial, 1, flatProfiler);
+    expect(flatProfiler.beltRouteChecks, "sibling flat oracle visits both passes for every row")
+      .toBe(initial.belts.length * 2);
+    expect(flatProfiler.beltStableRoutesSkipped, "sibling flat oracle reports no route-index skips")
+      .toBe(0);
+    expect(canonicalSha256(active), "sibling JS indexed/flat canonical")
+      .toBe(canonicalSha256(flat));
+    expect(active.totalProduced.iron_ingot ?? 0, "one sibling signal makes the empty sibling share reservation order")
+      .toBeLessThan(sleepingBaseline.totalProduced.iron_ingot ?? 0);
+    const siblingAndProducerIds = [signalBeltId, emptySiblingBeltId, producerBeltId];
+    expect(active.belts.filter((belt) => siblingAndProducerIds.includes(belt.id))
+      .map((belt) => ({ id: belt.id, progress: belt.progress, transferred: belt.totalTransferred })),
+    "sibling active rows match the independent flat result").toEqual(
+      flat.belts.filter((belt) => siblingAndProducerIds.includes(belt.id))
+        .map((belt) => ({ id: belt.id, progress: belt.progress, transferred: belt.totalTransferred })),
+    );
+
+    const checkpoint = await seed(initial, 222);
+    const opened = await open(checkpoint);
+    const advanced = await client.request({
+      operation: "coreAdvance", sessionId: opened.sessionId,
+      request: { baseRevision: checkpoint.revision, simulationSeconds: 1, wallSeconds: 1 },
+    });
+    expect(advanced.supported, `sibling native support: ${advanced.reason ?? ""}`).toBe(true);
+    expect(advanced.beltScheduler).toMatchObject({
+      activeQueueEnabled: true,
+      routeCount: initial.belts.length,
+    });
+    expect(advanced.beltScheduler.stableRoutesSkipped, "sibling native dormant cohort remains skipped")
+      .toBeGreaterThanOrEqual(96);
+    expect(advanced.summary.canonicalFields, "sibling native top-level")
+      .toEqual(canonicalFields(flat));
+    expect(advanced.summary.canonicalSha256, "sibling native canonical/conservation")
+      .toBe(canonicalSha256(flat));
+    expect(advanced.summary.domainSha256, "sibling native domain proof")
+      .toBe(nativeCoreDomainSha256(flat, advanced.revision));
     await client.request({ operation: "coreClose", sessionId: opened.sessionId });
   }, 60_000);
 

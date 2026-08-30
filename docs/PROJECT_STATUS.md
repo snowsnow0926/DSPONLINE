@@ -1,5 +1,11 @@
 # DSP极简网络项目现状
 
+> **Windows Rust 持久有序 active-route 索引（2026-08-31，开发候选，未发布）**：在上一切片按 `(legacy station, item)` 休眠线路的基础上，Rust 现在把严格递增的活动线路行号作为 session runtime 增量维护。冷启动/拓扑重编只做一次全量播种；无脏变化的稳态选择直接线性访问活动行，不再每个 pass 重建并排序，复杂度由 `O(A log A)` 收敛到线路选择热段的 `O(A)`。脏组会在下一 selection 前按稳定顺序去重并合并；Dense/Mask、候选失败、快照携带、共享 pool 回滚和中途 wake 均保持原有持久行结算顺序与 revision 原子性。
+>
+> JavaScript 同时增加显式测试专用的独立 flat `O(all)` oracle：它不读取任何活动/休眠索引，而是从原始 state 和全部持久化线路两遍聚合 `(source,item)`。同物料任一 sibling 有源输出、在途信号或 allowance 时整组醒着；旧逐线路过滤会被 shared-target 规范哈希回归稳定抓住。当前新鲜门禁为 Rust Core `749/749`、Host `176/176`，native differential `50/1/0`，完整 Vitest `2,496/29/0`，Windows native/desktop `455/1/0`，Server `384/2/0` 加 station `4/0/0`，完整 Chromium 最终 `433/27/0`（`6.7m`）；TypeScript、check、strict clippy、fmt、diff check 和 production build/startup budget 均通过。首轮 Chromium 的 `432/27/1` 及其 `Target crashed` 没有删除，安静环境定向 `3/3` 后才进行上述从零全量复跑。
+>
+> 当前统一口径约为 `Rust 83% / 薄 UI 96% / O(active) 96% / 并行 72% / 综合 88% / 发布成熟度 60%`。这次只关闭线路选择的稳态排序，不代表全部物流、全领域原生权威或多核都完成；24 小时、多硬件、安装/覆盖升级、签名和灰度仍未通过。固定 P 核合成稀疏 A/B 的 6/6 进程与调度门禁都成功，但每个进程重新生成的 fixture SHA/canonical hash 不同，故有效样本为 `0/6`、最终判 **No-Result**；表面 `1.812% / 4.129% / 4.723%` 候选降幅全部作废，不宣传收益。去路径报告位于 `artifacts/performance/native-station-active-route-pcore-ab-20260831/`。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均未改变；未连接生产、未修改玩家存档。
+>
 > **Windows Rust 内置 legacy PLS/ILS 物品级 belt-source `O(active)`（2026-08-31，开发候选，未发布）**：对于 built-in 默认 registry、固定五槽且身份/目录/拓扑可完整证明的旧式行星与星际物流站，Rust 现在按 `(source station, item)` 管理传送带供货活动。没有现货、时钟余额或待完成动作的空物品组可以休眠；库存 writer 只唤醒该站当前 `outputs[item] > EPSILON` 的已路由物品，同站其他空物品不被连带加入选择时钟。传送带入站只写 `inputs`，不会同一步伪造输出 credit；真实 local-buffer promotion 和航线完成写入输出后，才按精确物品证据唤醒。quantum 模式、MOD/opaque、特殊站、轨道采集器/电梯与无法证明的形状全部失败关闭并保持 `always-awake`。
 >
 > 实际模式改变会走稀有 `O(all)` 路由重编/重分类；普通 Active 量子桥刷新不会重复重编。失败候选在任何验证、写回或提交边界都会把唯一大型工作区归还旧 snapshot，只有状态提交成功才把它发布给新 pool；重叠候选 first-return-wins，不形成 pool 链或第二份工厂缓冲。全局共享目标保持持久行顺序，同源公平次序改为跨平台固定 UTF-8 字节序；合法大小写/Unicode/MOD 线路 ID 不再因 JavaScript `localeCompare` 与 Rust `str::cmp` 不同而送往不同下游。活动目录、候选位和 pool 身份只在 runtime，不进入 v47、WAL 或 canonical hash。

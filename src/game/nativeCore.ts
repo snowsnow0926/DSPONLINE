@@ -18,6 +18,8 @@ import {
   type DesktopNativeCoreFactoryInventoryResult,
   type DesktopNativeCoreConstructionInventoryRequest,
   type DesktopNativeCoreConstructionInventoryResult,
+  type DesktopNativeCoreBlueprintWorkspaceRequest,
+  type DesktopNativeCoreBlueprintWorkspaceResult,
   type DesktopNativeCoreConstructionPlacementContextRequest,
   type DesktopNativeCoreConstructionPlacementContextResult,
   type DesktopNativeCoreConstructionBeltPlacementContextRequest,
@@ -65,6 +67,7 @@ type NativeCoreTransferProjection =
   | DesktopNativeCoreFactoryReadModelResult
   | DesktopNativeCoreFactoryInventoryResult
   | DesktopNativeCoreConstructionInventoryResult
+  | DesktopNativeCoreBlueprintWorkspaceResult
   | DesktopNativeCoreConstructionPlacementContextResult
   | DesktopNativeCoreConstructionBeltPlacementContextResult
   | DesktopNativeCoreConstructionBeltLaneContextResult
@@ -126,6 +129,7 @@ export interface WindowsNativeCoreShadow {
   factoryReadModel(request: Omit<DesktopNativeCoreFactoryReadModelRequest, "sessionId">): Promise<DesktopNativeCoreFactoryReadModelResult>;
   factoryInventoryProjection?(request: Omit<DesktopNativeCoreFactoryInventoryRequest, "sessionId">): Promise<DesktopNativeCoreFactoryInventoryResult>;
   constructionInventoryProjection?(request: Omit<DesktopNativeCoreConstructionInventoryRequest, "sessionId">): Promise<DesktopNativeCoreConstructionInventoryResult>;
+  blueprintWorkspaceProjection?(request: Omit<DesktopNativeCoreBlueprintWorkspaceRequest, "sessionId">): Promise<DesktopNativeCoreBlueprintWorkspaceResult>;
   constructionPlacementContext?(request: Omit<DesktopNativeCoreConstructionPlacementContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionPlacementContextResult>;
   constructionBeltPlacementContext?(request: Omit<DesktopNativeCoreConstructionBeltPlacementContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionBeltPlacementContextResult>;
   constructionBeltLaneContext?(request: Omit<DesktopNativeCoreConstructionBeltLaneContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionBeltLaneContextResult>;
@@ -421,6 +425,29 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
       throw new Error("Windows 原生建筑库存投影不可用");
     }
     return desktop.getNativeCoreConstructionInventory({ sessionId: this.sessionId, ...request });
+  }
+
+  async blueprintWorkspaceProjection(
+    request: Omit<DesktopNativeCoreBlueprintWorkspaceRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreBlueprintWorkspaceResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "blueprint-workspace-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreBlueprintWorkspaceResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "blueprint-workspace-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreBlueprintWorkspace !== "function") {
+      throw new Error("Windows 原生蓝图只读模型不可用");
+    }
+    return desktop.getNativeCoreBlueprintWorkspace({ sessionId: this.sessionId, ...request });
   }
 
   async constructionPlacementContext(

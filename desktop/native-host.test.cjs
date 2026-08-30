@@ -729,6 +729,53 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
   });
 });
 
+test("core registry forwards an exact blueprint selector and rejects ambiguous IDs or cursors", async () => {
+  const calls = [];
+  const registry = new NativeCoreSessionRegistry({
+    request(request) {
+      calls.push(request);
+      return Promise.resolve({ schemaVersion: 1, projectionType: "blueprint-workspace-v1", revision: 8 });
+    },
+  });
+  registry.sessions.set("core-blueprint", {
+    ownerId: 7, slot: "normal-main", ownerEpoch: 1, state: "owned", inFlight: 0,
+  });
+  const request = {
+    sessionId: "core-blueprint",
+    expectedRevision: 8,
+    expectedRegistryFingerprint: "builtin:test",
+    section: "detail",
+    blueprintId: "mod:蓝图/Ω🚀",
+    cursor: 0,
+    limit: 32,
+  };
+  await registry.blueprintWorkspaceProjection(7, request);
+  const stalePageRequest = {
+    ...request,
+    section: "library",
+    blueprintId: null,
+    cursor: 4_096,
+  };
+  await registry.blueprintWorkspaceProjection(7, stalePageRequest);
+  assert.deepEqual(calls, [
+    { operation: "coreBlueprintWorkspaceProjection", ...request },
+    { operation: "coreBlueprintWorkspaceProjection", ...stalePageRequest },
+  ]);
+  for (const invalid of [
+    { ...request, blueprintId: "bad\nidentifier" },
+    { ...request, blueprintId: "\ud800" },
+    { ...request, cursor: 1 },
+    { ...request, section: "library" },
+    { ...request, section: "library", blueprintId: null, cursor: 4_097 },
+    { ...request, unexpected: true },
+  ]) {
+    assert.throws(
+      () => registry.blueprintWorkspaceProjection(7, invalid),
+      /blueprint workspace projection request is invalid/,
+    );
+  }
+});
+
 test("core registry forwards exact bounded Dyson workspace page selectors and rejects malformed UTF-8 IDs", async () => {
   const calls = [];
   const registry = new NativeCoreSessionRegistry({

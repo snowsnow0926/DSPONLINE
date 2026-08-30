@@ -336,6 +336,8 @@ export interface DesktopBridge {
   getNativeCoreFactoryInventory?: (request: DesktopNativeCoreFactoryInventoryRequest) => Promise<DesktopNativeCoreFactoryInventoryResult>;
   /** Read-only, catalog-identity-bound top-level construction stock for the native thin UI. */
   getNativeCoreConstructionInventory?: (request: DesktopNativeCoreConstructionInventoryRequest) => Promise<DesktopNativeCoreConstructionInventoryResult>;
+  /** Paged native blueprint library, one selected compact detail, and construction queue; never a full GameState. */
+  getNativeCoreBlueprintWorkspace?: (request: DesktopNativeCoreBlueprintWorkspaceRequest) => Promise<DesktopNativeCoreBlueprintWorkspaceResult>;
   /** Same-revision Rust-derived ordinary single-building template; the renderer may add only a finite position. */
   getNativeCoreConstructionPlacementContext?: (request: DesktopNativeCoreConstructionPlacementContextRequest) => Promise<DesktopNativeCoreConstructionPlacementContextResult>;
   /** Same-revision Rust-derived exact single ordinary-belt template and construction debit. */
@@ -1048,6 +1050,132 @@ export interface DesktopNativeCoreConstructionInventoryResult {
   limits: {
     rows: 256;
     projectionBytes: 1048576;
+  };
+}
+
+export type DesktopNativeCoreBlueprintWorkspaceSection = "library" | "detail" | "queue";
+
+export interface DesktopNativeCoreBlueprintWorkspaceRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  section: DesktopNativeCoreBlueprintWorkspaceSection;
+  blueprintId: string | null;
+  cursor: number;
+  limit: 32;
+}
+
+export interface DesktopNativeCoreBlueprintCounts {
+  entities: number;
+  belts: number;
+  resourceAnchors: number;
+  externalPorts: number;
+}
+
+export interface DesktopNativeCoreBlueprintSummary {
+  id: string;
+  name: string;
+  revision: number;
+  rotation: 0 | 90 | 180 | 270;
+  mirror: "none" | "horizontal";
+  counts: DesktopNativeCoreBlueprintCounts;
+  detailStatus: "candidate" | "truncated";
+}
+
+export interface DesktopNativeCoreBlueprintDetailEntity {
+  key: string;
+  buildingId: string;
+  /** Native catalog display value; currently falls back to the catalog building ID. */
+  buildingLabel: string;
+  offset: { x: number; y: number };
+  machineCount: number;
+  recipeId: string | null;
+  operationEnabledOnDeploy: boolean | null;
+}
+
+export interface DesktopNativeCoreBlueprintDetailBelt {
+  key: string;
+  sourceKey: string;
+  targetKey: string;
+  itemId: string;
+  lanes: number;
+  tier: number;
+}
+
+export interface DesktopNativeCoreBlueprintDetailAnchor {
+  key: string;
+  resourceId: string;
+  extractorBuildingId: string;
+  offset: { x: number; y: number };
+  minerCount: number;
+}
+
+export interface DesktopNativeCoreBlueprintDetailPort {
+  key: string;
+  entityKey: string;
+  direction: "input" | "output";
+  itemId: string;
+  offset: { x: number; y: number };
+}
+
+export interface DesktopNativeCoreBlueprintDetail {
+  summary: DesktopNativeCoreBlueprintSummary;
+  status: "supported" | "truncated" | "unsupported";
+  unsupportedReason: "detail-limits-exceeded" | "projection-byte-budget-exceeded" | "unproven-catalog-semantics" | null;
+  entities: DesktopNativeCoreBlueprintDetailEntity[];
+  belts: DesktopNativeCoreBlueprintDetailBelt[];
+  resourceAnchors: DesktopNativeCoreBlueprintDetailAnchor[];
+  externalPorts: DesktopNativeCoreBlueprintDetailPort[];
+}
+
+export interface DesktopNativeCoreBlueprintQueueRow {
+  id: string;
+  blueprintId: string;
+  blueprintVersionId: string | null;
+  blueprintRevision: number;
+  blueprintName: string;
+  planetId: string;
+  planetName: string | null;
+  position: { x: number; y: number };
+  rotation: 0 | 90 | 180 | 270;
+  mirror: "none" | "horizontal";
+  queuedAt: number;
+  status: "pending-materials" | "waiting-fleet";
+  counts: DesktopNativeCoreBlueprintCounts | null;
+  semanticStatus: "catalog-backed" | "truncated" | "unsupported";
+  reservedConstructionTotal: number;
+  reservedFleetTotal: number;
+  placedEntityCount: number;
+  actionable: false;
+}
+
+export interface DesktopNativeCoreBlueprintWorkspaceResult {
+  schemaVersion: 1;
+  projectionType: "blueprint-workspace-v1";
+  source: "native-core";
+  revision: number;
+  stateVersion: 47;
+  registryFingerprint: string;
+  readOnly: true;
+  request: Omit<DesktopNativeCoreBlueprintWorkspaceRequest, "sessionId">;
+  counts: { library: number; queue: number };
+  page: {
+    cursor: number;
+    limit: 32;
+    totalCount: number;
+    rows: Array<DesktopNativeCoreBlueprintSummary | DesktopNativeCoreBlueprintDetail | DesktopNativeCoreBlueprintQueueRow>;
+    nextCursor: number | null;
+    truncated: boolean;
+  };
+  limits: {
+    pageRows: 32;
+    sourceRows: 4096;
+    detailEntities: 512;
+    detailBelts: 1024;
+    detailResourceAnchors: 256;
+    detailExternalPorts: 256;
+    projectionBytes: 1048576;
+    opaqueIdBytes: 512;
+    nameBytes: 256;
   };
 }
 
@@ -2315,6 +2443,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
     }
   | {
       sessionId: string;
+      projectionType: "blueprint-workspace-v1";
+      payload: Omit<DesktopNativeCoreBlueprintWorkspaceRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
       projectionType: "construction-placement-context-v1";
       payload: Omit<DesktopNativeCoreConstructionPlacementContextRequest, "sessionId">;
     }
@@ -2394,7 +2527,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "construction-placement-context-v1" | "construction-belt-placement-context-v1" | "construction-belt-lane-context-v1" | "construction-belt-removal-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "blueprint-workspace-v1" | "construction-placement-context-v1" | "construction-belt-placement-context-v1" | "construction-belt-lane-context-v1" | "construction-belt-removal-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
   payloadLength: number;
   sha256: string;
 }

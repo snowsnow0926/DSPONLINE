@@ -6494,7 +6494,12 @@ function normalizeCoreCommandReconcile(value) {
       ["status", "receipt"],
       "native core command reconciliation result",
     );
-    return { status: "committed", receipt: normalizeCoreCommand(source.receipt) };
+    const receipt = normalizeCoreCommand(source.receipt);
+    if (receipt.previousRevision === Number.MAX_SAFE_INTEGER ||
+        receipt.revision !== receipt.previousRevision + 1) {
+      throw protocolError("native command reconciliation receipt revision chain");
+    }
+    return { status: "committed", receipt };
   }
   const source = exactObject(
     value,

@@ -253,6 +253,15 @@ test("native command reconciliation results are exact, bounded and discriminated
     status: "committed",
     receipt,
   }), { status: "committed", receipt });
+  const maxSafeReceipt = {
+    ...receipt,
+    previousRevision: Number.MAX_SAFE_INTEGER - 1,
+    revision: Number.MAX_SAFE_INTEGER,
+  };
+  assert.deepEqual(normalizeRendererNativeResult("coreCommandReconcile", {
+    status: "committed",
+    receipt: maxSafeReceipt,
+  }), { status: "committed", receipt: maxSafeReceipt });
   for (const value of [
     { status: "pending", baseRevision: 17, currentRevision: 17 },
     { status: "not-committed", baseRevision: 17, currentRevision: 17 },
@@ -263,6 +272,20 @@ test("native command reconciliation results are exact, bounded and discriminated
   for (const invalid of [
     { status: "committed", receipt, extra: true },
     { status: "committed", receipt: { ...receipt, hostPath: SECRET_PATH } },
+    { status: "committed", receipt: { ...receipt, revision: receipt.previousRevision } },
+    { status: "committed", receipt: { ...receipt, revision: receipt.previousRevision + 2 } },
+    {
+      status: "committed",
+      receipt: {
+        ...receipt,
+        previousRevision: Number.MAX_SAFE_INTEGER,
+        revision: Number.MAX_SAFE_INTEGER,
+      },
+    },
+    {
+      status: "committed",
+      receipt: { ...receipt, revision: Number.MAX_SAFE_INTEGER + 1 },
+    },
     { status: "unknown", baseRevision: 17, currentRevision: 17 },
     { status: "pending", baseRevision: 17, currentRevision: 17, path: SECRET_PATH },
     { status: "not-committed", baseRevision: 17, currentRevision: 18 },

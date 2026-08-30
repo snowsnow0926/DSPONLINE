@@ -56,6 +56,7 @@ const LEGACY_INTERNAL_CHECKPOINT_FORMAT_VERSION: u16 = 1;
 const DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION: u16 = 2;
 pub(crate) const PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS: f64 = 30.0;
 const PURE_IDLE_SESSION_FORMAT_VERSION: u8 = 1;
+pub(crate) const PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS: u8 = 30;
 
 /// Renderer projections never need route ledgers. They can be large, contain
 /// in-flight material accounting, and must not become an accidental command
@@ -1051,6 +1052,10 @@ struct ChunkedManifest {
     // PureIdleSessionState uses deny_unknown_fields.
     #[serde(default, deserialize_with = "deserialize_present_pure_idle_session")]
     pure_idle_macro_session: Option<PureIdleSessionState>,
+    // Kept outside PureIdleSessionState so older native builds can ignore the
+    // optional key instead of rejecting that deny_unknown_fields payload.
+    #[serde(default)]
+    pure_idle_macro_construction_carry_seconds: Option<u8>,
 }
 
 fn deserialize_present_pure_idle_session<'de, D>(
@@ -2527,6 +2532,10 @@ pub struct CoreState {
     /// continuous conservative pure-idle session. It is persisted only in the
     /// private chunk manifest, never in public saves or canonical hashes.
     pure_idle_session: Option<PureIdleSessionState>,
+    /// Whole construction-tail seconds waiting for the next canonical block.
+    /// This is private checkpoint state and never enters public v47 or its
+    /// canonical hash.
+    pure_idle_macro_construction_carry_seconds: u8,
     /// Runtime-only macro-v10 calibration snapshots and ordinary-flow proof.
     /// A checkpoint reload deliberately drops this cache; pure-idle rebuilds
     /// it with a disposable exact probe before authorizing any productive tail.
@@ -2996,6 +3005,19 @@ impl CoreState {
             }
             (None, None) => None,
         };
+        let pure_idle_macro_construction_carry_seconds = match (
+            pure_idle_session,
+            manifest.pure_idle_macro_construction_carry_seconds,
+        ) {
+            (Some(session), Some(carry))
+                if session.macro_v10 && carry < PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS =>
+            {
+                carry
+            }
+            (Some(session), None) if session.macro_v10 => 0,
+            (_, None) => 0,
+            _ => bail!("native core macro construction cursor checkpoint is invalid"),
+        };
         let mut remaining_chunk_references = HashMap::<String, usize>::new();
         for metadata in &manifest.chunks {
             *remaining_chunk_references
@@ -3077,6 +3099,7 @@ impl CoreState {
             catalog,
             manifest.chunks,
             pure_idle_session,
+            pure_idle_macro_construction_carry_seconds,
             SaveDirtyPages::default(),
         )
     }
@@ -3120,6 +3143,7 @@ impl CoreState {
             catalog,
             Vec::new(),
             None,
+            0,
             SaveDirtyPages {
                 entity_topology: true,
                 belt_topology: true,
@@ -3137,6 +3161,7 @@ impl CoreState {
         catalog: RuntimeCatalog,
         checkpoint_chunks: Vec<ChunkMetadata>,
         pure_idle_session: Option<PureIdleSessionState>,
+        pure_idle_macro_construction_carry_seconds: u8,
         save_dirty: SaveDirtyPages,
     ) -> anyhow::Result<Self> {
         let production_history_tiers =
@@ -3174,6 +3199,7 @@ impl CoreState {
             checkpoint_chunks,
             pending_checkpoint_chunks: SyncCell::new(None),
             pure_idle_session,
+            pure_idle_macro_construction_carry_seconds,
             pure_idle_macro_runtime: None,
             summary_cache: SyncCell::new(None),
             production_history_tiers: production_history_tiers.into(),
@@ -3349,6 +3375,15 @@ impl CoreState {
                 .as_object_mut()
                 .expect("native checkpoint manifest is an object")
                 .insert(key.to_owned(), serde_json::to_value(session)?);
+            if session.macro_v10 && self.pure_idle_macro_construction_carry_seconds > 0 {
+                manifest_value
+                    .as_object_mut()
+                    .expect("native checkpoint manifest is an object")
+                    .insert(
+                        "pureIdleMacroConstructionCarrySeconds".to_owned(),
+                        Value::from(self.pure_idle_macro_construction_carry_seconds),
+                    );
+            }
         }
         let manifest = serde_json::to_string(&manifest_value)?;
         visit(&manifest_key, &manifest)?;
@@ -3500,6 +3535,15 @@ impl CoreState {
                 .as_object_mut()
                 .expect("native checkpoint manifest is an object")
                 .insert(key.to_owned(), serde_json::to_value(session)?);
+            if session.macro_v10 && self.pure_idle_macro_construction_carry_seconds > 0 {
+                manifest_value
+                    .as_object_mut()
+                    .expect("native checkpoint manifest is an object")
+                    .insert(
+                        "pureIdleMacroConstructionCarrySeconds".to_owned(),
+                        Value::from(self.pure_idle_macro_construction_carry_seconds),
+                    );
+            }
         }
         let manifest = serde_json::to_string(&manifest_value)?;
         visit(&manifest_key, &manifest)?;
@@ -4233,6 +4277,13 @@ impl CoreState {
             .unwrap_or(0.0)
     }
 
+    pub(crate) fn pure_idle_macro_construction_carry_seconds(&self) -> u8 {
+        self.pure_idle_session
+            .filter(|session| session.last_committed_revision == self.revision && session.macro_v10)
+            .map(|_| self.pure_idle_macro_construction_carry_seconds)
+            .unwrap_or(0)
+    }
+
     /// Installs session progress on a disposable candidate. Callers must do
     /// this only after every simulation, multiplier and diagnostic check has
     /// succeeded, immediately before atomically replacing the live state.
@@ -4240,28 +4291,47 @@ impl CoreState {
         &mut self,
         exact_simulation_seconds_used: f64,
     ) -> anyhow::Result<()> {
-        PureIdleSessionState {
+        let session = PureIdleSessionState {
             format_version: PURE_IDLE_SESSION_FORMAT_VERSION,
             exact_simulation_seconds_used,
             last_committed_revision: self.revision,
             macro_v10: false,
         }
-        .validate(self.revision)
-        .map(|session| self.pure_idle_session = Some(session))
+        .validate(self.revision)?;
+        self.pure_idle_session = Some(session);
+        self.pure_idle_macro_construction_carry_seconds = 0;
+        Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn install_pure_idle_macro_session_progress(
         &mut self,
         exact_simulation_seconds_used: f64,
     ) -> anyhow::Result<()> {
-        PureIdleSessionState {
+        self.install_pure_idle_macro_session_progress_with_construction_carry(
+            exact_simulation_seconds_used,
+            0,
+        )
+    }
+
+    pub(crate) fn install_pure_idle_macro_session_progress_with_construction_carry(
+        &mut self,
+        exact_simulation_seconds_used: f64,
+        construction_carry_seconds: u8,
+    ) -> anyhow::Result<()> {
+        if construction_carry_seconds >= PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS {
+            bail!("native core macro construction cursor is invalid");
+        }
+        let session = PureIdleSessionState {
             format_version: PURE_IDLE_SESSION_FORMAT_VERSION,
             exact_simulation_seconds_used,
             last_committed_revision: self.revision,
             macro_v10: true,
         }
-        .validate(self.revision)
-        .map(|session| self.pure_idle_session = Some(session))
+        .validate(self.revision)?;
+        self.pure_idle_session = Some(session);
+        self.pure_idle_macro_construction_carry_seconds = construction_carry_seconds;
+        Ok(())
     }
 
     pub(crate) fn replace_entity_raw(&mut self, index: usize, value: RawRecord) {
@@ -9960,6 +10030,93 @@ mod tests {
     }
 
     #[test]
+    fn macro_construction_cursor_requires_a_current_bounded_value() {
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let macro_session = json!({
+            "formatVersion": 1,
+            "exactSimulationSecondsUsed": 30,
+            "lastCommittedRevision": 7,
+            "macroV10": true
+        });
+
+        for invalid_cursor in [json!(30), json!(-1), json!("1")] {
+            let mut records = fixture_records();
+            let mut manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+            manifest["pureIdleMacroSession"] = macro_session.clone();
+            manifest["pureIdleMacroConstructionCarrySeconds"] = invalid_cursor;
+            records.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+            assert!(
+                CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                    .is_err()
+            );
+        }
+
+        let mut orphaned = fixture_records();
+        let mut manifest: Value = serde_json::from_slice(&orphaned[manifest_key]).unwrap();
+        manifest["pureIdleMacroConstructionCarrySeconds"] = json!(1);
+        orphaned.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+        assert!(
+            CoreState::from_internal_records(fixture_identity(7), &orphaned, fixture_catalog())
+                .is_err()
+        );
+
+        let mut valid = fixture_records();
+        let mut manifest: Value = serde_json::from_slice(&valid[manifest_key]).unwrap();
+        manifest["pureIdleMacroSession"] = macro_session;
+        manifest["pureIdleMacroConstructionCarrySeconds"] = json!(29);
+        valid.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+        let restored =
+            CoreState::from_internal_records(fixture_identity(7), &valid, fixture_catalog())
+                .unwrap();
+        assert_eq!(restored.pure_idle_macro_construction_carry_seconds(), 29);
+    }
+
+    #[test]
+    fn macro_construction_cursor_roundtrips_incrementally_but_not_in_public_v47() {
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let canonical_before = state.canonical_sha256().unwrap();
+        state
+            .install_pure_idle_macro_session_progress_with_construction_carry(30.0, 17)
+            .unwrap();
+        assert_eq!(state.canonical_sha256().unwrap(), canonical_before);
+
+        let mut records = fixture_records();
+        let mut delta = BTreeMap::new();
+        let visit = state
+            .visit_dirty_internal_checkpoint_records(43, |key, value| {
+                delta.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        apply_checkpoint_delta(&mut records, &visit, delta);
+        state.abort_checkpoint_visit();
+        let restored =
+            CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                .unwrap();
+        assert_eq!(restored.pure_idle_macro_construction_carry_seconds(), 17);
+        assert_eq!(restored.canonical_sha256().unwrap(), canonical_before);
+
+        let mut public = Vec::new();
+        restored.write_v47_envelope(43, &mut public).unwrap();
+        let envelope: Value = serde_json::from_slice(&public).unwrap();
+        assert!(
+            envelope
+                .get("pureIdleMacroConstructionCarrySeconds")
+                .is_none()
+        );
+        assert!(
+            envelope["state"]
+                .get("pureIdleMacroConstructionCarrySeconds")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn committed_non_idle_revision_lazily_resets_pure_idle_credit() {
         let mut state = CoreState::from_internal_records(
             fixture_identity(7),
@@ -9974,6 +10131,14 @@ mod tests {
         // revision without updating this private pure-idle marker.
         state.revision += 1;
         assert_eq!(state.pure_idle_exact_seconds_used(), 0.0);
+
+        state
+            .install_pure_idle_macro_session_progress_with_construction_carry(30.0, 17)
+            .unwrap();
+        assert_eq!(state.pure_idle_macro_construction_carry_seconds(), 17);
+        state.revision += 1;
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), 0.0);
+        assert_eq!(state.pure_idle_macro_construction_carry_seconds(), 0);
     }
 
     #[test]

@@ -8,11 +8,13 @@ use serde_json::{Map, Number, Value};
 use crate::construction::ConstructionRunReceipt;
 use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
 use crate::simulation::{CoreAdvanceMode, CoreAdvanceRequest, CoreAdvanceResult};
-use crate::state::{CoreState, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS};
+use crate::state::{
+    CoreState, PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS,
+};
 
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
-const MACRO_V10_ALGORITHM_VERSION: &str = "native-pure-idle-macro-v10-three-window-closed-recipe-research-dyson-terminal-finite-vein-handcraft-construction-stock-v11";
+const MACRO_V10_ALGORITHM_VERSION: &str = "native-pure-idle-macro-v10-three-window-closed-recipe-research-dyson-terminal-finite-vein-handcraft-construction-block30-v12";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MICROS_PER_SECOND: i128 = 1_000_000;
 const DYSON_ROCKET_LAUNCH_ENERGY_MICRO_MJ: i128 = 108_000_000;
@@ -3231,6 +3233,7 @@ fn build_construction_tail_certificate(
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct ConstructionTailApplication {
     crafted: i128,
+    carry_seconds: u8,
 }
 
 fn apply_construction_tail_certificate(
@@ -3238,6 +3241,7 @@ fn apply_construction_tail_certificate(
     certificate: &ConstructionTailCertificate,
     elapsed_before: f64,
     elapsed_after: f64,
+    carry_seconds: u8,
 ) -> Result<ConstructionTailApplication, String> {
     validate_renewable_power_tail_certificate(state, &certificate.renewable_power)?;
     if !construction_tail_requested(state) {
@@ -3256,8 +3260,18 @@ fn apply_construction_tail_certificate(
                 .and_then(|before| after.checked_sub(before))
         })
         .ok_or_else(|| "construction-tail schedule overflowed".to_owned())?;
-    if scheduled_seconds == 0 {
-        return Ok(ConstructionTailApplication::default());
+    let block_seconds = i128::from(PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS);
+    let total_pending_seconds = scheduled_seconds
+        .checked_add(i128::from(carry_seconds))
+        .ok_or_else(|| "construction-tail canonical block cursor overflowed".to_owned())?;
+    let canonical_blocks = total_pending_seconds / block_seconds;
+    let carry_seconds = u8::try_from(total_pending_seconds % block_seconds)
+        .map_err(|_| "construction-tail canonical block cursor is invalid".to_owned())?;
+    if canonical_blocks == 0 {
+        return Ok(ConstructionTailApplication {
+            crafted: 0,
+            carry_seconds,
+        });
     }
 
     let mut current_ids =
@@ -3286,16 +3300,37 @@ fn apply_construction_tail_certificate(
             state, &base, &entities,
         ))
     });
-    let outcome = crate::construction::run_centers(
-        state,
-        &mut base,
-        &mut entities,
-        scheduled_seconds as f64,
-        &power_factors,
-        &state.factory_topology.construction_center_indices,
-        Arc::make_mut(&mut runtime),
-    )
-    .map_err(|error| format!("construction-tail settlement failed: {error:#}"))?;
+    // Construction centers share target cursors, per-planet material and a
+    // guarded fair-work budget. Feeding an arbitrary request-sized duration to
+    // `run_centers` makes target ownership depend on how the caller sliced the
+    // same interval. Execute only fixed 30-second canonical blocks and retain
+    // the sub-block remainder in the private checkpoint. Thus F^(a+b) observes
+    // exactly the same block sequence as F^a followed by F^b, while long
+    // offline windows need 1/30th as many engine invocations as a literal
+    // per-second oracle. Once the active directory is empty, no production,
+    // delivery or power event exists in this isolated tail that could wake it,
+    // so the remaining blocks are proven no-ops.
+    let mut crafted = 0_i128;
+    let mut remaining_blocks = canonical_blocks;
+    while remaining_blocks > 0 {
+        let outcome = crate::construction::run_centers(
+            state,
+            &mut base,
+            &mut entities,
+            f64::from(PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS),
+            &power_factors,
+            &state.factory_topology.construction_center_indices,
+            Arc::make_mut(&mut runtime),
+        )
+        .map_err(|error| format!("construction-tail settlement failed: {error:#}"))?;
+        crafted = crafted
+            .checked_add(outcome.receipt.crafted)
+            .ok_or_else(|| "construction-tail crafted receipt overflowed".to_owned())?;
+        remaining_blocks -= 1;
+        if outcome.scan.selected_rows == 0 {
+            break;
+        }
+    }
 
     // Bucket-average diagnostics are not gameplay authority and vary with the
     // caller's segmentation. Preserve work progress, but keep these two
@@ -3321,7 +3356,8 @@ fn apply_construction_tail_certificate(
         .map_err(|error| format!("construction-tail commit failed: {error:#}"))?;
     state.install_prepared_construction_runtime(runtime);
     Ok(ConstructionTailApplication {
-        crafted: outcome.receipt.crafted,
+        crafted,
+        carry_seconds,
     })
 }
 
@@ -6694,11 +6730,12 @@ fn prove_internal_exact_settlement_candidate(
 /// starting stock. It carries an exact per-recipe input/output/queue receipt,
 /// never treats cumulative production as inventory, and stops after at most
 /// 4,096 remaining batches. A construction-only tail may reuse the exact
-/// native construction engine on whole-second boundaries, but only for centers
-/// on certified permanent-renewable grids and only against real tray or
-/// already-reserved quantum-buffer stock. It cannot download new quantum
-/// material or extrapolate an ordinary source; every unclosed terminal remains
-/// frozen.
+/// native construction engine in fixed 30-second blocks, carrying an
+/// incomplete block only in the private native checkpoint. It is admitted only
+/// for centers on certified permanent-renewable grids and only against real
+/// tray or already-reserved quantum-buffer stock. It cannot download new
+/// quantum material or extrapolate an ordinary source; every unclosed terminal
+/// remains frozen.
 pub(crate) fn advance(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -6756,6 +6793,11 @@ fn advance_bounded(
         state.pure_idle_macro_exact_seconds_used()
     } else {
         state.pure_idle_exact_seconds_used()
+    };
+    let mut construction_carry_seconds = if macro_v10 {
+        state.pure_idle_macro_construction_carry_seconds()
+    } else {
+        0
     };
     let mut macro_runtime = macro_v10.then(|| {
         state
@@ -7063,6 +7105,7 @@ fn advance_bounded(
                     certificate,
                     current_elapsed,
                     elapsed,
+                    construction_carry_seconds,
                 ) {
                     Ok(application) => application,
                     Err(reason) => {
@@ -7073,13 +7116,19 @@ fn advance_bounded(
                         );
                     }
                 };
+                construction_carry_seconds = construction_application.carry_seconds;
                 let construction_reason = if construction_application.crafted > 0 {
                     format!(
-                        "construction-only tail spent real owned inventory and completed {} item(s); no material source was extrapolated for it",
-                        construction_application.crafted,
+                        "construction-only tail spent real owned inventory and completed {} item(s) in canonical 30-second block(s); {} second(s) remain below the next block and no material source was extrapolated",
+                        construction_application.crafted, construction_application.carry_seconds,
+                    )
+                } else if construction_application.carry_seconds > 0 {
+                    format!(
+                        "construction-only tail retained {} second(s) below the next canonical 30-second block; it neither debited material nor minted output",
+                        construction_application.carry_seconds,
                     )
                 } else {
-                    "construction-only tail reached its real inventory/target horizon without manufacturing an item"
+                    "construction-only tail reached its real inventory/target horizon at a canonical 30-second boundary without manufacturing an item"
                         .to_owned()
                 };
                 tail_reason = Some(match tail_reason.take() {
@@ -7132,7 +7181,10 @@ fn advance_bounded(
         // candidate. Every possible failure below leaves the source session
         // and its full/remaining credit untouched.
         if macro_v10 {
-            candidate.install_pure_idle_macro_session_progress(exact_progress)?;
+            candidate.install_pure_idle_macro_session_progress_with_construction_carry(
+                exact_progress,
+                construction_carry_seconds,
+            )?;
         } else {
             candidate.install_pure_idle_session_progress(exact_progress)?;
         }
@@ -8745,6 +8797,106 @@ mod tests {
         state
     }
 
+    fn productive_multi_center_construction_macro_fixture(
+        multiplier: f64,
+        center_count: usize,
+        prebuilt_job_steps: usize,
+    ) -> CoreState {
+        let mut base = powered_fixture_base(multiplier, "infinite");
+        base["tray"] = json!({ "iron_ore": 75_000 });
+        base["planetTrays"]["home"] = json!({ "iron_ore": 75_000 });
+        base["construction"] = json!({ "test_building": 0, "conveyor_belt_mk1": 0 });
+        let mut jobs = Map::new();
+        if prebuilt_job_steps > 0 {
+            for index in 0..center_count {
+                let construction_id = if index % 2 == 0 {
+                    "test_building"
+                } else {
+                    "conveyor_belt_mk1"
+                };
+                jobs.insert(
+                    format!("construction-center-{index:05}"),
+                    json!({
+                        "constructionId": construction_id,
+                        "steps": (0..prebuilt_job_steps)
+                            .map(|_| json!({
+                                "kind": "building",
+                                "constructionId": construction_id
+                            }))
+                            .collect::<Vec<_>>(),
+                        "stepIndex": 0,
+                        "elapsedSeconds": 0,
+                        "inventory": {}
+                    }),
+                );
+            }
+        }
+        base["constructionAutomation"] = json!({
+            "enabled": true,
+            "targetStock": {
+                "test_building": 100_000,
+                "conveyor_belt_mk1": 100_000
+            },
+            "cursor": 0,
+            "totalCrafted": 0,
+            "lastCraftedId": null,
+            "destroyedByproducts": {},
+            "jobs": jobs,
+            "quantumSourceEnabled": false,
+            "quantumMaterialBuffer": {}
+        });
+        let mut entities = vec![
+            json!({
+                "id": "wind",
+                "kind": "power",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "wind_turbine",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            }),
+            json!({
+                "id": "controller",
+                "kind": "machine",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "time_warp_device",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 1,
+                "productionRate": 0
+            }),
+        ];
+        for index in 0..center_count {
+            entities.push(json!({
+                "id": format!("construction-center-{index:05}"),
+                "kind": "machine",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "construction_center",
+                "machineCount": 1_000,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            }));
+        }
+        fixture_state_from_parts(base, entities)
+    }
+
     fn pure_idle_request(
         revision: u64,
         simulation_seconds: f64,
@@ -9188,6 +9340,134 @@ mod tests {
                 long.summary().unwrap().canonical_sha256,
             );
         }
+    }
+
+    #[test]
+    fn macro_v10_multi_center_shared_stock_is_split_invariant() {
+        for multiplier in [8.0, 12.0, 15.0, 16.0] {
+            for center_count in [2, 3, 5] {
+                for prebuilt_job_steps in [0, 1_000] {
+                    let initial = productive_multi_center_construction_macro_fixture(
+                        multiplier,
+                        center_count,
+                        prebuilt_job_steps,
+                    );
+                    let mut one_shot = initial.clone();
+                    let revision = one_shot.revision;
+                    let result = advance_macro_v10(
+                        &mut one_shot,
+                        &pure_idle_macro_request(revision, 600.0, 600.0 / multiplier),
+                    )
+                    .unwrap();
+                    assert!(
+                        result.supported,
+                        "{multiplier}x/{center_count} center/{prebuilt_job_steps} WIP one-shot: {:?}",
+                        result.reason,
+                    );
+
+                    let mut segmented = initial;
+                    // Deliberately cross canonical block boundaries at awkward
+                    // points. The private carry must make this sequence
+                    // equivalent to the single 600-second request.
+                    for seconds in [31.0, 7.0, 22.0, 113.0, 5.0, 211.0, 211.0] {
+                        let revision = segmented.revision;
+                        let result = advance_macro_v10(
+                            &mut segmented,
+                            &pure_idle_macro_request(revision, seconds, seconds / multiplier),
+                        )
+                        .unwrap();
+                        assert!(
+                            result.supported,
+                            "{multiplier}x/{center_count} center/{prebuilt_job_steps} WIP segment: {:?}",
+                            result.reason,
+                        );
+                    }
+
+                    assert_eq!(
+                        segmented.summary().unwrap().canonical_sha256,
+                        one_shot.summary().unwrap().canonical_sha256,
+                        "{multiplier}x/{center_count} centers/{prebuilt_job_steps} WIP changed ownership when the same tail was segmented",
+                    );
+                    assert_eq!(
+                        proof_counter(
+                            one_shot.base_value()["constructionAutomation"].get("totalCrafted"),
+                            "multi-center construction totalCrafted",
+                        )
+                        .unwrap(),
+                        75_000,
+                    );
+                    assert_eq!(one_shot.base_value()["tray"]["iron_ore"], json!(0.0));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn macro_v10_construction_block_carry_survives_private_checkpoint_reload() {
+        let initial = productive_construction_macro_fixture(15.0, 1_000);
+        let mut exact_boundary = initial.clone();
+        let revision = exact_boundary.revision;
+        let result = advance_macro_v10(
+            &mut exact_boundary,
+            &pure_idle_macro_request(revision, 30.0, 2.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+
+        let mut calibrated = initial;
+        let revision = calibrated.revision;
+        let result = advance_macro_v10(
+            &mut calibrated,
+            &pure_idle_macro_request(revision, 31.0, 31.0 / 15.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(calibrated.pure_idle_macro_construction_carry_seconds(), 1);
+        assert_eq!(
+            calibrated.base_value()["construction"],
+            exact_boundary.base_value()["construction"],
+            "a partial canonical block must not mint construction output",
+        );
+        assert_eq!(
+            calibrated.base_value()["tray"],
+            exact_boundary.base_value()["tray"],
+            "a partial canonical block must not debit construction material",
+        );
+
+        let mut records = BTreeMap::<String, Vec<u8>>::new();
+        calibrated
+            .visit_internal_checkpoint_records(42, |key, value| {
+                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let manifest: Value = serde_json::from_slice(
+            &records["dsp-idle-network.internal.v1.chunked.v1.normal.manifest"],
+        )
+        .unwrap();
+        assert_eq!(manifest["pureIdleMacroConstructionCarrySeconds"], 1);
+
+        let mut identity = calibrated.identity.clone();
+        identity.revision = calibrated.revision;
+        let mut reloaded =
+            CoreState::from_internal_records(identity, &records, (*calibrated.catalog).clone())
+                .unwrap();
+        assert_eq!(reloaded.pure_idle_macro_construction_carry_seconds(), 1);
+        assert!(reloaded.pure_idle_macro_runtime.is_none());
+
+        let mut continuous = calibrated;
+        for state in [&mut continuous, &mut reloaded] {
+            let revision = state.revision;
+            let result =
+                advance_macro_v10(state, &pure_idle_macro_request(revision, 29.0, 29.0 / 15.0))
+                    .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+            assert_eq!(state.pure_idle_macro_construction_carry_seconds(), 0);
+        }
+        assert_eq!(
+            reloaded.summary().unwrap().canonical_sha256,
+            continuous.summary().unwrap().canonical_sha256,
+        );
     }
 
     #[test]

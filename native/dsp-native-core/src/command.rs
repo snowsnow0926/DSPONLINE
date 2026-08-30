@@ -8784,7 +8784,10 @@ mod tests {
             "research_speed_2"
         );
         assert_eq!(paused.parse_entity(0).unwrap()["progress"], 0.0);
-        assert_eq!(pause_receipt.changed_entity_ids, [lab_id.clone()]);
+        assert_eq!(
+            pause_receipt.changed_entity_ids,
+            std::slice::from_ref(&lab_id)
+        );
 
         let resume = top_level_leaf_command(
             paused.revision,

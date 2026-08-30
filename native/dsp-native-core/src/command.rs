@@ -4517,17 +4517,408 @@ fn station_busy_vehicle_count(
     Ok(total)
 }
 
-fn validate_station_fleet_target_command(
+#[derive(Clone, Copy)]
+enum StationFleetKind {
+    Drone,
+    Vessel,
+}
+
+impl StationFleetKind {
+    fn from_intent(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "drone" => Ok(Self::Drone),
+            "vessel" => Ok(Self::Vessel),
+            _ => bail!("native player-authority station fleet intent kind is invalid"),
+        }
+    }
+
+    fn from_field(value: &str) -> anyhow::Result<Self> {
+        match value {
+            "stationDrones" => Ok(Self::Drone),
+            "stationVessels" => Ok(Self::Vessel),
+            _ => bail!("native player-authority station fleet field is invalid"),
+        }
+    }
+
+    fn field(self) -> &'static str {
+        match self {
+            Self::Drone => "stationDrones",
+            Self::Vessel => "stationVessels",
+        }
+    }
+
+    fn item_id(self) -> &'static str {
+        match self {
+            Self::Drone => "logistics_drone",
+            Self::Vessel => "logistics_vessel",
+        }
+    }
+
+    fn route_scope(self) -> &'static str {
+        match self {
+            Self::Drone => "local",
+            Self::Vessel => "remote",
+        }
+    }
+
+    fn capacity_per_building(self) -> u64 {
+        match self {
+            Self::Drone => PLAYER_STATION_DRONES_PER_BUILDING,
+            Self::Vessel => PLAYER_STATION_VESSELS_PER_BUILDING,
+        }
+    }
+}
+
+struct StationFleetContext {
+    station_id: String,
+    station: Map<String, Value>,
+    kind: StationFleetKind,
+    current_count: u64,
+    capacity: u64,
+    busy: u64,
+    portable_count: u64,
+}
+
+struct StationFleetDerivation {
+    top_level_changes: Vec<ValuePatch>,
+    changed_entities: Vec<RecordPatch>,
+}
+
+impl StationFleetDerivation {
+    fn into_command(self, protocol_version: u16, base_revision: u64) -> SimulationCommandPatch {
+        SimulationCommandPatch {
+            protocol_version,
+            base_revision,
+            top_level_changes: self.top_level_changes,
+            changed_entities: self.changed_entities,
+            added_entities: Vec::new(),
+            removed_entity_ids: Vec::new(),
+            changed_belts: Vec::new(),
+            added_belts: Vec::new(),
+            removed_belt_ids: Vec::new(),
+        }
+    }
+}
+
+fn station_fleet_context(
     state: &CoreState,
+    station_id: &str,
+    kind: StationFleetKind,
+    require_active_planet: bool,
+    require_builtin_catalog: bool,
+) -> anyhow::Result<StationFleetContext> {
+    if require_builtin_catalog
+        && (state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+            || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT)
+    {
+        bail!("native player-authority station fleet requires the built-in catalog")
+    }
+    let station_index = *state
+        .entity_index
+        .get(station_id)
+        .ok_or_else(|| anyhow!("native player-authority station fleet entity is missing"))?;
+    let station = state.parse_entity(station_index)?;
+    let station = station
+        .as_object()
+        .ok_or_else(|| anyhow!("native player-authority station fleet entity is invalid"))?;
+    let building_id = station
+        .get("buildingId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority station fleet building is missing"))?;
+    let compatible = match kind {
+        StationFleetKind::Drone => matches!(
+            building_id,
+            "planetary_logistics_station" | "interstellar_logistics_station"
+        ),
+        StationFleetKind::Vessel => building_id == "interstellar_logistics_station",
+    };
+    if !compatible
+        || station.get("kind").and_then(Value::as_str) != Some("station")
+        || state
+            .catalog
+            .buildings
+            .get(building_id)
+            .is_none_or(|building| building.kind != "station")
+    {
+        bail!("native player-authority station fleet target is incompatible")
+    }
+    if require_active_planet {
+        let planet_id = station
+            .get("planetId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("native player-authority station fleet planet is invalid"))?;
+        let active_planet_id = state
+            .base_value()
+            .get("activePlanetId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("native player-authority active planet is missing"))?;
+        if planet_id != active_planet_id {
+            bail!("native player-authority station fleet target is not on the active planet")
+        }
+    }
+    if (require_active_planet
+        && station.get("interactionLocked").and_then(Value::as_bool) != Some(false))
+        || (!require_active_planet
+            && station
+                .get("interactionLocked")
+                .is_some_and(|locked| locked.as_bool() != Some(false)))
+    {
+        bail!("native player-authority station fleet target is locked or malformed")
+    }
+    let current_count =
+        finite_json_number(station.get(kind.field()), "current station fleet count")?
+            .floor()
+            .max(0.0);
+    if current_count > MAX_JAVASCRIPT_SAFE_INTEGER as f64 {
+        bail!("native player-authority current station fleet count is too large")
+    }
+    let current_count = current_count as u64;
+    let machine_count = safe_json_integer(station.get("machineCount"), "station stack")?;
+    let capacity = machine_count
+        .checked_mul(kind.capacity_per_building())
+        .filter(|capacity| *capacity <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        .ok_or_else(|| anyhow!("native player-authority station fleet capacity overflows"))?;
+    let busy = station_busy_vehicle_count(state, station_id, kind.route_scope())?;
+    let item_id = kind.item_id();
+    if !state.catalog.items.contains_key(item_id) {
+        bail!("native player-authority station fleet item is not in the catalog")
+    }
+    let base = state.base_value();
+    let portable = base
+        .get("portableFleet")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority portable fleet is missing"))?;
+    let portable_count = normalized_construction_inventory(portable.get(item_id))?;
+    Ok(StationFleetContext {
+        station_id: station_id.to_owned(),
+        station: station.clone(),
+        kind,
+        current_count,
+        capacity,
+        busy,
+        portable_count,
+    })
+}
+
+fn derive_station_fleet_final(
+    state: &CoreState,
+    context: StationFleetContext,
+    final_count: u64,
+    force_progress_resets: bool,
+) -> anyhow::Result<StationFleetDerivation> {
+    if final_count == context.current_count {
+        bail!("native player-authority station fleet target is unchanged")
+    }
+    if final_count > context.capacity || final_count < context.busy {
+        bail!("native player-authority station fleet target violates capacity or busy vehicles")
+    }
+    let item_id = context.kind.item_id();
+    let expected_inventory = if final_count > context.current_count {
+        let loaded = final_count - context.current_count;
+        context.portable_count.checked_sub(loaded).ok_or_else(|| {
+            anyhow!("native player-authority portable fleet stock is insufficient")
+        })?
+    } else {
+        let returned = context.current_count - final_count;
+        context
+            .portable_count
+            .checked_add(returned)
+            .filter(|next| *next <= MAX_JAVASCRIPT_SAFE_INTEGER)
+            .ok_or_else(|| anyhow!("native player-authority fleet refund overflows"))?
+    };
+    let mut station_changes = vec![ValuePatch {
+        path: vec![PathSegment::Key(context.kind.field().to_owned())],
+        operation: "set".to_owned(),
+        value: Some(Value::from(final_count)),
+    }];
+    let station_progress_is_zero = context
+        .station
+        .get("stationProgress")
+        .map(|value| finite_json_number(Some(value), "current station progress"))
+        .transpose()?
+        .is_some_and(|progress| progress == 0.0);
+    if force_progress_resets || !station_progress_is_zero {
+        station_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("stationProgress".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(0)),
+        });
+    }
+    let mut changed_entities = vec![RecordPatch {
+        id: context.station_id.clone(),
+        changes: station_changes,
+    }];
+    let peer_id = match context.station.get("stationPeerId") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(peer_id)) if !peer_id.is_empty() => Some(peer_id.as_str()),
+        _ => bail!("native player-authority station fleet peer ID is invalid"),
+    };
+    if let Some(peer_id) = peer_id
+        && peer_id != context.station_id
+        && let Some(peer_index) = state.entity_index.get(peer_id)
+    {
+        let peer = state.parse_entity(*peer_index)?;
+        let peer_progress_is_zero = peer
+            .get("stationProgress")
+            .map(|value| finite_json_number(Some(value), "current station peer progress"))
+            .transpose()?
+            .is_some_and(|progress| progress == 0.0);
+        if force_progress_resets || !peer_progress_is_zero {
+            changed_entities.push(RecordPatch {
+                id: peer_id.to_owned(),
+                changes: vec![ValuePatch {
+                    path: vec![PathSegment::Key("stationProgress".to_owned())],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from(0)),
+                }],
+            });
+        }
+    }
+    Ok(StationFleetDerivation {
+        top_level_changes: vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("portableFleet".to_owned()),
+                PathSegment::Key(item_id.to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(Value::from(expected_inventory)),
+        }],
+        changed_entities,
+    })
+}
+
+fn validate_station_fleet_derivation(
     command: &SimulationCommandPatch,
+    derivation: &StationFleetDerivation,
 ) -> anyhow::Result<()> {
-    if command.changed_entities.is_empty()
+    if !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+        || command.top_level_changes.len() != derivation.top_level_changes.len()
+        || command.changed_entities.len() != derivation.changed_entities.len()
+    {
+        bail!("native player-authority station fleet entity effects are incomplete or mixed")
+    }
+    let expected_top = &derivation.top_level_changes[0];
+    let expected_path = expected_top
+        .path
+        .iter()
+        .map(|segment| match segment {
+            PathSegment::Key(key) => Ok(key.as_str()),
+            PathSegment::Index(_) => Err(anyhow!(
+                "native player-authority station fleet derived path is invalid"
+            )),
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if require_exact_set_patch(&command.top_level_changes, &expected_path)?
+        != expected_top
+            .value
+            .as_ref()
+            .expect("derived fleet value exists")
+    {
+        bail!("native player-authority station fleet inventory accounting is invalid")
+    }
+    let mut seen = HashSet::new();
+    for record in &command.changed_entities {
+        if !seen.insert(record.id.as_str()) {
+            bail!("native player-authority station fleet entity is repeated")
+        }
+        let Some(expected_record) = derivation
+            .changed_entities
+            .iter()
+            .find(|expected| expected.id == record.id)
+        else {
+            bail!("native player-authority station fleet command changes an unrelated entity")
+        };
+        if serde_json::to_value(&record.changes)? != serde_json::to_value(&expected_record.changes)?
+        {
+            bail!("native player-authority station fleet entity accounting is invalid")
+        }
+    }
+    Ok(())
+}
+
+fn command_contains_station_fleet_target_intent(command: &SimulationCommandPatch) -> bool {
+    command.changed_entities.iter().any(|record| {
+        record
+            .changes
+            .iter()
+            .any(|change| path_matches(&change.path, &["stationFleetTarget", "intent"]))
+    })
+}
+
+fn require_station_fleet_target_intent(
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<(&str, StationFleetKind, u64)> {
+    if command.changed_entities.len() != 1
+        || command.changed_entities[0].changes.len() != 1
+        || !command.top_level_changes.is_empty()
         || !command.added_entities.is_empty()
         || !command.removed_entity_ids.is_empty()
         || !command.changed_belts.is_empty()
         || !command.added_belts.is_empty()
         || !command.removed_belt_ids.is_empty()
     {
+        bail!("native player-authority station fleet intent shape is invalid")
+    }
+    let record = &command.changed_entities[0];
+    let change = &record.changes[0];
+    if !path_matches(&change.path, &["stationFleetTarget", "intent"]) || change.operation != "set" {
+        bail!("native player-authority station fleet intent path is invalid")
+    }
+    let intent = change
+        .value
+        .as_ref()
+        .and_then(Value::as_object)
+        .filter(|intent| intent.len() == 2)
+        .ok_or_else(|| anyhow!("native player-authority station fleet intent is invalid"))?;
+    let kind =
+        StationFleetKind::from_intent(intent.get("kind").and_then(Value::as_str).ok_or_else(
+            || anyhow!("native player-authority station fleet intent kind is invalid"),
+        )?)?;
+    let target_count = intent
+        .get("targetCount")
+        .and_then(Value::as_u64)
+        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        .ok_or_else(|| anyhow!("native player-authority station fleet intent target is invalid"))?;
+    Ok((record.id.as_str(), kind, target_count))
+}
+
+fn expand_station_fleet_target_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<SimulationCommandPatch> {
+    let (station_id, kind, target_count) = require_station_fleet_target_intent(command)?;
+    let context = station_fleet_context(state, station_id, kind, true, true)?;
+    let requested = target_count.min(context.capacity);
+    let desired = requested.max(context.busy);
+    let loaded = desired
+        .saturating_sub(context.current_count)
+        .min(context.portable_count);
+    let unloaded = context.current_count.saturating_sub(desired);
+    let final_count = context
+        .current_count
+        .checked_add(loaded)
+        .and_then(|value| value.checked_sub(unloaded))
+        .ok_or_else(|| anyhow!("native player-authority station fleet intent overflows"))?;
+    derive_station_fleet_final(state, context, final_count, true)
+        .map(|derived| derived.into_command(command.protocol_version, command.base_revision))
+}
+
+fn validate_station_fleet_target_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    expand_station_fleet_target_intent(state, command).map(|_| ())
+}
+
+fn validate_station_fleet_target_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.changed_entities.is_empty() {
         bail!("native player-authority station fleet command shape is invalid")
     }
     if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
@@ -4551,184 +4942,68 @@ fn validate_station_fleet_target_command(
                 .value
                 .as_ref()
                 .and_then(Value::as_u64)
+                .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
                 .ok_or_else(|| {
                     anyhow!("native player-authority station fleet target is invalid")
                 })?;
-            target = Some((record.id.as_str(), field.as_str(), value));
+            target = Some((
+                record.id.as_str(),
+                StationFleetKind::from_field(field)?,
+                value,
+            ));
         }
     }
-    let (station_id, field, final_count) =
+    let (station_id, kind, final_count) =
         target.ok_or_else(|| anyhow!("native player-authority station fleet target is missing"))?;
+    let context = station_fleet_context(state, station_id, kind, false, true)?;
+    let derivation = derive_station_fleet_final(state, context, final_count, false)?;
+    validate_station_fleet_derivation(command, &derivation)
+}
+
+struct StationWarperContext {
+    station_id: String,
+    current_count: u64,
+    capacity: u64,
+    tray_count: u64,
+    tray_path: Vec<String>,
+}
+
+struct StationWarperDerivation {
+    top_level_changes: Vec<ValuePatch>,
+    changed_entities: Vec<RecordPatch>,
+}
+
+impl StationWarperDerivation {
+    fn into_command(self, protocol_version: u16, base_revision: u64) -> SimulationCommandPatch {
+        SimulationCommandPatch {
+            protocol_version,
+            base_revision,
+            top_level_changes: self.top_level_changes,
+            changed_entities: self.changed_entities,
+            added_entities: Vec::new(),
+            removed_entity_ids: Vec::new(),
+            changed_belts: Vec::new(),
+            added_belts: Vec::new(),
+            removed_belt_ids: Vec::new(),
+        }
+    }
+}
+
+fn station_warper_context(
+    state: &CoreState,
+    station_id: &str,
+    require_active_planet: bool,
+    require_builtin_catalog: bool,
+) -> anyhow::Result<StationWarperContext> {
+    if require_builtin_catalog
+        && (state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+            || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT)
+    {
+        bail!("native player-authority station warper requires the built-in catalog")
+    }
     let station_index = *state
         .entity_index
         .get(station_id)
-        .ok_or_else(|| anyhow!("native player-authority station fleet entity is missing"))?;
-    let station = state.parse_entity(station_index)?;
-    let station = station
-        .as_object()
-        .ok_or_else(|| anyhow!("native player-authority station fleet entity is invalid"))?;
-    let building_id = station
-        .get("buildingId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("native player-authority station fleet building is missing"))?;
-    let compatible = match field {
-        "stationDrones" => matches!(
-            building_id,
-            "planetary_logistics_station" | "interstellar_logistics_station"
-        ),
-        "stationVessels" => building_id == "interstellar_logistics_station",
-        _ => false,
-    };
-    if !compatible
-        || station.get("kind").and_then(Value::as_str) != Some("station")
-        || state
-            .catalog
-            .buildings
-            .get(building_id)
-            .is_none_or(|building| building.kind != "station")
-    {
-        bail!("native player-authority station fleet target is incompatible")
-    }
-    if let Some(locked) = station.get("interactionLocked")
-        && locked.as_bool() != Some(false)
-    {
-        bail!("native player-authority station fleet target is locked or malformed")
-    }
-    let current_count = finite_json_number(station.get(field), "current station fleet count")?
-        .floor()
-        .max(0.0);
-    if current_count > MAX_JAVASCRIPT_SAFE_INTEGER as f64 {
-        bail!("native player-authority current station fleet count is too large")
-    }
-    let current_count = current_count as u64;
-    if final_count == current_count {
-        bail!("native player-authority station fleet target is unchanged")
-    }
-    let machine_count = safe_json_integer(station.get("machineCount"), "station stack")?;
-    let per_building = if field == "stationDrones" {
-        PLAYER_STATION_DRONES_PER_BUILDING
-    } else {
-        PLAYER_STATION_VESSELS_PER_BUILDING
-    };
-    let capacity = machine_count
-        .checked_mul(per_building)
-        .filter(|capacity| *capacity <= MAX_JAVASCRIPT_SAFE_INTEGER)
-        .ok_or_else(|| anyhow!("native player-authority station fleet capacity overflows"))?;
-    let scope = if field == "stationDrones" {
-        "local"
-    } else {
-        "remote"
-    };
-    let busy = station_busy_vehicle_count(state, station_id, scope)?;
-    if final_count > capacity || final_count < busy {
-        bail!("native player-authority station fleet target violates capacity or busy vehicles")
-    }
-
-    let item_id = if field == "stationDrones" {
-        "logistics_drone"
-    } else {
-        "logistics_vessel"
-    };
-    if !state.catalog.items.contains_key(item_id) {
-        bail!("native player-authority station fleet item is not in the catalog")
-    }
-    let base = state.base_value();
-    let portable = base
-        .get("portableFleet")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("native player-authority portable fleet is missing"))?;
-    let portable_count = normalized_construction_inventory(portable.get(item_id))?;
-    let expected_inventory = if final_count > current_count {
-        let loaded = final_count - current_count;
-        portable_count.checked_sub(loaded).ok_or_else(|| {
-            anyhow!("native player-authority portable fleet stock is insufficient")
-        })?
-    } else {
-        let returned = current_count - final_count;
-        portable_count
-            .checked_add(returned)
-            .filter(|next| *next <= MAX_JAVASCRIPT_SAFE_INTEGER)
-            .ok_or_else(|| anyhow!("native player-authority fleet refund overflows"))?
-    };
-    if command.top_level_changes.len() != 1
-        || require_exact_set_patch(&command.top_level_changes, &["portableFleet", item_id])?
-            .as_u64()
-            != Some(expected_inventory)
-    {
-        bail!("native player-authority station fleet inventory accounting is invalid")
-    }
-
-    let mut expected_records = BTreeMap::<String, Vec<(Vec<&str>, Value)>>::new();
-    let mut station_changes = vec![(vec![field], Value::from(final_count))];
-    let station_progress_is_zero = station
-        .get("stationProgress")
-        .map(|value| finite_json_number(Some(value), "current station progress"))
-        .transpose()?
-        .is_some_and(|progress| progress == 0.0);
-    if !station_progress_is_zero {
-        station_changes.push((vec!["stationProgress"], Value::from(0)));
-    }
-    expected_records.insert(station_id.to_owned(), station_changes);
-    let peer_id = match station.get("stationPeerId") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(peer_id)) if !peer_id.is_empty() => Some(peer_id.as_str()),
-        _ => bail!("native player-authority station fleet peer ID is invalid"),
-    };
-    if let Some(peer_id) = peer_id
-        && peer_id != station_id
-        && let Some(peer_index) = state.entity_index.get(peer_id)
-    {
-        let peer = state.parse_entity(*peer_index)?;
-        let peer_progress_is_zero = peer
-            .get("stationProgress")
-            .map(|value| finite_json_number(Some(value), "current station peer progress"))
-            .transpose()?
-            .is_some_and(|progress| progress == 0.0);
-        if !peer_progress_is_zero {
-            expected_records.insert(
-                peer_id.to_owned(),
-                vec![(vec!["stationProgress"], Value::from(0))],
-            );
-        }
-    }
-    if command.changed_entities.len() != expected_records.len() {
-        bail!("native player-authority station fleet entity effects are incomplete or mixed")
-    }
-    let mut seen_records = HashSet::new();
-    for record in &command.changed_entities {
-        if !seen_records.insert(record.id.as_str()) {
-            bail!("native player-authority station fleet entity is repeated")
-        }
-        let expected = expected_records.get(&record.id).ok_or_else(|| {
-            anyhow!("native player-authority station fleet command changes an unrelated entity")
-        })?;
-        require_exact_set_patch_values(&record.changes, expected)?;
-    }
-    Ok(())
-}
-
-fn validate_station_warper_inventory_command(
-    state: &CoreState,
-    command: &SimulationCommandPatch,
-) -> anyhow::Result<()> {
-    if command.changed_entities.len() != 1
-        || command.changed_entities[0].changes.len() != 1
-        || command.top_level_changes.len() != 1
-        || !command.added_entities.is_empty()
-        || !command.removed_entity_ids.is_empty()
-        || !command.changed_belts.is_empty()
-        || !command.added_belts.is_empty()
-        || !command.removed_belt_ids.is_empty()
-    {
-        bail!("native player-authority station warper inventory command shape is invalid")
-    }
-    let record = &command.changed_entities[0];
-    let final_count = require_exact_set_patch(&record.changes, &["stationWarpers"])?
-        .as_u64()
-        .ok_or_else(|| anyhow!("native player-authority station warper count is invalid"))?;
-    let station_index = *state
-        .entity_index
-        .get(&record.id)
         .ok_or_else(|| anyhow!("native player-authority station warper entity is missing"))?;
     let station = state.parse_entity(station_index)?;
     let station = station
@@ -4745,8 +5020,12 @@ fn validate_station_warper_inventory_command(
     {
         bail!("native player-authority station warper target is incompatible")
     }
-    if let Some(locked) = station.get("interactionLocked")
-        && locked.as_bool() != Some(false)
+    if (require_active_planet
+        && station.get("interactionLocked").and_then(Value::as_bool) != Some(false))
+        || (!require_active_planet
+            && station
+                .get("interactionLocked")
+                .is_some_and(|locked| locked.as_bool() != Some(false)))
     {
         bail!("native player-authority station warper target is locked or malformed")
     }
@@ -4766,16 +5045,13 @@ fn validate_station_warper_inventory_command(
         bail!("native player-authority current station warper count is too large")
     }
     let current = current as u64;
-    if current == final_count {
-        bail!("native player-authority station warper count is unchanged")
-    }
     let machine_count = safe_json_integer(station.get("machineCount"), "station stack")?;
     let capacity = machine_count
         .checked_mul(50)
         .filter(|capacity| *capacity <= MAX_JAVASCRIPT_SAFE_INTEGER)
         .ok_or_else(|| anyhow!("native player-authority station warper capacity overflows"))?;
-    if final_count > capacity {
-        bail!("native player-authority station warper count exceeds capacity")
+    if current > capacity {
+        bail!("native player-authority current station warper count exceeds capacity")
     }
     let planet_id = station
         .get("planetId")
@@ -4793,6 +5069,9 @@ fn validate_station_warper_inventory_command(
         .get("activePlanetId")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("native player-authority active planet is missing"))?;
+    if require_active_planet && planet_id != active_planet_id {
+        bail!("native player-authority station warper target is not on the active planet")
+    }
     let (tray, tray_path) = if planet_id == active_planet_id {
         (
             state
@@ -4800,7 +5079,7 @@ fn validate_station_warper_inventory_command(
                 .get("tray")
                 .and_then(Value::as_object)
                 .ok_or_else(|| anyhow!("native player-authority active tray is missing"))?,
-            vec!["tray", "space_warper"],
+            vec!["tray".to_owned(), "space_warper".to_owned()],
         )
     } else {
         (
@@ -4811,28 +5090,177 @@ fn validate_station_warper_inventory_command(
                 .and_then(|trays| trays.get(planet_id))
                 .and_then(Value::as_object)
                 .ok_or_else(|| anyhow!("native player-authority remote planet tray is missing"))?,
-            vec!["planetTrays", planet_id, "space_warper"],
+            vec![
+                "planetTrays".to_owned(),
+                planet_id.to_owned(),
+                "space_warper".to_owned(),
+            ],
         )
     };
     let tray_count = normalized_construction_inventory(tray.get("space_warper"))?;
-    let expected_tray = if final_count > current {
-        tray_count
-            .checked_sub(final_count - current)
+    Ok(StationWarperContext {
+        station_id: station_id.to_owned(),
+        current_count: current,
+        capacity,
+        tray_count,
+        tray_path,
+    })
+}
+
+fn derive_station_warper_final(
+    context: StationWarperContext,
+    final_count: u64,
+) -> anyhow::Result<StationWarperDerivation> {
+    if final_count == context.current_count {
+        bail!("native player-authority station warper count is unchanged")
+    }
+    if final_count > context.capacity {
+        bail!("native player-authority station warper count exceeds capacity")
+    }
+    let expected_tray = if final_count > context.current_count {
+        context
+            .tray_count
+            .checked_sub(final_count - context.current_count)
             .ok_or_else(|| {
                 anyhow!("native player-authority station warper stock is insufficient")
             })?
     } else {
-        tray_count
-            .checked_add(current - final_count)
+        context
+            .tray_count
+            .checked_add(context.current_count - final_count)
             .filter(|count| *count <= MAX_JAVASCRIPT_SAFE_INTEGER)
             .ok_or_else(|| anyhow!("native player-authority station warper refund overflows"))?
     };
-    if require_exact_set_patch(&command.top_level_changes, &tray_path)?.as_u64()
-        != Some(expected_tray)
+    Ok(StationWarperDerivation {
+        top_level_changes: vec![ValuePatch {
+            path: context
+                .tray_path
+                .into_iter()
+                .map(PathSegment::Key)
+                .collect(),
+            operation: "set".to_owned(),
+            value: Some(Value::from(expected_tray)),
+        }],
+        changed_entities: vec![RecordPatch {
+            id: context.station_id,
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("stationWarpers".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(final_count)),
+            }],
+        }],
+    })
+}
+
+fn validate_station_warper_derivation(
+    command: &SimulationCommandPatch,
+    derivation: &StationWarperDerivation,
+) -> anyhow::Result<()> {
+    if !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+        || serde_json::to_value(&command.top_level_changes)?
+            != serde_json::to_value(&derivation.top_level_changes)?
+        || serde_json::to_value(&command.changed_entities)?
+            != serde_json::to_value(&derivation.changed_entities)?
     {
         bail!("native player-authority station warper inventory accounting is invalid")
     }
     Ok(())
+}
+
+fn command_contains_station_warper_inventory_intent(command: &SimulationCommandPatch) -> bool {
+    command.changed_entities.iter().any(|record| {
+        record
+            .changes
+            .iter()
+            .any(|change| path_matches(&change.path, &["stationWarperInventory", "intent"]))
+    })
+}
+
+fn require_station_warper_inventory_intent(
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<(&str, i64)> {
+    if command.changed_entities.len() != 1
+        || command.changed_entities[0].changes.len() != 1
+        || !command.top_level_changes.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority station warper intent shape is invalid")
+    }
+    let record = &command.changed_entities[0];
+    let change = &record.changes[0];
+    if !path_matches(&change.path, &["stationWarperInventory", "intent"])
+        || change.operation != "set"
+    {
+        bail!("native player-authority station warper intent path is invalid")
+    }
+    let intent = change
+        .value
+        .as_ref()
+        .and_then(Value::as_object)
+        .filter(|intent| intent.len() == 1)
+        .ok_or_else(|| anyhow!("native player-authority station warper intent is invalid"))?;
+    let delta = intent
+        .get("delta")
+        .and_then(Value::as_i64)
+        .filter(|delta| *delta != 0 && delta.unsigned_abs() <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        .ok_or_else(|| anyhow!("native player-authority station warper intent delta is invalid"))?;
+    Ok((record.id.as_str(), delta))
+}
+
+fn expand_station_warper_inventory_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<SimulationCommandPatch> {
+    let (station_id, delta) = require_station_warper_inventory_intent(command)?;
+    let context = station_warper_context(state, station_id, true, true)?;
+    let final_count = if delta > 0 {
+        let added = (delta as u64)
+            .min(context.capacity - context.current_count)
+            .min(context.tray_count);
+        context
+            .current_count
+            .checked_add(added)
+            .ok_or_else(|| anyhow!("native player-authority station warper intent overflows"))?
+    } else {
+        context.current_count - context.current_count.min(delta.unsigned_abs())
+    };
+    derive_station_warper_final(context, final_count)
+        .map(|derived| derived.into_command(command.protocol_version, command.base_revision))
+}
+
+fn validate_station_warper_inventory_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    expand_station_warper_inventory_intent(state, command).map(|_| ())
+}
+
+fn validate_station_warper_inventory_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    if command.changed_entities.len() != 1
+        || command.changed_entities[0].changes.len() != 1
+        || command.top_level_changes.len() != 1
+    {
+        bail!("native player-authority station warper inventory command shape is invalid")
+    }
+    let record = &command.changed_entities[0];
+    let final_count = require_exact_set_patch(&record.changes, &["stationWarpers"])?
+        .as_u64()
+        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        .ok_or_else(|| anyhow!("native player-authority station warper count is invalid"))?;
+    let context = station_warper_context(state, &record.id, false, false)?;
+    let derivation = derive_station_warper_final(context, final_count)?;
+    validate_station_warper_derivation(command, &derivation)
 }
 
 fn string_array_contains(value: Option<&Value>, needle: &str) -> anyhow::Result<bool> {
@@ -7295,6 +7723,12 @@ impl CoreState {
         if command_contains_fuel_item_intent(command) {
             return validate_fuel_item_command(self, command);
         }
+        if command_contains_station_fleet_target_intent(command) {
+            return validate_station_fleet_target_intent(self, command);
+        }
+        if command_contains_station_warper_inventory_intent(command) {
+            return validate_station_warper_inventory_intent(self, command);
+        }
         if command.changed_entities.iter().any(|record| {
             record.changes.iter().any(|change| {
                 matches!(
@@ -7481,6 +7915,50 @@ impl CoreState {
         bail!("native player-authority command domain is not typed yet")
     }
 
+    /// Rebuilds the durable renderer invalidation receipt after a Host restart.
+    /// A station fleet WAL stores only its semantic marker, so the current
+    /// authoritative station is also needed to recover the peer progress reset.
+    pub fn deterministic_player_authority_resume_result(
+        &self,
+        command: &SimulationCommandPatch,
+        previous_revision: u64,
+        revision: u64,
+    ) -> anyhow::Result<CommandApplyResult> {
+        let mut result = command.deterministic_apply_result(previous_revision, revision)?;
+        if command_contains_station_warper_inventory_intent(command) {
+            require_station_warper_inventory_intent(command)?;
+            result.topology_dirty = false;
+            return Ok(result);
+        }
+        if !command_contains_station_fleet_target_intent(command) {
+            return Ok(result);
+        }
+        let (station_id, _, _) = require_station_fleet_target_intent(command)?;
+        let station_index = *self
+            .entity_index
+            .get(station_id)
+            .ok_or_else(|| anyhow!("native player-authority station fleet entity is missing"))?;
+        let station = self.parse_entity(station_index)?;
+        let station = station
+            .as_object()
+            .ok_or_else(|| anyhow!("native player-authority station fleet entity is invalid"))?;
+        let peer_id = match station.get("stationPeerId") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(peer_id)) if !peer_id.is_empty() => Some(peer_id.as_str()),
+            _ => bail!("native player-authority station fleet peer ID is invalid"),
+        };
+        if let Some(peer_id) = peer_id
+            && peer_id != station_id
+            && self.entity_index.contains_key(peer_id)
+        {
+            result.changed_entity_ids.push(peer_id.to_owned());
+            result.changed_entity_ids.sort_unstable();
+            result.changed_entity_ids.dedup();
+        }
+        result.topology_dirty = false;
+        Ok(result)
+    }
+
     pub fn apply_player_authority_command(
         &mut self,
         command: &SimulationCommandPatch,
@@ -7577,6 +8055,8 @@ impl CoreState {
         let expanded_research_transition_intent;
         let expanded_energy_exchanger_mode_intent;
         let expanded_fuel_item_intent;
+        let expanded_station_fleet_target_intent;
+        let expanded_station_warper_inventory_intent;
         let expanded_manual_mining_intent;
         let expanded_black_hole_pause_intent;
         let expanded_time_warp_intent;
@@ -7594,6 +8074,14 @@ impl CoreState {
         } else if command_contains_fuel_item_intent(command) {
             expanded_fuel_item_intent = expand_fuel_item_intent(self, command)?;
             &expanded_fuel_item_intent
+        } else if command_contains_station_fleet_target_intent(command) {
+            expanded_station_fleet_target_intent =
+                expand_station_fleet_target_intent(self, command)?;
+            &expanded_station_fleet_target_intent
+        } else if command_contains_station_warper_inventory_intent(command) {
+            expanded_station_warper_inventory_intent =
+                expand_station_warper_inventory_intent(self, command)?;
+            &expanded_station_warper_inventory_intent
         } else if crate::manual_mining::command_contains_intent(command) {
             expanded_manual_mining_intent = crate::manual_mining::expand_intent(self, command)?;
             &expanded_manual_mining_intent
@@ -9740,6 +10228,50 @@ mod tests {
                 path: vec![PathSegment::Key(field.to_owned())],
                 operation: "set".to_owned(),
                 value: Some(Value::from(final_count)),
+            }],
+        }];
+        command
+    }
+
+    fn station_fleet_intent_command(
+        revision: u64,
+        entity_id: &str,
+        kind: &str,
+        target_count: Value,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.changed_entities = vec![RecordPatch {
+            id: entity_id.to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![
+                    PathSegment::Key("stationFleetTarget".to_owned()),
+                    PathSegment::Key("intent".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(serde_json::json!({
+                    "kind": kind,
+                    "targetCount": target_count,
+                })),
+            }],
+        }];
+        command
+    }
+
+    fn station_warper_intent_command(
+        revision: u64,
+        entity_id: &str,
+        delta: Value,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.changed_entities = vec![RecordPatch {
+            id: entity_id.to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![
+                    PathSegment::Key("stationWarperInventory".to_owned()),
+                    PathSegment::Key("intent".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(serde_json::json!({ "delta": delta })),
             }],
         }];
         command
@@ -12953,6 +13485,200 @@ mod tests {
     }
 
     #[test]
+    fn player_authority_station_fleet_intent_partially_loads_and_replays_semantically() {
+        let baseline = player_station_fleet_conservation_state();
+        let command = station_fleet_intent_command(
+            baseline.revision,
+            "station-ils",
+            "drone",
+            Value::from(12),
+        );
+        let durable_json = serde_json::to_string(&command).unwrap();
+        assert!(durable_json.contains("stationFleetTarget"));
+        assert!(!durable_json.contains("portableFleetAfter"));
+        assert!(!durable_json.contains("stationProgress\":0"));
+        let durable: SimulationCommandPatch = serde_json::from_str(&durable_json).unwrap();
+        let tray_before = baseline.base_value()["tray"].clone();
+        let routes_before = baseline
+            .parse_entity(*baseline.entity_index.get("station-empty").unwrap())
+            .unwrap()["stationRoutes"]
+            .clone();
+
+        let mut live = baseline.clone();
+        let receipt = live.apply_player_authority_command(&durable).unwrap();
+        assert_eq!(
+            receipt.changed_entity_ids,
+            vec!["station-empty".to_owned(), "station-ils".to_owned()]
+        );
+        let target = live
+            .parse_entity(*live.entity_index.get("station-ils").unwrap())
+            .unwrap();
+        let peer = live
+            .parse_entity(*live.entity_index.get("station-empty").unwrap())
+            .unwrap();
+        assert_eq!(target["stationDrones"], 10);
+        assert_eq!(live.base_value()["portableFleet"]["logistics_drone"], 0);
+        assert_eq!(live.base_value()["tray"], tray_before);
+        assert_eq!(target["stationProgress"], 0);
+        assert_eq!(peer["stationProgress"], 0);
+        assert_eq!(peer["stationRoutes"], routes_before);
+
+        let live_hash = live.canonical_sha256().unwrap();
+        let mut replayed = baseline;
+        replayed
+            .replay_operation(
+                command.base_revision,
+                receipt.revision,
+                Some(&durable),
+                0.0,
+                0.0,
+                crate::CoreAdvanceMode::Exact,
+            )
+            .unwrap();
+        assert_eq!(replayed.canonical_sha256().unwrap(), live_hash);
+        assert_eq!(replayed.base_value(), live.base_value());
+    }
+
+    #[test]
+    fn player_authority_station_fleet_intent_enforces_busy_floor_and_atomic_boundaries() {
+        let mut busy = player_station_fleet_conservation_state();
+        let tray_before = busy.base_value()["tray"].clone();
+        busy.apply_player_authority_command(&station_fleet_intent_command(
+            busy.revision,
+            "station-ils",
+            "vessel",
+            Value::from(0),
+        ))
+        .unwrap();
+        let target = busy
+            .parse_entity(*busy.entity_index.get("station-ils").unwrap())
+            .unwrap();
+        assert_eq!(target["stationVessels"], 1);
+        assert_eq!(busy.base_value()["portableFleet"]["logistics_vessel"], 5);
+        assert_eq!(busy.base_value()["tray"], tray_before);
+
+        let assert_rejected =
+            |mut state: CoreState, command: SimulationCommandPatch, expected: &str| {
+                let revision = state.revision;
+                let hash = state.canonical_sha256().unwrap();
+                let error = state.apply_player_authority_command(&command).unwrap_err();
+                assert!(
+                    format!("{error:#}").contains(expected),
+                    "unexpected intent rejection: {error:#}"
+                );
+                assert_eq!(state.revision, revision);
+                assert_eq!(state.canonical_sha256().unwrap(), hash);
+            };
+
+        let stale_state = player_station_configuration_state();
+        assert_rejected(
+            stale_state.clone(),
+            station_fleet_intent_command(
+                stale_state.revision - 1,
+                "station-ils",
+                "drone",
+                Value::from(6),
+            ),
+            "base revision is not current",
+        );
+        assert_rejected(
+            stale_state.clone(),
+            station_fleet_intent_command(
+                stale_state.revision,
+                "station-ils",
+                "drone",
+                Value::from(5),
+            ),
+            "unchanged",
+        );
+        let mut no_stock = stale_state.clone();
+        no_stock.base_value_mut()["portableFleet"]["logistics_drone"] = Value::from(0);
+        assert_rejected(
+            no_stock.clone(),
+            station_fleet_intent_command(no_stock.revision, "station-ils", "drone", Value::from(6)),
+            "unchanged",
+        );
+        assert_rejected(
+            stale_state.clone(),
+            station_fleet_intent_command(
+                stale_state.revision,
+                "station-pls",
+                "vessel",
+                Value::from(3),
+            ),
+            "incompatible",
+        );
+        assert_rejected(
+            stale_state.clone(),
+            station_fleet_intent_command(
+                stale_state.revision,
+                "station-locked",
+                "drone",
+                Value::from(6),
+            ),
+            "locked or malformed",
+        );
+        assert_rejected(
+            stale_state.clone(),
+            station_fleet_intent_command(
+                stale_state.revision,
+                "station-remote",
+                "drone",
+                Value::from(6),
+            ),
+            "active planet",
+        );
+        let modded = player_station_configuration_state_for_registry("MOD-station-intent");
+        assert_rejected(
+            modded.clone(),
+            station_fleet_intent_command(modded.revision, "station-ils", "drone", Value::from(6)),
+            "built-in catalog",
+        );
+        let mut overflow = stale_state.clone();
+        overflow.base_value_mut()["portableFleet"]["logistics_drone"] =
+            Value::from(MAX_JAVASCRIPT_SAFE_INTEGER);
+        assert_rejected(
+            overflow.clone(),
+            station_fleet_intent_command(overflow.revision, "station-ils", "drone", Value::from(0)),
+            "refund overflows",
+        );
+        let mut mixed = station_fleet_intent_command(
+            stale_state.revision,
+            "station-ils",
+            "drone",
+            Value::from(6),
+        );
+        mixed.changed_entities[0].changes.push(ValuePatch {
+            path: vec![PathSegment::Key("stationDrones".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(6)),
+        });
+        assert_rejected(stale_state.clone(), mixed, "intent shape");
+        let mut extra_key = station_fleet_intent_command(
+            stale_state.revision,
+            "station-ils",
+            "drone",
+            Value::from(6),
+        );
+        extra_key.changed_entities[0].changes[0].value = Some(serde_json::json!({
+            "kind": "drone",
+            "targetCount": 6,
+            "stationDrones": 6
+        }));
+        assert_rejected(stale_state.clone(), extra_key, "intent is invalid");
+        assert_rejected(
+            stale_state.clone(),
+            station_fleet_intent_command(
+                stale_state.revision,
+                "station-ils",
+                "drone",
+                Value::from(MAX_JAVASCRIPT_SAFE_INTEGER + 1),
+            ),
+            "intent target",
+        );
+    }
+
+    #[test]
     fn player_authority_station_fleet_conservation_failures_are_atomic() {
         let test_case = station_fleet_conservation_case("drone-busy-floor-refund");
         let assert_rejected =
@@ -13255,6 +13981,179 @@ mod tests {
             4
         );
         assert_eq!(state.revision, 14);
+    }
+
+    #[test]
+    fn player_authority_station_warper_intent_partially_loads_and_replays_semantically() {
+        let mut baseline = player_station_configuration_state();
+        baseline
+            .apply_command(&top_level_leaf_command(
+                baseline.revision,
+                &["research", "completedTechIds"],
+                serde_json::json!(["space_warp"]),
+            ))
+            .unwrap();
+        let command =
+            station_warper_intent_command(baseline.revision, "station-ils", Value::from(20));
+        let durable_json = serde_json::to_string(&command).unwrap();
+        assert!(durable_json.contains("stationWarperInventory"));
+        assert!(!durable_json.contains("space_warper"));
+        let durable: SimulationCommandPatch = serde_json::from_str(&durable_json).unwrap();
+        let target_before = baseline
+            .parse_entity(*baseline.entity_index.get("station-ils").unwrap())
+            .unwrap();
+        let progress_before = target_before["stationProgress"].clone();
+        let routes_before = target_before["stationRoutes"].clone();
+
+        let mut live = baseline.clone();
+        let receipt = live.apply_player_authority_command(&durable).unwrap();
+        assert_eq!(receipt.changed_entity_ids, vec!["station-ils".to_owned()]);
+        let target = live
+            .parse_entity(*live.entity_index.get("station-ils").unwrap())
+            .unwrap();
+        assert_eq!(target["stationWarpers"], 10);
+        assert_eq!(live.base_value()["tray"]["space_warper"], 0);
+        assert_eq!(target["stationProgress"], progress_before);
+        assert_eq!(target["stationRoutes"], routes_before);
+
+        let live_hash = live.canonical_sha256().unwrap();
+        let mut replayed = baseline;
+        replayed
+            .replay_operation(
+                command.base_revision,
+                receipt.revision,
+                Some(&durable),
+                0.0,
+                0.0,
+                crate::CoreAdvanceMode::Exact,
+            )
+            .unwrap();
+        assert_eq!(replayed.canonical_sha256().unwrap(), live_hash);
+
+        live.apply_player_authority_command(&station_warper_intent_command(
+            live.revision,
+            "station-ils",
+            Value::from(-4),
+        ))
+        .unwrap();
+        let target = live
+            .parse_entity(*live.entity_index.get("station-ils").unwrap())
+            .unwrap();
+        assert_eq!(target["stationWarpers"], 6);
+        assert_eq!(live.base_value()["tray"]["space_warper"], 4);
+    }
+
+    #[test]
+    fn player_authority_station_warper_intent_failures_are_atomic() {
+        let unlocked_state = || {
+            let mut state = player_station_configuration_state();
+            state
+                .apply_command(&top_level_leaf_command(
+                    state.revision,
+                    &["research", "completedTechIds"],
+                    serde_json::json!(["space_warp"]),
+                ))
+                .unwrap();
+            state
+        };
+        let assert_rejected =
+            |mut state: CoreState, command: SimulationCommandPatch, expected: &str| {
+                let revision = state.revision;
+                let hash = state.canonical_sha256().unwrap();
+                let error = state.apply_player_authority_command(&command).unwrap_err();
+                assert!(
+                    format!("{error:#}").contains(expected),
+                    "unexpected warper intent rejection: {error:#}"
+                );
+                assert_eq!(state.revision, revision);
+                assert_eq!(state.canonical_sha256().unwrap(), hash);
+            };
+
+        let locked_tech = player_station_configuration_state();
+        assert_rejected(
+            locked_tech.clone(),
+            station_warper_intent_command(locked_tech.revision, "station-ils", Value::from(1)),
+            "technology is locked",
+        );
+        let state = unlocked_state();
+        assert_rejected(
+            state.clone(),
+            station_warper_intent_command(state.revision, "station-ils", Value::from(0)),
+            "delta is invalid",
+        );
+        assert_rejected(
+            state.clone(),
+            station_warper_intent_command(state.revision, "station-pls", Value::from(1)),
+            "incompatible",
+        );
+        assert_rejected(
+            state.clone(),
+            station_warper_intent_command(state.revision, "station-locked", Value::from(1)),
+            "locked or malformed",
+        );
+        assert_rejected(
+            state.clone(),
+            station_warper_intent_command(state.revision, "station-remote", Value::from(1)),
+            "active planet",
+        );
+        let mut no_stock = state.clone();
+        no_stock.base_value_mut()["tray"]["space_warper"] = Value::from(0);
+        assert_rejected(
+            no_stock.clone(),
+            station_warper_intent_command(no_stock.revision, "station-ils", Value::from(1)),
+            "unchanged",
+        );
+        let modded = {
+            let mut state = player_station_configuration_state_for_registry("MOD-warper-intent");
+            state
+                .apply_command(&top_level_leaf_command(
+                    state.revision,
+                    &["research", "completedTechIds"],
+                    serde_json::json!(["space_warp"]),
+                ))
+                .unwrap();
+            state
+        };
+        assert_rejected(
+            modded.clone(),
+            station_warper_intent_command(modded.revision, "station-ils", Value::from(1)),
+            "built-in catalog",
+        );
+        let mut overflow = state.clone();
+        overflow.base_value_mut()["tray"]["space_warper"] =
+            Value::from(MAX_JAVASCRIPT_SAFE_INTEGER);
+        let index = *overflow.entity_index.get("station-ils").unwrap();
+        let mut station = overflow.parse_entity(index).unwrap();
+        station["stationWarpers"] = Value::from(1);
+        overflow.replace_entity_raw(index, serde_json::to_string(&station).unwrap().into());
+        overflow.rebuild_indexes().unwrap();
+        assert_rejected(
+            overflow.clone(),
+            station_warper_intent_command(overflow.revision, "station-ils", Value::from(-1)),
+            "refund overflows",
+        );
+        let mut mixed =
+            station_warper_intent_command(state.revision, "station-ils", Value::from(1));
+        mixed.changed_entities[0].changes.push(ValuePatch {
+            path: vec![PathSegment::Key("stationWarpers".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(1)),
+        });
+        assert_rejected(state.clone(), mixed, "intent shape");
+        let mut extra_key =
+            station_warper_intent_command(state.revision, "station-ils", Value::from(1));
+        extra_key.changed_entities[0].changes[0].value =
+            Some(serde_json::json!({ "delta": 1, "stationWarpers": 1 }));
+        assert_rejected(state.clone(), extra_key, "intent is invalid");
+        assert_rejected(
+            state.clone(),
+            station_warper_intent_command(
+                state.revision,
+                "station-ils",
+                Value::from((MAX_JAVASCRIPT_SAFE_INTEGER + 1) as i64),
+            ),
+            "delta is invalid",
+        );
     }
 
     #[test]

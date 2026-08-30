@@ -2582,7 +2582,9 @@ impl CoreRegistry {
             bail!("native player-authority command base revision is not current");
         }
 
-        let command_changes = if initial.pending_command.is_none() {
+        let command_changes = if initial.pending_command.is_none()
+            || initial_summary.revision == request.base_revision
+        {
             let mut preflight = self.session(session_id)?.clone();
             let applied = match kind {
                 PlayerAuthorityCommandKind::Gameplay => {
@@ -2599,12 +2601,14 @@ impl CoreRegistry {
             }
             applied
         } else {
-            request.command.deterministic_apply_result(
-                request.base_revision,
-                request.base_revision.checked_add(1).ok_or_else(|| {
-                    anyhow!("native player-authority command revision is exhausted")
-                })?,
-            )?
+            self.session(session_id)?
+                .deterministic_player_authority_resume_result(
+                    &request.command,
+                    request.base_revision,
+                    request.base_revision.checked_add(1).ok_or_else(|| {
+                        anyhow!("native player-authority command revision is exhausted")
+                    })?,
+                )?
         };
 
         let staged = match kind {
@@ -4512,6 +4516,41 @@ mod tests {
         catalog
     }
 
+    fn player_authority_station_inventory_catalog() -> Value {
+        let mut catalog = player_authority_catalog();
+        catalog["items"].as_array_mut().unwrap().extend([
+            json!({ "id": "logistics_drone", "name": "logistics_drone", "kind": "solid" }),
+            json!({ "id": "logistics_vessel", "name": "logistics_vessel", "kind": "solid" }),
+            json!({ "id": "space_warper", "name": "space_warper", "kind": "solid" }),
+        ]);
+        catalog["buildings"].as_array_mut().unwrap().extend([
+            json!({
+                "id": "planetary_logistics_station",
+                "kind": "station",
+                "speed": 1,
+                "inputCapacity": 100,
+                "outputCapacity": 100,
+                "powerDemandKw": 1,
+                "powerGenerationKw": 0
+            }),
+            json!({
+                "id": "interstellar_logistics_station",
+                "kind": "station",
+                "speed": 1,
+                "inputCapacity": 100,
+                "outputCapacity": 100,
+                "powerDemandKw": 1,
+                "powerGenerationKw": 0
+            }),
+        ]);
+        catalog["technologies"].as_array_mut().unwrap().push(json!({
+            "id": "space_warp",
+            "costs": [{ "itemId": "iron_ingot", "amount": 1 }],
+            "prerequisites": []
+        }));
+        catalog
+    }
+
     fn player_authority_macro_catalog() -> Value {
         let mut catalog = player_authority_catalog();
         catalog["buildings"].as_array_mut().unwrap().extend([
@@ -4908,6 +4947,111 @@ mod tests {
         serde_json::to_vec(&envelope).unwrap()
     }
 
+    fn player_authority_station_inventory_envelope() -> Vec<u8> {
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["tray"]["space_warper"] = Value::from(10);
+        envelope["state"]["tray"]["logistics_drone"] = Value::from(41);
+        envelope["state"]["tray"]["logistics_vessel"] = Value::from(43);
+        envelope["state"]["portableFleet"] = json!({ "logistics_drone": 3, "logistics_vessel": 2 });
+        envelope["state"]["research"]["completedTechIds"] = json!(["space_warp"]);
+        envelope["state"]["entities"]
+            .as_array_mut()
+            .unwrap()
+            .extend([
+                json!({
+                    "id": "station-ils",
+                    "kind": "station",
+                    "planetId": "home",
+                    "position": { "x": 7, "y": 2 },
+                    "interactionLocked": false,
+                    "buildingId": "interstellar_logistics_station",
+                    "powerGridId": "grid-a",
+                    "powerPriority": 2,
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0,
+                    "stationSlots": [],
+                    "stationProgress": 0.75,
+                    "stationDrones": 7,
+                    "stationVessels": 4,
+                    "stationWarpers": 0,
+                    "stationPeerId": "station-peer",
+                    "stationRoutes": [],
+                    "stationWarpEnabled": true,
+                    "stationWarperAutoRefill": false,
+                    "stationWarperTarget": 50,
+                    "stationHubEnabled": false,
+                    "stationHubPriority": 1
+                }),
+                json!({
+                    "id": "station-peer",
+                    "kind": "station",
+                    "planetId": "home",
+                    "position": { "x": 8, "y": 2 },
+                    "interactionLocked": false,
+                    "buildingId": "interstellar_logistics_station",
+                    "powerGridId": "grid-a",
+                    "powerPriority": 2,
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0,
+                    "stationSlots": [],
+                    "stationProgress": 0.5,
+                    "stationDrones": 0,
+                    "stationVessels": 0,
+                    "stationWarpers": 0,
+                    "stationPeerId": "station-ils",
+                    "stationRoutes": [{
+                        "id": "busy-local",
+                        "slotIndex": 0,
+                        "peerId": "station-ils",
+                        "itemId": "iron_ore",
+                        "scope": "local",
+                        "cargo": 2,
+                        "vehicleCount": 2,
+                        "progress": 0.25,
+                        "duration": 10,
+                        "requiresWarp": false,
+                        "vehicleStationId": "station-ils",
+                        "waypointStationIds": []
+                    }, {
+                        "id": "busy-remote",
+                        "slotIndex": 0,
+                        "peerId": "station-ils",
+                        "itemId": "iron_ore",
+                        "scope": "remote",
+                        "cargo": 1,
+                        "vehicleCount": 1,
+                        "progress": 0.5,
+                        "duration": 20,
+                        "requiresWarp": true,
+                        "vehicleStationId": "station-ils",
+                        "waypointStationIds": []
+                    }],
+                    "stationWarpEnabled": true,
+                    "stationWarperAutoRefill": false,
+                    "stationWarperTarget": 50,
+                    "stationHubEnabled": false,
+                    "stationHubPriority": 1
+                }),
+            ]);
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        serde_json::to_vec(&envelope).unwrap()
+    }
+
     fn player_authority_fixture() -> (
         tempfile::TempDir,
         SaveStore,
@@ -4928,6 +5072,19 @@ mod tests {
         player_authority_fixture_from_parts(
             player_authority_fuel_envelope(),
             player_authority_fuel_catalog(),
+        )
+    }
+
+    fn player_authority_station_inventory_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        player_authority_fixture_from_parts(
+            player_authority_station_inventory_envelope(),
+            player_authority_station_inventory_catalog(),
         )
     }
 
@@ -5355,6 +5512,66 @@ mod tests {
                         "path": ["fuelItemId"],
                         "operation": "set",
                         "value": "energetic_graphite"
+                    }]
+                }],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn player_authority_station_fleet_intent_command(
+        base_revision: u64,
+        command_id: &str,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [],
+                "changedEntities": [{
+                    "id": "station-ils",
+                    "changes": [{
+                        "path": ["stationFleetTarget", "intent"],
+                        "operation": "set",
+                        "value": { "kind": "drone", "targetCount": 12 }
+                    }]
+                }],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn player_authority_station_warper_intent_command(
+        base_revision: u64,
+        command_id: &str,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [],
+                "changedEntities": [{
+                    "id": "station-ils",
+                    "changes": [{
+                        "path": ["stationWarperInventory", "intent"],
+                        "operation": "set",
+                        "value": { "delta": 20 }
                     }]
                 }],
                 "addedEntities": [],
@@ -8986,6 +9203,327 @@ mod tests {
         )
         .unwrap();
         assert_eq!(replayed["state"], live_state);
+    }
+
+    #[test]
+    fn station_inventory_semantic_intents_survive_generic_cold_wal_reopen() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = player_authority_station_inventory_envelope();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_station_inventory_catalog(),
+            )
+            .unwrap();
+        let checkpoint = imported.checkpoint.clone();
+        let fleet_command = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "baseRevision": checkpoint.revision,
+            "topLevelChanges": [],
+            "changedEntities": [{
+                "id": "station-ils",
+                "changes": [{
+                    "path": ["stationFleetTarget", "intent"],
+                    "operation": "set",
+                    "value": { "kind": "drone", "targetCount": 12 }
+                }]
+            }],
+            "addedEntities": [],
+            "removedEntityIds": [],
+            "changedBelts": [],
+            "addedBelts": [],
+            "removedBeltIds": []
+        }))
+        .unwrap();
+        let fleet = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "station-fleet-before-cold-reopen".to_owned(),
+                    base_revision: checkpoint.revision,
+                    command: Some(fleet_command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        let warper_command = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "baseRevision": fleet.revision,
+            "topLevelChanges": [],
+            "changedEntities": [{
+                "id": "station-ils",
+                "changes": [{
+                    "path": ["stationWarperInventory", "intent"],
+                    "operation": "set",
+                    "value": { "delta": 20 }
+                }]
+            }],
+            "addedEntities": [],
+            "removedEntityIds": [],
+            "changedBelts": [],
+            "addedBelts": [],
+            "removedBeltIds": []
+        }))
+        .unwrap();
+        let warpers = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "station-warpers-before-cold-reopen".to_owned(),
+                    base_revision: fleet.revision,
+                    command: Some(warper_command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        let live_summary = warpers
+            .summary
+            .as_ref()
+            .expect("diagnostic commit must return the live summary");
+        assert_eq!(warpers.revision, checkpoint.revision + 2);
+
+        let wal = store
+            .read_wal(&checkpoint.slot, checkpoint.revision)
+            .unwrap();
+        assert_eq!(wal.len(), 2);
+        let fleet_payload = serde_json::to_string(&wal[0].payload).unwrap();
+        let warper_payload = serde_json::to_string(&wal[1].payload).unwrap();
+        assert!(fleet_payload.contains("stationFleetTarget"));
+        assert!(!fleet_payload.contains("portableFleet"));
+        assert!(!fleet_payload.contains("stationProgress"));
+        assert!(warper_payload.contains("stationWarperInventory"));
+        assert!(!warper_payload.contains("space_warper"));
+        assert!(!warper_payload.contains("stationWarpers"));
+
+        registry
+            .export_v47(&store, &imported.session_id, "station-intents-live", 100)
+            .unwrap();
+        let live: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/station-intents-live.json")).unwrap(),
+        )
+        .unwrap();
+        let station = live["state"]["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["id"] == "station-ils")
+            .unwrap();
+        let peer = live["state"]["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["id"] == "station-peer")
+            .unwrap();
+        assert_eq!(station["stationDrones"], 10);
+        assert_eq!(station["stationWarpers"], 10);
+        assert_eq!(station["stationProgress"], 0);
+        assert_eq!(peer["stationProgress"], 0);
+        assert_eq!(peer["stationRoutes"].as_array().unwrap().len(), 2);
+        assert_eq!(live["state"]["portableFleet"]["logistics_drone"], 0);
+        assert_eq!(live["state"]["tray"]["space_warper"], 0);
+        assert_eq!(live["state"]["tray"]["logistics_drone"], 41);
+        let live_state = live["state"].clone();
+        let live_hash = live_summary.canonical_sha256.clone();
+
+        drop(registry);
+        drop(store);
+        let reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = CoreRegistry::default();
+        let reopened = reopened_registry
+            .open(
+                &reopened_store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_station_inventory_catalog(),
+            )
+            .unwrap();
+        assert_eq!(reopened.replayed_wal_entries, 2);
+        assert_eq!(reopened.replayed_revision, warpers.revision);
+        assert_eq!(reopened.summary.canonical_sha256, live_hash);
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &reopened.session_id,
+                "station-intents-replayed",
+                100,
+            )
+            .unwrap();
+        let replayed: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/station-intents-replayed.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replayed["state"], live_state);
+    }
+
+    #[test]
+    fn station_fleet_intent_is_atomic_across_every_host_durable_boundary() {
+        let (_clean_root, mut clean_store, mut clean_registry, clean_session, checkpoint) =
+            player_authority_station_inventory_fixture();
+        let clean = clean_registry
+            .commit_player_authority_command(
+                &mut clean_store,
+                &clean_session,
+                player_authority_station_fleet_intent_command(
+                    checkpoint.revision,
+                    "station-fleet-boundary",
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            clean.changed_entity_ids,
+            ["station-ils".to_owned(), "station-peer".to_owned()]
+        );
+        assert!(clean.changed_belt_ids.is_empty());
+        assert!(!clean.topology_dirty);
+
+        for fault in [
+            PlayerAuthorityCommandFault::AfterStage,
+            PlayerAuthorityCommandFault::AfterWal,
+            PlayerAuthorityCommandFault::AfterCheckpoint,
+            PlayerAuthorityCommandFault::AfterReceipt,
+            PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
+        ] {
+            let (_root, mut store, mut registry, session_id, checkpoint) =
+                player_authority_station_inventory_fixture();
+            let before = registry.status(&session_id).unwrap();
+            let request = || {
+                player_authority_station_fleet_intent_command(
+                    checkpoint.revision,
+                    "station-fleet-boundary",
+                )
+            };
+            let error = registry
+                .commit_player_authority_command_internal(
+                    &mut store,
+                    &session_id,
+                    request(),
+                    PlayerAuthorityCommandKind::Gameplay,
+                    fault,
+                )
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("lost response"),
+                "{fault:?}: {error:#}"
+            );
+            if fault == PlayerAuthorityCommandFault::AfterStage {
+                let after = registry.status(&session_id).unwrap();
+                assert_eq!(after.revision, before.revision);
+                assert_eq!(after.canonical_sha256, before.canonical_sha256);
+            }
+
+            drop(registry);
+            let published = store.recover("normal-main").unwrap().unwrap();
+            let mut reopened = CoreRegistry::default();
+            let opened = reopened
+                .open(
+                    &store,
+                    "normal-main",
+                    published.generation,
+                    &published.root_hash,
+                    published.revision,
+                    &published.registry_fingerprint,
+                    player_authority_station_inventory_catalog(),
+                )
+                .unwrap();
+            let recovered = reopened
+                .commit_player_authority_command(&mut store, &opened.session_id, request())
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
+            assert!(recovered.duplicate, "{fault:?}");
+            assert_eq!(recovered.revision, clean.revision, "{fault:?}");
+            assert_eq!(
+                recovered.summary.canonical_sha256, clean.summary.canonical_sha256,
+                "{fault:?}"
+            );
+            assert_eq!(
+                recovered.changed_entity_ids, clean.changed_entity_ids,
+                "{fault:?}"
+            );
+            assert!(recovered.changed_belt_ids.is_empty(), "{fault:?}");
+            assert!(!recovered.topology_dirty, "{fault:?}");
+            let lease = store.require_exact_realtime_lease().unwrap();
+            assert_eq!(lease.acknowledged.revision, recovered.revision, "{fault:?}");
+            assert!(lease.pending_command.is_none(), "{fault:?}");
+        }
+    }
+
+    #[test]
+    fn station_warper_intent_keeps_exact_receipt_after_wal_boundary_restart() {
+        let (_clean_root, mut clean_store, mut clean_registry, clean_session, checkpoint) =
+            player_authority_station_inventory_fixture();
+        let clean = clean_registry
+            .commit_player_authority_command(
+                &mut clean_store,
+                &clean_session,
+                player_authority_station_warper_intent_command(
+                    checkpoint.revision,
+                    "station-warper-boundary",
+                ),
+            )
+            .unwrap();
+        assert_eq!(clean.changed_entity_ids, ["station-ils"]);
+        assert!(clean.changed_belt_ids.is_empty());
+        assert!(!clean.topology_dirty);
+
+        let (_root, mut store, mut registry, session_id, checkpoint) =
+            player_authority_station_inventory_fixture();
+        let request = || {
+            player_authority_station_warper_intent_command(
+                checkpoint.revision,
+                "station-warper-boundary",
+            )
+        };
+        let error = registry
+            .commit_player_authority_command_internal(
+                &mut store,
+                &session_id,
+                request(),
+                PlayerAuthorityCommandKind::Gameplay,
+                PlayerAuthorityCommandFault::AfterWal,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("lost response"));
+        drop(registry);
+
+        let published = store.recover("normal-main").unwrap().unwrap();
+        let mut reopened = CoreRegistry::default();
+        let opened = reopened
+            .open(
+                &store,
+                "normal-main",
+                published.generation,
+                &published.root_hash,
+                published.revision,
+                &published.registry_fingerprint,
+                player_authority_station_inventory_catalog(),
+            )
+            .unwrap();
+        let recovered = reopened
+            .commit_player_authority_command(&mut store, &opened.session_id, request())
+            .unwrap();
+        assert!(recovered.duplicate);
+        assert_eq!(
+            recovered.summary.canonical_sha256,
+            clean.summary.canonical_sha256
+        );
+        assert_eq!(recovered.changed_entity_ids, clean.changed_entity_ids);
+        assert!(recovered.changed_belt_ids.is_empty());
+        assert!(!recovered.topology_dirty);
     }
 
     #[test]

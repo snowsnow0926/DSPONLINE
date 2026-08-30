@@ -8998,6 +8998,156 @@ mod tests {
     }
 
     #[test]
+    fn black_hole_pause_intent_survives_host_wal_cold_reopen_without_touching_ledgers() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let mut catalog = player_authority_catalog();
+        catalog["buildings"].as_array_mut().unwrap().push(json!({
+            "id": "micro_black_hole_connector",
+            "kind": "machine",
+            "speed": 1,
+            "inputCapacity": 0,
+            "outputCapacity": 0
+        }));
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["entities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "black-hole-a",
+                "kind": "machine",
+                "planetId": "home",
+                "position": { "x": 7, "y": 2 },
+                "interactionLocked": false,
+                "buildingId": "micro_black_hole_connector",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "blackHolePaused": true,
+                "blackHoleActivationConfirmed": false,
+                "blackHolePorts": [
+                    { "index": 0, "currentItemId": "iron_ore", "totalDestroyed": "12345678901234567890" },
+                    { "index": 1, "totalDestroyed": "7" },
+                    { "index": 2, "totalDestroyed": "0" }
+                ]
+            }));
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                catalog.clone(),
+            )
+            .unwrap();
+        let checkpoint = imported.checkpoint.clone();
+        let command = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "baseRevision": checkpoint.revision,
+            "topLevelChanges": [],
+            "changedEntities": [{
+                "id": "black-hole-a",
+                "changes": [{
+                    "path": ["blackHolePaused", "intent"],
+                    "operation": "set",
+                    "value": { "paused": false, "confirmActivation": true }
+                }]
+            }],
+            "addedEntities": [],
+            "removedEntityIds": [],
+            "changedBelts": [],
+            "addedBelts": [],
+            "removedBeltIds": []
+        }))
+        .unwrap();
+        let committed = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "black-hole-before-cold-reopen".to_owned(),
+                    base_revision: checkpoint.revision,
+                    command: Some(command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        let live_hash = committed
+            .summary
+            .as_ref()
+            .expect("diagnostic commit must return the live summary")
+            .canonical_sha256
+            .clone();
+        registry
+            .export_v47(&store, &imported.session_id, "black-hole-live", 100)
+            .unwrap();
+        let live: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/black-hole-live.json")).unwrap(),
+        )
+        .unwrap();
+        let black_hole = live["state"]["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["id"] == "black-hole-a")
+            .unwrap();
+        assert_eq!(black_hole["blackHolePaused"], false);
+        assert_eq!(black_hole["blackHoleActivationConfirmed"], true);
+        assert_eq!(
+            black_hole["blackHolePorts"][0]["totalDestroyed"],
+            "12345678901234567890"
+        );
+        let live_state = live["state"].clone();
+
+        drop(registry);
+        drop(store);
+
+        let reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = CoreRegistry::default();
+        let reopened = reopened_registry
+            .open(
+                &reopened_store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                catalog,
+            )
+            .unwrap();
+        assert_eq!(reopened.replayed_wal_entries, 1);
+        assert_eq!(reopened.replayed_revision, committed.revision);
+        assert_eq!(reopened.summary.canonical_sha256, live_hash);
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &reopened.session_id,
+                "black-hole-replayed",
+                100,
+            )
+            .unwrap();
+        let replayed: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/black-hole-replayed.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replayed["state"], live_state);
+    }
+
+    #[test]
     fn manual_mining_semantic_intent_survives_cold_wal_reopen() {
         let root = tempdir().unwrap();
         let mut store = SaveStore::open(root.path()).unwrap();

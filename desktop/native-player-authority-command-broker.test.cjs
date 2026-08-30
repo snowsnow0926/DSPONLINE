@@ -99,6 +99,46 @@ test("a main-only observer sees only validated durable commands and cannot poiso
   });
 });
 
+test("black-hole intent crosses the host as a minimal durable command with a settled receipt", async () => {
+  const blackHoleCommand = command(17, {
+    changedEntities: [{
+      id: "black-hole-a",
+      changes: [{
+        path: ["blackHolePaused", "intent"],
+        operation: "set",
+        value: { paused: false, confirmActivation: true },
+      }],
+    }],
+  });
+  const observed = [];
+  const { broker, calls } = brokerFixture({
+    onCommittedCommand(value) { observed.push(value); },
+    commit: async (request) => commandResult(request, {
+      changedEntityIds: ["black-hole-a"],
+      changedBeltIds: [],
+      topologyDirty: false,
+    }),
+  });
+
+  const receipt = await broker.commit(7, { sessionId: "core-1", command: blackHoleCommand });
+  assert.deepEqual(receipt, {
+    previousRevision: 17,
+    revision: 18,
+    changedEntityIds: ["black-hole-a"],
+    changedBeltIds: [],
+    topologyDirty: false,
+  });
+  assert.deepEqual(calls[0].command, blackHoleCommand);
+  assert.equal(JSON.stringify(calls[0].command).includes("blackHolePorts"), false);
+  assert.equal(JSON.stringify(calls[0].command).includes("totalDestroyed"), false);
+  assert.deepEqual(observed[0], {
+    sessionId: "core-1",
+    baseRevision: 17,
+    revision: 18,
+    command: blackHoleCommand,
+  });
+});
+
 test("a durable command retires main-only cleanup even when its renderer disappears before delivery", async () => {
   let trustChecks = 0;
   const observed = [];

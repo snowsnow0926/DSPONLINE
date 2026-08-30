@@ -1,4 +1,4 @@
-import { CircuitBoard, Flame, Layers3, LockKeyhole, Minus, Plus, Route, Trash2 } from "lucide-react";
+import { Atom, CircuitBoard, Flame, Layers3, LockKeyhole, Minus, Pause, Play, Plus, Route, Trash2 } from "lucide-react";
 import { CONSTRUCTION, FUEL_ENERGY_MJ, ITEMS } from "../game/content";
 import type {
   FactoryInspectorSummaryReadModel,
@@ -38,6 +38,10 @@ interface NativeFactoryInspectorPanelProps {
     targetMode: NativeProjectedEnergyExchangerMode,
   ) => void;
   onFuelItemChange: (entityId: string, targetItemId: ItemId) => void;
+  onBlackHolePausedChange: (
+    entityId: string,
+    paused: boolean,
+  ) => void;
   onBeltLaneCountChange: (beltId: string, targetLanes: number) => void;
   onBeltPriorityChange: (beltId: string, targetPriority: 0 | 1 | 2) => void;
   onRemoveBelt: (beltId: string) => void;
@@ -75,6 +79,7 @@ function NativeEntitySummary({
   onSplitterDistributionModeChange,
   onEnergyExchangerModeChange,
   onFuelItemChange,
+  onBlackHolePausedChange,
 }: {
   entity: SelectedEntityReadModel;
   configuration: NativeProjectedEntityConfigurationBinding | null;
@@ -92,6 +97,10 @@ function NativeEntitySummary({
     targetMode: NativeProjectedEnergyExchangerMode,
   ) => void;
   onFuelItemChange: (entityId: string, targetItemId: ItemId) => void;
+  onBlackHolePausedChange: (
+    entityId: string,
+    paused: boolean,
+  ) => void;
 }) {
   const label = entity.buildingId
     ? constructionNames.get(entity.buildingId) ?? entity.buildingId
@@ -101,6 +110,22 @@ function NativeEntitySummary({
   const energyExchangerMode = getNativeProjectedEnergyExchangerMode(configuration);
   const energyExchangerSwitchable = canNativeProjectedEnergyExchangerModeChange(configuration);
   const fuelConfiguration = getNativeProjectedFuelItemConfiguration(configuration);
+  const blackHoleState = configuration?.entity.buildingId === "micro_black_hole_connector" &&
+    typeof configuration.entity.blackHolePaused === "boolean" &&
+    typeof configuration.entity.blackHoleActivationConfirmed === "boolean"
+    ? {
+      paused: configuration.entity.blackHolePaused,
+      activationConfirmed: configuration.entity.blackHoleActivationConfirmed,
+    }
+    : null;
+  const toggleBlackHole = () => {
+    if (!blackHoleState) return;
+    if (!blackHoleState.paused) {
+      onBlackHolePausedChange(entity.entityId, true);
+      return;
+    }
+    onBlackHolePausedChange(entity.entityId, false);
+  };
   return <>
     <section className="inspector-content native-factory-inspector__entity" aria-label="Windows 原生建筑摘要">
       <div className="inspector-identity"><i className="building-mark"><CircuitBoard size={18} /></i><div><span>Windows 原生建筑</span><strong>{label}</strong></div></div>
@@ -196,6 +221,23 @@ function NativeEntitySummary({
           </option>)}
         </select>
       </label>
+    </section>}
+    {blackHoleState === null ? null : <section
+      className="native-inspector-safe-actions"
+      data-native-black-hole-paused="micro-black-hole-v1"
+    >
+      <strong><Atom size={14} />Rust 微型黑洞</strong>
+      <p>输入物资将被永久销毁且无法找回。Rust 会在 durable revision 再核对行星、内置目录、实体锁与首次启动确认。</p>
+      <dl className="metric-ledger">
+        <div><dt>运行开关</dt><dd>{blackHoleState.paused ? "已暂停" : "销毁中"}</dd></div>
+        <div><dt>启动确认</dt><dd>{blackHoleState.activationConfirmed ? "已确认" : "尚未确认"}</dd></div>
+      </dl>
+      <button
+        type="button"
+        disabled={pending || entity.interactionLocked}
+        onClick={toggleBlackHole}
+      >{blackHoleState.paused ? <Play size={14} /> : <Pause size={14} />}
+        {blackHoleState.paused ? "启动微型黑洞" : "暂停销毁"}</button>
     </section>}
     <section className="native-inspector-safe-actions" data-native-construction-stack="ordinary-single-v1">
       <strong>Rust 建筑堆叠</strong>
@@ -306,6 +348,7 @@ export function NativeFactoryInspectorPanel({
   onSplitterDistributionModeChange,
   onEnergyExchangerModeChange,
   onFuelItemChange,
+  onBlackHolePausedChange,
   onBeltLaneCountChange,
   onBeltPriorityChange,
   onRemoveBelt,
@@ -353,6 +396,7 @@ export function NativeFactoryInspectorPanel({
       onSplitterDistributionModeChange={onSplitterDistributionModeChange}
       onEnergyExchangerModeChange={onEnergyExchangerModeChange}
       onFuelItemChange={onFuelItemChange}
+      onBlackHolePausedChange={onBlackHolePausedChange}
     />;
   } else if (inspector.belt && !inspector.entity) {
     content = <NativeBeltSummary belt={inspector.belt} pending={pending} onLaneCountChange={onBeltLaneCountChange} onPriorityChange={onBeltPriorityChange} onRemove={onRemoveBelt} />;

@@ -5,6 +5,11 @@ import { resolve } from "node:path";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type {
+  NativeConstructionCenterFrameIdentity,
+  NativeConstructionCenterPendingIdentity,
+  NativeConstructionCenterTargetStockSubmission,
+} from "../game/nativeConstructionCenterIntent";
 import type { NativeConstructionCenterWorkspaceFrame } from "../game/nativeConstructionCenterWorkspace";
 import { NativeConstructionCenterWorkspace } from "./NativeConstructionCenterWorkspace";
 
@@ -27,6 +32,7 @@ function frame(): NativeConstructionCenterWorkspaceFrame {
       schema: "construction-center-workspace-v1",
       registryFingerprint: "7df8cf3a",
       readOnly: true,
+      writeAvailable: true,
       activePlanetId: "home",
       activePlanetName: "家园星",
       paused: false,
@@ -101,6 +107,13 @@ describe("NativeConstructionCenterWorkspace", () => {
   let host: HTMLDivElement;
   let root: Root;
 
+  type Callbacks = {
+    onClose: ReturnType<typeof vi.fn<() => void>>;
+    onSubmitEnabledIntent: ReturnType<typeof vi.fn<(identity: NativeConstructionCenterFrameIdentity, enabled: boolean) => void>>;
+    onSubmitQuantumSupplyIntent: ReturnType<typeof vi.fn<(identity: NativeConstructionCenterFrameIdentity, enabled: boolean) => void>>;
+    onSubmitTargetStockIntent: ReturnType<typeof vi.fn<(submission: NativeConstructionCenterTargetStockSubmission) => void>>;
+  };
+
   beforeEach(() => {
     host = document.createElement("div");
     document.body.append(host);
@@ -112,28 +125,258 @@ describe("NativeConstructionCenterWorkspace", () => {
     host.remove();
   });
 
-  function render(value: NativeConstructionCenterWorkspaceFrame | null, readStatus: "loading" | "ready" | "unavailable" = "ready") {
-    const onClose = vi.fn();
-    act(() => root.render(<NativeConstructionCenterWorkspace open frame={value} readStatus={readStatus} onClose={onClose} />));
-    return onClose;
+  function render(
+    value: NativeConstructionCenterWorkspaceFrame | null,
+    readStatus: "loading" | "ready" | "unavailable" = "ready",
+    pendingIdentity: NativeConstructionCenterPendingIdentity | null = null,
+    callbacks: Callbacks = {
+      onClose: vi.fn<() => void>(),
+      onSubmitEnabledIntent: vi.fn<(identity: NativeConstructionCenterFrameIdentity, enabled: boolean) => void>(),
+      onSubmitQuantumSupplyIntent: vi.fn<(identity: NativeConstructionCenterFrameIdentity, enabled: boolean) => void>(),
+      onSubmitTargetStockIntent: vi.fn<(submission: NativeConstructionCenterTargetStockSubmission) => void>(),
+    },
+    open = true,
+  ) {
+    act(() => root.render(<NativeConstructionCenterWorkspace
+      open={open}
+      frame={value}
+      readStatus={readStatus}
+      pendingIdentity={pendingIdentity}
+      onClose={callbacks.onClose}
+      onSubmitEnabledIntent={callbacks.onSubmitEnabledIntent}
+      onSubmitQuantumSupplyIntent={callbacks.onSubmitQuantumSupplyIntent}
+      onSubmitTargetStockIntent={callbacks.onSubmitTargetStockIntent}
+    />));
+    return callbacks;
   }
 
-  it("renders only the identity-bound Rust catalog and keeps every write control disabled", () => {
+  function setInput(input: HTMLInputElement, value: string) {
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      input.dispatchEvent(new InputEvent("input", { bubbles: true, data: value, inputType: "insertText" }));
+    });
+  }
+
+  function blur(input: HTMLInputElement) {
+    act(() => input.dispatchEvent(new FocusEvent("focusout", { bubbles: true })));
+  }
+
+  function dialogButton(label: string) {
+    return [...host.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')]
+      .find((button) => button.textContent === label)!;
+  }
+
+  it("submits toggle intents without optimistically changing projected values", () => {
+    const callbacks = render(frame());
+    const toggles = host.querySelectorAll<HTMLInputElement>(".construction-center-toggle input");
+    expect(toggles[0]?.disabled).toBe(false);
+    expect(toggles[1]?.disabled).toBe(false);
+    act(() => toggles[0]!.click());
+    expect(callbacks.onSubmitEnabledIntent).toHaveBeenCalledWith({
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 19,
+      activePlanetId: "home",
+    }, false);
+    expect(toggles[0]?.checked).toBe(true);
+    act(() => toggles[1]!.click());
+    expect(callbacks.onSubmitQuantumSupplyIntent).toHaveBeenCalledWith({
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 19,
+      activePlanetId: "home",
+    }, false);
+    expect(toggles[1]?.checked).toBe(true);
+  });
+
+  it("renders only the identity-bound Rust catalog and leaves batch writes disabled", () => {
     render(frame());
     const header = host.querySelector("[data-native-authority-session='session-a']");
     expect(header?.getAttribute("data-native-authority-run")).toBe("run-a");
     expect(header?.getAttribute("data-native-authority-revision")).toBe("19");
     expect(header?.getAttribute("data-native-authority-planet")).toBe("home");
-    expect(host.textContent).toContain("原生写入尚未开放");
+    expect(host.textContent).toContain("批量写入尚未开放");
+    expect(host.textContent).toContain("不会循环多条目标命令伪装为原子操作");
     expect(host.textContent).toContain("风力涡轮机");
     expect(host.textContent).toContain("物流运输机");
     expect(host.textContent).toContain("铁矿石");
     expect(host.textContent).toContain("处理器");
-    for (const control of host.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement>("button[title='原生写入尚未开放'], input[aria-label*='只读'], input[aria-label*='尚未开放'], select[aria-label*='尚未开放']")) {
+    for (const control of host.querySelectorAll<HTMLInputElement | HTMLButtonElement>("[aria-label='原生建筑制造批量写入状态'] button, [aria-label='原生建筑制造批量写入状态'] input")) {
       expect(control.disabled).toBe(true);
     }
-    expect(host.querySelector<HTMLInputElement>("input[type='checkbox']")?.disabled).toBe(true);
+    expect(host.querySelector<HTMLInputElement>("input[type='checkbox']")?.disabled).toBe(false);
+    expect(host.querySelector<HTMLInputElement>("[aria-label='风力涡轮机目标库存']")?.disabled).toBe(false);
     expect(host.querySelector<HTMLInputElement>("[aria-label='搜索原生自动制造目标']")?.disabled).toBe(false);
+  });
+
+  it("supports step, preset, and strict projected increases without optimistic changes", () => {
+    const callbacks = render(frame());
+    const input = host.querySelector<HTMLInputElement>("[aria-label='风力涡轮机目标库存']")!;
+    act(() => host.querySelector<HTMLButtonElement>("[aria-label='增加风力涡轮机目标库存']")!.click());
+    expect(callbacks.onSubmitTargetStockIntent).toHaveBeenLastCalledWith(expect.objectContaining({
+      targetId: "wind_turbine",
+      target: 51,
+      confirmedDecreaseFrom: null,
+    }));
+    callbacks.onSubmitTargetStockIntent.mockClear();
+
+    const preset = host.querySelector<HTMLSelectElement>("[aria-label='风力涡轮机常用目标库存']")!;
+    act(() => {
+      preset.value = "100";
+      preset.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(callbacks.onSubmitTargetStockIntent).toHaveBeenLastCalledWith(expect.objectContaining({
+      targetId: "wind_turbine",
+      target: 100,
+      confirmedDecreaseFrom: null,
+    }));
+    callbacks.onSubmitTargetStockIntent.mockClear();
+
+    setInput(input, "51");
+    blur(input);
+    expect(callbacks.onSubmitTargetStockIntent).toHaveBeenCalledWith({
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 19,
+      activePlanetId: "home",
+      targetId: "wind_turbine",
+      target: 51,
+      confirmedDecreaseFrom: null,
+    });
+    expect(input.value).toBe("50");
+
+    callbacks.onSubmitTargetStockIntent.mockClear();
+    setInput(input, "050");
+    blur(input);
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(host.textContent).toContain("不带符号、小数或前导零");
+    expect(callbacks.onSubmitTargetStockIntent).not.toHaveBeenCalled();
+  });
+
+  it("requires confirmation for every decrease and identifies cancellation/refund risk", () => {
+    const callbacks = render(frame());
+    const input = host.querySelector<HTMLInputElement>("[aria-label='风力涡轮机目标库存']")!;
+    setInput(input, "49");
+    blur(input);
+    expect(callbacks.onSubmitTargetStockIntent).not.toHaveBeenCalled();
+    expect(host.querySelector('[role="alertdialog"]')?.textContent).toContain("降低目标可能改变后续补货与在途任务");
+    act(() => dialogButton("取消").click());
+
+    setInput(input, "41");
+    blur(input);
+    expect(host.querySelector('[role="alertdialog"]')?.textContent).toContain("取消同目标在途任务并按守恒规则退款");
+    act(() => dialogButton("确认降低并提交 Rust").click());
+    expect(callbacks.onSubmitTargetStockIntent).toHaveBeenCalledWith({
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 19,
+      activePlanetId: "home",
+      targetId: "wind_turbine",
+      target: 41,
+      confirmedDecreaseFrom: 50,
+    });
+    expect(input.value).toBe("50");
+  });
+
+  it("keeps an Enter-created decrease confirmation through blur and same-value Enter", () => {
+    const callbacks = render(frame());
+    const input = host.querySelector<HTMLInputElement>("[aria-label='风力涡轮机目标库存']")!;
+    setInput(input, "41");
+    act(() => input.focus());
+    expect(document.activeElement).toBe(input);
+    act(() => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+    expect(document.activeElement).not.toBe(input);
+    expect(host.querySelector('[role="alertdialog"]')?.textContent).toContain("取消同目标在途任务并按守恒规则退款");
+
+    act(() => input.focus());
+    act(() => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })));
+    expect(document.activeElement).not.toBe(input);
+    expect(host.querySelector('[role="alertdialog"]')).not.toBeNull();
+
+    act(() => dialogButton("确认降低并提交 Rust").click());
+    expect(callbacks.onSubmitTargetStockIntent).toHaveBeenCalledTimes(1);
+    expect(callbacks.onSubmitTargetStockIntent).toHaveBeenCalledWith(expect.objectContaining({
+      targetId: "wind_turbine",
+      target: 41,
+      confirmedDecreaseFrom: 50,
+    }));
+  });
+
+  it("cancels a decrease confirmation when identity, filtering, open, or pending changes", () => {
+    const callbacks = render(frame());
+    const openConfirmation = () => {
+      const input = host.querySelector<HTMLInputElement>("[aria-label='风力涡轮机目标库存']")!;
+      setInput(input, "49");
+      blur(input);
+      expect(host.querySelector('[role="alertdialog"]')).not.toBeNull();
+    };
+    openConfirmation();
+    const next = { ...frame(), runId: "run-b" };
+    render(next, "ready", null, callbacks);
+    expect(host.querySelector('[role="alertdialog"]')).toBeNull();
+
+    openConfirmation();
+    act(() => host.querySelector<HTMLButtonElement>(".construction-center-categories button:nth-child(2)")!.click());
+    expect(host.querySelector('[role="alertdialog"]')).toBeNull();
+
+    openConfirmation();
+    render(next, "ready", {
+      sessionId: "session-a",
+      runId: "run-b",
+      revision: 19,
+      activePlanetId: "home",
+      kind: "targetStock",
+      targetId: "wind_turbine",
+      expectedRevision: null,
+    }, callbacks);
+    expect(host.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(host.querySelector<HTMLInputElement>("[aria-label='风力涡轮机目标库存']")?.disabled).toBe(true);
+
+    render(next, "ready", null, callbacks, false);
+    expect(host.textContent).toBe("");
+    expect(callbacks.onSubmitTargetStockIntent).not.toHaveBeenCalled();
+  });
+
+  it("locks all native writes through durable ACK and the awaited projected revision", () => {
+    const current = frame();
+    const pending: NativeConstructionCenterPendingIdentity = {
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 19,
+      activePlanetId: "home",
+      kind: "enabled",
+      targetId: null,
+      expectedRevision: null,
+    };
+    render(current, "ready", pending);
+    expect(host.textContent).toContain("等待 main-owned durable ACK");
+    expect(host.textContent).toContain("界面不会乐观改写");
+    expect([...host.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement>(
+      ".construction-center-toggle input, .construction-center-target input, .construction-center-target button, .construction-center-target select",
+    )]
+      .every((control) => control.disabled)).toBe(true);
+    expect(host.querySelector<HTMLInputElement>("[aria-label='搜索原生自动制造目标']")?.disabled).toBe(false);
+
+    render(current, "ready", { ...pending, expectedRevision: 20 });
+    expect(host.textContent).toContain("等待 revision 20");
+    expect(host.querySelector<HTMLInputElement>("input[type='checkbox']")?.checked).toBe(true);
+    expect(host.querySelector<HTMLInputElement>("[aria-label='风力涡轮机目标库存']")?.value).toBe("50");
+  });
+
+  it("locks all native writes when Rust cannot prove construction automation availability", () => {
+    const current = frame();
+    const unavailable = { ...current, workspace: { ...current.workspace, writeAvailable: false } };
+    const callbacks = render(unavailable);
+    expect(host.textContent).toContain("Rust 尚未证明制造协议科技与可用制造中心");
+    expect([...host.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement>(
+      ".construction-center-toggle input, .construction-center-target input, .construction-center-target button, .construction-center-target select",
+    )].every((control) => control.disabled)).toBe(true);
+    act(() => host.querySelector<HTMLInputElement>("input[type='checkbox']")!.click());
+    expect(callbacks.onSubmitEnabledIntent).not.toHaveBeenCalled();
+    expect(callbacks.onSubmitQuantumSupplyIntent).not.toHaveBeenCalled();
+    expect(callbacks.onSubmitTargetStockIntent).not.toHaveBeenCalled();
+    expect(host.querySelector<HTMLInputElement>("[aria-label='搜索原生自动制造目标']")?.disabled).toBe(false);
+    expect(host.querySelector<HTMLButtonElement>(".construction-center-categories button")?.disabled).toBe(false);
   });
 
   it("uses enabled controls only for local search and category filtering", () => {
@@ -151,13 +394,16 @@ describe("NativeConstructionCenterWorkspace", () => {
 
   it("fails closed without a complete built-in frame and has no legacy state dependency", () => {
     render(null, "unavailable");
-    expect(host.textContent).toContain("目录不受支持，已安全关闭展示");
-    expect(host.textContent).toContain("不会回退读取旧渲染器状态");
+    expect(host.textContent).toContain("目录不受支持，已安全关闭展示与写入");
+    expect(host.textContent).toContain("不会回退读取或写入旧渲染器状态");
     expect(host.querySelector("[data-native-construction-target-id]")).toBeNull();
 
     const source = readFileSync(resolve("src/components/NativeConstructionCenterWorkspace.tsx"), "utf8");
     expect(source).not.toMatch(/from\s+["']\.\.\/game\/(?:engine|content|types)["']/);
     expect(source).not.toMatch(/\bGameState\b|\bgame\.|getConstructionAutomationStatus|getStatus\s*\(/);
+    expect(source).not.toMatch(/nativeConstructionAutomationIntentCommands/);
     expect(source).not.toMatch(/on(?:Enabled|QuantumSource|Target|BatchTarget|Cancel|Refund|Move|Discard|Fund)\b/);
+    expect(source).toMatch(/onSubmitEnabledIntent[\s\S]*?onSubmitQuantumSupplyIntent[\s\S]*?onSubmitTargetStockIntent/);
+    expect(source).toMatch(/没有对应的原子 Rust 命令；不会循环多条目标命令伪装为原子操作/);
   });
 });

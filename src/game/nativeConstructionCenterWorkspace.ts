@@ -17,7 +17,8 @@ export function selectNativeConstructionCenterWorkspaceFrame(
   const workspace = frame?.constructionWorkspace.nativeCenterWorkspace;
   if (!frame || !workspace || workspace.activePlanetId !== frame.planetNavigation.activePlanetId ||
     workspace.activePlanetId !== frame.constructionWorkspace.activePlanetId ||
-    frame.constructionWorkspace.revision !== frame.revision) return null;
+    frame.constructionWorkspace.revision !== frame.revision ||
+    typeof workspace.writeAvailable !== "boolean") return null;
   return Object.freeze({
     source: "native-authoritative",
     sessionId: frame.sessionId,

@@ -1259,6 +1259,7 @@ test("factory read model is strictly bounded and revision-bound before renderer 
     schema: "construction-center-workspace-v1",
     registryFingerprint: "7df8cf3a",
     readOnly: true,
+    writeAvailable: true,
     activePlanetId: "MOD-星球",
     activePlanetName: "测试家园 Ω",
     paused: false,
@@ -1322,8 +1323,18 @@ test("factory read model is strictly bounded and revision-bound before renderer 
     context,
   );
   assert.equal(normalizedBuiltIn.construction.nativeCenterWorkspace.targets.rows[0].currentStock, 41);
+  assert.equal(normalizedBuiltIn.construction.nativeCenterWorkspace.writeAvailable, true);
   assert.equal(normalizedBuiltIn.construction.nativeCenterWorkspace.quantumBuffer.totalAmount, 4);
   assert.equal(normalizedBuiltIn.construction.nativeCenterWorkspace.limits.projectionBytes, 1_048_576);
+
+  const unavailableProjection = structuredClone(builtInProjection);
+  unavailableProjection.construction.nativeCenterWorkspace.writeAvailable = false;
+  const normalizedUnavailable = normalizeRendererNativeResult(
+    "coreFactoryReadModelProjection",
+    unavailableProjection,
+    context,
+  );
+  assert.equal(normalizedUnavailable.construction.nativeCenterWorkspace.writeAvailable, false);
 
   const rejects = (value, requestContext = context) => assert.throws(
     () => normalizeRendererNativeResult("coreFactoryReadModelProjection", value, requestContext),
@@ -1339,6 +1350,8 @@ test("factory read model is strictly bounded and revision-bound before renderer 
   rejects({ ...projection, shell: { ...projection.shell, path: SECRET_PATH } });
   for (const mutate of [
     (workspace) => { workspace.registryFingerprint = "MOD/forged"; },
+    (workspace) => { delete workspace.writeAvailable; },
+    (workspace) => { workspace.writeAvailable = "yes"; },
     (workspace) => { workspace.engineStatus = { body: SECRET_BODY }; },
     (workspace) => { workspace.centers.rows[0].planetId = "other"; },
     (workspace) => { workspace.quantumBuffer.rows[0].entityId = "unknown-center"; },

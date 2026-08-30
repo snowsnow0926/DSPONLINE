@@ -5718,14 +5718,25 @@ fn construction_automation_state(state: &CoreState) -> anyhow::Result<&Map<Strin
     Ok(automation)
 }
 
-fn require_builtin_unlocked_construction_automation(state: &CoreState) -> anyhow::Result<()> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConstructionAutomationWriteEligibility {
+    Available,
+    RegistryUnavailable,
+    TechnologyLocked,
+    CatalogInvalid,
+    CenterUnavailable,
+}
+
+pub(crate) fn construction_automation_write_eligibility(
+    state: &CoreState,
+) -> anyhow::Result<ConstructionAutomationWriteEligibility> {
     if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
         || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
     {
-        bail!("native player-authority construction automation requires the built-in registry")
+        return Ok(ConstructionAutomationWriteEligibility::RegistryUnavailable);
     }
     if !technology_is_completed(state, "construction_automation") {
-        bail!("native player-authority construction automation technology is locked")
+        return Ok(ConstructionAutomationWriteEligibility::TechnologyLocked);
     }
     if state
         .catalog
@@ -5740,18 +5751,16 @@ fn require_builtin_unlocked_construction_automation(state: &CoreState) -> anyhow
                 definition.required_tech_id.as_deref() != Some("construction_automation")
             })
     {
-        bail!("native player-authority construction automation catalog is invalid")
+        return Ok(ConstructionAutomationWriteEligibility::CatalogInvalid);
     }
     let mut available = false;
-    for entity_index in 0..state.entity_index.len() {
-        let entity = state.parse_entity(entity_index)?;
+    for entity_index in &state.factory_topology.construction_center_indices {
+        let entity = state.parse_entity(*entity_index)?;
         let object = entity.as_object().ok_or_else(|| {
             anyhow!("native player-authority construction automation entity is invalid")
         })?;
-        if object.get("buildingId").and_then(Value::as_str) != Some("construction_center") {
-            continue;
-        }
-        if object.get("kind").and_then(Value::as_str) == Some("machine")
+        if object.get("buildingId").and_then(Value::as_str) == Some("construction_center")
+            && object.get("kind").and_then(Value::as_str) == Some("machine")
             && object.get("interactionLocked").and_then(Value::as_bool) == Some(false)
             && object
                 .get("machineCount")
@@ -5763,10 +5772,29 @@ fn require_builtin_unlocked_construction_automation(state: &CoreState) -> anyhow
             available = true;
         }
     }
-    if !available {
-        bail!("native player-authority construction automation center is unavailable")
+    Ok(if available {
+        ConstructionAutomationWriteEligibility::Available
+    } else {
+        ConstructionAutomationWriteEligibility::CenterUnavailable
+    })
+}
+
+fn require_builtin_unlocked_construction_automation(state: &CoreState) -> anyhow::Result<()> {
+    match construction_automation_write_eligibility(state)? {
+        ConstructionAutomationWriteEligibility::Available => Ok(()),
+        ConstructionAutomationWriteEligibility::RegistryUnavailable => {
+            bail!("native player-authority construction automation requires the built-in registry")
+        }
+        ConstructionAutomationWriteEligibility::TechnologyLocked => {
+            bail!("native player-authority construction automation technology is locked")
+        }
+        ConstructionAutomationWriteEligibility::CatalogInvalid => {
+            bail!("native player-authority construction automation catalog is invalid")
+        }
+        ConstructionAutomationWriteEligibility::CenterUnavailable => {
+            bail!("native player-authority construction automation center is unavailable")
+        }
     }
-    Ok(())
 }
 
 fn construction_automation_stock_limit(state: &CoreState) -> u64 {

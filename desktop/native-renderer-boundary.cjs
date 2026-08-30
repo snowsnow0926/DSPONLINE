@@ -1900,7 +1900,7 @@ function normalizeConstructionCenterNamedQuantityRows(value, label, maximumRows,
 function normalizeNativeConstructionCenterWorkspace(value, activePlanetId) {
   if (value === null) return null;
   const source = exactObject(value, [
-    "schema", "registryFingerprint", "readOnly", "activePlanetId", "activePlanetName",
+    "schema", "registryFingerprint", "readOnly", "writeAvailable", "activePlanetId", "activePlanetName",
     "paused", "enabled", "quantumSourceEnabled", "quantumNetworkEnabled", "totalCrafted",
     "lastCraftedId", "lastCraftedName", "stockLimit", "cycleSeconds", "materialSeconds",
     "targets", "centers", "jobs", "materials", "quantumBuffer", "destroyedByproducts", "limits",
@@ -2048,6 +2048,7 @@ function normalizeNativeConstructionCenterWorkspace(value, activePlanetId) {
     schema: "construction-center-workspace-v1",
     registryFingerprint: "7df8cf3a",
     readOnly: true,
+    writeAvailable: boolean(source.writeAvailable, "native construction-center write availability"),
     activePlanetId,
     activePlanetName,
     paused: boolean(source.paused, "native construction-center paused"),

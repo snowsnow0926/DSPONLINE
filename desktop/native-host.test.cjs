@@ -17,6 +17,7 @@ const {
   NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY,
+  NATIVE_VIEWPORT_ENTITY_PRESENTATION_CAPABILITY,
   NativeHostClient,
   NativeCoreSessionRegistry,
   NativeSaveSessionRegistry,
@@ -726,6 +727,79 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
     expectedRevision: 2,
     cursor: 256,
     limit: 128,
+  });
+});
+
+test("viewport v2 entity presentation is capability-gated and forwarded only when requested", async () => {
+  const catalog = {
+    protocolVersion: 1,
+    registryFingerprint: "builtin:test",
+    items: [{ id: "iron_ore", kind: "solid" }],
+    buildings: [{
+      id: "mining_machine",
+      kind: "miner",
+      speed: 1,
+      inputCapacity: 0,
+      outputCapacity: 50,
+      powerDemandKw: 1,
+      powerGenerationKw: 0,
+    }],
+    recipes: [],
+    belts: [{ tier: 1, speed: 6 }],
+  };
+  const calls = [];
+  const client = {
+    hello: { capabilities: [] },
+    async request(request) {
+      calls.push(request);
+      if (request.operation === "coreOpen") {
+        return { sessionId: "core-presentation", authority: "shadow", summary: {} };
+      }
+      return { revision: 1 };
+    },
+  };
+  const registry = new NativeCoreSessionRegistry(client);
+  await registry.open(9, {
+    slot: "normal-main",
+    generation: 1,
+    rootHash: "a".repeat(64),
+    revision: 1,
+    registryFingerprint: "builtin:test",
+    catalog,
+  });
+  const request = {
+    sessionId: "core-presentation",
+    planetId: "planet-a",
+    bounds: { minX: -1, minY: -1, maxX: 1, maxY: 1 },
+    entityLimit: 64,
+    beltLimit: 64,
+    entityPresentationVersion: 1,
+  };
+
+  assert.throws(
+    () => registry.viewportProjectionV2(9, request),
+    (error) => error?.code === "NATIVE_CORE_CAPABILITY_MISSING",
+  );
+  assert.equal(calls.some((call) => call.operation === "coreViewportProjectionV2"), false);
+
+  client.hello.capabilities.push(NATIVE_VIEWPORT_ENTITY_PRESENTATION_CAPABILITY);
+  await registry.viewportProjectionV2(9, request);
+  assert.deepEqual(calls.at(-1), {
+    operation: "coreViewportProjectionV2",
+    sessionId: "core-presentation",
+    baseFields: [],
+    planetId: "planet-a",
+    minX: -1,
+    minY: -1,
+    maxX: 1,
+    maxY: 1,
+    entityCursor: 0,
+    entityLimit: 64,
+    beltCursor: 0,
+    beltLimit: 64,
+    pinnedEntityIds: [],
+    pinnedBeltIds: [],
+    entityPresentationVersion: 1,
   });
 });
 

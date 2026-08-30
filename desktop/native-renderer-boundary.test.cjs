@@ -708,6 +708,20 @@ test("renderer native errors preserve only bounded symbolic codes", () => {
   assert.doesNotMatch(safe.stack, /[A-Z]:\\|native-renderer-boundary\.cjs/);
 });
 
+test("renderer publishes the bounded viewport presentation capability error", () => {
+  const raw = Object.assign(new Error("host capability details must remain private"), {
+    code: "NATIVE_CORE_CAPABILITY_MISSING",
+  });
+  const safe = createRendererNativeError(raw, {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生建筑展示能力不可用",
+  });
+
+  assert.equal(safe.code, "NATIVE_CORE_CAPABILITY_MISSING");
+  assert.equal(safe.message, "原生建筑展示能力不可用（NATIVE_CORE_CAPABILITY_MISSING）");
+  assert.doesNotMatch(safe.message, /private/);
+});
+
 test("malformed Host codes cannot smuggle stderr or paths", () => {
   const raw = Object.assign(new Error(SECRET_BODY), {
     code: `NATIVE_HOST_EXITED\n${SECRET_PATH}`,
@@ -1239,6 +1253,62 @@ test("viewport v2 binds independent pages and preserves bounded opaque selection
     ...projection,
     base: { paused: false, payload: new Array(16_384).fill("x".repeat(64)) },
   }, viewportV2Context({ baseFields: ["paused", "payload"] }));
+});
+
+test("viewport v2 entity presentation is opt-in, page-aligned, and fail-closed for unknown semantics", () => {
+  const legacy = viewportV2Projection();
+  const context = viewportV2Context({ entityPresentationVersion: 1 });
+  const entityPresentation = [
+    { entityId: legacy.entities[0].id, supported: false },
+    {
+      entityId: legacy.entities[1].id,
+      supported: true,
+      coverage: "complete",
+      status: { code: "running", label: "运行中", tone: "running" },
+      powerFactor: 0.75,
+      resourceReserve: {
+        infinite: false,
+        exhausted: false,
+        remaining: 75,
+        capacity: 100,
+        remainingRatio: 0.75,
+        remainingPercent: 75,
+      },
+      outputCapacity: 1_000,
+      cycleRatePerSecond: 2.5,
+      acceptedInputItemIds: ["mod:物品/铁矿 Ω"],
+      producedOutputItemIds: ["mod:物品/铁板 Ω"],
+      targetDysonOrbitLabel: null,
+    },
+  ];
+  const projection = {
+    ...legacy,
+    entityPresentationVersion: 1,
+    entityPresentation,
+  };
+  const normalized = normalizeRendererNativeResult("coreViewportProjectionV2", projection, context);
+  assert.deepEqual(normalized.entityPresentation, entityPresentation);
+  assert.equal(normalized.entityPresentation[0].supported, false);
+
+  const rejects = (value, requestContext = context) => assert.throws(
+    () => normalizeRendererNativeResult("coreViewportProjectionV2", value, requestContext),
+    (error) => error?.code === "NATIVE_PROTOCOL_INVALID",
+  );
+  rejects(legacy);
+  rejects(projection, viewportV2Context());
+  rejects({ ...projection, entityPresentation: projection.entityPresentation.slice(1) });
+  rejects({ ...projection, entityPresentation: [...projection.entityPresentation].reverse() });
+  rejects({
+    ...projection,
+    entityPresentation: [{ entityId: legacy.entities[0].id, supported: false, powerFactor: 1 }, entityPresentation[1]],
+  });
+  rejects({
+    ...projection,
+    entityPresentation: [entityPresentation[0], {
+      ...entityPresentation[1],
+      resourceReserve: { ...entityPresentation[1].resourceReserve, remainingRatio: 1.25 },
+    }],
+  });
 });
 
 test("factory read model is strictly bounded and revision-bound before renderer delivery", () => {

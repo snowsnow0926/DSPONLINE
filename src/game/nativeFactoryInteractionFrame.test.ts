@@ -137,6 +137,10 @@ function frame(input: {
     belts,
     projectedBelts: belts,
     entityById,
+    nodePresentationByEntityId: new Map(entities.map((entity) => [entity.id, {
+      entityId: entity.id,
+      supported: false as const,
+    }])),
     beltById,
     omittedCrossBoundaryBeltCount: 0,
     viewportReadModel: {

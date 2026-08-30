@@ -5024,6 +5024,46 @@ impl CoreState {
         pinned_entity_ids: &[String],
         pinned_belt_ids: &[String],
     ) -> anyhow::Result<Value> {
+        self.viewport_projection_v2_with_entity_presentation(
+            base_fields,
+            planet_id,
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+            entity_cursor,
+            entity_limit,
+            belt_cursor,
+            belt_limit,
+            pinned_entity_ids,
+            pinned_belt_ids,
+            None,
+        )
+    }
+
+    /// Opt-in extension of [`Self::viewport_projection_v2`] that appends a
+    /// projection-only presentation row for every returned entity. The legacy
+    /// entry point above retains both its signature and exact response shape.
+    #[allow(clippy::too_many_arguments)]
+    pub fn viewport_projection_v2_with_entity_presentation(
+        &self,
+        base_fields: &[String],
+        planet_id: &str,
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+        entity_cursor: usize,
+        entity_limit: usize,
+        belt_cursor: usize,
+        belt_limit: usize,
+        pinned_entity_ids: &[String],
+        pinned_belt_ids: &[String],
+        entity_presentation_version: Option<u8>,
+    ) -> anyhow::Result<Value> {
+        if entity_presentation_version.is_some_and(|version| version != 1) {
+            bail!("native viewport v2 entity presentation version is unsupported");
+        }
         if base_fields.len() > MAX_PROJECTION_BASE_FIELDS
             || entity_limit == 0
             || entity_limit > MAX_VIEWPORT_PROJECTION_ENTITIES
@@ -5159,11 +5199,33 @@ impl CoreState {
                 base.insert(field.clone(), value.clone());
             }
         }
-        let entities = returned_entity_indices
-            .iter()
-            .copied()
-            .map(|index| self.parse_entity(index).map(renderer_entity_projection))
-            .collect::<anyhow::Result<Vec<_>>>()?;
+        let (entities, entity_presentation) = if entity_presentation_version == Some(1) {
+            let rows = returned_entity_indices
+                .iter()
+                .copied()
+                .map(|index| {
+                    let entity = renderer_entity_projection(self.parse_entity(index)?);
+                    let presentation = crate::factory_canvas_presentation::project_entity(
+                        &self.identity.registry_fingerprint,
+                        &self.catalog,
+                        &self.base,
+                        &entity,
+                    );
+                    Ok((entity, presentation))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let (entities, presentation) = rows.into_iter().unzip();
+            (entities, Some(presentation))
+        } else {
+            (
+                returned_entity_indices
+                    .iter()
+                    .copied()
+                    .map(|index| self.parse_entity(index).map(renderer_entity_projection))
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+                None,
+            )
+        };
         let belts = returned_belt_indices
             .iter()
             .copied()
@@ -5182,7 +5244,7 @@ impl CoreState {
         let next_belt_cursor =
             (belt_page_end < visible_belt_indices.len()).then_some(belt_page_end);
         let world_bounds = spatial.world_bounds.as_json();
-        let value = serde_json::json!({
+        let mut value = serde_json::json!({
             "schemaVersion": 2,
             "projectionType": "viewport-v2",
             "revision": self.revision,
@@ -5213,6 +5275,16 @@ impl CoreState {
             },
             "broadQueryFallback": broad_query_fallback,
         });
+        if let Some(entity_presentation) = entity_presentation {
+            let object = value
+                .as_object_mut()
+                .expect("viewport v2 projection is always a JSON object");
+            object.insert("entityPresentationVersion".to_owned(), Value::from(1));
+            object.insert(
+                "entityPresentation".to_owned(),
+                Value::Array(entity_presentation),
+            );
+        }
         if serde_json::to_vec(&value)?.len() > MAX_PROJECTION_BYTES {
             bail!("native viewport v2 projection exceeds the byte limit");
         }
@@ -7378,6 +7450,186 @@ mod tests {
         assert_eq!(projection["viewportTotals"]["belts"], 1);
         assert_eq!(projection["worldBounds"]["minX"], 0.0);
         assert_eq!(projection["worldBounds"]["maxX"], 3000.0);
+    }
+
+    #[test]
+    fn viewport_v2_entity_presentation_is_opt_in_ordered_and_hash_neutral() {
+        const BUILTIN_REGISTRY: &str = "7df8cf3a";
+        let entities = json!([
+            {
+                "id":"near", "kind":"vein", "planetId":"home",
+                "position":{"x":0,"y":0}, "resourceId":"iron_ore",
+                "extractorBuildingId":"mining_machine", "minerCount":2,
+                "powerFactor":0.5, "resourceRemaining":25, "resourceCapacity":100,
+                "resourceDepletionRemainder":0, "inputs":{}, "outputs":{"iron_ore":3},
+                "progress":0, "utilization":0.5, "productionRate":120
+            },
+            {
+                "id":"pinned", "kind":"vein", "planetId":"home",
+                "position":{"x":2000,"y":2000}, "resourceId":"iron_ore",
+                "extractorBuildingId":"mining_machine", "minerCount":1,
+                "powerFactor":1, "resourceRemaining":10, "resourceCapacity":10,
+                "resourceDepletionRemainder":0, "inputs":{}, "outputs":{"iron_ore":0},
+                "progress":0, "utilization":1, "productionRate":60
+            }
+        ]);
+        let mut records = fixture_records_with_entity_json(&entities.to_string(), 2);
+        replace_fixture_belt_chunk(&mut records, b"[]".to_vec(), 0);
+        let mut catalog_snapshot = fixture_catalog().snapshot;
+        catalog_snapshot.registry_fingerprint = BUILTIN_REGISTRY.to_owned();
+        let catalog = RuntimeCatalog::validate(catalog_snapshot, BUILTIN_REGISTRY).unwrap();
+        let mut identity = fixture_identity(7);
+        identity.registry_fingerprint = BUILTIN_REGISTRY.to_owned();
+        let mut state = CoreState::from_internal_records(identity, &records, catalog).unwrap();
+        state.base_value_mut().insert(
+            "settings".to_owned(),
+            json!({
+                "resourceMode":"finite",
+                "productionBufferLimit":1_000,
+                "logisticsBufferLimit":1_000
+            }),
+        );
+        state.base_value_mut().insert(
+            "endgame".to_owned(),
+            json!({"infiniteResearch":{"vein_utilization":{"level":0}}}),
+        );
+        state.base_value_mut().insert(
+            "galaxy".to_owned(),
+            json!({"profiles":{"home":{"oceanType":"none"}}}),
+        );
+
+        let legacy = state
+            .viewport_projection_v2(
+                &[],
+                "home",
+                -10.0,
+                -10.0,
+                10.0,
+                10.0,
+                0,
+                1,
+                0,
+                1,
+                &["pinned".to_owned()],
+                &[],
+            )
+            .unwrap();
+        let explicit_none = state
+            .viewport_projection_v2_with_entity_presentation(
+                &[],
+                "home",
+                -10.0,
+                -10.0,
+                10.0,
+                10.0,
+                0,
+                1,
+                0,
+                1,
+                &["pinned".to_owned()],
+                &[],
+                None,
+            )
+            .unwrap();
+        assert_eq!(legacy, explicit_none);
+        assert!(legacy.get("entityPresentationVersion").is_none());
+        assert!(legacy.get("entityPresentation").is_none());
+
+        let hash_before = state.canonical_sha256().unwrap();
+        let projected = state
+            .viewport_projection_v2_with_entity_presentation(
+                &[],
+                "home",
+                -10.0,
+                -10.0,
+                10.0,
+                10.0,
+                0,
+                1,
+                0,
+                1,
+                &["pinned".to_owned()],
+                &[],
+                Some(1),
+            )
+            .unwrap();
+        assert_eq!(projected["entityPresentationVersion"], 1);
+        let entity_ids = projected["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entity| entity["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let presentation_ids = projected["entityPresentation"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entity| entity["entityId"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(entity_ids, ["near", "pinned"]);
+        assert_eq!(presentation_ids, entity_ids);
+        assert!(
+            projected["entityPresentation"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["supported"] == true)
+        );
+        assert_eq!(state.canonical_sha256().unwrap(), hash_before);
+        assert!(serde_json::to_vec(&projected).unwrap().len() <= MAX_PROJECTION_BYTES);
+
+        let error = state
+            .viewport_projection_v2_with_entity_presentation(
+                &[],
+                "home",
+                -10.0,
+                -10.0,
+                10.0,
+                10.0,
+                0,
+                1,
+                0,
+                1,
+                &[],
+                &[],
+                Some(2),
+            )
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native viewport v2 entity presentation version is unsupported"
+        );
+    }
+
+    #[test]
+    fn viewport_v2_entity_presentation_fails_closed_for_mod_registry() {
+        let state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let projected = state
+            .viewport_projection_v2_with_entity_presentation(
+                &[],
+                "home",
+                -1.0,
+                -1.0,
+                1.0,
+                1.0,
+                0,
+                1,
+                0,
+                1,
+                &[],
+                &[],
+                Some(1),
+            )
+            .unwrap();
+        assert_eq!(
+            projected["entityPresentation"],
+            json!([{ "entityId": "vein", "supported": false }])
+        );
     }
 
     #[test]

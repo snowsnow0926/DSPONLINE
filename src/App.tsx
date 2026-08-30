@@ -3782,6 +3782,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         selectedBeltIds: factoryThinViewSelectedBeltIds,
       },
       viewport: {
+        entityPresentationVersion: 1,
         baseFields: [...RECIPE_FOCUS_NATIVE_BASE_FIELDS, ...PLANET_VIEWPORT_NATIVE_BASE_FIELDS],
         planetId: nativeFactoryProjectionPlanetId,
         bounds: nativeFactoryViewportBounds,
@@ -14180,6 +14181,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         entities: [],
         belts: [],
         entityById: new Map<string, FactoryEntity>(),
+        nodePresentationByEntityId: new Map(),
       };
     }
     return selectFactoryCanvasRows(nativeAuthoritativeFactoryCanvasFrame, () => {
@@ -14409,9 +14411,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       }
       const entityIds = new Set(activePlanetEntities.flatMap((entity) => {
         const directBuilding = task.navigation?.kind === "building" && entity.buildingId === task.navigation.buildingId;
+        const nativePresentation = factoryCanvasRows.nodePresentationByEntityId?.get(entity.id);
+        const producedItemIds = nativePresentation
+          ? nativePresentation.supported ? nativePresentation.producedOutputItemIds : []
+          : getProducedOutputs(entity);
+        const acceptedItemIds = nativePresentation
+          ? nativePresentation.supported ? nativePresentation.acceptedInputItemIds : []
+          : getAcceptedInputs(entity, canvasGame);
         const relevantItem = (entity.resourceId && itemIds.has(entity.resourceId)) ||
-          getProducedOutputs(entity).some((itemId) => itemIds.has(itemId)) ||
-          getAcceptedInputs(entity, canvasGame).some((itemId) => itemIds.has(itemId));
+          producedItemIds.some((itemId) => itemIds.has(itemId as ItemId)) ||
+          acceptedItemIds.some((itemId) => itemIds.has(itemId as ItemId));
         return directBuilding || relevantItem ? [entity.id] : [];
       }));
       const beltIds = new Set(activePlanetBelts.flatMap((belt) => {
@@ -14422,7 +14431,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       }));
       return { entityIds, beltIds, itemIds };
     }, { entities: activePlanetEntities.length, belts: activePlanetBelts.length });
-  }, [activePlanetBelts, activePlanetEntities, canvasGame, highlightedTaskId]);
+  }, [activePlanetBelts, activePlanetEntities, canvasGame, factoryCanvasRows.nodePresentationByEntityId, highlightedTaskId]);
 
   const canvasPositionNodes = useMemo(() => activePlanetEntities.map((entity) => ({
     id: entity.id,
@@ -14550,12 +14559,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     reactFlowBelts.length === 0 && !placement && !blueprintPlacementId && !selectionMode && !deleteMode &&
     !regionMode && !lineFindMode;
   const canvasDisplayLookup = useMemo(
-    () => automaticDenseCanvasMode && !canvasRuntimeDetailsDeferred ? measureRuntimeTransitionPhase("canvas-display-lookup", () =>
+    () => automaticDenseCanvasMode && !nativePlayerAuthorityOwnsRuntime && !canvasRuntimeDetailsDeferred ? measureRuntimeTransitionPhase("canvas-display-lookup", () =>
       createEntityDisplayLookup(canvasGame), {
         entities: canvasGame.entities.length,
         belts: canvasGame.belts.length,
       }) : undefined,
-    [automaticDenseCanvasMode, canvasGame, canvasRuntimeDetailsDeferred],
+    [automaticDenseCanvasMode, canvasGame, canvasRuntimeDetailsDeferred, nativePlayerAuthorityOwnsRuntime],
   );
   const activateCanvasStack = useCallback((entityId: string, memberIds: readonly string[], mode: "select" | "cycle") => {
     const currentIndex = Math.max(0, memberIds.indexOf(entityId));
@@ -14611,7 +14620,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativeAuthoritativeFactoryCanvasFrame.runId === nativePlayerAuthorityCommandSource.runId &&
     nativeAuthoritativeFactoryCanvasFrame.revision === nativePlayerAuthorityCommandSource.baseRevision;
 
-  const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "presentationSignature" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "acceptedInputItemIds" | "producedOutputItemIds" | "connectionDraft" | "connectionViewportFull" | "dynamicEffects" | "presentationVisible" | "alertActive" | "stackHidden" | "stackMarker" | "stackHalo" | "stackCount" | "stackGroupId" | "stackMembershipToken" | "stackMemberIds" | "stackAlertCount" | "stackCriticalAlertCount" | "stackGeometryHandlesRequired">>(() => {
+  const commonNodeData = useMemo<Omit<FactoryNodeData, "visualSignature" | "presentationSignature" | "semanticSupported" | "entity" | "status" | "powerFactor" | "resourceReserve" | "connectedInputItemIds" | "inputBeltCounts" | "outputBeltCounts" | "blackHolePortConnections" | "cycleRatePerSecond" | "lod" | "acceptedInputItemIds" | "producedOutputItemIds" | "connectionDraft" | "connectionViewportFull" | "dynamicEffects" | "presentationVisible" | "alertActive" | "stackHidden" | "stackMarker" | "stackHalo" | "stackCount" | "stackGroupId" | "stackMembershipToken" | "stackMemberIds" | "stackAlertCount" | "stackCriticalAlertCount" | "stackGeometryHandlesRequired">>(() => {
     const technology = getTechnology(canvasGame.research.selectedTechId);
     const progress = technology ? canvasGame.research.progressByTech[technology.id] ?? {} : {};
     const planetProfile = getPlanetIndustrialProfile(canvasGame, factoryCanvasPlanetId);
@@ -14746,6 +14755,30 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           const topologyStable = Boolean(previous && previous.type === entity.kind &&
             previous.position.x === entity.position.x && previous.position.y === entity.position.y &&
             previous.data.entity.buildingId === entity.buildingId && previous.data.entity.resourceId === entity.resourceId);
+          const nativePresentation = factoryCanvasRows.nodePresentationByEntityId?.get(entity.id);
+          const nativePresentationSignature = nativePresentation
+            ? nativePresentation.supported
+              ? [
+                  "supported",
+                  nativePresentation.coverage,
+                  nativePresentation.status.code,
+                  nativePresentation.status.label,
+                  nativePresentation.status.tone,
+                  nativePresentation.powerFactor,
+                  nativePresentation.resourceReserve?.infinite ?? "",
+                  nativePresentation.resourceReserve?.exhausted ?? "",
+                  nativePresentation.resourceReserve?.remaining ?? "",
+                  nativePresentation.resourceReserve?.capacity ?? "",
+                  nativePresentation.resourceReserve?.remainingRatio ?? "",
+                  nativePresentation.resourceReserve?.remainingPercent ?? "",
+                  nativePresentation.outputCapacity,
+                  nativePresentation.cycleRatePerSecond,
+                  nativePresentation.acceptedInputItemIds.join(","),
+                  nativePresentation.producedOutputItemIds.join(","),
+                  nativePresentation.targetDysonOrbitLabel ?? "",
+                ].join("|")
+              : "unsupported"
+            : "web";
           const stackPresentation = canvasStackGrouping.byNodeId.get(entity.id) ?? {
             groupId: null,
             membershipToken: `${entity.id}:1`,
@@ -14808,7 +14841,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           const nodeDraggable = draggable && !stackHidden && !stackMarker && !focusContextOnly;
           const nodeSelectable = !stackHidden && !stackMarker;
           const nodeFocusable = !stackHidden && !stackMarker;
-          const nodeConnectable = !stackHidden && !stackMarker;
+          const nodeConnectable = !stackHidden && !stackMarker && nativePresentation?.supported !== false;
           const hiddenWrapperStyle = stackHidden ? { pointerEvents: "none" as const } : undefined;
           const hiddenWrapperAttributes = stackHidden
             ? { "aria-hidden": true, "data-stack-hidden-wrapper": "true" }
@@ -14824,7 +14857,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             stackPresentation.halo ? "factory-flow-node--stack-halo" : undefined,
             focusClassName,
           ].filter(Boolean).join(" ");
+          const staticVisualSignature = [
+            "deferred",
+            entity.id,
+            entity.kind,
+            entity.buildingId ?? "",
+            entity.resourceId ?? "",
+            nativePresentationSignature,
+          ].join(":");
           const staticPresentationStable = Boolean(previous && topologyStable && previous.data.lod === "compact" &&
+            previous.data.visualSignature === staticVisualSignature &&
             previous.data.readOnly === commonNodeData.readOnly &&
             previous.data.alertActive === staticAlertActive &&
             previous.draggable === nodeDraggable && previous.selectable === nodeSelectable &&
@@ -14847,10 +14889,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             const inputBeltCounts = beltNodeIndex.occupancy.input.get(entity.id) ?? previous?.data.inputBeltCounts ?? {};
             const outputBeltCounts = beltNodeIndex.occupancy.output.get(entity.id) ?? previous?.data.outputBeltCounts ?? {};
             const blackHolePortConnections = canvasTopology.targetPortItemsByEntity.get(entity.id) ?? previous?.data.blackHolePortConnections ?? {};
-            const acceptedInputItemIds = topologyStable && previous ? previous.data.acceptedInputItemIds : getAcceptedInputs(entity, canvasGame);
-            const producedOutputItemIds = topologyStable && previous ? previous.data.producedOutputItemIds : getProducedOutputs(entity);
+            const acceptedInputItemIds = nativePresentation
+              ? nativePresentation.supported ? nativePresentation.acceptedInputItemIds as readonly ItemId[] : []
+              : topologyStable && previous ? previous.data.acceptedInputItemIds : getAcceptedInputs(entity, canvasGame);
+            const producedOutputItemIds = nativePresentation
+              ? nativePresentation.supported ? nativePresentation.producedOutputItemIds as readonly ItemId[] : []
+              : topologyStable && previous ? previous.data.producedOutputItemIds : getProducedOutputs(entity);
             const stablePresentationVisible = previous?.data.lod === "compact" ? previous.data.presentationVisible : presentationVisible;
             const presentationSignature = ["static", entity.id, nodeDraggable, staticAlertActive, focusClassName,
+              nativePresentation?.supported ?? true,
               stackPresentation.groupId, stackPresentation.count, stackPresentation.hidden, stackPresentation.marker, stackPresentation.halo,
               stackPresentation.alertCount, stackPresentation.criticalAlertCount,
               stackGeometryHandlesRequired,
@@ -14871,21 +14918,38 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
                 previous.data.stackMarker === stackPresentation.marker ? previous.measured : undefined,
               data: {
                 ...commonNodeData,
-                visualSignature: `deferred:${entity.id}:${entity.kind}:${entity.buildingId ?? ""}:${entity.resourceId ?? ""}`,
+                visualSignature: staticVisualSignature,
                 presentationSignature,
+                semanticSupported: nativePresentation?.supported ?? true,
                 entity,
                 connectedInputItemIds,
                 inputBeltCounts,
                 outputBeltCounts,
                 blackHolePortConnections,
-                targetDysonOrbitLabel: previous?.data.targetDysonOrbitLabel,
-                powerFactor: previous?.data.powerFactor ?? 0,
-                resourceReserve: previous?.data.resourceReserve ?? null,
+                targetDysonOrbitLabel: nativePresentation
+                  ? nativePresentation.supported ? nativePresentation.targetDysonOrbitLabel ?? undefined : undefined
+                  : previous?.data.targetDysonOrbitLabel,
+                powerFactor: nativePresentation
+                  ? nativePresentation.supported ? nativePresentation.powerFactor : 0
+                  : previous?.data.powerFactor ?? 0,
+                resourceReserve: nativePresentation
+                  ? nativePresentation.supported ? nativePresentation.resourceReserve : null
+                  : previous?.data.resourceReserve ?? null,
                 status: staticAlertActive
                   ? { code: "idle", label: `重叠组内 ${stackPresentation.alertCount} 个生产告警`, tone: "warning" }
-                  : previous?.data.status ?? { code: "idle", label: stablePresentationVisible ? "密集视口简化" : "视口外简化", tone: "idle" },
-                outputCapacity: previous?.data.outputCapacity ?? 0,
-                cycleRatePerSecond: previous?.data.cycleRatePerSecond ?? 0,
+                  : nativePresentation
+                    ? nativePresentation.supported ? nativePresentation.status : {
+                        code: "unconfigured" as const,
+                        label: "原生语义暂不支持",
+                        tone: "idle" as const,
+                      }
+                    : previous?.data.status ?? { code: "idle", label: stablePresentationVisible ? "密集视口简化" : "视口外简化", tone: "idle" },
+                outputCapacity: nativePresentation
+                  ? nativePresentation.supported ? nativePresentation.outputCapacity : 0
+                  : previous?.data.outputCapacity ?? 0,
+                cycleRatePerSecond: nativePresentation
+                  ? nativePresentation.supported ? nativePresentation.cycleRatePerSecond : 0
+                  : previous?.data.cycleRatePerSecond ?? 0,
                 lod: "compact",
                 dynamicEffects: false,
                 presentationVisible: stablePresentationVisible,
@@ -14918,17 +14982,35 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             } satisfies FactoryFlowNode;
           }
           dynamicNodeCount += 1;
-          const ejectorTarget = entity.buildingId === "em_rail_ejector" ? getEjectorOrbitTargetStatus(canvasGame, entity) : null;
+          const ejectorTarget = !nativePresentation && entity.buildingId === "em_rail_ejector"
+            ? getEjectorOrbitTargetStatus(canvasGame, entity)
+            : null;
           const connectedInputItemIds = beltNodeIndex.connectedInputsByTarget.get(entity.id) ?? [];
           const inputBeltCounts = beltNodeIndex.occupancy.input.get(entity.id) ?? {};
           const outputBeltCounts = beltNodeIndex.occupancy.output.get(entity.id) ?? {};
           const blackHolePortConnections = canvasTopology.targetPortItemsByEntity.get(entity.id) ?? {};
-          const targetDysonOrbitLabel = ejectorTarget?.valid ? `轨道：${ejectorTarget.orbit!.name}` : ejectorTarget ? "轨道失效" : undefined;
-          const powerFactor = getEntityPowerFactor(canvasGame, entity, canvasDisplayLookup);
-          const resourceReserve = getResourceReserveSnapshot(canvasGame, entity);
-          const status = getEntityOperatingStatus(canvasGame, entity, canvasDisplayLookup);
-          const outputCapacity = getEntityOutputCapacity(canvasGame, entity);
-          const cycleRatePerSecond = getEntityCycleRatePerSimulationSecond(canvasGame, entity, canvasDisplayLookup);
+          const targetDysonOrbitLabel = nativePresentation
+            ? nativePresentation.supported ? nativePresentation.targetDysonOrbitLabel ?? undefined : undefined
+            : ejectorTarget?.valid ? `轨道：${ejectorTarget.orbit!.name}` : ejectorTarget ? "轨道失效" : undefined;
+          const powerFactor = nativePresentation
+            ? nativePresentation.supported ? nativePresentation.powerFactor : 0
+            : getEntityPowerFactor(canvasGame, entity, canvasDisplayLookup);
+          const resourceReserve = nativePresentation
+            ? nativePresentation.supported ? nativePresentation.resourceReserve : null
+            : getResourceReserveSnapshot(canvasGame, entity);
+          const status = nativePresentation
+            ? nativePresentation.supported ? nativePresentation.status : {
+                code: "unconfigured" as const,
+                label: "原生语义暂不支持",
+                tone: "idle" as const,
+              }
+            : getEntityOperatingStatus(canvasGame, entity, canvasDisplayLookup);
+          const outputCapacity = nativePresentation
+            ? nativePresentation.supported ? nativePresentation.outputCapacity : 0
+            : getEntityOutputCapacity(canvasGame, entity);
+          const cycleRatePerSecond = nativePresentation
+            ? nativePresentation.supported ? nativePresentation.cycleRatePerSecond : 0
+            : getEntityCycleRatePerSimulationSecond(canvasGame, entity, canvasDisplayLookup);
           const connectionViewportFull = Boolean(connectionDraft) && nodeIsInsideConnectionViewport({
             x: entity.position.x,
             y: entity.position.y,
@@ -14955,14 +15037,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               ? "full"
               : canvasPresentationDetailStage;
           const dynamicEffects = lod === "full" && canvasPresentationDetailStage === "full" && !stackPresentation.hidden;
-          const nodeConnectionDraft = connectionPresentation.exposeConnectionDraft ? connectionDraft : null;
-          const acceptedInputItemIds = getAcceptedInputs(entity, canvasGame);
-          const producedOutputItemIds = getProducedOutputs(entity);
+          const nodeConnectionDraft = nativePresentation?.supported === false
+            ? null
+            : connectionPresentation.exposeConnectionDraft ? connectionDraft : null;
+          const acceptedInputItemIds = nativePresentation
+            ? nativePresentation.supported ? nativePresentation.acceptedInputItemIds as readonly ItemId[] : []
+            : getAcceptedInputs(entity, canvasGame);
+          const producedOutputItemIds = nativePresentation
+            ? nativePresentation.supported ? nativePresentation.producedOutputItemIds as readonly ItemId[] : []
+            : getProducedOutputs(entity);
           const connectionClassName = nodeConnectionDraft
             ? entity.id === nodeConnectionDraft.nodeId
               ? "factory-flow-node--connection-origin"
               : nodeConnectionDraft.handleType === "source"
-                ? nodeConnectionDraft.itemId && canEntityAcceptBeltItem(canvasGame, entity, nodeConnectionDraft.itemId)
+                ? nodeConnectionDraft.itemId && (nativePresentation
+                  ? nativePresentation.supported && acceptedInputItemIds.includes(nodeConnectionDraft.itemId)
+                  : canEntityAcceptBeltItem(canvasGame, entity, nodeConnectionDraft.itemId))
                   ? "factory-flow-node--connection-candidate"
                   : undefined
                 : nodeConnectionDraft.itemId === null
@@ -15014,6 +15104,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           ].join("|");
           const presentationSignature = [
             getNodeConnectionPresentationToken(nodeConnectionDraft, entity.id, connectionPresentation.exposeConnectionDraft),
+            nativePresentation?.supported ?? true,
             selected,
             className,
             draggable,
@@ -15057,6 +15148,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               ...commonNodeData,
               visualSignature,
               presentationSignature,
+              semanticSupported: nativePresentation?.supported ?? true,
               entity,
               connectedInputItemIds,
               inputBeltCounts,
@@ -15134,7 +15226,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasNodeSemanticRevisionToken, canvasPresentationDetailStage, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, factoryCanvasRows.revision, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nativePlayerAuthorityOwnsRuntime, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
+  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasNodeSemanticRevisionToken, canvasPresentationDetailStage, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, factoryCanvasRows.nodePresentationByEntityId, factoryCanvasRows.revision, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nativePlayerAuthorityOwnsRuntime, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
 
   useLayoutEffect(() => {
     const startedAt = canvasNodeCommitStartedAtRef.current;

@@ -4,7 +4,13 @@ import type {
   DesktopNativeCoreViewportProjectionV2Result,
 } from "../desktop";
 import type { BeltConnection, FactoryEntity, PlanetId } from "./types";
-import type { FactorySelectionReadModel, FactoryViewportReadModel } from "./factoryReadModels";
+import type {
+  FactoryNodePresentationReadModel,
+  FactoryNodePresentationStatusReadModel,
+  FactoryNodeResourceReserveReadModel,
+  FactorySelectionReadModel,
+  FactoryViewportReadModel,
+} from "./factoryReadModels";
 import type { NativeFactoryThinViewSnapshot } from "./nativeFactoryThinViewStore";
 
 const ENTITY_KINDS = new Set(["vein", "machine", "power", "storage", "splitter", "station"]);
@@ -67,6 +73,15 @@ const ENTITY_ARRAY_KEYS = new Set([
 const ENTITY_RECORD_KEYS = new Set([
   "inputs", "outputs", "proliferatorBonusProgress", "stationLastSupplyPeerBySlot",
 ]);
+const NODE_PRESENTATION_STATUS_CODES = new Set([
+  "running", "idle", "paused", "missing-recipe", "missing-research", "missing-input",
+  "output-blocked", "no-power", "low-power", "missing-fuel", "resource-depleted",
+  "missing-proliferator", "no-fuel-selected", "grid-standby", "missing-route", "fleet-busy",
+  "missing-vessel", "missing-drone", "missing-warper", "missing-hub", "waiting-load",
+  "waiting-route", "collecting", "missing-dyson-swarm", "missing-dyson-orbit", "launch-paused",
+  "unconfigured",
+]);
+const NODE_PRESENTATION_TONES = new Set(["running", "warning", "blocked", "idle"]);
 
 export interface NativeAuthoritativeFactoryCanvasFrame {
   readonly source: "native-authoritative";
@@ -85,6 +100,7 @@ export interface NativeAuthoritativeFactoryCanvasFrame {
   /** Every projected row, including pinned and cross-boundary belts, for bounded inspectors/connection reads. */
   readonly projectedBelts: readonly BeltConnection[];
   readonly entityById: ReadonlyMap<string, FactoryEntity>;
+  readonly nodePresentationByEntityId: ReadonlyMap<string, FactoryNodePresentationReadModel>;
   readonly beltById: ReadonlyMap<string, BeltConnection>;
   readonly omittedCrossBoundaryBeltCount: number;
   readonly viewportReadModel: FactoryViewportReadModel;
@@ -110,6 +126,7 @@ export interface FactoryCanvasRows {
   readonly entities: readonly FactoryEntity[];
   readonly belts: readonly BeltConnection[];
   readonly entityById: ReadonlyMap<string, FactoryEntity>;
+  readonly nodePresentationByEntityId: ReadonlyMap<string, FactoryNodePresentationReadModel> | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -132,6 +149,10 @@ function finiteNumber(value: unknown, minimum = Number.NEGATIVE_INFINITY): value
 
 function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 512 && !value.includes("\0");
+}
+
+function boundedPresentationString(value: unknown, maximum: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= maximum && !/[\0\r\n]/.test(value);
 }
 
 function exactBounds(
@@ -227,6 +248,75 @@ function normalizeBelt(
   return Object.freeze({ ...value }) as BeltConnection;
 }
 
+function normalizeNodePresentation(value: unknown, entityId: string): FactoryNodePresentationReadModel | null {
+  if (!isRecord(value) || value.entityId !== entityId || typeof value.supported !== "boolean") return null;
+  if (!value.supported) {
+    if (!hasOnlyKeys(value, new Set(["entityId", "supported"]))) return null;
+    return Object.freeze({ entityId, supported: false });
+  }
+  const allowed = new Set([
+    "entityId", "supported", "coverage", "status", "powerFactor", "resourceReserve",
+    "outputCapacity", "cycleRatePerSecond", "acceptedInputItemIds", "producedOutputItemIds",
+    "targetDysonOrbitLabel",
+  ]);
+  if (!hasOnlyKeys(value, allowed) || (value.coverage !== "complete" && value.coverage !== "conservative") ||
+    !isRecord(value.status) || !hasOnlyKeys(value.status, new Set(["code", "label", "tone"])) ||
+    !NODE_PRESENTATION_STATUS_CODES.has(value.status.code as string) ||
+    !NODE_PRESENTATION_TONES.has(value.status.tone as string) ||
+    !boundedPresentationString(value.status.label, 256) ||
+    !finiteNumber(value.powerFactor, 0) || value.powerFactor > 1 ||
+    !finiteNumber(value.outputCapacity, 0) || !finiteNumber(value.cycleRatePerSecond, 0) ||
+    !Array.isArray(value.acceptedInputItemIds) || value.acceptedInputItemIds.length > 32 ||
+    !Array.isArray(value.producedOutputItemIds) || value.producedOutputItemIds.length > 32 ||
+    !value.acceptedInputItemIds.every((itemId) => boundedPresentationString(itemId, 512)) ||
+    !value.producedOutputItemIds.every((itemId) => boundedPresentationString(itemId, 512)) ||
+    new Set(value.acceptedInputItemIds).size !== value.acceptedInputItemIds.length ||
+    new Set(value.producedOutputItemIds).size !== value.producedOutputItemIds.length ||
+    value.targetDysonOrbitLabel !== null && !boundedPresentationString(value.targetDysonOrbitLabel, 256)) return null;
+  let resourceReserve: FactoryNodeResourceReserveReadModel | null = null;
+  if (value.resourceReserve !== null) {
+    const reserve = value.resourceReserve;
+    if (!isRecord(reserve) || !hasOnlyKeys(reserve, new Set([
+      "infinite", "exhausted", "remaining", "capacity", "remainingRatio", "remainingPercent",
+    ])) || typeof reserve.infinite !== "boolean" || typeof reserve.exhausted !== "boolean") return null;
+    const remaining = reserve.remaining;
+    const capacity = reserve.capacity;
+    if (remaining !== null && (typeof remaining !== "number" || !Number.isSafeInteger(remaining) || remaining < 0) ||
+      capacity !== null && (typeof capacity !== "number" || !Number.isSafeInteger(capacity) || capacity < 0) ||
+      !finiteNumber(reserve.remainingRatio, 0) || reserve.remainingRatio > 1 ||
+      !finiteNumber(reserve.remainingPercent, 0) || reserve.remainingPercent > 100 ||
+      reserve.infinite && (reserve.exhausted || remaining !== null || capacity !== null ||
+        reserve.remainingRatio !== 1 || reserve.remainingPercent !== 100) ||
+      !reserve.infinite && (remaining === null || capacity === null || remaining > capacity)) return null;
+    resourceReserve = Object.freeze({
+      infinite: reserve.infinite,
+      exhausted: reserve.exhausted,
+      remaining,
+      capacity,
+      remainingRatio: reserve.remainingRatio,
+      remainingPercent: reserve.remainingPercent,
+    });
+  }
+  const status: FactoryNodePresentationStatusReadModel = Object.freeze({
+    code: value.status.code as FactoryNodePresentationStatusReadModel["code"],
+    label: value.status.label,
+    tone: value.status.tone as FactoryNodePresentationStatusReadModel["tone"],
+  });
+  return Object.freeze({
+    entityId,
+    supported: true,
+    coverage: value.coverage,
+    status,
+    powerFactor: value.powerFactor,
+    resourceReserve,
+    outputCapacity: value.outputCapacity,
+    cycleRatePerSecond: value.cycleRatePerSecond,
+    acceptedInputItemIds: Object.freeze([...value.acceptedInputItemIds]),
+    producedOutputItemIds: Object.freeze([...value.producedOutputItemIds]),
+    targetDysonOrbitLabel: value.targetDysonOrbitLabel,
+  });
+}
+
 /**
  * Select a renderer-only native canvas frame. The function has no Web oracle
  * parameter by design: a valid frame is consumed without touching the large
@@ -255,6 +345,8 @@ export function selectNativeAuthoritativeFactoryCanvasFrame(
     viewport.projectionType !== "viewport-v2" || viewport.revision !== binding.expectedRevision ||
     viewport.planetId !== binding.planetId || viewport.nextEntityCursor !== null ||
     viewport.nextBeltCursor !== null || !exactBounds(viewport.bounds, binding.bounds) ||
+    viewport.entityPresentationVersion !== 1 || !Array.isArray(viewport.entityPresentation) ||
+    viewport.entityPresentation.length !== viewport.entities.length ||
     !sameIdSet(viewport.pinnedEntityIds, binding.requestedPinnedEntityIds) ||
     !sameIdSet(viewport.pinnedBeltIds, binding.requestedPinnedBeltIds) ||
     Reflect.ownKeys(viewport.base).length !== 0 || !shell || shell.source !== "native-core" ||
@@ -264,10 +356,14 @@ export function selectNativeAuthoritativeFactoryCanvasFrame(
     viewport.planetTotals.belts < viewport.viewportTotals.belts) return null;
 
   const entityById = new Map<string, FactoryEntity>();
-  for (const row of viewport.entities) {
+  const nodePresentationByEntityId = new Map<string, FactoryNodePresentationReadModel>();
+  for (let index = 0; index < viewport.entities.length; index += 1) {
+    const row = viewport.entities[index];
     const entity = normalizeEntity(row, binding.planetId);
-    if (!entity || entityById.has(entity.id)) return null;
+    const presentation = entity ? normalizeNodePresentation(viewport.entityPresentation[index], entity.id) : null;
+    if (!entity || !presentation || entityById.has(entity.id) || nodePresentationByEntityId.has(entity.id)) return null;
     entityById.set(entity.id, entity);
+    nodePresentationByEntityId.set(entity.id, presentation);
   }
   const visibleEntityIds = new Set([...entityById.values()].filter((entity) =>
     entity.position.x >= viewport.bounds.minX && entity.position.x <= viewport.bounds.maxX &&
@@ -292,7 +388,8 @@ export function selectNativeAuthoritativeFactoryCanvasFrame(
     const belt = projectedBeltById.get(id);
     return count + (belt && (beltSourceEntityIds.has(belt.source) || beltSourceEntityIds.has(belt.target)) ? 0 : 1);
   }, 0);
-  if (entityById.size !== expectedEntityRows || projectedBeltById.size !== expectedBeltRows) return null;
+  if (entityById.size !== expectedEntityRows || nodePresentationByEntityId.size !== entityById.size ||
+    projectedBeltById.size !== expectedBeltRows) return null;
 
   const belts = [...projectedBeltById.values()].filter((belt) =>
     entityById.has(belt.source) && entityById.has(belt.target));
@@ -344,6 +441,7 @@ export function selectNativeAuthoritativeFactoryCanvasFrame(
     belts: Object.freeze(belts),
     projectedBelts: Object.freeze([...projectedBeltById.values()]),
     entityById,
+    nodePresentationByEntityId,
     beltById: projectedBeltById,
     omittedCrossBoundaryBeltCount: projectedBeltById.size - belts.length,
     viewportReadModel,
@@ -362,9 +460,10 @@ export function selectFactoryCanvasRows(
     entities: nativeFrame.entities,
     belts: nativeFrame.belts,
     entityById: nativeFrame.entityById,
+    nodePresentationByEntityId: nativeFrame.nodePresentationByEntityId,
   };
   const web = createWebRows();
-  return { source: "web-game-state", revision: null, ...web };
+  return { source: "web-game-state", revision: null, nodePresentationByEntityId: null, ...web };
 }
 
 export function collectCanvasSelectionBeltIds(

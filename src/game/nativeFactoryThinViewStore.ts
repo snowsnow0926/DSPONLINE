@@ -6,6 +6,7 @@ import type {
   DesktopNativeCoreViewportProjectionV2Request,
   DesktopNativeCoreViewportProjectionV2Result,
 } from "../desktop";
+import type { FactoryNodePresentationReadModel } from "./factoryReadModels";
 
 export interface NativeFactoryThinViewFrame {
   readonly revision: number;
@@ -120,7 +121,8 @@ function samePageIdentity(
     page.broadQueryFallback === first.broadQueryFallback &&
     JSON.stringify(page.base) === JSON.stringify(first.base) &&
     sameStringSet(page.pinnedEntityIds, first.pinnedEntityIds) &&
-    sameStringSet(page.pinnedBeltIds, first.pinnedBeltIds);
+    sameStringSet(page.pinnedBeltIds, first.pinnedBeltIds) &&
+    page.entityPresentationVersion === first.entityPresentationVersion;
 }
 
 function projectionRecordEqual(left: object, right: object): boolean {
@@ -159,7 +161,9 @@ async function readCompleteViewportProjection(
   let beltCursor = 0;
   let first: DesktopNativeCoreViewportProjectionV2Result | null = null;
   let completed = false;
+  const presentationRequested = request.entityPresentationVersion === 1;
   const entities = new Map<string, DesktopNativeCoreEntityProjection>();
+  const entityPresentation = new Map<string, FactoryNodePresentationReadModel>();
   const belts = new Map<string, DesktopNativeCoreBeltProjection>();
   for (let pageIndex = 0; pageIndex < MAX_COMPLETE_VIEWPORT_PAGES; pageIndex += 1) {
     const page = await source.readVerifiedViewportProjectionV2({
@@ -181,7 +185,10 @@ async function readCompleteViewportProjection(
         page.planetTotals.entities < page.viewportTotals.entities ||
         page.planetTotals.belts < page.viewportTotals.belts ||
         !sameStringSet(page.pinnedEntityIds, requestedPinnedEntityIds) ||
-        !sameStringSet(page.pinnedBeltIds, requestedPinnedBeltIds)) {
+        !sameStringSet(page.pinnedBeltIds, requestedPinnedBeltIds) ||
+        (presentationRequested
+          ? page.entityPresentationVersion !== 1 || !Array.isArray(page.entityPresentation)
+          : page.entityPresentationVersion !== undefined || page.entityPresentation !== undefined)) {
         return null;
       }
     } else if (!samePageIdentity(first, page)) {
@@ -199,6 +206,20 @@ async function readCompleteViewportProjection(
         entities.set(entity.id, entity);
       }
     }
+    if (presentationRequested) {
+      if (!Array.isArray(page.entityPresentation) || page.entityPresentation.length !== page.entities.length) return null;
+      for (let index = 0; index < page.entityPresentation.length; index += 1) {
+        const row = page.entityPresentation[index];
+        const entity = page.entities[index];
+        if (!row || typeof row !== "object" || row.entityId !== entity.id || typeof row.supported !== "boolean") return null;
+        const previous = entityPresentation.get(row.entityId);
+        if (previous) {
+          if (!page.pinnedEntityIds.includes(row.entityId) || !projectionRecordEqual(previous, row)) return null;
+        } else {
+          entityPresentation.set(row.entityId, row);
+        }
+      }
+    }
     const pageBeltIds = new Set<string>();
     for (const belt of page.belts) {
       if (pageBeltIds.has(belt.id)) return null;
@@ -211,7 +232,8 @@ async function readCompleteViewportProjection(
       }
     }
     if (entities.size > MAX_COMPLETE_VIEWPORT_ENTITY_ROWS + requestedPinnedEntityIds.length ||
-      belts.size > MAX_COMPLETE_VIEWPORT_BELT_ROWS + requestedPinnedBeltIds.length) {
+      belts.size > MAX_COMPLETE_VIEWPORT_BELT_ROWS + requestedPinnedBeltIds.length ||
+      (presentationRequested && entityPresentation.size > MAX_COMPLETE_VIEWPORT_ENTITY_ROWS + requestedPinnedEntityIds.length)) {
       return null;
     }
 
@@ -250,11 +272,16 @@ async function readCompleteViewportProjection(
     const belt = belts.get(id);
     return count + (belt && (beltSourceEntityIds.has(belt.source ?? "") || beltSourceEntityIds.has(belt.target ?? "")) ? 0 : 1);
   }, 0);
-  if (entities.size !== expectedEntityUnion || belts.size !== expectedBeltUnion) return null;
+  if (entities.size !== expectedEntityUnion || belts.size !== expectedBeltUnion ||
+      (presentationRequested && entityPresentation.size !== entities.size)) return null;
 
   return {
     ...first,
     entities: entityRows,
+    ...(presentationRequested ? {
+      entityPresentationVersion: 1 as const,
+      entityPresentation: entityRows.map((entity) => entityPresentation.get(entity.id)!),
+    } : {}),
     belts: [...belts.values()],
     nextEntityCursor: null,
     nextBeltCursor: null,

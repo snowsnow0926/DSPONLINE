@@ -11,6 +11,7 @@ import {
   type NativeFactoryThinViewRequest,
   type NativeFactoryThinViewSource,
 } from "./nativeFactoryThinViewStore";
+import type { FactoryNodePresentationReadModel } from "./factoryReadModels";
 
 function factoryProjection(revision: number, planetId = "planet-a"): DesktopNativeCoreFactoryReadModelResult {
   return {
@@ -95,6 +96,35 @@ function viewportProjection(revision: number, planetId = "planet-a"): DesktopNat
   };
 }
 
+function nodePresentation(
+  entityId: string,
+  label = `running:${entityId}`,
+): FactoryNodePresentationReadModel {
+  return {
+    entityId,
+    supported: true,
+    coverage: "complete",
+    status: { code: "running", label, tone: "running" },
+    powerFactor: 1,
+    resourceReserve: null,
+    outputCapacity: entityId.length,
+    cycleRatePerSecond: 1,
+    acceptedInputItemIds: ["iron_ore"],
+    producedOutputItemIds: ["iron_ingot"],
+    targetDysonOrbitLabel: null,
+  };
+}
+
+function viewportProjectionWithPresentation(
+  revision: number,
+  planetId = "planet-a",
+): DesktopNativeCoreViewportProjectionV2Result {
+  const projection = viewportProjection(revision, planetId);
+  projection.entityPresentationVersion = 1;
+  projection.entityPresentation = projection.entities.map((entity) => nodePresentation(entity.id));
+  return projection;
+}
+
 function request(revision: number, planetId = "planet-a"): NativeFactoryThinViewRequest {
   return {
     expectedRevision: revision,
@@ -110,6 +140,12 @@ function request(revision: number, planetId = "planet-a"): NativeFactoryThinView
       pinnedBeltIds: [],
     },
   };
+}
+
+function requestWithPresentation(revision: number, planetId = "planet-a"): NativeFactoryThinViewRequest {
+  const next = request(revision, planetId);
+  next.viewport.entityPresentationVersion = 1;
+  return next;
 }
 
 function source(
@@ -437,6 +473,176 @@ describe("NativeFactoryThinViewStore", () => {
     pagedRequest.viewport.bounds = bounds;
     pagedRequest.viewport.entityLimit = 1;
     pagedRequest.viewport.pinnedEntityIds = ["pinned"];
+
+    await expect(new NativeFactoryThinViewStore().refresh(pagedSource, pagedRequest)).resolves.toEqual({
+      status: "unavailable",
+    });
+  });
+
+  it("merges an opt-in same-revision presentation sidecar in entity order and deduplicates a stable pinned row", async () => {
+    const revision = 27;
+    const bounds = { minX: 0, minY: 0, maxX: 2, maxY: 2 };
+    const worldBounds = { minX: 0, minY: 0, maxX: 100, maxY: 100 };
+    const ordinary: DesktopNativeCoreEntityProjection[] = Array.from({ length: 3 }, (_, index) => ({
+      id: `entity-${index}`,
+      kind: "vein",
+      planetId: "planet-a" as never,
+      position: { x: index, y: index },
+    }));
+    const pinned: DesktopNativeCoreEntityProjection = {
+      id: "entity-pinned",
+      kind: "vein",
+      planetId: "planet-a" as never,
+      position: { x: 100, y: 100 },
+    };
+    const reads: Array<{ entityCursor: number; presentationVersion: number | undefined }> = [];
+    const pagedSource: NativeFactoryThinViewSource = {
+      readVerifiedFactoryReadModel: vi.fn().mockResolvedValue(factoryProjection(revision)),
+      readVerifiedViewportProjectionV2: vi.fn(async (pageRequest): Promise<DesktopNativeCoreViewportProjectionV2Result> => {
+        const entityCursor = pageRequest.entityCursor ?? 0;
+        reads.push({ entityCursor, presentationVersion: pageRequest.entityPresentationVersion });
+        const entityPage = ordinary.slice(entityCursor, entityCursor + pageRequest.entityLimit);
+        const entities = [...entityPage, pinned].sort((left, right) => left.id.localeCompare(right.id));
+        return {
+          schemaVersion: 2,
+          projectionType: "viewport-v2",
+          revision,
+          planetId: "planet-a",
+          bounds,
+          base: {},
+          entities,
+          entityPresentationVersion: 1,
+          entityPresentation: entities.map((entity) => nodePresentation(entity.id)),
+          belts: [],
+          pinnedEntityIds: [pinned.id],
+          pinnedBeltIds: [],
+          nextEntityCursor: entityCursor + entityPage.length < ordinary.length
+            ? entityCursor + entityPage.length
+            : null,
+          nextBeltCursor: null,
+          planetTotals: { entities: 4, belts: 0 },
+          viewportTotals: { entities: 3, belts: 0 },
+          worldBounds,
+          minimap: { bounds: worldBounds, entityCount: 4, beltCount: 0, occupiedCellCount: 2, cellSize: 512 },
+          broadQueryFallback: false,
+        };
+      }),
+    };
+    const pagedRequest = requestWithPresentation(revision);
+    pagedRequest.viewport.bounds = bounds;
+    pagedRequest.viewport.entityLimit = 2;
+    pagedRequest.viewport.pinnedEntityIds = [pinned.id];
+
+    const result = await new NativeFactoryThinViewStore().refresh(pagedSource, pagedRequest);
+
+    expect(result.status).toBe("committed");
+    expect(reads).toEqual([
+      { entityCursor: 0, presentationVersion: 1 },
+      { entityCursor: 2, presentationVersion: 1 },
+    ]);
+    if (result.status === "committed") {
+      const { entities, entityPresentation, entityPresentationVersion } = result.frame.viewport;
+      expect(entityPresentationVersion).toBe(1);
+      expect(entityPresentation?.map((row) => row.entityId)).toEqual(entities.map((entity) => entity.id));
+      expect(entities.filter((entity) => entity.id === pinned.id)).toHaveLength(1);
+      expect(entityPresentation?.filter((row) => row.entityId === pinned.id)).toHaveLength(1);
+      expect(entityPresentation?.find((row) => row.entityId === pinned.id)).toEqual(nodePresentation(pinned.id));
+    }
+  });
+
+  it.each([
+    {
+      name: "missing sidecar",
+      corrupt: (projection: DesktopNativeCoreViewportProjectionV2Result) => {
+        delete projection.entityPresentationVersion;
+        delete projection.entityPresentation;
+      },
+    },
+    {
+      name: "sidecar order differs from entity order",
+      corrupt: (projection: DesktopNativeCoreViewportProjectionV2Result) => {
+        projection.entityPresentation = [...projection.entityPresentation!].reverse();
+      },
+    },
+    {
+      name: "sidecar cardinality differs from entity cardinality",
+      corrupt: (projection: DesktopNativeCoreViewportProjectionV2Result) => {
+        projection.entityPresentation = projection.entityPresentation!.slice(0, 1);
+      },
+    },
+  ])("fails closed when an opt-in $name", async ({ corrupt }) => {
+    const revision = 28;
+    const projection = viewportProjectionWithPresentation(revision);
+    const second: DesktopNativeCoreEntityProjection = {
+      id: "entity-2",
+      kind: "vein",
+      planetId: "planet-a" as never,
+      position: { x: 1, y: 1 },
+    };
+    projection.entities.push(second);
+    projection.entityPresentation!.push(nodePresentation(second.id));
+    projection.planetTotals.entities = 2;
+    projection.viewportTotals.entities = 2;
+    projection.minimap.entityCount = 2;
+    corrupt(projection);
+
+    await expect(new NativeFactoryThinViewStore().refresh(
+      source(factoryProjection(revision), projection),
+      requestWithPresentation(revision),
+    )).resolves.toEqual({ status: "unavailable" });
+  });
+
+  it("fails closed when a duplicate pinned presentation row drifts between same-revision pages", async () => {
+    const revision = 29;
+    const bounds = { minX: 0, minY: 0, maxX: 1, maxY: 1 };
+    const worldBounds = { minX: 0, minY: 0, maxX: 100, maxY: 100 };
+    const pinned: DesktopNativeCoreEntityProjection = {
+      id: "entity-pinned",
+      kind: "vein",
+      planetId: "planet-a" as never,
+      position: { x: 100, y: 100 },
+    };
+    const pagedSource: NativeFactoryThinViewSource = {
+      readVerifiedFactoryReadModel: vi.fn().mockResolvedValue(factoryProjection(revision)),
+      readVerifiedViewportProjectionV2: vi.fn(async (pageRequest): Promise<DesktopNativeCoreViewportProjectionV2Result> => {
+        const cursor = pageRequest.entityCursor ?? 0;
+        const ordinary: DesktopNativeCoreEntityProjection = {
+          id: `entity-${cursor}`,
+          kind: "vein",
+          planetId: "planet-a" as never,
+          position: { x: cursor, y: cursor },
+        };
+        const entities = [ordinary, pinned];
+        return {
+          schemaVersion: 2,
+          projectionType: "viewport-v2",
+          revision,
+          planetId: "planet-a",
+          bounds,
+          base: {},
+          entities,
+          entityPresentationVersion: 1,
+          entityPresentation: [
+            nodePresentation(ordinary.id),
+            nodePresentation(pinned.id, cursor === 0 ? "stable" : "drifted"),
+          ],
+          belts: [],
+          pinnedEntityIds: [pinned.id],
+          pinnedBeltIds: [],
+          nextEntityCursor: cursor === 0 ? 1 : null,
+          nextBeltCursor: null,
+          planetTotals: { entities: 3, belts: 0 },
+          viewportTotals: { entities: 2, belts: 0 },
+          worldBounds,
+          minimap: { bounds: worldBounds, entityCount: 3, beltCount: 0, occupiedCellCount: 2, cellSize: 512 },
+          broadQueryFallback: false,
+        };
+      }),
+    };
+    const pagedRequest = requestWithPresentation(revision);
+    pagedRequest.viewport.bounds = bounds;
+    pagedRequest.viewport.entityLimit = 1;
+    pagedRequest.viewport.pinnedEntityIds = [pinned.id];
 
     await expect(new NativeFactoryThinViewStore().refresh(pagedSource, pagedRequest)).resolves.toEqual({
       status: "unavailable",

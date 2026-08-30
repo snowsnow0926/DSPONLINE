@@ -69,6 +69,8 @@ export interface FactoryNodeData extends Record<string, unknown> {
   inventoryDepositEnabled?: boolean;
   visualSignature: string;
   presentationSignature: string;
+  /** False means Rust could not prove this MOD/entity semantic row; show topology only. */
+  semanticSupported?: boolean;
   entity: FactoryEntity;
   cargo: CargoStack | null;
   placement: BuildingId | null;
@@ -129,6 +131,28 @@ export interface FactoryNodeData extends Record<string, unknown> {
   stackAlertCount: number;
   stackCriticalAlertCount: number;
   stackGeometryHandlesRequired: boolean;
+}
+
+function FactoryNodeUnsupportedView({ data, selected }: NodeProps<FactoryFlowNode>) {
+  const { entity } = data;
+  const label = entity.buildingId ?? entity.resourceId ?? entity.id;
+  return <article
+    className={`factory-node factory-node-lod factory-node-lod--${data.lod} factory-node--status-idle${selected ? " factory-node--selected" : ""}`}
+    data-node-lod={data.lod}
+    data-native-semantic-supported="false"
+    data-heavy-card="false"
+    title={`原生语义暂不支持：${label}`}
+    aria-label={`${label}，原生语义暂不支持，只读显示`}
+  >
+    <header className="factory-node__header">
+      <div className="node-icon"><Factory size={18} /></div>
+      <div><span>只读拓扑节点</span><strong>{label}</strong></div>
+    </header>
+    {data.lod !== "compact" ? <div className="factory-node-lod__summary">
+      <span className="status-dot status-dot--idle" />
+      <strong>原生语义暂不支持</strong>
+    </div> : null}
+  </article>;
 }
 
 const SPECIAL_BELT_ENDPOINT_BUILDINGS = new Set([
@@ -1239,24 +1263,28 @@ function PowerFullNode({ data, selected }: NodeProps<FactoryFlowNode>) {
 export function VeinNode(props: NodeProps<FactoryFlowNode>) {
   if (props.data.stackHidden) return <FactoryNodeStackProxy {...props} />;
   if (props.data.stackMarker) return <FactoryNodeStackMarker {...props} />;
+  if (props.data.semanticSupported === false) return <FactoryNodeUnsupportedView {...props} />;
   return <>{props.data.lod === "full" ? <VeinFullNode {...props} /> : props.data.lod === "compact" ? <FactoryNodeCompactView {...props} /> : <FactoryNodeLodView {...props} />}<FactoryNodeStackOverlay data={props.data} /></>;
 }
 
 export function MachineNode(props: NodeProps<FactoryFlowNode>) {
   if (props.data.stackHidden) return <FactoryNodeStackProxy {...props} />;
   if (props.data.stackMarker) return <FactoryNodeStackMarker {...props} />;
+  if (props.data.semanticSupported === false) return <FactoryNodeUnsupportedView {...props} />;
   return <>{props.data.lod === "full" ? <MachineFullNode {...props} /> : props.data.lod === "compact" ? <FactoryNodeCompactView {...props} /> : <FactoryNodeLodView {...props} />}<FactoryNodeStackOverlay data={props.data} /></>;
 }
 
 export function LogisticsNode(props: NodeProps<FactoryFlowNode>) {
   if (props.data.stackHidden) return <FactoryNodeStackProxy {...props} />;
   if (props.data.stackMarker) return <FactoryNodeStackMarker {...props} />;
+  if (props.data.semanticSupported === false) return <FactoryNodeUnsupportedView {...props} />;
   return <>{props.data.lod === "full" ? <LogisticsFullNode {...props} /> : props.data.lod === "compact" ? <FactoryNodeCompactView {...props} /> : <FactoryNodeLodView {...props} />}<FactoryNodeStackOverlay data={props.data} /></>;
 }
 
 export function PowerNode(props: NodeProps<FactoryFlowNode>) {
   if (props.data.stackHidden) return <FactoryNodeStackProxy {...props} />;
   if (props.data.stackMarker) return <FactoryNodeStackMarker {...props} />;
+  if (props.data.semanticSupported === false) return <FactoryNodeUnsupportedView {...props} />;
   return <>{props.data.lod === "full" ? <PowerFullNode {...props} /> : props.data.lod === "compact" ? <FactoryNodeCompactView {...props} /> : <FactoryNodeLodView {...props} />}<FactoryNodeStackOverlay data={props.data} /></>;
 }
 

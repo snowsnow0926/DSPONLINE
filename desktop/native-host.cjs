@@ -46,6 +46,8 @@ const NATIVE_CONSTRUCTION_REMOVAL_CONTEXT_CAPABILITY =
   "native-core-construction-removal-context-v1";
 const NATIVE_CONSTRUCTION_STACK_CONTEXT_CAPABILITY =
   "native-core-construction-stack-context-v1";
+const NATIVE_VIEWPORT_ENTITY_PRESENTATION_CAPABILITY =
+  "native-core-viewport-entity-presentation-v1";
 const MAIN_PLAYER_AUTHORITY_OWNER_ID = "main-player-authority";
 const MAX_DURABLE_PLAYER_AUTHORITY_COMMAND_BYTES = 1_750_000;
 const MAX_PLAYER_AUTHORITY_MACRO_BUDGET_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
@@ -1009,6 +1011,7 @@ class NativeCoreSessionRegistry {
     const bounds = request?.bounds;
     const pinnedEntityIds = request?.pinnedEntityIds ?? [];
     const pinnedBeltIds = request?.pinnedBeltIds ?? [];
+    const entityPresentationVersion = request?.entityPresentationVersion;
     const finiteBound = (value) => Number.isFinite(value) && Math.abs(value) <= 10_000_000;
     if (!Array.isArray(baseFields) || baseFields.length > 64 ||
       baseFields.some((field) => !validLogicalId(field, 160) || field === "entities" || field === "belts") ||
@@ -1020,10 +1023,18 @@ class NativeCoreSessionRegistry {
       !Number.isSafeInteger(request?.entityLimit) || request.entityLimit < 1 || request.entityLimit > 4096 ||
       !Number.isSafeInteger(request?.beltCursor ?? 0) || (request?.beltCursor ?? 0) < 0 ||
       !Number.isSafeInteger(request?.beltLimit) || request.beltLimit < 1 || request.beltLimit > 8192 ||
+      entityPresentationVersion !== undefined && entityPresentationVersion !== 1 ||
       !Array.isArray(pinnedEntityIds) || pinnedEntityIds.length > 32 ||
       !Array.isArray(pinnedBeltIds) || pinnedBeltIds.length > 64 ||
       pinnedEntityIds.some((id) => !validOpaqueId(id)) || pinnedBeltIds.some((id) => !validOpaqueId(id))) {
       throw new TypeError("native core viewport v2 projection request is invalid");
+    }
+    if (entityPresentationVersion === 1 &&
+        !this.client.hello?.capabilities?.includes(NATIVE_VIEWPORT_ENTITY_PRESENTATION_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide viewport entity presentation",
+        "NATIVE_CORE_CAPABILITY_MISSING",
+      );
     }
     return this.requestOwned(ownerId, request.sessionId, {
       operation: "coreViewportProjectionV2",
@@ -1040,6 +1051,7 @@ class NativeCoreSessionRegistry {
       beltLimit: request.beltLimit,
       pinnedEntityIds,
       pinnedBeltIds,
+      ...(entityPresentationVersion === 1 ? { entityPresentationVersion } : {}),
     });
   }
 
@@ -2191,6 +2203,7 @@ module.exports = {
   NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY,
+  NATIVE_VIEWPORT_ENTITY_PRESENTATION_CAPABILITY,
   NATIVE_V47_STREAM_IMPORT_CAPABILITY,
   NativeHostClient,
   NativeHostError,

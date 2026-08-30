@@ -75,6 +75,77 @@ export interface FactoryTimeWarpReadModel {
   readonly allocatedPowerKw: number;
 }
 
+export type FactoryNodePresentationCoverage = "complete" | "conservative";
+
+export type FactoryNodePresentationStatusCode =
+  | "running"
+  | "idle"
+  | "paused"
+  | "missing-recipe"
+  | "missing-research"
+  | "missing-input"
+  | "output-blocked"
+  | "no-power"
+  | "low-power"
+  | "missing-fuel"
+  | "resource-depleted"
+  | "missing-proliferator"
+  | "no-fuel-selected"
+  | "grid-standby"
+  | "missing-route"
+  | "fleet-busy"
+  | "missing-vessel"
+  | "missing-drone"
+  | "missing-warper"
+  | "missing-hub"
+  | "waiting-load"
+  | "waiting-route"
+  | "collecting"
+  | "missing-dyson-swarm"
+  | "missing-dyson-orbit"
+  | "launch-paused"
+  | "unconfigured";
+
+export interface FactoryNodePresentationStatusReadModel {
+  readonly code: FactoryNodePresentationStatusCode;
+  readonly label: string;
+  readonly tone: "running" | "warning" | "blocked" | "idle";
+}
+
+export interface FactoryNodeResourceReserveReadModel {
+  readonly infinite: boolean;
+  readonly exhausted: boolean;
+  readonly remaining: number | null;
+  readonly capacity: number | null;
+  readonly remainingRatio: number;
+  readonly remainingPercent: number;
+}
+
+/**
+ * Projection-only semantic sidecar for one viewport entity. It is never mixed
+ * into FactoryEntity and therefore cannot become a save or command oracle.
+ * Unknown/MOD behavior is represented explicitly instead of being guessed by
+ * the renderer from its deliberately hollow JavaScript shell.
+ */
+export type FactoryNodePresentationReadModel =
+  | Readonly<{
+      entityId: string;
+      supported: false;
+    }>
+  | Readonly<{
+      entityId: string;
+      supported: true;
+      coverage: FactoryNodePresentationCoverage;
+      status: FactoryNodePresentationStatusReadModel;
+      powerFactor: number;
+      resourceReserve: FactoryNodeResourceReserveReadModel | null;
+      outputCapacity: number;
+      cycleRatePerSecond: number;
+      acceptedInputItemIds: readonly string[];
+      producedOutputItemIds: readonly string[];
+      targetDysonOrbitLabel: string | null;
+    }>;
+
 /** Smallest visible factory status contract; it never owns a GameState. */
 export interface FactoryRunStatusReadModel {
   readonly schema: typeof FACTORY_READ_MODEL_SCHEMA;

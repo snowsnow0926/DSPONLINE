@@ -196,6 +196,8 @@ pub enum ControlRequest {
         pinned_entity_ids: Vec<String>,
         #[serde(default)]
         pinned_belt_ids: Vec<String>,
+        #[serde(default)]
+        entity_presentation_version: Option<u8>,
     },
     CoreFactoryReadModelProjection {
         session_id: String,
@@ -851,6 +853,66 @@ mod tests {
             }
             _ => panic!("factory read-model defaults decoded as the wrong variant"),
         }
+    }
+
+    #[test]
+    fn viewport_v2_protocol_keeps_entity_presentation_explicitly_opt_in() {
+        let legacy = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreViewportProjectionV2",
+            "sessionId": "core-legacy",
+            "planetId": "home",
+            "minX": -1,
+            "minY": -1,
+            "maxX": 1,
+            "maxY": 1,
+            "entityLimit": 1,
+            "beltLimit": 1
+        }))
+        .unwrap();
+        match legacy {
+            ControlRequest::CoreViewportProjectionV2 {
+                entity_presentation_version,
+                ..
+            } => assert_eq!(entity_presentation_version, None),
+            _ => panic!("legacy viewport v2 request decoded as the wrong operation"),
+        }
+
+        let opted_in = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreViewportProjectionV2",
+            "sessionId": "core-presentation",
+            "planetId": "home",
+            "minX": -1,
+            "minY": -1,
+            "maxX": 1,
+            "maxY": 1,
+            "entityLimit": 1,
+            "beltLimit": 1,
+            "entityPresentationVersion": 1
+        }))
+        .unwrap();
+        match opted_in {
+            ControlRequest::CoreViewportProjectionV2 {
+                entity_presentation_version,
+                ..
+            } => assert_eq!(entity_presentation_version, Some(1)),
+            _ => panic!("presentation viewport v2 request decoded as the wrong operation"),
+        }
+
+        assert!(
+            serde_json::from_value::<ControlRequest>(json!({
+                "operation": "coreViewportProjectionV2",
+                "sessionId": "core-overflow",
+                "planetId": "home",
+                "minX": -1,
+                "minY": -1,
+                "maxX": 1,
+                "maxY": 1,
+                "entityLimit": 1,
+                "beltLimit": 1,
+                "entityPresentationVersion": 256
+            }))
+            .is_err()
+        );
     }
 
     #[test]

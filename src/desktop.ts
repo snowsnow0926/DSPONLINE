@@ -1,5 +1,5 @@
 import type { BeltConnection, FactoryEntity, ProductionHistorySample } from "./game/types";
-import type { FactoryReadModelBundle } from "./game/factoryReadModels";
+import type { FactoryNodePresentationReadModel, FactoryReadModelBundle } from "./game/factoryReadModels";
 import type {
   LocalSaveNativeAuthorityCheckpoint,
   LocalSaveNativeAuthorityHandoffJournal,
@@ -910,6 +910,8 @@ export interface DesktopNativeCoreViewportProjectionResult {
 
 export interface DesktopNativeCoreViewportProjectionV2Request extends DesktopNativeCoreSessionRequest {
   expectedRevision: number;
+  /** Opt-in projection-only Rust semantics for the exact returned entity page. */
+  entityPresentationVersion?: 1;
   baseFields?: string[];
   planetId: string;
   bounds: { minX: number; minY: number; maxX: number; maxY: number };
@@ -929,6 +931,10 @@ export interface DesktopNativeCoreViewportProjectionV2Result {
   bounds: { minX: number; minY: number; maxX: number; maxY: number };
   base: Record<string, unknown>;
   entities: DesktopNativeCoreEntityProjection[];
+  /** Present iff entityPresentationVersion=1 was requested and accepted. */
+  entityPresentationVersion?: 1;
+  /** Same order and cardinality as entities; never merged into FactoryEntity. */
+  entityPresentation?: FactoryNodePresentationReadModel[];
   belts: DesktopNativeCoreBeltProjection[];
   pinnedEntityIds: string[];
   pinnedBeltIds: string[];

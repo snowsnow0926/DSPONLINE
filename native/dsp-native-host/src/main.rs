@@ -7,7 +7,8 @@ use dsp_native_core::{
     V47_IMPORT_JS_COMPATIBILITY_REQUIRED_CODE, V47ImportJavascriptCompatibilityRequired,
 };
 use dsp_native_host::core_runtime::{
-    CorePlayerAuthorityStartupRecoveryReceipt, CoreRegistry, PLAYER_AUTHORITY_COMMAND_CAPABILITY,
+    CorePlayerAuthorityStartupRecoveryReceipt, CoreRegistry,
+    NATIVE_CORE_VIEWPORT_ENTITY_PRESENTATION_V1_CAPABILITY, PLAYER_AUTHORITY_COMMAND_CAPABILITY,
     PLAYER_AUTHORITY_GATE_CAPABILITY, PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
     PLAYER_AUTHORITY_PAUSE_CAPABILITY, PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
     PLAYER_AUTHORITY_TICK_CAPABILITY,
@@ -80,6 +81,7 @@ fn handle_request(
                     "native-core-projection-v1",
                     "native-core-viewport-projection-v1",
                     "native-core-viewport-projection-v2",
+                    NATIVE_CORE_VIEWPORT_ENTITY_PRESENTATION_V1_CAPABILITY,
                     "native-core-factory-read-model-v1",
                     "native-core-factory-inventory-v1",
                     "native-core-construction-inventory-v1",
@@ -270,7 +272,8 @@ fn handle_request(
             belt_limit,
             pinned_entity_ids,
             pinned_belt_ids,
-        } => cores.viewport_projection_v2(
+            entity_presentation_version,
+        } => cores.viewport_projection_v2_with_entity_presentation(
             &session_id,
             &base_fields,
             &planet_id,
@@ -284,6 +287,7 @@ fn handle_request(
             belt_limit,
             &pinned_entity_ids,
             &pinned_belt_ids,
+            entity_presentation_version,
         )?,
         ControlRequest::CoreFactoryReadModelProjection {
             session_id,

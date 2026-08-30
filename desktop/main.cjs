@@ -1041,6 +1041,7 @@ function nativeViewportProjectionV2ResultContext(request) {
     beltLimit: request?.beltLimit,
     pinnedEntityIds: request?.pinnedEntityIds ?? [],
     pinnedBeltIds: request?.pinnedBeltIds ?? [],
+    entityPresentationVersion: request?.entityPresentationVersion,
   };
 }
 

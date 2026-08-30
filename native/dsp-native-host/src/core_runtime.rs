@@ -28,6 +28,9 @@ const MAX_CORE_SESSIONS: usize = 4;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_COMMAND_PALETTE_SEARCH_REQUEST_BYTES: usize = 32_768;
 
+pub const NATIVE_CORE_VIEWPORT_ENTITY_PRESENTATION_V1_CAPABILITY: &str =
+    "native-core-viewport-entity-presentation-v1";
+
 #[allow(clippy::too_many_arguments)]
 fn command_palette_search_request_bytes(
     session_id: &str,
@@ -2921,7 +2924,8 @@ impl CoreRegistry {
         pinned_entity_ids: &[String],
         pinned_belt_ids: &[String],
     ) -> anyhow::Result<Value> {
-        self.session(session_id)?.viewport_projection_v2(
+        self.viewport_projection_v2_with_entity_presentation(
+            session_id,
             base_fields,
             planet_id,
             min_x,
@@ -2934,7 +2938,44 @@ impl CoreRegistry {
             belt_limit,
             pinned_entity_ids,
             pinned_belt_ids,
+            None,
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn viewport_projection_v2_with_entity_presentation(
+        &self,
+        session_id: &str,
+        base_fields: &[String],
+        planet_id: &str,
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+        entity_cursor: usize,
+        entity_limit: usize,
+        belt_cursor: usize,
+        belt_limit: usize,
+        pinned_entity_ids: &[String],
+        pinned_belt_ids: &[String],
+        entity_presentation_version: Option<u8>,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?
+            .viewport_projection_v2_with_entity_presentation(
+                base_fields,
+                planet_id,
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+                entity_cursor,
+                entity_limit,
+                belt_cursor,
+                belt_limit,
+                pinned_entity_ids,
+                pinned_belt_ids,
+                entity_presentation_version,
+            )
     }
 
     pub fn factory_read_model_projection(
@@ -5712,6 +5753,95 @@ mod tests {
         let mut registry = CoreRegistry::default();
         registry.enable_player_authority_coverage_for_test();
         registry
+    }
+
+    #[test]
+    fn viewport_entity_presentation_threads_through_registry_without_legacy_drift() {
+        assert_eq!(
+            NATIVE_CORE_VIEWPORT_ENTITY_PRESENTATION_V1_CAPABILITY,
+            "native-core-viewport-entity-presentation-v1"
+        );
+        let (_root, _store, registry, session_id, _checkpoint) =
+            player_authority_fixture_from_bytes(import_envelope());
+        let legacy = registry
+            .viewport_projection_v2(
+                &session_id,
+                &[],
+                "home",
+                -100.0,
+                -100.0,
+                100.0,
+                100.0,
+                0,
+                32,
+                0,
+                1,
+                &[],
+                &[],
+            )
+            .unwrap();
+        let explicit_none = registry
+            .viewport_projection_v2_with_entity_presentation(
+                &session_id,
+                &[],
+                "home",
+                -100.0,
+                -100.0,
+                100.0,
+                100.0,
+                0,
+                32,
+                0,
+                1,
+                &[],
+                &[],
+                None,
+            )
+            .unwrap();
+        assert_eq!(legacy, explicit_none);
+        assert!(legacy.get("entityPresentationVersion").is_none());
+        assert!(legacy.get("entityPresentation").is_none());
+
+        let opted_in = registry
+            .viewport_projection_v2_with_entity_presentation(
+                &session_id,
+                &[],
+                "home",
+                -100.0,
+                -100.0,
+                100.0,
+                100.0,
+                0,
+                32,
+                0,
+                1,
+                &[],
+                &[],
+                Some(1),
+            )
+            .unwrap();
+        assert_eq!(opted_in["entityPresentationVersion"], 1);
+        assert_eq!(
+            opted_in["entityPresentation"].as_array().unwrap().len(),
+            opted_in["entities"].as_array().unwrap().len()
+        );
+        assert!(
+            opted_in["entityPresentation"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|presentation| presentation["supported"] == true)
+        );
+        assert!(
+            opted_in["entityPresentation"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(opted_in["entities"].as_array().unwrap())
+                .all(|(presentation, entity)| {
+                    presentation["entityId"].as_str() == entity["id"].as_str()
+                })
+        );
     }
 
     fn player_authority_fixture_with_probe(

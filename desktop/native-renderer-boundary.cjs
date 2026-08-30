@@ -49,6 +49,15 @@ const ENTITY_QUANTITY_RECORD_KEYS = new Set([
   "inputs", "outputs", "proliferatorBonusProgress",
 ]);
 
+const FACTORY_NODE_PRESENTATION_STATUS_CODES = Object.freeze([
+  "running", "idle", "paused", "missing-recipe", "missing-research", "missing-input",
+  "output-blocked", "no-power", "low-power", "missing-fuel", "resource-depleted",
+  "missing-proliferator", "no-fuel-selected", "grid-standby", "missing-route", "fleet-busy",
+  "missing-vessel", "missing-drone", "missing-warper", "missing-hub", "waiting-load",
+  "waiting-route", "collecting", "missing-dyson-swarm", "missing-dyson-orbit", "launch-paused",
+  "unconfigured",
+]);
+
 const PRODUCTION_HISTORY_SAMPLE_REQUIRED_KEYS = Object.freeze([
   "elapsedSeconds", "productionPerMinute", "consumptionPerMinute", "inventory", "generationKw", "demandKw",
 ]);
@@ -63,6 +72,7 @@ const PRODUCTION_HISTORY_SAMPLE_OPTIONAL_KEYS = Object.freeze([
 const PUBLIC_NATIVE_ERROR_CODES = new Set([
   "NATIVE_CORE_ADVANCE_FAILED", "NATIVE_CORE_CHECKPOINT_FAILED", "NATIVE_CORE_CLOSE_FAILED",
   "NATIVE_CORE_COMMAND_FAILED", "NATIVE_CORE_COMMAND_RECONCILE_FAILED",
+  "NATIVE_CORE_CAPABILITY_MISSING",
   "NATIVE_CORE_COMMIT_FAILED", "NATIVE_CORE_COMPARE_FAILED",
   "NATIVE_CORE_EXACT_REALTIME_RUST_LEASE_UNAVAILABLE",
   "NATIVE_CORE_EXACT_REALTIME_WRITER_FENCE_UNAVAILABLE", "NATIVE_CORE_OPEN_FAILED",
@@ -326,11 +336,11 @@ function normalizeViewportProjectionContext(value, label) {
 }
 
 function normalizeViewportProjectionV2Context(value, label) {
-  const source = exactObject(value, [
+  const source = objectWithKeys(value, [
     "sessionId", "expectedRevision", "baseFields", "planetId", "bounds",
     "entityCursor", "entityLimit", "beltCursor", "beltLimit",
     "pinnedEntityIds", "pinnedBeltIds",
-  ], label);
+  ], ["entityPresentationVersion"], label);
   const entityLimit = safeInteger(source.entityLimit, `${label} entity limit`, 1);
   const beltLimit = safeInteger(source.beltLimit, `${label} belt limit`, 1);
   if (entityLimit > 4_096 || beltLimit > 8_192) throw protocolError(`${label} limits`);
@@ -346,6 +356,9 @@ function normalizeViewportProjectionV2Context(value, label) {
     beltLimit,
     pinnedEntityIds: opaqueIdArray(source.pinnedEntityIds, `${label} pinned entity IDs`, 32),
     pinnedBeltIds: opaqueIdArray(source.pinnedBeltIds, `${label} pinned belt IDs`, 64),
+    entityPresentationVersion: source.entityPresentationVersion === undefined
+      ? undefined
+      : oneOf(source.entityPresentationVersion, [1], `${label} entity presentation version`),
   };
 }
 
@@ -1284,21 +1297,87 @@ function normalizeViewportTotals(value, label) {
   };
 }
 
+function normalizeFactoryNodeResourceReserve(value, label) {
+  if (value === null) return null;
+  const source = exactObject(value, [
+    "infinite", "exhausted", "remaining", "capacity", "remainingRatio", "remainingPercent",
+  ], label);
+  const infinite = boolean(source.infinite, `${label}.infinite`);
+  const exhausted = boolean(source.exhausted, `${label}.exhausted`);
+  const remaining = source.remaining === null ? null : safeInteger(source.remaining, `${label}.remaining`);
+  const capacity = source.capacity === null ? null : safeInteger(source.capacity, `${label}.capacity`);
+  const remainingRatio = finiteNumber(source.remainingRatio, `${label}.remainingRatio`);
+  const remainingPercent = finiteNumber(source.remainingPercent, `${label}.remainingPercent`);
+  if (remainingRatio > 1 || remainingPercent > 100 ||
+      (infinite && (exhausted || remaining !== null || capacity !== null || remainingRatio !== 1 || remainingPercent !== 100)) ||
+      (!infinite && (remaining === null || capacity === null || remaining > capacity))) {
+    throw protocolError(label);
+  }
+  return { infinite, exhausted, remaining, capacity, remainingRatio, remainingPercent };
+}
+
+function normalizeFactoryNodePresentation(value, entity, index) {
+  const label = `native viewport v2 entity presentation[${index}]`;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw protocolError(label);
+  const supported = boolean(value.supported, `${label}.supported`);
+  const source = exactObject(value, supported
+    ? [
+        "entityId", "supported", "coverage", "status", "powerFactor", "resourceReserve",
+        "outputCapacity", "cycleRatePerSecond", "acceptedInputItemIds", "producedOutputItemIds",
+        "targetDysonOrbitLabel",
+      ]
+    : ["entityId", "supported"], label);
+  const entityId = opaqueId(source.entityId, `${label}.entityId`);
+  if (entityId !== entity.id) throw protocolError(`${label}.entityId`);
+  if (!supported) return { entityId, supported: false };
+
+  const statusSource = exactObject(source.status, ["code", "label", "tone"], `${label}.status`);
+  const status = {
+    code: oneOf(statusSource.code, FACTORY_NODE_PRESENTATION_STATUS_CODES, `${label}.status.code`),
+    label: boundedString(statusSource.label, `${label}.status.label`, 256),
+    tone: oneOf(statusSource.tone, ["running", "warning", "blocked", "idle"], `${label}.status.tone`),
+  };
+  const powerFactor = finiteNumber(source.powerFactor, `${label}.powerFactor`);
+  if (powerFactor > 1) throw protocolError(`${label}.powerFactor`);
+  const outputCapacity = finiteNumber(source.outputCapacity, `${label}.outputCapacity`);
+  const cycleRatePerSecond = finiteNumber(source.cycleRatePerSecond, `${label}.cycleRatePerSecond`);
+  const acceptedInputItemIds = opaqueIdArray(source.acceptedInputItemIds, `${label}.acceptedInputItemIds`, 32);
+  const producedOutputItemIds = opaqueIdArray(source.producedOutputItemIds, `${label}.producedOutputItemIds`, 32);
+  const targetDysonOrbitLabel = source.targetDysonOrbitLabel === null
+    ? null
+    : boundedString(source.targetDysonOrbitLabel, `${label}.targetDysonOrbitLabel`, 256);
+  return {
+    entityId,
+    supported: true,
+    coverage: oneOf(source.coverage, ["complete", "conservative"], `${label}.coverage`),
+    status,
+    powerFactor,
+    resourceReserve: normalizeFactoryNodeResourceReserve(source.resourceReserve, `${label}.resourceReserve`),
+    outputCapacity,
+    cycleRatePerSecond,
+    acceptedInputItemIds,
+    producedOutputItemIds,
+    targetDysonOrbitLabel,
+  };
+}
+
 function normalizeCoreViewportProjectionV2(value, context) {
+  const projectionContext = normalizeViewportProjectionV2Context(
+    context,
+    "native viewport v2 projection context",
+  );
+  const presentationRequested = projectionContext.entityPresentationVersion === 1;
   const source = exactObject(value, [
     "schemaVersion", "projectionType", "revision", "planetId", "bounds", "base",
     "entities", "belts", "pinnedEntityIds", "pinnedBeltIds", "nextEntityCursor",
     "nextBeltCursor", "planetTotals", "viewportTotals", "worldBounds", "minimap",
     "broadQueryFallback",
+    ...(presentationRequested ? ["entityPresentationVersion", "entityPresentation"] : []),
   ], "native viewport v2 projection");
   if (source.schemaVersion !== 2 || source.projectionType !== "viewport-v2") {
     throw protocolError("native viewport v2 projection identity");
   }
   requireProjectionByteBudget(source, "native viewport v2 projection");
-  const projectionContext = normalizeViewportProjectionV2Context(
-    context,
-    "native viewport v2 projection context",
-  );
   const revision = safeInteger(source.revision, "native viewport v2 revision");
   if (revision !== projectionContext.expectedRevision) {
     throw protocolError("native viewport v2 revision binding");
@@ -1360,6 +1439,15 @@ function normalizeCoreViewportProjectionV2(value, context) {
     null,
     (entry, label) => opaqueId(entry, label),
   );
+  let entityPresentation;
+  if (presentationRequested) {
+    if (source.entityPresentationVersion !== 1 || !Array.isArray(source.entityPresentation) ||
+        source.entityPresentation.length !== entities.length) {
+      throw protocolError("native viewport v2 entity presentation cardinality");
+    }
+    entityPresentation = source.entityPresentation.map((row, index) =>
+      normalizeFactoryNodePresentation(row, entities[index], index));
+  }
   const entityIds = new Set(entities.map((entity) => entity.id));
   const beltIds = new Set(belts.map((belt) => belt.id));
   if (pinnedEntityIds.some((id) => !entityIds.has(id)) || pinnedBeltIds.some((id) => !beltIds.has(id))) {
@@ -1441,6 +1529,10 @@ function normalizeCoreViewportProjectionV2(value, context) {
     bounds,
     base: normalizeProjectionBase(source.base, projectionContext.baseFields, "native viewport v2 base", budget),
     entities,
+    ...(presentationRequested ? {
+      entityPresentationVersion: 1,
+      entityPresentation,
+    } : {}),
     belts,
     pinnedEntityIds,
     pinnedBeltIds,

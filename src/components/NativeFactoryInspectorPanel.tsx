@@ -8,8 +8,11 @@ import type {
   SelectedEntityReadModel,
 } from "../game/factoryReadModels";
 import {
+  canNativeProjectedEnergyExchangerModeChange,
+  getNativeProjectedEnergyExchangerMode,
   getNativeProjectedPowerPriority,
   getNativeProjectedSplitterDistributionMode,
+  type NativeProjectedEnergyExchangerMode,
   type NativeProjectedEntityConfigurationBinding,
   type NativeProjectedSplitterDistributionMode,
 } from "../game/nativeProjectedEntityConfigurationCommands";
@@ -28,6 +31,10 @@ interface NativeFactoryInspectorPanelProps {
   onSplitterDistributionModeChange: (
     entityId: string,
     targetMode: NativeProjectedSplitterDistributionMode,
+  ) => void;
+  onEnergyExchangerModeChange: (
+    entityId: string,
+    targetMode: NativeProjectedEnergyExchangerMode,
   ) => void;
   onBeltLaneCountChange: (beltId: string, targetLanes: number) => void;
   onBeltPriorityChange: (beltId: string, targetPriority: 0 | 1 | 2) => void;
@@ -64,6 +71,7 @@ function NativeEntitySummary({
   onStackCountChange,
   onPowerPriorityChange,
   onSplitterDistributionModeChange,
+  onEnergyExchangerModeChange,
 }: {
   entity: SelectedEntityReadModel;
   configuration: NativeProjectedEntityConfigurationBinding | null;
@@ -76,12 +84,18 @@ function NativeEntitySummary({
     entityId: string,
     targetMode: NativeProjectedSplitterDistributionMode,
   ) => void;
+  onEnergyExchangerModeChange: (
+    entityId: string,
+    targetMode: NativeProjectedEnergyExchangerMode,
+  ) => void;
 }) {
   const label = entity.buildingId
     ? constructionNames.get(entity.buildingId) ?? entity.buildingId
     : entity.resourceId ? itemLabel(entity.resourceId) : entity.entityId;
   const powerPriority = getNativeProjectedPowerPriority(configuration);
   const splitterDistributionMode = getNativeProjectedSplitterDistributionMode(configuration);
+  const energyExchangerMode = getNativeProjectedEnergyExchangerMode(configuration);
+  const energyExchangerSwitchable = canNativeProjectedEnergyExchangerModeChange(configuration);
   return <>
     <section className="inspector-content native-factory-inspector__entity" aria-label="Windows 原生建筑摘要">
       <div className="inspector-identity"><i className="building-mark"><CircuitBoard size={18} /></i><div><span>Windows 原生建筑</span><strong>{label}</strong></div></div>
@@ -137,6 +151,24 @@ function NativeEntitySummary({
           aria-pressed={splitterDistributionMode === mode}
           onClick={() => onSplitterDistributionModeChange(entity.entityId, mode)}
         >{mode === "balanced" ? "均衡" : "优先线路"}</button>)}
+      </div>
+    </section>}
+    {energyExchangerMode === null ? null : <section
+      className="native-inspector-safe-actions"
+      data-native-energy-exchanger-mode="ordinary-single-v1"
+    >
+      <strong>Rust 能量枢纽模式</strong>
+      <p>{energyExchangerSwitchable
+        ? "切换后由 Rust 原子返还输入输出、回收相连线路，并重新设置配方和生产进度；界面不会预先改写。"
+        : "枢纽仍有储能，必须先放空；当前模式和存档不会被界面擅自改写。"}</p>
+      <div className="native-inspector-stack-actions" role="group" aria-label="Windows 原生能量枢纽模式">
+        {(["charge", "discharge"] as const).map((mode) => <button
+          type="button"
+          key={mode}
+          disabled={pending || !energyExchangerSwitchable || energyExchangerMode === mode}
+          aria-pressed={energyExchangerMode === mode}
+          onClick={() => onEnergyExchangerModeChange(entity.entityId, mode)}
+        >{mode === "charge" ? "空蓄电器充电" : "满蓄电器放电"}</button>)}
       </div>
     </section>}
     <section className="native-inspector-safe-actions" data-native-construction-stack="ordinary-single-v1">
@@ -246,6 +278,7 @@ export function NativeFactoryInspectorPanel({
   onStackCountChange,
   onEntityPowerPriorityChange,
   onSplitterDistributionModeChange,
+  onEnergyExchangerModeChange,
   onBeltLaneCountChange,
   onBeltPriorityChange,
   onRemoveBelt,
@@ -289,6 +322,7 @@ export function NativeFactoryInspectorPanel({
       onStackCountChange={onStackCountChange}
       onPowerPriorityChange={onEntityPowerPriorityChange}
       onSplitterDistributionModeChange={onSplitterDistributionModeChange}
+      onEnergyExchangerModeChange={onEnergyExchangerModeChange}
     />;
   } else if (inspector.belt && !inspector.entity) {
     content = <NativeBeltSummary belt={inspector.belt} pending={pending} onLaneCountChange={onBeltLaneCountChange} onPriorityChange={onBeltPriorityChange} onRemove={onRemoveBelt} />;

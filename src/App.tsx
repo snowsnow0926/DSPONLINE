@@ -520,8 +520,10 @@ import {
 } from "./game/nativeProjectedPlayerCommands";
 import { createNativeProjectedBeltPriorityCommand } from "./game/nativeProjectedBeltCommands";
 import {
+  createNativeProjectedEnergyExchangerModeCommand,
   createNativeProjectedEntityPowerPriorityCommand,
   createNativeProjectedSplitterDistributionModeCommand,
+  type NativeProjectedEnergyExchangerMode,
   type NativeProjectedEntityConfigurationBinding,
   type NativeProjectedSplitterDistributionMode,
 } from "./game/nativeProjectedEntityConfigurationCommands";
@@ -16929,6 +16931,35 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     );
     if (!accepted) setNotice("Rust 没有接受这次分流模式命令；存档未改变");
   }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
+  const changeNativeEnergyExchangerMode = useCallback((
+    entityId: string,
+    targetMode: NativeProjectedEnergyExchangerMode,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次能量枢纽模式未提交");
+      return;
+    }
+    const binding = nativeEntityConfigurationProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.id !== entityId || !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生能量枢纽选择、session 或 revision 已变化；本次模式未提交");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+      baseRevision === binding.revision
+        ? createNativeProjectedEnergyExchangerModeCommand(binding, targetMode)
+        : null,
+      () => setNotice(`已由 Rust 将当前能量枢纽设为${targetMode === "charge" ? "空蓄电器充电" : "满蓄电器放电"}`),
+    );
+    if (!accepted) setNotice("Rust 没有接受这次能量枢纽模式命令；存档未改变");
+  }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
   const selectedBelts = factoryInteractionRows.selectedBelts;
   const dockBeltTier = nativePlayerAuthorityOwnsRuntime
     ? nativeBeltPlacementTier ?? beltTier
@@ -18679,6 +18710,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           onStackCountChange={(entityId, targetCount) => void changeNativeOrdinaryBuildingStack(entityId, targetCount)}
           onEntityPowerPriorityChange={changeNativeEntityPowerPriority}
           onSplitterDistributionModeChange={changeNativeSplitterDistributionMode}
+          onEnergyExchangerModeChange={changeNativeEnergyExchangerMode}
           onBeltLaneCountChange={(beltId, targetLanes) => void changeNativeOrdinaryBeltLanes(beltId, targetLanes)}
           onBeltPriorityChange={changeNativeOrdinaryBeltPriority}
           onRemoveBelt={(beltId) => void removeNativeOrdinaryBelt(beltId)}

@@ -32,18 +32,22 @@ describe("native entity configuration App integration", () => {
     expect(handlers).toMatch(/commandSource\.sessionId !== binding\.sessionId[\s\S]*?commandSource\.baseRevision !== binding\.revision/);
     expect(handlers).toMatch(/commitNativeProjectedCommand\(binding\.revision,[\s\S]*?createNativeProjectedEntityPowerPriorityCommand\(binding, targetPriority\)/);
     expect(handlers).toMatch(/commitNativeProjectedCommand\(binding\.revision,[\s\S]*?createNativeProjectedSplitterDistributionModeCommand\(binding, targetMode\)/);
+    expect(handlers).toMatch(/commitNativeProjectedCommand\(binding\.revision,[\s\S]*?createNativeProjectedEnergyExchangerModeCommand\(binding, targetMode\)/);
     expect(handlers).not.toMatch(/commitGame|gameRef\.current|setPowerPriority|setSplitterMode/);
     expect(app).toMatch(/Never install or predict the projected edit locally[\s\S]*?nativePlayerAuthorityClockRef\.current\?\.refresh\(\)/);
   });
 
-  it("exposes only built-in power priority and splitter controls in the thin inspector", () => {
+  it("exposes only the covered built-in entity controls in the thin inspector", () => {
     expect(inspector).toMatch(/data-native-entity-power-priority="ordinary-single-v1"/);
     expect(inspector).toMatch(/\(\[3, 2, 1\] as const\)\.map/);
     expect(inspector).toMatch(/data-native-splitter-mode="ordinary-single-v1"/);
     expect(inspector).toMatch(/\(\["balanced", "priority"\] as const\)\.map/);
+    expect(inspector).toMatch(/data-native-energy-exchanger-mode="ordinary-single-v1"/);
+    expect(inspector).toMatch(/\(\["charge", "discharge"\] as const\)\.map/);
     expect(app).toMatch(/entityConfiguration=\{nativeEntityConfigurationProjectionBinding\}/);
     expect(app).toMatch(/onEntityPowerPriorityChange=\{changeNativeEntityPowerPriority\}/);
     expect(app).toMatch(/onSplitterDistributionModeChange=\{changeNativeSplitterDistributionMode\}/);
-    expect(inspector).not.toMatch(/energyMode|fuelItemId|stationSlots/);
+    expect(app).toMatch(/onEnergyExchangerModeChange=\{changeNativeEnergyExchangerMode\}/);
+    expect(inspector).not.toMatch(/fuelItemId|stationSlots/);
   });
 });

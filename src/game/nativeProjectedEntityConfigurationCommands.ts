@@ -2,11 +2,12 @@ import {
   SIMULATION_RUNTIME_PROTOCOL_VERSION,
   type SimulationCommandPatch,
 } from "./simulationRuntimeProtocol";
-import type { FactoryEntity, PlanetId, PowerPriority } from "./types";
+import type { EnergyMode, FactoryEntity, PlanetId, PowerPriority } from "./types";
 
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const MAX_LOGICAL_ID_BYTES = 256;
 const MAX_OPAQUE_ID_BYTES = 512;
+const ENERGY_EPSILON = 0.0001;
 const TEXT_ENCODER = new TextEncoder();
 
 const BUILTIN_POWER_PRIORITY_BUILDINGS = new Set([
@@ -27,6 +28,7 @@ const BUILTIN_POWER_PRIORITY_BUILDINGS = new Set([
 ]);
 
 export type NativeProjectedSplitterDistributionMode = "balanced" | "priority";
+export type NativeProjectedEnergyExchangerMode = Exclude<EnergyMode, "auto">;
 
 /**
  * One full entity row pinned into the bounded native canvas projection. The
@@ -81,6 +83,25 @@ export function getNativeProjectedSplitterDistributionMode(
   return mode === "balanced" || mode === "priority" ? mode : null;
 }
 
+/** Returns null unless this is the unlocked-shape built-in exchanger row. */
+export function getNativeProjectedEnergyExchangerMode(
+  binding: NativeProjectedEntityConfigurationBinding | null,
+): NativeProjectedEnergyExchangerMode | null {
+  if (!binding || !validBindingBase(binding) || binding.entity.kind !== "power" ||
+      binding.entity.buildingId !== "energy_exchanger") return null;
+  const mode = binding.entity.energyMode;
+  return mode === "charge" || mode === "discharge" ? mode : null;
+}
+
+/** The renderer may offer a switch only while the projected cell is empty. */
+export function canNativeProjectedEnergyExchangerModeChange(
+  binding: NativeProjectedEntityConfigurationBinding | null,
+): boolean {
+  if (getNativeProjectedEnergyExchangerMode(binding) === null || !binding) return false;
+  const storedEnergyMj = binding.entity.storedEnergyMj ?? 0;
+  return Number.isFinite(storedEnergyMj) && Math.max(0, storedEnergyMj) <= ENERGY_EPSILON;
+}
+
 function emptyCommand(baseRevision: number): SimulationCommandPatch {
   return {
     protocolVersion: SIMULATION_RUNTIME_PROTOCOL_VERSION,
@@ -127,6 +148,30 @@ export function createNativeProjectedSplitterDistributionModeCommand(
   command.changedEntities = [{
     id: binding.entity.id,
     changes: [{ path: ["distributionMode"], operation: "set", value: targetMode }],
+  }];
+  return command;
+}
+
+/**
+ * Builds only the requested mode leaf. Rust derives refunds, recipe/progress
+ * resets and every incident-belt removal from its latest authoritative row.
+ */
+export function createNativeProjectedEnergyExchangerModeCommand(
+  binding: NativeProjectedEntityConfigurationBinding,
+  targetMode: NativeProjectedEnergyExchangerMode,
+): SimulationCommandPatch | null {
+  const current = getNativeProjectedEnergyExchangerMode(binding);
+  if (current === null || (targetMode !== "charge" && targetMode !== "discharge")) {
+    throw new TypeError("原生能量枢纽模式投影无效或不受支持");
+  }
+  if (current === targetMode) return null;
+  if (!canNativeProjectedEnergyExchangerModeChange(binding)) {
+    throw new TypeError("原生能量枢纽仍有储能，不能切换模式");
+  }
+  const command = emptyCommand(binding.revision);
+  command.changedEntities = [{
+    id: binding.entity.id,
+    changes: [{ path: ["energyMode"], operation: "set", value: targetMode }],
   }];
   return command;
 }

@@ -89,7 +89,7 @@ describe("NativeFactoryInspectorPanel", () => {
     const remove = vi.fn();
     const stack = vi.fn();
     const lock = vi.fn();
-    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi()} entityConfiguration={null} pending={false} onEntityLockChange={lock} onRemoveEntity={remove} onStackCountChange={stack} onEntityPowerPriorityChange={vi.fn()} onSplitterDistributionModeChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
+    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi()} entityConfiguration={null} pending={false} onEntityLockChange={lock} onRemoveEntity={remove} onStackCountChange={stack} onEntityPowerPriorityChange={vi.fn()} onSplitterDistributionModeChange={vi.fn()} onEnergyExchangerModeChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
     expect(host.textContent).toContain("MOD/建筑-一");
     expect(host.textContent).toContain("MOD/输入");
     const button = host.querySelector<HTMLButtonElement>('[data-native-construction-removal] button')!;
@@ -105,7 +105,7 @@ describe("NativeFactoryInspectorPanel", () => {
   });
 
   it("fails closed for a mismatched revision and never exposes the removal action", () => {
-    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi({ revision: 9 })} entityConfiguration={null} pending={false} onEntityLockChange={vi.fn()} onRemoveEntity={vi.fn()} onStackCountChange={vi.fn()} onEntityPowerPriorityChange={vi.fn()} onSplitterDistributionModeChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
+    act(() => root.render(<NativeFactoryInspectorPanel inspector={inspector()} multiSelection={multi({ revision: 9 })} entityConfiguration={null} pending={false} onEntityLockChange={vi.fn()} onRemoveEntity={vi.fn()} onStackCountChange={vi.fn()} onEntityPowerPriorityChange={vi.fn()} onSplitterDistributionModeChange={vi.fn()} onEnergyExchangerModeChange={vi.fn()} onBeltLaneCountChange={vi.fn()} onBeltPriorityChange={vi.fn()} onRemoveBelt={vi.fn()} />));
     expect(host.textContent).toContain("正在核对原生检查摘要");
     expect(host.querySelector("[data-native-construction-removal]")).toBeNull();
   });
@@ -145,6 +145,7 @@ describe("NativeFactoryInspectorPanel", () => {
       onStackCountChange={vi.fn()}
       onEntityPowerPriorityChange={vi.fn()}
       onSplitterDistributionModeChange={vi.fn()}
+      onEnergyExchangerModeChange={vi.fn()}
       onBeltLaneCountChange={lanes}
       onBeltPriorityChange={priority}
       onRemoveBelt={removeBelt}
@@ -188,6 +189,7 @@ describe("NativeFactoryInspectorPanel", () => {
       onStackCountChange={vi.fn()}
       onEntityPowerPriorityChange={priority}
       onSplitterDistributionModeChange={vi.fn()}
+      onEnergyExchangerModeChange={vi.fn()}
       onBeltLaneCountChange={vi.fn()}
       onBeltPriorityChange={vi.fn()}
       onRemoveBelt={vi.fn()}
@@ -231,6 +233,7 @@ describe("NativeFactoryInspectorPanel", () => {
         onStackCountChange={vi.fn()}
         onEntityPowerPriorityChange={vi.fn()}
         onSplitterDistributionModeChange={mode}
+        onEnergyExchangerModeChange={vi.fn()}
         onBeltLaneCountChange={vi.fn()}
         onBeltPriorityChange={vi.fn()}
         onRemoveBelt={vi.fn()}
@@ -254,5 +257,63 @@ describe("NativeFactoryInspectorPanel", () => {
       buildingId: "MOD/custom-splitter" as FactoryEntity["buildingId"],
     })));
     expect(host.querySelector("[data-native-splitter-mode]")).toBeNull();
+  });
+
+  it("routes an empty built-in energy exchanger and blocks stored or pending rows", () => {
+    const mode = vi.fn();
+    const exchanger = projectedEntity({
+      id: "exchanger-a",
+      kind: "power",
+      buildingId: "energy_exchanger",
+      recipeId: "accumulator_charge",
+      powerPriority: undefined,
+      energyMode: "charge",
+      storedEnergyMj: 0.0001,
+      powerInputKw: 0,
+      powerOutputKw: 0,
+    });
+    const exchangerSummary = {
+      ...entity,
+      entityId: exchanger.id,
+      kind: exchanger.kind,
+      buildingId: exchanger.buildingId ?? null,
+      recipeId: exchanger.recipeId ?? null,
+      machineCount: 1,
+      inputItems: { rows: [], totalCount: 0, truncated: false },
+    };
+    const render = (projected: FactoryEntity, pending = false) => act(() => root.render(
+      <NativeFactoryInspectorPanel
+        inspector={inspector({ entity: exchangerSummary })}
+        multiSelection={multi({ entityRows: { rows: [exchangerSummary], totalCount: 1, truncated: false } })}
+        entityConfiguration={configuration(projected)}
+        pending={pending}
+        onEntityLockChange={vi.fn()}
+        onRemoveEntity={vi.fn()}
+        onStackCountChange={vi.fn()}
+        onEntityPowerPriorityChange={vi.fn()}
+        onSplitterDistributionModeChange={vi.fn()}
+        onEnergyExchangerModeChange={mode}
+        onBeltLaneCountChange={vi.fn()}
+        onBeltPriorityChange={vi.fn()}
+        onRemoveBelt={vi.fn()}
+      />,
+    ));
+
+    render(exchanger);
+    let buttons = [...host.querySelectorAll<HTMLButtonElement>("[data-native-energy-exchanger-mode] button")];
+    expect(buttons).toHaveLength(2);
+    expect(buttons[0].disabled).toBe(true);
+    expect(buttons[1].disabled).toBe(false);
+    act(() => buttons[1].click());
+    expect(mode).toHaveBeenCalledWith("exchanger-a", "discharge");
+
+    render(exchanger, true);
+    buttons = [...host.querySelectorAll<HTMLButtonElement>("[data-native-energy-exchanger-mode] button")];
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+
+    render({ ...exchanger, storedEnergyMj: 0.01 });
+    buttons = [...host.querySelectorAll<HTMLButtonElement>("[data-native-energy-exchanger-mode] button")];
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+    expect(host.textContent).toContain("必须先放空");
   });
 });

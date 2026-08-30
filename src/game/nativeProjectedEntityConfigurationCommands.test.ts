@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { FactoryEntity } from "./types";
 import {
+  canNativeProjectedEnergyExchangerModeChange,
+  createNativeProjectedEnergyExchangerModeCommand,
   createNativeProjectedEntityPowerPriorityCommand,
   createNativeProjectedSplitterDistributionModeCommand,
+  getNativeProjectedEnergyExchangerMode,
   getNativeProjectedPowerPriority,
   getNativeProjectedSplitterDistributionMode,
   type NativeProjectedEntityConfigurationBinding,
@@ -125,6 +128,81 @@ describe("native projected entity configuration commands", () => {
         .toThrow(TypeError);
     }
     expect(() => createNativeProjectedSplitterDistributionModeCommand(splitter, "random" as "balanced"))
+      .toThrow(TypeError);
+  });
+
+  it("builds only one exchanger mode intent and leaves derived refunds to Rust", () => {
+    const exchanger = binding({
+      entity: entity({
+        id: "exchanger-a",
+        kind: "power",
+        buildingId: "energy_exchanger",
+        recipeId: "accumulator_charge",
+        powerPriority: undefined,
+        energyMode: "charge",
+        storedEnergyMj: 0.0001,
+        inputs: { accumulator: 2 },
+        outputs: { charged_accumulator: 3 },
+      }),
+    });
+    expect(getNativeProjectedEnergyExchangerMode(exchanger)).toBe("charge");
+    expect(canNativeProjectedEnergyExchangerModeChange(exchanger)).toBe(true);
+    expect(createNativeProjectedEnergyExchangerModeCommand(exchanger, "discharge")).toEqual({
+      protocolVersion: 1,
+      baseRevision: 73,
+      topLevelChanges: [],
+      changedEntities: [{
+        id: "exchanger-a",
+        changes: [{ path: ["energyMode"], operation: "set", value: "discharge" }],
+      }],
+      addedEntities: [],
+      removedEntityIds: [],
+      changedBelts: [],
+      addedBelts: [],
+      removedBeltIds: [],
+    });
+    expect(createNativeProjectedEnergyExchangerModeCommand(exchanger, "charge")).toBeNull();
+  });
+
+  it("fails closed for stored, malformed, locked, foreign and MOD exchanger rows", () => {
+    const exchanger = (overrides: Partial<FactoryEntity> = {}) => binding({
+      entity: entity({
+        id: "exchanger-a",
+        kind: "power",
+        buildingId: "energy_exchanger",
+        recipeId: "accumulator_charge",
+        powerPriority: undefined,
+        energyMode: "charge",
+        storedEnergyMj: 0,
+        ...overrides,
+      }),
+    });
+    const stored = exchanger({ storedEnergyMj: 0.00011 });
+    expect(getNativeProjectedEnergyExchangerMode(stored)).toBe("charge");
+    expect(canNativeProjectedEnergyExchangerModeChange(stored)).toBe(false);
+    expect(() => createNativeProjectedEnergyExchangerModeCommand(stored, "discharge"))
+      .toThrow(TypeError);
+
+    for (const unsupported of [
+      exchanger({ interactionLocked: true }),
+      exchanger({ planetId: "ashen" }),
+      exchanger({ kind: "machine" }),
+      exchanger({ buildingId: "MOD/energy-exchanger" as FactoryEntity["buildingId"] }),
+      exchanger({ energyMode: "auto" }),
+      exchanger({ energyMode: "invalid" as "charge" }),
+      exchanger({ storedEnergyMj: Number.NaN }),
+    ]) {
+      if (unsupported.entity.storedEnergyMj !== undefined &&
+          Number.isNaN(unsupported.entity.storedEnergyMj)) {
+        expect(getNativeProjectedEnergyExchangerMode(unsupported)).toBe("charge");
+      } else {
+        expect(getNativeProjectedEnergyExchangerMode(unsupported)).toBeNull();
+      }
+      expect(canNativeProjectedEnergyExchangerModeChange(unsupported)).toBe(false);
+      expect(() => createNativeProjectedEnergyExchangerModeCommand(unsupported, "discharge"))
+        .toThrow(TypeError);
+    }
+    expect(() => createNativeProjectedEnergyExchangerModeCommand(exchanger(), "auto" as "charge"))
       .toThrow(TypeError);
   });
 });

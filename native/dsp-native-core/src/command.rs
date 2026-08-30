@@ -18,6 +18,7 @@ const MAX_PLAYER_ORBIT_ID_BYTES: usize = 160;
 const PLAYER_QUANTUM_CAPACITY_MIN: &str = "10000";
 const PLAYER_QUANTUM_CAPACITY_MAX: &str = "10000000000";
 const MAX_PLAYER_TECHNOLOGY_ROWS: usize = 512;
+const PLAYER_ENERGY_EPSILON: f64 = 0.0001;
 const BELT_ROUTE_MODES: &[&str] = &["bezier", "auto", "upper", "lower", "manual"];
 /// FNV-1a fingerprint produced by `createContentPackRegistry()` with no packs.
 /// The current CORE catalog omits the optional MOD `stackLimit`, so positive
@@ -1626,6 +1627,313 @@ fn validate_interaction_lock_command(
         }
     }
     Ok(())
+}
+
+fn command_contains_energy_exchanger_mode_intent(command: &SimulationCommandPatch) -> bool {
+    command.changed_entities.iter().any(|record| {
+        record
+            .changes
+            .iter()
+            .any(|change| path_matches(&change.path, &["energyMode"]))
+    })
+}
+
+fn validated_energy_exchanger_mode_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<(String, Value, String)> {
+    if command.changed_entities.len() != 1
+        || command.changed_entities[0].changes.len() != 1
+        || !command.top_level_changes.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority energy exchanger command shape is invalid")
+    }
+    if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    {
+        bail!("native player-authority energy exchanger commands require the built-in catalog")
+    }
+    let record = &command.changed_entities[0];
+    let target = require_exact_set_patch(&record.changes, &["energyMode"])?
+        .as_str()
+        .filter(|mode| matches!(*mode, "charge" | "discharge"))
+        .ok_or_else(|| anyhow!("native player-authority energy exchanger target is invalid"))?
+        .to_owned();
+    let index = *state
+        .entity_index
+        .get(&record.id)
+        .ok_or_else(|| anyhow!("native player-authority energy exchanger is missing"))?;
+    let entity = state.parse_entity(index)?;
+    let object = entity
+        .as_object()
+        .ok_or_else(|| anyhow!("native player-authority energy exchanger is invalid"))?;
+    if object.get("kind").and_then(Value::as_str) != Some("power")
+        || object.get("buildingId").and_then(Value::as_str) != Some("energy_exchanger")
+    {
+        bail!("native player-authority energy exchanger target is not the built-in building")
+    }
+    let active_planet_id = state
+        .base_value()
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority active planet is missing"))?;
+    if object.get("planetId").and_then(Value::as_str) != Some(active_planet_id) {
+        bail!("native player-authority energy exchanger is not on the active planet")
+    }
+    if object
+        .get("interactionLocked")
+        .is_some_and(|locked| locked.as_bool() != Some(false))
+    {
+        bail!("native player-authority energy exchanger is locked or malformed")
+    }
+    let current = object
+        .get("energyMode")
+        .and_then(Value::as_str)
+        .filter(|mode| matches!(*mode, "charge" | "discharge"))
+        .ok_or_else(|| {
+            anyhow!("native player-authority current energy exchanger mode is invalid")
+        })?;
+    if current == target {
+        bail!("native player-authority energy exchanger target is unchanged")
+    }
+    let building = state
+        .catalog
+        .buildings
+        .get("energy_exchanger")
+        .filter(|building| {
+            building.kind == "power"
+                && building.energy_capacity_mj.is_finite()
+                && building.energy_capacity_mj > 0.0
+        })
+        .ok_or_else(|| anyhow!("native player-authority energy exchanger catalog is invalid"))?;
+    let construction = state
+        .catalog
+        .constructions
+        .get("energy_exchanger")
+        .ok_or_else(|| {
+            anyhow!("native player-authority energy exchanger construction is missing")
+        })?;
+    if construction
+        .required_tech_id
+        .as_deref()
+        .is_some_and(|technology_id| !technology_is_completed(state, technology_id))
+    {
+        bail!("native player-authority energy exchanger technology is locked")
+    }
+    for recipe_id in ["accumulator_charge", "accumulator_discharge"] {
+        let recipe = state.catalog.recipes.get(recipe_id).filter(|recipe| {
+            recipe.building_id == "energy_exchanger"
+                && recipe
+                    .required_tech_id
+                    .as_deref()
+                    .is_none_or(|technology_id| technology_is_completed(state, technology_id))
+        });
+        if recipe.is_none() {
+            bail!("native player-authority energy exchanger recipe is missing or locked")
+        }
+    }
+    let machine_count = safe_json_integer(object.get("machineCount"), "energy exchanger count")?;
+    if machine_count == 0 {
+        bail!("native player-authority energy exchanger count is empty")
+    }
+    let capacity = building.energy_capacity_mj * machine_count as f64;
+    if !capacity.is_finite() {
+        bail!("native player-authority energy exchanger capacity is invalid")
+    }
+    let raw_stored = match object.get("storedEnergyMj") {
+        Some(value) => finite_json_number(Some(value), "energy exchanger stored energy")?,
+        None => 0.0,
+    };
+    if raw_stored.max(0.0).min(capacity) > PLAYER_ENERGY_EPSILON {
+        bail!("native player-authority energy exchanger still contains stored energy")
+    }
+    for field in ["inputs", "outputs"] {
+        let inventory = object
+            .get(field)
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                anyhow!("native player-authority energy exchanger inventory is invalid")
+            })?;
+        for (item_id, amount) in inventory {
+            if !state.catalog.items.contains_key(item_id) {
+                bail!("native player-authority energy exchanger inventory item is unknown")
+            }
+            if finite_json_number(Some(amount), "energy exchanger inventory")? < 0.0 {
+                bail!("native player-authority energy exchanger inventory is negative")
+            }
+        }
+    }
+    Ok((record.id.clone(), entity, target))
+}
+
+fn validate_energy_exchanger_mode_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    validated_energy_exchanger_mode_intent(state, command).map(|_| ())
+}
+
+fn add_energy_exchanger_refund_to_tray(
+    base: &mut Map<String, Value>,
+    item_id: &str,
+    amount: &Value,
+) -> anyhow::Result<()> {
+    let amount = finite_json_number(Some(amount), "energy exchanger inventory refund")?;
+    if amount < 0.0 {
+        bail!("native player-authority energy exchanger inventory refund is negative")
+    }
+    let target = if matches!(item_id, "logistics_drone" | "logistics_vessel") {
+        base.entry("portableFleet".to_owned())
+            .or_insert_with(|| serde_json::json!({ "logistics_drone": 0, "logistics_vessel": 0 }))
+            .as_object_mut()
+            .ok_or_else(|| {
+                anyhow!("native player-authority energy exchanger portable fleet is invalid")
+            })?
+    } else {
+        base.get_mut("tray")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native player-authority active tray is invalid"))?
+    };
+    let current = match target.get(item_id) {
+        Some(value) => finite_json_number(Some(value), "energy exchanger tray inventory")?,
+        None => 0.0,
+    };
+    if current < 0.0 {
+        bail!("native player-authority energy exchanger tray inventory is negative")
+    }
+    let next = (current + amount + PLAYER_ENERGY_EPSILON).floor();
+    if !next.is_finite() || next > MAX_JAVASCRIPT_SAFE_INTEGER as f64 {
+        bail!("native player-authority energy exchanger tray refund overflows")
+    }
+    target.insert(item_id.to_owned(), Value::from(next as u64));
+    Ok(())
+}
+
+fn expand_energy_exchanger_mode_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<SimulationCommandPatch> {
+    let (entity_id, before_entity, target) =
+        validated_energy_exchanger_mode_intent(state, command)?;
+    let before_object = before_entity
+        .as_object()
+        .expect("energy exchanger intent validated the entity object");
+    let mut candidate_base = Value::Object(state.base_value().clone());
+    let candidate_base_object = candidate_base
+        .as_object_mut()
+        .expect("the native core base is an object");
+    for field in ["inputs", "outputs"] {
+        for (item_id, amount) in before_object[field]
+            .as_object()
+            .expect("energy exchanger inventory was validated")
+        {
+            add_energy_exchanger_refund_to_tray(candidate_base_object, item_id, amount)?;
+        }
+    }
+
+    let mut removed_belt_ids = Vec::new();
+    let mut belt_refunds = BTreeMap::<&'static str, u64>::new();
+    for belt_index in 0..state.belts.ids.len() {
+        let belt = state.parse_belt(belt_index)?;
+        let object = belt
+            .as_object()
+            .ok_or_else(|| anyhow!("native player-authority incident belt is invalid"))?;
+        if object.get("source").and_then(Value::as_str) != Some(entity_id.as_str())
+            && object.get("target").and_then(Value::as_str) != Some(entity_id.as_str())
+        {
+            continue;
+        }
+        let belt_id = object
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("native player-authority incident belt ID is invalid"))?;
+        let lanes = safe_json_integer(object.get("lanes"), "incident belt lanes")?;
+        if lanes == 0 {
+            bail!("native player-authority incident belt lanes are empty")
+        }
+        let tier = safe_json_integer(object.get("tier"), "incident belt tier")?
+            .try_into()
+            .map_err(|_| anyhow!("native player-authority incident belt tier is invalid"))?;
+        let construction_id = builtin_belt_construction_id(state, tier)?;
+        let refund = belt_refunds.entry(construction_id).or_default();
+        *refund = refund
+            .checked_add(lanes)
+            .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+            .ok_or_else(|| {
+                anyhow!("native player-authority energy exchanger belt refund overflows")
+            })?;
+        removed_belt_ids.push(belt_id.to_owned());
+    }
+    let construction = candidate_base_object
+        .get_mut("construction")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native player-authority construction inventory is missing"))?;
+    for (construction_id, refund) in belt_refunds {
+        let current = normalized_construction_inventory(construction.get(construction_id))?;
+        let next = current
+            .checked_add(refund)
+            .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+            .ok_or_else(|| {
+                anyhow!("native player-authority energy exchanger belt refund overflows")
+            })?;
+        construction.insert(construction_id.to_owned(), Value::from(next));
+    }
+
+    let mut candidate_entity = before_entity.clone();
+    let candidate_object = candidate_entity
+        .as_object_mut()
+        .expect("energy exchanger intent validated the entity object");
+    candidate_object.insert("inputs".to_owned(), Value::Object(Map::new()));
+    candidate_object.insert("outputs".to_owned(), Value::Object(Map::new()));
+    candidate_object.insert("energyMode".to_owned(), Value::from(target.as_str()));
+    candidate_object.insert(
+        "recipeId".to_owned(),
+        Value::from(if target == "discharge" {
+            "accumulator_discharge"
+        } else {
+            "accumulator_charge"
+        }),
+    );
+    candidate_object.insert("progress".to_owned(), Value::from(0));
+    candidate_object.insert("powerInputKw".to_owned(), Value::from(0));
+    candidate_object.insert("powerOutputKw".to_owned(), Value::from(0));
+
+    let mut top_level_changes = Vec::new();
+    create_expected_value_patches(
+        &Value::Object(state.base_value().clone()),
+        &candidate_base,
+        Vec::new(),
+        &mut top_level_changes,
+    );
+    let mut entity_changes = Vec::new();
+    create_expected_value_patches(
+        &before_entity,
+        &candidate_entity,
+        Vec::new(),
+        &mut entity_changes,
+    );
+    if entity_changes.is_empty() {
+        bail!("native player-authority energy exchanger transition is empty")
+    }
+    Ok(SimulationCommandPatch {
+        protocol_version: command.protocol_version,
+        base_revision: command.base_revision,
+        top_level_changes,
+        changed_entities: vec![RecordPatch {
+            id: entity_id,
+            changes: entity_changes,
+        }],
+        added_entities: Vec::new(),
+        removed_entity_ids: Vec::new(),
+        changed_belts: Vec::new(),
+        added_belts: Vec::new(),
+        removed_belt_ids,
+    })
 }
 
 fn validate_entity_power_or_splitter_configuration_command(
@@ -6193,6 +6501,9 @@ impl CoreState {
         }) {
             return validate_interaction_lock_command(self, command);
         }
+        if command_contains_energy_exchanger_mode_intent(command) {
+            return validate_energy_exchanger_mode_command(self, command);
+        }
         if command.changed_entities.iter().any(|record| {
             record.changes.iter().any(|change| {
                 matches!(
@@ -6473,6 +6784,7 @@ impl CoreState {
         // and leave the two planet inventories and visible metrics mismatched.
         let expanded_active_planet_intent;
         let expanded_research_transition_intent;
+        let expanded_energy_exchanger_mode_intent;
         let applied_command = if command_contains_active_planet_intent(command) {
             expanded_active_planet_intent = expand_active_planet_intent(self, command)?;
             &expanded_active_planet_intent
@@ -6480,6 +6792,10 @@ impl CoreState {
             expanded_research_transition_intent =
                 expand_player_research_transition_intent(self, command)?;
             &expanded_research_transition_intent
+        } else if command_contains_energy_exchanger_mode_intent(command) {
+            expanded_energy_exchanger_mode_intent =
+                expand_energy_exchanger_mode_intent(self, command)?;
+            &expanded_energy_exchanger_mode_intent
         } else {
             command
         };
@@ -7194,6 +7510,164 @@ mod tests {
 
     fn player_command_state() -> CoreState {
         player_command_state_for_registry(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT)
+    }
+
+    fn player_energy_exchanger_catalog_for_registry(registry_fingerprint: &str) -> RuntimeCatalog {
+        let mut snapshot = serde_json::to_value(
+            player_command_catalog_for_registry(registry_fingerprint).snapshot,
+        )
+        .unwrap();
+        snapshot["items"].as_array_mut().unwrap().extend([
+            serde_json::json!({ "id": "accumulator", "kind": "solid" }),
+            serde_json::json!({ "id": "charged_accumulator", "kind": "solid" }),
+        ]);
+        snapshot["buildings"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "energy_exchanger",
+                "kind": "power",
+                "speed": 1,
+                "inputCapacity": 100,
+                "outputCapacity": 100,
+                "powerGenerationKw": 45000,
+                "powerChargeKw": 45000,
+                "energyCapacityMj": 90
+            }));
+        snapshot["recipes"].as_array_mut().unwrap().extend([
+            serde_json::json!({
+                "id": "accumulator_charge",
+                "buildingId": "energy_exchanger",
+                "duration": 2,
+                "requiredTechId": "energy_storage",
+                "inputs": [{ "itemId": "accumulator", "amount": 1 }],
+                "outputs": [{ "itemId": "charged_accumulator", "amount": 1 }]
+            }),
+            serde_json::json!({
+                "id": "accumulator_discharge",
+                "buildingId": "energy_exchanger",
+                "duration": 2,
+                "requiredTechId": "energy_storage",
+                "inputs": [{ "itemId": "charged_accumulator", "amount": 1 }],
+                "outputs": [{ "itemId": "accumulator", "amount": 1 }]
+            }),
+        ]);
+        snapshot["constructions"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "energy_exchanger",
+                "outputAmount": 1,
+                "requiredTechId": "energy_storage",
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+            }));
+        snapshot["technologies"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "energy_storage",
+                "costs": [{ "itemId": "electromagnetic_matrix", "amount": 3 }],
+                "prerequisites": []
+            }));
+        RuntimeCatalog::validate(
+            serde_json::from_value(snapshot).unwrap(),
+            registry_fingerprint,
+        )
+        .unwrap()
+    }
+
+    fn player_energy_exchanger_entity() -> String {
+        serde_json::json!({
+            "id": "exchanger-a",
+            "kind": "power",
+            "planetId": "home",
+            "position": { "x": 7.0, "y": 2.0 },
+            "interactionLocked": false,
+            "buildingId": "energy_exchanger",
+            "powerGridId": "grid-a",
+            "generationPriority": 2,
+            "recipeId": "accumulator_charge",
+            "energyMode": "charge",
+            "storedEnergyMj": PLAYER_ENERGY_EPSILON,
+            "machineCount": 2,
+            "minerCount": 0,
+            "inputs": { "accumulator": 2.4 },
+            "outputs": { "charged_accumulator": 3.6 },
+            "progress": 0.75,
+            "powerInputKw": 42000,
+            "powerOutputKw": 17000,
+            "routingCursor": 0,
+            "utilization": 0.5,
+            "productionRate": 0.25
+        })
+        .to_string()
+    }
+
+    fn player_energy_exchanger_belt(id: &str, source: &str, target: &str, lanes: u64) -> String {
+        serde_json::json!({
+            "id": id,
+            "planetId": "home",
+            "source": source,
+            "target": target,
+            "itemId": "accumulator",
+            "lanes": lanes,
+            "tier": 1,
+            "sorterTier": 1,
+            "progress": 0,
+            "priority": 1,
+            "stackSize": 1,
+            "monitorEnabled": false,
+            "routeMode": "auto",
+            "lastFlow": 0
+        })
+        .to_string()
+    }
+
+    fn player_energy_exchanger_state_for_registry(registry_fingerprint: &str) -> CoreState {
+        let seed = player_command_state_for_registry(registry_fingerprint);
+        let mut base = seed.base_value().clone();
+        base.get_mut("tray")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .extend([
+                ("accumulator".to_owned(), Value::from(7)),
+                ("charged_accumulator".to_owned(), Value::from(11)),
+            ]);
+        base["research"]["completedTechIds"] = serde_json::json!(["energy_storage"]);
+        CoreState::from_public_v47_parts(
+            CoreCheckpointIdentity {
+                slot: "normal-main".to_owned(),
+                generation: 1,
+                root_hash: "a".repeat(64),
+                revision: 9,
+                state_version: 47,
+                mode: "normal".to_owned(),
+                registry_fingerprint: registry_fingerprint.to_owned(),
+                base_primary_checksum: "12345678".to_owned(),
+            },
+            base,
+            vec![
+                player_command_entity("smelter-a", "arc_smelter", 1.0, None),
+                player_command_entity("ejector-a", "em_rail_ejector", 3.0, Some("orbit-home-old")),
+                player_command_entity("ejector-b", "em_rail_ejector", 5.0, Some("orbit-home-old")),
+                player_energy_exchanger_entity(),
+            ],
+            vec![
+                player_command_belt(),
+                player_energy_exchanger_belt("belt-exchanger-in", "smelter-a", "exchanger-a", 2),
+                player_energy_exchanger_belt("belt-exchanger-out", "exchanger-a", "ejector-a", 3),
+            ],
+            player_energy_exchanger_catalog_for_registry(registry_fingerprint),
+        )
+        .unwrap()
+    }
+
+    fn player_energy_exchanger_state() -> CoreState {
+        player_energy_exchanger_state_for_registry(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT)
+    }
+
+    fn energy_exchanger_mode_command(base_revision: u64, target: Value) -> SimulationCommandPatch {
+        entity_leaf_command(base_revision, "exchanger-a", "energyMode", target)
     }
 
     fn player_technology_layout_state() -> CoreState {
@@ -9647,6 +10121,195 @@ mod tests {
         assert!(format!("{error:#}").contains("current planet viewport zoom"));
         assert_eq!(malformed.revision, 9);
         assert_eq!(malformed.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_energy_exchanger_mode_expands_inventory_and_topology_atomically() {
+        let command = energy_exchanger_mode_command(9, Value::from("discharge"));
+        let durable = serde_json::to_string(&command).unwrap();
+        assert!(!durable.contains("accumulator_charge"));
+        assert!(!durable.contains("charged_accumulator"));
+        assert!(!durable.contains("belt-exchanger"));
+
+        let mut live = player_energy_exchanger_state();
+        let receipt = live.apply_player_authority_command(&command).unwrap();
+        assert_eq!(receipt.previous_revision, 9);
+        assert_eq!(receipt.revision, 10);
+        assert_eq!(receipt.changed_entity_ids, ["exchanger-a"]);
+        assert_eq!(
+            receipt.changed_belt_ids,
+            ["belt-exchanger-in", "belt-exchanger-out"]
+        );
+        assert!(receipt.topology_dirty);
+
+        let exchanger_index = *live.entity_index.get("exchanger-a").unwrap();
+        let exchanger = live.parse_entity(exchanger_index).unwrap();
+        assert_eq!(exchanger["energyMode"], "discharge");
+        assert_eq!(exchanger["recipeId"], "accumulator_discharge");
+        assert_eq!(exchanger["inputs"], serde_json::json!({}));
+        assert_eq!(exchanger["outputs"], serde_json::json!({}));
+        assert_eq!(exchanger["progress"], 0);
+        assert_eq!(exchanger["powerInputKw"], 0);
+        assert_eq!(exchanger["powerOutputKw"], 0);
+        assert_eq!(live.base_value()["tray"]["accumulator"], 9);
+        assert_eq!(live.base_value()["tray"]["charged_accumulator"], 14);
+        assert_eq!(live.base_value()["construction"]["conveyor_belt_mk1"], 10);
+        assert!(live.belt_index.contains_key("belt-priority"));
+        assert!(!live.belt_index.contains_key("belt-exchanger-in"));
+        assert!(!live.belt_index.contains_key("belt-exchanger-out"));
+
+        let live_hash = live.canonical_sha256().unwrap();
+        let replayed_command: SimulationCommandPatch = serde_json::from_str(&durable).unwrap();
+        let mut replayed = player_energy_exchanger_state();
+        replayed
+            .replay_operation(
+                9,
+                10,
+                Some(&replayed_command),
+                0.0,
+                0.0,
+                crate::CoreAdvanceMode::Exact,
+            )
+            .unwrap();
+        assert_eq!(replayed.canonical_sha256().unwrap(), live_hash);
+        assert_eq!(replayed.base_value(), live.base_value());
+        assert_eq!(
+            replayed
+                .parse_entity(*replayed.entity_index.get("exchanger-a").unwrap())
+                .unwrap(),
+            exchanger
+        );
+        assert!(replayed.belt_index.contains_key("belt-priority"));
+        assert!(!replayed.belt_index.contains_key("belt-exchanger-in"));
+        assert!(!replayed.belt_index.contains_key("belt-exchanger-out"));
+    }
+
+    #[test]
+    fn player_authority_energy_exchanger_mode_matches_portable_refund_and_epsilon_boundary() {
+        let mut state = player_energy_exchanger_state();
+        let index = *state.entity_index.get("exchanger-a").unwrap();
+        let mut entity = state.parse_entity(index).unwrap();
+        entity["inputs"]["logistics_drone"] = Value::from(1.9);
+        state.replace_entity_raw(index, Arc::<str>::from(entity.to_string()));
+
+        state
+            .apply_player_authority_command(&energy_exchanger_mode_command(
+                9,
+                Value::from("discharge"),
+            ))
+            .unwrap();
+
+        assert_eq!(state.base_value()["portableFleet"]["logistics_drone"], 21);
+        assert_eq!(state.base_value()["tray"]["logistics_drone"], 0);
+    }
+
+    #[test]
+    fn player_authority_energy_exchanger_mode_fails_closed_on_forged_or_unsupported_intents() {
+        let mut extra_root = energy_exchanger_mode_command(9, Value::from("discharge"));
+        extra_root.top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("paused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(true)),
+        });
+        let mut preexpanded = energy_exchanger_mode_command(9, Value::from("discharge"));
+        preexpanded
+            .removed_belt_ids
+            .push("belt-exchanger-in".to_owned());
+        let mut delete = energy_exchanger_mode_command(9, Value::from("discharge"));
+        delete.changed_entities[0].changes[0].operation = "delete".to_owned();
+        delete.changed_entities[0].changes[0].value = None;
+        let commands = [
+            energy_exchanger_mode_command(8, Value::from("discharge")),
+            energy_exchanger_mode_command(9, Value::from("auto")),
+            energy_exchanger_mode_command(9, Value::from("charge")),
+            entity_leaf_command(9, "smelter-a", "energyMode", Value::from("discharge")),
+            extra_root,
+            preexpanded,
+            delete,
+        ];
+        for command in commands {
+            let mut state = player_energy_exchanger_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        for (field, value) in [
+            ("interactionLocked", Value::from(true)),
+            (
+                "storedEnergyMj",
+                Value::from(PLAYER_ENERGY_EPSILON + 0.00001),
+            ),
+            ("planetId", Value::from("ashen")),
+        ] {
+            let mut state = player_energy_exchanger_state();
+            let index = *state.entity_index.get("exchanger-a").unwrap();
+            let mut entity = state.parse_entity(index).unwrap();
+            entity[field] = value;
+            state.replace_entity_raw(index, Arc::<str>::from(entity.to_string()));
+            let before = state.canonical_sha256().unwrap();
+            assert!(
+                state
+                    .apply_player_authority_command(&energy_exchanger_mode_command(
+                        9,
+                        Value::from("discharge"),
+                    ))
+                    .is_err()
+            );
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut locked_technology = player_energy_exchanger_state();
+        locked_technology.base_value_mut()["research"]["completedTechIds"] = serde_json::json!([]);
+        let before = locked_technology.canonical_sha256().unwrap();
+        assert!(
+            locked_technology
+                .apply_player_authority_command(&energy_exchanger_mode_command(
+                    9,
+                    Value::from("discharge"),
+                ))
+                .is_err()
+        );
+        assert_eq!(locked_technology.canonical_sha256().unwrap(), before);
+
+        let mut modded = player_energy_exchanger_state_for_registry("modded-energy-mode-test");
+        let before = modded.canonical_sha256().unwrap();
+        assert!(
+            modded
+                .apply_player_authority_command(&energy_exchanger_mode_command(
+                    9,
+                    Value::from("discharge"),
+                ))
+                .is_err()
+        );
+        assert_eq!(modded.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_energy_exchanger_late_refund_failure_is_atomic_for_live_and_wal() {
+        for replay in [false, true] {
+            let mut state = player_energy_exchanger_state();
+            state.base_value_mut()["tray"]["accumulator"] =
+                Value::from(MAX_JAVASCRIPT_SAFE_INTEGER);
+            let before = state.canonical_sha256().unwrap();
+            let command = energy_exchanger_mode_command(9, Value::from("discharge"));
+            let result = if replay {
+                state.replay_operation(
+                    9,
+                    10,
+                    Some(&command),
+                    0.0,
+                    0.0,
+                    crate::CoreAdvanceMode::Exact,
+                )
+            } else {
+                state.apply_player_authority_command(&command).map(|_| ())
+            };
+            assert!(result.is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
     }
 
     #[test]

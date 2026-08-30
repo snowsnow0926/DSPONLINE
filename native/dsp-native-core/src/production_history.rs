@@ -22,6 +22,7 @@ const TIERED_HISTORY_RETENTION_SECONDS: f64 = 24.0 * TIERED_HOUR_SECONDS;
 const TIERED_HISTORY_SIDECAR_FORMAT_VERSION: u16 = 1;
 const MAX_TIERED_HISTORY_SIDECAR_SAMPLES: usize = 32;
 const HISTORY_PROBE_CHUNK_ROWS: usize = 2_048;
+const HISTORY_REPLAY_SHARDS: usize = 32;
 
 #[derive(Debug, Clone, Copy)]
 struct ProductionHistoryBoundary {
@@ -191,9 +192,44 @@ struct HistoryUnitContribution {
 struct HistoryProbeChunk<'a> {
     start: usize,
     end: usize,
-    inventory: Vec<HistoryInventoryContribution<'a>>,
-    rates: Vec<HistoryRateContribution<'a>>,
+    inventory: [Vec<HistoryInventoryContribution<'a>>; HISTORY_REPLAY_SHARDS],
+    rates: [Vec<HistoryRateContribution<'a>>; HISTORY_REPLAY_SHARDS],
     units: Vec<HistoryUnitContribution>,
+}
+
+#[derive(Default)]
+struct HistoryReplayShard {
+    inventory: RateAccumulator,
+    production: RateAccumulator,
+    consumption: RateAccumulator,
+    planet_production: PlanetRateAccumulator,
+    planet_consumption: PlanetRateAccumulator,
+}
+
+fn history_replay_shard(item: &str) -> usize {
+    // A fixed FNV-1a shard is independent of HashMap's process-randomized
+    // hasher and of the selected worker limit. HISTORY_REPLAY_SHARDS is a
+    // power of two, so every item always belongs to exactly one private
+    // accumulator at 2/4/8 workers.
+    let mut hash = 2_166_136_261_u32;
+    for byte in item.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    hash as usize & (HISTORY_REPLAY_SHARDS - 1)
+}
+
+fn merge_unique_rates(target: &mut RateAccumulator, source: RateAccumulator) {
+    for (item, value) in source {
+        let previous = target.insert(item, value);
+        debug_assert!(previous.is_none(), "history replay item crossed shards");
+    }
+}
+
+fn merge_unique_planet_rates(target: &mut PlanetRateAccumulator, source: PlanetRateAccumulator) {
+    for (planet, source_rates) in source {
+        merge_unique_rates(target.entry(planet).or_default(), source_rates);
+    }
 }
 
 fn inspect_history_probe_chunk<'a>(
@@ -205,12 +241,14 @@ fn inspect_history_probe_chunk<'a>(
     let start = range.start;
     let end = range.end;
     let row_count = range.len();
-    let mut inventory = Vec::with_capacity(if refresh {
-        row_count.saturating_mul(2)
+    let inventory_capacity = if refresh {
+        row_count.saturating_mul(2).div_ceil(HISTORY_REPLAY_SHARDS)
     } else {
         0
-    });
-    let mut rates = Vec::with_capacity(row_count.saturating_mul(2));
+    };
+    let rate_capacity = row_count.saturating_mul(2).div_ceil(HISTORY_REPLAY_SHARDS);
+    let mut inventory = std::array::from_fn(|_| Vec::with_capacity(inventory_capacity));
+    let mut rates = std::array::from_fn(|_| Vec::with_capacity(rate_capacity));
     let mut units = Vec::with_capacity(if refresh { row_count } else { 0 });
     let mut recipe_cache = HashMap::<u32, Option<&crate::catalog::RecipeDefinition>>::new();
 
@@ -238,7 +276,7 @@ fn inspect_history_probe_chunk<'a>(
                 };
                 for (item, amount) in record {
                     if let Some(amount) = finite_number(Some(amount)) {
-                        inventory.push(HistoryInventoryContribution {
+                        inventory[history_replay_shard(item)].push(HistoryInventoryContribution {
                             item,
                             amount: amount.floor(),
                         });
@@ -267,7 +305,7 @@ fn inspect_history_probe_chunk<'a>(
             building,
             &mut recipe_cache,
             |target, planet, item, amount| {
-                rates.push(HistoryRateContribution {
+                rates[history_replay_shard(item)].push(HistoryRateContribution {
                     target,
                     planet,
                     item,
@@ -1230,55 +1268,94 @@ impl CoreState {
                 let inspect_millis = inspect_started.elapsed().as_secs_f64() * 1_000.0;
                 let inventory_contributions = probe_chunks
                     .iter()
-                    .map(|chunk| chunk.inventory.len())
+                    .flat_map(|chunk| chunk.inventory.iter())
+                    .map(Vec::len)
                     .sum::<usize>();
                 let rate_contributions = probe_chunks
                     .iter()
-                    .map(|chunk| chunk.rates.len())
+                    .flat_map(|chunk| chunk.rates.iter())
+                    .map(Vec::len)
                     .sum::<usize>();
                 let unit_contributions = probe_chunks
                     .iter()
                     .map(|chunk| chunk.units.len())
                     .sum::<usize>();
                 let replay_started = std::time::Instant::now();
-                for chunk in probe_chunks {
-                    let HistoryProbeChunk {
-                        start,
-                        end,
-                        inventory,
-                        rates,
-                        units,
-                    } = chunk;
+                for chunk in &probe_chunks {
                     if let Some(metrics) = &mut campaign_factory_metrics {
-                        for (index, entity) in entities[start..end].iter().enumerate() {
+                        for (index, entity) in entities[chunk.start..chunk.end].iter().enumerate() {
                             if let Some(entity) = entity.as_object() {
-                                metrics.observe_indexed_entity(self, start + index, entity);
+                                metrics.observe_indexed_entity(self, chunk.start + index, entity);
                             }
                         }
                     }
-                    if let Some(target) = &mut inventory_values {
-                        for contribution in inventory {
-                            add_rate(target, contribution.item, contribution.amount);
-                        }
-                    }
-                    for contribution in units {
+                    for contribution in &chunk.units {
                         productive_units += contribution.count;
                         utilized_units += contribution.count * contribution.utilization;
                         if contribution.utilization > EPSILON {
                             active += contribution.count;
                         }
                     }
-                    for contribution in rates {
-                        apply_history_rate_contribution(
-                            contribution,
-                            &mut production,
-                            &mut consumption,
-                            &mut planet_production,
-                            &mut planet_consumption,
-                        );
+                }
+
+                // Every persisted item is assigned to one fixed shard. A
+                // shard walks the already ordered probe chunks and therefore
+                // retains the exact contribution sequence for each global or
+                // per-planet key, including add_rate's per-step rounding.
+                // Different items never share accumulator state and may be
+                // reduced on private workers without making scheduling or the
+                // selected 2/4/8 worker limit observable.
+                let rows_per_replay_shard = entities.len().div_ceil(HISTORY_REPLAY_SHARDS);
+                let replay_shards = runtime.ordered_chunk_map(
+                    entities.len(),
+                    rows_per_replay_shard,
+                    |shard_index, _| {
+                        debug_assert!(shard_index < HISTORY_REPLAY_SHARDS);
+                        let mut replay = HistoryReplayShard::default();
+                        for chunk in &probe_chunks {
+                            for contribution in &chunk.inventory[shard_index] {
+                                add_rate(
+                                    &mut replay.inventory,
+                                    contribution.item,
+                                    contribution.amount,
+                                );
+                            }
+                            for &contribution in &chunk.rates[shard_index] {
+                                apply_history_rate_contribution(
+                                    contribution,
+                                    &mut replay.production,
+                                    &mut replay.consumption,
+                                    &mut replay.planet_production,
+                                    &mut replay.planet_consumption,
+                                );
+                            }
+                        }
+                        replay
+                    },
+                );
+                debug_assert_eq!(replay_shards.len(), HISTORY_REPLAY_SHARDS);
+                for replay in replay_shards {
+                    let HistoryReplayShard {
+                        inventory,
+                        production: shard_production,
+                        consumption: shard_consumption,
+                        planet_production: shard_planet_production,
+                        planet_consumption: shard_planet_consumption,
+                    } = replay;
+                    if let Some(target) = &mut inventory_values {
+                        merge_unique_rates(target, inventory);
                     }
+                    merge_unique_rates(&mut production, shard_production);
+                    merge_unique_rates(&mut consumption, shard_consumption);
+                    merge_unique_planet_rates(&mut planet_production, shard_planet_production);
+                    merge_unique_planet_rates(&mut planet_consumption, shard_planet_consumption);
                 }
                 if profile_enabled {
+                    eprintln!(
+                        "DSP_NATIVE_CORE_PROFILE\thistory-probe-replay-shards\tworkers={}\tshards={}",
+                        runtime.worker_count_for_items(entities.len()),
+                        HISTORY_REPLAY_SHARDS,
+                    );
                     eprintln!(
                         "DSP_NATIVE_CORE_PROFILE\thistory-probe-counters\tworkers={}\tchunks={}\trows={}\tinventory={}\trates={}\tunits={}",
                         runtime.worker_count_for_items(entities.len()),

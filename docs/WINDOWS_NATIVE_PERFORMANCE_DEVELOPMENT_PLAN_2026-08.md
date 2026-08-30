@@ -1728,3 +1728,23 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 3. 五秒量子上传预算已转为活动集合；下一步只接纳对同物料高扇出与多物料形状都不退化的新活动分配方案，并继续收敛施工量子需求、库存表解析/写回和模式过渡等跨域边界。继续用稳定 full-scan oracle 做 1/5/60 秒严格等价回归；两套排序候选已经用 A/B 证明不应保留，不能把 `O(A log A)`、连续生产、高扇出自然稠密或 fail-closed 场景包装成 `O(active)` 完成。
 4. 对剩余跨域只读探针实施固定分片私有输出、稳定顺序提交；共享浮点和物料写入只有在逐线程规范哈希一致时才并行。
 5. 在功能代码冻结后重新执行 server/API、完整 E2E、真实大档全进程峰值/吞吐/保存 P95、24 小时和多硬件矩阵；签名、云往返和发布仍交给独立 Release Agent。
+
+### 24.7 Rust 工厂节点展示 sidecar 与遗留写入口封堵（2026-08-30）
+
+`d6066d2` 先把原生 ownership 下的遗留 `commitGame` 通用 JavaScript 写入口改为在读取 hollow `gameRef` 或执行 updater 之前立即拒绝。`d966b5d` 随后关闭画布最直接的一组“Rust 实体 + JavaScript 空壳推导”错误：
+
+1. `viewport-v2` 保留 schemaVersion 2 和旧响应，只有显式请求 `entityPresentationVersion:1` 且 Host hello 发布 `native-core-viewport-entity-presentation-v1` 时，Rust 才增加同序、同数量 `entityPresentation`。支持行给出状态、供电因子、资源储量、输出容量、周期速率、有界输入/输出物料和太阳帆轨道标签；当前均诚实标为 `coverage:"conservative"`。非默认注册表、未知物料、超过 32 项或无法证明语义的行严格退化为 `{entityId,supported:false}`，不伪造零值。
+2. sidecar 只存在于 projection：不写入 `FactoryEntity`、命令、WAL、checkpoint、v47 或 canonical hash。旧 Rust API 的签名和无 opt-in JSON 逐字保持；新增字段仍计入 1 MiB 响应上限。Host、main 和 renderer 分别校验能力、owner、session/revision、请求上下文、SHA-256、精确字段、数值范围、行数和 entity ID 对齐。
+3. `NativeFactoryThinViewStore` 只在同一 revision 收齐所有独立分页后发布；重复 pin 的实体与 presentation 必须逐字一致。缺 sidecar、错序、错数量、跨页漂移、额外字段、错误 cursor 或旧 revision 会保留上一完整帧/进入不可用状态，不安装部分页。`NativeAuthoritativeFactoryCanvasFrame` 再次独立校验并把 sidecar 存成单独 Map，永远不 spread 进实体。
+4. App 的远距静态卡和近距动态卡都先读取 Rust presentation；静态缓存签名包含完整 sidecar 语义，因此从 Web 切换到 Rust 或 revision 更新时不能沿用旧卡。native ownership 下不再创建全量 JavaScript display lookup，也不再用 hollow GameState 计算这组状态；unsupported 行只显示无端口、不可连线的只读拓扑卡。Web/PWA 继续走原 helper，行为不变。
+5. 这仍只是完整薄 UI 的一个 P0 切片。全局科研、完成科技、戴森/太阳帆总量、时间扭曲、电力环境倍率、完整端口与线路计数、物流活动、告警、上下游追踪和若干 workspace 仍未形成同 revision Rust presentation；原生交互层仍有受限的混合只读 `GameState` 兼容接口。它们必须继续迁移，不能把本节描述为“完整薄 UI 已完成”。`authorityEligible=false` 保持关闭，公开 GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 版本 1.2.3 均不变。
+
+本切片的新鲜验证：
+
+- Rust Core 单线程全量 `720/720`、Host `176/176`，总计 `896/896`；core/Host all-target strict clippy、fmt 与 diff check 通过。一次默认并发 workspace 在既有 Rayon worker 上 stack overflow/`STATUS_ACCESS_VIOLATION`，随后单 test thread 从零完成上述全量；失败历史保留。
+- 完整 Vitest `316` 文件通过、`14` 文件条件跳过，`2,479` 项通过、`29` 项条件跳过、`0` 失败，214.92 秒。
+- `npm run test:native` 为 `455` 通过、`1` 个 Windows symlink 权限条件跳过、`0` 失败；新增直接边界/分页/App 专项另有 desktop `49/49` 与 Vitest `49/49`，它们已包含在相应完整套件中，不能重复相加。
+- TypeScript 与 production build 通过；build 处理 2,048 modules，startup 总 gzip `180,342 B`、JavaScript `86,812 B`、CSS `93,530 B`、最大启动 JavaScript `58,974 B`、menu `257,701 B`、forbidden module `0`。
+- 未执行完整 E2E、24 小时、多硬件、Defender/磁盘满/只读目录、安装/覆盖升级、打包、Authenticode、云往返或灰度；未连接生产，也未修改真实玩家存档。
+
+下一步顺序不变：先迁移画布全局 presentation/端口/拓扑 trace，再关闭普通生产者一跳反向唤醒造成的常醒线路，最后只接纳具有实测收益且保持稳定提交顺序的下一个确定性并行领域。

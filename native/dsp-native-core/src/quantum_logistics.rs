@@ -5028,7 +5028,9 @@ fn commit_transition_patch_probes(
         }
         patches.push(probe.patch);
     }
-    diagnostics.topology_changed = !patches.is_empty();
+    diagnostics.topology_changed = patches
+        .iter()
+        .any(|patch| patch.planned || matches!(&patch.result, TransitionPatchResult::Complete(_)));
 
     // No source field is written until every parallel probe and every commit
     // target has been validated. This turns malformed transition data into a
@@ -8770,6 +8772,57 @@ mod tests {
         .as_object()
         .expect("transition base")
         .clone()
+    }
+
+    #[test]
+    fn transition_topology_change_reports_only_quantum_mode_writes() {
+        let cases = [
+            (
+                "active bridge refresh",
+                false,
+                false,
+                TransitionPatchResult::Active(Map::new()),
+                "transitioning",
+            ),
+            (
+                "planned transition",
+                true,
+                true,
+                TransitionPatchResult::Active(Map::new()),
+                "legacy",
+            ),
+            (
+                "completed transition",
+                true,
+                false,
+                TransitionPatchResult::Complete("legacy".to_owned()),
+                "transitioning",
+            ),
+        ];
+        for (label, expected, planned, result, initial_mode) in cases {
+            let mut base = transition_base(5.0);
+            let mut entities = vec![serde_json::json!({
+                "id": label,
+                "quantumMode": initial_mode,
+                "quantumTarget": planned,
+                "quantumTransition": null,
+            })];
+            let diagnostics = commit_transition_patch_probes(
+                &mut base,
+                &mut entities,
+                vec![TransitionPatchProbe {
+                    patch: TransitionPatch {
+                        entity_index: 0,
+                        planned,
+                        result,
+                    },
+                    worker_index: None,
+                }],
+                TransitionParallelDiagnostics::default(),
+            )
+            .unwrap();
+            assert_eq!(diagnostics.topology_changed, expected, "{label}");
+        }
     }
 
     fn transition_station(id: String, index: usize) -> Value {

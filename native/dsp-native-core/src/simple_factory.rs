@@ -3911,7 +3911,7 @@ fn simulate_step(
     >,
     seconds: f64,
     isolate_construction_automation: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
     let mut profile_checkpoint = std::time::Instant::now();
     macro_rules! profile_mark {
@@ -4052,6 +4052,20 @@ fn simulate_step(
         interstellar_peer_directory,
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
+    crate::belts::wake_tracked_station_sources(
+        state,
+        entities,
+        belt_runtime,
+        belt_routes,
+        &buffer_changed_station_indices,
+    )?;
+    crate::belts::wake_tracked_station_sources(
+        state,
+        entities,
+        belt_runtime,
+        belt_routes,
+        &quantum_flush_changed_station_indices,
+    )?;
     profile_mark!("quantum-supply-buffers");
     profile_mark!("belt-route-index");
     let mut belt_changed_entity_indices = Vec::new();
@@ -5144,6 +5158,13 @@ fn simulate_step(
     // `belts::transfer` clears and repopulates its movement evidence for each
     // phase. At this point the vector is therefore exactly the late output
     // transfer set, not an append-only continuation of the input phase.
+    crate::belts::wake_tracked_station_sources(
+        state,
+        entities,
+        belt_runtime,
+        belt_routes,
+        &belt_changed_entity_indices,
+    )?;
     late_logistics_changed_entity_indices.extend_from_slice(&belt_changed_entity_indices);
     crate::local_logistics::wake_transfer_buffers_from_changed_entities(
         entities,
@@ -5252,6 +5273,13 @@ fn simulate_step(
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
     local_step_runtime.wake_ready_from_changed_stations(&warper_changed_station_indices);
+    crate::belts::wake_tracked_station_sources(
+        state,
+        entities,
+        belt_runtime,
+        belt_routes,
+        &warper_changed_station_indices,
+    )?;
     if profile_enabled {
         let scan = step_route_ledger.scan();
         eprintln!(
@@ -5345,6 +5373,20 @@ fn simulate_step(
     local_step_runtime.wake_ready_from_changed_stations(&remote_route_changed_station_indices);
     quantum_step_runtime.wake_from_stations(&local_route_changed_station_indices);
     quantum_step_runtime.wake_from_stations(&remote_route_changed_station_indices);
+    crate::belts::wake_tracked_station_sources(
+        state,
+        entities,
+        belt_runtime,
+        belt_routes,
+        &local_route_changed_station_indices,
+    )?;
+    crate::belts::wake_tracked_station_sources(
+        state,
+        entities,
+        belt_runtime,
+        belt_routes,
+        &remote_route_changed_station_indices,
+    )?;
     profile_mark!("interstellar-route-advance");
     // Route advance can complete the final flight and release an output
     // reservation. Rebuild the already-required congestion ledger once here
@@ -5380,6 +5422,13 @@ fn simulate_step(
     );
     local_step_runtime.wake_ready_from_changed_stations(&post_route_warper_changed_station_indices);
     quantum_step_runtime.wake_from_stations(&post_route_warper_changed_station_indices);
+    crate::belts::wake_tracked_station_sources(
+        state,
+        entities,
+        belt_runtime,
+        belt_routes,
+        &post_route_warper_changed_station_indices,
+    )?;
     if profile_enabled {
         let scan = congestion_route_ledger.scan();
         eprintln!(
@@ -5619,6 +5668,13 @@ fn simulate_step(
             &quantum_boundary_changed_station_indices,
             std::sync::Arc::make_mut(interstellar_route_activity),
         );
+        crate::belts::wake_tracked_station_sources(
+            state,
+            entities,
+            belt_runtime,
+            belt_routes,
+            &quantum_boundary_changed_station_indices,
+        )?;
         // Elevator and quantum attachment transitions can change traditional
         // peer membership. Stable five-second settlements retain the
         // cross-revision wake caches; an actual transition rebuilds once.
@@ -5653,7 +5709,7 @@ fn simulate_step(
     }
     profile_mark!("metrics-and-global-finalize");
     let _ = profile_checkpoint.elapsed();
-    Ok(())
+    Ok(station_mode_topology_changed)
 }
 
 pub(crate) struct PreparedFactoryAdvance {
@@ -5729,7 +5785,7 @@ pub(crate) fn prepare_advance(
     }
     let mut base = state.base_value().clone();
     profile_mark!("parse-records");
-    let belt_routes = if let Some(routes) = state.prepared_belt_routes() {
+    let mut belt_routes = if let Some(routes) = state.prepared_belt_routes() {
         routes
     } else {
         std::sync::Arc::new(crate::belts::prepare_routes_from_state(state, &entities)?)
@@ -5890,7 +5946,7 @@ pub(crate) fn prepare_advance(
                 }
             }
         }
-        simulate_step(
+        let station_mode_topology_changed = simulate_step(
             state,
             &mut base,
             &mut entities,
@@ -5907,6 +5963,16 @@ pub(crate) fn prepare_advance(
             isolate_construction_automation,
         )
         .context("advance native simple factory step")?;
+        if station_mode_topology_changed {
+            let rebuilt_belt_routes = std::sync::Arc::new(
+                crate::belts::prepare_routes_from_state(state, &entities)
+                    .context("rebuild native belt routes after station mode transition")?,
+            );
+            belt_runtime
+                .rebuild_activity_for_routes(state, &entities, &belt_routes, &rebuilt_belt_routes)
+                .context("rebuild native belt activity after station mode transition")?;
+            belt_routes = rebuilt_belt_routes;
+        }
         let wall_step = remaining_wall.min(step * wall_per_simulation_second);
         if wall_step > 0.0 {
             advanced_wall += wall_step;

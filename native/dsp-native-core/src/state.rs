@@ -3795,6 +3795,10 @@ impl CoreState {
         &mut self,
         activity: Arc<crate::belts::BeltActivitySnapshot>,
     ) {
+        // A transition candidate owns a detached scratch pool until the state
+        // revision has committed. Publishing here is intentionally infallible
+        // and is the only point that disarms rollback to the prior snapshot.
+        activity.publish_reusable_pool();
         self.prepared_belt_activity = Some(activity);
     }
 

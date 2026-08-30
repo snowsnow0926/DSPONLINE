@@ -481,6 +481,20 @@ pub(crate) struct BeltActivitySnapshot {
 #[derive(Debug, Default)]
 struct BeltReusablePool {
     runtime: Mutex<Option<BeltReusableRuntime>>,
+    publication: Mutex<BeltReusablePoolPublication>,
+}
+
+#[derive(Debug, Default)]
+enum BeltReusablePoolPublication {
+    #[default]
+    Committed,
+    /// A station-mode transition detached this candidate from the source
+    /// revision's pool. Until the candidate is installed after a durable
+    /// state commit, dropping the last reference returns the one resident
+    /// workspace to that source pool.
+    Pending {
+        rollback_pool: Option<Arc<BeltReusablePool>>,
+    },
 }
 
 #[derive(Debug)]
@@ -514,9 +528,20 @@ impl BeltActivitySnapshot {
                 .reusable_pool
                 .estimated_bytes(&self.active_group_indices)
     }
+
+    pub(crate) fn publish_reusable_pool(&self) {
+        self.reusable_pool.publish();
+    }
 }
 
 impl BeltReusablePool {
+    fn pending(rollback_pool: Option<Arc<Self>>) -> Self {
+        Self {
+            runtime: Mutex::new(None),
+            publication: Mutex::new(BeltReusablePoolPublication::Pending { rollback_pool }),
+        }
+    }
+
     fn take(&self) -> Option<BeltReusableRuntime> {
         self.runtime
             .lock()
@@ -548,6 +573,51 @@ impl BeltReusablePool {
                     }
             })
             .unwrap_or(0)
+    }
+
+    fn is_pending(&self) -> bool {
+        matches!(
+            *self
+                .publication
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            BeltReusablePoolPublication::Pending { .. }
+        )
+    }
+
+    fn publish(&self) {
+        let previous = {
+            let mut publication = self
+                .publication
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *publication)
+        };
+        drop(previous);
+    }
+}
+
+impl Drop for BeltReusablePool {
+    fn drop(&mut self) {
+        let publication = std::mem::take(
+            self.publication
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let BeltReusablePoolPublication::Pending {
+            rollback_pool: Some(rollback_pool),
+        } = publication
+        else {
+            return;
+        };
+        if let Some(runtime) = self
+            .runtime
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            rollback_pool.put_if_empty(runtime);
+        }
     }
 }
 
@@ -817,12 +887,25 @@ impl BeltRuntime {
             self.diagnostics.carried_active_groups = self.active_group_indices.len();
             return Ok(self);
         }
+        let (active_group_indices, active_queue_enabled) =
+            self.classify_activity(state, entities, prepared_routes)?;
+        self.install_classified_activity(
+            prepared_routes,
+            active_group_indices,
+            active_queue_enabled,
+        );
+        Ok(self)
+    }
+
+    fn classify_activity(
+        &self,
+        state: &CoreState,
+        entities: &[Value],
+        prepared_routes: &PreparedRoutes,
+    ) -> anyhow::Result<(Vec<u32>, bool)> {
         let mut initially_dormant_routes = 0_usize;
+        let mut active_group_indices = Vec::new();
         for (group_index, group) in prepared_routes.groups.iter().enumerate() {
-            self.diagnostics.initialization_group_checks = self
-                .diagnostics
-                .initialization_group_checks
-                .saturating_add(1);
             let item_id = state
                 .symbols
                 .resolve(group.item_symbol)
@@ -840,16 +923,22 @@ impl BeltRuntime {
             });
             let has_complete_ordinary_input =
                 ordinary_machine_has_complete_input_cycle(state, source, item_id);
-            self.active_groups[group_index] = has_source_output
+            let tracked_station_shape_drifted = prepared_routes
+                .is_tracked_station_group(compact_index(group_index, "activity group index")?)
+                && !is_tracked_builtin_logistics_station(
+                    state,
+                    source,
+                    expand_compact_index(group.source_index),
+                );
+            let active = has_source_output
                 || has_source_input
                 || has_runtime_signal
                 || has_complete_ordinary_input
+                || tracked_station_shape_drifted
                 || group.always_awake;
-            if self.active_groups[group_index] {
-                self.active_group_indices
-                    .push(compact_index(group_index, "active group index")?);
-            }
-            if !self.active_groups[group_index] {
+            if active {
+                active_group_indices.push(compact_index(group_index, "active group index")?);
+            } else {
                 initially_dormant_routes += group.route_indices.len();
             }
         }
@@ -858,9 +947,89 @@ impl BeltRuntime {
         } else {
             64.max(prepared_routes.routes.len().div_ceil(10))
         };
-        self.active_queue_enabled = initially_dormant_routes >= dormant_threshold;
-        self.diagnostics.active_queue_enabled = self.active_queue_enabled;
-        Ok(self)
+        Ok((
+            active_group_indices,
+            initially_dormant_routes >= dormant_threshold,
+        ))
+    }
+
+    fn install_classified_activity(
+        &mut self,
+        prepared_routes: &PreparedRoutes,
+        active_group_indices: Vec<u32>,
+        active_queue_enabled: bool,
+    ) {
+        self.active_groups.fill(false);
+        for &group_index in &active_group_indices {
+            self.active_groups[expand_compact_index(group_index)] = true;
+        }
+        self.active_group_indices = active_group_indices;
+        self.active_queue_enabled = active_queue_enabled;
+        self.diagnostics.route_count = prepared_routes.routes.len();
+        self.diagnostics.group_count = prepared_routes.groups.len();
+        self.diagnostics.active_queue_enabled = active_queue_enabled;
+        self.diagnostics.initialization_group_checks = self
+            .diagnostics
+            .initialization_group_checks
+            .saturating_add(prepared_routes.groups.len() as u64);
+    }
+
+    /// A completed station-mode or quantum-mode transition changes whether a
+    /// source group is intrinsically active without changing any persisted
+    /// belt row. Rebuild the runtime-only activity proof against a freshly
+    /// compiled route directory while preserving every dynamic belt column
+    /// and all candidate-local mutation evidence.
+    pub(crate) fn rebuild_activity_for_routes(
+        &mut self,
+        state: &CoreState,
+        entities: &[Value],
+        previous_routes: &PreparedRoutes,
+        prepared_routes: &PreparedRoutes,
+    ) -> anyhow::Result<()> {
+        let belt_count = self.progress.len();
+        let group_count = prepared_routes.groups.len();
+        let target_slot_count = expand_compact_index(prepared_routes.target_slot_count);
+        if entities.len() != state.entities.ids.len()
+            || !previous_routes.stable_topology_matches(prepared_routes)
+            || prepared_routes.routes.len() != belt_count
+            || self.progress.len() != belt_count
+            || self.total_transferred.len() != belt_count
+            || self.congestion.len() != belt_count
+            || self.last_flow.len() != belt_count
+            || self.total_dirty.len() != belt_count
+            || self.active_groups.len() != group_count
+            || !self
+                .workspace
+                .matches_dimensions(belt_count, group_count, target_slot_count)
+        {
+            bail!("native belt activity rebuild topology changed");
+        }
+        let (active_group_indices, active_queue_enabled) =
+            self.classify_activity(state, entities, prepared_routes)?;
+
+        // This runtime may have leased its scratch from the previous route
+        // snapshot. The first transition moves the same allocation to a
+        // candidate-local pool without publishing new-route activity through
+        // the old snapshot or briefly allocating a second O(all) workspace.
+        // Further transitions in this candidate keep that unpublished pool;
+        // its rollback destination remains the original committed revision.
+        self.workspace.reset_after_failed_candidate();
+        if self
+            .reusable_pool
+            .as_ref()
+            .is_none_or(|pool| !pool.is_pending())
+        {
+            self.reusable_pool = Some(Arc::new(BeltReusablePool::pending(
+                self.reusable_pool.take(),
+            )));
+        }
+        self.install_classified_activity(
+            prepared_routes,
+            active_group_indices,
+            active_queue_enabled,
+        );
+        self.belt_capacity = prepared_routes.total_capacity;
+        Ok(())
     }
 
     pub(crate) fn from_state(
@@ -1310,9 +1479,9 @@ impl Drop for BeltRuntime {
         };
         // Drop means the candidate never published an activity snapshot.
         // Restore a topology-sized but logically empty scratch lease to the
-        // shared committed pool. The immutable source snapshot will seed its
-        // own active indices on the next retry, so a failed or discarded clone
-        // cannot leak candidate activity into another revision.
+        // runtime's currently armed pool. A mode transition first detaches to
+        // a fresh pool, so rollback cannot publish new-topology activity into
+        // the committed source snapshot's pool.
         self.active_groups.fill(false);
         self.active_group_indices.clear();
         self.workspace.reset_after_failed_candidate();
@@ -1344,6 +1513,17 @@ pub(crate) struct PreparedRoutes {
     target_slot_count: u32,
     total_capacity: f64,
     group_by_key: Arc<HashMap<(u32, u32), u32>>,
+    /// Built-in logistics stations with a closed inventory-write proof. Rows
+    /// and their source groups are both stable-sorted, so an inventory event
+    /// expands in O(changed stations) without depending on HashMap iteration.
+    tracked_station_sources: Box<[TrackedStationSource]>,
+    tracked_station_group_indices: Box<[u32]>,
+}
+
+#[derive(Debug, Clone)]
+struct TrackedStationSource {
+    station_index: u32,
+    group_indices: Box<[u32]>,
 }
 
 #[repr(C)]
@@ -1475,7 +1655,65 @@ impl PreparedRoutes {
                 .iter()
                 .map(|group| group.route_indices.len() * size_of::<u32>())
                 .sum::<usize>()
-            + self.group_by_key.capacity() * size_of::<((u32, u32), u32)>()) as u64
+            + self.group_by_key.capacity() * size_of::<((u32, u32), u32)>()
+            + self.tracked_station_sources.len() * size_of::<TrackedStationSource>()
+            + self
+                .tracked_station_sources
+                .iter()
+                .map(|source| source.group_indices.len() * size_of::<u32>())
+                .sum::<usize>()
+            + self.tracked_station_group_indices.len() * size_of::<u32>()) as u64
+    }
+
+    #[inline]
+    fn tracked_station_groups(&self, station_index: u32) -> Option<&[u32]> {
+        self.tracked_station_sources
+            .binary_search_by_key(&station_index, |source| source.station_index)
+            .ok()
+            .map(|index| self.tracked_station_sources[index].group_indices.as_ref())
+    }
+
+    #[inline]
+    fn is_tracked_station_group(&self, group_index: u32) -> bool {
+        self.tracked_station_group_indices
+            .binary_search(&group_index)
+            .is_ok()
+    }
+
+    /// A station-mode transition may only reclassify source activity. Belt
+    /// rows, groups, capacity, and target accounting remain immutable within
+    /// one prepared advance; rejecting any other drift keeps the rebuild
+    /// atomic instead of applying dynamic columns to a different topology.
+    fn stable_topology_matches(&self, next: &Self) -> bool {
+        self.target_slot_count == next.target_slot_count
+            && self.total_capacity.to_bits() == next.total_capacity.to_bits()
+            && self.group_by_key == next.group_by_key
+            && self.routes.len() == next.routes.len()
+            && self
+                .routes
+                .iter()
+                .zip(&next.routes)
+                .all(|(previous, next)| {
+                    previous.capacity.to_bits() == next.capacity.to_bits()
+                        && previous.source_index == next.source_index
+                        && previous.target_index == next.target_index
+                        && previous.source_group == next.source_group
+                        && previous.target_slot == next.target_slot
+                        && previous.belt_sort_rank == next.belt_sort_rank
+                        && previous.target_port_index == next.target_port_index
+                        && previous.priority == next.priority
+                })
+            && self.groups.len() == next.groups.len()
+            && self
+                .groups
+                .iter()
+                .zip(&next.groups)
+                .all(|(previous, next)| {
+                    previous.source_index == next.source_index
+                        && previous.item_symbol == next.item_symbol
+                        && previous.balanced_splitter == next.balanced_splitter
+                        && previous.route_indices == next.route_indices
+                })
     }
 }
 
@@ -1761,6 +1999,9 @@ fn advance_belt_clocks_with_runtime(
     let congestion_decay = 0.85_f64.powf(seconds);
     match selection {
         ActiveSelection::All | ActiveSelection::Dense { .. } => {
+            let active_groups = &runtime.active_groups;
+            let has_tracked_station_groups =
+                !prepared_routes.tracked_station_group_indices.is_empty();
             let mut progress_pages = runtime.progress.materialized_pages_mut();
             let mut congestion_pages = runtime.congestion.materialized_pages_mut();
             let mut last_flow_pages = runtime.last_flow.materialized_pages_mut();
@@ -1770,8 +2011,15 @@ fn advance_belt_clocks_with_runtime(
                 &mut congestion_pages,
                 &mut last_flow_pages,
                 |belt_index, progress, congestion, last_flow| {
+                    let route = &prepared_routes.routes[belt_index];
+                    if has_tracked_station_groups
+                        && prepared_routes.is_tracked_station_group(route.source_group)
+                        && !active_groups[route.source_group()]
+                    {
+                        return;
+                    }
                     advance_belt_clock_row(
-                        &prepared_routes.routes[belt_index],
+                        route,
                         progress,
                         congestion,
                         last_flow,
@@ -1880,7 +2128,71 @@ fn catch_up_newly_woken_ordinary_producer_clocks(
         &catch_up_selection,
         seconds,
         belt_limit,
-    )
+    )?;
+    Ok(())
+}
+
+fn tracked_station_wake_groups(
+    prepared_routes: &PreparedRoutes,
+    changed_station_indices: &[usize],
+) -> anyhow::Result<Vec<u32>> {
+    let mut group_indices = Vec::new();
+    for station_index in changed_station_indices.iter().copied() {
+        let station_index = compact_index(station_index, "station wake entity index")?;
+        if let Some(groups) = prepared_routes.tracked_station_groups(station_index) {
+            group_indices.extend_from_slice(groups);
+        }
+    }
+    group_indices.sort_unstable();
+    group_indices.dedup();
+    Ok(group_indices)
+}
+
+/// Apply exact inventory-write evidence before the next belt selection. Each
+/// changed station wakes only routed items that currently have transferable
+/// output; callers without station-row evidence must not widen the event.
+pub(crate) fn wake_tracked_station_sources(
+    state: &CoreState,
+    entities: &[Value],
+    runtime: &mut BeltRuntime,
+    prepared_routes: &PreparedRoutes,
+    changed_station_indices: &[usize],
+) -> anyhow::Result<()> {
+    // A save with no legacy station belt source has no reverse directory.
+    // Quantum-heavy factories commonly report many changed station rows, so
+    // return before compact-index conversion or one binary search per row.
+    if prepared_routes.tracked_station_sources.is_empty() {
+        return Ok(());
+    }
+    let group_indices = tracked_station_wake_groups(prepared_routes, changed_station_indices)?;
+    let mut output_group_indices = Vec::with_capacity(group_indices.len());
+    for group_index in group_indices {
+        let group = prepared_routes
+            .groups
+            .get(expand_compact_index(group_index))
+            .ok_or_else(|| anyhow!("native station wake group is outside the topology"))?;
+        let item_id = state
+            .symbols
+            .resolve(group.item_symbol)
+            .ok_or_else(|| anyhow!("native station wake item is missing"))?;
+        let source = entities
+            .get(expand_compact_index(group.source_index))
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native station wake source is invalid"))?;
+        if output_amount(source, item_id) > EPSILON {
+            output_group_indices.push(group_index);
+        }
+    }
+    if output_group_indices
+        .iter()
+        .any(|&group_index| expand_compact_index(group_index) >= runtime.active_groups.len())
+    {
+        bail!("native station wake group is outside the runtime topology");
+    }
+    for group_index in output_group_indices {
+        runtime.wake_group(group_index)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2135,6 +2447,14 @@ fn refresh_active_groups(
             .as_object()
             .ok_or_else(|| anyhow!("native belt source is not an object"))?;
         let next = group.always_awake
+            || (prepared_routes.is_tracked_station_group(compact_index(
+                group_index,
+                "active group index",
+            )?) && !is_tracked_builtin_logistics_station(
+                state,
+                source,
+                expand_compact_index(group.source_index),
+            ))
             || output_amount(source, item_id) > EPSILON
             || ordinary_machine_has_complete_input_cycle(state, source, item_id)
             // Storage/splitter inputs are promoted to outputs at the start of
@@ -2821,6 +3141,131 @@ fn ordinary_machine_has_complete_input_cycle(
                 });
             (input_cycles + EPSILON).floor() >= 1.0
         })
+}
+
+fn is_tracked_builtin_logistics_station(
+    state: &CoreState,
+    source: &Map<String, Value>,
+    source_index: usize,
+) -> bool {
+    // An opaque content pack can attach inventory writers to an otherwise
+    // built-in-looking station. Only the built-in catalog has the closed set
+    // of writers consumed by simple_factory's reverse-wake barriers.
+    // Quantum stations are `potentiallyProduces` sources in the JavaScript
+    // oracle on every positive-duration step, not only on a five-second
+    // network boundary. Reject that common case before catalog/slot proofs so
+    // its historical always-awake selection retains direct-through credit.
+    if string_at(source, "kind") != Some("station")
+        || source
+            .get("quantumMode")
+            .is_some_and(|mode| mode.as_str() != Some("legacy"))
+        || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || crate::system_space_station::is_elevator(source)
+        || state
+            .factory_topology
+            .station_indices
+            .binary_search(&source_index)
+            .is_err()
+        || string_at(source, "id").and_then(|id| state.entity_index.get(id).copied())
+            != Some(source_index)
+    {
+        return false;
+    }
+    let Some(building_id @ ("planetary_logistics_station" | "interstellar_logistics_station")) =
+        string_at(source, "buildingId")
+    else {
+        return false;
+    };
+    if state
+        .catalog
+        .buildings
+        .get(building_id)
+        .is_none_or(|building| building.kind != "station")
+        || !source.get("inputs").is_some_and(Value::is_object)
+        || !source.get("outputs").is_some_and(Value::is_object)
+        || !source.get("stationRoutes").is_some_and(Value::is_array)
+        || finite_number(source.get("machineCount")) < 1.0
+        || source
+            .get("stationModeTransition")
+            .is_some_and(|value| !value.is_null())
+        || source
+            .get("quantumTransition")
+            .is_some_and(|value| !value.is_null())
+        || source
+            .get("stationOperationMode")
+            .is_some_and(|mode| mode.as_str() != Some("legacy"))
+    {
+        return false;
+    }
+    let Some(slots) = source
+        .get("stationSlots")
+        .and_then(Value::as_array)
+        .filter(|slots| slots.len() == 5)
+    else {
+        return false;
+    };
+    let mut configured_items = HashSet::with_capacity(5);
+    slots.iter().all(|value| {
+        let Some(slot) = value.as_object() else {
+            return false;
+        };
+        let Some(local_mode) = nullish_string_or_default(slot, "localMode", "storage") else {
+            return false;
+        };
+        let Some(remote_mode) = nullish_string_or_default(slot, "remoteMode", "storage") else {
+            return false;
+        };
+        let Some(route_policy) = nullish_string_or_default(slot, "routePolicy", "relay-preferred")
+        else {
+            return false;
+        };
+        if !matches!(local_mode, "supply" | "demand" | "storage")
+            || !matches!(remote_mode, "supply" | "demand" | "storage")
+            || !matches!(
+                route_policy,
+                "direct" | "relay-preferred" | "relay-required"
+            )
+        {
+            return false;
+        }
+        let minimum_load = finite_number(slot.get("minimumLoad"));
+        if ![0.1, 0.25, 0.5, 1.0].contains(&minimum_load) {
+            return false;
+        }
+        match slot.get("itemId") {
+            None | Some(Value::Null) => true,
+            Some(Value::String(item_id)) => {
+                state.catalog.items.contains_key(item_id)
+                    && configured_items.insert(item_id.as_str())
+            }
+            _ => false,
+        }
+    })
+}
+
+fn nullish_string_or_default<'a>(
+    object: &'a Map<String, Value>,
+    key: &str,
+    default: &'static str,
+) -> Option<&'a str> {
+    match object.get(key) {
+        None | Some(Value::Null) => Some(default),
+        Some(Value::String(value)) => Some(value.as_str()),
+        Some(_) => None,
+    }
+}
+
+#[cfg(test)]
+#[inline]
+fn source_group_always_awake(
+    state: &CoreState,
+    source: &Map<String, Value>,
+    source_index: usize,
+    item_id: &str,
+) -> bool {
+    source_may_produce_during_step(state, source, item_id)
+        && !is_tracked_builtin_logistics_station(state, source, source_index)
 }
 
 fn source_may_produce_during_step(
@@ -3542,6 +3987,7 @@ fn prepare_routes_from_rows(
     let mut target_slot_by_key = HashMap::<TargetSlotKey, u32>::new();
     let mut groups = Vec::<PreparedGroup>::new();
     let mut group_route_indices = Vec::<Vec<u32>>::new();
+    let mut tracked_station_groups = HashMap::<u32, Vec<u32>>::new();
     for (route_index, route) in routes.iter_mut().enumerate() {
         let item_symbol = state.belts.items[route_index];
         let group_key = (route.source_index, item_symbol);
@@ -3552,6 +3998,8 @@ fn prepare_routes_from_rows(
                 .as_object()
                 .expect("validated belt source");
             let source_group = compact_index(groups.len(), "source group index")?;
+            let tracked_station =
+                is_tracked_builtin_logistics_station(state, source, route.source_index());
             groups.push(PreparedGroup {
                 source_index: route.source_index,
                 item_symbol,
@@ -3561,9 +4009,15 @@ fn prepare_routes_from_rows(
                     state,
                     source,
                     state.symbols.resolve(item_symbol).unwrap_or_default(),
-                ),
+                ) && !tracked_station,
                 route_indices: Box::default(),
             });
+            if tracked_station {
+                tracked_station_groups
+                    .entry(route.source_index)
+                    .or_default()
+                    .push(source_group);
+            }
             group_route_indices.push(Vec::new());
             group_by_key.insert(group_key, source_group);
             source_group
@@ -3611,12 +4065,32 @@ fn prepare_routes_from_rows(
     routes.shrink_to_fit();
     groups.shrink_to_fit();
     group_by_key.shrink_to_fit();
+    let mut tracked_station_sources = tracked_station_groups
+        .into_iter()
+        .map(|(station_index, mut group_indices)| {
+            group_indices.sort_unstable();
+            group_indices.dedup();
+            TrackedStationSource {
+                station_index,
+                group_indices: group_indices.into_boxed_slice(),
+            }
+        })
+        .collect::<Vec<_>>();
+    tracked_station_sources.sort_by_key(|source| source.station_index);
+    let mut tracked_station_group_indices = tracked_station_sources
+        .iter()
+        .flat_map(|source| source.group_indices.iter().copied())
+        .collect::<Vec<_>>();
+    tracked_station_group_indices.sort_unstable();
+    tracked_station_group_indices.dedup();
     Ok(PreparedRoutes {
         routes,
         groups,
         target_slot_count: compact_index(target_slot_by_key.len(), "target slot count")?,
         total_capacity,
         group_by_key: Arc::new(group_by_key),
+        tracked_station_sources: tracked_station_sources.into_boxed_slice(),
+        tracked_station_group_indices: tracked_station_group_indices.into_boxed_slice(),
     })
 }
 
@@ -4322,13 +4796,13 @@ pub(crate) fn transfer_with_bandwidth(
                 defer_source_depletion_reset,
                 flow_window_seconds,
             )?;
-            // The captured selection predates this phase's actual input movement.
-            // A dormant ordinary producer may therefore become eligible only
-            // after one of its inputs arrives. Full-scan semantics already
-            // advanced every one of its output routes at the start of the phase;
-            // catch up only groups absent from that immutable selection, then let
-            // reservation grant same-step output credit. Zero-second output
-            // phases only carry the wake into the next exact step.
+            // The captured selection predates this phase's actual input
+            // movement. A dormant ordinary producer can turn that input into
+            // output later in this same step, so catch up only its recipe
+            // groups absent from the immutable selection before reservation.
+            // Station/storage inputs are not promoted until the next step's
+            // buffer phase; their exact item wake carries forward without a
+            // same-step clock or output credit.
             catch_up_newly_woken_ordinary_producer_clocks(
                 belt_runtime,
                 state,
@@ -4602,6 +5076,956 @@ mod tests {
         }
     }
 
+    fn builtin_logistics_station_state(
+        building_id: &str,
+        quantum_mode: &str,
+    ) -> (CoreState, Value) {
+        let empty_slot = || {
+            json!({
+                "itemId": null,
+                "localMode": "storage",
+                "remoteMode": "storage",
+                "minimumLoad": 0.1,
+                "minStock": 0,
+                "maxStock": 1000,
+                "priority": 1,
+                "routePolicy": "relay-preferred",
+                "warperBudget": 0
+            })
+        };
+        let entity = json!({
+            "id": "tracked-station",
+            "kind": "station",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": building_id,
+            "machineCount": 1,
+            "stationTier": 1,
+            "stationOperationMode": "legacy",
+            "stationModeTransition": null,
+            "quantumMode": quantum_mode,
+            "quantumTransition": null,
+            "stationSlots": [
+                {
+                    "itemId": "iron_ore",
+                    "localMode": "supply",
+                    "remoteMode": "supply",
+                    "minimumLoad": 0.1,
+                    "minStock": 0,
+                    "maxStock": 1000,
+                    "priority": 1,
+                    "routePolicy": "direct",
+                    "warperBudget": 0
+                },
+                empty_slot(), empty_slot(), empty_slot(), empty_slot()
+            ],
+            "stationRoutes": [],
+            "inputs": { "iron_ore": 0 },
+            "outputs": { "iron_ore": 0 },
+            "routingCursor": 0
+        });
+        let mut state = crate::simple_factory::tests::fixture_state(std::slice::from_ref(&entity));
+        state.identity.registry_fingerprint = EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned();
+        let catalog = Arc::make_mut(&mut state.catalog);
+        catalog.snapshot.registry_fingerprint = EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned();
+        let mut building = catalog
+            .buildings
+            .get("interstellar_logistics_station")
+            .expect("fixture station building")
+            .clone();
+        building.id = building_id.to_owned();
+        building.kind = "station".to_owned();
+        catalog.buildings.insert(building_id.to_owned(), building);
+        (state, entity)
+    }
+
+    #[test]
+    fn builtin_planetary_and_legacy_interstellar_stations_have_closed_wake_shape() {
+        for (building_id, quantum_mode) in [
+            ("planetary_logistics_station", "legacy"),
+            ("interstellar_logistics_station", "legacy"),
+        ] {
+            for operation_mode in [Some("legacy"), None] {
+                let (state, mut entity) =
+                    builtin_logistics_station_state(building_id, quantum_mode);
+                if let Some(operation_mode) = operation_mode {
+                    entity["stationOperationMode"] = Value::from(operation_mode);
+                } else {
+                    entity
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("stationOperationMode");
+                }
+                let source = entity.as_object().unwrap();
+                assert!(is_tracked_builtin_logistics_station(&state, source, 0));
+                assert!(!source_group_always_awake(&state, source, 0, "iron_ore"));
+            }
+        }
+
+        let (state, mut implicit_legacy) =
+            builtin_logistics_station_state("planetary_logistics_station", "legacy");
+        implicit_legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("quantumMode");
+        let source = implicit_legacy.as_object().unwrap();
+        assert!(is_tracked_builtin_logistics_station(&state, source, 0));
+        assert!(!source_group_always_awake(&state, source, 0, "iron_ore"));
+    }
+
+    #[test]
+    fn logistics_station_slot_nullish_defaults_match_javascript() {
+        let (state, entity) =
+            builtin_logistics_station_state("interstellar_logistics_station", "legacy");
+        for field in ["localMode", "remoteMode", "routePolicy"] {
+            for nullish in [false, true] {
+                let mut candidate = entity.clone();
+                let first_slot = candidate["stationSlots"]
+                    .as_array_mut()
+                    .unwrap()
+                    .first_mut()
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap();
+                if nullish {
+                    first_slot.insert(field.to_owned(), Value::Null);
+                } else {
+                    first_slot.remove(field);
+                }
+                assert!(
+                    is_tracked_builtin_logistics_station(&state, candidate.as_object().unwrap(), 0),
+                    "{field} {} must use the JavaScript nullish default",
+                    if nullish { "null" } else { "missing" }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_quantum_station_retains_historical_always_awake_source_group() {
+        let (state, entity) =
+            builtin_logistics_station_state("interstellar_logistics_station", "quantum");
+        let source = entity.as_object().unwrap();
+        assert!(!is_tracked_builtin_logistics_station(&state, source, 0));
+        assert!(source_group_always_awake(&state, source, 0, "iron_ore"));
+    }
+
+    #[test]
+    fn logistics_station_tracking_fails_closed_for_registry_shape_and_special_sources() {
+        let (state, entity) =
+            builtin_logistics_station_state("interstellar_logistics_station", "legacy");
+        let assert_fails_closed = |state: &CoreState, entity: &Value, label: &str| {
+            let source = entity.as_object().unwrap();
+            assert!(
+                !is_tracked_builtin_logistics_station(state, source, 0),
+                "{label} unexpectedly entered the tracked directory"
+            );
+            assert!(
+                source_group_always_awake(state, source, 0, "iron_ore"),
+                "{label} must retain the historical always-awake fallback"
+            );
+        };
+
+        let mut mod_identity = state.clone();
+        mod_identity.identity.registry_fingerprint = "mod:opaque".to_owned();
+        assert_fails_closed(&mod_identity, &entity, "checkpoint registry drift");
+
+        let mut catalog_drift = state.clone();
+        Arc::make_mut(&mut catalog_drift.catalog)
+            .snapshot
+            .registry_fingerprint = "mod:catalog".to_owned();
+        assert_fails_closed(&catalog_drift, &entity, "catalog registry drift");
+
+        let mut malformed = entity.clone();
+        malformed["stationSlots"] = json!([]);
+        assert_fails_closed(&state, &malformed, "malformed slots");
+
+        let mut near_minimum_load = entity.clone();
+        near_minimum_load["stationSlots"][0]["minimumLoad"] = Value::from(0.1 + f64::EPSILON);
+        assert_fails_closed(
+            &state,
+            &near_minimum_load,
+            "near but non-catalog minimum load",
+        );
+
+        for building_id in [
+            "planetary_logistics_station",
+            "interstellar_logistics_station",
+        ] {
+            let (operation_state, operation_entity) =
+                builtin_logistics_station_state(building_id, "legacy");
+            for operation_mode in ["elevator", "mod:unknown"] {
+                let mut non_legacy = operation_entity.clone();
+                non_legacy["stationOperationMode"] = Value::from(operation_mode);
+                assert_fails_closed(
+                    &operation_state,
+                    &non_legacy,
+                    &format!("{building_id} {operation_mode}"),
+                );
+            }
+            for (operation_mode, label) in [
+                (Value::Null, "null"),
+                (Value::from(7), "numeric"),
+                (json!({ "opaque": true }), "object"),
+            ] {
+                let mut malformed_mode = operation_entity.clone();
+                malformed_mode["stationOperationMode"] = operation_mode;
+                assert_fails_closed(
+                    &operation_state,
+                    &malformed_mode,
+                    &format!("{building_id} {label} operation mode"),
+                );
+            }
+        }
+
+        for field in ["localMode", "remoteMode", "routePolicy"] {
+            for (malformed_value, label) in [
+                (Value::from(7), "numeric"),
+                (json!({ "opaque": true }), "object"),
+                (Value::Bool(true), "boolean"),
+                (json!(["storage"]), "array"),
+            ] {
+                let mut malformed_slot = entity.clone();
+                malformed_slot["stationSlots"]
+                    .as_array_mut()
+                    .unwrap()
+                    .first_mut()
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(field.to_owned(), malformed_value);
+                assert_fails_closed(&state, &malformed_slot, &format!("{field} {label}"));
+            }
+        }
+
+        let mut transitioning = entity.clone();
+        transitioning["quantumTransition"] = json!({ "targetMode": "quantum" });
+        assert_fails_closed(&state, &transitioning, "quantum transition");
+
+        for quantum_mode in ["quantum", "transitioning", "mod:unknown"] {
+            let mut non_legacy = entity.clone();
+            non_legacy["quantumMode"] = Value::from(quantum_mode);
+            assert_fails_closed(&state, &non_legacy, quantum_mode);
+        }
+        for (quantum_mode, label) in [
+            (Value::Null, "null quantum mode"),
+            (Value::from(7), "numeric quantum mode"),
+            (json!({ "opaque": true }), "object quantum mode"),
+        ] {
+            let mut malformed_mode = entity.clone();
+            malformed_mode["quantumMode"] = quantum_mode;
+            assert_fails_closed(&state, &malformed_mode, label);
+        }
+
+        for building_id in [
+            "orbital_collector",
+            "material_delivery_hub",
+            "orbital_cargo_terminal",
+            "mod:unknown-station",
+        ] {
+            let mut special = entity.clone();
+            special["buildingId"] = Value::from(building_id);
+            assert_fails_closed(&state, &special, building_id);
+        }
+    }
+
+    fn tracked_station_prepared_routes() -> PreparedRoutes {
+        let routes = (0..3)
+            .map(|index| Route {
+                capacity: 6.0,
+                source_index: if index == 1 { 7 } else { 3 },
+                target_index: 0,
+                source_group: index,
+                target_slot: index,
+                belt_sort_rank: 0,
+                target_port_index: None,
+                priority: 1,
+            })
+            .collect::<Vec<_>>();
+        let groups = (0..3)
+            .map(|index| PreparedGroup {
+                source_index: if index == 1 { 7 } else { 3 },
+                item_symbol: index + 1,
+                balanced_splitter: false,
+                always_awake: false,
+                route_indices: vec![index].into_boxed_slice(),
+            })
+            .collect();
+        PreparedRoutes {
+            routes,
+            groups,
+            target_slot_count: 3,
+            total_capacity: 18.0,
+            group_by_key: Arc::new(HashMap::new()),
+            tracked_station_sources: vec![
+                TrackedStationSource {
+                    station_index: 3,
+                    group_indices: vec![0, 2].into_boxed_slice(),
+                },
+                TrackedStationSource {
+                    station_index: 7,
+                    group_indices: vec![1].into_boxed_slice(),
+                },
+            ]
+            .into_boxed_slice(),
+            tracked_station_group_indices: vec![0, 1, 2].into_boxed_slice(),
+        }
+    }
+
+    fn transition_pool_fixture() -> (
+        CoreState,
+        Vec<Value>,
+        Arc<PreparedRoutes>,
+        Arc<PreparedRoutes>,
+    ) {
+        let (state, station) =
+            builtin_logistics_station_state("interstellar_logistics_station", "legacy");
+        let item_symbol = state
+            .symbols
+            .lookup("interstellar_logistics_station")
+            .expect("fixture item symbol");
+        let legacy = PreparedRoutes {
+            routes: vec![Route {
+                capacity: 6.0,
+                source_index: 0,
+                target_index: 0,
+                source_group: 0,
+                target_slot: 0,
+                belt_sort_rank: 0,
+                target_port_index: None,
+                priority: 1,
+            }],
+            groups: vec![PreparedGroup {
+                source_index: 0,
+                item_symbol,
+                balanced_splitter: false,
+                always_awake: false,
+                route_indices: vec![0].into_boxed_slice(),
+            }],
+            target_slot_count: 1,
+            total_capacity: 6.0,
+            group_by_key: Arc::new(HashMap::from([((0, item_symbol), 0)])),
+            tracked_station_sources: vec![TrackedStationSource {
+                station_index: 0,
+                group_indices: vec![0].into_boxed_slice(),
+            }]
+            .into_boxed_slice(),
+            tracked_station_group_indices: vec![0].into_boxed_slice(),
+        };
+        let mut quantum = legacy.clone();
+        quantum.groups[0].always_awake = true;
+        quantum.tracked_station_sources = Box::default();
+        quantum.tracked_station_group_indices = Box::default();
+        (state, vec![station], Arc::new(legacy), Arc::new(quantum))
+    }
+
+    fn pooled_transition_runtime(
+        snapshot: &Arc<BeltActivitySnapshot>,
+        routes: &PreparedRoutes,
+    ) -> BeltRuntime {
+        let reusable = snapshot
+            .take_reusable_runtime()
+            .expect("fixture committed scratch checkout");
+        let mut runtime = BeltRuntime::empty_with_reusable(1, routes, Some(reusable));
+        runtime.reusable_pool = Some(Arc::clone(&snapshot.reusable_pool));
+        runtime.progress = [0.0].into_iter().collect();
+        runtime.total_transferred = [0.0].into_iter().collect();
+        runtime.congestion = [0.0].into_iter().collect();
+        runtime.last_flow = [0.0].into_iter().collect();
+        runtime
+    }
+
+    #[test]
+    fn station_wake_directory_expands_exact_rows_stably() {
+        let prepared = tracked_station_prepared_routes();
+        assert_eq!(
+            tracked_station_wake_groups(&prepared, &[7, 7, 99]).unwrap(),
+            vec![1]
+        );
+        assert_eq!(
+            tracked_station_wake_groups(&prepared, &[7, 3, 7]).unwrap(),
+            vec![0, 1, 2]
+        );
+        assert!(
+            tracked_station_wake_groups(&prepared, &[])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn empty_station_wake_directory_returns_before_changed_index_conversion() {
+        let state = crate::simple_factory::tests::fixture_state(&[]);
+        let prepared = empty_prepared_routes();
+        let mut runtime = BeltRuntime::empty(0, &prepared);
+
+        wake_tracked_station_sources(
+            &state,
+            &[],
+            &mut runtime,
+            &prepared,
+            &[usize::MAX, usize::MAX],
+        )
+        .unwrap();
+
+        assert!(runtime.active_group_indices.is_empty());
+    }
+
+    #[test]
+    fn full_and_dense_clocks_skip_proven_dormant_tracked_station_groups() {
+        let prepared = tracked_station_prepared_routes();
+        let run = |selection: ActiveSelection| {
+            let mut runtime = kernel_runtime(3);
+            for index in 0..3 {
+                runtime.progress[index] = 0.0;
+                runtime.congestion[index] = 0.0;
+                runtime.last_flow[index] = 0.0;
+            }
+            runtime.active_groups = vec![true, false, true];
+            runtime.active_group_indices = vec![0, 2];
+            advance_belt_clocks(&mut runtime, &prepared, &selection, 1.0, 100.0).unwrap();
+            (0..3)
+                .map(|index| runtime.progress[index])
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(run(ActiveSelection::All), [6.0, 0.0, 6.0]);
+        assert_eq!(
+            run(ActiveSelection::Dense {
+                selected_group_indices: vec![0, 2],
+                selected_route_indices: vec![0, 2],
+            }),
+            [6.0, 0.0, 6.0]
+        );
+    }
+
+    #[test]
+    fn station_inventory_wake_selects_only_groups_with_positive_current_output() {
+        let (state, mut station) =
+            builtin_logistics_station_state("interstellar_logistics_station", "legacy");
+        station["outputs"] = json!({ "interstellar_logistics_station": 4, "home": 0 });
+        let positive_item = state
+            .symbols
+            .lookup("interstellar_logistics_station")
+            .expect("fixture building symbol");
+        let empty_item = state.symbols.lookup("home").expect("fixture planet symbol");
+        let prepared = PreparedRoutes {
+            routes: vec![
+                Route {
+                    capacity: 6.0,
+                    source_index: 0,
+                    target_index: 0,
+                    source_group: 0,
+                    target_slot: 0,
+                    belt_sort_rank: 0,
+                    target_port_index: None,
+                    priority: 1,
+                },
+                Route {
+                    capacity: 6.0,
+                    source_index: 0,
+                    target_index: 0,
+                    source_group: 1,
+                    target_slot: 1,
+                    belt_sort_rank: 0,
+                    target_port_index: None,
+                    priority: 1,
+                },
+            ],
+            groups: vec![
+                PreparedGroup {
+                    source_index: 0,
+                    item_symbol: positive_item,
+                    balanced_splitter: false,
+                    always_awake: false,
+                    route_indices: vec![0].into_boxed_slice(),
+                },
+                PreparedGroup {
+                    source_index: 0,
+                    item_symbol: empty_item,
+                    balanced_splitter: false,
+                    always_awake: false,
+                    route_indices: vec![1].into_boxed_slice(),
+                },
+            ],
+            target_slot_count: 2,
+            total_capacity: 12.0,
+            group_by_key: Arc::new(HashMap::new()),
+            tracked_station_sources: vec![TrackedStationSource {
+                station_index: 0,
+                group_indices: vec![0, 1].into_boxed_slice(),
+            }]
+            .into_boxed_slice(),
+            tracked_station_group_indices: vec![0, 1].into_boxed_slice(),
+        };
+        let entities = vec![station];
+
+        let mut runtime = kernel_runtime(2);
+        runtime.active_groups = vec![false; 2];
+        wake_tracked_station_sources(&state, &entities, &mut runtime, &prepared, &[0, 0]).unwrap();
+        assert_eq!(runtime.active_group_indices, vec![0]);
+    }
+
+    #[test]
+    fn station_mode_rebuild_reclassifies_exact_topology_and_switches_scratch_pools() {
+        let (_, first) =
+            builtin_logistics_station_state("interstellar_logistics_station", "legacy");
+        let mut second = first.clone();
+        second["id"] = Value::from("unrelated-station");
+        second["inputs"] = json!({ "interstellar_logistics_station": 0 });
+        second["outputs"] = json!({ "interstellar_logistics_station": 0 });
+        let mut entities = vec![first, second];
+        let mut state = crate::simple_factory::tests::fixture_state(&entities);
+        state.identity.registry_fingerprint = EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned();
+        let catalog = Arc::make_mut(&mut state.catalog);
+        catalog.snapshot.registry_fingerprint = EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned();
+        let mut station_building = catalog
+            .buildings
+            .get("interstellar_logistics_station")
+            .expect("fixture station building")
+            .clone();
+        station_building.kind = "station".to_owned();
+        catalog.buildings.insert(
+            "interstellar_logistics_station".to_owned(),
+            station_building,
+        );
+        let item_symbol = state
+            .symbols
+            .lookup("interstellar_logistics_station")
+            .expect("fixture building symbol");
+        let routes = (0..2)
+            .map(|index| Route {
+                capacity: 6.0,
+                source_index: index,
+                target_index: 0,
+                source_group: index,
+                target_slot: index,
+                belt_sort_rank: 0,
+                target_port_index: None,
+                priority: 1,
+            })
+            .collect::<Vec<_>>();
+        let legacy_routes = PreparedRoutes {
+            routes,
+            groups: (0..2)
+                .map(|index| PreparedGroup {
+                    source_index: index,
+                    item_symbol,
+                    balanced_splitter: false,
+                    always_awake: false,
+                    route_indices: vec![index].into_boxed_slice(),
+                })
+                .collect(),
+            target_slot_count: 2,
+            total_capacity: 12.0,
+            group_by_key: Arc::new(HashMap::from([
+                ((0, item_symbol), 0),
+                ((1, item_symbol), 1),
+            ])),
+            tracked_station_sources: vec![
+                TrackedStationSource {
+                    station_index: 0,
+                    group_indices: vec![0].into_boxed_slice(),
+                },
+                TrackedStationSource {
+                    station_index: 1,
+                    group_indices: vec![1].into_boxed_slice(),
+                },
+            ]
+            .into_boxed_slice(),
+            tracked_station_group_indices: vec![0, 1].into_boxed_slice(),
+        };
+        let mut quantum_routes = legacy_routes.clone();
+        quantum_routes.groups[0].always_awake = true;
+        quantum_routes.tracked_station_sources = vec![TrackedStationSource {
+            station_index: 1,
+            group_indices: vec![1].into_boxed_slice(),
+        }]
+        .into_boxed_slice();
+        quantum_routes.tracked_station_group_indices = vec![1].into_boxed_slice();
+
+        let legacy_routes_arc = Arc::new(legacy_routes.clone());
+        let mut committed = BeltRuntime::empty(2, &legacy_routes);
+        committed.active_groups.fill(false);
+        committed.active_group_indices.clear();
+        let old_snapshot = committed.activity_snapshot(&legacy_routes_arc);
+        let old_pool = Arc::clone(&old_snapshot.reusable_pool);
+        let reusable = old_snapshot
+            .take_reusable_runtime()
+            .expect("committed scratch checkout");
+        let mut runtime = BeltRuntime::empty_with_reusable(2, &legacy_routes, Some(reusable));
+        runtime.reusable_pool = Some(Arc::clone(&old_pool));
+        runtime.progress = [0.0, 0.0].into_iter().collect();
+        runtime.total_transferred = [17.0, 23.0].into_iter().collect();
+        runtime.congestion = [0.0, 0.0].into_iter().collect();
+        runtime.last_flow = [0.0, 0.0].into_iter().collect();
+        runtime.total_dirty[1] = true;
+        runtime.touched_routes.record_index(1).unwrap();
+        runtime.active_groups = vec![false, true];
+        runtime.active_group_indices = vec![1];
+        runtime.workspace.pending_wake_group_indices.push(1);
+        runtime.diagnostics.carried_active_groups = 7;
+        let active_groups_ptr = runtime.active_groups.as_ptr();
+        let post_actions_ptr = runtime.workspace.post_actions.as_ptr();
+        let workspace_groups_ptr = runtime.workspace.groups.as_ptr();
+        let target_free_ptr = runtime.workspace.target_free.as_ptr();
+
+        entities[0]["quantumMode"] = Value::from("quantum");
+        let mut topology_drift = quantum_routes.clone();
+        topology_drift.routes[0].priority = 2;
+        let error = runtime
+            .rebuild_activity_for_routes(&state, &entities, &legacy_routes, &topology_drift)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native belt activity rebuild topology changed"
+        );
+        assert_eq!(runtime.active_group_indices, vec![1]);
+        assert_eq!(runtime.workspace.pending_wake_group_indices, vec![1]);
+        assert!(Arc::ptr_eq(
+            runtime.reusable_pool.as_ref().unwrap(),
+            &old_pool
+        ));
+
+        runtime
+            .rebuild_activity_for_routes(&state, &entities, &legacy_routes, &quantum_routes)
+            .unwrap();
+        assert_eq!(runtime.active_group_indices, vec![0]);
+        assert_eq!(runtime.active_groups, vec![true, false]);
+        assert_eq!(runtime.progress[0].to_bits(), 0.0_f64.to_bits());
+        assert_eq!(runtime.total_transferred[0].to_bits(), 17.0_f64.to_bits());
+        assert_eq!(runtime.total_transferred[1].to_bits(), 23.0_f64.to_bits());
+        assert!(runtime.total_dirty[1]);
+        assert_eq!(runtime.touched_routes.signature(), Some(vec![1]));
+        assert_eq!(runtime.diagnostics.carried_active_groups, 7);
+        assert_eq!(runtime.active_groups.as_ptr(), active_groups_ptr);
+        assert_eq!(runtime.workspace.post_actions.as_ptr(), post_actions_ptr);
+        assert_eq!(runtime.workspace.groups.as_ptr(), workspace_groups_ptr);
+        assert_eq!(runtime.workspace.target_free.as_ptr(), target_free_ptr);
+
+        assert!(!Arc::ptr_eq(
+            runtime.reusable_pool.as_ref().unwrap(),
+            &old_pool
+        ));
+        let pending_pool_ptr = Arc::as_ptr(runtime.reusable_pool.as_ref().unwrap());
+        assert!(old_pool.take().is_none());
+
+        entities[0]["quantumMode"] = Value::from("legacy");
+        runtime
+            .rebuild_activity_for_routes(&state, &entities, &quantum_routes, &legacy_routes)
+            .unwrap();
+        assert!(runtime.active_group_indices.is_empty());
+        assert_eq!(runtime.active_groups, vec![false, false]);
+        assert_eq!(runtime.total_transferred[0].to_bits(), 17.0_f64.to_bits());
+        assert_eq!(runtime.total_transferred[1].to_bits(), 23.0_f64.to_bits());
+        assert_eq!(runtime.touched_routes.signature(), Some(vec![1]));
+        assert_eq!(runtime.diagnostics.carried_active_groups, 7);
+        assert_eq!(runtime.active_groups.as_ptr(), active_groups_ptr);
+        assert_eq!(runtime.workspace.post_actions.as_ptr(), post_actions_ptr);
+        assert_eq!(runtime.workspace.groups.as_ptr(), workspace_groups_ptr);
+        assert_eq!(runtime.workspace.target_free.as_ptr(), target_free_ptr);
+        assert_eq!(
+            Arc::as_ptr(runtime.reusable_pool.as_ref().unwrap()),
+            pending_pool_ptr,
+            "multiple transitions must keep one unpublished pool"
+        );
+
+        let mut failed_candidate = runtime;
+        let transitioned_pool = Arc::downgrade(failed_candidate.reusable_pool.as_ref().unwrap());
+        failed_candidate.active_groups[1] = true;
+        failed_candidate.active_group_indices = vec![1];
+        failed_candidate
+            .workspace
+            .pending_wake_group_indices
+            .push(1);
+        drop(failed_candidate);
+        assert!(
+            transitioned_pool.upgrade().is_none(),
+            "failed candidate must release its unpublished pool"
+        );
+        let failed_scratch = old_snapshot
+            .take_reusable_runtime()
+            .expect("failed transitioned candidate restores committed scratch");
+        assert_eq!(failed_scratch.active_groups.as_ptr(), active_groups_ptr);
+        assert_eq!(
+            failed_scratch.workspace.post_actions.as_ptr(),
+            post_actions_ptr
+        );
+        assert_eq!(
+            failed_scratch.workspace.groups.as_ptr(),
+            workspace_groups_ptr
+        );
+        assert_eq!(
+            failed_scratch.workspace.target_free.as_ptr(),
+            target_free_ptr
+        );
+        assert!(failed_scratch.active_groups.iter().all(|active| !active));
+        assert!(failed_scratch.occupied_group_indices.is_empty());
+        assert!(
+            failed_scratch
+                .workspace
+                .pending_wake_group_indices
+                .is_empty()
+        );
+
+        let mut retry = BeltRuntime::empty_with_reusable(2, &legacy_routes, Some(failed_scratch));
+        assert!(retry.diagnostics.runtime_workspace_reused);
+        assert_eq!(
+            retry.diagnostics.runtime_workspace_initialized_route_rows,
+            0
+        );
+        assert_eq!(
+            retry.diagnostics.runtime_workspace_initialized_group_rows,
+            0
+        );
+        assert_eq!(
+            retry.diagnostics.runtime_workspace_initialized_target_rows,
+            0
+        );
+        retry.reusable_pool = Some(Arc::clone(&old_pool));
+        retry.progress = [0.0, 0.0].into_iter().collect();
+        retry.total_transferred = [17.0, 23.0].into_iter().collect();
+        retry.congestion = [0.0, 0.0].into_iter().collect();
+        retry.last_flow = [0.0, 0.0].into_iter().collect();
+        let retry = retry
+            .finish_activity(
+                &state,
+                &entities,
+                &legacy_routes_arc,
+                Some(Arc::clone(&old_snapshot)),
+            )
+            .unwrap();
+        assert!(retry.active_group_indices.is_empty());
+        assert_eq!(retry.active_groups, vec![false, false]);
+        assert!(retry.workspace.pending_wake_group_indices.is_empty());
+        assert_eq!(retry.total_transferred[0].to_bits(), 17.0_f64.to_bits());
+        assert_eq!(retry.total_transferred[1].to_bits(), 23.0_f64.to_bits());
+    }
+
+    #[test]
+    fn transitioned_snapshot_rolls_workspace_back_after_writeback_failure() {
+        let (state, mut entities, legacy_routes, quantum_routes) = transition_pool_fixture();
+        let mut seed = BeltRuntime::empty(1, &legacy_routes);
+        seed.active_groups.fill(false);
+        seed.active_group_indices.clear();
+        let workspace_ptr = seed.workspace.post_actions.as_ptr();
+        let resident_bytes = seed.workspace.estimated_bytes()
+            + seed.active_groups.capacity().div_ceil(u8::BITS as usize) as u64;
+        let old_snapshot = seed.activity_snapshot(&legacy_routes);
+        assert_eq!(old_snapshot.estimated_bytes(), resident_bytes);
+
+        let mut runtime = pooled_transition_runtime(&old_snapshot, &legacy_routes);
+        entities[0]["quantumMode"] = Value::from("quantum");
+        runtime
+            .rebuild_activity_for_routes(&state, &entities, &legacy_routes, &quantum_routes)
+            .unwrap();
+        let pending_pool = Arc::downgrade(runtime.reusable_pool.as_ref().unwrap());
+        let pending_snapshot = runtime.activity_snapshot(&quantum_routes);
+        assert_eq!(old_snapshot.estimated_bytes(), 0);
+        assert_eq!(
+            pending_snapshot.estimated_bytes(),
+            resident_bytes + size_of::<u32>() as u64,
+            "rollback metadata must not count the old pool a second time"
+        );
+
+        let error = runtime
+            .into_patches(&state, BeltFlowRequirement::NotRequired)
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native belt runtime source changed before commit sealing"
+        );
+        drop(pending_snapshot);
+        assert!(pending_pool.upgrade().is_none());
+
+        let returned = old_snapshot
+            .take_reusable_runtime()
+            .expect("write-back failure restores the committed workspace");
+        assert_eq!(returned.workspace.post_actions.as_ptr(), workspace_ptr);
+        assert_eq!(returned.active_groups, [true]);
+        assert_eq!(&*returned.occupied_group_indices, &[0]);
+        assert_eq!(returned.estimated_bytes(), resident_bytes);
+        let retried = BeltRuntime::empty_with_reusable(1, &legacy_routes, Some(returned));
+        assert!(retried.diagnostics.runtime_workspace_reused);
+        assert_eq!(retried.workspace.post_actions.as_ptr(), workspace_ptr);
+        assert!(retried.active_groups.iter().all(|active| !*active));
+    }
+
+    #[test]
+    fn successful_transition_install_disarms_committed_pool_rollback() {
+        let (mut state, mut entities, legacy_routes, quantum_routes) = transition_pool_fixture();
+        let mut seed = BeltRuntime::empty(1, &legacy_routes);
+        seed.active_groups.fill(false);
+        seed.active_group_indices.clear();
+        let workspace_ptr = seed.workspace.post_actions.as_ptr();
+        let old_snapshot = seed.activity_snapshot(&legacy_routes);
+        state.install_prepared_belt_activity(Arc::clone(&old_snapshot));
+
+        let mut runtime = pooled_transition_runtime(&old_snapshot, &legacy_routes);
+        entities[0]["quantumMode"] = Value::from("quantum");
+        runtime
+            .rebuild_activity_for_routes(&state, &entities, &legacy_routes, &quantum_routes)
+            .unwrap();
+        let committed_snapshot = runtime.activity_snapshot(&quantum_routes);
+        assert!(committed_snapshot.reusable_pool.is_pending());
+        state.install_prepared_belt_activity(Arc::clone(&committed_snapshot));
+        assert!(!committed_snapshot.reusable_pool.is_pending());
+        assert!(old_snapshot.take_reusable_runtime().is_none());
+
+        let committed_runtime = committed_snapshot
+            .take_reusable_runtime()
+            .expect("installed transition retains its detached workspace");
+        assert_eq!(
+            committed_runtime.workspace.post_actions.as_ptr(),
+            workspace_ptr
+        );
+        committed_snapshot
+            .reusable_pool
+            .put_if_empty(committed_runtime);
+        drop(state);
+        drop(committed_snapshot);
+        assert!(
+            old_snapshot.take_reusable_runtime().is_none(),
+            "dropping a published snapshot must not roll back into the old revision"
+        );
+    }
+
+    #[test]
+    fn old_snapshot_overlap_keeps_first_return_and_does_not_double_count_rollback_pool() {
+        let (state, mut entities, legacy_routes, quantum_routes) = transition_pool_fixture();
+        let mut seed = BeltRuntime::empty(1, &legacy_routes);
+        seed.active_groups.fill(false);
+        seed.active_group_indices.clear();
+        let resident_bytes = seed.workspace.estimated_bytes()
+            + seed.active_groups.capacity().div_ceil(u8::BITS as usize) as u64;
+        let original_workspace_ptr = seed.workspace.post_actions.as_ptr();
+        let old_snapshot = seed.activity_snapshot(&legacy_routes);
+        let mut transitioning = pooled_transition_runtime(&old_snapshot, &legacy_routes);
+        entities[0]["quantumMode"] = Value::from("quantum");
+        transitioning
+            .rebuild_activity_for_routes(&state, &entities, &legacy_routes, &quantum_routes)
+            .unwrap();
+
+        assert!(old_snapshot.take_reusable_runtime().is_none());
+        let mut overlapping = BeltRuntime::empty_with_reusable(1, &legacy_routes, None);
+        overlapping.reusable_pool = Some(Arc::clone(&old_snapshot.reusable_pool));
+        let overlapping_workspace_ptr = overlapping.workspace.post_actions.as_ptr();
+        assert_ne!(overlapping_workspace_ptr, original_workspace_ptr);
+        drop(overlapping);
+        assert_eq!(old_snapshot.estimated_bytes(), resident_bytes);
+
+        let pending_pool = Arc::downgrade(transitioning.reusable_pool.as_ref().unwrap());
+        let pending_snapshot = transitioning.activity_snapshot(&quantum_routes);
+        assert_eq!(
+            pending_snapshot.estimated_bytes(),
+            resident_bytes + size_of::<u32>() as u64,
+            "the pending snapshot must count only its own resident workspace"
+        );
+        drop(transitioning);
+        drop(pending_snapshot);
+        assert!(pending_pool.upgrade().is_none());
+
+        let winner = old_snapshot
+            .take_reusable_runtime()
+            .expect("overlapping old-revision candidate remains the pool winner");
+        assert_eq!(
+            winner.workspace.post_actions.as_ptr(),
+            overlapping_workspace_ptr
+        );
+        assert_ne!(
+            winner.workspace.post_actions.as_ptr(),
+            original_workspace_ptr
+        );
+        assert!(winner.active_groups.iter().all(|active| !*active));
+        assert!(winner.occupied_group_indices.is_empty());
+        assert_eq!(winner.estimated_bytes(), resident_bytes);
+    }
+
+    #[test]
+    fn belt_input_station_wake_defers_its_clock_until_next_step() {
+        let (state, station) =
+            builtin_logistics_station_state("interstellar_logistics_station", "legacy");
+        let item_symbol = state
+            .symbols
+            .lookup("interstellar_logistics_station")
+            .expect("fixture station symbol");
+        let prepared = PreparedRoutes {
+            routes: vec![Route {
+                capacity: 6.0,
+                source_index: 0,
+                target_index: 0,
+                source_group: 0,
+                target_slot: 0,
+                belt_sort_rank: 0,
+                target_port_index: None,
+                priority: 1,
+            }],
+            groups: vec![PreparedGroup {
+                source_index: 0,
+                item_symbol,
+                balanced_splitter: false,
+                always_awake: false,
+                route_indices: vec![0].into_boxed_slice(),
+            }],
+            target_slot_count: 1,
+            total_capacity: 6.0,
+            group_by_key: Arc::new(HashMap::from([((0, item_symbol), 0)])),
+            tracked_station_sources: vec![TrackedStationSource {
+                station_index: 0,
+                group_indices: vec![0].into_boxed_slice(),
+            }]
+            .into_boxed_slice(),
+            tracked_station_group_indices: vec![0].into_boxed_slice(),
+        };
+        let mut pending = Vec::new();
+        queue_target_source_wakes(
+            &state,
+            std::slice::from_ref(&station),
+            &prepared,
+            &prepared.routes[0],
+            item_symbol,
+            &mut pending,
+        )
+        .unwrap();
+        assert_eq!(pending, vec![0]);
+
+        let mut runtime = kernel_runtime(1);
+        runtime.active_groups = vec![false; 1];
+        runtime.progress[0] = 0.0;
+        catch_up_newly_woken_ordinary_producer_clocks(
+            &mut runtime,
+            &state,
+            std::slice::from_ref(&station),
+            &prepared,
+            &ActiveSelection::Mask {
+                selected_group_indices: Vec::new(),
+                selected_route_indices: Vec::new(),
+            },
+            &pending,
+            1.0,
+            100.0,
+        )
+        .unwrap();
+        assert_eq!(runtime.progress[0].to_bits(), 0.0_f64.to_bits());
+        runtime.wake_group(0).unwrap();
+        assert_eq!(runtime.active_group_indices, vec![0]);
+        catch_up_newly_woken_ordinary_producer_clocks(
+            &mut runtime,
+            &state,
+            std::slice::from_ref(&station),
+            &prepared,
+            &ActiveSelection::Mask {
+                selected_group_indices: vec![0],
+                selected_route_indices: vec![0],
+            },
+            &pending,
+            1.0,
+            100.0,
+        )
+        .unwrap();
+        assert_eq!(runtime.progress[0].to_bits(), 0.0_f64.to_bits());
+    }
+
     #[test]
     fn ordinary_producer_wake_skips_an_unrouted_uninterned_sibling_output() {
         let (mut state, entity) = builtin_ordinary_machine_state(0.0);
@@ -4622,6 +6046,8 @@ mod tests {
             target_slot_count: 0,
             total_capacity: 0.0,
             group_by_key: Arc::new(HashMap::from([((0, output_symbol), 7)])),
+            tracked_station_sources: Box::default(),
+            tracked_station_group_indices: Box::default(),
         };
         let route = Route {
             capacity: 6.0,
@@ -4713,6 +6139,8 @@ mod tests {
             groups: Vec::new(),
             target_slot_count: 0,
             group_by_key: Arc::new(HashMap::new()),
+            tracked_station_sources: Box::default(),
+            tracked_station_group_indices: Box::default(),
         }
     }
 
@@ -4786,6 +6214,8 @@ mod tests {
                 ((0, item_symbol), 0),
                 ((1, item_symbol), 1),
             ])),
+            tracked_station_sources: Box::default(),
+            tracked_station_group_indices: Box::default(),
         };
         let mut runtime = kernel_runtime(2);
         // Group 0 models the clock already applied by the captured selection;
@@ -4952,6 +6382,8 @@ mod tests {
                 target_slot_count: 0,
                 total_capacity: 0.0,
                 group_by_key: Arc::new(HashMap::new()),
+                tracked_station_sources: Box::default(),
+                tracked_station_group_indices: Box::default(),
             },
         )
     }
@@ -5229,6 +6661,8 @@ mod tests {
             target_slot_count: 1,
             total_capacity: 24.0,
             group_by_key: Arc::new(HashMap::new()),
+            tracked_station_sources: Box::default(),
+            tracked_station_group_indices: Box::default(),
         };
         let run = |workers| {
             let mut runtime = kernel_runtime(4);
@@ -5663,6 +7097,8 @@ mod tests {
             target_slot_count: 0,
             total_capacity: 0.0,
             group_by_key: Arc::new(HashMap::new()),
+            tracked_station_sources: Box::default(),
+            tracked_station_group_indices: Box::default(),
         }
     }
 
@@ -6378,6 +7814,8 @@ mod tests {
             target_slot_count: 1,
             total_capacity: 4.0,
             group_by_key: Arc::new(HashMap::new()),
+            tracked_station_sources: Box::default(),
+            tracked_station_group_indices: Box::default(),
         };
         let selection = ActiveSelection::Mask {
             selected_group_indices: vec![1],
@@ -6492,6 +7930,8 @@ mod tests {
             target_slot_count: 4,
             total_capacity: 30.0,
             group_by_key: Arc::new(HashMap::new()),
+            tracked_station_sources: Box::default(),
+            tracked_station_group_indices: Box::default(),
         }
     }
 
@@ -6648,6 +8088,8 @@ mod tests {
             target_slot_count: compact_index(component_count, "resolver target count").unwrap(),
             total_capacity: component_count as f64 * 6.0,
             group_by_key: Arc::new(HashMap::new()),
+            tracked_station_sources: Box::default(),
+            tracked_station_group_indices: Box::default(),
         }
     }
 

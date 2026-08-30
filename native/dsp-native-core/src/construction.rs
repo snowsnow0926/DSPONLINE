@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
+use num_bigint::BigUint;
+use num_traits::Zero;
 use serde_json::{Map, Number, Value};
 
 use crate::catalog::{ItemAmount, RuntimeCatalog};
@@ -2910,6 +2912,176 @@ fn normalize_quantum_buffers(buffers: &mut Map<String, Value>) {
     });
 }
 
+fn safe_persisted_inventory_amount(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
+    match value {
+        None => Ok(0),
+        Some(value) => value
+            .as_u64()
+            .filter(|amount| *amount <= MAX_SAFE_INTEGER as u64)
+            .ok_or_else(|| anyhow!("native construction {label} is not a safe integer")),
+    }
+}
+
+fn checked_refund_inventory_add(
+    inventory: &mut Map<String, Value>,
+    item_id: &str,
+    amount: u64,
+    label: &str,
+) -> anyhow::Result<()> {
+    let current = safe_persisted_inventory_amount(inventory.get(item_id), label)?;
+    let next = current
+        .checked_add(amount)
+        .filter(|next| *next <= MAX_SAFE_INTEGER as u64)
+        .ok_or_else(|| {
+            anyhow!("native construction {label} refund exceeds the safe integer limit")
+        })?;
+    inventory.insert(item_id.to_owned(), Value::from(next));
+    Ok(())
+}
+
+fn refund_tray_mut<'a>(
+    base: &'a mut Map<String, Value>,
+    planet_id: &str,
+) -> anyhow::Result<&'a mut Map<String, Value>> {
+    let active_planet_id = base
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native construction active planet is missing"))?
+        .to_owned();
+    if active_planet_id == planet_id {
+        return base
+            .get_mut("tray")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native construction active planet tray is missing"));
+    }
+    let trays = base
+        .get_mut("planetTrays")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native construction planet tray directory is missing"))?;
+    let tray = trays
+        .entry(planet_id.to_owned())
+        .or_insert_with(|| Value::Object(Map::new()));
+    tray.as_object_mut()
+        .ok_or_else(|| anyhow!("native construction planet tray is invalid"))
+}
+
+fn refund_planet_id(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entity_id: &str,
+) -> anyhow::Result<String> {
+    let active_planet_id = base
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native construction active planet is missing"))?;
+    let planet_id = match state.entity_index.get(entity_id).copied() {
+        None => active_planet_id.to_owned(),
+        Some(entity_index) => {
+            let entity = state.parse_entity(entity_index)?;
+            let entity = entity
+                .as_object()
+                .ok_or_else(|| anyhow!("native construction refund entity is invalid"))?;
+            entity
+                .get("planetId")
+                .and_then(Value::as_str)
+                .unwrap_or(active_planet_id)
+                .to_owned()
+        }
+    };
+    if !state
+        .catalog
+        .planets
+        .iter()
+        .any(|planet| planet.id == planet_id)
+    {
+        bail!("native construction refund planet is unknown")
+    }
+    Ok(planet_id)
+}
+
+fn validate_refund_inventory(
+    state: &CoreState,
+    inventory: &Map<String, Value>,
+    label: &str,
+) -> anyhow::Result<()> {
+    for (item_id, amount) in inventory {
+        if !state.catalog.items.contains_key(item_id) {
+            bail!("native construction {label} item is unknown")
+        }
+        safe_persisted_inventory_amount(Some(amount), label)?;
+    }
+    Ok(())
+}
+
+fn prove_quantum_refund_order_independent(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    buffers: &Map<String, Value>,
+) -> anyhow::Result<()> {
+    let mut totals = BTreeMap::<String, BigUint>::new();
+    let mut refund_planets = BTreeMap::<String, BTreeSet<String>>::new();
+    for (entity_id, value) in buffers {
+        let inventory = value
+            .as_object()
+            .ok_or_else(|| anyhow!("native construction quantum buffer is invalid"))?;
+        validate_refund_inventory(state, inventory, "quantum buffer")?;
+        let planet_id = refund_planet_id(state, base, entity_id)?;
+        for (item_id, value) in inventory {
+            let amount = safe_persisted_inventory_amount(Some(value), "quantum buffer")?;
+            if amount == 0 {
+                continue;
+            }
+            *totals.entry(item_id.clone()).or_default() += BigUint::from(amount);
+            refund_planets
+                .entry(item_id.clone())
+                .or_default()
+                .insert(planet_id.clone());
+        }
+    }
+    for (item_id, total) in totals {
+        let accepted = crate::quantum_logistics::preview_construction_refund_acceptance(
+            base, &item_id, &total,
+        )?;
+        if !accepted.is_zero()
+            && accepted < total
+            && refund_planets
+                .get(&item_id)
+                .is_some_and(|planets| planets.len() > 1)
+        {
+            bail!(
+                "native construction quantum refund order is ambiguous across planets for {item_id}"
+            )
+        }
+    }
+    Ok(())
+}
+
+fn refund_job_inventory(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    planet_id: &str,
+    inventory: &Map<String, Value>,
+) -> anyhow::Result<()> {
+    validate_refund_inventory(state, inventory, "job inventory")?;
+    for (item_id, value) in inventory {
+        let amount = safe_persisted_inventory_amount(Some(value), "job inventory")?;
+        if amount == 0 {
+            continue;
+        }
+        if matches!(item_id.as_str(), "logistics_drone" | "logistics_vessel") {
+            let fleet = base
+                .get_mut("portableFleet")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow!("native construction portable fleet is missing"))?;
+            checked_refund_inventory_add(fleet, item_id, amount, "portable fleet")?;
+        } else {
+            let tray = refund_tray_mut(base, planet_id)?;
+            checked_refund_inventory_add(tray, item_id, amount, "planet tray")?;
+        }
+    }
+    Ok(())
+}
+
 fn refund_quantum_buffer(
     base: &mut Map<String, Value>,
     buffers: &mut Map<String, Value>,
@@ -2930,14 +3102,134 @@ fn refund_quantum_buffer(
         let requested = amount.min(u64::MAX as f64) as u64;
         let deposited =
             crate::quantum_logistics::deposit_construction_refund(base, &item_id, requested)?;
-        let remainder = amount - deposited as f64;
-        if remainder > 0.0 {
-            let planet_tray = tray_mut(base, planet_id)
-                .ok_or_else(|| anyhow!("native construction planet tray is missing"))?;
-            let current = inventory_amount(planet_tray, &item_id);
-            set_inventory_amount(planet_tray, &item_id, current + remainder)?;
+        let remainder = requested.saturating_sub(deposited);
+        if remainder > 0 {
+            let planet_tray = refund_tray_mut(base, planet_id)?;
+            let raw_current = finite_number(planet_tray.get(&item_id));
+            if !nonnegative_safe_integer(raw_current) {
+                bail!("native construction quantum refund exceeds the safe integer limit")
+            }
+            let current = raw_current as u64;
+            let next = current
+                .checked_add(remainder)
+                .filter(|next| *next <= MAX_SAFE_INTEGER as u64)
+                .ok_or_else(|| {
+                    anyhow!("native construction quantum refund exceeds the safe integer limit")
+                })?;
+            planet_tray.insert(item_id, Value::from(next));
         }
     }
+    Ok(())
+}
+
+/// Apply the current v47 single-target construction policy. Lowering a target
+/// to already-owned stock is a cancellation transaction: only matching jobs
+/// are refunded, while every direct quantum reservation is returned exactly as
+/// the JavaScript authority does. The caller owns `base`, so any late failure
+/// discards the entire derived candidate without touching the live state.
+pub(crate) fn apply_target_stock_policy(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    target_id: &str,
+    normalized_target: u64,
+) -> anyhow::Result<()> {
+    let stock_directory = if matches!(target_id, "logistics_drone" | "logistics_vessel") {
+        "portableFleet"
+    } else {
+        "construction"
+    };
+    let current_stock = base
+        .get(stock_directory)
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native construction target stock directory is missing"))?;
+    let current_stock =
+        safe_persisted_inventory_amount(current_stock.get(target_id), "current target stock")?;
+
+    if normalized_target <= current_stock {
+        let automation = base
+            .get("constructionAutomation")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native construction automation state is missing"))?;
+        match automation.get("quantumMaterialBuffer") {
+            None => {}
+            Some(Value::Object(buffers)) => {
+                prove_quantum_refund_order_independent(state, base, buffers)?
+            }
+            Some(_) => bail!("native construction quantum buffer directory is invalid"),
+        }
+    }
+
+    let mut automation = base
+        .remove("constructionAutomation")
+        .and_then(|value| value.as_object().cloned())
+        .ok_or_else(|| anyhow!("native construction automation state is missing"))?;
+    let mut target_stock = automation
+        .remove("targetStock")
+        .and_then(|value| value.as_object().cloned())
+        .ok_or_else(|| anyhow!("native construction target stock policy is missing"))?;
+    if normalized_target == 0 {
+        target_stock.remove(target_id);
+    } else {
+        target_stock.insert(target_id.to_owned(), Value::from(normalized_target));
+    }
+    automation.insert("targetStock".to_owned(), Value::Object(target_stock));
+
+    if normalized_target <= current_stock {
+        let mut jobs = automation
+            .remove("jobs")
+            .and_then(|value| value.as_object().cloned())
+            .ok_or_else(|| anyhow!("native construction jobs are missing"))?;
+        let matching_job_ids = jobs
+            .iter()
+            .filter_map(|(entity_id, job)| {
+                (job.as_object()
+                    .and_then(|job| job.get("constructionId"))
+                    .and_then(Value::as_str)
+                    == Some(target_id))
+                .then_some(entity_id.clone())
+            })
+            .collect::<Vec<_>>();
+        for entity_id in matching_job_ids {
+            let job = jobs
+                .get(&entity_id)
+                .and_then(Value::as_object)
+                .ok_or_else(|| anyhow!("native construction matching job is invalid"))?;
+            let inventory = job
+                .get("inventory")
+                .and_then(Value::as_object)
+                .ok_or_else(|| anyhow!("native construction matching job inventory is missing"))?
+                .clone();
+            let planet_id = refund_planet_id(state, base, &entity_id)?;
+            refund_job_inventory(state, base, &planet_id, &inventory)?;
+            jobs.remove(&entity_id);
+        }
+        automation.insert("jobs".to_owned(), Value::Object(jobs));
+
+        let mut buffers = match automation.remove("quantumMaterialBuffer") {
+            None => Map::new(),
+            Some(Value::Object(buffers)) => buffers,
+            Some(_) => bail!("native construction quantum buffer directory is invalid"),
+        };
+        let buffered_entity_ids = buffers.keys().cloned().collect::<Vec<_>>();
+        for entity_id in buffered_entity_ids {
+            let inventory = buffers
+                .get(&entity_id)
+                .and_then(Value::as_object)
+                .ok_or_else(|| anyhow!("native construction quantum buffer is invalid"))?;
+            validate_refund_inventory(state, inventory, "quantum buffer")?;
+            let planet_id = refund_planet_id(state, base, &entity_id)?;
+            refund_quantum_buffer(base, &mut buffers, &entity_id, &planet_id)?;
+        }
+        normalize_quantum_buffers(&mut buffers);
+        if !buffers.is_empty() {
+            automation.insert("quantumMaterialBuffer".to_owned(), Value::Object(buffers));
+        }
+    }
+
+    base.insert(
+        "constructionAutomation".to_owned(),
+        Value::Object(automation),
+    );
     Ok(())
 }
 

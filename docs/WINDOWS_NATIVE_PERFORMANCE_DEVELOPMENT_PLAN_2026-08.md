@@ -1620,7 +1620,7 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 ### 24.3 本 HEAD 新鲜验证
 
 - 当前运行时代码 `06a4f58`（以及只改测试 lint 的 `662d9cd`）新跑 TypeScript：0 错误；完整 Vitest 为 294 文件通过、14 文件条件跳过、0 失败，2,336 项通过、29 项跳过、0 失败，总耗时 211.05 秒。科技布局/原生命令定向 20/20、Rust command 模块 67/67、生产缓存交叉回归 1/1、星际物流模块 53/53 也均通过。
-- 当前 production build：2,034 modules；startup 总 gzip 180,342 B、JavaScript 86,812 B、CSS 93,530 B、最大启动 JavaScript 58,974 B、menu 257,705 B、forbidden 0，预算通过。
+- 文档提交 `cb42166` 的 clean production build 为 Build ID `1.2.3+cb42166e3e5a`、2,034 modules；startup 总 gzip 180,333 B、JavaScript 86,803 B、CSS 93,530 B、最大启动 JavaScript 58,974 B、menu 257,702 B、forbidden 0，预算通过。后续若只追加证据文档必须重新生成 Build ID，不能把该 ID 冒充成新源码包。
 - 当前 Release Rust Host 以单 build job 编译通过；Windows native/desktop JavaScript 为 406 通过、1 个目录 symlink 权限不足 `EPERM` 条件跳过、0 失败，对应 junction 防护测试通过。
 - Rust `cargo fmt --check` 通过。Clippy 首轮只发现科研测试的一处不必要 clone，`662d9cd` 修复后 `--workspace --all-targets -D warnings` 通过，定向科研生命周期 1/1。16 test threads 的 workspace 运行在 core 中途复现本机 `0xc0000005`，没有断言失败汇总；按既定边界以单 build job、单 test thread 完整复验为 core 617/617、Host 157/157，总计 774/774、0 失败。该异常证据保留，不能写成 16 线程完整通过。
 - 当前 Server/API/SQLite 主套件 384 通过、2 条件跳过；空间站 4/4；运维 56 通过、6 条 Linux/systemd/权限条件跳过，全部 0 失败，且没有连接生产。

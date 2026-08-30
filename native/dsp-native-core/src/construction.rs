@@ -1801,8 +1801,8 @@ fn safe_multiply(left: f64, right: f64) -> f64 {
 }
 
 fn safe_add(left: f64, right: f64) -> f64 {
-    let left = floor_amount(left).max(0.0).min(MAX_SAFE_INTEGER);
-    let right = floor_amount(right).max(0.0).min(MAX_SAFE_INTEGER);
+    let left = floor_amount(left);
+    let right = floor_amount(right);
     if left > MAX_SAFE_INTEGER - right {
         MAX_SAFE_INTEGER
     } else {
@@ -3437,8 +3437,8 @@ pub(crate) fn run_centers(
                         "cursor",
                         ((target.index + 1) % target_count) as f64,
                     )?;
-                    if let Some(batch) = resolved.batch.as_ref() {
-                        if let Some((used_work, batch_completed)) = try_run_repeatable_batch(
+                    if let Some(batch) = resolved.batch.as_ref()
+                        && let Some((used_work, batch_completed)) = try_run_repeatable_batch(
                             state,
                             base,
                             &mut automation,
@@ -3451,22 +3451,19 @@ pub(crate) fn run_centers(
                             remaining_work,
                             machine_count,
                             max_fair_batch_jobs,
-                        )? {
-                            wake_centers.insert(entity_index);
-                            remaining_work = (remaining_work - used_work).max(0.0);
-                            completed += batch_completed;
-                            receipt.record_completion(
-                                (!matches!(
-                                    target.id.as_str(),
-                                    "logistics_drone" | "logistics_vessel"
-                                ))
+                        )?
+                    {
+                        wake_centers.insert(entity_index);
+                        remaining_work = (remaining_work - used_work).max(0.0);
+                        completed += batch_completed;
+                        receipt.record_completion(
+                            (!matches!(target.id.as_str(), "logistics_drone" | "logistics_vessel"))
                                 .then_some(target.id.as_str()),
-                                batch_completed,
-                            );
-                            worked = true;
-                            set_number(center, "progress", 0.0)?;
-                            continue;
-                        }
+                            batch_completed,
+                        );
+                        worked = true;
+                        set_number(center, "progress", 0.0)?;
+                        continue;
                     }
                     job = planned_job_value(&target, resolved.plan)
                         .as_object()

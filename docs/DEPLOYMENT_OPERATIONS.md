@@ -15,6 +15,8 @@
 
 硬边界：上海节点必须继续由上海本机提供前端与 `/api`，不得改成香港反代或域名跳转。上海为 HTTP，前端必须继续拒绝云账号密码传输。
 
+> 当前生产状态（2026-08-30，1.2.5 已稳定发布）：香港/上海 Web/API current 均为 `1.2.5-0a1c6629ced1`，previous 均为 `1.2.4-3154f8cf4479`；香港 generation 47 / proxy generation 186，上海 generation 31 / proxy generation 89，均为 blue / 4321。上海下载页 current 为 `download-site-1.2.5-0a1c6629ced1`、previous 为 1.2.4；香港 `/canary/previous/` 302/no-store 到不可变 1.2.4。两地 API/proxy/health timer active、`NRestarts=0`、pending 与 disposable preflight 均为空、health/ready 200、Nginx 有效。香港/上海正式发布快照分别为 4,460,781,568 / 462,848 B，并通过完整 SHA、quick-check、schema 8、layout 3 和 inode/mtime 身份绑定；香港异地备份 timer active，上海恢复演练 timer active。发布后磁盘 80% / 76%。Windows 1.2.5 为 `NotSigned`；Android `1.2.5 / 1002005` 保持长期证书。完整证据见 [1.2.5 发布记录](./releases/1.2.5.md)。
+
 > 当前生产状态（2026-08-27，1.2.2 已稳定发布）：香港/上海 Web/API current 均为 `1.2.2-8b9c93e13270`，previous 均为 `1.1.9-c3f4eff6cb5a`；香港 generation 43 / proxy generation 168，上海 generation 25 / proxy generation 71，均为 blue / 4321。上海下载页 current 为 `download-site-1.2.2-8b9c93e13270`、previous 为 1.1.9；香港 `/canary/previous/` 302/no-store 到不可变 1.1.9。两地 API/proxy/health timer active、`NRestarts=0`、pending 为空、health/ready 200、backup idle、node-health 无失败，schema v8/layout v3 未变。香港/上海正式备份分别为 3,772,833,792 / 462,848 字节并通过完整 SHA、`quick_check` 和身份校验；发布后磁盘 60% / 75%。Windows 1.2.2 继续 `NotSigned`；Android `1.2.2 / 1002002` 保持长期证书。回滚与首次香港 control 执行位故障的完整恢复证据见 [1.2.2 发布记录](./releases/1.2.2.md)。
 
 > 当前生产状态（2026-08-24，1.1.5 已稳定发布）：香港/上海 Web/API 均为 `1.1.5-a92c0d3157f3`，香港 generation 35 / proxy generation 135，上海 generation 21 / proxy generation 59；两地 previous Web/API 均为 `1.1.4-7dbc149a016c`。上海下载页 current 为 `download-site-1.1.5-a92c0d3157f3`，previous 保留 1.1.4；香港 `/canary/previous/` 302 到 `web-1.1.4-7dbc149a016c`。两地 API、代理和健康 timer active，`NRestarts=0`，local/public health/ready 200，pending switch 为空。1.1.5 没有恢复或改写生产数据库、WAL/SHM、玩家存档或排行榜；数据库 schema 8 / SQLite layout 3 的正式 Backup API evidence 已保留并通过 quick_check/哈希/磁盘水位。上海切换辅助命令的非零退出已由独立 current/previous 指针、release-control audit、监听器和公网验收覆盖，禁止重复执行。回滚只允许在当前 generation、evidence 和健康条件仍匹配时按发布记录的 Web/API、下载页和原生边界分别执行，不能把 previous-stable 当作 API 或数据库灾备。
@@ -204,6 +206,8 @@ Get-FileHash release/download-site-<build-id>/downloads/desktop/stable/*.exe -Al
 仓库提供 `deploy/switch-release.sh` 切换前端与后端代码并保存上一次代码指向。1.0.40 候选增加稳定交接代理：Nginx 固定指向 `127.0.0.1:4330`；代理先让已有上传和导出完成并排队新写请求，再短暂排队全部请求。旧写实例释放共享 `flock` 后，新实例才可在 4321/4322 之一接触生产 SQLite。候选预热只允许使用已经验证的发布前备份克隆，不允许两个写实例同时打开生产库。正式安装时须把控制文件放入不可变 `/usr/local/lib/dsp-idle-release/<build-id>/`，再原子更新 `/usr/local/lib/dsp-idle-release/current`，不得覆盖正在运行的控制文件。
 
 API 切换必须提供与不可变 SQLite Backup API 快照绑定的证据。证据锁定绝对路径、大小、mtime、dev/inode、SHA-256、`quick_check`、schema 和 SQLite layout；切换关键路径只复核身份和元数据，避免重新顺序读取多 GiB 快照。快照创建和独立预置副本生成时完成完整 SHA-256。`--dry-run` 执行同样的证据与目标校验，但不启动服务、不 reload Nginx、不改软链。节点级非密钥配置从 `deploy/dsp-idle-runtime.env.example` 安装到 `/etc/dsp-idle-cloud/runtime.env`；真实凭据仍只放 `admin.env`。
+
+不要假定生产节点安装了 `sqlite3` CLI。创建快照后应优先使用当前不可变 API 发布中固定版本的 `better-sqlite3`/仓库快照检查器执行 `quick_check`、schema/layout 与身份绑定；如果 CLI 缺失但快照已经生成，不得把工具缺失误报为数据库或备份损坏，也不得重新覆盖该快照。仍须完成完整 SHA-256、无活动 sidecar、inode/mtime evidence 和二次元数据复核。
 
 1.0.41 起 pending journal 固定为 `/var/lib/dsp-idle-cloud/release-state/pending-switch.json`，不得放回 `/run`。状态目录必须是 `root:<service-group> 2750`，状态文件是 `root:<service-group> 0640`；active API 只读。阶段依次为 `prepared → publishing → published`，失败或不一致时进入 `recovering`。任何恢复失败都保留 journal 和 proxy hold，禁止手工删除后强行启动 writer。所有参与 unit 保留共享 RuntimeDirectory，并对配置错误 78、锁占用 75 使用 `RestartPreventExitStatus` 和 StartLimit。
 

@@ -1,6 +1,6 @@
 # 1.2.5 Release Agent 交接
 
-> 状态：`1.2.5-0a1c6629ced1` 已完成发布前软件门禁、真实终局档验收、正式 Android 签名、Windows stable 封装和不可变制品；未访问生产，仍受本 Release ID 的设备/长时门禁阻断。
+> 状态：交接已执行完成。用户针对 `1.2.5-0a1c6629ced1` 明确接受设备/覆盖升级/长时门禁残余风险后，香港、上海、下载页、Windows stable 与 Android stable 已于 2026-08-30 完成全量原子发布；生产证据见 [1.2.5 正式发布记录](./releases/1.2.5.md)。
 
 ## 固定候选
 
@@ -28,18 +28,18 @@
 
 完整数字、制品哈希和兼容边界见 [1.2.5 候选记录](./releases/1.2.5-candidate.md)。
 
-## Release No-Go 条件
+## 发布时明确接受的残余风险
 
-以下证据尚未完成，且当前没有只适用于本 Release ID 的豁免：
+以下证据尚未完成，用户已明确只针对本 Release ID 接受对应风险：
 
 1. Android 实体设备；
 2. 低配/主流/高配 Windows；
 3. Windows 1.2.4 → 1.2.5 覆盖升级；
 4. 长时运行。
 
-Release Agent 必须先补齐这些门禁，或取得用户明确针对 `1.2.5-0a1c6629ced1` 的风险接受。不得复用 1.2.3、1.2.4 或作废候选的豁免。
+该豁免不适用于后续版本，也没有豁免新鲜备份、完整哈希、Android 证书连续性、严格 TLS、原子切换、健康检查或回滚保护。
 
-## 获得授权后的固定发布边界
+## 已执行的固定发布边界
 
 1. 完整读取 `docs/PROTECTED_RELEASE_ACCESS.md`、`docs/DEPLOYMENT_OPERATIONS.md`、`docs/RELEASE_RUNBOOK_CHECKS.md` 与 Skill deployment reference；复验 manifest、provenance 和 SHA256SUMS，不重建候选。
 2. 通过受保护配置分别对香港、上海做只读身份、current/previous/generation/pending、服务、Nginx、容量和备份能力预检；不得输出节点或凭据。
@@ -49,4 +49,4 @@ Release Agent 必须先补齐这些门禁，或取得用户明确针对 `1.2.5-0
 6. 验收 version/health/ready、PWA/service worker/cache、完整下载哈希、Range 206、Android 签名与证书连续性、Windows `NotSigned`、服务 `NRestarts` 和 current/previous 指针。
 7. 观察通过后把 1.2.4 设为 previous-stable；代码回滚只切不可变目录，永不恢复数据库。
 
-本开发阶段没有连接生产、创建生产备份、上传制品、修改 DNS/下载页或切换生产指针。
+上述步骤均已执行并通过；开发阶段未连接生产的历史事实保持不变，实际生产变更、备份身份、generation、下载哈希、稳定性观察和回滚边界见 [正式发布记录](./releases/1.2.5.md)。

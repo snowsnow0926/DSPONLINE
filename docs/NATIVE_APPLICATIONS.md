@@ -12,19 +12,19 @@
 
 > 1.2.1 开发候选优化 Windows 76.9 MB 大型存档的原生冷启动、摘要诊断、事务内存和同 revision 重复保存，并为 Electron 包增加 Android Gradle 残留的排除与生成后硬校验。`authorityEligible=false` 和 JavaScript 权威保持不变；本版不是原生核心默认接管，也没有完成 24 小时/多硬件 Gate C。开发实测与残余边界见 [1.2.1 Windows 性能报告](./releases/1.2.1-windows-performance-development-report-2026-08-27.md)。
 
-> 1.2.0 开发候选为 Windows 增加私有原生增量存档和独立 Rust 影子模拟核心。邀请 Beta 默认关闭、JavaScript 保持权威；原生核心 `authorityEligible=false`，在 24 小时与多硬件 Gate C 完成前不得宣传为默认稳定权威。公开存档继续是 GameState v47 / envelope v2，Web/Android 和 Windows 回退路径不读取私有原生格式。候选实现、实测和残余边界见 [1.2.0 Windows 原生第二、三层报告](./releases/1.2.0-windows-native-layers23-development-report-2026-08-27.md)。该段只描述历史候选边界，不改变下方 1.2.2 当前公开稳定版本事实。
+> 1.2.0 开发候选为 Windows 增加私有原生增量存档和独立 Rust 影子模拟核心。邀请 Beta 默认关闭、JavaScript 保持权威；原生核心 `authorityEligible=false`，在 24 小时与多硬件 Gate C 完成前不得宣传为默认稳定权威。公开存档继续是 GameState v47 / envelope v2，Web/Android 和 Windows 回退路径不读取私有原生格式。候选实现、实测和残余边界见 [1.2.0 Windows 原生第二、三层报告](./releases/1.2.0-windows-native-layers23-development-report-2026-08-27.md)。该段只描述历史候选边界，不改变下方 1.2.5 当前公开稳定版本事实。
 
-> 当前发布版本：Web/Windows `1.2.2`；Android 正式包 `1.2.2 / 1002002`
-> 1.2.2 已进入香港/上海 Web/API、上海下载页、Windows stable 和 Android stable；香港 Web previous-stable 固定为 1.1.9。
-> 当前公开稳定版本：Windows `1.2.2` 安装包按历史策略为 `NotSigned`；Android `1.2.2 / 1002002` 使用既有长期证书签名。
+> 当前发布版本：Web/Windows `1.2.5`；Android 正式包 `1.2.5 / 1002005`
+> 1.2.5 已进入香港/上海 Web/API、上海下载页、Windows stable 和 Android stable；香港 Web previous-stable 固定为 1.2.4。
+> 当前公开稳定版本：Windows `1.2.5` 安装包按历史策略为 `NotSigned`；Android `1.2.5 / 1002005` 使用既有长期证书签名。
 > 当前稳定版 Windows 包名：`com.dspidle.network`；本工作树性能开发版使用上方独立身份。
 > Android applicationId：`cn.dsponline.network`
-> 1.2.2 的 Web、Windows 与 Android 采用 GameState v47、envelope v2、云 schema v8、SQLite layout v3；纯挂机 30 秒轻量采样不改变旧档迁移边界。
+> 1.2.5 的 Web、Windows 与 Android 采用 GameState v47、envelope v2、云 schema v8、SQLite layout v3；纯挂机 Worker/施工和蓝图布局修复不改变旧档迁移边界。
 > 公开下载入口：`https://download.dsponline.cn/`，文件由上海节点提供，不消耗香港游戏节点流量。
 
-> 冻结 APK：5,316,145 B，SHA-256 `67f340c7d2585c21e196d59dcf049760cfc7f1a7975eb2f21561150211edec31`；AAB：5,105,232 B，SHA-256 `4fabf007426a9d4ba64d43edd406382173f6aa12c18740f4fdc1943e9f50f429`。APK/AAB 的 v2/v3、zipalign、包元数据和历史证书连续性通过；API 36.1 模拟器覆盖升级通过，实体 Android 设备门禁由用户对本候选明确豁免，未创建新证书。
+> 冻结 APK：5,387,389 B，SHA-256 `a039e0d59e7260e7004fae3dec314ca57bd4d6e3e91bf30cf708f780f9113bc8`；AAB：5,176,418 B，SHA-256 `7dcf69a32f19217b91cc1c4606469a6a3e86cd01edb2d00e87716da835b60f28`。APK/AAB 的 v2/v3、zipalign、包元数据和历史证书连续性通过；实体 Android 设备门禁由用户只针对本 Release ID 明确豁免，未创建新证书。
 
-> Windows setup：104,838,532 B，SHA-256 `b2ff8dbb5cfb1b06470de15e719851af64f7e37d519eb9f2a5dc28ff2d017b4b`；blockmap SHA-256 `8cf411515bc281c6a11efc9af2ba1c7e3f8dc10f936257258e0b5e8e0414edf5`。完整下载哈希、更新清单和残余边界见 [1.2.2 正式发布记录](./releases/1.2.2.md)。
+> Windows setup：105,320,506 B，SHA-256 `9126882235c015ec86d3fd5530db5a15831054b4201ea7e4f5e84b78d9221dd9`。完整下载哈希、更新清单、用户豁免和残余边界见 [1.2.5 正式发布记录](./releases/1.2.5.md)。
 
 > 历史 1.0.42 制品和门禁记录仍保留在 [1.0.42 正式发布记录](./releases/1.0.42.md)，不代表当前 stable。
 

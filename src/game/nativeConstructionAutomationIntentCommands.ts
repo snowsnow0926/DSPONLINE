@@ -85,3 +85,25 @@ export function createNativeConstructionAutomationTargetStockIntentCommand(
   }];
   return command;
 }
+
+/**
+ * Sends one integer policy only. Rust derives the complete set of unlocked
+ * built-in building targets from the same authoritative v47 revision; the
+ * renderer never supplies a target-ID list or any inventory/job state.
+ */
+export function createNativeConstructionAutomationBatchBuildingTargetStockIntentCommand(
+  baseRevision: number,
+  target: number,
+): SimulationCommandPatch {
+  if (!Number.isSafeInteger(target) || target < 1 ||
+      target > MAX_CONSTRUCTION_AUTOMATION_TARGET) {
+    throw new TypeError("原生建筑制造中心批量建筑目标意图无效");
+  }
+  const command = emptyCommand(baseRevision);
+  command.topLevelChanges = [{
+    path: ["constructionAutomation", "intent"],
+    operation: "set",
+    value: { kind: "batchBuildingTargetStock", target },
+  }];
+  return command;
+}

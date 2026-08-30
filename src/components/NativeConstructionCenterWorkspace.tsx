@@ -6,13 +6,17 @@ import type {
   NativeConstructionCenterTargetReadModel,
 } from "../game/factoryReadModels";
 import {
+  confirmNativeConstructionCenterBatchBuildingTargetStock,
   confirmNativeConstructionCenterTargetStock,
+  evaluateNativeConstructionCenterBatchBuildingTargetStock,
   evaluateNativeConstructionCenterTargetStock,
   nativeConstructionCenterFrameIdentity,
   nativeConstructionCenterIdentityKey,
   nativeConstructionCenterPendingKey,
   nativeConstructionCenterTargetPresets,
   parseNativeConstructionCenterTargetDraft,
+  type NativeConstructionCenterBatchBuildingTargetStockConfirmation,
+  type NativeConstructionCenterBatchBuildingTargetStockSubmission,
   type NativeConstructionCenterFrameIdentity,
   type NativeConstructionCenterPendingIdentity,
   type NativeConstructionCenterTargetStockConfirmation,
@@ -172,6 +176,7 @@ export function NativeConstructionCenterWorkspace({
   onClose,
   onSubmitEnabledIntent,
   onSubmitQuantumSupplyIntent,
+  onSubmitBatchBuildingTargetStockIntent,
   onSubmitTargetStockIntent,
 }: {
   open: boolean;
@@ -181,11 +186,14 @@ export function NativeConstructionCenterWorkspace({
   onClose: () => void;
   onSubmitEnabledIntent: (identity: NativeConstructionCenterFrameIdentity, enabled: boolean) => void;
   onSubmitQuantumSupplyIntent: (identity: NativeConstructionCenterFrameIdentity, enabled: boolean) => void;
+  onSubmitBatchBuildingTargetStockIntent: (submission: NativeConstructionCenterBatchBuildingTargetStockSubmission) => void;
   onSubmitTargetStockIntent: (submission: NativeConstructionCenterTargetStockSubmission) => void;
 }) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<Category>("all");
   const [confirmation, setConfirmation] = useState<NativeConstructionCenterTargetStockConfirmation | null>(null);
+  const [batchDraft, setBatchDraft] = useState("100");
+  const [batchConfirmation, setBatchConfirmation] = useState<NativeConstructionCenterBatchBuildingTargetStockConfirmation | null>(null);
   const [interactionError, setInteractionError] = useState<string | null>(null);
   const workspace = frame?.workspace ?? null;
   const term = query.trim().toLocaleLowerCase("zh-CN");
@@ -204,8 +212,16 @@ export function NativeConstructionCenterWorkspace({
 
   useEffect(() => {
     setConfirmation(null);
+    setBatchConfirmation(null);
     setInteractionError(null);
   }, [category, frameIdentityKey, open, pendingKey, query]);
+
+  useEffect(() => {
+    const stockLimit = workspace?.stockLimit;
+    setBatchDraft(String(typeof stockLimit === "number" && Number.isSafeInteger(stockLimit) && stockLimit > 0
+      ? Math.min(100, stockLimit)
+      : 100));
+  }, [frameIdentityKey, open, pendingKey, workspace?.stockLimit]);
 
   if (!open) return null;
   if (!workspace || !frame || !frameIdentity) {
@@ -223,6 +239,7 @@ export function NativeConstructionCenterWorkspace({
 
   const requestTargetStock = (targetId: string, value: number) => {
     setConfirmation(null);
+    setBatchConfirmation(null);
     setInteractionError(null);
     const evaluated = evaluateNativeConstructionCenterTargetStock(frame, pendingIdentity, targetId, value);
     if (evaluated.status === "rejected") {
@@ -242,6 +259,39 @@ export function NativeConstructionCenterWorkspace({
       return;
     }
     onSubmitTargetStockIntent(submission);
+  };
+  const requestBatchBuildingTargetStock = (value: number) => {
+    setConfirmation(null);
+    setBatchConfirmation(null);
+    setInteractionError(null);
+    const evaluated = evaluateNativeConstructionCenterBatchBuildingTargetStock(frame, pendingIdentity, value);
+    if (evaluated.status === "rejected") {
+      setInteractionError(evaluated.message);
+    } else {
+      setBatchConfirmation(evaluated.confirmation);
+    }
+  };
+  const commitBatchDraft = () => {
+    const parsed = parseNativeConstructionCenterTargetDraft(batchDraft, workspace.stockLimit);
+    if (!parsed.ok) {
+      setInteractionError(parsed.message);
+      return;
+    }
+    if (parsed.value < 1) {
+      setInteractionError("全部建筑目标必须是正安全整数");
+      return;
+    }
+    requestBatchBuildingTargetStock(parsed.value);
+  };
+  const confirmBatchBuildingTargetStock = () => {
+    if (!batchConfirmation) return;
+    const submission = confirmNativeConstructionCenterBatchBuildingTargetStock(frame, pendingIdentity, batchConfirmation);
+    setBatchConfirmation(null);
+    if (!submission) {
+      setInteractionError("批量确认已因投影、目录或命令状态变化而失效；存档未改变");
+      return;
+    }
+    onSubmitBatchBuildingTargetStockIntent(submission);
   };
   const completedTargets = workspace.targets.rows.filter((target) => target.target > 0 && target.currentStock >= target.target).length;
   const activeTargets = workspace.targets.rows.filter((target) => target.target > 0).length;
@@ -268,6 +318,7 @@ export function NativeConstructionCenterWorkspace({
       <label className="construction-center-toggle" title={writeLocked ? "等待原生命令与新 revision 投影" : undefined}>
         <input type="checkbox" checked={workspace.enabled} disabled={writeLocked} onChange={(event) => {
           setConfirmation(null);
+          setBatchConfirmation(null);
           onSubmitEnabledIntent(frameIdentity, event.target.checked);
         }} />
         <i /><span><strong>自动补足</strong><small>{workspace.enabled ? "制造协议运行" : "制造协议暂停"}</small></span>
@@ -275,6 +326,7 @@ export function NativeConstructionCenterWorkspace({
       <label className="construction-center-toggle" title={writeLocked ? "等待原生命令与新 revision 投影" : undefined}>
         <input type="checkbox" checked={workspace.quantumSourceEnabled} disabled={writeLocked || !workspace.quantumNetworkEnabled} onChange={(event) => {
           setConfirmation(null);
+          setBatchConfirmation(null);
           onSubmitQuantumSupplyIntent(frameIdentity, event.target.checked);
         }} />
         <i /><span><strong>量子仓库直供</strong><small>{!workspace.quantumNetworkEnabled
@@ -286,6 +338,7 @@ export function NativeConstructionCenterWorkspace({
         value={query}
         onValueChange={(value) => {
           setConfirmation(null);
+          setBatchConfirmation(null);
           setQuery(value);
         }}
         placeholder="搜索建筑、科技或材料"
@@ -294,17 +347,46 @@ export function NativeConstructionCenterWorkspace({
       <div className="construction-center-categories" role="group" aria-label="建筑制造分类">
         {(Object.keys(CATEGORY_LABELS) as Category[]).map((id) => <button className={category === id ? "active" : ""} type="button" key={id} onClick={() => {
           setConfirmation(null);
+          setBatchConfirmation(null);
           setCategory(id);
         }}>{CATEGORY_LABELS[id]}</button>)}
       </div>
     </div>
 
-    <section className="construction-center-batch-target" aria-label="原生建筑制造批量写入状态">
-      <div><strong>批量写入尚未开放</strong><small>没有对应的原子 Rust 命令；不会循环多条目标命令伪装为原子操作。</small></div>
+    <section className="construction-center-batch-target" aria-label="原生建筑制造批量写入">
+      <div><strong>全部已解锁建筑目标</strong><small>一条原子 Rust 意图统一修改；只改补货策略，不循环命令、不取消任务或退料。</small></div>
       <div className="construction-center-batch-target__actions">
-        {[100, 1_000, 10_000].map((value) => <button type="button" key={value} disabled title="批量写入尚未开放"><QuantityValue value={value} /></button>)}
-        <input value="" disabled readOnly placeholder="自定义" aria-label="全部建筑目标数量（批量写入尚未开放）" />
-        <button type="button" className="primary" disabled title="批量写入尚未开放">应用全部</button>
+        {[100, 1_000, 10_000].map((value) => <button
+          type="button"
+          key={value}
+          disabled={writeLocked || value > workspace.stockLimit}
+          onClick={() => {
+            setBatchDraft(String(value));
+            requestBatchBuildingTargetStock(value);
+          }}
+        ><QuantityValue value={value} /></button>)}
+        <input
+          inputMode="numeric"
+          pattern="[0-9]*"
+          min={1}
+          max={workspace.stockLimit}
+          value={batchDraft}
+          disabled={writeLocked}
+          onChange={(event) => {
+            setBatchConfirmation(null);
+            setBatchDraft(event.target.value);
+            setInteractionError(null);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commitBatchDraft();
+            }
+          }}
+          placeholder="自定义"
+          aria-label="全部已解锁建筑目标数量"
+        />
+        <button type="button" className="primary" disabled={writeLocked} onClick={commitBatchDraft}>应用全部</button>
       </div>
     </section>
 
@@ -317,8 +399,25 @@ export function NativeConstructionCenterWorkspace({
 
     {!workspace.writeAvailable ? <div className="construction-center-status" role="status">
       <span><TriangleAlert size={14} /><strong>Rust 尚未证明制造协议科技与可用制造中心</strong></span>
-      <em>需要完成制造协议科技，且任一行星存在未锁定、数量有效的建筑制造中心；三类原生写入均已安全锁定。</em>
+      <em>需要完成制造协议科技，且任一行星存在未锁定、数量有效的建筑制造中心；四类原生写入均已安全锁定。</em>
     </div> : null}
+
+    {batchConfirmation ? <section
+      className="construction-center-batch-target construction-center-native-confirm"
+      role="alertdialog"
+      aria-label="确认批量设置全部已解锁建筑目标"
+      data-native-construction-confirm-batch-target={batchConfirmation.target}
+    >
+      <div><strong><TriangleAlert size={14} />确认统一设置全部已解锁建筑目标</strong><small>
+        将检查 {batchConfirmation.affectedCount.toLocaleString("zh-CN")} 种建筑，把其中 {batchConfirmation.changedCount.toLocaleString("zh-CN")} 种改为 {batchConfirmation.target.toLocaleString("zh-CN")}
+        {batchConfirmation.loweredCount > 0 ? `，其中 ${batchConfirmation.loweredCount.toLocaleString("zh-CN")} 种会降低目标` : ""}。
+        只改变后续补货策略；不会取消或退款现有任务，也不会改写 WIP、托盘、量子库存或随身库存。
+      </small></div>
+      <div className="construction-center-batch-target__actions">
+        <button type="button" onClick={() => setBatchConfirmation(null)}>取消</button>
+        <button type="button" className="primary" onClick={confirmBatchBuildingTargetStock}>确认并提交单条 Rust 意图</button>
+      </div>
+    </section> : null}
 
     {confirmation ? <section
       className="construction-center-batch-target construction-center-native-confirm"
@@ -372,7 +471,10 @@ export function NativeConstructionCenterWorkspace({
             stockLimit={workspace.stockLimit}
             frameKey={frameIdentityKey}
             locked={writeLocked}
-            onInteraction={() => setConfirmation(null)}
+            onInteraction={() => {
+              setConfirmation(null);
+              setBatchConfirmation(null);
+            }}
             onRequest={(value) => requestTargetStock(target.targetId, value)}
           />
         </article>;

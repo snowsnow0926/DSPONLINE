@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { NativeConstructionCenterWorkspaceFrame } from "./nativeConstructionCenterWorkspace";
 import {
+  confirmNativeConstructionCenterBatchBuildingTargetStock,
   confirmNativeConstructionCenterTargetStock,
+  evaluateNativeConstructionCenterBatchBuildingTargetStock,
   evaluateNativeConstructionCenterTargetStock,
   nativeConstructionCenterFrameIdentity,
+  nativeConstructionCenterIdentityKey,
   nativeConstructionCenterIdentityMatchesFrame,
+  nativeConstructionCenterPendingKey,
   nativeConstructionCenterTargetPresets,
   parseNativeConstructionCenterTargetDraft,
   type NativeConstructionCenterPendingIdentity,
@@ -65,6 +69,49 @@ function frame(): NativeConstructionCenterWorkspaceFrame {
         destroyedByproductRows: 256,
         costRowsPerTarget: 32,
         projectionBytes: 1048576,
+      },
+    },
+  };
+}
+
+function batchFrame(revision = 19): NativeConstructionCenterWorkspaceFrame {
+  const current = frame();
+  const building = current.workspace.targets.rows[0];
+  return {
+    ...current,
+    revision,
+    workspace: {
+      ...current.workspace,
+      targets: {
+        rows: [
+          building,
+          {
+            ...building,
+            targetId: "arc_smelter",
+            name: "电弧熔炉",
+            category: "production",
+            target: 25,
+            currentStock: 12,
+          },
+          {
+            ...building,
+            targetId: "planetary_logistics_station",
+            name: "行星物流运输站",
+            category: "logistics",
+            target: 300,
+            unlocked: false,
+          },
+          {
+            ...building,
+            targetId: "logistics_vessel",
+            name: "星际物流运输船",
+            kind: "fleet",
+            category: "logistics",
+            target: 400,
+          },
+        ],
+        totalCount: 4,
+        truncated: false,
       },
     },
   };
@@ -136,5 +183,189 @@ describe("native construction-center intent guards", () => {
     })).toBeNull();
     expect(nativeConstructionCenterIdentityMatchesFrame(lower.confirmation.identity, current)).toBe(true);
     expect(nativeConstructionCenterIdentityMatchesFrame(lower.confirmation.identity, { ...current, runId: "run-b" })).toBe(false);
+  });
+
+  it("requires an explicit ID-free confirmation for every batch building target update", () => {
+    const current = batchFrame();
+    const evaluated = evaluateNativeConstructionCenterBatchBuildingTargetStock(current, null, 50);
+    expect(evaluated).toMatchObject({
+      status: "confirmation-required",
+      confirmation: {
+        identity: {
+          sessionId: "session-a",
+          runId: "run-a",
+          revision: 19,
+          activePlanetId: "home",
+        },
+        target: 50,
+        affectedCount: 2,
+        changedCount: 2,
+        loweredCount: 1,
+        cancelsJobsAndRefunds: false,
+      },
+    });
+    if (evaluated.status !== "confirmation-required") throw new Error("confirmation expected");
+    expect(Object.isFrozen(evaluated.confirmation)).toBe(true);
+    const submission = confirmNativeConstructionCenterBatchBuildingTargetStock(
+      current,
+      null,
+      evaluated.confirmation,
+    );
+    expect(submission).toEqual({
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 19,
+      activePlanetId: "home",
+      target: 50,
+      confirmedAffectedCount: 2,
+      confirmedChangedCount: 2,
+      confirmedLoweredCount: 1,
+    });
+    expect(Object.isFrozen(submission)).toBe(true);
+    expect(JSON.stringify(submission)).not.toMatch(/wind_turbine|arc_smelter|targetId|jobs|inventory/);
+  });
+
+  it("keeps batch identity retry-stable while fencing pending work and revision drift", () => {
+    const current = batchFrame();
+    const evaluated = evaluateNativeConstructionCenterBatchBuildingTargetStock(current, null, 50);
+    if (evaluated.status !== "confirmation-required") throw new Error("confirmation expected");
+    const pending: NativeConstructionCenterPendingIdentity = {
+      ...evaluated.confirmation.identity,
+      kind: "batchBuildingTargetStock",
+      targetId: null,
+      expectedRevision: null,
+    };
+    expect(nativeConstructionCenterIdentityKey(evaluated.confirmation.identity)).toBe(
+      '["session-a","run-a",19,"home"]',
+    );
+    expect(nativeConstructionCenterPendingKey(pending)).toBe(
+      '["session-a","run-a",19,"home","batchBuildingTargetStock",null,null]',
+    );
+    expect(nativeConstructionCenterPendingKey({ ...pending, expectedRevision: 20 }))
+      .not.toBe(nativeConstructionCenterPendingKey(pending));
+    expect(evaluateNativeConstructionCenterBatchBuildingTargetStock(current, pending, 50).status)
+      .toBe("rejected");
+    expect(confirmNativeConstructionCenterBatchBuildingTargetStock(
+      current,
+      pending,
+      evaluated.confirmation,
+    )).toBeNull();
+
+    const first = confirmNativeConstructionCenterBatchBuildingTargetStock(current, null, evaluated.confirmation);
+    const retry = confirmNativeConstructionCenterBatchBuildingTargetStock(current, null, evaluated.confirmation);
+    expect(retry).toEqual(first);
+    expect(retry).not.toBe(first);
+    expect(confirmNativeConstructionCenterBatchBuildingTargetStock(
+      batchFrame(20),
+      null,
+      evaluated.confirmation,
+    )).toBeNull();
+    const refreshed = evaluateNativeConstructionCenterBatchBuildingTargetStock(batchFrame(20), null, 50);
+    expect(refreshed).toMatchObject({
+      status: "confirmation-required",
+      confirmation: { identity: { revision: 20 } },
+    });
+  });
+
+  it("rejects invalid, incomplete, unchanged or forged batch confirmations", () => {
+    const current = batchFrame();
+    for (const invalid of [0, -1, 1.5, 501, 100_000_001, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(evaluateNativeConstructionCenterBatchBuildingTargetStock(current, null, invalid).status)
+        .toBe("rejected");
+    }
+    const noBuildings = {
+      ...current,
+      workspace: {
+        ...current.workspace,
+        targets: {
+          ...current.workspace.targets,
+          rows: current.workspace.targets.rows.map((row) => ({ ...row, unlocked: false })),
+        },
+      },
+    };
+    expect(evaluateNativeConstructionCenterBatchBuildingTargetStock(noBuildings, null, 50).status)
+      .toBe("rejected");
+    const unchanged = {
+      ...current,
+      workspace: {
+        ...current.workspace,
+        targets: {
+          ...current.workspace.targets,
+          rows: current.workspace.targets.rows.map((row) => row.kind === "building" && row.unlocked
+            ? { ...row, target: 50 }
+            : row),
+        },
+      },
+    };
+    expect(evaluateNativeConstructionCenterBatchBuildingTargetStock(unchanged, null, 50).status)
+      .toBe("rejected");
+    const truncated = {
+      ...current,
+      workspace: {
+        ...current.workspace,
+        targets: { ...current.workspace.targets, truncated: true },
+      },
+    };
+    expect(evaluateNativeConstructionCenterBatchBuildingTargetStock(truncated, null, 50))
+      .toMatchObject({ status: "rejected", message: expect.stringContaining("不完整") });
+    const incomplete = {
+      ...current,
+      workspace: {
+        ...current.workspace,
+        targets: { ...current.workspace.targets, totalCount: current.workspace.targets.rows.length + 1 },
+      },
+    };
+    expect(evaluateNativeConstructionCenterBatchBuildingTargetStock(incomplete, null, 50))
+      .toMatchObject({ status: "rejected", message: expect.stringContaining("不完整") });
+
+    const evaluated = evaluateNativeConstructionCenterBatchBuildingTargetStock(current, null, 50);
+    if (evaluated.status !== "confirmation-required") throw new Error("confirmation expected");
+    expect(confirmNativeConstructionCenterBatchBuildingTargetStock(current, null, {
+      ...evaluated.confirmation,
+      affectedCount: 99,
+    })).toBeNull();
+    expect(confirmNativeConstructionCenterBatchBuildingTargetStock(current, null, {
+      ...evaluated.confirmation,
+      cancelsJobsAndRefunds: true,
+    } as unknown as typeof evaluated.confirmation)).toBeNull();
+    const rowDrifted = {
+      ...current,
+      workspace: {
+        ...current.workspace,
+        targets: {
+          ...current.workspace.targets,
+          rows: current.workspace.targets.rows.map((row) => row.targetId === "wind_turbine"
+            ? { ...row, target: 40 }
+            : row),
+        },
+      },
+    };
+    expect(confirmNativeConstructionCenterBatchBuildingTargetStock(
+      rowDrifted,
+      null,
+      evaluated.confirmation,
+    )).toBeNull();
+
+    const historicalAboveCurrentLimit = {
+      ...current,
+      workspace: {
+        ...current.workspace,
+        targets: {
+          ...current.workspace.targets,
+          rows: current.workspace.targets.rows.map((row) => row.targetId === "wind_turbine"
+            ? { ...row, target: 100_000_000 }
+            : row),
+        },
+      },
+    };
+    const historicalEvaluation = evaluateNativeConstructionCenterBatchBuildingTargetStock(
+      historicalAboveCurrentLimit,
+      null,
+      50,
+    );
+    expect(historicalEvaluation).toMatchObject({
+      status: "confirmation-required",
+      confirmation: { loweredCount: 1 },
+    });
   });
 });

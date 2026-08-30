@@ -5606,6 +5606,7 @@ enum ConstructionAutomationIntent {
     Enabled(bool),
     QuantumSupplyEnabled(bool),
     TargetStock { target_id: String, target: u64 },
+    BatchBuildingTargetStock { target: u64 },
 }
 
 fn command_contains_construction_automation_intent(command: &SimulationCommandPatch) -> bool {
@@ -5684,6 +5685,13 @@ fn require_construction_automation_intent(
                 target_id: target_id.to_owned(),
                 target,
             })
+        }
+        Some("batchBuildingTargetStock") if intent.len() == 2 => {
+            let target = safe_json_integer(
+                intent.get("target"),
+                "construction automation batch building target stock",
+            )?;
+            Ok(ConstructionAutomationIntent::BatchBuildingTargetStock { target })
         }
         _ => bail!("native player-authority construction automation intent fields are invalid"),
     }
@@ -5817,6 +5825,39 @@ fn normalized_construction_automation_target(
     Ok(requested.min(construction_automation_stock_limit(state)))
 }
 
+fn require_construction_automation_batch_target(
+    state: &CoreState,
+    requested: u64,
+) -> anyhow::Result<u64> {
+    let stock_limit = construction_automation_stock_limit(state);
+    if requested < 1 || requested > stock_limit {
+        bail!(
+            "native player-authority construction automation batch target must be between 1 and {stock_limit}"
+        )
+    }
+    Ok(requested)
+}
+
+fn unlocked_construction_automation_building_target_ids(
+    state: &CoreState,
+) -> anyhow::Result<Vec<String>> {
+    let base = state.base_value();
+    let targets = crate::construction_planner::targets(state)
+        .into_iter()
+        .filter(|target| {
+            matches!(
+                &target.kind,
+                crate::construction_planner::TargetKind::Building
+            ) && crate::construction_planner::target_is_unlocked(base, target)
+        })
+        .map(|target| target.id)
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        bail!("native player-authority construction automation has no unlocked building targets")
+    }
+    Ok(targets)
+}
+
 fn validate_construction_automation_target(
     state: &CoreState,
     target_id: &str,
@@ -5934,6 +5975,28 @@ fn validate_construction_automation_intent(
                 bail!("native player-authority construction automation target is unchanged")
             }
         }
+        ConstructionAutomationIntent::BatchBuildingTargetStock { target } => {
+            let target = require_construction_automation_batch_target(state, target)?;
+            let target_stock = automation
+                .get("targetStock")
+                .and_then(Value::as_object)
+                .expect("construction automation target directory was validated above");
+            let target_ids = unlocked_construction_automation_building_target_ids(state)?;
+            let mut changed = false;
+            for target_id in target_ids {
+                let current = match target_stock.get(&target_id) {
+                    None => 0,
+                    Some(value) => safe_json_integer(
+                        Some(value),
+                        "current construction automation batch building target stock",
+                    )?,
+                };
+                changed |= current != target;
+            }
+            if !changed {
+                bail!("native player-authority construction automation batch target is unchanged")
+            }
+        }
     }
     Ok(())
 }
@@ -5989,6 +6052,32 @@ fn expand_construction_automation_intent(
                 })
             })
             .collect()
+        }
+        ConstructionAutomationIntent::BatchBuildingTargetStock { target } => {
+            let target = require_construction_automation_batch_target(state, target)?;
+            let target_stock = construction_automation_state(state)?
+                .get("targetStock")
+                .and_then(Value::as_object)
+                .expect("construction automation target directory was validated above");
+            unlocked_construction_automation_building_target_ids(state)?
+                .into_iter()
+                .filter(|target_id| {
+                    target_stock
+                        .get(target_id)
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0)
+                        != target
+                })
+                .map(|target_id| ValuePatch {
+                    path: vec![
+                        PathSegment::Key("constructionAutomation".to_owned()),
+                        PathSegment::Key("targetStock".to_owned()),
+                        PathSegment::Key(target_id),
+                    ],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from(target)),
+                })
+                .collect()
         }
     };
     Ok(SimulationCommandPatch {
@@ -10145,6 +10234,213 @@ mod tests {
             construction_automation_material_snapshot(&live),
             before_pause
         );
+    }
+
+    #[test]
+    fn construction_automation_batch_building_target_is_atomic_and_replayable() {
+        let mut live = player_construction_automation_state();
+        live.base_value_mut()["research"]["completedTechIds"] = serde_json::json!([
+            "construction_automation",
+            "construction_capacity_1",
+            "construction_capacity_2",
+            "quantum_logistics_network",
+            "basic_logistics",
+            "planetary_logistics",
+            "interstellar_logistics"
+        ]);
+        live.base_value_mut()["constructionAutomation"]["targetStock"]["logistics_vessel"] =
+            Value::from(73);
+        // This row deliberately satisfies the single-target cancellation
+        // predicate (new target <= owned stock) while retaining live WIP and
+        // direct quantum reservations. The batch command is policy-only and
+        // must not reuse that cancellation/refund path.
+        live.base_value_mut()["constructionAutomation"]["targetStock"]["arc_smelter"] =
+            Value::from(50);
+        live.base_value_mut()["constructionAutomation"]["targetStock"]["orbital_cargo_terminal"] =
+            Value::from(91);
+        live.base_value_mut()["constructionAutomation"]["targetStock"]["future_opaque_target"] =
+            Value::from(44);
+        live.base_value_mut()["constructionAutomation"]["opaquePolicy"] =
+            serde_json::json!({ "owner": "future-core", "revision": 7 });
+
+        let mut replay = live.clone();
+        let unlocked_ids = unlocked_construction_automation_building_target_ids(&live).unwrap();
+        assert!(unlocked_ids.contains(&"arc_smelter".to_owned()));
+        assert!(unlocked_ids.contains(&"construction_center".to_owned()));
+        assert!(!unlocked_ids.contains(&"orbital_cargo_terminal".to_owned()));
+        let before_target_stock = live.base_value()["constructionAutomation"]["targetStock"]
+            .as_object()
+            .unwrap()
+            .clone();
+        let mut before_non_policy = live.base_value()["constructionAutomation"].clone();
+        before_non_policy
+            .as_object_mut()
+            .unwrap()
+            .remove("targetStock");
+        let material_before = construction_automation_material_snapshot(&live);
+        let jobs_before = live.base_value()["constructionAutomation"]["jobs"].clone();
+        let quantum_buffers_before =
+            live.base_value()["constructionAutomation"]["quantumMaterialBuffer"].clone();
+        assert_eq!(live.base_value()["construction"]["arc_smelter"], 4);
+        assert!(
+            live.base_value()["constructionAutomation"]["jobs"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|job| job["constructionId"] == "arc_smelter")
+        );
+        assert!(
+            live.base_value()["constructionAutomation"]["quantumMaterialBuffer"]
+                .as_object()
+                .is_some_and(|buffers| !buffers.is_empty())
+        );
+        let revision = live.revision;
+        let command = construction_automation_intent_command(
+            revision,
+            serde_json::json!({
+                "kind": "batchBuildingTargetStock",
+                "target": 3
+            }),
+        );
+
+        let expanded = expand_construction_automation_intent(&live, &command).unwrap();
+        let expanded_ids = expanded
+            .top_level_changes
+            .iter()
+            .map(|patch| match patch.path.as_slice() {
+                [
+                    PathSegment::Key(root),
+                    PathSegment::Key(directory),
+                    PathSegment::Key(id),
+                ] if root == "constructionAutomation" && directory == "targetStock" => id.clone(),
+                _ => panic!("unexpected batch target patch"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(expanded_ids, unlocked_ids);
+
+        let live_result = live.apply_player_authority_command(&command).unwrap();
+        let replay_result = replay.apply_command(&command).unwrap();
+        assert_eq!(live_result, replay_result);
+        assert_eq!(live.revision, revision + 1);
+        assert!(live_result.changed_entity_ids.is_empty());
+        assert!(live_result.changed_belt_ids.is_empty());
+        assert!(live_result.topology_dirty);
+        assert_eq!(
+            live.canonical_sha256().unwrap(),
+            replay.canonical_sha256().unwrap()
+        );
+        for target_id in &unlocked_ids {
+            assert_eq!(
+                live.base_value()["constructionAutomation"]["targetStock"][target_id],
+                3,
+                "{target_id}"
+            );
+        }
+        assert_eq!(
+            live.base_value()["constructionAutomation"]["targetStock"]["logistics_vessel"],
+            73
+        );
+        assert_eq!(
+            live.base_value()["constructionAutomation"]["targetStock"]["orbital_cargo_terminal"],
+            before_target_stock["orbital_cargo_terminal"]
+        );
+        assert_eq!(
+            live.base_value()["constructionAutomation"]["targetStock"]["future_opaque_target"],
+            before_target_stock["future_opaque_target"]
+        );
+        let mut after_non_policy = live.base_value()["constructionAutomation"].clone();
+        after_non_policy
+            .as_object_mut()
+            .unwrap()
+            .remove("targetStock");
+        assert_eq!(after_non_policy, before_non_policy);
+        assert_eq!(
+            live.base_value()["constructionAutomation"]["jobs"],
+            jobs_before
+        );
+        assert_eq!(
+            live.base_value()["constructionAutomation"]["quantumMaterialBuffer"],
+            quantum_buffers_before
+        );
+        assert_eq!(
+            construction_automation_material_snapshot(&live),
+            material_before
+        );
+
+        let unchanged_revision = live.revision;
+        let unchanged_hash = live.canonical_sha256().unwrap();
+        let unchanged = construction_automation_intent_command(
+            unchanged_revision,
+            serde_json::json!({
+                "kind": "batchBuildingTargetStock",
+                "target": 3
+            }),
+        );
+        assert!(live.apply_player_authority_command(&unchanged).is_err());
+        assert_eq!(live.revision, unchanged_revision);
+        assert_eq!(live.canonical_sha256().unwrap(), unchanged_hash);
+    }
+
+    #[test]
+    fn construction_automation_batch_building_target_rejects_forged_or_untrusted_intents() {
+        let mut limited = player_construction_automation_state();
+        limited.base_value_mut()["research"]["completedTechIds"] =
+            serde_json::json!(["construction_automation"]);
+
+        let mut registry_drift = player_construction_automation_state();
+        registry_drift.catalog = Arc::new(player_construction_automation_catalog_for_registry(
+            "catalog-registry-drift",
+        ));
+
+        let cases = [
+            (
+                player_construction_automation_state(),
+                serde_json::json!({
+                    "kind": "batchBuildingTargetStock",
+                    "target": 0
+                }),
+            ),
+            (
+                limited,
+                serde_json::json!({
+                    "kind": "batchBuildingTargetStock",
+                    "target": 101
+                }),
+            ),
+            (
+                player_construction_automation_state(),
+                serde_json::json!({
+                    "kind": "batchBuildingTargetStock",
+                    "target": 10,
+                    "targetIds": ["arc_smelter"]
+                }),
+            ),
+            (
+                player_construction_automation_state_for_registry("modded-construction-automation"),
+                serde_json::json!({
+                    "kind": "batchBuildingTargetStock",
+                    "target": 10
+                }),
+            ),
+            (
+                registry_drift,
+                serde_json::json!({
+                    "kind": "batchBuildingTargetStock",
+                    "target": 10
+                }),
+            ),
+        ];
+
+        for (mut state, intent) in cases {
+            let revision = state.revision;
+            let before = state.canonical_sha256().unwrap();
+            let base_before = state.base_value().clone();
+            let command = construction_automation_intent_command(revision, intent);
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, revision);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+            assert_eq!(state.base_value(), &base_before);
+        }
     }
 
     #[test]

@@ -658,12 +658,14 @@ import { selectNativeAuthoritativeFactoryWorkspaceFrame } from "./game/nativeFac
 import { selectNativeConstructionCenterWorkspaceFrame } from "./game/nativeConstructionCenterWorkspace";
 import {
   nativeConstructionCenterIdentityMatchesFrame,
+  type NativeConstructionCenterBatchBuildingTargetStockSubmission,
   type NativeConstructionCenterFrameIdentity,
   type NativeConstructionCenterIntentKind,
   type NativeConstructionCenterPendingIdentity,
   type NativeConstructionCenterTargetStockSubmission,
 } from "./game/nativeConstructionCenterIntent";
 import {
+  createNativeConstructionAutomationBatchBuildingTargetStockIntentCommand,
   createNativeConstructionAutomationEnabledIntentCommand,
   createNativeConstructionAutomationQuantumSupplyIntentCommand,
   createNativeConstructionAutomationTargetStockIntentCommand,
@@ -9032,6 +9034,36 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         submission.target,
       ),
       (receipt) => `${row.name}目标意图已由 Rust 耐久提交；等待 revision ${receipt.revision.toLocaleString("zh-CN")} 投影`,
+    );
+  }, [commitNativeConstructionCenterIntent]);
+
+  const submitNativeConstructionCenterBatchBuildingTargetStockIntent = useCallback((
+    submission: NativeConstructionCenterBatchBuildingTargetStockSubmission,
+  ): void => {
+    const frame = nativeConstructionCenterWorkspaceFrameRef.current;
+    const affectedRows = frame?.workspace.targets.rows.filter((row) => row.kind === "building" && row.unlocked) ?? [];
+    const changedRows = affectedRows.filter((row) => row.target !== submission.target);
+    const loweredCount = changedRows.filter((row) => row.target > submission.target).length;
+    if (!nativeConstructionCenterIdentityMatchesFrame(submission, frame) || !frame ||
+        !frame.workspace.writeAvailable || frame.workspace.targets.truncated ||
+        frame.workspace.targets.totalCount !== frame.workspace.targets.rows.length || affectedRows.length === 0 ||
+        !Number.isSafeInteger(submission.target) || submission.target < 1 ||
+        submission.target > frame.workspace.stockLimit || submission.target > 100_000_000 || changedRows.length === 0 ||
+        submission.confirmedAffectedCount !== affectedRows.length ||
+        submission.confirmedChangedCount !== changedRows.length ||
+        submission.confirmedLoweredCount !== loweredCount) {
+      setNotice("批量建筑目标不属于当前完整 Rust 投影、没有变化或超出同 revision 上限；本次操作未提交");
+      return;
+    }
+    commitNativeConstructionCenterIntent(
+      submission,
+      "batchBuildingTargetStock",
+      null,
+      (baseRevision) => createNativeConstructionAutomationBatchBuildingTargetStockIntentCommand(
+        baseRevision,
+        submission.target,
+      ),
+      (receipt) => `全部已解锁建筑目标意图已由 Rust 原子提交（${affectedRows.length.toLocaleString("zh-CN")} 种）；等待 revision ${receipt.revision.toLocaleString("zh-CN")} 投影`,
     );
   }, [commitNativeConstructionCenterIntent]);
 
@@ -20070,6 +20102,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setConstructionCenterOpen(false)}
             onSubmitEnabledIntent={submitNativeConstructionCenterEnabledIntent}
             onSubmitQuantumSupplyIntent={submitNativeConstructionCenterQuantumSupplyIntent}
+            onSubmitBatchBuildingTargetStockIntent={submitNativeConstructionCenterBatchBuildingTargetStockIntent}
             onSubmitTargetStockIntent={submitNativeConstructionCenterTargetStockIntent}
           />
         ) : (

@@ -10377,15 +10377,58 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(cleared.revision, checkpoint.revision + 4);
+        let batch_command = player_authority_construction_automation_intent_command(
+            cleared.revision,
+            "construction-batch-before-cold-reopen",
+            json!({
+                "kind": "batchBuildingTargetStock",
+                "target": 37
+            }),
+        )
+        .command;
+        let batched = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "construction-batch-before-cold-reopen".to_owned(),
+                    base_revision: cleared.revision,
+                    command: Some(batch_command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(batched.revision, checkpoint.revision + 5);
 
         let wal = store
             .read_wal(&checkpoint.slot, checkpoint.revision)
             .unwrap();
-        assert_eq!(wal.len(), 4);
+        assert_eq!(wal.len(), 5);
+        assert_eq!(
+            wal.last().map(|entry| entry.command_id.as_str()),
+            Some("construction-batch-before-cold-reopen")
+        );
+        let batch_replay = decode_wal_operation(wal.last().unwrap()).unwrap();
+        let batch_marker = serde_json::to_value(batch_replay.command.unwrap()).unwrap();
+        assert_eq!(
+            batch_marker.pointer("/topLevelChanges/0/value"),
+            Some(&json!({
+                "kind": "batchBuildingTargetStock",
+                "target": 37
+            }))
+        );
+        assert_eq!(batch_marker["topLevelChanges"].as_array().unwrap().len(), 1);
+        let batch_marker_text = serde_json::to_string(&batch_marker).unwrap();
+        assert!(!batch_marker_text.contains("targetIds"));
+        assert!(!batch_marker_text.contains("arc_smelter"));
+        assert!(!batch_marker_text.contains("construction_center"));
         let wal_payload = serde_json::to_string(&wal).unwrap();
         assert!(wal_payload.contains("constructionAutomation"));
         assert!(wal_payload.contains("quantumSupplyEnabled"));
+        assert!(wal_payload.contains("batchBuildingTargetStock"));
         assert!(wal_payload.contains("logistics_vessel"));
         assert!(!wal_payload.contains("quantumMaterialBuffer"));
         assert!(!wal_payload.contains("construction-center-a"));
@@ -10412,11 +10455,6 @@ mod tests {
         assert_eq!(
             live["state"]["constructionAutomation"]["targetStock"]["logistics_vessel"],
             500
-        );
-        assert!(
-            live["state"]["constructionAutomation"]["targetStock"]
-                .get("arc_smelter")
-                .is_none()
         );
         assert_eq!(
             live["state"]["constructionAutomation"]["jobs"]
@@ -10461,7 +10499,18 @@ mod tests {
             );
         }
         let live_state = live["state"].clone();
-        let live_hash = cleared.summary.as_ref().unwrap().canonical_sha256.clone();
+        for target_id in [
+            "arc_smelter",
+            "conveyor_belt_mk1",
+            "construction_center",
+            "orbital_cargo_terminal",
+        ] {
+            assert_eq!(
+                live["state"]["constructionAutomation"]["targetStock"][target_id], 37,
+                "{target_id}"
+            );
+        }
+        let live_hash = batched.summary.as_ref().unwrap().canonical_sha256.clone();
 
         drop(registry);
         drop(store);
@@ -10478,8 +10527,8 @@ mod tests {
                 player_authority_construction_automation_catalog(),
             )
             .unwrap();
-        assert_eq!(reopened.replayed_wal_entries, 4);
-        assert_eq!(reopened.replayed_revision, cleared.revision);
+        assert_eq!(reopened.replayed_wal_entries, 5);
+        assert_eq!(reopened.replayed_revision, batched.revision);
         assert_eq!(reopened.summary.canonical_sha256, live_hash);
         reopened_registry
             .export_v47(
@@ -10514,6 +10563,13 @@ mod tests {
                     "kind": "targetStock",
                     "targetId": "arc_smelter",
                     "target": 0
+                }),
+            ),
+            (
+                "batch",
+                json!({
+                    "kind": "batchBuildingTargetStock",
+                    "target": 37
                 }),
             ),
         ] {

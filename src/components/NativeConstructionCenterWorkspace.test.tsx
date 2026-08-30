@@ -6,6 +6,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  NativeConstructionCenterBatchBuildingTargetStockSubmission,
   NativeConstructionCenterFrameIdentity,
   NativeConstructionCenterPendingIdentity,
   NativeConstructionCenterTargetStockSubmission,
@@ -111,6 +112,7 @@ describe("NativeConstructionCenterWorkspace", () => {
     onClose: ReturnType<typeof vi.fn<() => void>>;
     onSubmitEnabledIntent: ReturnType<typeof vi.fn<(identity: NativeConstructionCenterFrameIdentity, enabled: boolean) => void>>;
     onSubmitQuantumSupplyIntent: ReturnType<typeof vi.fn<(identity: NativeConstructionCenterFrameIdentity, enabled: boolean) => void>>;
+    onSubmitBatchBuildingTargetStockIntent: ReturnType<typeof vi.fn<(submission: NativeConstructionCenterBatchBuildingTargetStockSubmission) => void>>;
     onSubmitTargetStockIntent: ReturnType<typeof vi.fn<(submission: NativeConstructionCenterTargetStockSubmission) => void>>;
   };
 
@@ -133,6 +135,7 @@ describe("NativeConstructionCenterWorkspace", () => {
       onClose: vi.fn<() => void>(),
       onSubmitEnabledIntent: vi.fn<(identity: NativeConstructionCenterFrameIdentity, enabled: boolean) => void>(),
       onSubmitQuantumSupplyIntent: vi.fn<(identity: NativeConstructionCenterFrameIdentity, enabled: boolean) => void>(),
+      onSubmitBatchBuildingTargetStockIntent: vi.fn<(submission: NativeConstructionCenterBatchBuildingTargetStockSubmission) => void>(),
       onSubmitTargetStockIntent: vi.fn<(submission: NativeConstructionCenterTargetStockSubmission) => void>(),
     },
     open = true,
@@ -145,6 +148,7 @@ describe("NativeConstructionCenterWorkspace", () => {
       onClose={callbacks.onClose}
       onSubmitEnabledIntent={callbacks.onSubmitEnabledIntent}
       onSubmitQuantumSupplyIntent={callbacks.onSubmitQuantumSupplyIntent}
+      onSubmitBatchBuildingTargetStockIntent={callbacks.onSubmitBatchBuildingTargetStockIntent}
       onSubmitTargetStockIntent={callbacks.onSubmitTargetStockIntent}
     />));
     return callbacks;
@@ -189,24 +193,71 @@ describe("NativeConstructionCenterWorkspace", () => {
     expect(toggles[1]?.checked).toBe(true);
   });
 
-  it("renders only the identity-bound Rust catalog and leaves batch writes disabled", () => {
+  it("renders only the identity-bound Rust catalog and exposes one atomic batch write", () => {
     render(frame());
     const header = host.querySelector("[data-native-authority-session='session-a']");
     expect(header?.getAttribute("data-native-authority-run")).toBe("run-a");
     expect(header?.getAttribute("data-native-authority-revision")).toBe("19");
     expect(header?.getAttribute("data-native-authority-planet")).toBe("home");
-    expect(host.textContent).toContain("批量写入尚未开放");
-    expect(host.textContent).toContain("不会循环多条目标命令伪装为原子操作");
+    expect(host.textContent).toContain("全部已解锁建筑目标");
+    expect(host.textContent).toContain("不循环命令、不取消任务或退料");
     expect(host.textContent).toContain("风力涡轮机");
     expect(host.textContent).toContain("物流运输机");
     expect(host.textContent).toContain("铁矿石");
     expect(host.textContent).toContain("处理器");
-    for (const control of host.querySelectorAll<HTMLInputElement | HTMLButtonElement>("[aria-label='原生建筑制造批量写入状态'] button, [aria-label='原生建筑制造批量写入状态'] input")) {
-      expect(control.disabled).toBe(true);
-    }
+    const batchControls = host.querySelectorAll<HTMLInputElement | HTMLButtonElement>("[aria-label='原生建筑制造批量写入'] button, [aria-label='原生建筑制造批量写入'] input");
+    expect(batchControls).toHaveLength(5);
+    expect(batchControls[0]?.disabled).toBe(false);
+    expect(batchControls[1]?.disabled).toBe(true);
+    expect(batchControls[2]?.disabled).toBe(true);
+    expect(batchControls[3]?.disabled).toBe(false);
+    expect(batchControls[4]?.disabled).toBe(false);
     expect(host.querySelector<HTMLInputElement>("input[type='checkbox']")?.disabled).toBe(false);
     expect(host.querySelector<HTMLInputElement>("[aria-label='风力涡轮机目标库存']")?.disabled).toBe(false);
     expect(host.querySelector<HTMLInputElement>("[aria-label='搜索原生自动制造目标']")?.disabled).toBe(false);
+  });
+
+  it("requires a revision-bound confirmation and submits one ID-free batch intent without optimistic changes", () => {
+    const callbacks = render(frame());
+    const batchInput = host.querySelector<HTMLInputElement>("[aria-label='全部已解锁建筑目标数量']")!;
+    expect(batchInput.value).toBe("100");
+    act(() => host.querySelector<HTMLButtonElement>("[aria-label='原生建筑制造批量写入'] button")!.click());
+    const dialog = host.querySelector('[role="alertdialog"][aria-label="确认批量设置全部已解锁建筑目标"]');
+    expect(dialog?.textContent).toContain("检查 1 种建筑");
+    expect(dialog?.textContent).toContain("不会取消或退款现有任务");
+    expect(callbacks.onSubmitBatchBuildingTargetStockIntent).not.toHaveBeenCalled();
+    expect(host.querySelector<HTMLInputElement>("[aria-label='风力涡轮机目标库存']")?.value).toBe("50");
+
+    act(() => dialogButton("确认并提交单条 Rust 意图").click());
+    expect(callbacks.onSubmitBatchBuildingTargetStockIntent).toHaveBeenCalledWith({
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 19,
+      activePlanetId: "home",
+      target: 100,
+      confirmedAffectedCount: 1,
+      confirmedChangedCount: 1,
+      confirmedLoweredCount: 0,
+    });
+    expect(host.querySelector<HTMLInputElement>("[aria-label='风力涡轮机目标库存']")?.value).toBe("50");
+  });
+
+  it("rejects zero/no-change batch drafts and describes lowering as policy-only", () => {
+    const callbacks = render(frame());
+    const batchInput = host.querySelector<HTMLInputElement>("[aria-label='全部已解锁建筑目标数量']")!;
+    setInput(batchInput, "0");
+    act(() => [...host.querySelectorAll<HTMLButtonElement>("[aria-label='原生建筑制造批量写入'] button")].at(-1)!.click());
+    expect(host.textContent).toContain("全部建筑目标必须是正安全整数");
+
+    setInput(batchInput, "50");
+    act(() => [...host.querySelectorAll<HTMLButtonElement>("[aria-label='原生建筑制造批量写入'] button")].at(-1)!.click());
+    expect(host.textContent).toContain("目标策略没有变化");
+
+    setInput(batchInput, "25");
+    act(() => [...host.querySelectorAll<HTMLButtonElement>("[aria-label='原生建筑制造批量写入'] button")].at(-1)!.click());
+    expect(host.querySelector('[role="alertdialog"]')?.textContent).toContain("其中 1 种会降低目标");
+    expect(host.querySelector('[role="alertdialog"]')?.textContent).toContain("不会取消或退款现有任务");
+    expect(callbacks.onSubmitBatchBuildingTargetStockIntent).not.toHaveBeenCalled();
   });
 
   it("supports step, preset, and strict projected increases without optimistic changes", () => {
@@ -352,7 +403,7 @@ describe("NativeConstructionCenterWorkspace", () => {
     expect(host.textContent).toContain("等待 main-owned durable ACK");
     expect(host.textContent).toContain("界面不会乐观改写");
     expect([...host.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement>(
-      ".construction-center-toggle input, .construction-center-target input, .construction-center-target button, .construction-center-target select",
+      ".construction-center-toggle input, .construction-center-target input, .construction-center-target button, .construction-center-target select, [aria-label='原生建筑制造批量写入'] input, [aria-label='原生建筑制造批量写入'] button",
     )]
       .every((control) => control.disabled)).toBe(true);
     expect(host.querySelector<HTMLInputElement>("[aria-label='搜索原生自动制造目标']")?.disabled).toBe(false);
@@ -369,11 +420,12 @@ describe("NativeConstructionCenterWorkspace", () => {
     const callbacks = render(unavailable);
     expect(host.textContent).toContain("Rust 尚未证明制造协议科技与可用制造中心");
     expect([...host.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement>(
-      ".construction-center-toggle input, .construction-center-target input, .construction-center-target button, .construction-center-target select",
+      ".construction-center-toggle input, .construction-center-target input, .construction-center-target button, .construction-center-target select, [aria-label='原生建筑制造批量写入'] input, [aria-label='原生建筑制造批量写入'] button",
     )].every((control) => control.disabled)).toBe(true);
     act(() => host.querySelector<HTMLInputElement>("input[type='checkbox']")!.click());
     expect(callbacks.onSubmitEnabledIntent).not.toHaveBeenCalled();
     expect(callbacks.onSubmitQuantumSupplyIntent).not.toHaveBeenCalled();
+    expect(callbacks.onSubmitBatchBuildingTargetStockIntent).not.toHaveBeenCalled();
     expect(callbacks.onSubmitTargetStockIntent).not.toHaveBeenCalled();
     expect(host.querySelector<HTMLInputElement>("[aria-label='搜索原生自动制造目标']")?.disabled).toBe(false);
     expect(host.querySelector<HTMLButtonElement>(".construction-center-categories button")?.disabled).toBe(false);
@@ -403,7 +455,7 @@ describe("NativeConstructionCenterWorkspace", () => {
     expect(source).not.toMatch(/\bGameState\b|\bgame\.|getConstructionAutomationStatus|getStatus\s*\(/);
     expect(source).not.toMatch(/nativeConstructionAutomationIntentCommands/);
     expect(source).not.toMatch(/on(?:Enabled|QuantumSource|Target|BatchTarget|Cancel|Refund|Move|Discard|Fund)\b/);
-    expect(source).toMatch(/onSubmitEnabledIntent[\s\S]*?onSubmitQuantumSupplyIntent[\s\S]*?onSubmitTargetStockIntent/);
-    expect(source).toMatch(/没有对应的原子 Rust 命令；不会循环多条目标命令伪装为原子操作/);
+    expect(source).toMatch(/onSubmitEnabledIntent[\s\S]*?onSubmitQuantumSupplyIntent[\s\S]*?onSubmitBatchBuildingTargetStockIntent[\s\S]*?onSubmitTargetStockIntent/);
+    expect(source).toMatch(/一条原子 Rust 意图统一修改/);
   });
 });

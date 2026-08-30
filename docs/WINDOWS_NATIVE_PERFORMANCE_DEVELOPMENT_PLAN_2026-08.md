@@ -1560,8 +1560,8 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 
 | 目标 | 估算进度 | 已闭合的主要切片 | 仍未闭合 |
 | --- | ---: | --- | --- |
-| Rust 唯一玩家可见权威 | 约 83% | main-owned 连续时钟、durable 命令回执、耐久暂停/继续和启动恢复、同 revision 投影、接管前完整覆盖门禁；公开存档/云/恢复边界已在 native ownership 下失败关闭；既有行星、科研、建筑、空间站、制造等最小意图之外，蓝图名称现在也由 Rust 验证并耐久提交；响应丢失只做 main-owned 只读 receipt 对账，renderer 不重发 mutation；普通闭合配方、科研、火箭、太阳帆和“已有施工库存”具备部分纯挂机守恒证书 | `authorityEligible=false`；完整 productive pure-idle/offline/time-warp、出口、合同、有限资源、公开主档写回和全部玩家命令覆盖仍不足；制造中心批量写面、蓝图捕获/导入/变换/删除/部署等写面和若干跨域操作尚未闭合；接管前 legacy fallback 仍必须保留完整 GameState，因此不能把“单一写入机制”写成“全游戏已经 Rust 权威” |
-| 完整薄 UI | 约 96% | 主画布、minimap、运行状态、行星导航、科研、配方、生产缓存、星际工业、量子库存、普通建筑/线路及库存交互、星图、戴森、制造中心和内置空间站均可消费同 revision 有界 Rust 投影或提交最小意图；蓝图库/施工队列真分页，蓝图重命名保留稳定 DOM、草稿与 IME，等待 durable ACK/只读 reconciliation 和新投影；renderer 不乐观改写权威状态 | 建筑制造批量目标仍未迁移；蓝图捕获、导入、部署、变换、删除等写面仍未迁移；运营、银河、合同、MOD/批量操作和戴森完整几何仍未迁移；微型黑洞端口编辑及毁灭账本也未迁移；失败关闭不等于功能迁移完成，renderer 仍不是完整薄客户端 |
+| Rust 唯一玩家可见权威 | 约 83% | main-owned 连续时钟、durable 命令回执、耐久暂停/继续和启动恢复、同 revision 投影、接管前完整覆盖门禁；公开存档/云/恢复边界已在 native ownership 下失败关闭；既有行星、科研、建筑、空间站、制造等最小意图之外，蓝图名称和制造中心批量建筑目标现在也由 Rust 验证并耐久提交；响应丢失只做 main-owned 只读 receipt 对账，renderer 不重发 mutation；普通闭合配方、科研、火箭、太阳帆和“已有施工库存”具备部分纯挂机守恒证书 | `authorityEligible=false`；完整 productive pure-idle/offline/time-warp、出口、合同、有限资源、公开主档写回和全部玩家命令覆盖仍不足；蓝图捕获/导入/变换/删除/部署等写面和若干跨域操作尚未闭合；接管前 legacy fallback 仍必须保留完整 GameState，因此不能把“单一写入机制”写成“全游戏已经 Rust 权威” |
+| 完整薄 UI | 约 96% | 主画布、minimap、运行状态、行星导航、科研、配方、生产缓存、星际工业、量子库存、普通建筑/线路及库存交互、星图、戴森、制造中心和内置空间站均可消费同 revision 有界 Rust 投影或提交最小意图；制造中心可用单条原子意图统一已解锁建筑目标；蓝图库/施工队列真分页，蓝图重命名保留稳定 DOM、草稿与 IME，等待 durable ACK/只读 reconciliation 和新投影；renderer 不乐观改写权威状态 | 蓝图捕获、导入、部署、变换、删除等写面仍未迁移；运营、银河、合同、MOD/其他批量操作和戴森完整几何仍未迁移；微型黑洞端口编辑及毁灭账本也未迁移；失败关闭不等于功能迁移完成，renderer 仍不是完整薄客户端 |
 | 真正 `O(active)` 物流 | 约 95% | 线路活动调度、本地/星际 ready 与 dispatch、peer directory、跨 revision demand queue、量子普通 flush/休眠 download、量子五秒上传和模式过渡均使用持久活动/待处理集合与反向唤醒；线路容量和量子合法性探测使用稳定分片；所有稀疏路径保留 75% 稠密退化和 MOD/失配失败关闭 | network parse/write 仍遍历部分库存键；活动请求分配为 `O(A log A)`；拓扑重编、连续生产、高扇出、自然稠密和 fail-closed 路径按语义仍会全扫；冲突组件物料应用并行原型虽语义一致但实测中位慢 9.87%、P95 慢 11.55%，已拒绝而非冒充完成 |
 | 全领域确定性原生并行 | 约 72% | 普通机器和线路内核外，已并行或复用矿脉、物流 readiness/congestion、线路容量预留与源快照、本地站缓冲、曲速器预留、量子计划验证与供给探测、施工、轨道终端、射线接收器、银河出口、任务指标、历史诊断及生产历史刷新/重放；所有已接纳阶段使用固定分片、私有输出和原顺序提交；当前统一 runtime 的真实档 1/2/4/8 矩阵得到相同规范/领域/守恒哈希 | 共享物料和状态的固定顺序写入、完整离线/纯挂机及若干跨域阶段仍串行；传送带冲突组件候选已因退化拒绝；尚无跨 CPU、Windows 10/11、不同调度和 24 小时矩阵 |
 | 当前开发机可闭合工作 | 约 98% | 四个目标的高价值代码、安全边界、确定性测试和本机专项大多已闭合，当前以剩余功能迁移与冻结门禁为主 | 只表示单机开发收口，不包含真实 24 小时、多硬件、杀毒软件、磁盘故障、安装签名和灰度 |
@@ -1770,3 +1770,14 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 - GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版本 1.2.3 和 `authorityEligible=false` 均未改变。完整 E2E 失败史保留：收紧 v103 离线报告门禁后的首轮为 `431/27/2`；v33 银河出口单 Worker 原样通过，v144 堆叠失败由合法 2 秒精确报告令画布保持 `inert` 引起。v144 助手改为只接受 1～10 秒、原始=提交、全程精确、未用宏观外推、0% 误差、`deterministic-exact`、收益已验证、状态精确且无警告的报告，定向 `3/3` 通过。下一轮完整结果为 `432/27/1`；唯一 v108 失败来自 Playwright 对离屏 hub 的隐式滚动与 React Flow 滚动复位竞态。原样单 Worker `1/1`、连续 `3/3` 均通过；测试现先执行真实 Fit View，等待节点完整入窗且中心 topmost 后再普通点击，并将旧的无条件离线报告 handler 替换为同样的 fail-closed 精确门禁，v108 全文件 `5/5` 通过。当前最终完整 E2E 为 `433/27/0`（`7.1m`），耐久 E2E 为 `7/7`（`48.9s`）。24 小时、多硬件、签名、安装/覆盖升级或部署未执行，也未连接生产。
 
 下一步只允许把“按实体生成私有 mutation journal、再按原线路顺序提交”的 replacement-style 候选作为隔离实验；共享目标或冲突组件不能直接并行写入。它必须先在真实大档 A/B 中证明墙钟收益并通过同一 1/5/60、分段、失败原子性与 `1/2/4/8` 确定性矩阵，否则只保留 No-Go 证据，不合入产品代码。
+
+### 24.9 制造中心批量建筑目标原子意图（2026-08-31，开发候选）
+
+本切片关闭 24.1 中制造中心唯一明确列出的批量写面，但固定百分比仍按原分母和整数估算保持 `Rust 83% / 薄 UI 96%`，不因一个小切片人为跳点：
+
+1. renderer 只发送 `{ kind: "batchBuildingTargetStock", target }`，不发送建筑 ID、任务、库存或退款目录。Rust 在同一 authoritative revision 中重新验证 built-in registry、制造科技、可用制造中心和当前科技库存上限，再从 `construction_planner::targets` 的稳定顺序自行筛选已解锁 `building` 目标。`target` 必须为 `1..=stockLimit`，不夹紧；额外字段、MOD/目录漂移、无已解锁建筑和无实际变化都在写入前拒绝。
+2. 批量操作严格复用历史 Web 规则的“策略变更”语义，而不复用单目标降低时的取消/退款策略。Rust 只写发生变化的 `constructionAutomation.targetStock.<id>`；现有 jobs、WIP、量子预留、托盘、随身库存、非建筑 fleet 目标和未知 opaque 键逐值保留。live 应用和 WAL 重放得到同一 revision、结果与规范哈希，失败时源 revision、规范哈希和基对象不变。
+3. 薄 UI 要求完整未截断的同 session/run/revision/活动行星目标投影，每次应用都先显示影响、变化和降低数量并要求显式确认。确认期间 projection、行集合、计数或 pending 状态变化会使确认失效；提交后所有制造写控件保持锁定，等待 durable ACK 和新 revision 投影。界面不乐观改写任何目标，也不会循环多条单目标命令伪装原子操作。
+4. 本切片没有新增 IPC、持久字段或迁移。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版本 1.2.3 与 `authorityEligible=false` 均不变；Web/PWA 的既有批量策略路径保持原行为。
+
+本切片的独立新鲜验证：Rust construction automation 专项 `7/7`、Core 单线程全量 `731/731`、新增批量降低专项 `2/2`、Host live/cold-WAL/五故障点专项 `2/2`，strict clippy、check 与 fmt 通过；首次并发全量在无关本地物流测试处出现一次 Windows `STATUS_ACCESS_VIOLATION`，随后按本计划固定的单 test thread 从零全量通过，异常记录不删除。组件、App 边界、intent workflow 与命令 helper 聚焦 Vitest 为 `4` 文件、`26/26`，TypeScript 和 production build/startup budget 通过；build 处理 `2,048` modules，startup 总 gzip `180,345 B`、JavaScript `86,815 B`、CSS `93,530 B`、最大启动 JavaScript `58,974 B`、menu `257,713 B`、forbidden module `0`。交叉终审先发现“App 无法证明确认”和“历史高目标不能合法降低”两项边界，以及“降低夹具其实在提高”和“真实 Host WAL 未覆盖 marker”两项 P1 测试缺口；合并前分别以三项确认计数同 revision 复核、兼容历史 safe integer 目标、真实降低夹具和第五条 ID-free WAL marker 关闭，复审 P0/P1/P2 为零。完整组合 Vitest、native Node、server、E2E、24 小时、多硬件、安装/覆盖升级、签名和灰度仍需在后续组合源码冻结后新跑；本节不复用 24.8 的结果，也未连接生产或修改玩家存档。

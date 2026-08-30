@@ -1,5 +1,9 @@
 # DSP极简网络项目现状
 
+> **Windows Rust 制造中心批量建筑目标原子意图（2026-08-31，开发候选，未发布）**：原生制造中心不再把“全部建筑目标”留作灰色占位。renderer 每次只发送一个不含目标 ID 列表的 `{ kind: "batchBuildingTargetStock", target }` marker；Rust 在当前 revision 自行验证 built-in registry、制造科技、可用中心和科技库存上限，并按稳定目录只更新已解锁建筑目标。该操作严格是补货策略变更：不会取消或退款现有任务，不触碰 WIP、量子预留、托盘、随身库存、运输机/运输船目标或未知字段。MOD/目录漂移、额外字段、0/越界值、无目标、无变化、旧 revision 或截断投影均整条拒绝，失败前后 revision 与规范哈希不变。
+>
+> 玩家界面会先列出影响、变化和降低数量并要求确认；确认绑定 session/run/revision/活动行星和完整行集合，App 会从同一投影重新计算三项计数，任何不符都会失效。提交后不乐观显示新目标，而是等待 durable ACK 与新 revision Rust 投影。独立新鲜验证为 Rust 专项 `7/7`、Core 单线程全量 `731/731`、新增批量降低 `2/2`、Host live/cold-WAL/五故障点 `2/2`、聚焦 Vitest `4` 文件 `26/26`，TypeScript、check、strict clippy、fmt、production build 与 startup budget 通过；首次并发 Rust 全量曾在无关物流用例处出现一次 Windows `STATUS_ACCESS_VIOLATION`，之后单 test thread 从零全量通过，失败史保留。交叉终审发现的两项边界和两项 P1 测试缺口均在提交前关闭，复审 P0/P1/P2 为零。组合源码的完整 Vitest/native/server/E2E 尚待最终冻结后重跑。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版本 1.2.3 与 `authorityEligible=false` 均未改变；未连接生产、未修改玩家存档。
+>
 > **Windows Rust 普通生产者反向唤醒与线路工作区原子复用（2026-08-31，开发候选，未发布）**：内置默认内容目录中的普通生产建筑不再仅因“配方可能产出”就让全部输出线路永久常醒。完整输入周期会按现有 `EPSILON`/整数结算语义预先激活对应输出；真实输入货物到达时会反向唤醒该建筑的全部已路由配方输出；若输出在本步传输选择快照之后才被唤醒，Rust 会在容量预留前为这一小组补齐同一步线路时钟，避免多等一个模拟步。MOD、opaque、特殊/全局配方以及无法证明的目录形状继续保守常醒；活动集合达到 75% 时仍退化为稳定全扫描。
 >
 > 同一切片把线路临时缓冲改为按精确拓扑共享的单槽复用池。已提交快照、失败候选、纯挂机 disposable clone 和重叠候选不再通过“取走缓冲”互相破坏；候选在发布前失败时会完整清空逻辑状态、保留工厂尺度分配并归还池，重叠借用采用 first-return-wins。真实 `Barrier` 双线程测试会阻止任一候选在另一候选完成 checkout 前发布，证明同一时刻只有一个候选持有池内驻留工作区、另一个使用独立分配，两个候选不会共享可变缓冲；回池后仍只保留一个完整来源并能在下一次借用时清除旧活动位。这样失败/取消不会把候选活动位或待处理队列泄漏进下一 revision，也不会让一次丢弃的纯挂机探针永久失去复用能力。

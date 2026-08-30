@@ -4,6 +4,7 @@ export type NativeConstructionCenterIntentKind =
   | "enabled"
   | "quantumSupplyEnabled"
   | "targetStock"
+  | "batchBuildingTargetStock"
   | "otherNativeCommand";
 
 export interface NativeConstructionCenterFrameIdentity {
@@ -37,16 +38,45 @@ export interface NativeConstructionCenterTargetStockConfirmation {
   readonly cancelsJobsAndRefunds: boolean;
 }
 
+export interface NativeConstructionCenterBatchBuildingTargetStockSubmission
+  extends NativeConstructionCenterFrameIdentity {
+  readonly target: number;
+  readonly confirmedAffectedCount: number;
+  readonly confirmedChangedCount: number;
+  readonly confirmedLoweredCount: number;
+}
+
+export interface NativeConstructionCenterBatchBuildingTargetStockConfirmation {
+  readonly identity: NativeConstructionCenterFrameIdentity;
+  readonly target: number;
+  /** All unlocked building rows represented by this complete Rust projection. */
+  readonly affectedCount: number;
+  /** Rows whose policy will actually change. */
+  readonly changedCount: number;
+  /** Changed rows whose target policy will be lowered. */
+  readonly loweredCount: number;
+  /** Batch policy updates deliberately preserve jobs, WIP and reservations. */
+  readonly cancelsJobsAndRefunds: false;
+}
+
 export type NativeConstructionCenterTargetStockEvaluation =
   | { readonly status: "rejected"; readonly message: string }
   | { readonly status: "ready"; readonly submission: NativeConstructionCenterTargetStockSubmission }
   | { readonly status: "confirmation-required"; readonly confirmation: NativeConstructionCenterTargetStockConfirmation };
+
+export type NativeConstructionCenterBatchBuildingTargetStockEvaluation =
+  | { readonly status: "rejected"; readonly message: string }
+  | {
+    readonly status: "confirmation-required";
+    readonly confirmation: NativeConstructionCenterBatchBuildingTargetStockConfirmation;
+  };
 
 export type NativeConstructionCenterTargetDraftResult =
   | { readonly ok: true; readonly value: number }
   | { readonly ok: false; readonly message: string };
 
 const TARGET_PRESETS = [0, 100, 500, 2_000, 10_000, 100_000, 100_000_000] as const;
+const MAX_CONSTRUCTION_AUTOMATION_TARGET = 100_000_000;
 
 export function nativeConstructionCenterFrameIdentity(
   frame: NativeConstructionCenterWorkspaceFrame,
@@ -178,5 +208,99 @@ export function confirmNativeConstructionCenterTargetStock(
     targetId: confirmation.targetId,
     target: confirmation.target,
     confirmedDecreaseFrom: confirmation.previousTarget,
+  });
+}
+
+type NativeConstructionCenterBatchBuildingSummary = Readonly<{
+  affectedCount: number;
+  changedCount: number;
+  loweredCount: number;
+}>;
+
+function nativeConstructionCenterBatchBuildingSummary(
+  frame: NativeConstructionCenterWorkspaceFrame,
+  target: number,
+): NativeConstructionCenterBatchBuildingSummary | null {
+  if (!Number.isSafeInteger(frame.workspace.stockLimit) || frame.workspace.stockLimit < 1 ||
+      !Number.isSafeInteger(target) || target < 1 || target > frame.workspace.stockLimit ||
+      target > MAX_CONSTRUCTION_AUTOMATION_TARGET ||
+      frame.workspace.targets.truncated ||
+      frame.workspace.targets.totalCount !== frame.workspace.targets.rows.length) return null;
+
+  const seenTargetIds = new Set<string>();
+  let affectedCount = 0;
+  let changedCount = 0;
+  let loweredCount = 0;
+  for (const row of frame.workspace.targets.rows) {
+    if (row.kind !== "building" || !row.unlocked) continue;
+    if (typeof row.targetId !== "string" || row.targetId.length === 0 ||
+        seenTargetIds.has(row.targetId) || !Number.isSafeInteger(row.target) || row.target < 0) return null;
+    seenTargetIds.add(row.targetId);
+    affectedCount += 1;
+    if (row.target === target) continue;
+    changedCount += 1;
+    if (row.target > target) loweredCount += 1;
+  }
+  if (affectedCount === 0 || changedCount === 0) return null;
+  return Object.freeze({ affectedCount, changedCount, loweredCount });
+}
+
+/**
+ * Prepares one explicit confirmation for a batch policy update. The complete
+ * target projection and frame identity are fenced here, while Rust remains the
+ * authority that derives the affected built-in target IDs at commit time.
+ */
+export function evaluateNativeConstructionCenterBatchBuildingTargetStock(
+  frame: NativeConstructionCenterWorkspaceFrame | null,
+  pending: NativeConstructionCenterPendingIdentity | null,
+  target: number,
+): NativeConstructionCenterBatchBuildingTargetStockEvaluation {
+  if (!frame || frame.workspace.writeAvailable !== true || pending) {
+    return { status: "rejected", message: "原生权威投影不可用或已有命令待确认" };
+  }
+  const summary = nativeConstructionCenterBatchBuildingSummary(frame, target);
+  if (!summary) {
+    return {
+      status: "rejected",
+      message: frame.workspace.targets.truncated ||
+        frame.workspace.targets.totalCount !== frame.workspace.targets.rows.length
+        ? "建筑目标投影不完整，不能确认批量修改"
+        : "批量目标无效、没有已解锁建筑或目标策略没有变化",
+    };
+  }
+  return {
+    status: "confirmation-required",
+    confirmation: Object.freeze({
+      identity: nativeConstructionCenterFrameIdentity(frame),
+      target,
+      ...summary,
+      cancelsJobsAndRefunds: false as const,
+    }),
+  };
+}
+
+/**
+ * Revalidates the exact frame and counts before returning the retry-stable,
+ * ID-free submission. A changed revision, row set or concurrent command makes
+ * the old confirmation unusable.
+ */
+export function confirmNativeConstructionCenterBatchBuildingTargetStock(
+  frame: NativeConstructionCenterWorkspaceFrame | null,
+  pending: NativeConstructionCenterPendingIdentity | null,
+  confirmation: NativeConstructionCenterBatchBuildingTargetStockConfirmation,
+): NativeConstructionCenterBatchBuildingTargetStockSubmission | null {
+  if (!nativeConstructionCenterIdentityMatchesFrame(confirmation.identity, frame) || !frame ||
+      frame.workspace.writeAvailable !== true || pending ||
+      confirmation.cancelsJobsAndRefunds !== false) return null;
+  const summary = nativeConstructionCenterBatchBuildingSummary(frame, confirmation.target);
+  if (!summary || summary.affectedCount !== confirmation.affectedCount ||
+      summary.changedCount !== confirmation.changedCount ||
+      summary.loweredCount !== confirmation.loweredCount) return null;
+  return Object.freeze({
+    ...confirmation.identity,
+    target: confirmation.target,
+    confirmedAffectedCount: summary.affectedCount,
+    confirmedChangedCount: summary.changedCount,
+    confirmedLoweredCount: summary.loweredCount,
   });
 }

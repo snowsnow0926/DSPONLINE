@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  createNativeConstructionAutomationBatchBuildingTargetStockIntentCommand,
   createNativeConstructionAutomationEnabledIntentCommand,
   createNativeConstructionAutomationQuantumSupplyIntentCommand,
   createNativeConstructionAutomationTargetStockIntentCommand,
@@ -44,6 +45,33 @@ describe("native construction automation semantic intent commands", () => {
     expect(encoded).not.toContain("constructionQueue");
   });
 
+  it("submits one batch target policy without renderer-derived target IDs", () => {
+    const command = createNativeConstructionAutomationBatchBuildingTargetStockIntentCommand(
+      44,
+      2_000,
+    );
+    expect(command).toMatchObject({
+      protocolVersion: 1,
+      baseRevision: 44,
+      topLevelChanges: [{
+        path: ["constructionAutomation", "intent"],
+        operation: "set",
+        value: { kind: "batchBuildingTargetStock", target: 2_000 },
+      }],
+      changedEntities: [],
+      addedEntities: [],
+      removedEntityIds: [],
+      changedBelts: [],
+      addedBelts: [],
+      removedBeltIds: [],
+    });
+    const encoded = JSON.stringify(command);
+    expect(encoded).not.toContain("targetId");
+    expect(encoded).not.toContain("wind_turbine");
+    expect(encoded).not.toContain("jobs");
+    expect(encoded).not.toContain("inventory");
+  });
+
   it("rejects malformed revisions, IDs, booleans and targets before crossing the bridge", () => {
     expect(() => createNativeConstructionAutomationEnabledIntentCommand(-1, true)).toThrow();
     expect(() => createNativeConstructionAutomationEnabledIntentCommand(0, 1 as unknown as boolean)).toThrow();
@@ -54,5 +82,14 @@ describe("native construction automation semantic intent commands", () => {
     expect(() => createNativeConstructionAutomationTargetStockIntentCommand(0, "arc_smelter", -1)).toThrow();
     expect(() => createNativeConstructionAutomationTargetStockIntentCommand(0, "arc_smelter", 1.5)).toThrow();
     expect(() => createNativeConstructionAutomationTargetStockIntentCommand(0, "arc_smelter", 100_000_001)).toThrow();
+    expect(() => createNativeConstructionAutomationBatchBuildingTargetStockIntentCommand(-1, 1)).toThrow();
+    expect(() => createNativeConstructionAutomationBatchBuildingTargetStockIntentCommand(0, 0)).toThrow();
+    expect(() => createNativeConstructionAutomationBatchBuildingTargetStockIntentCommand(0, -1)).toThrow();
+    expect(() => createNativeConstructionAutomationBatchBuildingTargetStockIntentCommand(0, 1.5)).toThrow();
+    expect(() => createNativeConstructionAutomationBatchBuildingTargetStockIntentCommand(0, 100_000_001)).toThrow();
+    expect(() => createNativeConstructionAutomationBatchBuildingTargetStockIntentCommand(
+      0,
+      Number.MAX_SAFE_INTEGER + 1,
+    )).toThrow();
   });
 });

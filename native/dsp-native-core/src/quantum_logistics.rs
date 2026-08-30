@@ -509,11 +509,72 @@ struct Slot {
 
 #[derive(Debug, Clone)]
 struct Request {
+    /// Internal allocation identity. Length-prefixed fields keep endpoint and
+    /// construction namespaces disjoint even when MOD IDs contain `:` or
+    /// arbitrary Unicode. This key is runtime-only and never enters v47.
     key: String,
+    /// Historical lexical key used only for deterministic allocation order.
+    /// Keeping it separate preserves every non-colliding winner while `key`
+    /// provides collision-free equality and lookup semantics.
+    order_key: String,
     entity_index: usize,
     item_id: String,
     amount: BigUint,
     priority: i64,
+}
+
+impl Request {
+    fn endpoint(
+        entity_index: usize,
+        entity_id: &str,
+        item_id: &str,
+        amount: BigUint,
+        priority: i64,
+    ) -> Self {
+        Self {
+            key: structured_request_key("endpoint", entity_id, item_id),
+            order_key: format!("{entity_id}:{item_id}"),
+            entity_index,
+            item_id: item_id.to_owned(),
+            amount,
+            priority,
+        }
+    }
+
+    fn construction(demand: &crate::construction::QuantumDemand) -> Self {
+        Self {
+            key: structured_request_key("construction-direct", &demand.entity_id, &demand.item_id),
+            order_key: demand.key.clone(),
+            entity_index: usize::MAX,
+            item_id: demand.item_id.clone(),
+            amount: BigUint::from(demand.amount),
+            priority: 1,
+        }
+    }
+
+    #[cfg(test)]
+    fn synthetic(key: &str, item_id: &str, amount: u64, priority: i64) -> Self {
+        Self {
+            key: key.to_owned(),
+            order_key: key.to_owned(),
+            entity_index: 0,
+            item_id: item_id.to_owned(),
+            amount: BigUint::from(amount),
+            priority,
+        }
+    }
+}
+
+fn structured_request_key(namespace: &str, entity_id: &str, item_id: &str) -> String {
+    // Decimal byte lengths followed by exact UTF-8 payloads form a canonical,
+    // injective tuple encoding. No delimiter occurring inside an ID can merge
+    // two request owners, and byte length is architecture-independent.
+    format!(
+        "{}:{namespace}{}:{entity_id}{}:{item_id}",
+        namespace.len(),
+        entity_id.len(),
+        item_id.len(),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -3048,6 +3109,12 @@ fn request_order(left: &Request, right: &Request) -> Ordering {
     right
         .priority
         .cmp(&left.priority)
+        .then_with(|| request_lexical_order(left, right))
+}
+
+fn request_lexical_order(left: &Request, right: &Request) -> Ordering {
+    left.order_key
+        .cmp(&right.order_key)
         .then_with(|| left.key.cmp(&right.key))
 }
 
@@ -3211,7 +3278,7 @@ fn settle_outputs(
     }
     let mut values = HashMap::new();
     for (item_id, item_requests) in &mut by_item {
-        item_requests.sort_by(|left, right| left.key.cmp(&right.key));
+        item_requests.sort_by(request_lexical_order);
         let available = network.inventory.get(item_id).cloned().unwrap_or_default();
         let planned = item_requests
             .iter()
@@ -3927,7 +3994,6 @@ fn settle_downloads_with_request_count(
             if slot.remote_mode != "demand" {
                 continue;
             }
-            let key = format!("{station_id}:{item_id}");
             let current = item_amount(station, "outputs", item_id).floor().max(0.0);
             let local_capacity = station_capacity(state, base, station, &slot)?
                 .floor()
@@ -3949,31 +4015,30 @@ fn settle_downloads_with_request_count(
             upsert_request_in_stable_order(
                 &mut requests,
                 &mut request_positions,
-                Request {
-                    key,
+                Request::endpoint(
                     entity_index,
-                    item_id: item_id.to_owned(),
-                    amount: BigUint::from(capacity),
-                    priority: slot.priority,
-                },
+                    station_id,
+                    item_id,
+                    BigUint::from(capacity),
+                    slot.priority,
+                ),
             );
         }
     }
     let construction_demands = crate::construction::quantum_demands(state, base, entities)?
         .into_iter()
-        .map(|demand| (demand.key.clone(), demand))
+        .map(|demand| {
+            (
+                structured_request_key("construction-direct", &demand.entity_id, &demand.item_id),
+                demand,
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     for demand in construction_demands.values() {
         upsert_request_in_stable_order(
             &mut requests,
             &mut request_positions,
-            Request {
-                key: demand.key.clone(),
-                entity_index: usize::MAX,
-                item_id: demand.item_id.clone(),
-                amount: BigUint::from(demand.amount),
-                priority: 1,
-            },
+            Request::construction(demand),
         );
     }
     let mut allocation_requests = requests.clone();
@@ -4013,6 +4078,109 @@ fn settle_downloads_with_request_count(
     network.set_runtime_flow(flow.clone());
     write_network(base, &network)?;
     Ok((Some(flow), allocation_requests.len()))
+}
+
+fn construction_macro_quantum_scope_is_exclusive(
+    base: &Map<String, Value>,
+    entities: &[Value],
+) -> anyhow::Result<bool> {
+    let automation = base
+        .get("constructionAutomation")
+        .and_then(Value::as_object);
+    if automation
+        .and_then(|automation| automation.get("enabled"))
+        .and_then(Value::as_bool)
+        != Some(true)
+        || automation
+            .and_then(|automation| automation.get("quantumSourceEnabled"))
+            .and_then(Value::as_bool)
+            != Some(true)
+        || !network_enabled(base)?
+    {
+        return Ok(false);
+    }
+    let mut tower_count = 0_u64;
+    for entity in entities.iter().filter_map(Value::as_object) {
+        if !is_quantum_station(entity) {
+            continue;
+        }
+        tower_count = tower_count
+            .checked_add(floor_u64(
+                finite_number(entity.get("machineCount")).floor().max(0.0),
+            ))
+            .ok_or_else(|| anyhow!("native construction macro quantum tower count overflowed"))?;
+        if slots(entity)?
+            .iter()
+            .any(|slot| slot.remote_mode == "demand")
+        {
+            return Ok(false);
+        }
+    }
+    Ok(tower_count > 0)
+}
+
+/// Returns the exact five-second global download grant for the narrow
+/// construction-only replay. A grant exists only when construction is the sole
+/// download sink; ordinary tower demand would make the shared cursor/bandwidth
+/// order observable and therefore freezes the replay instead.
+pub(crate) fn construction_macro_download_per_boundary(
+    base: &Map<String, Value>,
+    entities: &[Value],
+) -> anyhow::Result<Option<u64>> {
+    if !construction_macro_quantum_scope_is_exclusive(base, entities)? {
+        return Ok(None);
+    }
+    let bandwidth = runtime_bandwidth(base, entities);
+    let capacity = boundary_capacity(bandwidth.per_minute, SETTLEMENT_SECONDS)
+        .to_u64()
+        .ok_or_else(|| anyhow!("native construction macro quantum grant exceeds u64"))?;
+    if capacity == 0 || capacity > MAX_SAFE_INTEGER {
+        return Ok(None);
+    }
+    Ok(Some(capacity))
+}
+
+/// Replays one ordinary five-second quantum download boundary with no belt
+/// through-credit. The caller must hold an identity-bound certificate for the
+/// expected grant. The existing allocator remains the sole owner of global
+/// inventory debits, per-item cursors and direct construction-buffer credits.
+pub(crate) fn settle_construction_macro_download_boundary(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    boundary_second: f64,
+    expected_download_per_boundary: u64,
+) -> anyhow::Result<u64> {
+    let current = construction_macro_download_per_boundary(base, entities)?
+        .ok_or_else(|| anyhow!("native construction macro quantum scope is no longer exclusive"))?;
+    if current != expected_download_per_boundary {
+        bail!("native construction macro quantum bandwidth changed after certification");
+    }
+    let (flow, _) = settle_downloads_with_request_count(
+        state,
+        base,
+        entities,
+        &crate::belts::OutputCredits::default(),
+        boundary_second,
+        SETTLEMENT_SECONDS,
+    )?;
+    let downloaded = flow
+        .map(|flow| {
+            flow.downloaded.values().try_fold(0_u64, |total, amount| {
+                let amount = amount.to_u64().ok_or_else(|| {
+                    anyhow!("native construction macro quantum delivery exceeds u64")
+                })?;
+                total.checked_add(amount).ok_or_else(|| {
+                    anyhow!("native construction macro quantum delivery total overflowed")
+                })
+            })
+        })
+        .transpose()?
+        .unwrap_or(0);
+    if downloaded > expected_download_per_boundary {
+        bail!("native construction macro quantum delivery exceeded its certified grant");
+    }
+    Ok(downloaded)
 }
 
 #[cfg(test)]
@@ -4183,13 +4351,13 @@ pub(crate) fn settle_active_downloads(
         upsert_request_in_stable_order(
             &mut requests,
             &mut request_positions,
-            Request {
-                key: format!("{}:{item_id}", &state.entities.ids[entity_index]),
+            Request::endpoint(
                 entity_index,
-                item_id: item_id.to_owned(),
-                amount: BigUint::from(capacity),
-                priority: i64::from(plan.slot.priority),
-            },
+                &state.entities.ids[entity_index],
+                item_id,
+                BigUint::from(capacity),
+                i64::from(plan.slot.priority),
+            ),
         );
         if requests.len() == previous_len.saturating_add(1) {
             request_plan_rows.push(plan_index);
@@ -4205,7 +4373,12 @@ pub(crate) fn settle_active_downloads(
     }
     let construction_demands = construction_demands
         .into_iter()
-        .map(|demand| (demand.key.clone(), demand))
+        .map(|demand| {
+            (
+                structured_request_key("construction-direct", &demand.entity_id, &demand.item_id),
+                demand,
+            )
+        })
         .collect::<BTreeMap<_, _>>();
     let station_request_count = requests.len();
     for demand in construction_demands.values() {
@@ -4213,13 +4386,7 @@ pub(crate) fn settle_active_downloads(
         upsert_request_in_stable_order(
             &mut requests,
             &mut request_positions,
-            Request {
-                key: demand.key.clone(),
-                entity_index: usize::MAX,
-                item_id: demand.item_id.clone(),
-                amount: BigUint::from(demand.amount),
-                priority: 1,
-            },
+            Request::construction(demand),
         );
         if requests.len() != previous_len.saturating_add(1) {
             linear_order_eligible = false;
@@ -4442,20 +4609,16 @@ pub(crate) fn settle_uploads(
                 if available < 1 {
                     continue;
                 }
-                let key = format!("{}:{item_id}", &state.entities.ids[entity_index]);
-                request_rows.insert(key.clone(), row);
-                let previous_len = requests.len();
-                upsert_request_in_stable_order(
-                    &mut requests,
-                    &mut request_positions,
-                    Request {
-                        key,
-                        entity_index,
-                        item_id: item_id.to_owned(),
-                        amount: BigUint::from(available),
-                        priority: 1,
-                    },
+                let request = Request::endpoint(
+                    entity_index,
+                    &state.entities.ids[entity_index],
+                    item_id,
+                    BigUint::from(available),
+                    1,
                 );
+                request_rows.insert(request.key.clone(), row);
+                let previous_len = requests.len();
+                upsert_request_in_stable_order(&mut requests, &mut request_positions, request);
                 if requests.len() == previous_len.saturating_add(1) {
                     request_source_rows.push(row);
                 } else {
@@ -4481,20 +4644,16 @@ pub(crate) fn settle_uploads(
             if available < 1 {
                 continue;
             }
-            let key = format!("{}:{item_id}", &state.entities.ids[entity_index]);
-            request_rows.insert(key.clone(), row);
-            let previous_len = requests.len();
-            upsert_request_in_stable_order(
-                &mut requests,
-                &mut request_positions,
-                Request {
-                    key,
-                    entity_index,
-                    item_id: item_id.to_owned(),
-                    amount: BigUint::from(available),
-                    priority: i64::from(plan.slot.priority),
-                },
+            let request = Request::endpoint(
+                entity_index,
+                &state.entities.ids[entity_index],
+                item_id,
+                BigUint::from(available),
+                i64::from(plan.slot.priority),
             );
+            request_rows.insert(request.key.clone(), row);
+            let previous_len = requests.len();
+            upsert_request_in_stable_order(&mut requests, &mut request_positions, request);
             if requests.len() == previous_len.saturating_add(1) {
                 request_source_rows.push(row);
             } else {
@@ -4514,20 +4673,16 @@ pub(crate) fn settle_uploads(
             };
             let available = floor_u64(item_amount(endpoint, "outputs", item_id));
             if available > 0 {
-                let key = format!(
-                    "{}:{item_id}",
-                    string_at(endpoint, "id").unwrap_or_default()
-                );
                 upsert_request_in_stable_order(
                     &mut requests,
                     &mut request_positions,
-                    Request {
-                        key,
+                    Request::endpoint(
                         entity_index,
-                        item_id: item_id.to_owned(),
-                        amount: BigUint::from(available),
-                        priority: 1,
-                    },
+                        string_at(endpoint, "id").unwrap_or_default(),
+                        item_id,
+                        BigUint::from(available),
+                        1,
+                    ),
                 );
             }
         }
@@ -4561,17 +4716,16 @@ pub(crate) fn settle_uploads(
                 if available < 1 {
                     continue;
                 }
-                let key = format!("{station_id}:{item_id}");
                 upsert_request_in_stable_order(
                     &mut requests,
                     &mut request_positions,
-                    Request {
-                        key,
+                    Request::endpoint(
                         entity_index,
-                        item_id: item_id.to_owned(),
-                        amount: BigUint::from(available),
-                        priority: slot.priority,
-                    },
+                        station_id,
+                        item_id,
+                        BigUint::from(available),
+                        slot.priority,
+                    ),
                 );
             }
         }
@@ -5360,6 +5514,67 @@ mod tests {
         (state, base, entities)
     }
 
+    fn colliding_station_construction_fixture() -> (
+        CoreState,
+        Map<String, Value>,
+        Vec<Value>,
+        &'static str,
+        &'static str,
+        &'static str,
+    ) {
+        const CENTER_ID: &str = "施工:中心/Ω🚀";
+        const ITEM_ID: &str = "模组:量子铁/Ω🚀";
+        const STATION_ID: &str = "construction-direct:施工:中心/Ω🚀";
+
+        let (fixture_state, mut base, mut entities) = construction_quantum_fixture(1);
+        entities[1]["id"] = Value::from(CENTER_ID);
+        let mut demand_station = quantum_station(STATION_ID, ITEM_ID, "demand", 0.0, 0.0, vec![]);
+        demand_station["stationSlots"][0]["maxStock"] = Value::from(100);
+        entities.push(demand_station);
+        entities.push(serde_json::json!({
+            "id": "collision-wind",
+            "kind": "power",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "wind_turbine",
+            "machineCount": 1,
+            "minerCount": 0,
+            "inputs": {},
+            "outputs": {},
+            "progress": 0,
+            "routingCursor": 0,
+            "utilization": 0,
+            "productionRate": 0
+        }));
+
+        let jobs = base["constructionAutomation"]["jobs"]
+            .as_object_mut()
+            .expect("collision construction jobs");
+        let job = jobs
+            .remove("center-00000")
+            .expect("original collision construction job");
+        jobs.insert(CENTER_ID.to_owned(), job);
+
+        let mut catalog = (*fixture_state.catalog).clone();
+        let mut item = catalog.items["iron_ore"].clone();
+        item.id = ITEM_ID.to_owned();
+        item.name = ITEM_ID.to_owned();
+        catalog.items.insert(ITEM_ID.to_owned(), item);
+        catalog
+            .constructions
+            .get_mut("widget")
+            .expect("collision widget construction")
+            .costs[0] = crate::catalog::ItemAmount {
+            item_id: ITEM_ID.to_owned(),
+            amount: 1.0,
+        };
+        set_test_network_item(&mut base, ITEM_ID, "101");
+
+        let mut state = crate::simple_factory::tests::fixture_state(&entities);
+        state.catalog = Arc::new(catalog);
+        (state, base, entities, CENTER_ID, ITEM_ID, STATION_ID)
+    }
+
     fn set_construction_quantum_item(
         base: &mut Map<String, Value>,
         center_id: &str,
@@ -5451,6 +5666,33 @@ mod tests {
             .and_then(Value::as_object_mut)
             .expect("quantum test inventory")
             .insert(item_id.to_owned(), Value::from(amount));
+    }
+
+    fn test_network_item_amount(base: &Map<String, Value>, item_id: &str) -> BigUint {
+        parse_network(base)
+            .expect("quantum test network")
+            .inventory
+            .get(item_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn construction_quantum_buffer_amount(
+        base: &Map<String, Value>,
+        center_id: &str,
+        item_id: &str,
+    ) -> u64 {
+        floor_u64(
+            base.get("constructionAutomation")
+                .and_then(Value::as_object)
+                .and_then(|automation| automation.get("quantumMaterialBuffer"))
+                .and_then(Value::as_object)
+                .and_then(|buffers| buffers.get(center_id))
+                .and_then(Value::as_object)
+                .and_then(|buffer| buffer.get(item_id))
+                .map(|amount| finite_number(Some(amount)))
+                .unwrap_or(0.0),
+        )
     }
 
     fn set_test_runtime_flow(base: &mut Map<String, Value>, boundary_second: f64, rows: usize) {
@@ -5645,23 +5887,11 @@ mod tests {
     }
 
     fn request(key: &str, amount: u64) -> Request {
-        Request {
-            key: key.to_owned(),
-            entity_index: 0,
-            item_id: "iron_ore".to_owned(),
-            amount: BigUint::from(amount),
-            priority: 1,
-        }
+        Request::synthetic(key, "iron_ore", amount, 1)
     }
 
     fn item_request(key: &str, item_id: &str, amount: u64, priority: i64) -> Request {
-        Request {
-            key: key.to_owned(),
-            entity_index: 0,
-            item_id: item_id.to_owned(),
-            amount: BigUint::from(amount),
-            priority,
-        }
+        Request::synthetic(key, item_id, amount, priority)
     }
 
     fn request_signature(requests: &[Request]) -> Vec<(String, String, String, i64)> {
@@ -5697,7 +5927,8 @@ mod tests {
                 let key = format!("station-{random:016x}-{row:05}:item-{:02}", row % 23);
                 entries.push((row, priority, key.clone()));
                 all.push(Request {
-                    key,
+                    key: key.clone(),
+                    order_key: key,
                     entity_index: row,
                     item_id: format!("item-{:02}", row % 23),
                     amount: BigUint::from((random % 10_000) + 1),
@@ -5754,7 +5985,7 @@ mod tests {
         let entries = requests
             .iter()
             .enumerate()
-            .map(|(row, request)| (row, request.priority, request.key.clone()))
+            .map(|(row, request)| (row, request.priority, request.order_key.clone()))
             .collect();
         let ranks = build_request_order_rank(entries, row_count).unwrap();
         let rows = (0..row_count).rev().collect::<Vec<_>>();
@@ -5792,7 +6023,7 @@ mod tests {
         let entries = station_requests
             .iter()
             .enumerate()
-            .map(|(row, request)| (row, request.priority, request.key.clone()))
+            .map(|(row, request)| (row, request.priority, request.order_key.clone()))
             .collect();
         let ranks = build_request_order_rank(entries, station_requests.len()).unwrap();
         let station_rows = vec![0, 1, 2, 3];
@@ -6978,6 +7209,419 @@ mod tests {
     }
 
     #[test]
+    fn construction_macro_download_is_construction_only_and_conserves_inventory() {
+        let (mut state, mut base, mut entities) = construction_quantum_fixture(1);
+        let mut catalog = (*state.catalog).clone();
+        catalog
+            .constructions
+            .get_mut("widget")
+            .expect("widget construction")
+            .costs[0]
+            .amount = 1_000.0;
+        state.catalog = Arc::new(catalog);
+        let source_entities = entities.clone();
+        let inventory_before = test_network_item_amount(&base, "iron_ore");
+
+        let grant = construction_macro_download_per_boundary(&base, &entities)
+            .expect("construction macro grant")
+            .expect("exclusive construction quantum scope");
+        assert_eq!(grant, 416, "one tower grants one exact five-second cap");
+        let downloaded = settle_construction_macro_download_boundary(
+            &state,
+            &mut base,
+            &mut entities,
+            5.0,
+            grant,
+        )
+        .expect("construction-only macro download");
+        let inventory_after = test_network_item_amount(&base, "iron_ore");
+
+        assert_eq!(downloaded, grant);
+        assert!(downloaded <= grant);
+        assert_eq!(
+            inventory_before - inventory_after,
+            BigUint::from(downloaded),
+            "the global inventory debit must equal the construction credit"
+        );
+        assert_eq!(
+            construction_quantum_buffer_amount(&base, "center-00000", "iron_ore"),
+            downloaded
+        );
+        assert_eq!(
+            entities, source_entities,
+            "construction-only replay must not credit an ordinary station output"
+        );
+    }
+
+    #[test]
+    fn colon_unicode_station_and_construction_requests_do_not_alias_or_lose_material() {
+        let (state, mut base, mut entities, center_id, item_id, station_id) =
+            colliding_station_construction_fixture();
+        assert_eq!(
+            format!("{station_id}:{item_id}"),
+            format!("construction-direct:{center_id}:{item_id}"),
+            "the fixture must collide under the historical delimiter key"
+        );
+        assert_ne!(
+            structured_request_key("endpoint", station_id, item_id),
+            structured_request_key("construction-direct", center_id, item_id),
+            "structured request identity must separate the two owners"
+        );
+        let inventory_before = test_network_item_amount(&base, item_id);
+
+        let (flow, request_count) = settle_downloads_with_request_count(
+            &state,
+            &mut base,
+            &mut entities,
+            &crate::belts::OutputCredits::default(),
+            5.0,
+            SETTLEMENT_SECONDS,
+        )
+        .expect("collision-free exact download settlement");
+        let flow = flow.expect("enabled collision network flow");
+        let station = entities
+            .iter()
+            .filter_map(Value::as_object)
+            .find(|entity| string_at(entity, "id") == Some(station_id))
+            .expect("ordinary collision station");
+        let station_credit = floor_u64(item_amount(station, "outputs", item_id));
+        let construction_credit = construction_quantum_buffer_amount(&base, center_id, item_id);
+        let inventory_after = test_network_item_amount(&base, item_id);
+
+        assert_eq!(request_count, 2);
+        assert_eq!(station_credit, 100);
+        assert_eq!(construction_credit, 1);
+        assert_eq!(inventory_after, BigUint::zero());
+        assert_eq!(flow.downloaded[item_id], BigUint::from(101_u64));
+        assert_eq!(
+            inventory_before - inventory_after,
+            BigUint::from(station_credit + construction_credit),
+            "every network debit must have exactly one ordinary or construction owner"
+        );
+
+        let (state, mut rejected_base, mut rejected_entities, _, _, _) =
+            colliding_station_construction_fixture();
+        let source_base = rejected_base.clone();
+        let source_entities = rejected_entities.clone();
+        let error = settle_construction_macro_download_boundary(
+            &state,
+            &mut rejected_base,
+            &mut rejected_entities,
+            5.0,
+            416,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native construction macro quantum scope is no longer exclusive"
+        );
+        assert_eq!(rejected_base, source_base);
+        assert_eq!(rejected_entities, source_entities);
+    }
+
+    #[test]
+    fn construction_macro_multiple_centers_use_stable_unicode_id_order() {
+        let (fixture_state, mut source_base, mut source_entities) = construction_quantum_fixture(3);
+        let center_ids = ["中心:乙/Ω", "center-ζ", "中心:甲/🚀"];
+        let jobs = source_base["constructionAutomation"]["jobs"]
+            .as_object_mut()
+            .expect("construction jobs");
+        for (index, center_id) in center_ids.iter().enumerate() {
+            let original_id = format!("center-{index:05}");
+            let job = jobs
+                .remove(&original_id)
+                .expect("original construction job");
+            jobs.insert((*center_id).to_owned(), job);
+            source_entities[index + 1]["id"] = Value::from(*center_id);
+        }
+        set_test_network_item(&mut source_base, "iron_ore", "2");
+        let mut state = crate::simple_factory::tests::fixture_state(&source_entities);
+        state.catalog = Arc::clone(&fixture_state.catalog);
+        let mut permuted_entities = vec![
+            source_entities[0].clone(),
+            source_entities[3].clone(),
+            source_entities[1].clone(),
+            source_entities[2].clone(),
+        ];
+        let mut permuted_state = crate::simple_factory::tests::fixture_state(&permuted_entities);
+        permuted_state.catalog = Arc::clone(&fixture_state.catalog);
+        let mut base = source_base.clone();
+        let mut entities = source_entities;
+        let mut permuted_base = source_base;
+
+        let grant = construction_macro_download_per_boundary(&base, &entities)
+            .expect("stable-order grant")
+            .expect("stable-order scope");
+        let downloaded = settle_construction_macro_download_boundary(
+            &state,
+            &mut base,
+            &mut entities,
+            5.0,
+            grant,
+        )
+        .expect("stable-order settlement");
+        let permuted_grant =
+            construction_macro_download_per_boundary(&permuted_base, &permuted_entities)
+                .expect("permuted stable-order grant")
+                .expect("permuted stable-order scope");
+        let permuted_downloaded = settle_construction_macro_download_boundary(
+            &permuted_state,
+            &mut permuted_base,
+            &mut permuted_entities,
+            5.0,
+            permuted_grant,
+        )
+        .expect("permuted stable-order settlement");
+
+        assert_eq!(downloaded, 2);
+        assert_eq!(permuted_downloaded, downloaded);
+        assert_eq!(permuted_grant, grant);
+        assert_eq!(
+            permuted_base, base,
+            "entity storage order must not change scarce construction winners"
+        );
+        let mut sorted_ids = center_ids;
+        sorted_ids.sort_unstable();
+        for (position, center_id) in sorted_ids.into_iter().enumerate() {
+            assert_eq!(
+                construction_quantum_buffer_amount(&base, center_id, "iron_ore"),
+                u64::from(position < 2),
+                "scarce remainder winner {center_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn construction_macro_rejects_any_ordinary_quantum_demand_slot_atomically() {
+        let (state, mut base, mut entities) = construction_quantum_fixture(1);
+        let certified = construction_macro_download_per_boundary(&base, &entities)
+            .expect("initial grant")
+            .expect("initial exclusive scope");
+        entities[0]["stationSlots"][0]["remoteMode"] = Value::from("demand");
+        assert_eq!(
+            construction_macro_download_per_boundary(&base, &entities)
+                .expect("demand-slot scope check"),
+            None
+        );
+        let source_base = base.clone();
+        let source_entities = entities.clone();
+
+        let error = settle_construction_macro_download_boundary(
+            &state,
+            &mut base,
+            &mut entities,
+            5.0,
+            certified,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native construction macro quantum scope is no longer exclusive"
+        );
+        assert_eq!(base, source_base);
+        assert_eq!(entities, source_entities);
+    }
+
+    #[test]
+    fn construction_macro_grant_requires_enabled_source_network_and_tower() {
+        let (_, source_base, source_entities) = construction_quantum_fixture(1);
+        assert!(
+            construction_macro_download_per_boundary(&source_base, &source_entities)
+                .expect("enabled construction grant")
+                .is_some()
+        );
+
+        let mut automation_disabled = source_base.clone();
+        automation_disabled["constructionAutomation"]["enabled"] = Value::Bool(false);
+        assert_eq!(
+            construction_macro_download_per_boundary(&automation_disabled, &source_entities)
+                .expect("disabled automation scope"),
+            None
+        );
+
+        let mut source_disabled = source_base.clone();
+        source_disabled["constructionAutomation"]["quantumSourceEnabled"] = Value::Bool(false);
+        assert_eq!(
+            construction_macro_download_per_boundary(&source_disabled, &source_entities)
+                .expect("disabled source scope"),
+            None
+        );
+
+        let mut network_disabled = source_base.clone();
+        network_disabled["quantumLogisticsNetwork"]["enabled"] = Value::Bool(false);
+        assert_eq!(
+            construction_macro_download_per_boundary(&network_disabled, &source_entities)
+                .expect("disabled network scope"),
+            None
+        );
+
+        assert_eq!(
+            construction_macro_download_per_boundary(&source_base, &source_entities[1..])
+                .expect("no-tower scope"),
+            None
+        );
+    }
+
+    #[test]
+    fn construction_macro_rejects_research_or_stack_grant_drift_atomically() {
+        let (state, mut research_base, mut research_entities) = construction_quantum_fixture(1);
+        let certified =
+            construction_macro_download_per_boundary(&research_base, &research_entities)
+                .expect("research drift initial grant")
+                .expect("research drift initial scope");
+        research_base["endgame"]["infiniteResearch"]["galactic_logistics"]["level"] =
+            Value::from(1);
+        let source_base = research_base.clone();
+        let source_entities = research_entities.clone();
+        let error = settle_construction_macro_download_boundary(
+            &state,
+            &mut research_base,
+            &mut research_entities,
+            5.0,
+            certified,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native construction macro quantum bandwidth changed after certification"
+        );
+        assert_eq!(research_base, source_base);
+        assert_eq!(research_entities, source_entities);
+
+        let (state, mut stack_base, mut stack_entities) = construction_quantum_fixture(1);
+        let certified = construction_macro_download_per_boundary(&stack_base, &stack_entities)
+            .expect("stack drift initial grant")
+            .expect("stack drift initial scope");
+        stack_entities[0]["machineCount"] = Value::from(2);
+        let source_base = stack_base.clone();
+        let source_entities = stack_entities.clone();
+        let error = settle_construction_macro_download_boundary(
+            &state,
+            &mut stack_base,
+            &mut stack_entities,
+            5.0,
+            certified,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "native construction macro quantum bandwidth changed after certification"
+        );
+        assert_eq!(stack_base, source_base);
+        assert_eq!(stack_entities, source_entities);
+    }
+
+    #[test]
+    fn construction_macro_unicode_center_and_item_ids_conserve_exactly() {
+        let (fixture_state, mut base, mut entities) = construction_quantum_fixture(1);
+        let center_id = "施工中心:甲/Ω🚀";
+        let item_id = "模组:量子铁/Ω🚀";
+        entities[1]["id"] = Value::from(center_id);
+        let jobs = base["constructionAutomation"]["jobs"]
+            .as_object_mut()
+            .expect("unicode construction jobs");
+        let job = jobs
+            .remove("center-00000")
+            .expect("original unicode construction job");
+        jobs.insert(center_id.to_owned(), job);
+        let mut catalog = (*fixture_state.catalog).clone();
+        catalog
+            .constructions
+            .get_mut("widget")
+            .expect("unicode widget construction")
+            .costs[0]
+            .item_id = item_id.to_owned();
+        let mut state = crate::simple_factory::tests::fixture_state(&entities);
+        state.catalog = Arc::new(catalog);
+        set_test_network_item(&mut base, item_id, "7");
+        let inventory_before = test_network_item_amount(&base, item_id);
+        let grant = construction_macro_download_per_boundary(&base, &entities)
+            .expect("unicode construction grant")
+            .expect("unicode construction scope");
+
+        let downloaded = settle_construction_macro_download_boundary(
+            &state,
+            &mut base,
+            &mut entities,
+            5.0,
+            grant,
+        )
+        .expect("unicode construction settlement");
+        let inventory_after = test_network_item_amount(&base, item_id);
+
+        assert_eq!(downloaded, 7);
+        assert_eq!(inventory_before - inventory_after, BigUint::from(7_u64));
+        assert_eq!(
+            construction_quantum_buffer_amount(&base, center_id, item_id),
+            7
+        );
+    }
+
+    #[test]
+    fn construction_macro_respects_material_capacity_and_empty_inventory() {
+        let (state, mut base, mut entities) = construction_quantum_fixture(1);
+        set_construction_quantum_item(&mut base, "center-00000", "iron_ore", 9.0);
+        set_test_network_item(&mut base, "iron_ore", "3");
+        let grant = construction_macro_download_per_boundary(&base, &entities)
+            .expect("capacity grant")
+            .expect("capacity scope");
+
+        let downloaded = settle_construction_macro_download_boundary(
+            &state,
+            &mut base,
+            &mut entities,
+            5.0,
+            grant,
+        )
+        .expect("capacity settlement");
+        assert_eq!(downloaded, 1);
+        assert_eq!(
+            construction_quantum_buffer_amount(&base, "center-00000", "iron_ore"),
+            10
+        );
+        assert_eq!(
+            test_network_item_amount(&base, "iron_ore"),
+            BigUint::from(2_u64)
+        );
+        let downloaded = settle_construction_macro_download_boundary(
+            &state,
+            &mut base,
+            &mut entities,
+            10.0,
+            grant,
+        )
+        .expect("full-capacity settlement");
+        assert_eq!(downloaded, 0);
+        assert_eq!(
+            test_network_item_amount(&base, "iron_ore"),
+            BigUint::from(2_u64)
+        );
+
+        let (state, mut empty_base, mut empty_entities) = construction_quantum_fixture(1);
+        set_test_network_item(&mut empty_base, "iron_ore", "0");
+        let grant = construction_macro_download_per_boundary(&empty_base, &empty_entities)
+            .expect("empty inventory grant")
+            .expect("empty inventory scope");
+        let downloaded = settle_construction_macro_download_boundary(
+            &state,
+            &mut empty_base,
+            &mut empty_entities,
+            5.0,
+            grant,
+        )
+        .expect("empty inventory settlement");
+        assert_eq!(downloaded, 0);
+        assert_eq!(
+            construction_quantum_buffer_amount(&empty_base, "center-00000", "iron_ore"),
+            0
+        );
+        assert_eq!(
+            test_network_item_amount(&empty_base, "iron_ore"),
+            BigUint::zero()
+        );
+    }
+
+    #[test]
     fn construction_active_downloads_match_full_scan_bytes_at_1_5_and_60_seconds() {
         for seconds in [1.0, 5.0, 60.0] {
             let (state, source_base, source_entities) = construction_quantum_fixture(8);
@@ -7950,6 +8594,7 @@ mod tests {
                 &mut positions,
                 Request {
                     key: key.to_owned(),
+                    order_key: key.to_owned(),
                     entity_index: 0,
                     item_id: item_id.to_owned(),
                     amount: BigUint::from(amount),

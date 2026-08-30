@@ -22,6 +22,7 @@ jobs:
       DSP_RELEASE_CHANNEL: ${{ inputs.channel || 'stable' }}
       DSP_DESKTOP_API_BASE_URL: https://dsponline.cn/api
       DSP_UPDATE_BASE_URL: https://dsponline.cn/downloads/desktop
+      CARGO_BUILD_JOBS: "1"
       CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
       CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
     steps:
@@ -33,13 +34,26 @@ jobs:
       - run: npm ci
       - run: npm run licenses:check
       - run: npm run typecheck
+      - run: npm run test:native-core:serial
+      - run: npm run native:build-host
       - run: npm run test:native
       - run: npm run desktop:release
+      - name: Resolve the complete desktop release output
+        shell: pwsh
+        run: |
+          $candidates = @("release-performance-edition", "release-performance-edition-fallback")
+          $complete = @($candidates | Where-Object {
+            (Test-Path (Join-Path $_ "latest.yml") -PathType Leaf) -and
+            (Test-Path (Join-Path $_ "update-feed\desktop\$env:DSP_RELEASE_CHANNEL\release.json") -PathType Leaf)
+          })
+          if ($complete.Count -ne 1) { throw "Expected exactly one complete desktop release output, found $($complete.Count)" }
+          "DSP_DESKTOP_RELEASE_OUTPUT=$($complete[0])" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dsp-idle-${{ env.DSP_RELEASE_CHANNEL }}
+          if-no-files-found: error
           path: |
-            release/*.exe
-            release/*.blockmap
-            release/latest.yml
-            release/update-feed/**
+            ${{ env.DSP_DESKTOP_RELEASE_OUTPUT }}/*.exe
+            ${{ env.DSP_DESKTOP_RELEASE_OUTPUT }}/*.blockmap
+            ${{ env.DSP_DESKTOP_RELEASE_OUTPUT }}/latest.yml
+            ${{ env.DSP_DESKTOP_RELEASE_OUTPUT }}/update-feed/**

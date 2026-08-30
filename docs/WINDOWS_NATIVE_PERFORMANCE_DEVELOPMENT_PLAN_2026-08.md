@@ -1698,7 +1698,30 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 
 因此当前 Windows 常规源码验收固定使用 `CARGO_BUILD_JOBS=1` 和单 test thread；16/24 线程数字只保留为冻结 316-test EXE 的诊断样本，不能复用为当前 workspace 通过证据。产品仍最多使用 8 workers，并继续用 1/2/4/8 独立进程状态哈希矩阵证明确定性。该证据只说明 28 线程故障更像本机硬件/BIOS/异构调度或 Rust/LLVM/Windows 工具链高负载问题；在第二台机器、Rust 版本和默认 BIOS 对照完成前，既不能把它归为产品内存安全 bug，也不能宣称主机硬件已确定损坏。
 
-### 24.5 下一批开发顺序
+### 24.5 pure-idle v14 ordinary→五秒量子→施工闭合（2026-08-30，当前共享开发树）
+
+本阶段把先前只能消费精确前缀既有库存的 construction-only v12 尾段收窄后扩展为 `native-pure-idle-macro-v10-closed-ledger-construction-quantum-v14`。它没有增加第二套普通生产算法，而是在同一个 disposable candidate 内串接既有闭合 ordinary 合同、真实五秒量子下载和固定 30 秒施工规范块：
+
+1. ordinary 宏观结算先按完整闭合配方、有限资源、科研与终端门禁写入候选；量子共享库存相对 ordinary 前的逐物料正增量被记为 construction pending credit，而不是默认成区间起点已经存在的库存。施工应用会先从复制的量子库存 hold back 这些归属，再按 ordinary 证书的逐秒安全整数产率，在每个绝对五秒边界仅释放当时成熟的部分，调用真实 `settle_construction_macro_download_boundary` 后才让 construction runtime 继续工作。真实下载是显式 wake event；receipt bridge 保持连续 revision 证明，不能通过重建 runtime 丢失精确阶段回执。由此长窗口、`30+570`、`10+20+540`、checkpoint/reload 与不同倍率必须产生同一 canonical state，且 30 秒信用不能在首个五秒边界一次性消费。
+2. bounded quantum replay 对一个连续 macro-v10 session 总计最多 30 模拟秒。原生 internal manifest 私有保存 `pureIdleMacroConstructionQuantumReplayRemainingSeconds` 与 `pureIdleMacroConstructionQuantumPendingCredits`；前者只允许 `0..=30`，后者是非空物料 ID 到 JavaScript safe integer `u64` 的确定性表。显式 replay 只接受当前 macro-v10 session，pending key 本身还要求 replay 大于零；完整/增量 checkpoint 均往返，旧 manifest 缺字段分别默认 `30` 与空表。无 session、conservative/orphan、manifest session revision 不匹配、空 ID、负数、字符串、`null`、超范围或超过 safe integer 都失败关闭；运行中后来发生的 committed revision 漂移通过 getter 恢复 `30`/空表，切换到 conservative session 会清空 attribution。公开 GameState v47、v47 envelope、canonical hash、envelope v2、cloud schema v8 与 SQLite layout v3 不含这些私有字段。
+3. capacity horizon 明确失败关闭。ordinary 结算一旦因量子逐物料容量而截断，本候选立即把施工 replay 置零并清空 pending attribution；施工下载即使随后释放空间，也不能回头扩张已经签发的 ordinary 产量。已经证明并写入容量以内的 ordinary 结果与本地已有施工库存可以保留，但不再执行这次联合量子回放。该规则刻意少发收益来保证 one-shot、分段和 reload 一致，不能被描述为吞吐优化。
+4. 本轮修复期间，联合 split/reload 专项先后真实暴露“重建 construction runtime 丢失 recipe input receipt”和“reload 后 ordinary future credit 被当作旧库存”的两次诊断失败；前者改为保留 receipt bridge 并以下载事件 wake，后者增加 pending holdback/按五秒释放，最终专项 `1/1` 通过。容量审计随后补上“施工释放容量重开 ordinary horizon”的分段风险并按上一条关闭。失败历史保留，不能把本阶段写成从第一次运行就全绿。
+5. pending attribution 不能脱离当前 ordinary 产率证书独立存在。应用施工尾段前会逐物料要求当前证书中仍有正的安全整数 release rate；缺失或为零时 disposable candidate 在任何状态安装前原子拒绝，source revision 与 canonical hash 不变。专项覆盖“保存了 pending、但当前 ordinary rate map 为空”的陈旧证书场景，防止私有 checkpoint 余额被误当作无来源库存。
+6. construction macro tail 不得把小数时钟向上取整。候选要求尾段开始与结束微秒都整除一秒；任一 fractional boundary 都以“fractional work remains exact-only”失败关闭，由 exact path 处理，不能凑成一个额外整秒或固定 30 秒施工块。专项以 `0.25 → 59.8` 秒证明拒绝前后 revision/canonical hash 不变。
+7. 量子物流内部 owner identity 改为命名空间、实体 ID、物料 ID 各自带 UTF-8 字节长度的结构化 key，避免冒号分隔在 MOD/Unicode ID 下产生别名。历史 `order_key` 仅保留确定性分配顺序，不再用作聚合身份；结构化 key 同时提供碰撞自由身份和最终 tie-break。守恒专项构造旧分隔符下相同的 station/construction key，最终普通 owner 获得 100、施工 owner 获得 1、总下载和库存扣减均为 101，即 `101 = 100 + 1`，并验证 construction-only 排他边界仍会原子拒绝混合 owner。
+
+当前工件的新鲜验证如下；focused 数字均是 Core 全量的子集，不能相加冒充额外覆盖：
+
+- Rust Core 单线程最终全量 `716/716`、Rust Host 最终全量 `174/174`，均为 `0` 失败、`0` 跳过；`cargo check -p dsp-native-core --all-targets` 与 `cargo fmt --check` 通过。
+- 较早 focused 运行包括 construction macro `7/7`、量子物流 `62/62`、pure-idle construction `6/6`、joint split/reload 最终 `1/1`、state `76/76`（其中 pending checkpoint 严格/往返 `2/2`）；上述数字是最终 Core 全量的子集且早于三项审计回归。最终 `716/716` 已包含 pending-current-rate 原子拒绝、fractional exact-only 和 MOD/Unicode/冒号 owner 的 `101 = 100 + 1` 守恒测试，不能把 focused 数字与全量相加。
+- fresh Release Host 下以 `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 运行完整 Vitest：`315` 文件通过、`14` 文件条件跳过，`2,472` 项通过、`28` 项条件跳过、`0` 失败，201.81 秒；long differential 已执行，真实玩家档条件用例未执行。`npm run typecheck` 通过。
+- 发布编排修订后重跑 `npm run test:native` 为 `453` 总项、`452` 通过、`1` 个 Windows symlink 权限条件跳过、`0` 失败，7.437 秒。脚本现已补入此前漏列的 `native-player-authority-state-delivery`、`native-player-authority-pause-ipc`、`native-construction-belt-lane-context`、`native-construction-belt-placement-context`、`native-dyson-workspace-projection-ipc` 和 `account-archive-download` 六个文件，并加入标准/fallback 打包目录与 update feed 失败传播回归；较早的 `422/1/0` 只属于扩容前诊断史，不是当前门禁。
+- CI 的 unit job 在完整 Vitest 前构建 Release Host，CI 的 server-ops-native job 以及 desktop/Android release 在 `test:native` 前构建 Release Host，release-gate 则在完整 Vitest 与 native integration 两者之前构建；对应顺序回归已加入 release-gate 脚本测试。这避免 Host 缺失时条件跳过差分用例，也避免复用陈旧二进制。`npm run build` 通过并处理 2,048 modules；startup 总 gzip `180,339 B`、JavaScript `86,809 B`、CSS `93,530 B`、最大启动 JavaScript `58,974 B`、menu `257,706 B`、forbidden module `0`。
+- 本阶段没有新跑完整 E2E、24 小时全进程、多硬件、Defender/磁盘满/只读目录、原生打包/安装/覆盖升级、Authenticode、真实云往返或灰度；不得把 source build 或工作流顺序改动写成 E2E/包已通过。
+
+这项工作只闭合了“已证明 ordinary 生产如何按时间进入量子、再供 construction”这一条跨域账本，并补齐对应原生私有 checkpoint。它不等于四大目标全部完成：剩余玩家可达命令、薄 UI、MOD/opaque 形状、完整离线/时间扭曲权威、全领域确定性、24 小时、多硬件、签名与发布门禁仍按下节推进；`authorityEligible=false` 保持不变。
+
+### 24.6 下一批开发顺序
 
 1. 扩展原生物料/命令覆盖，只有所有玩家可达规则、离线和时间扭曲都通过守恒与确定性门禁后才允许 `authorityEligible=true`。
 2. 科研全生命周期、配方、托盘/手持物与普通建筑交互、星图、戴森只读面、全局行星切换和蓝图重命名已经迁移；下一步迁移蓝图捕获/导入/变换/删除/部署、运营、银河、合同、剩余空间站、MOD/燃料/批量/`energyMode` 和戴森完整几何。完成前 renderer 仍不是完整薄 UI；当前失败关闭的按钮不能计作功能完成。

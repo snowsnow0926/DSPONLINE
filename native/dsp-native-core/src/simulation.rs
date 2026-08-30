@@ -236,6 +236,25 @@ impl CoreState {
         &mut self,
         request: &CoreAdvanceRequest,
     ) -> anyhow::Result<CoreAdvanceResult> {
+        self.advance_exact_with_construction_policy(request, false)
+    }
+
+    /// Internal calibration path that retains construction-center demand in
+    /// the ordinary power plan while leaving the construction domain itself
+    /// untouched. Public exact advances deliberately keep the historical
+    /// player-facing behavior above.
+    pub(crate) fn advance_exact_isolating_construction(
+        &mut self,
+        request: &CoreAdvanceRequest,
+    ) -> anyhow::Result<CoreAdvanceResult> {
+        self.advance_exact_with_construction_policy(request, true)
+    }
+
+    fn advance_exact_with_construction_policy(
+        &mut self,
+        request: &CoreAdvanceRequest,
+        isolate_construction_automation: bool,
+    ) -> anyhow::Result<CoreAdvanceResult> {
         let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
         let mut profile_checkpoint = std::time::Instant::now();
         macro_rules! profile_mark {
@@ -338,8 +357,12 @@ impl CoreState {
         }
 
         if simple_factory_reason.is_none() {
-            let mut prepared =
-                crate::simple_factory::prepare_advance(self, simulation_seconds, wall_seconds)?;
+            let mut prepared = crate::simple_factory::prepare_advance(
+                self,
+                simulation_seconds,
+                wall_seconds,
+                isolate_construction_automation,
+            )?;
             let belt_routes = prepared.belt_routes.clone();
             let belt_activity = prepared.belt_activity.clone();
             let local_peer_directory = prepared.local_peer_directory.clone();

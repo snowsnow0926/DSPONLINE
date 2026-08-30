@@ -9,12 +9,14 @@ use crate::construction::ConstructionRunReceipt;
 use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
 use crate::simulation::{CoreAdvanceMode, CoreAdvanceRequest, CoreAdvanceResult};
 use crate::state::{
-    CoreState, PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS,
+    CoreState, PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS,
+    PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS, PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS,
 };
 
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
-const MACRO_V10_ALGORITHM_VERSION: &str = "native-pure-idle-macro-v10-three-window-closed-recipe-research-dyson-terminal-finite-vein-handcraft-construction-block30-v12";
+const MACRO_V10_ALGORITHM_VERSION: &str =
+    "native-pure-idle-macro-v10-closed-ledger-construction-quantum-v14";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MICROS_PER_SECOND: i128 = 1_000_000;
 const DYSON_ROCKET_LAUNCH_ENERGY_MICRO_MJ: i128 = 108_000_000;
@@ -188,9 +190,10 @@ struct RenewablePowerTailCertificate {
 }
 
 /// Runtime-only authority for a construction-only macro tail. This certificate
-/// never grants ordinary production, logistics delivery,
-/// research, Dyson or terminal work; construction may spend only inventory
-/// already present at the exact-prefix boundary.
+/// never grants arbitrary logistics delivery, research, Dyson or terminal
+/// work. A narrow optional quantum grant lets construction consume ordinary
+/// production that was first credited by the closed material ledger, using at
+/// most thirty seconds of the exact five-second download allocator.
 /// Every admitted center belongs to a grid whose complete calibrated demand
 /// is covered by a permanent renewable lower bound, so the tail never burns
 /// fuel or storage owned by another subsystem.
@@ -198,6 +201,13 @@ struct RenewablePowerTailCertificate {
 struct ConstructionTailCertificate {
     renewable_power: RenewablePowerTailCertificate,
     center_entity_ids: Vec<String>,
+    quantum: Option<ConstructionQuantumTailGrant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConstructionQuantumTailGrant {
+    fingerprint: String,
+    download_per_boundary: u64,
 }
 
 /// Ephemeral proof input for one native candidate. It is never serialized into
@@ -3197,6 +3207,287 @@ fn construction_center_identity(
     ))
 }
 
+fn construction_quantum_fingerprint_counter(
+    value: Option<&Value>,
+    default: i128,
+    label: &str,
+) -> Result<i128, String> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    let value = value
+        .as_f64()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| format!("{label} is not finite"))?;
+    let value = value.floor().max(0.0);
+    if value > MAX_SAFE_INTEGER {
+        return Err(format!("{label} exceeds the safe integer range"));
+    }
+    Ok(value as i128)
+}
+
+fn construction_quantum_fingerprint_integer(value: i128) -> Value {
+    // Certificate identity is private to the native runtime. Encoding proof
+    // counters as canonical decimal strings retains every safe-integer bit
+    // and avoids an architecture-dependent i128 -> JSON-number conversion.
+    Value::String(value.to_string())
+}
+
+/// Captures only the configuration that makes construction the exclusive
+/// quantum download sink. Inventory is deliberately absent: ordinary macro
+/// production may credit that inventory before construction spends it.
+fn construction_quantum_macro_fingerprint(state: &CoreState) -> Result<Option<String>, String> {
+    let base = state.base_value();
+    let automation = match base
+        .get("constructionAutomation")
+        .and_then(Value::as_object)
+    {
+        Some(automation)
+            if automation.get("enabled").and_then(Value::as_bool) == Some(true)
+                && automation
+                    .get("quantumSourceEnabled")
+                    .and_then(Value::as_bool)
+                    == Some(true) =>
+        {
+            automation
+        }
+        _ => return Ok(None),
+    };
+    if base
+        .get("quantumLogisticsNetwork")
+        .and_then(Value::as_object)
+        .and_then(|network| network.get("enabled"))
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Ok(None);
+    }
+
+    let entities = state
+        .parse_entities_parallel()
+        .map_err(|error| format!("construction quantum entity snapshot failed: {error:#}"))?;
+    let mut centers = Vec::<Value>::new();
+    let mut quantum_towers = Vec::<Value>::new();
+    for (entity_index, entity) in entities.iter().enumerate() {
+        let entity = entity
+            .as_object()
+            .ok_or_else(|| format!("construction quantum entity {entity_index} is malformed"))?;
+        if entity.get("buildingId").and_then(Value::as_str) == Some("construction_center") {
+            let id = entity
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| "construction quantum center has no ID".to_owned())?;
+            let planet_id = entity
+                .get("planetId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| format!("construction quantum center {id} has no planet"))?;
+            let machine_count = construction_quantum_fingerprint_counter(
+                entity.get("machineCount"),
+                0,
+                &format!("construction quantum center {id} machineCount"),
+            )?;
+            let priority = construction_quantum_fingerprint_counter(
+                entity.get("powerPriority"),
+                2,
+                &format!("construction quantum center {id} powerPriority"),
+            )?;
+            centers.push(serde_json::json!({
+                "id": id,
+                "planetId": planet_id,
+                "machineCount": construction_quantum_fingerprint_integer(machine_count),
+                "gridId": entity
+                    .get("powerGridId")
+                    .and_then(Value::as_str)
+                    .unwrap_or("grid-a"),
+                "priority": construction_quantum_fingerprint_integer(priority),
+            }));
+        }
+        if entity.get("kind").and_then(Value::as_str) != Some("station")
+            || entity.get("buildingId").and_then(Value::as_str)
+                != Some("interstellar_logistics_station")
+            || entity.get("quantumMode").and_then(Value::as_str) != Some("quantum")
+        {
+            continue;
+        }
+        let id = entity
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| "construction quantum tower has no ID".to_owned())?;
+        let machine_count = construction_quantum_fingerprint_counter(
+            entity.get("machineCount"),
+            0,
+            &format!("construction quantum tower {id} machineCount"),
+        )?;
+        let raw_slots = entity
+            .get("stationSlots")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("construction quantum tower {id} has no station slots"))?;
+        let mut slots = Vec::new();
+        for (slot_index, raw_slot) in raw_slots.iter().enumerate() {
+            let slot = raw_slot.as_object().ok_or_else(|| {
+                format!("construction quantum tower {id} slot {slot_index} is malformed")
+            })?;
+            let Some(item_id) = slot
+                .get("itemId")
+                .and_then(Value::as_str)
+                .filter(|item_id| !item_id.is_empty())
+            else {
+                continue;
+            };
+            let remote_mode = slot
+                .get("remoteMode")
+                .and_then(Value::as_str)
+                .unwrap_or("storage");
+            if !matches!(remote_mode, "supply" | "demand" | "storage") {
+                return Err(format!(
+                    "construction quantum tower {id} slot {slot_index} has an invalid remote mode"
+                ));
+            }
+            if remote_mode == "demand" {
+                return Ok(None);
+            }
+            let priority = construction_quantum_fingerprint_counter(
+                slot.get("priority"),
+                1,
+                &format!("construction quantum tower {id} slot {slot_index} priority"),
+            )?;
+            slots.push(serde_json::json!({
+                "itemId": item_id,
+                "remoteMode": remote_mode,
+                "priority": construction_quantum_fingerprint_integer(priority),
+            }));
+        }
+        quantum_towers.push(serde_json::json!({
+            "id": id,
+            "machineCount": construction_quantum_fingerprint_integer(machine_count),
+            "slots": slots,
+        }));
+    }
+    centers.sort_by(|left, right| {
+        left.get("id")
+            .and_then(Value::as_str)
+            .cmp(&right.get("id").and_then(Value::as_str))
+    });
+    quantum_towers.sort_by(|left, right| {
+        left.get("id")
+            .and_then(Value::as_str)
+            .cmp(&right.get("id").and_then(Value::as_str))
+    });
+    if centers.is_empty() || quantum_towers.is_empty() {
+        return Ok(None);
+    }
+
+    let target_stock = automation
+        .get("targetStock")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "construction quantum targetStock is malformed".to_owned())?;
+    let portable_fleet = base
+        .get("portableFleet")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "construction quantum portableFleet is malformed".to_owned())?;
+    let construction = base
+        .get("construction")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "construction quantum construction inventory is malformed".to_owned())?;
+    let mut normalized_targets = Vec::with_capacity(target_stock.len());
+    let mut active_targets = Vec::new();
+    for (target_id, raw_target) in target_stock {
+        let target = proof_counter(
+            Some(raw_target),
+            &format!("constructionAutomation.targetStock.{target_id}"),
+        )
+        .map_err(|error| error.to_string())?;
+        let current = if portable_fleet.contains_key(target_id) {
+            proof_counter(
+                portable_fleet.get(target_id),
+                &format!("portableFleet.{target_id}"),
+            )
+        } else {
+            proof_counter(
+                construction.get(target_id),
+                &format!("construction.{target_id}"),
+            )
+        }
+        .map_err(|error| error.to_string())?;
+        let normalized = Value::Array(vec![
+            Value::String(target_id.clone()),
+            construction_quantum_fingerprint_integer(target),
+        ]);
+        normalized_targets.push(normalized.clone());
+        if target > current {
+            active_targets.push(normalized);
+        }
+    }
+    normalized_targets.sort_by(|left, right| left[0].as_str().cmp(&right[0].as_str()));
+    active_targets.sort_by(|left, right| left[0].as_str().cmp(&right[0].as_str()));
+    if active_targets.len() != 1 {
+        return Ok(None);
+    }
+    let active_target_id = active_targets[0][0]
+        .as_str()
+        .expect("normalized construction target IDs are strings");
+    if let Some(jobs) = automation.get("jobs") {
+        let jobs = jobs
+            .as_object()
+            .ok_or_else(|| "construction quantum jobs are malformed".to_owned())?;
+        for (job_id, job) in jobs {
+            let job = job
+                .as_object()
+                .ok_or_else(|| format!("construction quantum job {job_id} is malformed"))?;
+            if job.get("constructionId").and_then(Value::as_str) != Some(active_target_id) {
+                return Ok(None);
+            }
+        }
+    }
+    let logistics_level = proof_counter(
+        base.get("endgame")
+            .and_then(Value::as_object)
+            .and_then(|endgame| endgame.get("infiniteResearch"))
+            .and_then(Value::as_object)
+            .and_then(|research| research.get("galactic_logistics"))
+            .and_then(Value::as_object)
+            .and_then(|research| research.get("level")),
+        "endgame.infiniteResearch.galactic_logistics.level",
+    )
+    .map_err(|error| error.to_string())?;
+    serde_json::to_string(&serde_json::json!({
+        "centers": centers,
+        "activeTargets": active_targets,
+        "quantumTowers": quantum_towers,
+        "targetStock": normalized_targets,
+        "galacticLogisticsLevel": construction_quantum_fingerprint_integer(logistics_level),
+    }))
+    .map(Some)
+    .map_err(|error| format!("construction quantum fingerprint encode failed: {error}"))
+}
+
+fn build_construction_quantum_tail_grant(
+    state: &CoreState,
+) -> Result<Option<ConstructionQuantumTailGrant>, String> {
+    let Some(fingerprint) = construction_quantum_macro_fingerprint(state)? else {
+        return Ok(None);
+    };
+    let entities = state
+        .parse_entities_parallel()
+        .map_err(|error| format!("construction quantum grant entity snapshot failed: {error:#}"))?;
+    let Some(download_per_boundary) =
+        crate::quantum_logistics::construction_macro_download_per_boundary(
+            state.base_value(),
+            &entities,
+        )
+        .map_err(|error| format!("construction quantum grant calculation failed: {error:#}"))?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ConstructionQuantumTailGrant {
+        fingerprint,
+        download_per_boundary,
+    }))
+}
+
 fn build_construction_tail_certificate(
     state: &CoreState,
     snapshots: &[SettlementProofSnapshot],
@@ -3227,38 +3518,230 @@ fn build_construction_tail_certificate(
     Ok(Some(ConstructionTailCertificate {
         renewable_power,
         center_entity_ids,
+        quantum: build_construction_quantum_tail_grant(state)?,
     }))
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ConstructionTailApplication {
     crafted: i128,
     carry_seconds: u8,
+    quantum_replay_remaining_seconds: u8,
+    quantum_downloaded: u64,
+    quantum_pending_credits: MaterialTotals,
+}
+
+fn capture_construction_quantum_inventory(
+    base: &Map<String, Value>,
+) -> Result<MaterialTotals, String> {
+    let inventory = base
+        .get("quantumLogisticsNetwork")
+        .and_then(Value::as_object)
+        .and_then(|network| network.get("inventory"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| "construction quantum inventory is malformed".to_owned())?;
+    let mut totals = MaterialTotals::new();
+    for (item_id, amount) in inventory {
+        totals.insert(
+            item_id.clone(),
+            proof_counter(
+                Some(amount),
+                &format!("quantumLogisticsNetwork.inventory.{item_id}"),
+            )
+            .map_err(|error| error.to_string())?,
+        );
+    }
+    Ok(totals)
+}
+
+fn merge_construction_quantum_pending_credits(
+    pending: &mut MaterialTotals,
+    before: &MaterialTotals,
+    after: &MaterialTotals,
+) -> Result<(), String> {
+    for item_id in material_ids([before, after]) {
+        let credited = after
+            .get(&item_id)
+            .copied()
+            .unwrap_or(0)
+            .checked_sub(before.get(&item_id).copied().unwrap_or(0))
+            .ok_or_else(|| format!("construction quantum {item_id} credit delta overflowed"))?;
+        if credited <= 0 {
+            continue;
+        }
+        let accumulated = pending
+            .get(&item_id)
+            .copied()
+            .unwrap_or(0)
+            .checked_add(credited)
+            .ok_or_else(|| format!("construction quantum {item_id} pending credit overflowed"))?;
+        pending.insert(item_id, accumulated);
+    }
+    Ok(())
+}
+
+fn adjust_construction_quantum_pending_credits(
+    base: &mut Map<String, Value>,
+    pending: &MaterialTotals,
+    restore: bool,
+) -> Result<(), String> {
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let inventory = base
+        .get_mut("quantumLogisticsNetwork")
+        .and_then(Value::as_object_mut)
+        .and_then(|network| network.get_mut("inventory"))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "construction quantum inventory disappeared".to_owned())?;
+    for (item_id, amount) in pending {
+        let current = proof_counter(
+            inventory.get(item_id),
+            &format!("quantumLogisticsNetwork.inventory.{item_id}"),
+        )
+        .map_err(|error| error.to_string())?;
+        let next = if restore {
+            current
+                .checked_add(*amount)
+                .ok_or_else(|| format!("construction quantum {item_id} restore overflowed"))?
+        } else {
+            current.checked_sub(*amount).ok_or_else(|| {
+                format!("construction quantum {item_id} holdback exceeds credited inventory")
+            })?
+        };
+        if next < 0 {
+            return Err(format!(
+                "construction quantum {item_id} holdback underflowed inventory"
+            ));
+        }
+        inventory.insert(item_id.clone(), Value::String(next.to_string()));
+    }
+    Ok(())
+}
+
+fn release_construction_quantum_pending_credits(
+    base: &mut Map<String, Value>,
+    pending: &mut MaterialTotals,
+    units_per_second: &MaterialTotals,
+    seconds: u8,
+) -> Result<i128, String> {
+    if pending.is_empty() || seconds == 0 {
+        return Ok(0);
+    }
+    let inventory = base
+        .get_mut("quantumLogisticsNetwork")
+        .and_then(Value::as_object_mut)
+        .and_then(|network| network.get_mut("inventory"))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "construction quantum inventory disappeared".to_owned())?;
+    let mut released_total = 0_i128;
+    let item_ids = pending.keys().cloned().collect::<Vec<_>>();
+    for item_id in item_ids {
+        let available = pending.get(&item_id).copied().unwrap_or(0);
+        let rate = units_per_second.get(&item_id).copied().unwrap_or(0).max(0);
+        let release =
+            available.min(rate.checked_mul(i128::from(seconds)).ok_or_else(|| {
+                format!("construction quantum {item_id} boundary credit overflowed")
+            })?);
+        if release <= 0 {
+            continue;
+        }
+        let current = proof_counter(
+            inventory.get(&item_id),
+            &format!("quantumLogisticsNetwork.inventory.{item_id}"),
+        )
+        .map_err(|error| error.to_string())?;
+        let next = current
+            .checked_add(release)
+            .ok_or_else(|| format!("construction quantum {item_id} release overflowed"))?;
+        inventory.insert(item_id.clone(), Value::String(next.to_string()));
+        if release == available {
+            pending.remove(&item_id);
+        } else {
+            pending.insert(item_id, available - release);
+        }
+        released_total = released_total
+            .checked_add(release)
+            .ok_or_else(|| "construction quantum boundary release total overflowed".to_owned())?;
+    }
+    Ok(released_total)
+}
+
+fn run_construction_tail_segment(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    seconds: u8,
+    power_factors: &HashMap<usize, f64>,
+    runtime: &mut crate::construction::ConstructionRuntime,
+) -> Result<(i128, usize), String> {
+    if seconds == 0 {
+        return Ok((0, 0));
+    }
+    let outcome = crate::construction::run_centers(
+        state,
+        base,
+        entities,
+        f64::from(seconds),
+        power_factors,
+        &state.factory_topology.construction_center_indices,
+        runtime,
+    )
+    .map_err(|error| format!("construction-tail settlement failed: {error:#}"))?;
+    Ok((outcome.receipt.crafted, outcome.scan.selected_rows))
+}
+
+struct ConstructionTailApplicationRequest<'a> {
+    elapsed_before: f64,
+    elapsed_after: f64,
+    isolated_receipt_base_revision: u64,
+    carry_seconds: u8,
+    quantum_replay_remaining_seconds: u8,
+    quantum_pending_credits: MaterialTotals,
+    quantum_credit_rates: &'a MaterialTotals,
+    allow_quantum_replay: bool,
 }
 
 fn apply_construction_tail_certificate(
     state: &mut CoreState,
     certificate: &ConstructionTailCertificate,
-    elapsed_before: f64,
-    elapsed_after: f64,
-    carry_seconds: u8,
+    request: ConstructionTailApplicationRequest<'_>,
 ) -> Result<ConstructionTailApplication, String> {
+    let ConstructionTailApplicationRequest {
+        elapsed_before,
+        elapsed_after,
+        isolated_receipt_base_revision,
+        carry_seconds,
+        quantum_replay_remaining_seconds,
+        mut quantum_pending_credits,
+        quantum_credit_rates,
+        allow_quantum_replay,
+    } = request;
     validate_renewable_power_tail_certificate(state, &certificate.renewable_power)?;
+    if quantum_replay_remaining_seconds > PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS {
+        return Err("construction-tail quantum replay cursor is invalid".to_owned());
+    }
     if !construction_tail_requested(state) {
-        return Ok(ConstructionTailApplication::default());
+        return Ok(ConstructionTailApplication {
+            quantum_replay_remaining_seconds,
+            quantum_pending_credits,
+            ..ConstructionTailApplication::default()
+        });
     }
     let before_micros = elapsed_micros(elapsed_before)?;
     let after_micros = elapsed_micros(elapsed_after)?;
     if after_micros < before_micros {
         return Err("construction-tail clock regressed".to_owned());
     }
+    if before_micros % MICROS_PER_SECOND != 0 || after_micros % MICROS_PER_SECOND != 0 {
+        return Err(
+            "construction-tail requires whole-second clock boundaries; fractional work remains exact-only"
+                .to_owned(),
+        );
+    }
     let scheduled_seconds = after_micros
-        .checked_div(MICROS_PER_SECOND)
-        .and_then(|after| {
-            before_micros
-                .checked_div(MICROS_PER_SECOND)
-                .and_then(|before| after.checked_sub(before))
-        })
+        .checked_sub(before_micros)
+        .and_then(|duration| duration.checked_div(MICROS_PER_SECOND))
         .ok_or_else(|| "construction-tail schedule overflowed".to_owned())?;
     let block_seconds = i128::from(PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS);
     let total_pending_seconds = scheduled_seconds
@@ -3271,6 +3754,9 @@ fn apply_construction_tail_certificate(
         return Ok(ConstructionTailApplication {
             crafted: 0,
             carry_seconds,
+            quantum_replay_remaining_seconds,
+            quantum_downloaded: 0,
+            quantum_pending_credits,
         });
     }
 
@@ -3295,11 +3781,49 @@ fn apply_construction_tail_certificate(
     let mut entities = state
         .parse_entities_parallel()
         .map_err(|error| format!("construction-tail entity snapshot failed: {error:#}"))?;
+    let active_quantum_grant = allow_quantum_replay
+        .then_some(certificate.quantum.as_ref())
+        .flatten();
+    if let Some(grant) = active_quantum_grant {
+        let current_fingerprint = construction_quantum_macro_fingerprint(state)?
+            .ok_or_else(|| "construction quantum grant is no longer eligible".to_owned())?;
+        if current_fingerprint != grant.fingerprint {
+            return Err("construction quantum grant identity changed after calibration".to_owned());
+        }
+        let current_download_per_boundary =
+            crate::quantum_logistics::construction_macro_download_per_boundary(&base, &entities)
+                .map_err(|error| {
+                    format!("construction quantum grant validation failed: {error:#}")
+                })?
+                .ok_or_else(|| "construction quantum grant is no longer exclusive".to_owned())?;
+        if current_download_per_boundary != grant.download_per_boundary {
+            return Err("construction quantum bandwidth changed after calibration".to_owned());
+        }
+    } else if !quantum_pending_credits.is_empty() {
+        return Err("construction quantum pending credits have no active grant".to_owned());
+    }
+    for (item_id, amount) in &quantum_pending_credits {
+        if *amount <= 0 {
+            return Err(format!(
+                "construction quantum {item_id} pending credit is not positive"
+            ));
+        }
+        let rate = quantum_credit_rates.get(item_id).copied().unwrap_or(0);
+        if rate <= 0 {
+            return Err(format!(
+                "construction quantum {item_id} pending credit has no current ordinary release rate"
+            ));
+        }
+    }
+    adjust_construction_quantum_pending_credits(&mut base, &quantum_pending_credits, false)?;
     let mut runtime = state.prepared_construction_runtime().unwrap_or_else(|| {
         Arc::new(crate::construction::ConstructionRuntime::build(
             state, &base, &entities,
         ))
     });
+    Arc::make_mut(&mut runtime)
+        .record_isolated_noop_receipts(isolated_receipt_base_revision, state.revision)
+        .map_err(|error| format!("construction-tail isolated receipt bridge failed: {error:#}"))?;
     // Construction centers share target cursors, per-planet material and a
     // guarded fair-work budget. Feeding an arbitrary request-sized duration to
     // `run_centers` makes target ownership depend on how the caller sliced the
@@ -3307,27 +3831,136 @@ fn apply_construction_tail_certificate(
     // the sub-block remainder in the private checkpoint. Thus F^(a+b) observes
     // exactly the same block sequence as F^a followed by F^b, while long
     // offline windows need 1/30th as many engine invocations as a literal
-    // per-second oracle. Once the active directory is empty, no production,
-    // delivery or power event exists in this isolated tail that could wake it,
-    // so the remaining blocks are proven no-ops.
+    // per-second oracle. The one bounded quantum replay is split at exact
+    // absolute five-second boundaries; pending ordinary credit is revealed at
+    // its certified per-second rate and each real delivery explicitly wakes
+    // the active directory. After that replay, an empty active directory has
+    // no remaining production, delivery or power event that could wake it.
+    let after_whole_seconds = after_micros / MICROS_PER_SECOND;
+    let block_end_seconds = after_whole_seconds
+        .checked_sub(i128::from(carry_seconds))
+        .ok_or_else(|| "construction-tail canonical block endpoint underflowed".to_owned())?;
+    let block_span_seconds = canonical_blocks
+        .checked_mul(block_seconds)
+        .ok_or_else(|| "construction-tail canonical block span overflowed".to_owned())?;
+    let mut block_start_seconds = block_end_seconds
+        .checked_sub(block_span_seconds)
+        .ok_or_else(|| "construction-tail canonical block start underflowed".to_owned())?;
+    if block_start_seconds < 0 {
+        return Err("construction-tail canonical block starts before zero".to_owned());
+    }
+
     let mut crafted = 0_i128;
+    let mut quantum_downloaded = 0_u64;
+    let mut quantum_replay_remaining_seconds = quantum_replay_remaining_seconds;
+    let mut quantum_replay_attempted = false;
     let mut remaining_blocks = canonical_blocks;
     while remaining_blocks > 0 {
-        let outcome = crate::construction::run_centers(
+        let mut selected_rows = 0_usize;
+        let mut block_quantum_downloaded = 0_u64;
+        let replay_seconds = if active_quantum_grant.is_some() {
+            quantum_replay_remaining_seconds.min(PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS)
+        } else {
+            0
+        };
+        if replay_seconds > 0 {
+            quantum_replay_attempted = true;
+            let replay_end_seconds = block_start_seconds
+                .checked_add(i128::from(replay_seconds))
+                .ok_or_else(|| "construction quantum replay endpoint overflowed".to_owned())?;
+            let mut cursor_seconds = block_start_seconds;
+            while cursor_seconds < replay_end_seconds {
+                let next_boundary_seconds = cursor_seconds
+                    .checked_div(5)
+                    .and_then(|bucket| bucket.checked_add(1))
+                    .and_then(|bucket| bucket.checked_mul(5))
+                    .ok_or_else(|| "construction quantum boundary overflowed".to_owned())?;
+                let work_end_seconds = replay_end_seconds.min(next_boundary_seconds);
+                let work_seconds = u8::try_from(work_end_seconds - cursor_seconds)
+                    .map_err(|_| "construction quantum replay segment is invalid".to_owned())?;
+                let (segment_crafted, segment_selected_rows) = run_construction_tail_segment(
+                    state,
+                    &mut base,
+                    &mut entities,
+                    work_seconds,
+                    &power_factors,
+                    Arc::make_mut(&mut runtime),
+                )?;
+                crafted = crafted
+                    .checked_add(segment_crafted)
+                    .ok_or_else(|| "construction-tail crafted receipt overflowed".to_owned())?;
+                selected_rows = selected_rows
+                    .checked_add(segment_selected_rows)
+                    .ok_or_else(|| "construction-tail selected row count overflowed".to_owned())?;
+                cursor_seconds = work_end_seconds;
+                if cursor_seconds != next_boundary_seconds {
+                    continue;
+                }
+                release_construction_quantum_pending_credits(
+                    &mut base,
+                    &mut quantum_pending_credits,
+                    quantum_credit_rates,
+                    work_seconds,
+                )?;
+                let boundary_second = if cursor_seconds <= MAX_SAFE_INTEGER as i128 {
+                    cursor_seconds as f64
+                } else {
+                    return Err(
+                        "construction quantum boundary exceeds the safe timeline range".to_owned(),
+                    );
+                };
+                let downloaded =
+                    crate::quantum_logistics::settle_construction_macro_download_boundary(
+                        state,
+                        &mut base,
+                        &mut entities,
+                        boundary_second,
+                        active_quantum_grant
+                            .expect("replay requires a construction quantum grant")
+                            .download_per_boundary,
+                    )
+                    .map_err(|error| {
+                        format!("construction quantum boundary settlement failed: {error:#}")
+                    })?;
+                quantum_downloaded = quantum_downloaded
+                    .checked_add(downloaded)
+                    .ok_or_else(|| "construction quantum download receipt overflowed".to_owned())?;
+                block_quantum_downloaded = block_quantum_downloaded
+                    .checked_add(downloaded)
+                    .ok_or_else(|| "construction quantum block receipt overflowed".to_owned())?;
+                if downloaded > 0 {
+                    // A direct quantum-buffer credit is a real wake event.
+                    // Preserve the private exact/isolated receipt history and
+                    // wake the compact directory in place instead of
+                    // rebuilding it and breaking the revision proof chain.
+                    Arc::make_mut(&mut runtime).wake_all();
+                }
+            }
+            quantum_replay_remaining_seconds -= replay_seconds;
+        }
+        let trailing_seconds = PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS - replay_seconds;
+        let (segment_crafted, segment_selected_rows) = run_construction_tail_segment(
             state,
             &mut base,
             &mut entities,
-            f64::from(PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS),
+            trailing_seconds,
             &power_factors,
-            &state.factory_topology.construction_center_indices,
             Arc::make_mut(&mut runtime),
-        )
-        .map_err(|error| format!("construction-tail settlement failed: {error:#}"))?;
+        )?;
         crafted = crafted
-            .checked_add(outcome.receipt.crafted)
+            .checked_add(segment_crafted)
             .ok_or_else(|| "construction-tail crafted receipt overflowed".to_owned())?;
+        selected_rows = selected_rows
+            .checked_add(segment_selected_rows)
+            .ok_or_else(|| "construction-tail selected row count overflowed".to_owned())?;
         remaining_blocks -= 1;
-        if outcome.scan.selected_rows == 0 {
+        block_start_seconds = block_start_seconds
+            .checked_add(block_seconds)
+            .ok_or_else(|| "construction-tail canonical block cursor overflowed".to_owned())?;
+        if selected_rows == 0
+            && block_quantum_downloaded == 0
+            && (active_quantum_grant.is_none() || quantum_replay_remaining_seconds == 0)
+        {
             break;
         }
     }
@@ -3344,6 +3977,8 @@ fn apply_construction_tail_certificate(
         center.insert("utilization".to_owned(), Value::from(0));
         center.insert("productionRate".to_owned(), Value::from(0));
     }
+    adjust_construction_quantum_pending_credits(&mut base, &quantum_pending_credits, true)?;
+    quantum_pending_credits.clear();
 
     let next_revision = state
         .revision
@@ -3354,10 +3989,16 @@ fn apply_construction_tail_certificate(
     state
         .commit_simulated_state(base, entities, belt_commit, next_revision, false)
         .map_err(|error| format!("construction-tail commit failed: {error:#}"))?;
+    if quantum_replay_attempted {
+        state.invalidate_prepared_quantum_logistics_directory();
+    }
     state.install_prepared_construction_runtime(runtime);
     Ok(ConstructionTailApplication {
         crafted,
         carry_seconds,
+        quantum_replay_remaining_seconds,
+        quantum_downloaded,
+        quantum_pending_credits,
     })
 }
 
@@ -3477,21 +4118,6 @@ fn active_recipe_tail_exclusion_reason(state: &CoreState) -> Option<String> {
     {
         return Some("handcraft or construction work is active".to_owned());
     }
-    let construction = base
-        .get("constructionAutomation")
-        .and_then(Value::as_object);
-    if construction
-        .and_then(|construction| construction.get("enabled"))
-        .and_then(Value::as_bool)
-        == Some(true)
-        || collection_has_entries(construction.and_then(|construction| construction.get("jobs")))
-        || collection_has_entries(
-            construction.and_then(|construction| construction.get("quantumMaterialBuffer")),
-        )
-    {
-        return Some("construction automation is active".to_owned());
-    }
-
     if endgame
         .and_then(|endgame| endgame.get("autoDispatch"))
         .and_then(Value::as_bool)
@@ -5174,6 +5800,21 @@ fn exact_three_window_probe(
     state: &CoreState,
     request: &CoreAdvanceRequest,
 ) -> Result<Vec<SettlementProofSnapshot>, String> {
+    exact_three_window_probe_with_construction_policy(state, request, false)
+}
+
+fn exact_three_window_probe_isolating_construction(
+    state: &CoreState,
+    request: &CoreAdvanceRequest,
+) -> Result<Vec<SettlementProofSnapshot>, String> {
+    exact_three_window_probe_with_construction_policy(state, request, true)
+}
+
+fn exact_three_window_probe_with_construction_policy(
+    state: &CoreState,
+    request: &CoreAdvanceRequest,
+    isolate_construction_automation: bool,
+) -> Result<Vec<SettlementProofSnapshot>, String> {
     let multiplier = finite_number_at(state.base_value().get("timeWarp"), &["effectiveMultiplier"])
         .filter(|value| *value > 0.0)
         .ok_or_else(|| "probe multiplier is invalid".to_owned())?;
@@ -5187,13 +5828,17 @@ fn exact_three_window_probe(
     ];
     for _ in 0..3 {
         let exact_base_revision = probe.revision;
-        let mut result = probe
-            .advance_exact(&exact_request(
-                probe.revision,
-                MACRO_V10_CALIBRATION_WINDOW_SECONDS,
-                MACRO_V10_CALIBRATION_WINDOW_SECONDS / multiplier,
-            ))
-            .map_err(|error| format!("probe exact window failed: {error:#}"))?;
+        let probe_request = exact_request(
+            probe.revision,
+            MACRO_V10_CALIBRATION_WINDOW_SECONDS,
+            MACRO_V10_CALIBRATION_WINDOW_SECONDS / multiplier,
+        );
+        let mut result = if isolate_construction_automation {
+            probe.advance_exact_isolating_construction(&probe_request)
+        } else {
+            probe.advance_exact(&probe_request)
+        }
+        .map_err(|error| format!("probe exact window failed: {error:#}"))?;
         if !result.supported {
             return Err(result
                 .reason
@@ -6746,8 +7391,10 @@ pub(crate) fn advance(
 /// New wire-distinct macro mode. It retains the deterministic 3x10-second
 /// calibration boundary and settles only independently certified domains:
 /// source/closed-recipe ordinary flow and its research/Dyson sinks, bounded
-/// handcraft, or real-stock construction on permanent-renewable grids. Every
-/// domain without its own closed receipt freezes.
+/// handcraft, or construction on permanent-renewable grids. Ordinary and
+/// construction ledgers may compose only through a private, at-most-thirty-
+/// second quantum replay whose five-second releases are checkpointed and
+/// material-conservative. Every domain without its own closed receipt freezes.
 pub(crate) fn advance_macro_v10(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
@@ -6798,6 +7445,20 @@ fn advance_bounded(
         state.pure_idle_macro_construction_carry_seconds()
     } else {
         0
+    };
+    let mut construction_quantum_replay_remaining_seconds = if macro_v10 {
+        state.pure_idle_macro_construction_quantum_replay_remaining_seconds()
+    } else {
+        0
+    };
+    let mut construction_quantum_pending_credits = if macro_v10 {
+        state
+            .pure_idle_macro_construction_quantum_pending_credits()
+            .into_iter()
+            .map(|(item_id, amount)| (item_id, i128::from(amount)))
+            .collect::<MaterialTotals>()
+    } else {
+        MaterialTotals::new()
     };
     let mut macro_runtime = macro_v10.then(|| {
         state
@@ -6923,26 +7584,44 @@ fn advance_bounded(
             || construction_tail_requested(&candidate)
                 && runtime.construction_certificate.is_none())
     {
-        let snapshots = if runtime.calibration_snapshots.len() == 4 {
+        let construction_requested = construction_tail_requested(&candidate);
+        let construction_snapshots = if runtime.calibration_snapshots.len() == 4 {
             Ok(runtime.calibration_snapshots.clone())
         } else {
             exact_three_window_probe(&candidate, request)
         };
-        match snapshots {
-            Ok(snapshots) => {
-                if runtime.certificate.is_none() {
-                    match build_ordinary_flow_certificate(&candidate, &snapshots) {
-                        Ok(certificate) => {
-                            runtime.certificate = Some(certificate);
-                            runtime.rejection_reason = None;
-                        }
-                        Err(reason) => {
-                            runtime.certificate = None;
-                            runtime.rejection_reason = Some(reason);
-                        }
+        // Construction is an independent material consumer. Its exact
+        // calibration still competes for power, but its mutable inventory,
+        // jobs and outputs must not suppress or contaminate the ordinary
+        // production certificate. A disposable isolated probe keeps the
+        // center power demand in the grid plan while skipping only the
+        // construction mutation.
+        let ordinary_snapshots = if construction_requested {
+            exact_three_window_probe_isolating_construction(&candidate, request)
+        } else {
+            construction_snapshots.clone()
+        };
+        if runtime.certificate.is_none() {
+            match ordinary_snapshots {
+                Ok(snapshots) => match build_ordinary_flow_certificate(&candidate, &snapshots) {
+                    Ok(certificate) => {
+                        runtime.certificate = Some(certificate);
+                        runtime.rejection_reason = None;
                     }
+                    Err(reason) => {
+                        runtime.certificate = None;
+                        runtime.rejection_reason = Some(reason);
+                    }
+                },
+                Err(reason) => {
+                    runtime.certificate = None;
+                    runtime.rejection_reason = Some(reason);
                 }
-                if runtime.construction_certificate.is_none() {
+            }
+        }
+        if construction_requested && runtime.construction_certificate.is_none() {
+            match construction_snapshots {
+                Ok(snapshots) => {
                     match build_construction_tail_certificate(&candidate, &snapshots) {
                         Ok(certificate) => {
                             runtime.construction_certificate = certificate;
@@ -6954,12 +7633,10 @@ fn advance_bounded(
                         }
                     }
                 }
-            }
-            Err(reason) => {
-                runtime.certificate = None;
-                runtime.rejection_reason = Some(reason.clone());
-                runtime.construction_certificate = None;
-                runtime.construction_rejection_reason = Some(reason);
+                Err(reason) => {
+                    runtime.construction_certificate = None;
+                    runtime.construction_rejection_reason = Some(reason);
+                }
             }
         }
     }
@@ -6973,6 +7650,7 @@ fn advance_bounded(
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
         let elapsed = checked_elapsed_after_prefix(current_elapsed, tail_seconds)?;
+        let construction_isolated_receipt_base_revision = candidate.revision;
         let mut handcraft_handled_tail = false;
         if macro_v10 && collection_has_entries(candidate.base_value().get("handcraftQueue")) {
             handcraft_handled_tail = true;
@@ -7016,7 +7694,29 @@ fn advance_bounded(
             }
         }
         if !handcraft_handled_tail && let Some(runtime) = macro_runtime.as_mut() {
+            let construction_quantum_granted = runtime
+                .construction_certificate
+                .as_ref()
+                .and_then(|certificate| certificate.quantum.as_ref())
+                .is_some();
+            let mut allow_construction_quantum_replay =
+                construction_quantum_granted && construction_quantum_replay_remaining_seconds > 0;
+            let mut construction_quantum_credit_rates = MaterialTotals::new();
             if let Some(certificate) = runtime.certificate.as_mut() {
+                let quantum_inventory_before = if allow_construction_quantum_replay {
+                    match capture_construction_quantum_inventory(candidate.base_value()) {
+                        Ok(inventory) => Some(inventory),
+                        Err(reason) => {
+                            return unsupported(
+                                state,
+                                request,
+                                format!("pure-idle-construction-quantum-credit-rejected: {reason}"),
+                            );
+                        }
+                    }
+                } else {
+                    None
+                };
                 let ordinary_application = match apply_ordinary_flow_certificate(
                     &mut candidate,
                     certificate,
@@ -7032,6 +7732,43 @@ fn advance_bounded(
                         );
                     }
                 };
+                if let Some(quantum_inventory_before) = quantum_inventory_before {
+                    let quantum_inventory_after =
+                        match capture_construction_quantum_inventory(candidate.base_value()) {
+                            Ok(inventory) => inventory,
+                            Err(reason) => {
+                                return unsupported(
+                                    state,
+                                    request,
+                                    format!(
+                                        "pure-idle-construction-quantum-credit-rejected: {reason}"
+                                    ),
+                                );
+                            }
+                        };
+                    if ordinary_application.capacity_limited {
+                        // A construction download can reopen quantum capacity.
+                        // Crediting an entire long ordinary tail before that
+                        // download would make one-shot and segmented calls see
+                        // different production horizons. Fail closed for the
+                        // bounded replay while keeping the already-proven
+                        // ordinary credit and all local construction stock.
+                        allow_construction_quantum_replay = false;
+                        construction_quantum_replay_remaining_seconds = 0;
+                        construction_quantum_pending_credits.clear();
+                    } else if let Err(reason) = merge_construction_quantum_pending_credits(
+                        &mut construction_quantum_pending_credits,
+                        &quantum_inventory_before,
+                        &quantum_inventory_after,
+                    ) {
+                        return unsupported(
+                            state,
+                            request,
+                            format!("pure-idle-construction-quantum-credit-rejected: {reason}"),
+                        );
+                    }
+                    construction_quantum_credit_rates = certificate.units_per_second.clone();
+                }
                 tail_reason = Some(
                     if ordinary_application.deposited_units > 0
                         || ordinary_application.rockets_launched > 0
@@ -7103,9 +7840,17 @@ fn advance_bounded(
                 let construction_application = match apply_construction_tail_certificate(
                     &mut candidate,
                     certificate,
-                    current_elapsed,
-                    elapsed,
-                    construction_carry_seconds,
+                    ConstructionTailApplicationRequest {
+                        elapsed_before: current_elapsed,
+                        elapsed_after: elapsed,
+                        isolated_receipt_base_revision: construction_isolated_receipt_base_revision,
+                        carry_seconds: construction_carry_seconds,
+                        quantum_replay_remaining_seconds:
+                            construction_quantum_replay_remaining_seconds,
+                        quantum_pending_credits: construction_quantum_pending_credits.clone(),
+                        quantum_credit_rates: &construction_quantum_credit_rates,
+                        allow_quantum_replay: allow_construction_quantum_replay,
+                    },
                 ) {
                     Ok(application) => application,
                     Err(reason) => {
@@ -7117,10 +7862,17 @@ fn advance_bounded(
                     }
                 };
                 construction_carry_seconds = construction_application.carry_seconds;
+                construction_quantum_replay_remaining_seconds =
+                    construction_application.quantum_replay_remaining_seconds;
+                construction_quantum_pending_credits =
+                    construction_application.quantum_pending_credits;
                 let construction_reason = if construction_application.crafted > 0 {
                     format!(
-                        "construction-only tail spent real owned inventory and completed {} item(s) in canonical 30-second block(s); {} second(s) remain below the next block and no material source was extrapolated",
-                        construction_application.crafted, construction_application.carry_seconds,
+                        "construction-only tail spent real owned inventory and completed {} item(s) in canonical 30-second block(s); {} second(s) remain below the next block, {} real quantum-network unit(s) were downloaded within the bounded replay, {} replay second(s) remain, and no material source was extrapolated",
+                        construction_application.crafted,
+                        construction_application.carry_seconds,
+                        construction_application.quantum_downloaded,
+                        construction_application.quantum_replay_remaining_seconds,
                     )
                 } else if construction_application.carry_seconds > 0 {
                     format!(
@@ -7181,9 +7933,23 @@ fn advance_bounded(
         // candidate. Every possible failure below leaves the source session
         // and its full/remaining credit untouched.
         if macro_v10 {
-            candidate.install_pure_idle_macro_session_progress_with_construction_carry(
+            let construction_quantum_pending_credits = construction_quantum_pending_credits
+                .into_iter()
+                .map(|(item_id, amount)| {
+                    u64::try_from(amount)
+                        .map(|amount| (item_id.clone(), amount))
+                        .map_err(|_| {
+                            anyhow!(
+                                "construction quantum pending credit for {item_id} cannot be checkpointed"
+                            )
+                        })
+                })
+                .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+            candidate.install_pure_idle_macro_session_progress_with_construction_state(
                 exact_progress,
                 construction_carry_seconds,
+                construction_quantum_replay_remaining_seconds,
+                construction_quantum_pending_credits,
             )?;
         } else {
             candidate.install_pure_idle_session_progress(exact_progress)?;
@@ -8797,6 +9563,113 @@ mod tests {
         state
     }
 
+    fn productive_recipe_construction_quantum_macro_fixture(
+        multiplier: f64,
+        target: u64,
+    ) -> CoreState {
+        let source = productive_closed_recipe_macro_fixture(multiplier);
+        let mut base = source.base_value().clone();
+        base.insert(
+            "constructionAutomation".to_owned(),
+            json!({
+                "enabled": true,
+                "targetStock": { "test_building": target },
+                "cursor": 0,
+                "totalCrafted": 0,
+                "lastCraftedId": null,
+                "destroyedByproducts": {},
+                "jobs": {},
+                "quantumSourceEnabled": true,
+                "quantumMaterialBuffer": {}
+            }),
+        );
+        base.insert(
+            "construction".to_owned(),
+            json!({ "test_building": 0, "conveyor_belt_mk1": 0 }),
+        );
+        base["quantumLogisticsNetwork"]["enabled"] = json!(true);
+        base["quantumLogisticsNetwork"]["inventory"] = json!({});
+        base["quantumLogisticsNetwork"]["itemCapacities"] = json!({
+            "iron_ore": "10000000000",
+            "iron_ingot": "10000000000"
+        });
+        let mut entities = source.parse_entities_parallel().unwrap();
+        entities.push(json!({
+            "id": "construction-center",
+            "kind": "machine",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "construction_center",
+            "machineCount": 100,
+            "minerCount": 0,
+            "inputs": {},
+            "outputs": {},
+            "progress": 0,
+            "routingCursor": 0,
+            "utilization": 0,
+            "productionRate": 0
+        }));
+        entities.push(json!({
+            "id": "quantum-supply-tower",
+            "kind": "station",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "interstellar_logistics_station",
+            "stationTier": 2,
+            "stationOperationMode": "legacy",
+            "stationModeTransition": null,
+            "quantumMode": "quantum",
+            "machineCount": 1,
+            "stationSlots": [
+                { "itemId": null, "localMode": "storage", "remoteMode": "storage", "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000, "priority": 1, "routePolicy": "direct", "warperBudget": 0 },
+                { "itemId": null, "localMode": "storage", "remoteMode": "storage", "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000, "priority": 1, "routePolicy": "direct", "warperBudget": 0 },
+                { "itemId": null, "localMode": "storage", "remoteMode": "storage", "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000, "priority": 1, "routePolicy": "direct", "warperBudget": 0 },
+                { "itemId": null, "localMode": "storage", "remoteMode": "storage", "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000, "priority": 1, "routePolicy": "direct", "warperBudget": 0 },
+                { "itemId": null, "localMode": "storage", "remoteMode": "storage", "minimumLoad": 0.1, "minStock": 0, "maxStock": 1000000, "priority": 1, "routePolicy": "direct", "warperBudget": 0 }
+            ],
+            "stationRoutes": [],
+            "stationDrones": 0,
+            "stationVessels": 0,
+            "stationWarpEnabled": false,
+            "stationWarpers": 0,
+            "stationDispatchCursor": 0,
+            "stationLastSupplyPeerBySlot": {},
+            "stationProgress": 0,
+            "stationCongestion": 0,
+            "stationTrips": 0,
+            "stationLastTransfer": 0,
+            "inputs": {},
+            "outputs": {},
+            "progress": 0,
+            "routingCursor": 0,
+            "utilization": 0,
+            "productionRate": 0
+        }));
+        let mut catalog = fixture_catalog().snapshot;
+        catalog.buildings.push(BuildingDefinition {
+            id: "interstellar_logistics_station".to_owned(),
+            kind: "station".to_owned(),
+            speed: 1.0,
+            input_capacity: 1_000_000.0,
+            output_capacity: 1_000_000.0,
+            power_demand_kw: 0.0,
+            power_generation_kw: 0.0,
+            power_charge_kw: 0.0,
+            energy_capacity_mj: 0.0,
+            fuel_item_ids: Vec::new(),
+            fuel_efficiency: 1.0,
+            family: None,
+            accepts: None,
+        });
+        let catalog = RuntimeCatalog::validate(catalog, "pure-idle-test").unwrap();
+        fixture_state_from_parts_with_belts_and_catalog(
+            Value::Object(base),
+            entities,
+            source.parse_belts_parallel().unwrap(),
+            catalog,
+        )
+    }
+
     fn productive_multi_center_construction_macro_fixture(
         multiplier: f64,
         center_count: usize,
@@ -9468,6 +10341,357 @@ mod tests {
             reloaded.summary().unwrap().canonical_sha256,
             continuous.summary().unwrap().canonical_sha256,
         );
+    }
+
+    #[test]
+    fn macro_v10_joint_recipe_quantum_construction_is_split_and_reload_invariant() {
+        for multiplier in [8.0, 12.0, 15.0, 16.0] {
+            let initial = productive_recipe_construction_quantum_macro_fixture(multiplier, 10_000);
+            let mut exact_prefix = initial.clone();
+            let revision = exact_prefix.revision;
+            let exact = advance_macro_v10(
+                &mut exact_prefix,
+                &pure_idle_macro_request(revision, 30.0, 30.0 / multiplier),
+            )
+            .unwrap();
+            assert!(exact.supported, "{multiplier}x exact: {:?}", exact.reason);
+            let exact_crafted = proof_counter(
+                exact_prefix.base_value()["constructionAutomation"].get("totalCrafted"),
+                "joint exact totalCrafted",
+            )
+            .unwrap();
+
+            let mut one_shot = initial.clone();
+            let revision = one_shot.revision;
+            let result = advance_macro_v10(
+                &mut one_shot,
+                &pure_idle_macro_request(revision, 600.0, 600.0 / multiplier),
+            )
+            .unwrap();
+            assert!(
+                result.supported,
+                "{multiplier}x one-shot: {:?}",
+                result.reason
+            );
+            let one_shot_crafted = proof_counter(
+                one_shot.base_value()["constructionAutomation"].get("totalCrafted"),
+                "joint one-shot totalCrafted",
+            )
+            .unwrap();
+            assert!(
+                one_shot_crafted > exact_crafted,
+                "{multiplier}x macro construction did not spend ordinary macro production: exact={exact_crafted} one-shot={one_shot_crafted} reason={:?} construction={:?} inventory={:?} ordinary_rejection={:?} construction_rejection={:?}",
+                result.reason,
+                one_shot.base_value().get("construction"),
+                one_shot.base_value()["quantumLogisticsNetwork"].get("inventory"),
+                one_shot
+                    .pure_idle_macro_runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.rejection_reason.as_deref()),
+                one_shot
+                    .pure_idle_macro_runtime
+                    .as_ref()
+                    .and_then(|runtime| runtime.construction_rejection_reason.as_deref()),
+            );
+            assert_eq!(
+                one_shot.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+                0,
+            );
+
+            let mut segmented = initial.clone();
+            for seconds in [30.0, 570.0] {
+                let revision = segmented.revision;
+                let result = advance_macro_v10(
+                    &mut segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / multiplier),
+                )
+                .unwrap();
+                assert!(
+                    result.supported,
+                    "{multiplier}x segmented {seconds}s: {:?}",
+                    result.reason
+                );
+            }
+            assert_eq!(
+                segmented.summary().unwrap().canonical_sha256,
+                one_shot.summary().unwrap().canonical_sha256,
+                "{multiplier}x joint settlement changed when segmented",
+            );
+
+            if multiplier != 15.0 {
+                continue;
+            }
+            let mut fine_segmented = exact_prefix.clone();
+            for seconds in [10.0, 20.0] {
+                let revision = fine_segmented.revision;
+                let result = advance_macro_v10(
+                    &mut fine_segmented,
+                    &pure_idle_macro_request(revision, seconds, seconds / multiplier),
+                )
+                .unwrap();
+                assert!(
+                    result.supported,
+                    "fine segmented {seconds}s: {:?}",
+                    result.reason
+                );
+                let mut records = BTreeMap::<String, Vec<u8>>::new();
+                fine_segmented
+                    .visit_internal_checkpoint_records(42, |key, value| {
+                        records.insert(key.to_owned(), value.as_bytes().to_vec());
+                        Ok(())
+                    })
+                    .unwrap();
+                let mut identity = fine_segmented.identity.clone();
+                identity.revision = fine_segmented.revision;
+                fine_segmented = CoreState::from_internal_records(
+                    identity,
+                    &records,
+                    (*fine_segmented.catalog).clone(),
+                )
+                .unwrap();
+            }
+            let revision = fine_segmented.revision;
+            let result = advance_macro_v10(
+                &mut fine_segmented,
+                &pure_idle_macro_request(revision, 540.0, 36.0),
+            )
+            .unwrap();
+            assert!(result.supported, "fine remainder: {:?}", result.reason);
+            assert_eq!(
+                fine_segmented.summary().unwrap().canonical_sha256,
+                one_shot.summary().unwrap().canonical_sha256,
+                "sub-block ordinary credits were treated as untracked old quantum inventory",
+            );
+
+            let mut checkpointed = initial;
+            let revision = checkpointed.revision;
+            let first = advance_macro_v10(
+                &mut checkpointed,
+                &pure_idle_macro_request(revision, 60.0, 4.0),
+            )
+            .unwrap();
+            assert!(first.supported, "checkpoint prefix: {:?}", first.reason);
+            assert_eq!(
+                checkpointed.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+                0,
+            );
+            let mut records = BTreeMap::<String, Vec<u8>>::new();
+            checkpointed
+                .visit_internal_checkpoint_records(42, |key, value| {
+                    records.insert(key.to_owned(), value.as_bytes().to_vec());
+                    Ok(())
+                })
+                .unwrap();
+            let mut identity = checkpointed.identity.clone();
+            identity.revision = checkpointed.revision;
+            let mut reloaded = CoreState::from_internal_records(
+                identity,
+                &records,
+                (*checkpointed.catalog).clone(),
+            )
+            .unwrap();
+            assert_eq!(
+                reloaded.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+                0,
+            );
+            let revision = reloaded.revision;
+            let remainder = advance_macro_v10(
+                &mut reloaded,
+                &pure_idle_macro_request(revision, 540.0, 36.0),
+            )
+            .unwrap();
+            assert!(
+                remainder.supported,
+                "reload remainder: {:?}",
+                remainder.reason
+            );
+            assert_eq!(
+                reloaded.summary().unwrap().canonical_sha256,
+                one_shot.summary().unwrap().canonical_sha256,
+                "consumed quantum replay budget reset after checkpoint reload",
+            );
+        }
+    }
+
+    #[test]
+    fn macro_v10_joint_quantum_capacity_horizon_fails_closed_and_is_split_invariant() {
+        let mut calibrated = productive_recipe_construction_quantum_macro_fixture(15.0, 10_000);
+        let revision = calibrated.revision;
+        let result = advance_macro_v10(
+            &mut calibrated,
+            &pure_idle_macro_request(revision, 30.0, 2.0),
+        )
+        .unwrap();
+        assert!(result.supported, "calibration: {:?}", result.reason);
+        calibrated.base_value_mut()["quantumLogisticsNetwork"]["inventory"]["iron_ore"] =
+            json!("9990");
+        calibrated.base_value_mut()["quantumLogisticsNetwork"]["itemCapacities"]["iron_ore"] =
+            json!("10000");
+        calibrated.invalidate_prepared_quantum_logistics_directory();
+
+        let mut one_shot = calibrated.clone();
+        let revision = one_shot.revision;
+        let result = advance_macro_v10(
+            &mut one_shot,
+            &pure_idle_macro_request(revision, 570.0, 38.0),
+        )
+        .unwrap();
+        assert!(result.supported, "one-shot: {:?}", result.reason);
+        assert_eq!(
+            one_shot.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+            0,
+            "capacity-limited joint flow must permanently forfeit bounded replay",
+        );
+        assert_eq!(
+            one_shot.base_value()["quantumLogisticsNetwork"]["inventory"]["iron_ore"],
+            json!("10000"),
+        );
+
+        let mut segmented = calibrated;
+        let revision = segmented.revision;
+        let first = advance_macro_v10(
+            &mut segmented,
+            &pure_idle_macro_request(revision, 30.0, 2.0),
+        )
+        .unwrap();
+        assert!(first.supported, "first segment: {:?}", first.reason);
+        let mut records = BTreeMap::<String, Vec<u8>>::new();
+        segmented
+            .visit_internal_checkpoint_records(42, |key, value| {
+                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let mut identity = segmented.identity.clone();
+        identity.revision = segmented.revision;
+        let mut reloaded =
+            CoreState::from_internal_records(identity, &records, (*segmented.catalog).clone())
+                .unwrap();
+        let revision = reloaded.revision;
+        let remainder = advance_macro_v10(
+            &mut reloaded,
+            &pure_idle_macro_request(revision, 540.0, 36.0),
+        )
+        .unwrap();
+        assert!(remainder.supported, "remainder: {:?}", remainder.reason);
+        assert_eq!(
+            reloaded.summary().unwrap().canonical_sha256,
+            one_shot.summary().unwrap().canonical_sha256,
+            "capacity reopened by construction changed ordinary production after segmentation",
+        );
+        assert_eq!(
+            reloaded.base_value()["totalProduced"],
+            one_shot.base_value()["totalProduced"],
+        );
+        assert_eq!(
+            reloaded.base_value()["constructionAutomation"],
+            one_shot.base_value()["constructionAutomation"],
+        );
+    }
+
+    #[test]
+    fn macro_v10_joint_quantum_credit_is_released_at_exact_five_second_boundaries() {
+        let mut state = productive_recipe_construction_quantum_macro_fixture(15.0, 10_000);
+        let revision = state.revision;
+        let exact =
+            advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
+        assert!(exact.supported, "exact: {:?}", exact.reason);
+        let exact_crafted = proof_counter(
+            state.base_value()["constructionAutomation"].get("totalCrafted"),
+            "boundary exact totalCrafted",
+        )
+        .unwrap();
+        let revision = state.revision;
+        let tail =
+            advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
+        assert!(tail.supported, "tail: {:?}", tail.reason);
+        let crafted = proof_counter(
+            state.base_value()["constructionAutomation"].get("totalCrafted"),
+            "boundary tail totalCrafted",
+        )
+        .unwrap()
+            - exact_crafted;
+        let buffered = state.base_value()["constructionAutomation"]["quantumMaterialBuffer"]
+            .as_object()
+            .and_then(|buffers| buffers.get("construction-center"))
+            .and_then(Value::as_object)
+            .and_then(|inventory| inventory.get("iron_ore"))
+            .map(|amount| proof_counter(Some(amount), "boundary buffered iron_ore").unwrap())
+            .unwrap_or(0);
+        assert_eq!(crafted + buffered, 30);
+        assert!(
+            crafted < 30 && buffered > 0,
+            "all thirty seconds of ordinary credit became usable at the first five-second boundary: crafted={crafted} buffered={buffered} reason={:?}",
+            tail.reason,
+        );
+    }
+
+    #[test]
+    fn macro_v10_pending_quantum_credit_requires_current_release_rates_atomically() {
+        let mut state = productive_recipe_construction_quantum_macro_fixture(15.0, 10_000);
+        let revision = state.revision;
+        let exact =
+            advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
+        assert!(exact.supported, "exact: {:?}", exact.reason);
+        let certificate = state
+            .pure_idle_macro_runtime
+            .as_ref()
+            .and_then(|runtime| runtime.construction_certificate.clone())
+            .expect("joint fixture has a construction certificate");
+        assert!(certificate.quantum.is_some());
+        let source_revision = state.revision;
+        let source_hash = state.canonical_sha256().unwrap();
+        let elapsed = state.base_value()["elapsedSeconds"]
+            .as_f64()
+            .expect("fixture elapsed clock");
+
+        let error = apply_construction_tail_certificate(
+            &mut state,
+            &certificate,
+            ConstructionTailApplicationRequest {
+                elapsed_before: elapsed,
+                elapsed_after: elapsed + 30.0,
+                isolated_receipt_base_revision: source_revision,
+                carry_seconds: 0,
+                quantum_replay_remaining_seconds:
+                    PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS,
+                quantum_pending_credits: BTreeMap::from([("iron_ore".to_owned(), 1)]),
+                quantum_credit_rates: &MaterialTotals::new(),
+                allow_quantum_replay: true,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("has no current ordinary release rate"),
+            "unexpected error: {error}",
+        );
+        assert_eq!(state.revision, source_revision);
+        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+    }
+
+    #[test]
+    fn macro_v10_fractional_construction_tail_fails_closed_without_rounding_up() {
+        let mut state = productive_recipe_construction_quantum_macro_fixture(15.0, 10_000);
+        state.base_value_mut()["elapsedSeconds"] = json!(0.25);
+        let source_revision = state.revision;
+        let source_hash = state.canonical_sha256().unwrap();
+
+        let result = advance_macro_v10(
+            &mut state,
+            &pure_idle_macro_request(source_revision, 59.8, 59.8 / 15.0),
+        )
+        .unwrap();
+        assert!(!result.supported);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("whole-second clock boundaries")),
+            "unexpected reason: {:?}",
+            result.reason,
+        );
+        assert_eq!(state.revision, source_revision);
+        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
     }
 
     #[test]
@@ -12829,7 +14053,7 @@ mod tests {
     }
 
     #[test]
-    fn closed_recipe_certificate_rejects_every_unclosed_tail_domain() {
+    fn closed_recipe_certificate_rejects_unclosed_domains_but_allows_isolated_construction() {
         let state = productive_closed_recipe_macro_fixture(15.0);
         let request = pure_idle_macro_request(state.revision, 60.0, 4.0);
         let snapshots = exact_three_window_probe(&state, &request).unwrap();
@@ -12851,7 +14075,9 @@ mod tests {
         assert_domain_rejected("research", research);
         let mut construction = state.clone();
         construction.base_value_mut()["constructionAutomation"]["enabled"] = json!(true);
-        assert_domain_rejected("construction", construction);
+        let construction_certificate =
+            build_ordinary_flow_certificate(&construction, &snapshots).unwrap();
+        assert_eq!(construction_certificate.recipe_ids, ["iron_ingot"]);
         let mut export = state.clone();
         export.base_value_mut()["endgame"]["autoDispatch"] = json!(true);
         assert_domain_rejected("export", export);

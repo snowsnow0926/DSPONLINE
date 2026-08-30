@@ -3910,6 +3910,7 @@ fn simulate_step(
         crate::interstellar_logistics::InterstellarRouteActivity,
     >,
     seconds: f64,
+    isolate_construction_automation: bool,
 ) -> anyhow::Result<()> {
     let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
     let mut profile_checkpoint = std::time::Instant::now();
@@ -5010,25 +5011,27 @@ fn simulate_step(
     }
     profile_mark!("research-reset");
 
-    let construction_outcome = crate::construction::run_centers(
-        state,
-        base,
-        entities,
-        seconds,
-        &power_factors,
-        &state.factory_topology.construction_center_indices,
-        std::sync::Arc::make_mut(construction_runtime),
-    )?;
-    quantum_step_runtime
-        .wake_construction_centers(&construction_outcome.quantum_wake.center_indices);
-    if profile_enabled {
-        eprintln!(
-            "DSP_NATIVE_CORE_PROFILE\tconstruction-active\t{}/{}\tdense={}\tdirectory-fallback={}",
-            construction_outcome.scan.selected_rows,
-            construction_outcome.scan.total_rows,
-            construction_outcome.scan.dense_fallback,
-            construction_outcome.scan.directory_fallback,
-        );
+    if !isolate_construction_automation {
+        let construction_outcome = crate::construction::run_centers(
+            state,
+            base,
+            entities,
+            seconds,
+            &power_factors,
+            &state.factory_topology.construction_center_indices,
+            std::sync::Arc::make_mut(construction_runtime),
+        )?;
+        quantum_step_runtime
+            .wake_construction_centers(&construction_outcome.quantum_wake.center_indices);
+        if profile_enabled {
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE\tconstruction-active\t{}/{}\tdense={}\tdirectory-fallback={}",
+                construction_outcome.scan.selected_rows,
+                construction_outcome.scan.total_rows,
+                construction_outcome.scan.dense_fallback,
+                construction_outcome.scan.directory_fallback,
+            );
+        }
     }
     profile_mark!("construction");
 
@@ -5679,6 +5682,7 @@ pub(crate) fn prepare_advance(
     state: &CoreState,
     simulation_seconds: f64,
     wall_seconds: f64,
+    isolate_construction_automation: bool,
 ) -> anyhow::Result<PreparedFactoryAdvance> {
     let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
     let mut profile_checkpoint = std::time::Instant::now();
@@ -5900,6 +5904,7 @@ pub(crate) fn prepare_advance(
             &mut interstellar_peer_directory,
             &mut interstellar_route_activity,
             step,
+            isolate_construction_automation,
         )
         .context("advance native simple factory step")?;
         let wall_step = remaining_wall.min(step * wall_per_simulation_second);
@@ -5998,9 +6003,10 @@ pub(crate) fn prepare_advance(
 pub(crate) mod tests {
     use super::*;
     use crate::catalog::{
-        BeltDefinition, CatalogSnapshot, ItemAmount, ItemDefinition, PlanetDefinition,
-        ProliferatorDefinition, RecipeDefinition, RuntimeCatalog,
+        BeltDefinition, CatalogSnapshot, ConstructionDefinition, ItemAmount, ItemDefinition,
+        PlanetDefinition, ProliferatorDefinition, RecipeDefinition, RuntimeCatalog,
     };
+    use crate::simulation::{CoreAdvanceMode, CoreAdvanceRequest};
     use crate::state::CoreCheckpointIdentity;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -6212,6 +6218,7 @@ pub(crate) mod tests {
                     "mining_machine",
                     "interstellar_logistics_station",
                     "orbital_collector",
+                    "construction_center",
                     "wind_turbine",
                     "solar_panel",
                     "geothermal_power_station",
@@ -6265,7 +6272,16 @@ pub(crate) mod tests {
                             .collect(),
                     ),
                 ],
-                constructions: Vec::new(),
+                constructions: vec![ConstructionDefinition {
+                    id: "test_building".to_owned(),
+                    output_amount: 1.0,
+                    automation_order: 0,
+                    required_tech_id: None,
+                    costs: vec![ItemAmount {
+                        item_id: "iron_ore".to_owned(),
+                        amount: 1.0,
+                    }],
+                }],
                 belts: vec![BeltDefinition {
                     tier: 1,
                     speed: 6.0,
@@ -6328,9 +6344,9 @@ pub(crate) mod tests {
         })
     }
 
-    pub(crate) fn fixture_state(entities: &[Value]) -> CoreState {
+    fn fixture_state_from_base(base: Value, entities: &[Value]) -> CoreState {
         let entity_count = entities.len();
-        let base = serde_json::to_vec(&fixture_base()).unwrap();
+        let base = serde_json::to_vec(&base).unwrap();
         let entities = serde_json::to_vec(entities).unwrap();
         let belts = serde_json::to_vec(&Vec::<Value>::new()).unwrap();
         let chunks = [
@@ -6399,6 +6415,452 @@ pub(crate) mod tests {
             fixture_catalog(),
         )
         .unwrap()
+    }
+
+    pub(crate) fn fixture_state(entities: &[Value]) -> CoreState {
+        fixture_state_from_base(fixture_base(), entities)
+    }
+
+    fn construction_isolation_base() -> Value {
+        const SYSTEM_IDS: [&str; 8] = [
+            "helios",
+            "borealis",
+            "aurora",
+            "ember",
+            "sirius",
+            "white_dwarf",
+            "neutron",
+            "blue_giant",
+        ];
+        let mut plans = Map::new();
+        let mut active_orbits = Map::new();
+        let mut orbits = Map::new();
+        let mut absorption = Map::new();
+        let mut system_profiles = Map::new();
+        for system_id in SYSTEM_IDS {
+            let orbit_id = format!("test-orbit-{system_id}");
+            plans.insert(
+                system_id.to_owned(),
+                json!({
+                    "systemId": system_id,
+                    "activeLayerId": null,
+                    "structurePoints": 0,
+                    "shellSails": 0,
+                    "layers": []
+                }),
+            );
+            active_orbits.insert(system_id.to_owned(), Value::from(orbit_id.clone()));
+            orbits.insert(
+                system_id.to_owned(),
+                json!([{
+                    "id": orbit_id,
+                    "name": "test",
+                    "radius": 12000,
+                    "inclination": 0,
+                    "longitude": 0,
+                    "sailsInOrbit": 0,
+                    "totalLaunched": 0,
+                    "totalExpired": 0,
+                    "decayProgress": 0,
+                    "generationKw": 0
+                }]),
+            );
+            absorption.insert(system_id.to_owned(), Value::from(0));
+            system_profiles.insert(system_id.to_owned(), json!({ "luminosity": 1 }));
+        }
+
+        let mut base = Map::new();
+        for (key, value) in [
+            ("version", json!(47)),
+            ("mode", json!("normal")),
+            ("activePlanetId", json!("home")),
+            ("elapsedSeconds", json!(0)),
+            ("historyRecordedAt", json!(0)),
+            ("productionHistory", json!([])),
+            ("paused", json!(false)),
+            ("tray", json!({ "iron_ore": 10 })),
+            ("planetTrays", json!({ "home": { "iron_ore": 10 } })),
+            ("planetTrayItemLimits", json!({ "home": 1000000 })),
+            (
+                "portableFleet",
+                json!({ "logistics_drone": 0, "logistics_vessel": 0 }),
+            ),
+            ("construction", json!({ "test_building": 0 })),
+            ("manualMined", json!(0)),
+            ("totalProduced", json!({})),
+            ("blueprints", json!([])),
+            ("handcraftQueue", json!([])),
+            ("constructionQueue", json!([])),
+            ("planetMetrics", json!({ "home": {} })),
+            ("powerGridMetrics", json!({ "home": {} })),
+            ("systemSpaceStations", json!({})),
+        ] {
+            base.insert(key.to_owned(), value);
+        }
+        base.insert(
+            "settings".to_owned(),
+            json!({
+                "simulationSpeed": 1,
+                "resourceMode": "infinite",
+                "difficulty": "standard",
+                "productionBufferLimit": 1000000,
+                "logisticsBufferLimit": 1000000,
+                "beltBufferLimit": 100000000,
+                "proliferatorBufferLimit": 600
+            }),
+        );
+        base.insert(
+            "research".to_owned(),
+            json!({
+                "selectedTechId": null,
+                "pausedTechId": null,
+                "queuedTechIds": [],
+                "progressByTech": {},
+                "completedTechIds": ["proliferator_1"]
+            }),
+        );
+        base.insert(
+            "campaign".to_owned(),
+            json!({
+                "completedTaskIds": [],
+                "rewardedTaskIds": [],
+                "activeTaskId": "mine_first_ore",
+                "activeChapterId": "foundation"
+            }),
+        );
+        base.insert(
+            "constructionAutomation".to_owned(),
+            json!({
+                "enabled": true,
+                "targetStock": { "test_building": 1 },
+                "cursor": 0,
+                "totalCrafted": 0,
+                "lastCraftedId": null,
+                "destroyedByproducts": {},
+                "jobs": {},
+                "quantumSourceEnabled": false,
+                "quantumMaterialBuffer": {}
+            }),
+        );
+        base.insert(
+            "exploration".to_owned(),
+            json!({
+                "missions": [],
+                "unlockedSystemIds": ["helios"],
+                "colonizedPlanetIds": ["home"],
+                "surveyProgressBySystem": { "helios": 1 }
+            }),
+        );
+        base.insert(
+            "galaxy".to_owned(),
+            json!({
+                "profiles": {
+                    "home": {
+                        "windMultiplier": 1,
+                        "solarMultiplier": 1,
+                        "geothermalMultiplier": 1,
+                        "miningMultiplier": 1,
+                        "productionSpeedMultiplier": 1,
+                        "specialization": "balanced",
+                        "oceanType": "none"
+                    }
+                },
+                "systemProfiles": Value::Object(system_profiles)
+            }),
+        );
+        base.insert(
+            "timeWarp".to_owned(),
+            json!({
+                "controllerEntityId": null,
+                "enabled": false,
+                "requestedMultiplier": 1,
+                "effectiveMultiplier": 1,
+                "pendingSimulationSeconds": 0,
+                "pendingWallSeconds": 0,
+                "requiredPowerKw": 0,
+                "allocatedPowerKw": 0
+            }),
+        );
+        base.insert(
+            "dysonSwarm".to_owned(),
+            json!({
+                "sailsInOrbit": 0,
+                "totalLaunched": 0,
+                "totalExpired": 0,
+                "decayProgress": 0,
+                "generationKw": 0,
+                "receiverLoadKw": 0
+            }),
+        );
+        base.insert(
+            "dysonSphere".to_owned(),
+            json!({
+                "structurePoints": 0,
+                "totalRocketsLaunched": 0,
+                "shellSails": 0,
+                "totalSailsAbsorbed": 0,
+                "absorptionProgress": 0,
+                "generationKw": 0
+            }),
+        );
+        base.insert(
+            "dysonEngineering".to_owned(),
+            json!({
+                "launchMode": "balanced",
+                "launchThrottle": 1,
+                "launchEnabled": false,
+                "activeOrbitBySystem": Value::Object(active_orbits),
+                "orbitsBySystem": Value::Object(orbits),
+                "absorptionProgressBySystem": Value::Object(absorption),
+                "launchEnergySpentMj": 0
+            }),
+        );
+        base.insert("dysonPlans".to_owned(), Value::Object(plans));
+        base.insert(
+            "galacticHubNetwork".to_owned(),
+            json!({
+                "fleetInstalled": 0,
+                "fleetBusy": 0,
+                "fleetReturns": [],
+                "warpers": "0",
+                "warperTarget": "0",
+                "routingCursors": {}
+            }),
+        );
+        base.insert(
+            "quantumLogisticsNetwork".to_owned(),
+            json!({
+                "enabled": false,
+                "inventory": {},
+                "itemCapacities": {},
+                "routingCursors": {},
+                "uploadRoutingCursors": {}
+            }),
+        );
+        base.insert(
+            "endgame".to_owned(),
+            json!({
+                "activeInfiniteResearchId": null,
+                "autoResearch": false,
+                "autoDispatch": false,
+                "dispatchThrottle": 1,
+                "exportInputMode": "building",
+                "exportProjects": {
+                    "universe_archive": { "enabled": false, "priority": 1, "level": 0, "delivered": 0, "totalDelivered": 0, "dispatchProgress": 0 },
+                    "solar_sail_array": { "enabled": false, "priority": 1, "level": 0, "delivered": 0, "totalDelivered": 0, "dispatchProgress": 0 },
+                    "carrier_rocket_fleet": { "enabled": false, "priority": 1, "level": 0, "delivered": 0, "totalDelivered": 0, "dispatchProgress": 0 },
+                    "antimatter_exchange": { "enabled": false, "priority": 1, "level": 0, "delivered": 0, "totalDelivered": 0, "dispatchProgress": 0 }
+                },
+                "galacticCredits": 0,
+                "galacticScore": 0,
+                "totalExported": 0,
+                "exportedLastMinute": 0,
+                "exportWindowAmount": 0,
+                "exportWindowStartedAt": 0,
+                "infiniteResearch": {
+                    "matrix_compression": { "level": 0, "progress": "0" },
+                    "vein_utilization": { "level": 0, "progress": "0" },
+                    "galactic_logistics": { "level": 0, "progress": "0" },
+                    "stellar_harnessing": { "level": 0, "progress": "0" },
+                    "continuum_simulation": { "level": 0, "progress": "0" }
+                },
+                "constructionActivity": { "activityId": null, "activityClockMs": 0 }
+            }),
+        );
+        Value::Object(base)
+    }
+
+    fn construction_isolation_fixture() -> CoreState {
+        fixture_state_from_base(
+            construction_isolation_base(),
+            &[
+                json!({
+                    "id": "wind",
+                    "kind": "power",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "wind_turbine",
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0
+                }),
+                json!({
+                    "id": "smelter",
+                    "kind": "machine",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "arc_smelter",
+                    "recipeId": "iron_ingot",
+                    "machineCount": 300,
+                    "minerCount": 0,
+                    "inputs": { "iron_ore": 10000 },
+                    "outputs": { "iron_ingot": 0 },
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0
+                }),
+                json!({
+                    "id": "construction-center",
+                    "kind": "machine",
+                    "planetId": "home",
+                    "powerGridId": "grid-a",
+                    "buildingId": "construction_center",
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0
+                }),
+            ],
+        )
+    }
+
+    fn construction_exact_request(base_revision: u64) -> CoreAdvanceRequest {
+        CoreAdvanceRequest {
+            base_revision,
+            simulation_seconds: 5.1,
+            wall_seconds: 5.1,
+            advance_mode: CoreAdvanceMode::Exact,
+            include_diagnostics: false,
+        }
+    }
+
+    #[test]
+    fn exact_construction_isolation_keeps_power_and_ordinary_production_conservative() {
+        let initial = construction_isolation_fixture();
+        let mut default_exact = initial.clone();
+        let mut direct_default_exact = initial.clone();
+        let mut isolated_exact = initial;
+
+        let default_revision = default_exact.revision;
+        let default_result = default_exact
+            .advance(&construction_exact_request(default_revision))
+            .unwrap();
+        assert!(
+            default_result.supported,
+            "unexpected default exact reason: {:?}",
+            default_result.reason
+        );
+        let direct_revision = direct_default_exact.revision;
+        let direct_result = direct_default_exact
+            .advance_exact(&construction_exact_request(direct_revision))
+            .unwrap();
+        assert!(
+            direct_result.supported,
+            "unexpected direct default exact reason: {:?}",
+            direct_result.reason
+        );
+        assert_eq!(
+            default_exact.canonical_sha256().unwrap(),
+            direct_default_exact.canonical_sha256().unwrap(),
+            "the public exact dispatch and the default crate exact path must remain hash-identical"
+        );
+        assert_eq!(
+            default_exact.materialize().unwrap(),
+            direct_default_exact.materialize().unwrap()
+        );
+        let isolated_revision = isolated_exact.revision;
+        let isolated_result = isolated_exact
+            .advance_exact_isolating_construction(&construction_exact_request(isolated_revision))
+            .unwrap();
+        assert!(
+            isolated_result.supported,
+            "unexpected isolated exact reason: {:?}",
+            isolated_result.reason
+        );
+
+        assert_eq!(
+            default_exact.base_value()["construction"]["test_building"],
+            json!(1.0)
+        );
+        assert_eq!(default_exact.base_value()["tray"]["iron_ore"], json!(9.0));
+        assert_eq!(
+            default_exact.base_value()["constructionAutomation"]["totalCrafted"],
+            json!(1.0)
+        );
+        assert_eq!(
+            isolated_exact.base_value()["construction"]["test_building"],
+            json!(0)
+        );
+        assert_eq!(isolated_exact.base_value()["tray"]["iron_ore"], json!(10));
+        assert_eq!(
+            isolated_exact.base_value()["constructionAutomation"]["totalCrafted"],
+            json!(0)
+        );
+        assert_eq!(
+            isolated_exact.base_value()["constructionAutomation"]["jobs"],
+            json!({})
+        );
+
+        let default_entities = default_exact.parse_entities_parallel().unwrap();
+        let isolated_entities = isolated_exact.parse_entities_parallel().unwrap();
+        let default_smelter = default_entities
+            .iter()
+            .find(|entity| entity["id"] == "smelter")
+            .unwrap();
+        let isolated_smelter = isolated_entities
+            .iter()
+            .find(|entity| entity["id"] == "smelter")
+            .unwrap();
+        assert_eq!(default_smelter, isolated_smelter);
+        assert!(
+            isolated_smelter["outputs"]["iron_ingot"]
+                .as_f64()
+                .is_some_and(|amount| amount > 0.0 && amount < 1_530.0),
+            "ordinary production must run under the construction-inclusive power factor"
+        );
+        assert_eq!(
+            default_exact.base_value()["totalProduced"]["iron_ingot"],
+            isolated_exact.base_value()["totalProduced"]["iron_ingot"]
+        );
+        assert_eq!(
+            default_exact.base_value()["powerGridMetrics"],
+            isolated_exact.base_value()["powerGridMetrics"]
+        );
+        for key in ["generationKw", "demandKw", "powerFactor"] {
+            assert_eq!(
+                default_exact.base_value()["planetMetrics"]["home"][key],
+                isolated_exact.base_value()["planetMetrics"]["home"][key]
+            );
+        }
+        let isolated_grid = &isolated_exact.base_value()["powerGridMetrics"]["home"]["grid-a"];
+        assert_eq!(isolated_grid["generationKw"], json!(300.0));
+        assert_eq!(isolated_grid["demandKw"], json!(301.0));
+        assert_eq!(isolated_grid["powerFactor"], json!(0.9967));
+    }
+
+    #[test]
+    fn failed_isolated_exact_candidate_leaves_source_transaction_unchanged() {
+        let mut source = construction_isolation_fixture();
+        source.base_value_mut().remove("totalProduced");
+        let revision = source.revision;
+        let hash = source.canonical_sha256().unwrap();
+        let bytes = source.materialize().unwrap();
+
+        let failure = source
+            .advance_exact_isolating_construction(&construction_exact_request(revision))
+            .unwrap_err();
+        assert!(
+            format!("{failure:#}").contains("total production record is missing"),
+            "unexpected failure: {failure:#}"
+        );
+        assert_eq!(source.revision, revision);
+        assert_eq!(source.canonical_sha256().unwrap(), hash);
+        assert_eq!(source.materialize().unwrap(), bytes);
+        assert_eq!(
+            source.base_value()["construction"]["test_building"],
+            json!(0)
+        );
+        assert_eq!(source.base_value()["tray"]["iron_ore"], json!(10));
     }
 
     fn fixture_profile() -> PlanetProfile {

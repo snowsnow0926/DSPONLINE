@@ -16,6 +16,10 @@ const {
   validatePerformanceEditionPackageIdentity,
   verifyPackagedPerformanceEditionIdentity,
 } = require("./performance-edition-identity.cjs");
+const {
+  createDesktopUpdateFeedArguments,
+  finalizePackagedOutput,
+} = require("./pack.cjs");
 
 const packageMetadata = require("../package.json");
 
@@ -73,9 +77,55 @@ test("package and NSIS metadata are frozen to a 1.2.3 identity distinct from the
   assert.equal(Object.prototype.hasOwnProperty.call(packageMetadata.build.nsis, "guid"), false);
   assert.equal(packageMetadata.updateBaseUrl, "");
   assert.equal(packageMetadata.cloudApiBaseUrl, "");
-  assert.match(packageMetadata.scripts["desktop:release"], /--desktop-source release-performance-edition/);
-  assert.match(packageMetadata.scripts["desktop:release"], /--output release-performance-edition\/update-feed/);
-  assert.doesNotMatch(packageMetadata.scripts["desktop:release"], /--desktop-source release(?:\s|$)/);
+  assert.match(packageMetadata.scripts["desktop:release"], /node desktop\/pack\.cjs release/);
+  assert.doesNotMatch(packageMetadata.scripts["desktop:release"], /create-native-update-manifests/);
+});
+
+test("desktop release feed follows the exact successful standard or fallback output", () => {
+  const repositoryRoot = path.resolve(__dirname, "..");
+  const standardOutput = resolvePerformanceEditionOutputDirectory(repositoryRoot);
+  const fallbackOutput = path.resolve(`${standardOutput}-fallback`);
+  for (const sourceDirectory of [standardOutput, fallbackOutput]) {
+    const args = createDesktopUpdateFeedArguments(sourceDirectory, {
+      repositoryRoot,
+      releaseChannel: "beta",
+      updateBaseUrl: "https://updates.example.test/desktop",
+    });
+    assert.deepEqual(args.slice(1), [
+      "--channel", "beta",
+      "--base-url", "https://updates.example.test/desktop",
+      "--desktop-source", sourceDirectory,
+      "--output", path.join(sourceDirectory, "update-feed"),
+    ]);
+  }
+  assert.throws(() => createDesktopUpdateFeedArguments(path.resolve(repositoryRoot, "release"), {
+    repositoryRoot,
+    releaseChannel: "stable",
+    updateBaseUrl: "https://updates.example.test/desktop",
+  }), /输出目录/);
+});
+
+test("desktop fallback finalization propagates feed failure without reading the standard output", async () => {
+  const repositoryRoot = path.resolve(__dirname, "..");
+  const standardOutput = resolvePerformanceEditionOutputDirectory(repositoryRoot);
+  const fallbackOutput = path.resolve(`${standardOutput}-fallback`);
+  const calls = [];
+  const result = await finalizePackagedOutput(fallbackOutput, {
+    verify(sourceDirectory) {
+      calls.push(["verify", sourceDirectory]);
+    },
+    releaseMode: true,
+    async createUpdateFeed(sourceDirectory) {
+      calls.push(["feed", sourceDirectory]);
+      return 17;
+    },
+  });
+  assert.equal(result, 17);
+  assert.deepEqual(calls, [
+    ["verify", fallbackOutput],
+    ["feed", fallbackOutput],
+  ]);
+  assert.equal(calls.some(([, sourceDirectory]) => sourceDirectory === standardOutput), false);
 });
 
 test("electron-builder accepts the frozen performance-edition package configuration", async () => {

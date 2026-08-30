@@ -1,6 +1,10 @@
 # 玩法与系统基线
 
-> **Windows Rust 保守纯挂机施工尾段（2026-08-30，集成开发候选，未发布）**：`native-pure-idle-macro-v10-three-window-closed-recipe-research-dyson-terminal-finite-vein-handcraft-construction-block30-v12` 继续保留有界精确前缀，但允许一个严格受限的 construction-only 尾段。它只能消费精确前缀边界时已经归属于建筑制造的库存，不在尾段下载新量子物料，也不授予普通生产、物流、科研、戴森、出口、合同或其他终端产出；每个制造中心还必须属于已证明永久可再生供电下界的电网，手工制造队列或放置施工队列同时存在时拒绝授权。尾段按固定 30 秒规范块推进，不足一块的私有 carry 只进入原生内部检查点并可跨 reload 延续，不进入公开 v47 或规范哈希。库存耗尽、达到目标、身份/电力/证明漂移或候选失败都会在完整块边界停止或原子丢弃，不能用未来产量、缓存复制或量子直供补齐。
+> **Windows Rust 保守纯挂机施工尾段（2026-08-30，集成开发候选，未发布）**：`native-pure-idle-macro-v10-closed-ledger-construction-quantum-v14` 继续只授权 construction-only 尾段，但现在允许施工在同一候选内消费由闭合 ordinary 宏观产线真实生产、并经量子网络真实下载到中心缓存的材料。结算顺序固定为 ordinary 生产先记账、每个绝对五秒边界释放当时已经成熟的量子信用并执行下载、施工再消费；未来五秒或未来 30 秒的普通产量不能提前成为起始库存，完整 30 秒信用也不能在第一个量子边界一次性释放。量子精确回放在一个连续 macro-v10 session 中总计最多 30 秒，之后施工仍只能消费真实既有库存；普通生产、物流、科研、戴森、出口、合同和其他终端不会因施工尾段额外获益。
+>
+> 施工本身仍按固定 30 秒规范块推进，不足一块的 carry 以及尚未跨块的逐物料量子归属只进入原生私有检查点并可跨 reload 延续。每个 pending 物料在释放时必须仍有当前普通产率证书；没有证书、证书产率为零或 attribution 已陈旧时，候选整体拒绝，不能凭私有余额造出材料。施工宏观尾段只接收整秒起止边界，小数秒不会向上取整或凑入下一个施工块，只能由 exact 结算处理。每个制造中心必须属于已证明永久可再生供电下界的电网，手工制造队列或放置施工队列同时存在时拒绝授权。若 ordinary 产量已经撞到量子容量上限，施工下载后来腾出的空间不能反向增加本次 ordinary 产量；系统会失败关闭这一次性量子回放，而不是因调用分段方式不同多生产。
+>
+> 量子网络内部用长度前缀结构化 owner key 区分 station 与 construction 请求；旧 `order_key` 只控制确定性排序。因此含冒号、Unicode 或 MOD ID 的站点、制造中心和物料不会互相冒名。守恒回归覆盖同一轮普通 owner 下载 100、施工 owner 下载 1、总库存精确减少 101，即 `101 = 100 + 1`，没有丢料或重复发料。库存耗尽、达到目标、身份/带宽/receipt/电力/证明漂移或候选失败都会在规范边界停止或原子丢弃。私有 carry、replay 游标、pending attribution 和结构化 owner key 不进入公开 GameState v47、envelope 或规范哈希，旧公开存档格式不变。
 
 > **Windows Rust 蓝图重命名对账（2026-08-30，集成开发候选，未发布）**：重命名仍是 Rust 从当前权威目录验证并展开的最小语义意图。响应丢失时 renderer 只向 main-owned broker 查询同一个 durable command 的只读 receipt，绝不再次 dispatch/retry mutation；committed receipt 必须逐字段符合公开边界、绑定原 session/run/command/base revision，且 revision 严格为 `previousRevision + 1`。foreign、畸形、跳号、原地不动、超出安全整数或 lineage/原行漂移都失败关闭并显示冲突，不会把未知结果猜成成功。该切片不代表蓝图捕获、导入、变换、删除、部署、排队或导出已迁移。
 

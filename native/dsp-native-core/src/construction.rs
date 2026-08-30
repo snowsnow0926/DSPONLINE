@@ -296,6 +296,29 @@ impl ConstructionRuntime {
         }
     }
 
+    /// Records revisions advanced by a caller that has separately proven the
+    /// construction domain was isolated and unchanged. Pure-idle uses this to
+    /// keep the private construction receipt chain contiguous while its
+    /// ordinary closed ledger credits material before construction spends it.
+    /// Public exact simulation never calls this path.
+    pub(crate) fn record_isolated_noop_receipts(
+        &mut self,
+        base_revision: u64,
+        result_revision: u64,
+    ) -> anyhow::Result<()> {
+        if base_revision > result_revision {
+            bail!("native isolated construction receipt revision regressed");
+        }
+        let mut revision = base_revision;
+        while revision < result_revision {
+            self.record_run_receipt(revision, &ConstructionRunReceipt::default());
+            revision = revision.checked_add(1).ok_or_else(|| {
+                anyhow!("native isolated construction receipt revision exhausted")
+            })?;
+        }
+        Ok(())
+    }
+
     /// Merge only a contiguous series of exact-stage receipts. Missing,
     /// reordered, overflowed, or MOD-fractional rows fail closed and cannot be
     /// used as construction authority by pure-idle settlement.

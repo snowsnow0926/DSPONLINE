@@ -172,7 +172,7 @@ node scripts/create-native-update-manifests.mjs `
   --android-certificate-sha256 <公开证书指纹>
 ```
 
-生成器没有默认发布域名，必须传入 `--base-url` 或设置 `DSP_NATIVE_UPDATE_BASE_URL`。Windows 的 `latest.yml`、安装程序和 blockmap 由 `npm run desktop:release` 整理到 `release/update-feed/desktop/<channel>/`。Android JSON 与 APK 整理到 `release/update-feed/android/`。这些命令只生成待发布目录，不上传服务器。
+生成器没有默认发布域名，必须传入 `--base-url` 或设置 `DSP_NATIVE_UPDATE_BASE_URL`。Windows 的 `latest.yml`、安装程序和 blockmap 由 `npm run desktop:release` 写入本次唯一成功的 `release-performance-edition/` 或 `release-performance-edition-fallback/`，对应更新清单位于该目录的 `update-feed/desktop/<channel>/`。Android JSON 与 APK 整理到 `release/update-feed/android/`。这些命令只生成待发布目录，不上传服务器。
 
 ## 6. CI 与发布门禁
 

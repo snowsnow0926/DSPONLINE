@@ -57,6 +57,8 @@ const DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION: u16 = 2;
 pub(crate) const PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS: f64 = 30.0;
 const PURE_IDLE_SESSION_FORMAT_VERSION: u8 = 1;
 pub(crate) const PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS: u8 = 30;
+pub(crate) const PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS: u8 = 30;
+const MAX_JS_SAFE_INTEGER_U64: u64 = 9_007_199_254_740_991;
 
 /// Renderer projections never need route ledgers. They can be large, contain
 /// in-flight material accounting, and must not become an accidental command
@@ -1056,6 +1058,52 @@ struct ChunkedManifest {
     // optional key instead of rejecting that deny_unknown_fields payload.
     #[serde(default)]
     pure_idle_macro_construction_carry_seconds: Option<u8>,
+    // This private cursor is intentionally outside PureIdleSessionState so an
+    // older native host can ignore it. Missing means the historical checkpoint
+    // has not consumed the new bounded construction-only quantum replay yet.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_construction_quantum_replay_seconds"
+    )]
+    pure_idle_macro_construction_quantum_replay_remaining_seconds: Option<u8>,
+    // Ordinary macro flow can provision quantum inventory before construction
+    // has accumulated one canonical 30-second block. This private attribution
+    // ledger prevents that inventory from becoming unowned starting stock.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_construction_quantum_pending_credits"
+    )]
+    pure_idle_macro_construction_quantum_pending_credits: Option<BTreeMap<String, u64>>,
+}
+
+fn deserialize_present_construction_quantum_replay_seconds<'de, D>(
+    deserializer: D,
+) -> Result<Option<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    u8::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_present_construction_quantum_pending_credits<'de, D>(
+    deserializer: D,
+) -> Result<Option<BTreeMap<String, u64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    BTreeMap::<String, u64>::deserialize(deserializer).map(Some)
+}
+
+fn validate_construction_quantum_pending_credits(
+    credits: &BTreeMap<String, u64>,
+) -> anyhow::Result<()> {
+    if credits
+        .iter()
+        .any(|(item_id, amount)| item_id.is_empty() || *amount > MAX_JS_SAFE_INTEGER_U64)
+    {
+        bail!("native core macro construction quantum pending credits are invalid");
+    }
+    Ok(())
 }
 
 fn deserialize_present_pure_idle_session<'de, D>(
@@ -2536,6 +2584,14 @@ pub struct CoreState {
     /// This is private checkpoint state and never enters public v47 or its
     /// canonical hash.
     pure_idle_macro_construction_carry_seconds: u8,
+    /// Remaining construction-only quantum replay granted to one continuous
+    /// macro-v10 session. The cursor is private checkpoint state: it never
+    /// enters public GameState v47 or its canonical hash.
+    pure_idle_macro_construction_quantum_replay_remaining_seconds: u8,
+    /// Ordinary macro quantum credits that remain attributable to construction
+    /// until the next canonical 30-second block consumes or releases them.
+    /// This ledger is private checkpoint state and never enters public v47.
+    pure_idle_macro_construction_quantum_pending_credits: BTreeMap<String, u64>,
     /// Runtime-only macro-v10 calibration snapshots and ordinary-flow proof.
     /// A checkpoint reload deliberately drops this cache; pure-idle rebuilds
     /// it with a disposable exact probe before authorizing any productive tail.
@@ -3018,6 +3074,40 @@ impl CoreState {
             (_, None) => 0,
             _ => bail!("native core macro construction cursor checkpoint is invalid"),
         };
+        let pure_idle_macro_construction_quantum_replay_remaining_seconds = match (
+            pure_idle_session,
+            manifest.pure_idle_macro_construction_quantum_replay_remaining_seconds,
+        ) {
+            (Some(session), Some(remaining))
+                if session.macro_v10
+                    && remaining <= PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS =>
+            {
+                remaining
+            }
+            (Some(session), None) if session.macro_v10 => {
+                PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+            }
+            (_, None) => PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS,
+            _ => bail!("native core macro construction quantum replay checkpoint is invalid"),
+        };
+        let pure_idle_macro_construction_quantum_pending_credits = match manifest
+            .pure_idle_macro_construction_quantum_pending_credits
+            .clone()
+        {
+            Some(credits)
+                if pure_idle_session.is_some_and(|session| session.macro_v10)
+                    && pure_idle_macro_construction_quantum_replay_remaining_seconds > 0 =>
+            {
+                validate_construction_quantum_pending_credits(&credits)?;
+                credits
+            }
+            None => BTreeMap::new(),
+            Some(_) => {
+                bail!(
+                    "native core macro construction quantum pending credits checkpoint is invalid"
+                )
+            }
+        };
         let mut remaining_chunk_references = HashMap::<String, usize>::new();
         for metadata in &manifest.chunks {
             *remaining_chunk_references
@@ -3100,6 +3190,8 @@ impl CoreState {
             manifest.chunks,
             pure_idle_session,
             pure_idle_macro_construction_carry_seconds,
+            pure_idle_macro_construction_quantum_replay_remaining_seconds,
+            pure_idle_macro_construction_quantum_pending_credits,
             SaveDirtyPages::default(),
         )
     }
@@ -3144,6 +3236,8 @@ impl CoreState {
             Vec::new(),
             None,
             0,
+            PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS,
+            BTreeMap::new(),
             SaveDirtyPages {
                 entity_topology: true,
                 belt_topology: true,
@@ -3162,8 +3256,19 @@ impl CoreState {
         checkpoint_chunks: Vec<ChunkMetadata>,
         pure_idle_session: Option<PureIdleSessionState>,
         pure_idle_macro_construction_carry_seconds: u8,
+        pure_idle_macro_construction_quantum_replay_remaining_seconds: u8,
+        pure_idle_macro_construction_quantum_pending_credits: BTreeMap<String, u64>,
         save_dirty: SaveDirtyPages,
     ) -> anyhow::Result<Self> {
+        validate_construction_quantum_pending_credits(
+            &pure_idle_macro_construction_quantum_pending_credits,
+        )?;
+        if !pure_idle_macro_construction_quantum_pending_credits.is_empty()
+            && (pure_idle_session.is_none_or(|session| !session.macro_v10)
+                || pure_idle_macro_construction_quantum_replay_remaining_seconds == 0)
+        {
+            bail!("native core macro construction quantum pending credits are orphaned");
+        }
         let production_history_tiers =
             crate::production_history::TieredProductionHistory::from_base(&base);
         let mut state = Self {
@@ -3200,6 +3305,8 @@ impl CoreState {
             pending_checkpoint_chunks: SyncCell::new(None),
             pure_idle_session,
             pure_idle_macro_construction_carry_seconds,
+            pure_idle_macro_construction_quantum_replay_remaining_seconds,
+            pure_idle_macro_construction_quantum_pending_credits,
             pure_idle_macro_runtime: None,
             summary_cache: SyncCell::new(None),
             production_history_tiers: production_history_tiers.into(),
@@ -3384,6 +3491,36 @@ impl CoreState {
                         Value::from(self.pure_idle_macro_construction_carry_seconds),
                     );
             }
+            if session.macro_v10
+                && self.pure_idle_macro_construction_quantum_replay_remaining_seconds
+                    != PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+            {
+                manifest_value
+                    .as_object_mut()
+                    .expect("native checkpoint manifest is an object")
+                    .insert(
+                        "pureIdleMacroConstructionQuantumReplayRemainingSeconds".to_owned(),
+                        Value::from(
+                            self.pure_idle_macro_construction_quantum_replay_remaining_seconds,
+                        ),
+                    );
+            }
+            if session.macro_v10
+                && self.pure_idle_macro_construction_quantum_replay_remaining_seconds > 0
+                && !self
+                    .pure_idle_macro_construction_quantum_pending_credits
+                    .is_empty()
+            {
+                manifest_value
+                    .as_object_mut()
+                    .expect("native checkpoint manifest is an object")
+                    .insert(
+                        "pureIdleMacroConstructionQuantumPendingCredits".to_owned(),
+                        serde_json::to_value(
+                            &self.pure_idle_macro_construction_quantum_pending_credits,
+                        )?,
+                    );
+            }
         }
         let manifest = serde_json::to_string(&manifest_value)?;
         visit(&manifest_key, &manifest)?;
@@ -3544,6 +3681,36 @@ impl CoreState {
                         Value::from(self.pure_idle_macro_construction_carry_seconds),
                     );
             }
+            if session.macro_v10
+                && self.pure_idle_macro_construction_quantum_replay_remaining_seconds
+                    != PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+            {
+                manifest_value
+                    .as_object_mut()
+                    .expect("native checkpoint manifest is an object")
+                    .insert(
+                        "pureIdleMacroConstructionQuantumReplayRemainingSeconds".to_owned(),
+                        Value::from(
+                            self.pure_idle_macro_construction_quantum_replay_remaining_seconds,
+                        ),
+                    );
+            }
+            if session.macro_v10
+                && self.pure_idle_macro_construction_quantum_replay_remaining_seconds > 0
+                && !self
+                    .pure_idle_macro_construction_quantum_pending_credits
+                    .is_empty()
+            {
+                manifest_value
+                    .as_object_mut()
+                    .expect("native checkpoint manifest is an object")
+                    .insert(
+                        "pureIdleMacroConstructionQuantumPendingCredits".to_owned(),
+                        serde_json::to_value(
+                            &self.pure_idle_macro_construction_quantum_pending_credits,
+                        )?,
+                    );
+            }
         }
         let manifest = serde_json::to_string(&manifest_value)?;
         visit(&manifest_key, &manifest)?;
@@ -3655,6 +3822,13 @@ impl CoreState {
         directory: Arc<crate::quantum_logistics::QuantumLogisticsDirectory>,
     ) {
         self.prepared_quantum_logistics_directory = Some(directory);
+    }
+
+    /// Drops only the immutable quantum endpoint/slot directory after a
+    /// construction-only quantum replay mutates inventories behind the ordinary
+    /// logistics step. All unrelated prepared runtimes remain reusable.
+    pub(crate) fn invalidate_prepared_quantum_logistics_directory(&mut self) {
+        self.prepared_quantum_logistics_directory = None;
     }
 
     pub(crate) fn prepared_construction_runtime(
@@ -4284,6 +4458,26 @@ impl CoreState {
             .unwrap_or(0)
     }
 
+    pub(crate) fn pure_idle_macro_construction_quantum_replay_remaining_seconds(&self) -> u8 {
+        self.pure_idle_session
+            .filter(|session| session.last_committed_revision == self.revision && session.macro_v10)
+            .map(|_| self.pure_idle_macro_construction_quantum_replay_remaining_seconds)
+            .unwrap_or(PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS)
+    }
+
+    pub(crate) fn pure_idle_macro_construction_quantum_pending_credits(
+        &self,
+    ) -> BTreeMap<String, u64> {
+        self.pure_idle_session
+            .filter(|session| session.last_committed_revision == self.revision && session.macro_v10)
+            .filter(|_| self.pure_idle_macro_construction_quantum_replay_remaining_seconds > 0)
+            .map(|_| {
+                self.pure_idle_macro_construction_quantum_pending_credits
+                    .clone()
+            })
+            .unwrap_or_default()
+    }
+
     /// Installs session progress on a disposable candidate. Callers must do
     /// this only after every simulation, multiplier and diagnostic check has
     /// succeeded, immediately before atomically replacing the live state.
@@ -4300,6 +4494,10 @@ impl CoreState {
         .validate(self.revision)?;
         self.pure_idle_session = Some(session);
         self.pure_idle_macro_construction_carry_seconds = 0;
+        self.pure_idle_macro_construction_quantum_replay_remaining_seconds =
+            PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS;
+        self.pure_idle_macro_construction_quantum_pending_credits
+            .clear();
         Ok(())
     }
 
@@ -4308,19 +4506,37 @@ impl CoreState {
         &mut self,
         exact_simulation_seconds_used: f64,
     ) -> anyhow::Result<()> {
-        self.install_pure_idle_macro_session_progress_with_construction_carry(
+        let quantum_replay_remaining_seconds =
+            self.pure_idle_macro_construction_quantum_replay_remaining_seconds();
+        let quantum_pending_credits = self.pure_idle_macro_construction_quantum_pending_credits();
+        self.install_pure_idle_macro_session_progress_with_construction_state(
             exact_simulation_seconds_used,
             0,
+            quantum_replay_remaining_seconds,
+            quantum_pending_credits,
         )
     }
 
-    pub(crate) fn install_pure_idle_macro_session_progress_with_construction_carry(
+    pub(crate) fn install_pure_idle_macro_session_progress_with_construction_state(
         &mut self,
         exact_simulation_seconds_used: f64,
         construction_carry_seconds: u8,
+        construction_quantum_replay_remaining_seconds: u8,
+        construction_quantum_pending_credits: BTreeMap<String, u64>,
     ) -> anyhow::Result<()> {
         if construction_carry_seconds >= PURE_IDLE_MACRO_CONSTRUCTION_BLOCK_SECONDS {
             bail!("native core macro construction cursor is invalid");
+        }
+        if construction_quantum_replay_remaining_seconds
+            > PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+        {
+            bail!("native core macro construction quantum replay cursor is invalid");
+        }
+        validate_construction_quantum_pending_credits(&construction_quantum_pending_credits)?;
+        if construction_quantum_replay_remaining_seconds == 0
+            && !construction_quantum_pending_credits.is_empty()
+        {
+            bail!("native core macro construction quantum pending credits are orphaned");
         }
         let session = PureIdleSessionState {
             format_version: PURE_IDLE_SESSION_FORMAT_VERSION,
@@ -4331,6 +4547,10 @@ impl CoreState {
         .validate(self.revision)?;
         self.pure_idle_session = Some(session);
         self.pure_idle_macro_construction_carry_seconds = construction_carry_seconds;
+        self.pure_idle_macro_construction_quantum_replay_remaining_seconds =
+            construction_quantum_replay_remaining_seconds;
+        self.pure_idle_macro_construction_quantum_pending_credits =
+            construction_quantum_pending_credits;
         Ok(())
     }
 
@@ -9965,15 +10185,38 @@ mod tests {
         assert_eq!(state.pure_idle_exact_seconds_used(), 30.0);
         assert_eq!(state.pure_idle_macro_exact_seconds_used(), 0.0);
 
+        let pending_credits = BTreeMap::from([("iron_ore".to_owned(), 1)]);
         state
-            .install_pure_idle_macro_session_progress(10.0)
+            .install_pure_idle_macro_session_progress_with_construction_state(
+                10.0,
+                0,
+                1,
+                pending_credits.clone(),
+            )
             .unwrap();
         assert_eq!(state.pure_idle_exact_seconds_used(), 0.0);
         assert_eq!(state.pure_idle_macro_exact_seconds_used(), 10.0);
+        assert_eq!(
+            state.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+            1
+        );
+        assert_eq!(
+            state.pure_idle_macro_construction_quantum_pending_credits(),
+            pending_credits
+        );
 
         state.install_pure_idle_session_progress(5.0).unwrap();
         assert_eq!(state.pure_idle_exact_seconds_used(), 5.0);
         assert_eq!(state.pure_idle_macro_exact_seconds_used(), 0.0);
+        assert_eq!(
+            state.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+            PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+        );
+        assert!(
+            state
+                .pure_idle_macro_construction_quantum_pending_credits()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -10072,6 +10315,180 @@ mod tests {
     }
 
     #[test]
+    fn macro_construction_quantum_replay_cursor_is_strict_and_legacy_defaults_to_full_credit() {
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let macro_session = json!({
+            "formatVersion": 1,
+            "exactSimulationSecondsUsed": 30,
+            "lastCommittedRevision": 7,
+            "macroV10": true
+        });
+        let cursor_key = "pureIdleMacroConstructionQuantumReplayRemainingSeconds";
+
+        for invalid_cursor in [json!(31), json!(-1), json!("1"), Value::Null] {
+            let mut records = fixture_records();
+            let mut manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+            manifest["pureIdleMacroSession"] = macro_session.clone();
+            manifest[cursor_key] = invalid_cursor;
+            records.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+            assert!(
+                CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                    .is_err()
+            );
+        }
+
+        let mut orphaned = fixture_records();
+        let mut manifest: Value = serde_json::from_slice(&orphaned[manifest_key]).unwrap();
+        manifest[cursor_key] = json!(1);
+        orphaned.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+        assert!(
+            CoreState::from_internal_records(fixture_identity(7), &orphaned, fixture_catalog())
+                .is_err()
+        );
+
+        let mut legacy = fixture_records();
+        let mut manifest: Value = serde_json::from_slice(&legacy[manifest_key]).unwrap();
+        manifest["pureIdleMacroSession"] = macro_session;
+        assert!(manifest.get(cursor_key).is_none());
+        legacy.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+        let restored =
+            CoreState::from_internal_records(fixture_identity(7), &legacy, fixture_catalog())
+                .unwrap();
+        assert_eq!(
+            restored.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+            PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+        );
+        assert!(
+            restored
+                .pure_idle_macro_construction_quantum_pending_credits()
+                .is_empty()
+        );
+
+        let mut state = restored;
+        assert!(
+            state
+                .install_pure_idle_macro_session_progress_with_construction_state(
+                    30.0,
+                    0,
+                    31,
+                    BTreeMap::new(),
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn macro_construction_quantum_pending_credits_are_strict_and_legacy_defaults_empty() {
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let credits_key = "pureIdleMacroConstructionQuantumPendingCredits";
+        let macro_session = json!({
+            "formatVersion": 1,
+            "exactSimulationSecondsUsed": 30,
+            "lastCommittedRevision": 7,
+            "macroV10": true
+        });
+
+        for orphaned_credits in [json!({}), json!({"iron_ore": 1})] {
+            let mut records = fixture_records();
+            let mut manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+            manifest[credits_key] = orphaned_credits;
+            records.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+            assert!(
+                CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                    .is_err()
+            );
+        }
+
+        let mut conservative = fixture_records();
+        let mut manifest: Value = serde_json::from_slice(&conservative[manifest_key]).unwrap();
+        manifest["pureIdleSession"] = json!({
+            "formatVersion": 1,
+            "exactSimulationSecondsUsed": 30,
+            "lastCommittedRevision": 7
+        });
+        manifest[credits_key] = json!({"iron_ore": 1});
+        conservative.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+        assert!(
+            CoreState::from_internal_records(fixture_identity(7), &conservative, fixture_catalog())
+                .is_err()
+        );
+
+        let mut exhausted = fixture_records();
+        let mut manifest: Value = serde_json::from_slice(&exhausted[manifest_key]).unwrap();
+        manifest["pureIdleMacroSession"] = macro_session.clone();
+        manifest["pureIdleMacroConstructionQuantumReplayRemainingSeconds"] = json!(0);
+        manifest[credits_key] = json!({"iron_ore": 1});
+        exhausted.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+        assert!(
+            CoreState::from_internal_records(fixture_identity(7), &exhausted, fixture_catalog())
+                .is_err()
+        );
+
+        for invalid_credits in [
+            json!({"": 1}),
+            json!({"iron_ore": MAX_JS_SAFE_INTEGER_U64 + 1}),
+            json!({"iron_ore": -1}),
+            json!({"iron_ore": "1"}),
+            Value::Null,
+        ] {
+            let mut records = fixture_records();
+            let mut manifest: Value = serde_json::from_slice(&records[manifest_key]).unwrap();
+            manifest["pureIdleMacroSession"] = macro_session.clone();
+            manifest[credits_key] = invalid_credits;
+            records.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+            assert!(
+                CoreState::from_internal_records(fixture_identity(7), &records, fixture_catalog())
+                    .is_err()
+            );
+        }
+
+        let mut legacy = fixture_records();
+        let mut manifest: Value = serde_json::from_slice(&legacy[manifest_key]).unwrap();
+        manifest["pureIdleMacroSession"] = macro_session;
+        assert!(manifest.get(credits_key).is_none());
+        legacy.insert(manifest_key.into(), serde_json::to_vec(&manifest).unwrap());
+        let mut restored =
+            CoreState::from_internal_records(fixture_identity(7), &legacy, fixture_catalog())
+                .unwrap();
+        assert!(
+            restored
+                .pure_idle_macro_construction_quantum_pending_credits()
+                .is_empty()
+        );
+
+        for invalid_credits in [
+            BTreeMap::from([("".to_owned(), 1)]),
+            BTreeMap::from([("iron_ore".to_owned(), MAX_JS_SAFE_INTEGER_U64 + 1)]),
+        ] {
+            assert!(
+                restored
+                    .install_pure_idle_macro_session_progress_with_construction_state(
+                        30.0,
+                        0,
+                        1,
+                        invalid_credits,
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            restored
+                .install_pure_idle_macro_session_progress_with_construction_state(
+                    30.0,
+                    0,
+                    0,
+                    BTreeMap::from([("iron_ore".to_owned(), 1)]),
+                )
+                .is_err()
+        );
+        assert!(
+            restored
+                .pure_idle_macro_construction_quantum_pending_credits()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn macro_construction_cursor_roundtrips_incrementally_but_not_in_public_v47() {
         let mut state = CoreState::from_internal_records(
             fixture_identity(7),
@@ -10081,7 +10498,12 @@ mod tests {
         .unwrap();
         let canonical_before = state.canonical_sha256().unwrap();
         state
-            .install_pure_idle_macro_session_progress_with_construction_carry(30.0, 17)
+            .install_pure_idle_macro_session_progress_with_construction_state(
+                30.0,
+                17,
+                PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS,
+                BTreeMap::new(),
+            )
             .unwrap();
         assert_eq!(state.canonical_sha256().unwrap(), canonical_before);
 
@@ -10117,6 +10539,239 @@ mod tests {
     }
 
     #[test]
+    fn macro_construction_quantum_replay_cursor_roundtrips_full_and_incremental_privately() {
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let cursor_key = "pureIdleMacroConstructionQuantumReplayRemainingSeconds";
+
+        for remaining in [0, 1, PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS] {
+            let mut state = CoreState::from_internal_records(
+                fixture_identity(7),
+                &fixture_records(),
+                fixture_catalog(),
+            )
+            .unwrap();
+            let canonical_before = state.canonical_sha256().unwrap();
+            let public_v47_before = state.materialize().unwrap();
+            state
+                .install_pure_idle_macro_session_progress_with_construction_state(
+                    30.0,
+                    17,
+                    remaining,
+                    BTreeMap::new(),
+                )
+                .unwrap();
+            assert_eq!(
+                state.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+                remaining
+            );
+            assert_eq!(state.canonical_sha256().unwrap(), canonical_before);
+            assert_eq!(state.materialize().unwrap(), public_v47_before);
+
+            let mut full = BTreeMap::<String, Vec<u8>>::new();
+            state
+                .visit_internal_checkpoint_records(42, |key, value| {
+                    full.insert(key.to_owned(), value.as_bytes().to_vec());
+                    Ok(())
+                })
+                .unwrap();
+            let full_manifest: Value = serde_json::from_slice(&full[manifest_key]).unwrap();
+            if remaining == PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS {
+                assert!(full_manifest.get(cursor_key).is_none());
+            } else {
+                assert_eq!(full_manifest[cursor_key], remaining);
+            }
+            let restored_full =
+                CoreState::from_internal_records(fixture_identity(7), &full, fixture_catalog())
+                    .unwrap();
+            assert_eq!(
+                restored_full.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+                remaining
+            );
+            assert_eq!(restored_full.canonical_sha256().unwrap(), canonical_before);
+
+            let mut incremental = fixture_records();
+            let mut delta = BTreeMap::new();
+            let visit = state
+                .visit_dirty_internal_checkpoint_records(43, |key, value| {
+                    delta.insert(key.to_owned(), value.as_bytes().to_vec());
+                    Ok(())
+                })
+                .unwrap();
+            apply_checkpoint_delta(&mut incremental, &visit, delta);
+            state.abort_checkpoint_visit();
+            let incremental_manifest: Value =
+                serde_json::from_slice(&incremental[manifest_key]).unwrap();
+            if remaining == PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS {
+                assert!(incremental_manifest.get(cursor_key).is_none());
+            } else {
+                assert_eq!(incremental_manifest[cursor_key], remaining);
+            }
+            let restored_incremental = CoreState::from_internal_records(
+                fixture_identity(7),
+                &incremental,
+                fixture_catalog(),
+            )
+            .unwrap();
+            assert_eq!(
+                restored_incremental
+                    .pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+                remaining
+            );
+            assert_eq!(
+                restored_incremental.canonical_sha256().unwrap(),
+                canonical_before
+            );
+
+            let public_v47 = restored_incremental.materialize().unwrap();
+            assert!(public_v47.get(cursor_key).is_none());
+            let mut public_envelope = Vec::new();
+            restored_incremental
+                .write_v47_envelope(43, &mut public_envelope)
+                .unwrap();
+            let envelope: Value = serde_json::from_slice(&public_envelope).unwrap();
+            assert!(envelope.get(cursor_key).is_none());
+            assert!(envelope["state"].get(cursor_key).is_none());
+        }
+    }
+
+    #[test]
+    fn macro_construction_quantum_pending_credits_roundtrip_privately() {
+        let manifest_key = "dsp-idle-network.internal.v1.chunked.v1.normal.manifest";
+        let credits_key = "pureIdleMacroConstructionQuantumPendingCredits";
+        let credits = BTreeMap::from([
+            ("iron_ore".to_owned(), 1),
+            ("mod:量子材料".to_owned(), MAX_JS_SAFE_INTEGER_U64),
+        ]);
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records(),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let canonical_before = state.canonical_sha256().unwrap();
+        let public_v47_before = state.materialize().unwrap();
+        state
+            .install_pure_idle_macro_session_progress_with_construction_state(
+                30.0,
+                17,
+                1,
+                credits.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            state.pure_idle_macro_construction_quantum_pending_credits(),
+            credits
+        );
+        assert_eq!(state.canonical_sha256().unwrap(), canonical_before);
+        assert_eq!(state.materialize().unwrap(), public_v47_before);
+
+        let mut full = BTreeMap::<String, Vec<u8>>::new();
+        state
+            .visit_internal_checkpoint_records(42, |key, value| {
+                full.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let full_manifest: Value = serde_json::from_slice(&full[manifest_key]).unwrap();
+        assert_eq!(full_manifest[credits_key]["iron_ore"], 1);
+        assert_eq!(
+            full_manifest[credits_key]["mod:量子材料"],
+            MAX_JS_SAFE_INTEGER_U64
+        );
+        let restored_full =
+            CoreState::from_internal_records(fixture_identity(7), &full, fixture_catalog())
+                .unwrap();
+        assert_eq!(
+            restored_full.pure_idle_macro_construction_quantum_pending_credits(),
+            credits
+        );
+        assert_eq!(restored_full.canonical_sha256().unwrap(), canonical_before);
+
+        let mut incremental = fixture_records();
+        let mut delta = BTreeMap::new();
+        let visit = state
+            .visit_dirty_internal_checkpoint_records(43, |key, value| {
+                delta.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        apply_checkpoint_delta(&mut incremental, &visit, delta);
+        state.abort_checkpoint_visit();
+        let incremental_manifest: Value =
+            serde_json::from_slice(&incremental[manifest_key]).unwrap();
+        assert_eq!(
+            incremental_manifest[credits_key],
+            full_manifest[credits_key]
+        );
+        let restored_incremental =
+            CoreState::from_internal_records(fixture_identity(7), &incremental, fixture_catalog())
+                .unwrap();
+        assert_eq!(
+            restored_incremental.pure_idle_macro_construction_quantum_pending_credits(),
+            credits
+        );
+        assert_eq!(
+            restored_incremental.canonical_sha256().unwrap(),
+            canonical_before
+        );
+
+        let public_v47 = restored_incremental.materialize().unwrap();
+        assert!(public_v47.get(credits_key).is_none());
+        let mut public_envelope = Vec::new();
+        restored_incremental
+            .write_v47_envelope(43, &mut public_envelope)
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(&public_envelope).unwrap();
+        assert!(envelope.get(credits_key).is_none());
+        assert!(envelope["state"].get(credits_key).is_none());
+    }
+
+    #[test]
+    fn public_v47_constructor_starts_with_full_construction_quantum_replay_credit() {
+        let source = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records_with_belts(Vec::new()),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let Value::Object(mut base) = source.materialize().unwrap() else {
+            panic!("fixture v47 state must be an object");
+        };
+        let entities = base
+            .remove("entities")
+            .and_then(|value| value.as_array().cloned())
+            .unwrap()
+            .into_iter()
+            .map(|value| serde_json::to_string(&value).unwrap())
+            .collect();
+        let belts = base
+            .remove("belts")
+            .and_then(|value| value.as_array().cloned())
+            .unwrap()
+            .into_iter()
+            .map(|value| serde_json::to_string(&value).unwrap())
+            .collect();
+
+        let restored = CoreState::from_public_v47_parts(
+            fixture_identity(7),
+            base,
+            entities,
+            belts,
+            fixture_catalog(),
+        )
+        .unwrap();
+        assert_eq!(
+            restored.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+            PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+        );
+        assert!(
+            restored
+                .pure_idle_macro_construction_quantum_pending_credits()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn committed_non_idle_revision_lazily_resets_pure_idle_credit() {
         let mut state = CoreState::from_internal_records(
             fixture_identity(7),
@@ -10133,12 +10788,113 @@ mod tests {
         assert_eq!(state.pure_idle_exact_seconds_used(), 0.0);
 
         state
-            .install_pure_idle_macro_session_progress_with_construction_carry(30.0, 17)
+            .install_pure_idle_macro_session_progress_with_construction_state(
+                30.0,
+                17,
+                PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS,
+                BTreeMap::new(),
+            )
             .unwrap();
         assert_eq!(state.pure_idle_macro_construction_carry_seconds(), 17);
+        assert_eq!(
+            state.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+            PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+        );
+        let pending_credits = BTreeMap::from([("iron_ore".to_owned(), 1)]);
+        state
+            .install_pure_idle_macro_session_progress_with_construction_state(
+                30.0,
+                17,
+                1,
+                pending_credits.clone(),
+            )
+            .unwrap();
+        assert_eq!(
+            state.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+            1
+        );
+        assert_eq!(
+            state.pure_idle_macro_construction_quantum_pending_credits(),
+            pending_credits
+        );
         state.revision += 1;
         assert_eq!(state.pure_idle_macro_exact_seconds_used(), 0.0);
         assert_eq!(state.pure_idle_macro_construction_carry_seconds(), 0);
+        assert_eq!(
+            state.pure_idle_macro_construction_quantum_replay_remaining_seconds(),
+            PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
+        );
+        assert!(
+            state
+                .pure_idle_macro_construction_quantum_pending_credits()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn invalidating_quantum_logistics_directory_preserves_other_prepared_caches() {
+        fn same_arc<T>(before: &Option<Arc<T>>, after: &Option<Arc<T>>) -> bool {
+            match (before, after) {
+                (Some(before), Some(after)) => Arc::ptr_eq(before, after),
+                (None, None) => true,
+                _ => false,
+            }
+        }
+
+        let mut state = CoreState::from_internal_records(
+            fixture_identity(7),
+            &fixture_records_with_belts(Vec::new()),
+            fixture_catalog(),
+        )
+        .unwrap();
+        let parsed = state.parse_entities_parallel().unwrap();
+        state.install_prepared_quantum_logistics_directory(Arc::new(
+            crate::quantum_logistics::QuantumLogisticsDirectory::build(&state, &parsed),
+        ));
+
+        let belt_routes = state.prepared_belt_routes.clone();
+        let belt_activity = state.prepared_belt_activity.clone();
+        let local_peers = state.prepared_local_peer_directory.clone();
+        let quantum_directory = state.prepared_quantum_logistics_directory.clone().unwrap();
+        let construction = state.prepared_construction_runtime.clone();
+        let station_transition = state.prepared_station_mode_transition_runtime.clone();
+        let quantum_transition = state.prepared_quantum_transition_runtime.clone();
+        let interstellar_peers = state.prepared_interstellar_peer_directory.clone();
+        let interstellar_activity = state.prepared_interstellar_route_activity.clone();
+        let parsed_entities = Arc::clone(&state.parsed_entity_runtime);
+        let factory_topology = Arc::clone(&state.factory_topology);
+        let canonical_before = state.canonical_sha256().unwrap();
+
+        state.invalidate_prepared_quantum_logistics_directory();
+
+        assert!(state.prepared_quantum_logistics_directory.is_none());
+        assert_eq!(Arc::strong_count(&quantum_directory), 1);
+        assert!(same_arc(&belt_routes, &state.prepared_belt_routes));
+        assert!(same_arc(&belt_activity, &state.prepared_belt_activity));
+        assert!(same_arc(&local_peers, &state.prepared_local_peer_directory));
+        assert!(same_arc(
+            &construction,
+            &state.prepared_construction_runtime
+        ));
+        assert!(same_arc(
+            &station_transition,
+            &state.prepared_station_mode_transition_runtime
+        ));
+        assert!(same_arc(
+            &quantum_transition,
+            &state.prepared_quantum_transition_runtime
+        ));
+        assert!(same_arc(
+            &interstellar_peers,
+            &state.prepared_interstellar_peer_directory
+        ));
+        assert!(same_arc(
+            &interstellar_activity,
+            &state.prepared_interstellar_route_activity
+        ));
+        assert!(Arc::ptr_eq(&state.parsed_entity_runtime, &parsed_entities));
+        assert!(Arc::ptr_eq(&state.factory_topology, &factory_topology));
+        assert_eq!(state.canonical_sha256().unwrap(), canonical_before);
     }
 
     #[test]

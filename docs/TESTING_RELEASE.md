@@ -1,5 +1,11 @@
 # 测试与发布基线
 
+> **Windows Rust pure-idle v14 当前源码门禁（2026-08-30，当前共享开发树，未发布）**：最终 Rust Core 单线程全量 `716/716`、Host `174/174`，均为 `0` 失败、`0` 跳过。三项审计回归已经进入 Core 全量：pending construction quantum credit 缺少当前正 ordinary release rate 时在安装前原子拒绝；fractional construction tail 只允许 exact path，宏观尾段要求整秒起止且不得向上取整；量子物流 owner 使用长度前缀结构化 key，旧 `order_key` 只排序，含 MOD/Unicode/冒号 ID 的两个 owner 以 `101 = 100 + 1` 验证无别名、无丢料并保持总库存守恒。它们均不改变公开 GameState v47、envelope 或 canonical hash。
+>
+> fresh Release Host 构建后，以 `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 运行完整 Vitest，结果为 **315 文件通过 / 14 条件跳过，2,472 项通过 / 28 条件跳过 / 0 失败**，201.81 秒；long differential 已实际执行，真实玩家档条件用例没有执行。修订发布编排后重跑 `npm run test:native` 为 **453 总项 / 452 通过 / 1 个 Windows symlink 权限条件跳过 / 0 失败**，7.437 秒。当前脚本新纳入此前漏列的 `native-player-authority-state-delivery.test.cjs`、`native-player-authority-pause-ipc.test.cjs`、`native-construction-belt-lane-context.test.cjs`、`native-construction-belt-placement-context.test.cjs`、`native-dyson-workspace-projection-ipc.test.cjs` 与 `account-archive-download.test.cjs`，并验证正式 feed 精确跟随本次成功的标准或 fallback 打包目录、feed 失败不会误报成功；旧 `422/1/0` 只属于扩容前诊断史，不是当前门禁。
+>
+> CI、desktop/Android release 与 release-gate 都会先以单 Cargo job 执行 Rust Core/Host 全量测试，再构建 fresh Release Host，最后才运行对应的 Vitest/native integration，并由脚本测试锁定顺序。这样 Rust 回归、缺 Host 或旧 Host 都不能冒充当前源码通过。该开发树尚未新跑完整 E2E、desktop/Android 打包、安装/覆盖升级、签名或灰度，不能写成 E2E 或原生包已通过。
+
 > **1.2.3 Windows 三层计划本地收口开发门禁（2026-08-28，未发布）**：最终运行时/打包提交 `be80af000295a34208bdbee2a73cd42795eec999`，Build ID `1.2.3+be80af000295`。最终 source 新跑 typecheck；Vitest **201 文件通过 / 14 条件跳过，1,696 项通过 / 29 跳过 / 0 失败**；server **384/2** 加 station **4/4**；Ops **56/6**；Windows native/desktop **179 通过 / 1 symlink 权限条件跳过 / 0 失败**；Rust workspace **244/244**（core 166、Host 78），fmt 与 clippy `-D warnings` 通过；Chromium **431/27/0**（458 总项、0 flaky、0 retry，381,422.982 ms）；durable E2E **7/0/0**（45,963.117 ms）。两份 E2E 均无首次失败复跑，证据为 `artifacts/test-gates/be80af0-e2e-gate-summary.json` 与 `artifacts/test-gates/be80af0-durable-playwright-report.json`。125 个运行时许可证、根/server 生产依赖审计 0 漏洞通过。production build 为 **1,982 modules**，startup 总 gzip **179,916 B**、JS **86,749 B**、CSS **93,167 B**、最大启动 JS **58,974 B**、menu **253,542 B**、forbidden **0**。
 >
 > 真实档门禁使用 44,167,989 字节、45,904 实体、91,955 线路的只读 v47 文件。冻结旧 Host 三轮 exact open 都因估算常驻量 **133,730,449 B** 超过 3× 正文硬门禁 **132,503,967 B** 而失败，因此完整 A/B 未取得；最终包内 Host 三轮 full stress **3/3**，估算 **130,413,884 B**，线程矩阵 **15/15** 跨 `1/2/4/8/auto` 哈希一致，源文件 SHA-256 未变。旧/新打开后 Private Bytes 中位为 **180,060,160 → 168,476,672 B**（-6.433%），拓扑索引 **23,824,603 → 21,798,899 B**（-8.503%），但打开峰值仅 -0.508%，打开中位 **4,201.25 → 4,253.92 ms**（慢 1.254%）。包内原生 exact 中位 **1,260.54 ms**，同轮 JavaScript **1,901.04 ms**；packaged auto 样本抖动明显，只作确定性证据。
@@ -90,11 +96,12 @@
 | 层级 | 命令 | 当前规模 | 覆盖重点 |
 | --- | --- | ---: | --- |
 | 类型检查 | `npm run typecheck` | 全部前端 TS | 严格类型、Vite 配置 |
+| Release Host | `npm run native:build-host` | Rust Host release profile | 必须先于完整 Vitest/native integration，防止缺失或陈旧 Host 导致条件跳过或错误对比 |
 | 单元/领域 | `npm test` | `1.0.43` runtime：1,238 项通过、18 项条件跳过、0 失败；第二轮返修相关 129/129 | 引擎暂停边界、递归制造守恒、Worker/稀疏存档与导入边界、O(E+B) 迁移、manual/return revision、增产剂重载、模式存档隔离、v1-v46 存档和云同步等 |
 | 浏览器 E2E | `npm run test:e2e` | `1.0.43` 同 runtime/test tree：Chromium 356/8、0 失败；production-preview PWA 3/3 | 大档租约/冲突、Worker 导入、revision/backup、当前/历史公告、PWA/version 和完整既有回归 |
 | 云服务 | `npm run test:server` | `1.0.42`：356 项通过、2 项可选夹具跳过；两节点远端结果相同 | 云槽、schema/layout、原子写入、大正文、排行榜和恢复保护 |
 | 运维工具 | `npm run test:ops` | 候选 55/6；代理热修后 56/6；两节点 Linux 各 59/2 | SQLite 一致性快照、异地恢复、Nginx、节点探针、发布备份证据、稳定交接代理、单写锁和切换故障回滚 |
-| 原生配置与发布工具 | `npm run test:native` | 24/24 | 社区更新源默认关闭、HTTPS 通道、Android/桌面更新清单、调试 APK 拒绝、显式发布基址、桌面包内元数据和静态下载页清单门禁 |
+| 原生配置与发布工具 | `npm run test:native` | fresh Release Host：`453` 总项、`452/1/0` | 原有原生/桌面集成，加 authority delivery/pause、施工带线/放置、Dyson workspace、账号归档下载与桌面 fallback/feed 闭环边界 |
 | 第三方许可证 | `npm run licenses:check` | 125 个运行时包 | 根项目/云服务 lockfile、直接依赖通知、完整许可证文本和 public 法律文件一致性 |
 | 生产构建 | `npm run build` | clean source `fceca3e`：1,929 modules，startup gzip 185,923 B，Build ID `1.0.43+fceca3eda51c`，无 `.dirty` | `tsc -b`、Vite chunk、独立 save-inspection Worker、普通离线/宏观 Worker 和 PWA 资源 |
 | Windows setup | `npm run desktop:dist` | 1.0.42 setup；FileVersion/ProductVersion 1.0.42；隔离启动 4 个进程；`NotSigned` | Electron 启动、包内 Build ID、正式 API/更新地址和稳定清单 |
@@ -172,6 +179,8 @@ npm ci
 npm --prefix server ci
 npm run licenses:check
 npm run typecheck
+npm run test:native-core:serial
+npm run native:build-host
 npm test
 npm run test:server
 npm run test:native
@@ -179,6 +188,8 @@ npm run test:ops
 npm run build
 npm run test:e2e
 ```
+
+`test:native-core:serial` 和 `native:build-host` 都使用单 Cargo job；后者使用 Cargo release profile。CI、desktop/Android release 与 release-gate 必须保持 Rust 全量测试、fresh Host 构建、Vitest/native integration 的先后顺序；任一步失败都必须直接失败关闭，不能用条件跳过继续发布门禁。
 
 桌面发布另加：
 

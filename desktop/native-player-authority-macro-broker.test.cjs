@@ -525,7 +525,8 @@ test("uncertain advance and finish recover the exact main-generated identity", a
     revision: 11,
     command: {
       topLevelChanges: [{
-        path: ["timeWarp", "enabled"], operation: "set", value: false,
+        path: ["timeWarp", "intent"], operation: "set",
+        value: { controllerEntityId: "controller", enabled: false },
       }],
     },
   }), true);
@@ -578,7 +579,8 @@ test("a lost normal finish reply replays one recovered terminal receipt without 
     revision: 11,
     command: {
       topLevelChanges: [{
-        path: ["timeWarp", "enabled"], operation: "set", value: false,
+        path: ["timeWarp", "intent"], operation: "set",
+        value: { controllerEntityId: "controller", enabled: false },
       }],
     },
   }), true);
@@ -745,7 +747,8 @@ test("startup-recovered finished cleanup replays only inside the same main-owned
     revision: 13,
     command: {
       topLevelChanges: [{
-        path: ["timeWarp", "enabled"], operation: "set", value: false,
+        path: ["timeWarp", "intent"], operation: "set",
+        value: { controllerEntityId: "controller", enabled: false },
       }],
     },
   }), true);

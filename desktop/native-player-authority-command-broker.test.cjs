@@ -139,6 +139,42 @@ test("black-hole intent crosses the host as a minimal durable command with a set
   });
 });
 
+test("time-warp intent and ejector target cross the host without renderer-derived state", async () => {
+  const timeWarpCommand = command(17, {
+    topLevelChanges: [{
+      path: ["timeWarp", "intent"],
+      operation: "set",
+      value: { controllerEntityId: "controller-a", requestedMultiplier: 16 },
+    }],
+  });
+  const ejectorCommand = command(17, {
+    changedEntities: [{
+      id: "ejector-a",
+      changes: [{
+        path: ["targetDysonOrbitId"],
+        operation: "set",
+        value: "orbit-new",
+      }],
+    }],
+  });
+  for (const expected of [timeWarpCommand, ejectorCommand]) {
+    const { broker, calls } = brokerFixture({
+      commit: async (request) => commandResult(request, {
+        changedEntityIds: expected === ejectorCommand ? ["ejector-a"] : [],
+        changedBeltIds: [],
+        topologyDirty: expected === timeWarpCommand,
+      }),
+    });
+    const receipt = await broker.commit(7, { sessionId: "core-1", command: expected });
+    assert.equal(receipt.revision, 18);
+    assert.deepEqual(calls[0].command, expected);
+    const encoded = JSON.stringify(calls[0].command);
+    assert.equal(encoded.includes("requiredPowerKw"), false);
+    assert.equal(encoded.includes("effectiveMultiplier"), false);
+    assert.equal(encoded.includes("orbitsBySystem"), false);
+  }
+});
+
 test("a durable command retires main-only cleanup even when its renderer disappears before delivery", async () => {
   let trustChecks = 0;
   const observed = [];

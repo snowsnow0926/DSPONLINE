@@ -529,6 +529,14 @@ import {
   type NativeProjectedEntityConfigurationBinding,
   type NativeProjectedSplitterDistributionMode,
 } from "./game/nativeProjectedEntityConfigurationCommands";
+import {
+  createNativeProjectedEjectorOrbitCommand,
+  createNativeProjectedTimeWarpRequestedMultiplierCommand,
+  readNativeProjectedEjectorOrbitFrame,
+  type NativeProjectedEjectorOrbitFrame,
+  type NativeProjectedEjectorOrbitIdentity,
+  type NativeProjectedTimeWarpControllerBinding,
+} from "./game/nativeProjectedTimeWarpEjectorCommands";
 import { createNativeProjectedQuantumItemCapacityCommand } from "./game/nativeProjectedQuantumCommands";
 import {
   createNativeProjectedCargoReturnCommand,
@@ -16487,6 +16495,70 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativePlayerAuthorityActiveFrame,
     nativePlayerAuthorityOwnsRuntime,
   ]);
+  const nativeTimeWarpControllerProjectionBinding = useMemo<
+    NativeProjectedTimeWarpControllerBinding | null
+  >(() => {
+    const configuration = nativeEntityConfigurationProjectionBinding;
+    const workspace = nativeAuthoritativeFactoryWorkspaceFrame;
+    const stellarIdentity = nativeStellarProjectionIdentity;
+    if (!configuration || configuration.entity.buildingId !== "time_warp_device" ||
+        !workspace || !stellarIdentity ||
+        workspace.sessionId !== configuration.sessionId ||
+        workspace.revision !== configuration.revision ||
+        workspace.runStatus.activePlanetId !== configuration.activePlanetId ||
+        stellarIdentity.sessionId !== configuration.sessionId ||
+        stellarIdentity.revision !== configuration.revision) return null;
+    return Object.freeze({
+      ...configuration,
+      registryFingerprint: stellarIdentity.registryFingerprint,
+      simulationSpeed: workspace.simulationSpeed,
+      timeWarp: workspace.timeWarp,
+    });
+  }, [
+    nativeAuthoritativeFactoryWorkspaceFrame,
+    nativeEntityConfigurationProjectionBinding,
+    nativeStellarProjectionIdentity,
+  ]);
+  const nativeEjectorOrbitProjectionIdentity = useMemo<
+    NativeProjectedEjectorOrbitIdentity | null
+  >(() => {
+    const configuration = nativeEntityConfigurationProjectionBinding;
+    const workspace = nativeAuthoritativeFactoryWorkspaceFrame;
+    const stellarIdentity = nativeStellarProjectionIdentity;
+    const activePlanet = factoryActivePlanetNavigationRow;
+    if (!configuration || configuration.entity.buildingId !== "em_rail_ejector" ||
+        !workspace || !stellarIdentity || !activePlanet?.active || !activePlanet.systemId ||
+        activePlanet.planetId !== configuration.activePlanetId ||
+        workspace.sessionId !== configuration.sessionId ||
+        workspace.revision !== configuration.revision ||
+        workspace.runStatus.activePlanetId !== configuration.activePlanetId ||
+        stellarIdentity.sessionId !== configuration.sessionId ||
+        stellarIdentity.revision !== configuration.revision) return null;
+    return Object.freeze({
+      ...configuration,
+      registryFingerprint: stellarIdentity.registryFingerprint,
+      activeSystemId: activePlanet.systemId,
+    });
+  }, [
+    factoryActivePlanetNavigationRow,
+    nativeAuthoritativeFactoryWorkspaceFrame,
+    nativeEntityConfigurationProjectionBinding,
+    nativeStellarProjectionIdentity,
+  ]);
+  const [nativeEjectorOrbitFrame, setNativeEjectorOrbitFrame] =
+    useState<NativeProjectedEjectorOrbitFrame | null>(null);
+  useEffect(() => {
+    let current = true;
+    setNativeEjectorOrbitFrame(null);
+    if (!nativeEjectorOrbitProjectionIdentity) return () => { current = false; };
+    void readNativeProjectedEjectorOrbitFrame(
+      desktopBridge,
+      nativeEjectorOrbitProjectionIdentity,
+    ).then((frame) => {
+      if (current) setNativeEjectorOrbitFrame(frame);
+    });
+    return () => { current = false; };
+  }, [desktopBridge, nativeEjectorOrbitProjectionIdentity]);
   const factorySelectionToolbarReadModel = useMemo(
     () => factoryInteractionRows.source === "native-authoritative"
       ? factoryInteractionRows.selectionToolbarReadModel
@@ -17085,6 +17157,101 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       if (!accepted) setNotice("Rust 没有接受这次微型黑洞启停命令；存档未改变");
     })();
   }, [commitNativeProjectedCommand, gameDialog, nativeEntityConfigurationProjectionBinding]);
+  const changeNativeTimeWarpEnabled = useCallback((
+    entityId: string,
+    enabled: boolean,
+  ): void => {
+    const binding = nativeTimeWarpControllerProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || !binding || !routeIdentity ||
+        !commandSource || binding.entity.id !== entityId ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision ||
+        binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision ||
+        selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId ||
+        selectedBeltIdsRef.current.length !== 0 || selectedBeltIdRef.current !== null ||
+        binding.timeWarp.enabled === enabled) {
+      setNotice("原生时间扭曲主控选择、session 或 revision 已变化；本次启停未提交");
+      return;
+    }
+    // The macro controller owns start/finish ordering. Its toggle command is
+    // now only a controller-bound semantic marker; no renderer-derived power
+    // field is installed before the durable Rust revision returns.
+    handleTimeWarpEnabledChange(enabled);
+  }, [handleTimeWarpEnabledChange, nativeTimeWarpControllerProjectionBinding]);
+  const changeNativeTimeWarpRequestedMultiplier = useCallback((
+    entityId: string,
+    requestedMultiplier: number,
+  ): void => {
+    const binding = nativeTimeWarpControllerProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || !binding || !routeIdentity ||
+        !commandSource || binding.entity.id !== entityId ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision ||
+        binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision ||
+        selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId ||
+        selectedBeltIdsRef.current.length !== 0 || selectedBeltIdRef.current !== null) {
+      setNotice("原生时间扭曲主控选择、session 或 revision 已变化；本次倍率未提交");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+      baseRevision === binding.revision
+        ? createNativeProjectedTimeWarpRequestedMultiplierCommand(binding, requestedMultiplier)
+        : null,
+      (receipt) => setNotice(
+        `已由 Rust 将时间扭曲请求倍率设为 ${requestedMultiplier}x · durable revision ${receipt.revision}`,
+      ),
+    );
+    if (!accepted) setNotice("Rust 没有接受这次时间扭曲倍率命令；存档未改变");
+  }, [commitNativeProjectedCommand, nativeTimeWarpControllerProjectionBinding]);
+  const changeNativeEjectorOrbit = useCallback((
+    entityId: string,
+    orbitId: string,
+  ): void => {
+    const frame = nativeEjectorOrbitFrame;
+    const identity = nativeEjectorOrbitProjectionIdentity;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || !frame || !identity || !routeIdentity ||
+        !commandSource || frame.entity.id !== entityId || identity.entity.id !== entityId ||
+        frame.sessionId !== identity.sessionId || frame.runId !== identity.runId ||
+        frame.revision !== identity.revision || frame.activePlanetId !== identity.activePlanetId ||
+        frame.activeSystemId !== identity.activeSystemId ||
+        identity.sessionId !== routeIdentity.sessionId || identity.runId !== routeIdentity.runId ||
+        identity.revision !== routeIdentity.revision ||
+        identity.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== identity.sessionId || commandSource.runId !== identity.runId ||
+        commandSource.baseRevision !== identity.revision ||
+        selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId ||
+        selectedBeltIdsRef.current.length !== 0 || selectedBeltIdRef.current !== null ||
+        !frame.orbitsById.has(orbitId)) {
+      setNotice("原生弹射器选择、轨道页、session 或 revision 已变化；本次目标未提交");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedEjectorOrbitCommand(frame, orbitId)
+        : null,
+      (receipt) => setNotice(
+        `已由 Rust 更新太阳帆目标轨道 · durable revision ${receipt.revision}`,
+      ),
+    );
+    if (!accepted) setNotice("Rust 没有接受这次太阳帆轨道命令；存档未改变");
+  }, [
+    commitNativeProjectedCommand,
+    nativeEjectorOrbitFrame,
+    nativeEjectorOrbitProjectionIdentity,
+  ]);
   const selectedBelts = factoryInteractionRows.selectedBelts;
   const dockBeltTier = nativePlayerAuthorityOwnsRuntime
     ? nativeBeltPlacementTier ?? beltTier
@@ -18829,6 +18996,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           inspector={factoryInspectorSummaryReadModel}
           multiSelection={factoryMultiSelectionSummaryReadModel}
           entityConfiguration={nativeEntityConfigurationProjectionBinding}
+          timeWarpController={nativeTimeWarpControllerProjectionBinding}
+          ejectorOrbitFrame={nativeEjectorOrbitFrame}
           pending={nativeRemovalContextPending || nativeStackContextPending || nativeBeltLaneContextPending || nativePlayerAuthorityCommandPending}
           onEntityLockChange={(_entityId, locked) => void commitNativeSelectionInteractionLock(locked)}
           onRemoveEntity={(entityId) => void removeNativeOrdinaryBuilding(entityId)}
@@ -18838,6 +19007,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           onEnergyExchangerModeChange={changeNativeEnergyExchangerMode}
           onFuelItemChange={changeNativeFuelItem}
           onBlackHolePausedChange={changeNativeBlackHolePaused}
+          onTimeWarpEnabledChange={changeNativeTimeWarpEnabled}
+          onTimeWarpRequestedMultiplierChange={changeNativeTimeWarpRequestedMultiplier}
+          onEjectorOrbitChange={changeNativeEjectorOrbit}
           onBeltLaneCountChange={(beltId, targetLanes) => void changeNativeOrdinaryBeltLanes(beltId, targetLanes)}
           onBeltPriorityChange={changeNativeOrdinaryBeltPriority}
           onRemoveBelt={(beltId) => void removeNativeOrdinaryBelt(beltId)}

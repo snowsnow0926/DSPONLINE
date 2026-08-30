@@ -497,10 +497,15 @@ class NativePlayerAuthorityMacroBroker {
         value.baseRevision < cached.receipt.revision ||
         value.revision !== value.baseRevision + 1 || !isRecord(value.command) ||
         !Array.isArray(value.command.topLevelChanges)) return false;
-    const disabled = value.command.topLevelChanges.some((change) =>
-      isRecord(change) && Array.isArray(change.path) && change.path.length === 2 &&
-      change.path[0] === "timeWarp" && change.path[1] === "enabled" &&
-      change.operation === "set" && change.value === false);
+    const disabled = value.command.topLevelChanges.some((change) => {
+      if (!isRecord(change) || !Array.isArray(change.path) || change.path.length !== 2 ||
+          change.path[0] !== "timeWarp" || change.operation !== "set") return false;
+      if (change.path[1] === "enabled") return change.value === false;
+      return change.path[1] === "intent" && isRecord(change.value) &&
+        typeof change.value.controllerEntityId === "string" &&
+        change.value.controllerEntityId.length > 0 && change.value.enabled === false &&
+        Object.keys(change.value).length === 2;
+    });
     if (!disabled) return false;
     this.lastRecovered = null;
     return true;

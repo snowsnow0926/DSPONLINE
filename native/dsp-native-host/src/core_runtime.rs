@@ -5273,21 +5273,12 @@ mod tests {
                 "protocolVersion": 1,
                 "baseRevision": base_revision,
                 "topLevelChanges": [{
-                    "path": ["timeWarp", "enabled"],
+                    "path": ["timeWarp", "intent"],
                     "operation": "set",
-                    "value": false
-                }, {
-                    "path": ["timeWarp", "effectiveMultiplier"],
-                    "operation": "set",
-                    "value": 1
-                }, {
-                    "path": ["timeWarp", "requiredPowerKw"],
-                    "operation": "set",
-                    "value": 0
-                }, {
-                    "path": ["timeWarp", "allocatedPowerKw"],
-                    "operation": "set",
-                    "value": 0
+                    "value": {
+                        "controllerEntityId": "controller",
+                        "enabled": false
+                    }
                 }],
                 "changedEntities": [],
                 "addedEntities": [],
@@ -8998,6 +8989,183 @@ mod tests {
     }
 
     #[test]
+    fn ejector_target_leaf_survives_host_wal_cold_reopen() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let mut catalog = player_authority_catalog();
+        catalog["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({ "id": "solar_sail", "name": "solar_sail", "kind": "solid" }));
+        catalog["buildings"].as_array_mut().unwrap().push(json!({
+            "id": "em_rail_ejector",
+            "kind": "machine",
+            "speed": 1,
+            "inputCapacity": 100,
+            "outputCapacity": 0,
+            "powerDemandKw": 1,
+            "powerGenerationKw": 0
+        }));
+        catalog["recipes"].as_array_mut().unwrap().push(json!({
+            "id": "solar_sail_launch",
+            "buildingId": "em_rail_ejector",
+            "duration": 1,
+            "inputs": [{ "itemId": "solar_sail", "amount": 1 }],
+            "outputs": []
+        }));
+        catalog["constructions"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "em_rail_ejector",
+                "outputAmount": 1,
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+            }));
+
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["dysonEngineering"]["orbitsBySystem"]["helios"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "orbit-new",
+                "name": "new",
+                "radius": 18000,
+                "inclination": 12,
+                "longitude": 24,
+                "sailsInOrbit": 0,
+                "totalLaunched": 0,
+                "totalExpired": 0,
+                "decayProgress": 0,
+                "generationKw": 0
+            }));
+        envelope["state"]["entities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "ejector-a",
+                "kind": "machine",
+                "planetId": "home",
+                "position": { "x": 7, "y": 2 },
+                "interactionLocked": false,
+                "buildingId": "em_rail_ejector",
+                "recipeId": "solar_sail_launch",
+                "targetDysonOrbitId": "test-orbit-helios",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            }));
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                catalog.clone(),
+            )
+            .unwrap();
+        let checkpoint = imported.checkpoint.clone();
+        let command = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "baseRevision": checkpoint.revision,
+            "topLevelChanges": [],
+            "changedEntities": [{
+                "id": "ejector-a",
+                "changes": [{
+                    "path": ["targetDysonOrbitId"],
+                    "operation": "set",
+                    "value": "orbit-new"
+                }]
+            }],
+            "addedEntities": [],
+            "removedEntityIds": [],
+            "changedBelts": [],
+            "addedBelts": [],
+            "removedBeltIds": []
+        }))
+        .unwrap();
+        let committed = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "ejector-target-before-cold-reopen".to_owned(),
+                    base_revision: checkpoint.revision,
+                    command: Some(command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        let live_hash = committed
+            .summary
+            .as_ref()
+            .expect("diagnostic commit must return the live summary")
+            .canonical_sha256
+            .clone();
+        registry
+            .export_v47(&store, &imported.session_id, "ejector-target-live", 100)
+            .unwrap();
+        let live: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/ejector-target-live.json")).unwrap(),
+        )
+        .unwrap();
+        let ejector = live["state"]["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["id"] == "ejector-a")
+            .unwrap();
+        assert_eq!(ejector["targetDysonOrbitId"], "orbit-new");
+        let live_state = live["state"].clone();
+
+        drop(registry);
+        drop(store);
+
+        let reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = CoreRegistry::default();
+        let reopened = reopened_registry
+            .open(
+                &reopened_store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                catalog,
+            )
+            .unwrap();
+        assert_eq!(reopened.replayed_wal_entries, 1);
+        assert_eq!(reopened.replayed_revision, committed.revision);
+        assert_eq!(reopened.summary.canonical_sha256, live_hash);
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &reopened.session_id,
+                "ejector-target-replayed",
+                100,
+            )
+            .unwrap();
+        let replayed: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/ejector-target-replayed.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replayed["state"], live_state);
+    }
+
+    #[test]
     fn black_hole_pause_intent_survives_host_wal_cold_reopen_without_touching_ledgers() {
         let root = tempdir().unwrap();
         let mut store = SaveStore::open(root.path()).unwrap();
@@ -10100,6 +10268,27 @@ mod tests {
             .expect("authority remains resumable after cleanup retirement");
         assert!(final_receipt.pending_macro_cleanup_session_id.is_none());
         assert!(final_receipt.pending_macro_cleanup_revision.is_none());
+        let projection = final_registry
+            .factory_read_model_projection(
+                &final_receipt.session_id,
+                &["controller".to_owned()],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(projection["revision"], final_receipt.revision);
+        assert_eq!(projection["shell"]["timeWarp"]["enabled"], false);
+        assert_eq!(
+            projection["shell"]["timeWarp"]["effectiveMultiplier"].as_f64(),
+            Some(1.0)
+        );
+        assert_eq!(
+            projection["shell"]["timeWarp"]["requiredPowerKw"].as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(
+            projection["shell"]["timeWarp"]["allocatedPowerKw"].as_f64(),
+            Some(0.0)
+        );
     }
 
     #[test]

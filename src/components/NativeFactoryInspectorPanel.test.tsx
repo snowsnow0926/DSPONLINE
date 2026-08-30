@@ -4,6 +4,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FactoryInspectorSummaryReadModel, FactoryMultiSelectionSummaryReadModel } from "../game/factoryReadModels";
 import type { NativeProjectedEntityConfigurationBinding } from "../game/nativeProjectedEntityConfigurationCommands";
+import type {
+  NativeProjectedEjectorOrbitFrame,
+  NativeProjectedTimeWarpControllerBinding,
+} from "../game/nativeProjectedTimeWarpEjectorCommands";
 import type { FactoryEntity } from "../game/types";
 import { NativeFactoryInspectorPanel } from "./NativeFactoryInspectorPanel";
 
@@ -454,5 +458,141 @@ describe("NativeFactoryInspectorPanel", () => {
       buildingId: "MOD/fuel-generator" as FactoryEntity["buildingId"],
     });
     expect(host.querySelector("[data-native-fuel-item]")).toBeNull();
+  });
+
+  it("routes time-warp controls only from the same-revision Rust controller projection", () => {
+    const enabled = vi.fn();
+    const multiplier = vi.fn();
+    const controller = projectedEntity({
+      id: "controller-a",
+      buildingId: "time_warp_device",
+      recipeId: undefined,
+      powerPriority: undefined,
+    });
+    const controllerSummary = {
+      ...entity,
+      entityId: controller.id,
+      buildingId: controller.buildingId ?? null,
+      recipeId: null,
+      machineCount: 1,
+      inputItems: { rows: [], totalCount: 0, truncated: false },
+    };
+    const controllerConfiguration = configuration(controller);
+    const controllerProjection: NativeProjectedTimeWarpControllerBinding = {
+      ...controllerConfiguration,
+      registryFingerprint: "7df8cf3a",
+      simulationSpeed: 4,
+      timeWarp: {
+        controllerEntityId: "controller-a",
+        enabled: false,
+        requestedMultiplier: 15,
+        effectiveMultiplier: 4,
+        requiredPowerKw: 0,
+        allocatedPowerKw: 0,
+      },
+    };
+    const render = (timeWarpController: NativeProjectedTimeWarpControllerBinding | null) => act(() => root.render(
+      <NativeFactoryInspectorPanel
+        inspector={inspector({ entity: controllerSummary })}
+        multiSelection={multi({ entityRows: { rows: [controllerSummary], totalCount: 1, truncated: false } })}
+        entityConfiguration={controllerConfiguration}
+        timeWarpController={timeWarpController}
+        pending={false}
+        onEntityLockChange={vi.fn()}
+        onRemoveEntity={vi.fn()}
+        onStackCountChange={vi.fn()}
+        onEntityPowerPriorityChange={vi.fn()}
+        onSplitterDistributionModeChange={vi.fn()}
+        onEnergyExchangerModeChange={vi.fn()}
+        onFuelItemChange={vi.fn()}
+        onBlackHolePausedChange={vi.fn()}
+        onTimeWarpEnabledChange={enabled}
+        onTimeWarpRequestedMultiplierChange={multiplier}
+        onBeltLaneCountChange={vi.fn()}
+        onBeltPriorityChange={vi.fn()}
+        onRemoveBelt={vi.fn()}
+      />,
+    ));
+
+    render(controllerProjection);
+    expect(host.textContent).toContain("请求倍率15x");
+    act(() => host.querySelector<HTMLButtonElement>('[aria-label="原生倍率加一"]')!.click());
+    expect(multiplier).toHaveBeenCalledWith("controller-a", 16);
+    const start = [...host.querySelectorAll<HTMLButtonElement>("[data-native-time-warp-controller] button")]
+      .find((button) => button.textContent?.includes("开始原生纯挂机"))!;
+    act(() => start.click());
+    expect(enabled).toHaveBeenCalledWith("controller-a", true);
+
+    render({ ...controllerProjection, revision: 9 });
+    expect(host.querySelector('[aria-label="Windows 原生时间扭曲请求倍率"]')).toBeNull();
+    expect(host.textContent).toContain("控制保持关闭");
+  });
+
+  it("routes one ejector target from the same-revision bounded orbit page", () => {
+    const changeOrbit = vi.fn();
+    const ejector = projectedEntity({
+      id: "ejector-a",
+      buildingId: "em_rail_ejector",
+      recipeId: "solar_sail_launch",
+      powerPriority: undefined,
+      targetDysonOrbitId: "orbit-old",
+    });
+    const ejectorSummary = {
+      ...entity,
+      entityId: ejector.id,
+      buildingId: ejector.buildingId ?? null,
+      recipeId: ejector.recipeId ?? null,
+      machineCount: 1,
+      inputItems: { rows: [], totalCount: 0, truncated: false },
+    };
+    const ejectorConfiguration = configuration(ejector);
+    const oldOrbit = {
+      orbitId: "orbit-old", name: "旧轨道", nameTruncated: false,
+      radius: 12_000, inclination: 0, longitude: 0, sailsInOrbit: 0,
+      totalLaunched: 0, totalExpired: 0, decayProgress: 0, generationKw: 0,
+    } as const;
+    const newOrbit = { ...oldOrbit, orbitId: "orbit-new", name: "新轨道", radius: 18_000 };
+    const orbitFrame: NativeProjectedEjectorOrbitFrame = {
+      ...ejectorConfiguration,
+      registryFingerprint: "7df8cf3a",
+      activeSystemId: "helios",
+      source: "native-core",
+      orbits: [oldOrbit, newOrbit],
+      orbitsById: new Map([[oldOrbit.orbitId, oldOrbit], [newOrbit.orbitId, newOrbit]]),
+    };
+    const render = (frame: NativeProjectedEjectorOrbitFrame | null) => act(() => root.render(
+      <NativeFactoryInspectorPanel
+        inspector={inspector({ entity: ejectorSummary })}
+        multiSelection={multi({ entityRows: { rows: [ejectorSummary], totalCount: 1, truncated: false } })}
+        entityConfiguration={ejectorConfiguration}
+        ejectorOrbitFrame={frame}
+        pending={false}
+        onEntityLockChange={vi.fn()}
+        onRemoveEntity={vi.fn()}
+        onStackCountChange={vi.fn()}
+        onEntityPowerPriorityChange={vi.fn()}
+        onSplitterDistributionModeChange={vi.fn()}
+        onEnergyExchangerModeChange={vi.fn()}
+        onFuelItemChange={vi.fn()}
+        onBlackHolePausedChange={vi.fn()}
+        onEjectorOrbitChange={changeOrbit}
+        onBeltLaneCountChange={vi.fn()}
+        onBeltPriorityChange={vi.fn()}
+        onRemoveBelt={vi.fn()}
+      />,
+    ));
+
+    render(orbitFrame);
+    const select = host.querySelector<HTMLSelectElement>('[aria-label="Windows 原生太阳帆目标轨道"]')!;
+    expect(select.value).toBe("orbit-old");
+    act(() => {
+      select.value = "orbit-new";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(changeOrbit).toHaveBeenCalledWith("ejector-a", "orbit-new");
+
+    render({ ...orbitFrame, revision: 9 });
+    expect(host.querySelector('[aria-label="Windows 原生太阳帆目标轨道"]')).toBeNull();
+    expect(host.textContent).toContain("旧网页存档不会作为备用来源");
   });
 });

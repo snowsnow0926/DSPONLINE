@@ -1558,6 +1558,24 @@ fn validate_ejector_target_command(
     {
         bail!("native player-authority ejector target command shape is invalid")
     }
+    if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    {
+        bail!("native player-authority ejector target requires the built-in registry")
+    }
+    let active_planet_id = state
+        .base_value()
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority active planet is invalid"))?;
+    if !state
+        .catalog
+        .planets
+        .iter()
+        .any(|planet| planet.id == active_planet_id)
+    {
+        bail!("native player-authority active planet is not in the catalog")
+    }
     let mut entity_ids = HashSet::new();
     let mut shared_orbit_id: Option<&str> = None;
     for record in &command.changed_entities {
@@ -1580,11 +1598,23 @@ fn validate_ejector_target_command(
         let object = entity
             .as_object_mut()
             .ok_or_else(|| anyhow!("native player-authority ejector is invalid"))?;
-        if object.get("buildingId").and_then(Value::as_str) != Some("em_rail_ejector")
-            || !state.catalog.buildings.contains_key("em_rail_ejector")
-            || object.get("interactionLocked").and_then(Value::as_bool) == Some(true)
-            || object.get("targetDysonOrbitId").and_then(Value::as_str) == Some(orbit_id)
+        if object.get("planetId").and_then(Value::as_str) != Some(active_planet_id) {
+            bail!("native player-authority ejector is not on the active planet")
+        }
+        if object.get("interactionLocked").and_then(Value::as_bool) != Some(false) {
+            bail!("native player-authority ejector is locked or malformed")
+        }
+        if object.get("kind").and_then(Value::as_str) != Some("machine")
+            || object.get("buildingId").and_then(Value::as_str) != Some("em_rail_ejector")
+            || state
+                .catalog
+                .buildings
+                .get("em_rail_ejector")
+                .is_none_or(|building| building.kind != "machine")
         {
+            bail!("native player-authority ejector target is not the built-in ejector")
+        }
+        if object.get("targetDysonOrbitId").and_then(Value::as_str) == Some(orbit_id) {
             bail!("native player-authority ejector target transition is invalid")
         }
         object.insert(
@@ -5043,6 +5073,69 @@ struct ValidatedTimeWarpState<'a> {
     paused: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TimeWarpIntentTarget {
+    Enabled(bool),
+    RequestedMultiplier(u64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TimeWarpIntent {
+    controller_entity_id: String,
+    target: TimeWarpIntentTarget,
+}
+
+fn command_contains_time_warp_intent(command: &SimulationCommandPatch) -> bool {
+    command
+        .top_level_changes
+        .iter()
+        .any(|change| path_matches(&change.path, &["timeWarp", "intent"]))
+}
+
+fn require_time_warp_intent(command: &SimulationCommandPatch) -> anyhow::Result<TimeWarpIntent> {
+    if command.top_level_changes.len() != 1
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority time-warp intent shape is invalid")
+    }
+    let change = &command.top_level_changes[0];
+    if !path_matches(&change.path, &["timeWarp", "intent"]) || change.operation != "set" {
+        bail!("native player-authority time-warp intent path is invalid")
+    }
+    let intent = change
+        .value
+        .as_ref()
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority time-warp intent is invalid"))?;
+    let controller_entity_id = intent
+        .get("controllerEntityId")
+        .and_then(Value::as_str)
+        .filter(|entity_id| !entity_id.is_empty() && entity_id.len() <= MAX_PLAYER_ORBIT_ID_BYTES)
+        .ok_or_else(|| anyhow!("native player-authority time-warp controller intent is invalid"))?
+        .to_owned();
+    let target = match (intent.get("enabled"), intent.get("requestedMultiplier")) {
+        (Some(enabled), None) if intent.len() == 2 => {
+            TimeWarpIntentTarget::Enabled(enabled.as_bool().ok_or_else(|| {
+                anyhow!("native player-authority time-warp enabled intent is invalid")
+            })?)
+        }
+        (None, Some(multiplier)) if intent.len() == 2 => {
+            let multiplier = safe_json_integer(Some(multiplier), "time-warp requested multiplier")?;
+            TimeWarpIntentTarget::RequestedMultiplier(multiplier)
+        }
+        _ => bail!("native player-authority time-warp intent fields are invalid"),
+    };
+    Ok(TimeWarpIntent {
+        controller_entity_id,
+        target,
+    })
+}
+
 fn validated_time_warp_state(state: &CoreState) -> anyhow::Result<ValidatedTimeWarpState<'_>> {
     let base = state.base_value();
     let value = base
@@ -5108,6 +5201,19 @@ fn validated_time_warp_state(state: &CoreState) -> anyhow::Result<ValidatedTimeW
 }
 
 fn require_unlocked_time_warp_controller(state: &CoreState, entity_id: &str) -> anyhow::Result<()> {
+    let active_planet_id = state
+        .base_value()
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority active planet is invalid"))?;
+    if !state
+        .catalog
+        .planets
+        .iter()
+        .any(|planet| planet.id == active_planet_id)
+    {
+        bail!("native player-authority active planet is not in the catalog")
+    }
     let index = *state
         .entity_index
         .get(entity_id)
@@ -5116,14 +5222,20 @@ fn require_unlocked_time_warp_controller(state: &CoreState, entity_id: &str) -> 
     let object = entity
         .as_object()
         .ok_or_else(|| anyhow!("native player-authority time-warp controller is invalid"))?;
-    if object.get("buildingId").and_then(Value::as_str) != Some("time_warp_device")
-        || !state.catalog.buildings.contains_key("time_warp_device")
+    if object.get("planetId").and_then(Value::as_str) != Some(active_planet_id) {
+        bail!("native player-authority time-warp controller is not on the active planet")
+    }
+    if object.get("kind").and_then(Value::as_str) != Some("machine")
+        || object.get("buildingId").and_then(Value::as_str) != Some("time_warp_device")
+        || state
+            .catalog
+            .buildings
+            .get("time_warp_device")
+            .is_none_or(|building| building.kind != "machine")
     {
         bail!("native player-authority time-warp controller building is invalid")
     }
-    if let Some(locked) = object.get("interactionLocked")
-        && locked.as_bool() != Some(false)
-    {
+    if object.get("interactionLocked").and_then(Value::as_bool) != Some(false) {
         bail!("native player-authority time-warp controller is locked or malformed")
     }
     Ok(())
@@ -5140,10 +5252,108 @@ fn push_expected_time_warp_change(
     }
 }
 
+fn validate_time_warp_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    let intent = require_time_warp_intent(command)?;
+    if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    {
+        bail!("native player-authority time-warp intent requires the built-in registry")
+    }
+    let current = validated_time_warp_state(state)?;
+    if current.controller_entity_id != Some(intent.controller_entity_id.as_str()) {
+        bail!("native player-authority time-warp controller intent is stale")
+    }
+    require_unlocked_time_warp_controller(state, &intent.controller_entity_id)?;
+    match intent.target {
+        TimeWarpIntentTarget::Enabled(target) => {
+            if current.enabled == target {
+                bail!("native player-authority time-warp enabled target is unchanged")
+            }
+        }
+        TimeWarpIntentTarget::RequestedMultiplier(target) => {
+            if target < 5 || target == current.requested_multiplier {
+                bail!("native player-authority time-warp requested multiplier target is invalid")
+            }
+        }
+    }
+    Ok(())
+}
+
+fn expand_time_warp_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<SimulationCommandPatch> {
+    validate_time_warp_intent(state, command)?;
+    let intent = require_time_warp_intent(command)?;
+    let current = validated_time_warp_state(state)?;
+    let mut expected = Vec::<(Vec<&'static str>, Value)>::new();
+    match intent.target {
+        TimeWarpIntentTarget::Enabled(target) => {
+            if target && current.paused {
+                expected.push((vec!["paused"], Value::from(false)));
+            }
+            push_expected_time_warp_change(
+                &mut expected,
+                current.value,
+                "enabled",
+                Value::from(target),
+            );
+            push_expected_time_warp_change(
+                &mut expected,
+                current.value,
+                "effectiveMultiplier",
+                current.simulation_speed.clone(),
+            );
+            push_expected_time_warp_change(
+                &mut expected,
+                current.value,
+                "requiredPowerKw",
+                Value::from(0),
+            );
+            push_expected_time_warp_change(
+                &mut expected,
+                current.value,
+                "allocatedPowerKw",
+                Value::from(0),
+            );
+        }
+        TimeWarpIntentTarget::RequestedMultiplier(target) => {
+            expected.push((vec!["timeWarp", "requestedMultiplier"], Value::from(target)))
+        }
+    }
+    Ok(SimulationCommandPatch {
+        protocol_version: command.protocol_version,
+        base_revision: command.base_revision,
+        top_level_changes: expected
+            .into_iter()
+            .map(|(path, value)| ValuePatch {
+                path: path
+                    .into_iter()
+                    .map(|segment| PathSegment::Key(segment.to_owned()))
+                    .collect(),
+                operation: "set".to_owned(),
+                value: Some(value),
+            })
+            .collect(),
+        changed_entities: Vec::new(),
+        added_entities: Vec::new(),
+        removed_entity_ids: Vec::new(),
+        changed_belts: Vec::new(),
+        added_belts: Vec::new(),
+        removed_belt_ids: Vec::new(),
+    })
+}
+
 fn validate_time_warp_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
 ) -> anyhow::Result<()> {
+    if command_contains_time_warp_intent(command) {
+        return validate_time_warp_intent(state, command);
+    }
     if command.top_level_changes.is_empty()
         || !command.changed_entities.is_empty()
         || !command.added_entities.is_empty()
@@ -5153,6 +5363,11 @@ fn validate_time_warp_command(
         || !command.removed_belt_ids.is_empty()
     {
         bail!("native player-authority time-warp command shape is invalid")
+    }
+    if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    {
+        bail!("native player-authority time-warp command requires the built-in registry")
     }
     let controller_target = optional_exact_set_patch(
         &command.top_level_changes,
@@ -7365,6 +7580,7 @@ impl CoreState {
         let expanded_fuel_item_intent;
         let expanded_manual_mining_intent;
         let expanded_black_hole_pause_intent;
+        let expanded_time_warp_intent;
         let applied_command = if command_contains_active_planet_intent(command) {
             expanded_active_planet_intent = expand_active_planet_intent(self, command)?;
             &expanded_active_planet_intent
@@ -7385,6 +7601,9 @@ impl CoreState {
         } else if command_contains_black_hole_pause_intent(command) {
             expanded_black_hole_pause_intent = expand_black_hole_pause_intent(self, command)?;
             &expanded_black_hole_pause_intent
+        } else if command_contains_time_warp_intent(command) {
+            expanded_time_warp_intent = expand_time_warp_intent(self, command)?;
+            &expanded_time_warp_intent
         } else {
             command
         };
@@ -8600,8 +8819,8 @@ mod tests {
         state
     }
 
-    fn player_time_warp_state() -> CoreState {
-        let mut state = player_command_state();
+    fn player_time_warp_state_for_registry(registry_fingerprint: &str) -> CoreState {
+        let mut state = player_command_state_for_registry(registry_fingerprint);
         let mut addition = empty_player_command(state.revision);
         addition.added_entities = [
             ("time-warp-a", false, 7.0, 21),
@@ -8638,6 +8857,10 @@ mod tests {
         .collect();
         state.apply_command(&addition).unwrap();
         state
+    }
+
+    fn player_time_warp_state() -> CoreState {
+        player_time_warp_state_for_registry(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT)
     }
 
     fn station_slots(primary_item_id: Option<&str>) -> Value {
@@ -9579,6 +9802,30 @@ mod tests {
         command
     }
 
+    fn time_warp_intent_command(
+        revision: u64,
+        controller_entity_id: &str,
+        target_field: &str,
+        target: Value,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        let mut intent = serde_json::Map::new();
+        intent.insert(
+            "controllerEntityId".to_owned(),
+            Value::from(controller_entity_id),
+        );
+        intent.insert(target_field.to_owned(), target);
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("timeWarp".to_owned()),
+                PathSegment::Key("intent".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(Value::Object(intent)),
+        }];
+        command
+    }
+
     fn dyson_launch_command(revision: u64, field: &str, value: Value) -> SimulationCommandPatch {
         let mut command = empty_player_command(revision);
         command.top_level_changes = vec![ValuePatch {
@@ -9589,6 +9836,26 @@ mod tests {
             operation: "set".to_owned(),
             value: Some(value),
         }];
+        command
+    }
+
+    fn ejector_target_command(
+        revision: u64,
+        entity_ids: &[&str],
+        orbit_id: &str,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.changed_entities = entity_ids
+            .iter()
+            .map(|entity_id| RecordPatch {
+                id: (*entity_id).to_owned(),
+                changes: vec![ValuePatch {
+                    path: vec![PathSegment::Key("targetDysonOrbitId".to_owned())],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from(orbit_id)),
+                }],
+            })
+            .collect();
         command
     }
 
@@ -13489,6 +13756,272 @@ mod tests {
     }
 
     #[test]
+    fn player_authority_time_warp_semantic_intent_is_minimal_and_wal_deterministic() {
+        let mut live = player_time_warp_state();
+        let mut replay = player_time_warp_state();
+        for state in [&mut live, &mut replay] {
+            state
+                .apply_player_authority_command(&time_warp_changes_command(
+                    state.revision,
+                    &[("controllerEntityId", Value::from("time-warp-a"))],
+                ))
+                .unwrap();
+        }
+
+        let multiplier = time_warp_intent_command(
+            live.revision,
+            "time-warp-a",
+            "requestedMultiplier",
+            Value::from(MAX_JAVASCRIPT_SAFE_INTEGER),
+        );
+        assert_eq!(multiplier.top_level_changes.len(), 1);
+        assert_research_intent_replays_identically(&mut live, &mut replay, &multiplier);
+        assert_eq!(
+            live.base_value()["timeWarp"]["requestedMultiplier"],
+            MAX_JAVASCRIPT_SAFE_INTEGER
+        );
+
+        let mut powered_snapshot = time_warp_changes_command(
+            live.revision,
+            &[
+                ("effectiveMultiplier", Value::from(12)),
+                ("requiredPowerKw", Value::from(100_000)),
+                ("allocatedPowerKw", Value::from(80_000)),
+            ],
+        );
+        powered_snapshot.top_level_changes.insert(
+            0,
+            ValuePatch {
+                path: vec![PathSegment::Key("paused".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(true)),
+            },
+        );
+        live.apply_command(&powered_snapshot).unwrap();
+        replay.apply_command(&powered_snapshot).unwrap();
+        let enable =
+            time_warp_intent_command(live.revision, "time-warp-a", "enabled", Value::from(true));
+        assert_research_intent_replays_identically(&mut live, &mut replay, &enable);
+        assert_eq!(live.base_value()["paused"], false);
+        assert_eq!(live.base_value()["timeWarp"]["enabled"], true);
+        assert_eq!(live.base_value()["timeWarp"]["effectiveMultiplier"], 4);
+        assert_eq!(live.base_value()["timeWarp"]["requiredPowerKw"], 0);
+        assert_eq!(live.base_value()["timeWarp"]["allocatedPowerKw"], 0);
+
+        let powered_snapshot = time_warp_changes_command(
+            live.revision,
+            &[
+                ("effectiveMultiplier", Value::from(15)),
+                ("requiredPowerKw", Value::from(200_000)),
+                ("allocatedPowerKw", Value::from(200_000)),
+            ],
+        );
+        live.apply_command(&powered_snapshot).unwrap();
+        replay.apply_command(&powered_snapshot).unwrap();
+        let disable =
+            time_warp_intent_command(live.revision, "time-warp-a", "enabled", Value::from(false));
+        assert_research_intent_replays_identically(&mut live, &mut replay, &disable);
+        assert_eq!(live.base_value()["timeWarp"]["enabled"], false);
+        assert_eq!(live.base_value()["timeWarp"]["effectiveMultiplier"], 4);
+        assert_eq!(live.base_value()["timeWarp"]["requiredPowerKw"], 0);
+        assert_eq!(live.base_value()["timeWarp"]["allocatedPowerKw"], 0);
+    }
+
+    #[test]
+    fn player_authority_time_warp_semantic_intent_rejects_forged_or_stale_state_atomically() {
+        fn selected_state() -> CoreState {
+            let mut state = player_time_warp_state();
+            state
+                .apply_player_authority_command(&time_warp_changes_command(
+                    state.revision,
+                    &[("controllerEntityId", Value::from("time-warp-a"))],
+                ))
+                .unwrap();
+            state
+        }
+
+        let revision = selected_state().revision;
+        let mut deleted = time_warp_intent_command(
+            revision,
+            "time-warp-a",
+            "requestedMultiplier",
+            Value::from(16),
+        );
+        deleted.top_level_changes[0].operation = "delete".to_owned();
+        deleted.top_level_changes[0].value = None;
+        let mut mixed = time_warp_intent_command(
+            revision,
+            "time-warp-a",
+            "requestedMultiplier",
+            Value::from(16),
+        );
+        mixed.top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("paused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(true)),
+        });
+        let mut mixed_entity = time_warp_intent_command(
+            revision,
+            "time-warp-a",
+            "requestedMultiplier",
+            Value::from(16),
+        );
+        mixed_entity.changed_entities.push(RecordPatch {
+            id: "smelter-a".to_owned(),
+            changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("powerPriority".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(3)),
+            }],
+        });
+        let mut both_targets = time_warp_intent_command(
+            revision,
+            "time-warp-a",
+            "requestedMultiplier",
+            Value::from(16),
+        );
+        both_targets.top_level_changes[0]
+            .value
+            .as_mut()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("enabled".to_owned(), Value::from(true));
+        let mut extra_field = time_warp_intent_command(
+            revision,
+            "time-warp-a",
+            "requestedMultiplier",
+            Value::from(16),
+        );
+        extra_field.top_level_changes[0]
+            .value
+            .as_mut()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("effectiveMultiplier".to_owned(), Value::from(16));
+
+        let commands = [
+            time_warp_intent_command(
+                revision - 1,
+                "time-warp-a",
+                "requestedMultiplier",
+                Value::from(16),
+            ),
+            time_warp_intent_command(
+                revision,
+                "time-warp-b",
+                "requestedMultiplier",
+                Value::from(16),
+            ),
+            time_warp_intent_command(
+                revision,
+                &"x".repeat(MAX_PLAYER_ORBIT_ID_BYTES + 1),
+                "requestedMultiplier",
+                Value::from(16),
+            ),
+            time_warp_intent_command(
+                revision,
+                "time-warp-a",
+                "requestedMultiplier",
+                Value::from(15),
+            ),
+            time_warp_intent_command(
+                revision,
+                "time-warp-a",
+                "requestedMultiplier",
+                Value::from(4),
+            ),
+            time_warp_intent_command(
+                revision,
+                "time-warp-a",
+                "requestedMultiplier",
+                Value::from(5.5),
+            ),
+            time_warp_intent_command(
+                revision,
+                "time-warp-a",
+                "requestedMultiplier",
+                Value::from(MAX_JAVASCRIPT_SAFE_INTEGER + 1),
+            ),
+            time_warp_intent_command(revision, "time-warp-a", "enabled", Value::from(false)),
+            time_warp_intent_command(revision, "time-warp-a", "enabled", Value::from("true")),
+            deleted,
+            mixed,
+            mixed_entity,
+            both_targets,
+            extra_field,
+        ];
+        for command in commands {
+            let mut state = selected_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, revision);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        for (field, value) in [
+            ("interactionLocked", Value::from(true)),
+            ("planetId", Value::from("ashen")),
+            ("kind", Value::from("power")),
+            ("buildingId", Value::from("arc_smelter")),
+        ] {
+            let mut state = selected_state();
+            let mutation = entity_leaf_command(state.revision, "time-warp-a", field, value);
+            state.apply_command(&mutation).unwrap();
+            let command = time_warp_intent_command(
+                state.revision,
+                "time-warp-a",
+                "requestedMultiplier",
+                Value::from(16),
+            );
+            let before = state.canonical_sha256().unwrap();
+            assert!(
+                state.apply_player_authority_command(&command).is_err(),
+                "{field}"
+            );
+            assert_eq!(state.canonical_sha256().unwrap(), before, "{field}");
+        }
+
+        let mut modded = player_time_warp_state_for_registry("modded-time-warp-intent");
+        modded
+            .apply_command(&time_warp_changes_command(
+                modded.revision,
+                &[("controllerEntityId", Value::from("time-warp-a"))],
+            ))
+            .unwrap();
+        let command = time_warp_intent_command(
+            modded.revision,
+            "time-warp-a",
+            "requestedMultiplier",
+            Value::from(16),
+        );
+        let before = modded.canonical_sha256().unwrap();
+        assert!(modded.apply_player_authority_command(&command).is_err());
+        assert_eq!(modded.canonical_sha256().unwrap(), before);
+
+        for active_planet_id in ["ashen", "missing"] {
+            let mut state = selected_state();
+            state
+                .apply_command(&top_level_leaf_command(
+                    state.revision,
+                    &["activePlanetId"],
+                    Value::from(active_planet_id),
+                ))
+                .unwrap();
+            let command = time_warp_intent_command(
+                state.revision,
+                "time-warp-a",
+                "requestedMultiplier",
+                Value::from(16),
+            );
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+    }
+
+    #[test]
     fn player_authority_time_warp_commands_fail_closed_without_mutation() {
         let mut delete_multiplier =
             time_warp_changes_command(10, &[("requestedMultiplier", Value::from(16))]);
@@ -14039,18 +14572,11 @@ mod tests {
         assert_eq!(moved.parse_entity(0).unwrap()["position"]["x"], 8.5);
 
         let mut state = player_command_state();
-        let mut target = empty_player_command(state.revision);
-        target.changed_entities = ["ejector-a", "ejector-b"]
-            .into_iter()
-            .map(|id| RecordPatch {
-                id: id.to_owned(),
-                changes: vec![ValuePatch {
-                    path: vec![PathSegment::Key("targetDysonOrbitId".to_owned())],
-                    operation: "set".to_owned(),
-                    value: Some(Value::from("orbit-home-new")),
-                }],
-            })
-            .collect();
+        let mut target = ejector_target_command(
+            state.revision,
+            &["ejector-a", "ejector-b"],
+            "orbit-home-new",
+        );
         state.apply_player_authority_command(&target).unwrap();
         assert_eq!(
             state.parse_entity(1).unwrap()["targetDysonOrbitId"],
@@ -14068,6 +14594,87 @@ mod tests {
         let before = rejected.canonical_sha256().unwrap();
         assert!(rejected.apply_player_authority_command(&target).is_err());
         assert_eq!(rejected.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_ejector_target_rejects_mod_cross_planet_locked_mixed_and_same_atomically() {
+        let base = player_command_state();
+        let revision = base.revision;
+        let mut deleted = ejector_target_command(revision, &["ejector-a"], "orbit-home-new");
+        deleted.changed_entities[0].changes[0].operation = "delete".to_owned();
+        deleted.changed_entities[0].changes[0].value = None;
+        let mut mixed = ejector_target_command(revision, &["ejector-a"], "orbit-home-new");
+        mixed.changed_entities[0].changes.push(ValuePatch {
+            path: vec![PathSegment::Key("powerPriority".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(3)),
+        });
+        let mut mixed_top = ejector_target_command(revision, &["ejector-a"], "orbit-home-new");
+        mixed_top.top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("paused".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(true)),
+        });
+        let commands = [
+            ejector_target_command(revision - 1, &["ejector-a"], "orbit-home-new"),
+            ejector_target_command(revision, &["ejector-a"], "orbit-home-old"),
+            ejector_target_command(revision, &["ejector-a"], "orbit-foreign"),
+            ejector_target_command(
+                revision,
+                &["ejector-a"],
+                &"x".repeat(MAX_PLAYER_ORBIT_ID_BYTES + 1),
+            ),
+            ejector_target_command(revision, &["smelter-a"], "orbit-home-new"),
+            deleted,
+            mixed,
+            mixed_top,
+        ];
+        for command in commands {
+            let mut state = player_command_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, revision);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        for (field, value) in [
+            ("interactionLocked", Value::from(true)),
+            ("planetId", Value::from("ashen")),
+            ("kind", Value::from("power")),
+            ("buildingId", Value::from("arc_smelter")),
+        ] {
+            let mut state = player_command_state();
+            let mutation = entity_leaf_command(state.revision, "ejector-a", field, value);
+            state.apply_command(&mutation).unwrap();
+            let command = ejector_target_command(state.revision, &["ejector-a"], "orbit-home-new");
+            let before = state.canonical_sha256().unwrap();
+            assert!(
+                state.apply_player_authority_command(&command).is_err(),
+                "{field}"
+            );
+            assert_eq!(state.canonical_sha256().unwrap(), before, "{field}");
+        }
+
+        let mut modded = player_command_state_for_registry("modded-ejector-target");
+        let command = ejector_target_command(modded.revision, &["ejector-a"], "orbit-home-new");
+        let before = modded.canonical_sha256().unwrap();
+        assert!(modded.apply_player_authority_command(&command).is_err());
+        assert_eq!(modded.canonical_sha256().unwrap(), before);
+
+        for active_planet_id in ["ashen", "missing"] {
+            let mut state = player_command_state();
+            state
+                .apply_command(&top_level_leaf_command(
+                    state.revision,
+                    &["activePlanetId"],
+                    Value::from(active_planet_id),
+                ))
+                .unwrap();
+            let command = ejector_target_command(state.revision, &["ejector-a"], "orbit-home-new");
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
     }
 
     #[test]

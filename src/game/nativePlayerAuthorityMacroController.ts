@@ -6,7 +6,8 @@ import type {
 } from "../desktop";
 import type { FactoryTimeWarpReadModel } from "./factoryReadModels";
 import type { NativePlayerAuthorityCommandSource } from "./nativePlayerAuthorityCommandSource";
-import type { SimulationCommandPatch, SimulationValuePatch } from "./simulationRuntimeProtocol";
+import { createNativeTimeWarpSemanticIntentCommand } from "./nativeProjectedTimeWarpEjectorCommands";
+import type { SimulationCommandPatch } from "./simulationRuntimeProtocol";
 
 const MAX_MACRO_BUDGET_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 const PERIODIC_WINDOW_MILLISECONDS = 1_000;
@@ -130,20 +131,6 @@ function errorCode(error: unknown): string {
     : "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED";
 }
 
-function emptyCommand(baseRevision: number, topLevelChanges: SimulationValuePatch[]): SimulationCommandPatch {
-  return {
-    protocolVersion: 1,
-    baseRevision,
-    topLevelChanges,
-    changedEntities: [],
-    addedEntities: [],
-    removedEntityIds: [],
-    changedBelts: [],
-    addedBelts: [],
-    removedBeltIds: [],
-  };
-}
-
 export function createNativeTimeWarpToggleCommand(
   baseRevision: number,
   simulationSpeed: number,
@@ -152,24 +139,12 @@ export function createNativeTimeWarpToggleCommand(
 ): SimulationCommandPatch | null {
   if (!Number.isSafeInteger(baseRevision) || baseRevision < 0 ||
       !Number.isSafeInteger(simulationSpeed) || simulationSpeed < 1 ||
+      typeof timeWarp.controllerEntityId !== "string" || !timeWarp.controllerEntityId ||
       typeof timeWarp.enabled !== "boolean" || timeWarp.enabled === enabled) return null;
-  const changes: SimulationValuePatch[] = [{
-    path: ["timeWarp", "enabled"],
-    operation: "set",
-    value: enabled,
-  }];
-  if (!enabled) {
-    if (timeWarp.effectiveMultiplier !== simulationSpeed) changes.push({
-      path: ["timeWarp", "effectiveMultiplier"], operation: "set", value: simulationSpeed,
-    });
-    if (timeWarp.requiredPowerKw !== 0) changes.push({
-      path: ["timeWarp", "requiredPowerKw"], operation: "set", value: 0,
-    });
-    if (timeWarp.allocatedPowerKw !== 0) changes.push({
-      path: ["timeWarp", "allocatedPowerKw"], operation: "set", value: 0,
-    });
-  }
-  return emptyCommand(baseRevision, changes);
+  return createNativeTimeWarpSemanticIntentCommand(baseRevision, {
+    controllerEntityId: timeWarp.controllerEntityId,
+    enabled,
+  });
 }
 
 function poweredMultiplier(

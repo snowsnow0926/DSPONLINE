@@ -3381,6 +3381,22 @@ pub(crate) fn deposit_construction_refund(
     Ok(accepted)
 }
 
+/// Preview the exact shared-inventory acceptance for a construction refund
+/// without mutating `base`. Construction cancellation uses this to prove that
+/// every possible per-center refund order has the same persisted outcome
+/// before it writes any tray, fleet, buffer, or quantum inventory field.
+pub(crate) fn preview_construction_refund_acceptance(
+    base: &Map<String, Value>,
+    item_id: &str,
+    requested: &BigUint,
+) -> anyhow::Result<BigUint> {
+    if requested.is_zero() {
+        return Ok(BigUint::zero());
+    }
+    let mut network = parse_network(base)?;
+    Ok(deposit(&mut network, item_id, requested))
+}
+
 fn record_immediate_upload(
     base: &Map<String, Value>,
     bandwidth: RuntimeBandwidth,

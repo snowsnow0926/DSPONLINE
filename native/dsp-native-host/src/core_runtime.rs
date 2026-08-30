@@ -4551,6 +4551,110 @@ mod tests {
         catalog
     }
 
+    fn player_authority_construction_automation_catalog() -> Value {
+        let mut catalog = player_authority_catalog();
+        catalog["planets"].as_array_mut().unwrap().push(json!({
+            "id": "ashen",
+            "name": "ashen",
+            "systemId": "sigma",
+            "kind": "terrestrial",
+            "orbitIndex": 1,
+            "simulationOrder": 1,
+            "orbitalYields": {}
+        }));
+        catalog["items"].as_array_mut().unwrap().extend([
+            json!({ "id": "logistics_drone", "name": "logistics_drone", "kind": "solid" }),
+            json!({ "id": "logistics_vessel", "name": "logistics_vessel", "kind": "solid" }),
+            json!({ "id": "space_warper", "name": "space_warper", "kind": "solid" }),
+        ]);
+        catalog["buildings"].as_array_mut().unwrap().extend([
+            json!({
+                "id": "construction_center",
+                "kind": "machine",
+                "speed": 1,
+                "inputCapacity": 100000000,
+                "outputCapacity": 100000000
+            }),
+            json!({
+                "id": "orbital_cargo_terminal",
+                "kind": "storage",
+                "speed": 1,
+                "inputCapacity": 100000000,
+                "outputCapacity": 100000000
+            }),
+        ]);
+        catalog["recipes"].as_array_mut().unwrap().extend([
+            json!({
+                "id": "logistics_drone",
+                "buildingId": "arc_smelter",
+                "duration": 4,
+                "requiredTechId": "planetary_logistics",
+                "inputs": [{ "itemId": "iron_ingot", "amount": 1 }],
+                "outputs": [{ "itemId": "logistics_drone", "amount": 1 }]
+            }),
+            json!({
+                "id": "logistics_vessel",
+                "buildingId": "arc_smelter",
+                "duration": 8,
+                "requiredTechId": "interstellar_logistics",
+                "inputs": [{ "itemId": "iron_ingot", "amount": 1 }],
+                "outputs": [{ "itemId": "logistics_vessel", "amount": 1 }]
+            }),
+        ]);
+        catalog["constructions"].as_array_mut().unwrap().extend([
+            json!({
+                "id": "construction_center",
+                "outputAmount": 1,
+                "requiredTechId": "construction_automation",
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+            }),
+            json!({
+                "id": "orbital_cargo_terminal",
+                "outputAmount": 1,
+                "requiredTechId": "universe_matrix",
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+            }),
+        ]);
+        catalog["technologies"].as_array_mut().unwrap().extend([
+            json!({
+                "id": "construction_automation",
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }],
+                "prerequisites": []
+            }),
+            json!({
+                "id": "construction_capacity_1",
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }],
+                "prerequisites": ["construction_automation"]
+            }),
+            json!({
+                "id": "construction_capacity_2",
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }],
+                "prerequisites": ["construction_capacity_1"]
+            }),
+            json!({
+                "id": "quantum_logistics_network",
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }],
+                "prerequisites": ["construction_automation"]
+            }),
+            json!({
+                "id": "planetary_logistics",
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }],
+                "prerequisites": []
+            }),
+            json!({
+                "id": "interstellar_logistics",
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }],
+                "prerequisites": ["planetary_logistics"]
+            }),
+            json!({
+                "id": "universe_matrix",
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }],
+                "prerequisites": []
+            }),
+        ]);
+        catalog
+    }
+
     fn player_authority_macro_catalog() -> Value {
         let mut catalog = player_authority_catalog();
         catalog["buildings"].as_array_mut().unwrap().extend([
@@ -5109,6 +5213,115 @@ mod tests {
         serde_json::to_vec(&envelope).unwrap()
     }
 
+    fn player_authority_construction_automation_envelope() -> Vec<u8> {
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["research"]["completedTechIds"] = json!([
+            "construction_automation",
+            "construction_capacity_1",
+            "construction_capacity_2",
+            "quantum_logistics_network",
+            "planetary_logistics",
+            "interstellar_logistics",
+            "universe_matrix"
+        ]);
+        envelope["state"]["constructionAutomation"] = json!({
+            "enabled": false,
+            "targetStock": { "arc_smelter": 2 },
+            "cursor": 3,
+            "totalCrafted": 7,
+            "lastCraftedId": "arc_smelter",
+            "destroyedByproducts": { "iron_ore": 5 },
+            "jobs": {
+                "construction-center-a": {
+                    "constructionId": "arc_smelter",
+                    "steps": [{ "kind": "building", "constructionId": "arc_smelter" }],
+                    "stepIndex": 0,
+                    "elapsedSeconds": 1,
+                    "inventory": { "iron_ingot": 9, "logistics_drone": 2 }
+                },
+                "construction-center-b": {
+                    "constructionId": "arc_smelter",
+                    "steps": [{ "kind": "building", "constructionId": "arc_smelter" }],
+                    "stepIndex": 0,
+                    "elapsedSeconds": 2,
+                    "inventory": { "iron_ingot": 4 }
+                },
+                "construction-center-unrelated": {
+                    "constructionId": "logistics_vessel",
+                    "steps": [{ "kind": "fleet", "itemId": "logistics_vessel", "amount": 1 }],
+                    "stepIndex": 0,
+                    "elapsedSeconds": 0,
+                    "inventory": { "iron_ingot": 6 }
+                }
+            },
+            "quantumMaterialBuffer": {
+                "construction-center-a": { "iron_ingot": 11 },
+                "construction-center-b": { "iron_ingot": 7, "space_warper": 3 },
+                "construction-center-unrelated": { "iron_ingot": 2 }
+            }
+        });
+        envelope["state"]["quantumLogisticsNetwork"] = json!({
+            "enabled": true,
+            "inventory": { "iron_ingot": "9980", "space_warper": "9997" },
+            "itemCapacities": { "iron_ingot": "10000", "space_warper": "10000" },
+            "routingCursors": { "iron_ingot": 7 },
+            "uploadRoutingCursors": { "iron_ingot": 9 }
+        });
+        envelope["state"]["orbitalStation"] = json!({ "status": "operational" });
+        envelope["state"]["construction"]["construction_center"] = Value::from(0);
+        envelope["state"]["construction"]["orbital_cargo_terminal"] = Value::from(0);
+        envelope["state"]["planetTrays"]["ashen"] = json!({ "space_warper": 7 });
+        envelope["state"]["entities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "construction-center-a",
+                "kind": "machine",
+                "planetId": "home",
+                "position": { "x": 9, "y": 2 },
+                "interactionLocked": false,
+                "buildingId": "construction_center",
+                "powerGridId": "grid-a",
+                "powerPriority": 2,
+                "recipeId": null,
+                "machineCount": 2,
+                "minerCount": 0,
+                "inputs": { "iron_ingot": 13 },
+                "outputs": { "arc_smelter": 17 },
+                "progress": 0.25,
+                "routingCursor": 0,
+                "utilization": 0.5,
+                "productionRate": 0
+            }));
+        envelope["state"]["entities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "construction-center-b",
+                "kind": "machine",
+                "planetId": "ashen",
+                "position": { "x": 10, "y": 2 },
+                "interactionLocked": false,
+                "buildingId": "construction_center",
+                "powerGridId": "grid-b",
+                "powerPriority": 2,
+                "recipeId": null,
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": { "iron_ingot": 3 },
+                "outputs": {},
+                "progress": 0.5,
+                "routingCursor": 0,
+                "utilization": 0.25,
+                "productionRate": 0
+            }));
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        serde_json::to_vec(&envelope).unwrap()
+    }
+
     fn player_authority_fixture() -> (
         tempfile::TempDir,
         SaveStore,
@@ -5156,6 +5369,57 @@ mod tests {
             player_authority_station_slot_envelope(),
             player_authority_station_inventory_catalog(),
         )
+    }
+
+    fn player_authority_construction_automation_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        player_authority_fixture_from_parts(
+            player_authority_construction_automation_envelope(),
+            player_authority_construction_automation_catalog(),
+        )
+    }
+
+    fn persisted_inventory_amount(value: Option<&Value>) -> u128 {
+        value
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .map(u128::from)
+                    .or_else(|| value.as_str()?.parse::<u128>().ok())
+            })
+            .unwrap_or(0)
+    }
+
+    fn construction_owned_material_total(state: &Value, item_id: &str) -> u128 {
+        let mut total = persisted_inventory_amount(state["tray"].get(item_id));
+        if let Some(planet_trays) = state["planetTrays"].as_object() {
+            total += planet_trays
+                .values()
+                .map(|tray| persisted_inventory_amount(tray.get(item_id)))
+                .sum::<u128>();
+        }
+        total += persisted_inventory_amount(state["portableFleet"].get(item_id));
+        total +=
+            persisted_inventory_amount(state["quantumLogisticsNetwork"]["inventory"].get(item_id));
+        if let Some(jobs) = state["constructionAutomation"]["jobs"].as_object() {
+            total += jobs
+                .values()
+                .map(|job| persisted_inventory_amount(job["inventory"].get(item_id)))
+                .sum::<u128>();
+        }
+        if let Some(buffers) = state["constructionAutomation"]["quantumMaterialBuffer"].as_object()
+        {
+            total += buffers
+                .values()
+                .map(|buffer| persisted_inventory_amount(buffer.get(item_id)))
+                .sum::<u128>();
+        }
+        total
     }
 
     fn player_authority_belt_fixture() -> (
@@ -5674,6 +5938,34 @@ mod tests {
                         "value": { "slotIndex": 0, "itemId": "iron_ingot" }
                     }]
                 }],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn player_authority_construction_automation_intent_command(
+        base_revision: u64,
+        command_id: &str,
+        intent: Value,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [{
+                    "path": ["constructionAutomation", "intent"],
+                    "operation": "set",
+                    "value": intent
+                }],
+                "changedEntities": [],
                 "addedEntities": [],
                 "removedEntityIds": [],
                 "changedBelts": [],
@@ -9469,6 +9761,348 @@ mod tests {
         )
         .unwrap();
         assert_eq!(replayed["state"], live_state);
+    }
+
+    #[test]
+    fn construction_automation_semantic_intents_survive_generic_cold_wal_reopen() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = player_authority_construction_automation_envelope();
+        let source: Value = serde_json::from_slice(&bytes).unwrap();
+        let source_material_totals = ["iron_ingot", "space_warper", "logistics_drone"]
+            .map(|item_id| construction_owned_material_total(&source["state"], item_id));
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_construction_automation_catalog(),
+            )
+            .unwrap();
+        let checkpoint = imported.checkpoint.clone();
+
+        let enabled_command = player_authority_construction_automation_intent_command(
+            checkpoint.revision,
+            "construction-enabled-before-cold-reopen",
+            json!({ "kind": "enabled", "enabled": true }),
+        )
+        .command;
+        let enabled = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "construction-enabled-before-cold-reopen".to_owned(),
+                    base_revision: checkpoint.revision,
+                    command: Some(enabled_command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        let quantum_command = player_authority_construction_automation_intent_command(
+            enabled.revision,
+            "construction-quantum-before-cold-reopen",
+            json!({ "kind": "quantumSupplyEnabled", "enabled": true }),
+        )
+        .command;
+        let quantum = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "construction-quantum-before-cold-reopen".to_owned(),
+                    base_revision: enabled.revision,
+                    command: Some(quantum_command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        let stock_command = player_authority_construction_automation_intent_command(
+            quantum.revision,
+            "construction-stock-before-cold-reopen",
+            json!({
+                "kind": "targetStock",
+                "targetId": "logistics_vessel",
+                "target": 500
+            }),
+        )
+        .command;
+        let stock = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "construction-stock-before-cold-reopen".to_owned(),
+                    base_revision: quantum.revision,
+                    command: Some(stock_command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        let clear_command = player_authority_construction_automation_intent_command(
+            stock.revision,
+            "construction-clear-before-cold-reopen",
+            json!({
+                "kind": "targetStock",
+                "targetId": "arc_smelter",
+                "target": 0
+            }),
+        )
+        .command;
+        let cleared = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "construction-clear-before-cold-reopen".to_owned(),
+                    base_revision: stock.revision,
+                    command: Some(clear_command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(cleared.revision, checkpoint.revision + 4);
+
+        let wal = store
+            .read_wal(&checkpoint.slot, checkpoint.revision)
+            .unwrap();
+        assert_eq!(wal.len(), 4);
+        let wal_payload = serde_json::to_string(&wal).unwrap();
+        assert!(wal_payload.contains("constructionAutomation"));
+        assert!(wal_payload.contains("quantumSupplyEnabled"));
+        assert!(wal_payload.contains("logistics_vessel"));
+        assert!(!wal_payload.contains("quantumMaterialBuffer"));
+        assert!(!wal_payload.contains("construction-center-a"));
+        assert!(!wal_payload.contains("constructionQueue"));
+        assert!(!wal_payload.contains("portableFleet"));
+
+        registry
+            .export_v47(
+                &store,
+                &imported.session_id,
+                "construction-intents-live",
+                100,
+            )
+            .unwrap();
+        let live: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/construction-intents-live.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(live["state"]["constructionAutomation"]["enabled"], true);
+        assert_eq!(
+            live["state"]["constructionAutomation"]["quantumSourceEnabled"],
+            true
+        );
+        assert_eq!(
+            live["state"]["constructionAutomation"]["targetStock"]["logistics_vessel"],
+            500
+        );
+        assert!(
+            live["state"]["constructionAutomation"]["targetStock"]
+                .get("arc_smelter")
+                .is_none()
+        );
+        assert_eq!(
+            live["state"]["constructionAutomation"]["jobs"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["construction-center-unrelated"]
+        );
+        assert!(
+            live["state"]["constructionAutomation"]
+                .get("quantumMaterialBuffer")
+                .is_none()
+        );
+        assert_eq!(
+            live["state"]["quantumLogisticsNetwork"]["inventory"]["iron_ingot"],
+            "10000"
+        );
+        assert_eq!(
+            live["state"]["quantumLogisticsNetwork"]["inventory"]["space_warper"],
+            "10000"
+        );
+        assert_eq!(live["state"]["tray"]["iron_ingot"], 9);
+        assert_eq!(live["state"]["planetTrays"]["ashen"]["iron_ingot"], 4);
+        assert_eq!(live["state"]["planetTrays"]["ashen"]["space_warper"], 7);
+        assert_eq!(live["state"]["portableFleet"]["logistics_drone"], 2);
+        let center = live["state"]["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["id"] == "construction-center-a")
+            .unwrap();
+        assert_eq!(center["inputs"]["iron_ingot"], 13);
+        for (index, item_id) in ["iron_ingot", "space_warper", "logistics_drone"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(
+                construction_owned_material_total(&live["state"], item_id),
+                source_material_totals[index],
+                "{item_id}"
+            );
+        }
+        let live_state = live["state"].clone();
+        let live_hash = cleared.summary.as_ref().unwrap().canonical_sha256.clone();
+
+        drop(registry);
+        drop(store);
+        let reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = CoreRegistry::default();
+        let reopened = reopened_registry
+            .open(
+                &reopened_store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_construction_automation_catalog(),
+            )
+            .unwrap();
+        assert_eq!(reopened.replayed_wal_entries, 4);
+        assert_eq!(reopened.replayed_revision, cleared.revision);
+        assert_eq!(reopened.summary.canonical_sha256, live_hash);
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &reopened.session_id,
+                "construction-intents-replayed",
+                100,
+            )
+            .unwrap();
+        let replayed: Value = serde_json::from_slice(
+            &std::fs::read(
+                root.path()
+                    .join("exports/construction-intents-replayed.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replayed["state"], live_state);
+    }
+
+    #[test]
+    fn construction_automation_intents_are_atomic_across_host_durable_boundaries() {
+        for (label, intent) in [
+            ("enabled", json!({ "kind": "enabled", "enabled": true })),
+            (
+                "quantum",
+                json!({ "kind": "quantumSupplyEnabled", "enabled": true }),
+            ),
+            (
+                "target",
+                json!({
+                    "kind": "targetStock",
+                    "targetId": "arc_smelter",
+                    "target": 0
+                }),
+            ),
+        ] {
+            let command_id = format!("construction-{label}-boundary");
+            let (_clean_root, mut clean_store, mut clean_registry, clean_session, checkpoint) =
+                player_authority_construction_automation_fixture();
+            let clean = clean_registry
+                .commit_player_authority_command(
+                    &mut clean_store,
+                    &clean_session,
+                    player_authority_construction_automation_intent_command(
+                        checkpoint.revision,
+                        &command_id,
+                        intent.clone(),
+                    ),
+                )
+                .unwrap_or_else(|error| panic!("{label}: {error:#}"));
+            assert!(clean.changed_entity_ids.is_empty(), "{label}");
+            assert!(clean.changed_belt_ids.is_empty(), "{label}");
+            assert!(clean.topology_dirty, "{label}");
+
+            for fault in [
+                PlayerAuthorityCommandFault::AfterStage,
+                PlayerAuthorityCommandFault::AfterWal,
+                PlayerAuthorityCommandFault::AfterCheckpoint,
+                PlayerAuthorityCommandFault::AfterReceipt,
+                PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
+            ] {
+                let (_root, mut store, mut registry, session_id, checkpoint) =
+                    player_authority_construction_automation_fixture();
+                let before = registry.status(&session_id).unwrap();
+                let request = || {
+                    player_authority_construction_automation_intent_command(
+                        checkpoint.revision,
+                        &command_id,
+                        intent.clone(),
+                    )
+                };
+                let error = registry
+                    .commit_player_authority_command_internal(
+                        &mut store,
+                        &session_id,
+                        request(),
+                        PlayerAuthorityCommandKind::Gameplay,
+                        fault,
+                    )
+                    .unwrap_err();
+                assert!(
+                    format!("{error:#}").contains("lost response"),
+                    "{label}/{fault:?}: {error:#}"
+                );
+                if fault == PlayerAuthorityCommandFault::AfterStage {
+                    let after = registry.status(&session_id).unwrap();
+                    assert_eq!(after.revision, before.revision, "{label}");
+                    assert_eq!(after.canonical_sha256, before.canonical_sha256, "{label}");
+                }
+
+                drop(registry);
+                let published = store.recover("normal-main").unwrap().unwrap();
+                let mut reopened = CoreRegistry::default();
+                let opened = reopened
+                    .open(
+                        &store,
+                        "normal-main",
+                        published.generation,
+                        &published.root_hash,
+                        published.revision,
+                        &published.registry_fingerprint,
+                        player_authority_construction_automation_catalog(),
+                    )
+                    .unwrap();
+                let recovered = reopened
+                    .commit_player_authority_command(&mut store, &opened.session_id, request())
+                    .unwrap_or_else(|error| panic!("{label}/{fault:?}: {error:#}"));
+                assert!(recovered.duplicate, "{label}/{fault:?}");
+                assert_eq!(recovered.revision, clean.revision, "{label}/{fault:?}");
+                assert_eq!(
+                    recovered.summary.canonical_sha256, clean.summary.canonical_sha256,
+                    "{label}/{fault:?}"
+                );
+                assert!(recovered.changed_entity_ids.is_empty(), "{label}/{fault:?}");
+                assert!(recovered.changed_belt_ids.is_empty(), "{label}/{fault:?}");
+                assert!(recovered.topology_dirty, "{label}/{fault:?}");
+                let lease = store.require_exact_realtime_lease().unwrap();
+                assert_eq!(
+                    lease.acknowledged.revision, recovered.revision,
+                    "{label}/{fault:?}"
+                );
+                assert!(lease.pending_command.is_none(), "{label}/{fault:?}");
+            }
+        }
     }
 
     #[test]

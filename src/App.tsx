@@ -644,6 +644,18 @@ import {
 import { selectNativeAuthoritativeFactoryWorkspaceFrame } from "./game/nativeFactoryWorkspaceFrame";
 import { selectNativeConstructionCenterWorkspaceFrame } from "./game/nativeConstructionCenterWorkspace";
 import {
+  nativeConstructionCenterIdentityMatchesFrame,
+  type NativeConstructionCenterFrameIdentity,
+  type NativeConstructionCenterIntentKind,
+  type NativeConstructionCenterPendingIdentity,
+  type NativeConstructionCenterTargetStockSubmission,
+} from "./game/nativeConstructionCenterIntent";
+import {
+  createNativeConstructionAutomationEnabledIntentCommand,
+  createNativeConstructionAutomationQuantumSupplyIntentCommand,
+  createNativeConstructionAutomationTargetStockIntentCommand,
+} from "./game/nativeConstructionAutomationIntentCommands";
+import {
   FACTORY_READ_MODEL_LIMITS,
   FACTORY_READ_MODEL_SCHEMA,
   type FactoryConstructionHeadlineReadModel,
@@ -2572,6 +2584,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const nativeManualMiningLastAttemptedFrameKeyRef = useRef<string | null>(null);
   const nativePlayerAuthorityPauseInFlightRef = useRef(false);
   const [nativePlayerAuthorityCommandPending, setNativePlayerAuthorityCommandPending] = useState(false);
+  const [nativeConstructionCenterPendingIdentity, setNativeConstructionCenterPendingIdentity] = useState<
+    NativeConstructionCenterPendingIdentity | null
+  >(null);
   if (!nativePlayerAuthorityActiveFrame) {
     nativePlayerAuthorityCommandBindingRef.current = null;
   } else {
@@ -3226,6 +3241,54 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     : nativeFactoryThinViewSnapshot.status === "ready" || nativeFactoryThinViewSnapshot.status === "unavailable"
       ? "unavailable" as const
       : "loading" as const;
+  const nativeConstructionCenterWorkspaceFrameRef = useRef(nativeConstructionCenterWorkspaceFrame);
+  const nativeConstructionCenterOpenRef = useRef(constructionCenterOpen);
+  const nativeConstructionCenterPendingIdentityRef = useRef(nativeConstructionCenterPendingIdentity);
+  nativeConstructionCenterWorkspaceFrameRef.current = nativeConstructionCenterWorkspaceFrame;
+  nativeConstructionCenterOpenRef.current = constructionCenterOpen;
+  nativeConstructionCenterPendingIdentityRef.current = nativeConstructionCenterPendingIdentity;
+  useEffect(() => {
+    const pending = nativeConstructionCenterPendingIdentityRef.current;
+    if (!pending) return;
+    const current = nativeConstructionCenterWorkspaceFrame;
+    const activeFrameDrifted = Boolean(nativePlayerAuthorityActiveFrame) && (
+      nativePlayerAuthorityActiveFrame!.sessionId !== pending.sessionId ||
+      nativePlayerAuthorityActiveFrame!.runId !== pending.runId
+    );
+    const projectionIdentityDrifted = Boolean(current) && (
+      current!.sessionId !== pending.sessionId || current!.runId !== pending.runId ||
+      current!.activePlanetId !== pending.activePlanetId
+    );
+    const failedBeforeAck = !nativePlayerAuthorityCommandPending && pending.expectedRevision === null;
+    const freshProjectionArrived = !nativePlayerAuthorityCommandPending && pending.expectedRevision !== null &&
+      Boolean(current) && current!.sessionId === pending.sessionId && current!.runId === pending.runId &&
+      current!.activePlanetId === pending.activePlanetId && current!.revision >= pending.expectedRevision;
+    if (!nativePlayerAuthorityOwnsRuntime || activeFrameDrifted || projectionIdentityDrifted ||
+        nativeFactoryProjectionPlanetId !== pending.activePlanetId ||
+        failedBeforeAck || freshProjectionArrived) {
+      nativeConstructionCenterPendingIdentityRef.current = null;
+      setNativeConstructionCenterPendingIdentity(null);
+    }
+  }, [
+    nativeConstructionCenterWorkspaceFrame,
+    nativeFactoryProjectionPlanetId,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityCommandPending,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  const nativeConstructionCenterUiPendingIdentity = nativeConstructionCenterPendingIdentity ?? (
+    nativePlayerAuthorityCommandPending && nativeConstructionCenterWorkspaceFrame
+      ? {
+        sessionId: nativeConstructionCenterWorkspaceFrame.sessionId,
+        runId: nativeConstructionCenterWorkspaceFrame.runId,
+        revision: nativeConstructionCenterWorkspaceFrame.revision,
+        activePlanetId: nativeConstructionCenterWorkspaceFrame.activePlanetId,
+        kind: "otherNativeCommand" as const,
+        targetId: null,
+        expectedRevision: null,
+      }
+      : null
+  );
   const nativePlayerAuthorityMacroControllerRef = useRef<
     NativePlayerAuthorityMacroController | null | undefined
   >(undefined);
@@ -8604,6 +8667,123 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     });
     return true;
   }, [invalidateFactoryAlertProjection, rejectPlayerStateEditDuringPrimarySave]);
+
+  const commitNativeConstructionCenterIntent = useCallback((
+    identity: NativeConstructionCenterFrameIdentity,
+    kind: Exclude<NativeConstructionCenterIntentKind, "otherNativeCommand">,
+    targetId: string | null,
+    buildCommand: (baseRevision: number) => SimulationCommandPatch,
+    successNotice: (receipt: NativePlayerAuthorityCommandReceipt) => string,
+  ): boolean => {
+    if (!nativeConstructionCenterOpenRef.current || !nativePlayerAuthorityOwnsRuntimeRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current || nativeConstructionCenterPendingIdentityRef.current) {
+      setNotice("建筑制造中心已关闭、被锁定或仍在等待上一条命令的新 revision 投影；本次操作未提交");
+      return false;
+    }
+    const frame = nativeConstructionCenterWorkspaceFrameRef.current;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!nativeConstructionCenterIdentityMatchesFrame(identity, frame) || !frame || !routeIdentity ||
+        !commandSource || routeIdentity.sessionId !== identity.sessionId || routeIdentity.runId !== identity.runId ||
+        routeIdentity.revision !== identity.revision || routeIdentity.planetId !== identity.activePlanetId ||
+        commandSource.sessionId !== identity.sessionId || commandSource.runId !== identity.runId ||
+        commandSource.baseRevision !== identity.revision) {
+      setNotice("建筑制造中心 session、run、revision 或活动行星已变化；本次操作未提交");
+      return false;
+    }
+    const accepted = commitNativeProjectedCommand(identity.revision, (baseRevision) => {
+      if (baseRevision !== identity.revision) return null;
+      return buildCommand(baseRevision);
+    }, (receipt) => {
+      const pending = nativeConstructionCenterPendingIdentityRef.current;
+      if (pending && pending.sessionId === identity.sessionId && pending.runId === identity.runId &&
+          pending.revision === identity.revision && pending.activePlanetId === identity.activePlanetId &&
+          pending.kind === kind && pending.targetId === targetId) {
+        const acknowledged = Object.freeze({ ...pending, expectedRevision: receipt.revision });
+        nativeConstructionCenterPendingIdentityRef.current = acknowledged;
+        setNativeConstructionCenterPendingIdentity(acknowledged);
+      }
+      setNotice(successNotice(receipt));
+    });
+    if (!accepted) return false;
+    const pending = Object.freeze({
+      ...identity,
+      kind,
+      targetId,
+      expectedRevision: null,
+    });
+    nativeConstructionCenterPendingIdentityRef.current = pending;
+    setNativeConstructionCenterPendingIdentity(pending);
+    return true;
+  }, [commitNativeProjectedCommand]);
+
+  const submitNativeConstructionCenterEnabledIntent = useCallback((
+    identity: NativeConstructionCenterFrameIdentity,
+    enabled: boolean,
+  ): void => {
+    const frame = nativeConstructionCenterWorkspaceFrameRef.current;
+    if (!nativeConstructionCenterIdentityMatchesFrame(identity, frame) || !frame ||
+        !frame.workspace.writeAvailable ||
+        typeof enabled !== "boolean" || enabled === frame.workspace.enabled) {
+      setNotice("自动补足开关不属于当前 Rust 投影或没有变化；本次操作未提交");
+      return;
+    }
+    commitNativeConstructionCenterIntent(
+      identity,
+      "enabled",
+      null,
+      (baseRevision) => createNativeConstructionAutomationEnabledIntentCommand(baseRevision, enabled),
+      (receipt) => `自动补足意图已由 Rust 耐久提交；等待 revision ${receipt.revision.toLocaleString("zh-CN")} 投影`,
+    );
+  }, [commitNativeConstructionCenterIntent]);
+
+  const submitNativeConstructionCenterQuantumSupplyIntent = useCallback((
+    identity: NativeConstructionCenterFrameIdentity,
+    enabled: boolean,
+  ): void => {
+    const frame = nativeConstructionCenterWorkspaceFrameRef.current;
+    if (!nativeConstructionCenterIdentityMatchesFrame(identity, frame) || !frame ||
+        !frame.workspace.writeAvailable ||
+        typeof enabled !== "boolean" || !frame.workspace.quantumNetworkEnabled ||
+        enabled === frame.workspace.quantumSourceEnabled) {
+      setNotice("量子直供开关不属于当前可写 Rust 投影、量子网络未启用或值没有变化；本次操作未提交");
+      return;
+    }
+    commitNativeConstructionCenterIntent(
+      identity,
+      "quantumSupplyEnabled",
+      null,
+      (baseRevision) => createNativeConstructionAutomationQuantumSupplyIntentCommand(baseRevision, enabled),
+      (receipt) => `量子直供意图已由 Rust 耐久提交；等待 revision ${receipt.revision.toLocaleString("zh-CN")} 投影`,
+    );
+  }, [commitNativeConstructionCenterIntent]);
+
+  const submitNativeConstructionCenterTargetStockIntent = useCallback((
+    submission: NativeConstructionCenterTargetStockSubmission,
+  ): void => {
+    const frame = nativeConstructionCenterWorkspaceFrameRef.current;
+    const row = frame?.workspace.targets.rows.find((candidate) => candidate.targetId === submission.targetId);
+    const lowering = Boolean(row) && submission.target < row!.target;
+    if (!nativeConstructionCenterIdentityMatchesFrame(submission, frame) || !frame ||
+        !frame.workspace.writeAvailable || !row || !row.unlocked ||
+        !Number.isSafeInteger(submission.target) || submission.target < 0 ||
+        submission.target > frame.workspace.stockLimit || submission.target === row.target ||
+        (lowering ? submission.confirmedDecreaseFrom !== row.target : submission.confirmedDecreaseFrom !== null)) {
+      setNotice("单目标库存不属于当前已解锁 Rust 目录、超出同 revision 上限或缺少降低确认；本次操作未提交");
+      return;
+    }
+    commitNativeConstructionCenterIntent(
+      submission,
+      "targetStock",
+      submission.targetId,
+      (baseRevision) => createNativeConstructionAutomationTargetStockIntentCommand(
+        baseRevision,
+        submission.targetId as ConstructionAutomationTargetId,
+        submission.target,
+      ),
+      (receipt) => `${row.name}目标意图已由 Rust 耐久提交；等待 revision ${receipt.revision.toLocaleString("zh-CN")} 投影`,
+    );
+  }, [commitNativeConstructionCenterIntent]);
 
   const takeNativeTrayItem = useCallback((itemId: string): void => {
     const frame = nativeFactoryInventoryFrame;
@@ -19532,7 +19712,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             open
             frame={nativeConstructionCenterWorkspaceFrame}
             readStatus={nativeConstructionCenterReadStatus}
+            pendingIdentity={nativeConstructionCenterUiPendingIdentity}
             onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setConstructionCenterOpen(false)}
+            onSubmitEnabledIntent={submitNativeConstructionCenterEnabledIntent}
+            onSubmitQuantumSupplyIntent={submitNativeConstructionCenterQuantumSupplyIntent}
+            onSubmitTargetStockIntent={submitNativeConstructionCenterTargetStockIntent}
           />
         ) : (
           <ConstructionCenterWorkspace

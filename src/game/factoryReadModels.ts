@@ -347,6 +347,7 @@ export interface NativeConstructionCenterWorkspaceReadModel {
   readonly schema: "construction-center-workspace-v1";
   readonly registryFingerprint: "7df8cf3a";
   readonly readOnly: true;
+  readonly writeAvailable: boolean;
   readonly activePlanetId: string;
   readonly activePlanetName: string;
   readonly paused: boolean;

@@ -10,7 +10,7 @@ describe("native construction-center App boundary", () => {
   const nativeWorkspace = source("src/components/NativeConstructionCenterWorkspace.tsx");
   const legacyWorkspace = source("src/components/ConstructionCenterWorkspace.tsx");
 
-  it("opens a player-visible native branch without passing GameState or legacy callbacks", () => {
+  it("opens a player-visible native branch with only identity-bound intent callbacks", () => {
     expect(app).toMatch(/import \{ NativeConstructionCenterWorkspace \} from "\.\/components\/NativeConstructionCenterWorkspace"/);
     expect(app).toMatch(/selectNativeConstructionCenterWorkspaceFrame\(nativeAuthoritativeFactoryWorkspaceFrame\)/);
     expect(app).toMatch(/constructionCenterVisible=\{nativePlayerAuthorityOwnsRuntime \|\| game\.entities\.some/);
@@ -21,6 +21,10 @@ describe("native construction-center App boundary", () => {
     const nativeTag = app.slice(app.indexOf("<NativeConstructionCenterWorkspace"), app.indexOf("/>", app.indexOf("<NativeConstructionCenterWorkspace")) + 2);
     expect(nativeTag).toMatch(/frame=\{nativeConstructionCenterWorkspaceFrame\}/);
     expect(nativeTag).toMatch(/readStatus=\{nativeConstructionCenterReadStatus\}/);
+    expect(nativeTag).toMatch(/pendingIdentity=\{nativeConstructionCenterUiPendingIdentity\}/);
+    expect(nativeTag).toMatch(/onSubmitEnabledIntent=\{submitNativeConstructionCenterEnabledIntent\}/);
+    expect(nativeTag).toMatch(/onSubmitQuantumSupplyIntent=\{submitNativeConstructionCenterQuantumSupplyIntent\}/);
+    expect(nativeTag).toMatch(/onSubmitTargetStockIntent=\{submitNativeConstructionCenterTargetStockIntent\}/);
     expect(nativeTag).not.toMatch(/\bgame=|onEnabledChange|onQuantumSourceChange|onTargetChange|onBatchTargetChange/);
 
     const legacyTag = app.slice(app.indexOf("<ConstructionCenterWorkspace", app.indexOf("<NativeConstructionCenterWorkspace")));
@@ -28,14 +32,58 @@ describe("native construction-center App boundary", () => {
     expect(legacyTag).toMatch(/onEnabledChange[\s\S]*?onQuantumSourceChange[\s\S]*?onTargetChange[\s\S]*?onBatchTargetChange/);
   });
 
-  it("keeps the native renderer display-only and the legacy Web workspace intact", () => {
+  it("keeps native controls projection-only and the legacy Web workspace intact", () => {
     expect(nativeWorkspace).not.toMatch(/from\s+["']\.\.\/game\/(?:engine|content|types)["']/);
     expect(nativeWorkspace).not.toMatch(/\bGameState\b|\bgame\.|getStatus\s*\(|getConstructionAutomationStatus/);
+    expect(nativeWorkspace).not.toMatch(/nativeConstructionAutomationIntentCommands/);
     expect(nativeWorkspace).not.toMatch(/on(?:Enabled|QuantumSource|Target|BatchTarget|Cancel|Refund|Move|Discard|Fund)\b/);
-    expect(nativeWorkspace).toMatch(/原生写入尚未开放/);
-    expect(nativeWorkspace).toMatch(/disabled readOnly/);
+    expect(nativeWorkspace).toMatch(/onSubmitEnabledIntent[\s\S]*?onSubmitQuantumSupplyIntent[\s\S]*?onSubmitTargetStockIntent/);
+    expect(nativeWorkspace).toMatch(/等待 main-owned durable ACK；界面不会乐观改写/);
+    expect(nativeWorkspace).toMatch(/workspace\?\.writeAvailable !== true/);
+    expect(nativeWorkspace).toMatch(/Rust 尚未证明制造协议科技与可用制造中心/);
+    expect(nativeWorkspace).toMatch(/确认降低[\s\S]*?取消同目标在途任务并按守恒规则退款/);
+    expect(nativeWorkspace).toMatch(/没有对应的原子 Rust 命令；不会循环多条目标命令伪装为原子操作/);
+    expect(nativeWorkspace).toMatch(/应用全部<\/button>/);
     expect(legacyWorkspace).toMatch(/game: GameState/);
     expect(legacyWorkspace).toMatch(/onEnabledChange[\s\S]*?onQuantumSourceChange[\s\S]*?onTargetChange[\s\S]*?onBatchTargetChange/);
+  });
+
+  it("routes exactly three semantic helpers through the durable single-flight broker", () => {
+    expect(app).toMatch(/from "\.\/game\/nativeConstructionAutomationIntentCommands"/);
+    const commandBlock = app.slice(
+      app.indexOf("const commitNativeConstructionCenterIntent"),
+      app.indexOf("const takeNativeTrayItem"),
+    );
+    expect(commandBlock).toMatch(/commitNativeProjectedCommand\(identity\.revision/);
+    expect(commandBlock).toMatch(/nativePlayerAuthorityCommandInFlightRef\.current \|\| nativeConstructionCenterPendingIdentityRef\.current/);
+    expect(commandBlock).toMatch(/nativeConstructionCenterIdentityMatchesFrame\(identity, frame\)/);
+    expect(commandBlock).toMatch(/routeIdentity\.revision !== identity\.revision/);
+    expect(commandBlock).toMatch(/commandSource\.baseRevision !== identity\.revision/);
+    expect(commandBlock.match(/createNativeConstructionAutomationEnabledIntentCommand\(/g)).toHaveLength(1);
+    expect(commandBlock.match(/createNativeConstructionAutomationQuantumSupplyIntentCommand\(/g)).toHaveLength(1);
+    expect(commandBlock.match(/createNativeConstructionAutomationTargetStockIntentCommand\(/g)).toHaveLength(1);
+    expect(commandBlock).not.toMatch(/topLevelChanges|changedEntities|changedBelts|\bgameRef\b|\bgame\.|workspace\.(?:jobs|materials|quantumBuffer|destroyedByproducts)|portableFleet|constructionQueue/);
+    expect(commandBlock).toMatch(/lowering[\s\S]*?confirmedDecreaseFrom !== row\.target/);
+    expect(commandBlock.match(/!frame\.workspace\.writeAvailable/g)).toHaveLength(3);
+    for (const [start, end] of [
+      ["const submitNativeConstructionCenterEnabledIntent", "const submitNativeConstructionCenterQuantumSupplyIntent"],
+      ["const submitNativeConstructionCenterQuantumSupplyIntent", "const submitNativeConstructionCenterTargetStockIntent"],
+      ["const submitNativeConstructionCenterTargetStockIntent", "const takeNativeTrayItem"],
+    ] as const) {
+      const callback = app.slice(app.indexOf(start), app.indexOf(end));
+      expect(callback.indexOf("!frame.workspace.writeAvailable"), start).toBeGreaterThanOrEqual(0);
+      expect(callback.indexOf("!frame.workspace.writeAvailable"), start)
+        .toBeLessThan(callback.indexOf("commitNativeConstructionCenterIntent("));
+    }
+
+    const pendingBlock = app.slice(
+      app.indexOf("const nativeConstructionCenterWorkspaceFrame ="),
+      app.indexOf("const nativePlayerAuthorityMacroControllerRef"),
+    );
+    expect(pendingBlock).toMatch(/pending\.expectedRevision !== null[\s\S]*?current!\.revision >= pending\.expectedRevision/);
+    expect(pendingBlock).toMatch(/!nativePlayerAuthorityOwnsRuntime \|\| activeFrameDrifted/);
+    expect(pendingBlock).not.toMatch(/!constructionCenterOpen \|\|/);
+    expect(pendingBlock).toMatch(/projectionIdentityDrifted[\s\S]*?nativeFactoryProjectionPlanetId !== pending\.activePlanetId/);
   });
 
   it("reuses the exact factory Host-main-preload operation and preserves its 1 MiB boundary", () => {

@@ -11,6 +11,7 @@ function frame(): NativeAuthoritativeFactoryWorkspaceFrame {
     schema: "construction-center-workspace-v1" as const,
     registryFingerprint: "7df8cf3a" as const,
     readOnly: true as const,
+    writeAvailable: true,
     activePlanetId: "home",
     activePlanetName: "家园星",
     paused: false,
@@ -83,5 +84,21 @@ describe("native construction-center workspace identity", () => {
       ...current,
       planetNavigation: { ...current.planetNavigation, activePlanetId: "remote" },
     })).toBeNull();
+
+    const unavailable = {
+      ...current,
+      constructionWorkspace: {
+        ...current.constructionWorkspace,
+        nativeCenterWorkspace: { ...current.constructionWorkspace.nativeCenterWorkspace!, writeAvailable: false },
+      },
+    };
+    expect(selectNativeConstructionCenterWorkspaceFrame(unavailable)?.workspace.writeAvailable).toBe(false);
+    for (const malformed of ["missing", "invalid"] as const) {
+      const candidate = structuredClone(current);
+      const rawWorkspace = candidate.constructionWorkspace.nativeCenterWorkspace as unknown as Record<string, unknown>;
+      if (malformed === "missing") delete rawWorkspace.writeAvailable;
+      else rawWorkspace.writeAvailable = "yes";
+      expect(selectNativeConstructionCenterWorkspaceFrame(candidate), malformed).toBeNull();
+    }
   });
 });

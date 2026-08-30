@@ -910,6 +910,10 @@ fn native_construction_center_workspace(
         .get("jobs")
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow!("native construction-center jobs are invalid"))?;
+    let write_available = matches!(
+        crate::command::construction_automation_write_eligibility(state)?,
+        crate::command::ConstructionAutomationWriteEligibility::Available
+    );
     let mut all_center_ids = HashSet::<String>::new();
     let mut active_center_ids = HashSet::<String>::new();
     let mut center_rows = Vec::<Value>::new();
@@ -1104,6 +1108,7 @@ fn native_construction_center_workspace(
         "schema": "construction-center-workspace-v1",
         "registryFingerprint": EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
         "readOnly": true,
+        "writeAvailable": write_available,
         "activePlanetId": active_planet_id,
         "activePlanetName": active_planet_name,
         "paused": paused,
@@ -1352,7 +1357,7 @@ impl CoreState {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, sync::Arc};
 
     use serde_json::json;
 
@@ -1558,15 +1563,26 @@ mod tests {
             CatalogSnapshot {
                 protocol_version: 1,
                 registry_fingerprint: registry_fingerprint.to_owned(),
-                planets: vec![PlanetDefinition {
-                    id: "home".to_owned(),
-                    name: "家园星".to_owned(),
-                    system_id: "helios".to_owned(),
-                    kind: "terrestrial".to_owned(),
-                    orbit_index: 1,
-                    simulation_order: 0,
-                    orbital_yields: HashMap::new(),
-                }],
+                planets: vec![
+                    PlanetDefinition {
+                        id: "home".to_owned(),
+                        name: "家园星".to_owned(),
+                        system_id: "helios".to_owned(),
+                        kind: "terrestrial".to_owned(),
+                        orbit_index: 1,
+                        simulation_order: 0,
+                        orbital_yields: HashMap::new(),
+                    },
+                    PlanetDefinition {
+                        id: "remote".to_owned(),
+                        name: "远方星".to_owned(),
+                        system_id: "helios".to_owned(),
+                        kind: "terrestrial".to_owned(),
+                        orbit_index: 2,
+                        simulation_order: 1,
+                        orbital_yields: HashMap::new(),
+                    },
+                ],
                 items: vec![
                     ItemDefinition {
                         id: "iron_ore".to_owned(),
@@ -1613,19 +1629,41 @@ mod tests {
                         amount: 1.0,
                     }],
                 }],
-                constructions: vec![ConstructionDefinition {
-                    id: "wind_turbine".to_owned(),
-                    output_amount: 1.0,
-                    automation_order: 0,
-                    required_tech_id: Some("electromagnetism".to_owned()),
-                    costs: vec![ItemAmount {
-                        item_id: "iron_ore".to_owned(),
-                        amount: 6.0,
-                    }],
-                }],
+                constructions: vec![
+                    ConstructionDefinition {
+                        id: "wind_turbine".to_owned(),
+                        output_amount: 1.0,
+                        automation_order: 0,
+                        required_tech_id: Some("electromagnetism".to_owned()),
+                        costs: vec![ItemAmount {
+                            item_id: "iron_ore".to_owned(),
+                            amount: 6.0,
+                        }],
+                    },
+                    ConstructionDefinition {
+                        id: "construction_center".to_owned(),
+                        output_amount: 1.0,
+                        automation_order: 1,
+                        required_tech_id: Some("construction_automation".to_owned()),
+                        costs: vec![ItemAmount {
+                            item_id: "iron_ore".to_owned(),
+                            amount: 10.0,
+                        }],
+                    },
+                ],
                 belts: Vec::new(),
                 proliferators: Vec::new(),
                 technologies: vec![
+                    TechnologyDefinition {
+                        id: "construction_automation".to_owned(),
+                        name: "制造协议".to_owned(),
+                        costs: vec![ItemAmount {
+                            item_id: "iron_ore".to_owned(),
+                            amount: 1.0,
+                        }],
+                        prerequisites: Vec::new(),
+                        construction_rewards: vec!["construction_center".to_owned()],
+                    },
                     TechnologyDefinition {
                         id: "electromagnetism".to_owned(),
                         name: "电磁学".to_owned(),
@@ -1671,10 +1709,10 @@ mod tests {
                 "requiredPowerKw": 0,
                 "allocatedPowerKw": 0
             },
-            "research": { "completedTechIds": ["electromagnetism", "planetary_logistics"] },
-            "exploration": { "unlockedSystemIds": ["helios"], "colonizedPlanetIds": ["home"] },
+            "research": { "completedTechIds": ["construction_automation", "electromagnetism", "planetary_logistics"] },
+            "exploration": { "unlockedSystemIds": ["helios"], "colonizedPlanetIds": ["home", "remote"] },
             "galaxy": { "planetMetadata": {}, "planetRoles": {} },
-            "planetMetrics": { "home": { "powerFactor": 1 } },
+            "planetMetrics": { "home": { "powerFactor": 1 }, "remote": { "powerFactor": 1 } },
             "constructionQueue": [],
             "construction": { "wind_turbine": 41 },
             "portableFleet": { "logistics_drone": 7, "logistics_vessel": 0 },
@@ -1937,6 +1975,7 @@ mod tests {
             EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
         );
         assert_eq!(workspace["readOnly"], true);
+        assert_eq!(workspace["writeAvailable"], true);
         assert_eq!(workspace["activePlanetId"], "home");
         assert_eq!(workspace["activePlanetName"], "家园星");
         assert_eq!(workspace["limits"]["targetRows"], MAX_TARGET_ROWS);
@@ -1949,7 +1988,7 @@ mod tests {
             MAX_CONSTRUCTION_MATERIAL_ROWS
         );
         assert_eq!(workspace["limits"]["projectionBytes"], MAX_PROJECTION_BYTES);
-        assert_eq!(workspace["targets"]["totalCount"], 2);
+        assert_eq!(workspace["targets"]["totalCount"], 3);
         assert_eq!(workspace["targets"]["truncated"], false);
         let targets = workspace["targets"]["rows"].as_array().unwrap();
         let building = targets
@@ -1984,6 +2023,145 @@ mod tests {
         assert_eq!(workspace["destroyedByproducts"]["totalAmount"], 3);
         assert!(serde_json::to_vec(&projection).unwrap().len() <= MAX_PROJECTION_BYTES);
         assert_eq!(state.summary().unwrap().canonical_sha256, before);
+    }
+
+    #[test]
+    fn construction_center_write_availability_is_global_and_fails_closed() {
+        let mut remote_view =
+            construction_center_state(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, false);
+        remote_view.base_value_mut()["activePlanetId"] = Value::from("remote");
+        let remote_projection = remote_view.factory_read_model_projection(&[], &[]).unwrap();
+        let remote_workspace = &remote_projection["construction"]["nativeCenterWorkspace"];
+        assert_eq!(remote_workspace["centers"]["totalCount"], 0);
+        assert_eq!(remote_workspace["writeAvailable"], true);
+
+        for completed_tech_ids in [
+            json!(["electromagnetism", "planetary_logistics"]),
+            json!(["construction_automation ", "electromagnetism"]),
+            Value::from("construction_automation"),
+        ] {
+            let mut technology_locked =
+                construction_center_state(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, false);
+            technology_locked.base_value_mut()["research"]["completedTechIds"] = completed_tech_ids;
+            let locked_projection = technology_locked
+                .factory_read_model_projection(&[], &[])
+                .unwrap();
+            assert_eq!(
+                locked_projection["construction"]["nativeCenterWorkspace"]["writeAvailable"],
+                false
+            );
+        }
+
+        for malformed in [
+            "kind",
+            "locked",
+            "zero-machines",
+            "missing-machines",
+            "negative-machines",
+            "fractional-machines",
+            "unsafe-machines",
+            "missing-lock",
+        ] {
+            let mut state =
+                construction_center_state(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, false);
+            state.base_value_mut()["activePlanetId"] = Value::from("remote");
+            let center_index = *state.entity_index.get("center-a").unwrap();
+            let mut center = state.parse_entity(center_index).unwrap();
+            match malformed {
+                "kind" => center["kind"] = Value::from("storage"),
+                "locked" => center["interactionLocked"] = Value::from(true),
+                "zero-machines" => center["machineCount"] = Value::from(0),
+                "missing-machines" => {
+                    center.as_object_mut().unwrap().remove("machineCount");
+                }
+                "negative-machines" => center["machineCount"] = Value::from(-1),
+                "fractional-machines" => center["machineCount"] = Value::from(1.5),
+                "unsafe-machines" => {
+                    center["machineCount"] = Value::from(MAX_JAVASCRIPT_SAFE_INTEGER + 1)
+                }
+                "missing-lock" => {
+                    center.as_object_mut().unwrap().remove("interactionLocked");
+                }
+                _ => unreachable!(),
+            }
+            state.replace_entity_raw(center_index, center.to_string().into());
+            let projection = state.factory_read_model_projection(&[], &[]).unwrap();
+            assert_eq!(
+                projection["construction"]["nativeCenterWorkspace"]["writeAvailable"], false,
+                "{malformed}"
+            );
+        }
+
+        for malformed in ["building-kind", "construction-technology"] {
+            let mut state =
+                construction_center_state(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, false);
+            let catalog = Arc::make_mut(&mut state.catalog);
+            match malformed {
+                "building-kind" => {
+                    catalog
+                        .buildings
+                        .get_mut("construction_center")
+                        .unwrap()
+                        .kind = "storage".to_owned();
+                }
+                "construction-technology" => {
+                    catalog
+                        .constructions
+                        .get_mut("construction_center")
+                        .unwrap()
+                        .required_tech_id = None;
+                }
+                _ => unreachable!(),
+            }
+            let projection = state.factory_read_model_projection(&[], &[]).unwrap();
+            assert_eq!(
+                projection["construction"]["nativeCenterWorkspace"]["writeAvailable"], false,
+                "{malformed}"
+            );
+        }
+    }
+
+    #[test]
+    fn construction_write_eligibility_does_not_parse_large_non_center_population() {
+        let mut state = construction_center_state(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, false);
+        let first_non_center = state.entity_raw_mut_topology().len();
+        {
+            let entities = state.entity_raw_mut_topology();
+            for index in 0..4_096 {
+                entities.push(
+                    json!({
+                        "id": format!("bulk-non-center-{index}"),
+                        "kind": "storage",
+                        "planetId": "home",
+                        "position": { "x": index, "y": 0 },
+                        "interactionLocked": false,
+                        "buildingId": "construction_center",
+                        "recipeId": null,
+                        "machineCount": 1,
+                        "minerCount": 0,
+                        "inputs": {},
+                        "outputs": {},
+                        "progress": 0,
+                        "utilization": 0,
+                        "productionRate": 0
+                    })
+                    .to_string()
+                    .into(),
+                );
+            }
+        }
+        state.rebuild_indexes().unwrap();
+        assert_eq!(state.factory_topology.construction_center_indices.len(), 1);
+
+        // Make every non-center row unparsable after the topology proof. The
+        // shared eligibility check must still read only the one center index.
+        for raw in &mut state.entity_raw_mut_topology()[first_non_center..] {
+            *raw = Arc::<str>::from("not-json");
+        }
+        assert_eq!(
+            crate::command::construction_automation_write_eligibility(&state).unwrap(),
+            crate::command::ConstructionAutomationWriteEligibility::Available
+        );
     }
 
     #[test]

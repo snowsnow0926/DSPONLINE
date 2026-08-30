@@ -85,7 +85,8 @@ function validNativeConstructionCenterWorkspace(
   activePlanetId: string,
 ): boolean {
   if (model.schema !== "construction-center-workspace-v1" || model.registryFingerprint !== "7df8cf3a" ||
-    model.readOnly !== true || model.activePlanetId !== activePlanetId || typeof model.activePlanetName !== "string" ||
+    model.readOnly !== true || typeof model.writeAvailable !== "boolean" ||
+    model.activePlanetId !== activePlanetId || typeof model.activePlanetName !== "string" ||
     model.activePlanetName.length < 1 || model.activePlanetName.length > 256 || typeof model.paused !== "boolean" ||
     typeof model.enabled !== "boolean" || typeof model.quantumSourceEnabled !== "boolean" ||
     typeof model.quantumNetworkEnabled !== "boolean" || !Number.isSafeInteger(model.totalCrafted) || model.totalCrafted < 0 ||

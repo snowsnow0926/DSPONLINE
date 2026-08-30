@@ -73,6 +73,7 @@ pub(crate) struct RuntimeBandwidth {
 const QUANTUM_ACTIVE_DENSE_NUMERATOR: usize = 3;
 const QUANTUM_ACTIVE_DENSE_DENOMINATOR: usize = 4;
 const QUANTUM_PLAN_VALIDATION_ROWS_PER_CHUNK: usize = 1_024;
+const QUANTUM_FLUSH_PROBE_ROWS_PER_CHUNK: usize = 1_024;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct QuantumActiveScan {
@@ -3487,60 +3488,179 @@ fn flush_supply_buffers_for_index(
     write_network(base, &network)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn flush_selected_supply_buffers_with_network(
-    _state: &CoreState,
-    base: &mut Map<String, Value>,
-    entities: &mut [Value],
-    directory: &mut QuantumLogisticsDirectory,
+#[derive(Debug, Clone, Copy)]
+struct SupplyBufferProbe {
+    plan_index: usize,
+    entity_index: usize,
+    item_index: u32,
+    input: f64,
+    output: f64,
+    from_output_available: f64,
+    requested: u64,
+    #[cfg(test)]
+    worker_index: Option<usize>,
+}
+
+fn probe_supply_buffer(
+    entities: &[Value],
+    directory: &QuantumLogisticsDirectory,
     route_ledger: &crate::station_route_ledger::StationRouteLedger,
-    runtime_bandwidth: RuntimeBandwidth,
+    plan_index: usize,
+) -> anyhow::Result<SupplyBufferProbe> {
+    let plan = *directory
+        .upload_plans
+        .get(plan_index)
+        .ok_or_else(|| anyhow!("native quantum upload plan index is invalid"))?;
+    let entity_index = plan.entity_index as usize;
+    let item_id = directory
+        .item_id(plan.item_index)
+        .ok_or_else(|| anyhow!("native quantum upload item index is invalid"))?;
+    let flush_slot = directory.upload_flush_contract(plan_index, plan.slot);
+    let station = entities
+        .get(entity_index)
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native quantum station is invalid"))?;
+    let input = item_amount(station, "inputs", item_id).floor().max(0.0);
+    let output = item_amount(station, "outputs", item_id).floor().max(0.0);
+    let outgoing = route_ledger
+        .quantum_reserved_outgoing(entity_index, item_id)
+        .floor()
+        .max(0.0);
+    let min_stock = f64::from(flush_slot.min_stock);
+    let from_output_available = (output - min_stock - outgoing).max(0.0);
+    let from_input_available = (input - (min_stock - output).max(0.0)).max(0.0);
+    Ok(SupplyBufferProbe {
+        plan_index,
+        entity_index,
+        item_index: plan.item_index,
+        input,
+        output,
+        from_output_available,
+        requested: floor_u64(from_output_available + from_input_available),
+        #[cfg(test)]
+        worker_index: rayon::current_thread_index(),
+    })
+}
+
+fn plan_supply_buffer_probes_with_runtime(
+    entities: &[Value],
+    directory: &QuantumLogisticsDirectory,
+    route_ledger: &crate::station_route_ledger::StationRouteLedger,
     selected: &[usize],
-    network: &mut Network,
+    runtime: &DeterministicRuntime,
+) -> Vec<anyhow::Result<SupplyBufferProbe>> {
+    if runtime.worker_count_for_items(selected.len()) == 1 {
+        return selected
+            .iter()
+            .map(|&plan_index| probe_supply_buffer(entities, directory, route_ledger, plan_index))
+            .collect();
+    }
+
+    // Fixed ascending chunks own only immutable station/ledger probes and a
+    // private result vector. Ordered chunk collection plus the serial replay
+    // below keeps selected-row error, capacity and writeback order identical
+    // at every worker limit.
+    runtime
+        .ordered_chunk_map(
+            selected.len(),
+            QUANTUM_FLUSH_PROBE_ROWS_PER_CHUNK,
+            |_, range| {
+                range
+                    .map(|selected_index| {
+                        probe_supply_buffer(
+                            entities,
+                            directory,
+                            route_ledger,
+                            selected[selected_index],
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            },
+        )
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+struct SupplyBufferFlushContext<'a> {
+    base: &'a mut Map<String, Value>,
+    entities: &'a mut [Value],
+    directory: &'a mut QuantumLogisticsDirectory,
+    route_ledger: &'a crate::station_route_ledger::StationRouteLedger,
+    runtime_bandwidth: RuntimeBandwidth,
+    selected: &'a [usize],
+    network: &'a mut Network,
+    runtime: &'a DeterministicRuntime,
+}
+
+fn flush_selected_supply_buffers_with_network(
+    context: SupplyBufferFlushContext<'_>,
 ) -> anyhow::Result<()> {
+    let SupplyBufferFlushContext {
+        base,
+        entities,
+        directory,
+        route_ledger,
+        runtime_bandwidth,
+        selected,
+        network,
+        runtime,
+    } = context;
+    let probes = plan_supply_buffer_probes_with_runtime(
+        entities,
+        directory,
+        route_ledger,
+        selected,
+        runtime,
+    );
+    if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tquantum-flush-probes\tworkers={}\trows={}\tchunks={}",
+            runtime.worker_count_for_items(selected.len()),
+            selected.len(),
+            selected.len().div_ceil(QUANTUM_FLUSH_PROBE_ROWS_PER_CHUNK),
+        );
+    }
     let mut normalized_for_deposit = false;
-    for &plan_index in selected {
-        let plan = directory.upload_plans[plan_index];
-        let entity_index = plan.entity_index as usize;
+    for probe in probes {
+        let probe = probe?;
         let item_id = directory
-            .item_id(plan.item_index)
-            .ok_or_else(|| anyhow!("native quantum upload item index is invalid"))?;
-        let flush_slot = directory.upload_flush_contract(plan_index, plan.slot);
-        let station = entities[entity_index]
-            .as_object_mut()
-            .ok_or_else(|| anyhow!("native quantum station is invalid"))?;
-        let input = item_amount(station, "inputs", item_id).floor().max(0.0);
-        let output = item_amount(station, "outputs", item_id).floor().max(0.0);
-        let outgoing = route_ledger
-            .quantum_reserved_outgoing(entity_index, item_id)
-            .floor()
-            .max(0.0);
-        let min_stock = f64::from(flush_slot.min_stock);
-        let from_output_available = (output - min_stock - outgoing).max(0.0);
-        let from_input_available = (input - (min_stock - output).max(0.0)).max(0.0);
-        let requested = floor_u64(from_output_available + from_input_available);
-        if requested < 1 {
+            .item_id(probe.item_index)
+            .expect("probed quantum upload item disappeared");
+        if probe.requested < 1 {
             continue;
         }
         if !normalized_for_deposit {
             network.remove_zero_inventory();
             normalized_for_deposit = true;
         }
-        let accepted = deposit(network, item_id, &BigUint::from(requested));
+        let accepted = deposit(network, item_id, &BigUint::from(probe.requested));
         let accepted_number = accepted.to_u64().unwrap_or(MAX_SAFE_INTEGER) as f64;
         if accepted_number < 1.0 {
             continue;
         }
-        let from_output = from_output_available.min(accepted_number);
+        let station = entities[probe.entity_index]
+            .as_object_mut()
+            .expect("probed quantum station disappeared");
+        let from_output = probe.from_output_available.min(accepted_number);
         if from_output > 0.0 {
-            set_item_amount(station, "outputs", item_id, output - from_output)?;
+            set_item_amount(station, "outputs", item_id, probe.output - from_output)?;
         }
         let remaining = accepted_number - from_output;
         if remaining > 0.0 {
-            set_item_amount(station, "inputs", item_id, (input - remaining).max(0.0))?;
+            set_item_amount(
+                station,
+                "inputs",
+                item_id,
+                (probe.input - remaining).max(0.0),
+            )?;
         }
         record_immediate_upload(base, runtime_bandwidth, network, item_id, &accepted);
-        directory.mark_inventory_written(entity_index);
+        directory.mark_inventory_written(probe.entity_index);
+        debug_assert_eq!(
+            directory.upload_plans[probe.plan_index].item_index,
+            probe.item_index
+        );
     }
     directory.commit_flush(selected);
     Ok(())
@@ -3663,16 +3783,16 @@ pub(crate) fn flush_active_supply_buffers(
         force_full_write,
     )?;
     apply_network_parse_scan(&mut scan, network_scan);
-    flush_selected_supply_buffers_with_network(
-        state,
+    flush_selected_supply_buffers_with_network(SupplyBufferFlushContext {
         base,
         entities,
         directory,
         route_ledger,
         runtime_bandwidth,
-        &selected,
-        &mut network,
-    )?;
+        selected: &selected,
+        network: &mut network,
+        runtime: crate::deterministic_runtime::runtime(),
+    })?;
     write_active_network(base, &network, directory)?;
     Ok(scan)
 }
@@ -4260,16 +4380,16 @@ pub(crate) fn settle_uploads(
     network.set_runtime_flow(flow.clone());
 
     if let Some(selected_flush_rows) = selected_flush_rows.as_ref() {
-        flush_selected_supply_buffers_with_network(
-            state,
+        flush_selected_supply_buffers_with_network(SupplyBufferFlushContext {
             base,
             entities,
             directory,
             route_ledger,
             runtime_bandwidth,
-            selected_flush_rows,
-            &mut network,
-        )?;
+            selected: selected_flush_rows,
+            network: &mut network,
+            runtime: crate::deterministic_runtime::runtime(),
+        })?;
     } else {
         // The permissive oracle owns its parse/write cycle. Publish this
         // boundary's flow first, then refresh the complete local session so
@@ -8562,6 +8682,199 @@ mod tests {
         assert_eq!(base, source_base);
         assert_eq!(entities, source_entities);
         assert_eq!(transition_bytes(&base, &entities), source_bytes);
+    }
+
+    fn dense_flush_probe_source(count: usize) -> (Map<String, Value>, Vec<Value>) {
+        let huge_item = "mod:量子/BigUint-Ω🚀";
+        let entities = (0..count)
+            .map(|index| {
+                let item_id = match index % 6 {
+                    0..=2 => "iron_ore",
+                    3..=4 => "iron_ingot",
+                    _ => huge_item,
+                };
+                let mut station = quantum_station(
+                    format!("dense-supply-{index:05}"),
+                    item_id,
+                    "supply",
+                    (index % 13) as f64 + 0.75,
+                    (index % 7) as f64 + 1.5,
+                    vec![],
+                );
+                station["stationSlots"][0]["minStock"] = Value::from(index % 3);
+                station["mod:opaque/保持"] = serde_json::json!({
+                    "index": index,
+                    "signedZero": -0.0,
+                    "text": "私有 probe 不得改写"
+                });
+                station
+            })
+            .collect::<Vec<_>>();
+        let mut base = active_quantum_base(0);
+        let maximum = "9".repeat(MAX_INTEGER_DIGITS);
+        set_test_network_item(&mut base, "iron_ore", "9997");
+        set_test_network_item(&mut base, "iron_ingot", "10000");
+        set_test_network_item(&mut base, huge_item, &maximum);
+        set_test_network_item(&mut base, "mod:dormant-zero/保持", "0");
+        base["quantumLogisticsNetwork"]["itemCapacities"][huge_item] =
+            Value::from(ITEM_CAPACITY_MAX.to_string());
+        (base, entities)
+    }
+
+    fn run_dense_flush_with_workers(
+        state: &CoreState,
+        source_base: &Map<String, Value>,
+        source_entities: &[Value],
+        workers: usize,
+    ) -> Vec<u8> {
+        let mut base = source_base.clone();
+        let mut entities = source_entities.to_vec();
+        let mut directory = QuantumLogisticsDirectory::build(state, &entities);
+        let selected = (0..directory.upload_plans.len()).collect::<Vec<_>>();
+        let bandwidth = directory.legacy_runtime_bandwidth(state, &base, &entities);
+        let mut network = parse_network(&base).expect("dense flush network");
+        let route_ledger = crate::station_route_ledger::StationRouteLedger::default();
+        let runtime = DeterministicRuntime::for_test(workers);
+        flush_selected_supply_buffers_with_network(SupplyBufferFlushContext {
+            base: &mut base,
+            entities: &mut entities,
+            directory: &mut directory,
+            route_ledger: &route_ledger,
+            runtime_bandwidth: bandwidth,
+            selected: &selected,
+            network: &mut network,
+            runtime: &runtime,
+        })
+        .expect("dense flush probe replay");
+        write_network(&mut base, &network).expect("dense flush network write");
+        quantum_oracle_bytes(&base, &entities)
+    }
+
+    #[test]
+    fn dense_flush_probes_match_full_oracle_at_one_two_four_and_eight_workers() {
+        let count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 2_117;
+        let (source_base, source_entities) = dense_flush_probe_source(count);
+        let state = crate::simple_factory::tests::fixture_state(&source_entities);
+        let mut oracle_base = source_base.clone();
+        let mut oracle_entities = source_entities.clone();
+        flush_supply_buffers_for_index(&mut oracle_base, &mut oracle_entities, None)
+            .expect("dense full-scan flush oracle");
+        let expected = quantum_oracle_bytes(&oracle_base, &oracle_entities);
+
+        assert_eq!(
+            oracle_base["quantumLogisticsNetwork"]["inventory"]["iron_ore"], "10000",
+            "same-item competitors must fill only the exact remaining capacity"
+        );
+        assert_eq!(
+            oracle_base["quantumLogisticsNetwork"]["inventory"]["iron_ingot"], "10000",
+            "a full item capacity must reject every station without reordering"
+        );
+        assert_eq!(
+            oracle_base["quantumLogisticsNetwork"]["inventory"]["mod:量子/BigUint-Ω🚀"],
+            "9".repeat(MAX_INTEGER_DIGITS),
+            "the saturated BigUint row must remain exact"
+        );
+        assert!(
+            oracle_base["quantumLogisticsNetwork"]["inventory"]
+                .get("mod:dormant-zero/保持")
+                .is_none(),
+            "the first positive request must preserve zero normalization"
+        );
+        assert_eq!(
+            oracle_entities[0]["mod:opaque/保持"]["text"],
+            "私有 probe 不得改写"
+        );
+
+        for workers in [1, 2, 4, 8] {
+            assert_eq!(
+                run_dense_flush_with_workers(&state, &source_base, &source_entities, workers,),
+                expected,
+                "workers={workers}"
+            );
+        }
+
+        let directory = QuantumLogisticsDirectory::build(&state, &source_entities);
+        let selected = (0..directory.upload_plans.len()).collect::<Vec<_>>();
+        let probes = plan_supply_buffer_probes_with_runtime(
+            &source_entities,
+            &directory,
+            &crate::station_route_ledger::StationRouteLedger::default(),
+            &selected,
+            &DeterministicRuntime::for_test(8),
+        );
+        assert_eq!(probes.len(), selected.len());
+        assert!(probes.iter().enumerate().all(|(position, probe)| {
+            probe
+                .as_ref()
+                .is_ok_and(|probe| probe.plan_index == selected[position])
+        }));
+        assert!(probes.iter().any(|probe| {
+            probe
+                .as_ref()
+                .is_ok_and(|probe| probe.worker_index.is_some())
+        }));
+    }
+
+    #[test]
+    fn flush_probe_errors_keep_lowest_selected_position_and_source_bytes() {
+        let count = crate::deterministic_runtime::PARALLEL_MIN_ITEMS + 257;
+        let (base, mut entities) = dense_flush_probe_source(count);
+        let state = crate::simple_factory::tests::fixture_state(&entities);
+        let directory = QuantumLogisticsDirectory::build(&state, &entities);
+        let selected = (0..directory.upload_plans.len()).collect::<Vec<_>>();
+        let first_failure = 117;
+        let later_failure = 4_100;
+        entities[first_failure] = Value::Null;
+        entities[later_failure] = Value::from("later-invalid-station");
+        let source_bytes = quantum_oracle_bytes(&base, &entities);
+
+        for workers in [1, 2, 4, 8] {
+            let probes = plan_supply_buffer_probes_with_runtime(
+                &entities,
+                &directory,
+                &crate::station_route_ledger::StationRouteLedger::default(),
+                &selected,
+                &DeterministicRuntime::for_test(workers),
+            );
+            let (position, error) = probes
+                .iter()
+                .enumerate()
+                .find_map(|(position, probe)| probe.as_ref().err().map(|error| (position, error)))
+                .expect("malformed dense flush probe");
+            assert_eq!(position, first_failure, "workers={workers}");
+            assert_eq!(
+                error.to_string(),
+                "native quantum station is invalid",
+                "workers={workers}"
+            );
+            assert_eq!(
+                quantum_oracle_bytes(&base, &entities),
+                source_bytes,
+                "read-only probes changed source bytes at workers={workers}"
+            );
+        }
+    }
+
+    #[test]
+    fn small_flush_probe_batches_stay_off_the_rayon_pool() {
+        let (base, entities) = dense_flush_probe_source(37);
+        let state = crate::simple_factory::tests::fixture_state(&entities);
+        let directory = QuantumLogisticsDirectory::build(&state, &entities);
+        let selected = (0..directory.upload_plans.len()).collect::<Vec<_>>();
+        let source_bytes = quantum_oracle_bytes(&base, &entities);
+        let probes = plan_supply_buffer_probes_with_runtime(
+            &entities,
+            &directory,
+            &crate::station_route_ledger::StationRouteLedger::default(),
+            &selected,
+            &DeterministicRuntime::for_test(8),
+        );
+        assert!(probes.iter().all(|probe| {
+            probe
+                .as_ref()
+                .is_ok_and(|probe| probe.worker_index.is_none())
+        }));
+        assert_eq!(quantum_oracle_bytes(&base, &entities), source_bytes);
     }
 
     #[test]

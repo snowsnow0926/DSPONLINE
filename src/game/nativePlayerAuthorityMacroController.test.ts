@@ -257,7 +257,7 @@ function controllerWithClock(bridge: MacroBridge, clock: ReturnType<typeof clock
 }
 
 describe("native player authority macro controller", () => {
-  it("builds exact enable and disable toggle command patches", () => {
+  it("builds minimal semantic enable and disable intents without predicting derived fields", () => {
     const disabled = timeWarp({
       enabled: false,
       effectiveMultiplier: 1,
@@ -268,9 +268,9 @@ describe("native player authority macro controller", () => {
       protocolVersion: 1,
       baseRevision: 7,
       topLevelChanges: [{
-        path: ["timeWarp", "enabled"],
+        path: ["timeWarp", "intent"],
         operation: "set",
-        value: true,
+        value: { controllerEntityId: "time-warp-controller", enabled: true },
       }],
       changedEntities: [],
       addedEntities: [],
@@ -283,12 +283,11 @@ describe("native player authority macro controller", () => {
     expect(createNativeTimeWarpToggleCommand(8, 1, timeWarp(), false)).toStrictEqual({
       protocolVersion: 1,
       baseRevision: 8,
-      topLevelChanges: [
-        { path: ["timeWarp", "enabled"], operation: "set", value: false },
-        { path: ["timeWarp", "effectiveMultiplier"], operation: "set", value: 1 },
-        { path: ["timeWarp", "requiredPowerKw"], operation: "set", value: 0 },
-        { path: ["timeWarp", "allocatedPowerKw"], operation: "set", value: 0 },
-      ],
+      topLevelChanges: [{
+        path: ["timeWarp", "intent"],
+        operation: "set",
+        value: { controllerEntityId: "time-warp-controller", enabled: false },
+      }],
       changedEntities: [],
       addedEntities: [],
       removedEntityIds: [],

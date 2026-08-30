@@ -1,4 +1,4 @@
-import { Atom, CircuitBoard, Flame, Layers3, LockKeyhole, Minus, Pause, Play, Plus, Route, Trash2 } from "lucide-react";
+import { Atom, CircuitBoard, Flame, Gauge, Layers3, LockKeyhole, Minus, Orbit, Pause, Play, Plus, Route, Trash2 } from "lucide-react";
 import { CONSTRUCTION, FUEL_ENERGY_MJ, ITEMS } from "../game/content";
 import type {
   FactoryInspectorSummaryReadModel,
@@ -17,13 +17,21 @@ import {
   type NativeProjectedEntityConfigurationBinding,
   type NativeProjectedSplitterDistributionMode,
 } from "../game/nativeProjectedEntityConfigurationCommands";
+import {
+  getNativeProjectedTimeWarpControllerState,
+  type NativeProjectedEjectorOrbitFrame,
+  type NativeProjectedTimeWarpControllerBinding,
+} from "../game/nativeProjectedTimeWarpEjectorCommands";
 import type { ItemId, PowerPriority } from "../game/types";
+import { PowerValue } from "./PowerValue";
 import { QuantityValue } from "./QuantityValue";
 
 interface NativeFactoryInspectorPanelProps {
   inspector: FactoryInspectorSummaryReadModel;
   multiSelection: FactoryMultiSelectionSummaryReadModel;
   entityConfiguration: NativeProjectedEntityConfigurationBinding | null;
+  timeWarpController?: NativeProjectedTimeWarpControllerBinding | null;
+  ejectorOrbitFrame?: NativeProjectedEjectorOrbitFrame | null;
   pending: boolean;
   onEntityLockChange: (entityId: string, locked: boolean) => void;
   onRemoveEntity: (entityId: string) => void;
@@ -42,6 +50,9 @@ interface NativeFactoryInspectorPanelProps {
     entityId: string,
     paused: boolean,
   ) => void;
+  onTimeWarpEnabledChange?: (entityId: string, enabled: boolean) => void;
+  onTimeWarpRequestedMultiplierChange?: (entityId: string, requestedMultiplier: number) => void;
+  onEjectorOrbitChange?: (entityId: string, orbitId: string) => void;
   onBeltLaneCountChange: (beltId: string, targetLanes: number) => void;
   onBeltPriorityChange: (beltId: string, targetPriority: 0 | 1 | 2) => void;
   onRemoveBelt: (beltId: string) => void;
@@ -71,6 +82,8 @@ function itemRows(label: string, rows: readonly ItemQuantityReadModel[], truncat
 function NativeEntitySummary({
   entity,
   configuration,
+  timeWarpController,
+  ejectorOrbitFrame,
   pending,
   onEntityLockChange,
   onRemoveEntity,
@@ -80,9 +93,14 @@ function NativeEntitySummary({
   onEnergyExchangerModeChange,
   onFuelItemChange,
   onBlackHolePausedChange,
+  onTimeWarpEnabledChange,
+  onTimeWarpRequestedMultiplierChange,
+  onEjectorOrbitChange,
 }: {
   entity: SelectedEntityReadModel;
   configuration: NativeProjectedEntityConfigurationBinding | null;
+  timeWarpController: NativeProjectedTimeWarpControllerBinding | null;
+  ejectorOrbitFrame: NativeProjectedEjectorOrbitFrame | null;
   pending: boolean;
   onEntityLockChange: (entityId: string, locked: boolean) => void;
   onRemoveEntity: (entityId: string) => void;
@@ -101,6 +119,9 @@ function NativeEntitySummary({
     entityId: string,
     paused: boolean,
   ) => void;
+  onTimeWarpEnabledChange?: (entityId: string, enabled: boolean) => void;
+  onTimeWarpRequestedMultiplierChange?: (entityId: string, requestedMultiplier: number) => void;
+  onEjectorOrbitChange?: (entityId: string, orbitId: string) => void;
 }) {
   const label = entity.buildingId
     ? constructionNames.get(entity.buildingId) ?? entity.buildingId
@@ -118,6 +139,8 @@ function NativeEntitySummary({
       activationConfirmed: configuration.entity.blackHoleActivationConfirmed,
     }
     : null;
+  const timeWarpState = getNativeProjectedTimeWarpControllerState(timeWarpController);
+  const ejectorTargetId = ejectorOrbitFrame?.entity.targetDysonOrbitId ?? null;
   const toggleBlackHole = () => {
     if (!blackHoleState) return;
     if (!blackHoleState.paused) {
@@ -239,6 +262,89 @@ function NativeEntitySummary({
       >{blackHoleState.paused ? <Play size={14} /> : <Pause size={14} />}
         {blackHoleState.paused ? "启动微型黑洞" : "暂停销毁"}</button>
     </section>}
+    {entity.buildingId !== "time_warp_device" ? null : <section
+      className="native-inspector-safe-actions"
+      data-native-time-warp-controller="semantic-intent-v1"
+    >
+      <strong><Gauge size={14} />Rust 时间扭曲主控</strong>
+      {timeWarpState ? <>
+        <p>界面只提交主控 ID 和目标值；倍率、供电和启停后的派生字段全部由 Rust 在最新 revision 重新计算。</p>
+        <dl className="metric-ledger">
+          <div><dt>运行开关</dt><dd>{timeWarpState.enabled ? "纯挂机运行中" : "已停止"}</dd></div>
+          <div><dt>请求倍率</dt><dd>{timeWarpState.requestedMultiplier}x</dd></div>
+          <div><dt>实际倍率</dt><dd>{timeWarpState.effectiveMultiplier}x</dd></div>
+          <div><dt>需求功率</dt><dd><PowerValue valueKw={timeWarpState.requiredPowerKw} /></dd></div>
+          <div><dt>获得功率</dt><dd><PowerValue valueKw={timeWarpState.allocatedPowerKw} /></dd></div>
+        </dl>
+        <div className="time-warp-stepper" aria-label="Windows 原生时间扭曲请求倍率">
+          <button
+            type="button"
+            aria-label="原生倍率减一"
+            disabled={pending || timeWarpState.requestedMultiplier <= 5 || !onTimeWarpRequestedMultiplierChange}
+            onClick={() => onTimeWarpRequestedMultiplierChange?.(
+              entity.entityId,
+              timeWarpState.requestedMultiplier - 1,
+            )}
+          >-</button>
+          <input
+            type="number"
+            min={5}
+            step={1}
+            value={timeWarpState.requestedMultiplier}
+            disabled={pending || !onTimeWarpRequestedMultiplierChange}
+            onChange={(event) => {
+              const value = Number(event.target.value);
+              if (Number.isSafeInteger(value) && value >= 5) {
+                onTimeWarpRequestedMultiplierChange?.(entity.entityId, value);
+              }
+            }}
+          />
+          <button
+            type="button"
+            aria-label="原生倍率加一"
+            disabled={pending || timeWarpState.requestedMultiplier >= Number.MAX_SAFE_INTEGER ||
+              !onTimeWarpRequestedMultiplierChange}
+            onClick={() => onTimeWarpRequestedMultiplierChange?.(
+              entity.entityId,
+              timeWarpState.requestedMultiplier + 1,
+            )}
+          >+</button>
+        </div>
+        <button
+          type="button"
+          disabled={pending || !onTimeWarpEnabledChange}
+          onClick={() => onTimeWarpEnabledChange?.(entity.entityId, !timeWarpState.enabled)}
+        >{timeWarpState.enabled ? <Pause size={14} /> : <Play size={14} />}
+          {timeWarpState.enabled ? "安全停止原生纯挂机" : "开始原生纯挂机"}</button>
+      </> : <p role="status">当前建筑不是同 revision 的已选主控，或原生投影正在刷新；控制保持关闭。</p>}
+    </section>}
+    {entity.buildingId !== "em_rail_ejector" ? null : <section
+      className="native-inspector-safe-actions"
+      data-native-ejector-orbit="entity-leaf-v1"
+    >
+      <strong><Orbit size={14} />Rust 太阳帆目标轨道</strong>
+      {ejectorOrbitFrame ? <>
+        <p>这里只读取当前恒星系最多 8 条原生轨道；提交时只发送弹射器 ID 和目标轨道 ID。</p>
+        <label>
+          <span>目标轨道</span>
+          <select
+            aria-label="Windows 原生太阳帆目标轨道"
+            value={ejectorTargetId ?? ""}
+            disabled={pending || !onEjectorOrbitChange}
+            onChange={(event) => onEjectorOrbitChange?.(entity.entityId, event.target.value)}
+          >
+            {ejectorTargetId && !ejectorOrbitFrame.orbitsById.has(ejectorTargetId)
+              ? <option value={ejectorTargetId}>失效轨道 · {ejectorTargetId}</option>
+              : null}
+            {!ejectorTargetId ? <option value="" disabled>选择轨道</option> : null}
+            {ejectorOrbitFrame.orbits.map((orbit) => <option
+              value={orbit.orbitId}
+              key={orbit.orbitId}
+            >{orbit.name || orbit.orbitId} · {orbit.radius.toLocaleString("zh-CN")} m</option>)}
+          </select>
+        </label>
+      </> : <p role="status">正在核对当前恒星系的同 revision 轨道页；旧网页存档不会作为备用来源。</p>}
+    </section>}
     <section className="native-inspector-safe-actions" data-native-construction-stack="ordinary-single-v1">
       <strong>Rust 建筑堆叠</strong>
       <p>每次只增减一栋。Rust 会用最新 revision 重新核对建筑上限和施工托盘；旧档中超过新上限的堆叠仍可安全减少。</p>
@@ -340,6 +446,8 @@ export function NativeFactoryInspectorPanel({
   inspector,
   multiSelection,
   entityConfiguration,
+  timeWarpController = null,
+  ejectorOrbitFrame = null,
   pending,
   onEntityLockChange,
   onRemoveEntity,
@@ -349,6 +457,9 @@ export function NativeFactoryInspectorPanel({
   onEnergyExchangerModeChange,
   onFuelItemChange,
   onBlackHolePausedChange,
+  onTimeWarpEnabledChange,
+  onTimeWarpRequestedMultiplierChange,
+  onEjectorOrbitChange,
   onBeltLaneCountChange,
   onBeltPriorityChange,
   onRemoveBelt,
@@ -373,6 +484,31 @@ export function NativeFactoryInspectorPanel({
     entityConfiguration.entity.interactionLocked === inspector.entity.interactionLocked
     ? entityConfiguration
     : null;
+  const currentTimeWarpController = currentEntityConfiguration && timeWarpController &&
+    timeWarpController.sessionId === currentEntityConfiguration.sessionId &&
+    timeWarpController.runId === currentEntityConfiguration.runId &&
+    timeWarpController.revision === currentEntityConfiguration.revision &&
+    timeWarpController.activePlanetId === currentEntityConfiguration.activePlanetId &&
+    timeWarpController.entity.id === currentEntityConfiguration.entity.id &&
+    timeWarpController.entity.planetId === currentEntityConfiguration.entity.planetId &&
+    timeWarpController.entity.kind === currentEntityConfiguration.entity.kind &&
+    timeWarpController.entity.buildingId === currentEntityConfiguration.entity.buildingId &&
+    timeWarpController.entity.interactionLocked === currentEntityConfiguration.entity.interactionLocked
+    ? timeWarpController
+    : null;
+  const currentEjectorOrbitFrame = currentEntityConfiguration && ejectorOrbitFrame &&
+    ejectorOrbitFrame.sessionId === currentEntityConfiguration.sessionId &&
+    ejectorOrbitFrame.runId === currentEntityConfiguration.runId &&
+    ejectorOrbitFrame.revision === currentEntityConfiguration.revision &&
+    ejectorOrbitFrame.activePlanetId === currentEntityConfiguration.activePlanetId &&
+    ejectorOrbitFrame.entity.id === currentEntityConfiguration.entity.id &&
+    ejectorOrbitFrame.entity.planetId === currentEntityConfiguration.entity.planetId &&
+    ejectorOrbitFrame.entity.kind === currentEntityConfiguration.entity.kind &&
+    ejectorOrbitFrame.entity.buildingId === currentEntityConfiguration.entity.buildingId &&
+    ejectorOrbitFrame.entity.interactionLocked === currentEntityConfiguration.entity.interactionLocked &&
+    ejectorOrbitFrame.entity.targetDysonOrbitId === currentEntityConfiguration.entity.targetDysonOrbitId
+    ? ejectorOrbitFrame
+    : null;
   let content;
   if (!ready) {
     content = <section className="inspector-content native-read-only-unavailable" role="status"><strong>正在核对原生检查摘要</strong><p>旧 JavaScript 存档不会作为备用显示来源。</p></section>;
@@ -388,6 +524,8 @@ export function NativeFactoryInspectorPanel({
     content = <NativeEntitySummary
       entity={inspector.entity}
       configuration={currentEntityConfiguration}
+      timeWarpController={currentTimeWarpController}
+      ejectorOrbitFrame={currentEjectorOrbitFrame}
       pending={pending}
       onEntityLockChange={onEntityLockChange}
       onRemoveEntity={onRemoveEntity}
@@ -397,6 +535,9 @@ export function NativeFactoryInspectorPanel({
       onEnergyExchangerModeChange={onEnergyExchangerModeChange}
       onFuelItemChange={onFuelItemChange}
       onBlackHolePausedChange={onBlackHolePausedChange}
+      onTimeWarpEnabledChange={onTimeWarpEnabledChange}
+      onTimeWarpRequestedMultiplierChange={onTimeWarpRequestedMultiplierChange}
+      onEjectorOrbitChange={onEjectorOrbitChange}
     />;
   } else if (inspector.belt && !inspector.entity) {
     content = <NativeBeltSummary belt={inspector.belt} pending={pending} onLaneCountChange={onBeltLaneCountChange} onPriorityChange={onBeltPriorityChange} onRemove={onRemoveBelt} />;

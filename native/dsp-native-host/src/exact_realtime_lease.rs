@@ -2745,16 +2745,30 @@ fn player_authority_command_disables_time_warp(command: &Value) -> bool {
         .and_then(Value::as_array)
         .is_some_and(|changes| {
             changes.iter().any(|change| {
-                change
-                    .get("path")
-                    .and_then(Value::as_array)
-                    .is_some_and(|path| {
-                        path.len() == 2
-                            && path[0].as_str() == Some("timeWarp")
-                            && path[1].as_str() == Some("enabled")
-                    })
-                    && change.get("operation").and_then(Value::as_str) == Some("set")
-                    && change.get("value").and_then(Value::as_bool) == Some(false)
+                let Some(path) = change.get("path").and_then(Value::as_array) else {
+                    return false;
+                };
+                if path.len() != 2
+                    || path[0].as_str() != Some("timeWarp")
+                    || change.get("operation").and_then(Value::as_str) != Some("set")
+                {
+                    return false;
+                }
+                if path[1].as_str() == Some("enabled") {
+                    return change.get("value").and_then(Value::as_bool) == Some(false);
+                }
+                path[1].as_str() == Some("intent")
+                    && change
+                        .get("value")
+                        .and_then(Value::as_object)
+                        .is_some_and(|intent| {
+                            intent.len() == 2
+                                && intent
+                                    .get("controllerEntityId")
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|entity_id| !entity_id.is_empty())
+                                && intent.get("enabled").and_then(Value::as_bool) == Some(false)
+                        })
             })
         })
 }

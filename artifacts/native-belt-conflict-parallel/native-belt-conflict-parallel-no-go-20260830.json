@@ -1,0 +1,238 @@
+{
+  "schemaVersion": 1,
+  "verification": "native-belt-conflict-component-parallel-no-go-v1",
+  "status": "no-go",
+  "generatedAt": "2026-08-30T10:43:25.121Z",
+  "decision": {
+    "accepted": false,
+    "reason": "The candidate is semantically exact against the frozen full-scan baseline but misses both timing gates: its median nativeAdvance is 9.865833099185155% slower and its nearest-rank P95 is 11.547548730064982% slower.",
+    "requiredMedianReductionPercent": 3,
+    "requiredP95RegressionPercentMaximum": 0,
+    "requiredWorkflowPeakIncreaseBytesMaximum": 8388608,
+    "productPrototypeReverted": true,
+    "mergedToSharedBranch": false
+  },
+  "sourceState": {
+    "worktree": "D:\\GameDev\\DSPidle2-native-belt-conflict-parallel",
+    "branch": "codex/native-belt-conflict-parallel",
+    "baselineCommit": "16e5583a625b658dc1a95d79069afae532d7e275",
+    "headBeforeEvidenceCommit": "16e5583a625b658dc1a95d79069afae532d7e275",
+    "prototypeTouched": [
+      "native/dsp-native-core/src/belts.rs",
+      "native/dsp-native-core/src/deterministic_runtime.rs"
+    ],
+    "prototypeDiffBlobSha1": "9b2f2b9ac3418dd5fa10ee341b66ad9e534a7b10",
+    "prototypeDiffInsertions": 1050,
+    "prototypeDiffDeletions": 2,
+    "productDiffAfterRevertFiles": 0,
+    "productDiffAfterRevertBytes": 0,
+    "finalRuntimeContainsPrototype": false,
+    "finalMaterialAlgorithmChanged": false
+  },
+  "prototypeDesign": {
+    "description": "Non-quantum, non-opaque disjoint components produced worker-private scalar plans and were replayed in stable source order on the owning thread.",
+    "properties": {
+      "deterministicPrivateWorkerOutput": true,
+      "stableOrderedCommit": true,
+      "sharedSerdeValueParallelWrites": false,
+      "unsafeUsed": false,
+      "completeEntityGraphClonePerComponent": false,
+      "quantumOpaqueModDriftDenseFailurePathsKeptSerial": true
+    },
+    "revertReason": "The private evaluation stage was additive; the existing stable serde_json::Value commit remained essentially unchanged. Replacing that commit would require a broader dynamic-map replay/swap design outside the narrow experiment boundary."
+  },
+  "immutableInputs": {
+    "fixture": {
+      "path": "C:\\Users\\WINDOWS\\Downloads\\dsp-idle-save-2026-08-27.json",
+      "sizeBytes": 44566548,
+      "sha256": "77aca1697a336bf84f8305e3c049620852ebabe6b7dd5622f3c84be4ec3d956d",
+      "unchangedAcrossEverySemanticAndAbRun": true
+    },
+    "baselineBinary": {
+      "path": "D:\\GameDev\\build-native-belt-conflict-baseline\\release\\dsp-native-host.exe",
+      "sizeBytes": 13012992,
+      "sha256": "1e63ea308cec89c11bd7c55fb3aead1ae707acee91a6211c7137e746dad7125c"
+    },
+    "candidateCorrectnessAndAbBinary": {
+      "path": "D:\\GameDev\\build-native-belt-conflict-candidate\\release\\dsp-native-host.exe",
+      "sizeBytes": 13082624,
+      "sha256": "e5559ad94f8dd9394887f965597ad04823ba38c29fa22af419f009b087d6225f",
+      "note": "Historical experiment binary only; source was subsequently reverted and this binary is not shippable."
+    },
+    "candidateSplitDiagnosticBinary": {
+      "sizeBytes": 13083136,
+      "sha256": "23f3c15f945584b12f2f7c51ed03a430988d4286cf4b4606b9061ca39b1ba741",
+      "note": "Historical diagnostic-only binary; not the correctness/A-B candidate and not shippable."
+    }
+  },
+  "correctness": {
+    "requestedCells": 24,
+    "completedCells": 24,
+    "baselineProfileOffCells": 12,
+    "candidateCells": 12,
+    "threadSettings": [1, 2, 4, 8],
+    "seconds": [1, 5, 60],
+    "candidateEqualsBaselineFullScanFieldForField": true,
+    "oneAndFiveSecondRustEqualsJavascriptFieldForField": true,
+    "sixtySecondCandidateEqualsBaselineFieldForField": true,
+    "fixtureShaUnchanged": true,
+    "schedulerProof": {
+      "activeQueueEnabled": false,
+      "oneSecondFullScanPasses": 3,
+      "groupCount": 42029,
+      "routeCount": 93200,
+      "oneSecondTransferRouteChecks": 186400
+    },
+    "durationProofs": {
+      "1": {
+        "canonicalSha256": "c4ea336fb581125baae31d21be4976e718c954b3a79a1003aff5d1ecccf11f2d",
+        "expectedJavascriptCanonicalSha256": "c4ea336fb581125baae31d21be4976e718c954b3a79a1003aff5d1ecccf11f2d",
+        "domainSha256": "2ae45c211717b5baf1a7e3980aeb06308d559071a1b0ea2e4f8ac154b877990e",
+        "conservationSha256": "ef9f323ca51a53378af418a970f35ead35183e147286c272749073f032f189dd"
+      },
+      "5": {
+        "canonicalSha256": "bc9675341618e689eed77b9c6fa5dcd3c5082eec499b5c8abb46cccd33441841",
+        "expectedJavascriptCanonicalSha256": "bc9675341618e689eed77b9c6fa5dcd3c5082eec499b5c8abb46cccd33441841",
+        "domainSha256": "d2d1958fdbb68ba11d82dd287229cfe82a9e12414df1cab76993788fd5c26eaf",
+        "conservationSha256": "136624afa4237e0464a57f17565181cd5ddfdfa6cd37f958ff6b9ca5a5146997"
+      },
+      "60": {
+        "nativeAndBaselineCanonicalSha256": "c0bae2ffe46e5fed9728aeba036c1aaa413075a101c53bb3f801be1deeeb4277",
+        "expectedJavascriptCanonicalSha256": "caf2f1a43aa44f4764cbbee2d4b9909e8dc0b50225dcc954a909268eff94c808",
+        "domainSha256": "9e7e2d31954624da0645939d6a006d9c973deea7daf0619a942b61bdbb9c8b4a",
+        "conservationSha256": "3a9fed120191a219051b494931b6e93b8d301a88d84f023e5cc82bb83dab3f45",
+        "remainingBaselineDivergence": {
+          "onlyPath": "dysonEngineering.launchEnergySpentMj",
+          "nativeAndCandidate": 75311891121082.4,
+          "javascript": 75311891121082.44,
+          "absoluteDifference": 0.04,
+          "waiver": "Pre-existing, stable, candidate-independent divergence; Dyson code was neither changed nor masked."
+        }
+      }
+    },
+    "candidateCellArtifacts": [
+      {"threads": 1, "seconds": 1, "sha256": "4eb5b6305ab74ac3a6e1f7947bea74674258b6c942bcff4827473d3c83f37a5b"},
+      {"threads": 1, "seconds": 5, "sha256": "28f79f112bccfec28c8083c8e6af0bc8c9073a9ed289746975feb6b5ae157cf0"},
+      {"threads": 1, "seconds": 60, "sha256": "1ee34a0a8a2d3cddefe523aaab2a5b2eecbfc155132435723d63bedfb3fca841"},
+      {"threads": 2, "seconds": 1, "sha256": "1e90cf16f865d94491e6eb750f48485fe8c561277923dfeb2a9377c024e24c08"},
+      {"threads": 2, "seconds": 5, "sha256": "ac352c29e4dabd794d6fb47dd2911df2c5b91e17dbac015e5d62e5cb9e2055b5"},
+      {"threads": 2, "seconds": 60, "sha256": "2b6cd4d22192f3df3e840be1e034f305b5597c55f80f835e7aec1c6b3582b380"},
+      {"threads": 4, "seconds": 1, "sha256": "41a82efac349b5593c1909ff7a7bdd67f029c5a773924cc64b3cebfbc4fd62c6"},
+      {"threads": 4, "seconds": 5, "sha256": "523659e2de0073a1adc59eaf0f1a521ba734cf479f8845a84993c453ca386a1e"},
+      {"threads": 4, "seconds": 60, "sha256": "a2c21eb78941aa11433f54472994764422126e43b69b56a817567efdeacc42b9"},
+      {"threads": 8, "seconds": 1, "sha256": "d17986646407fb7b171bdd46b53bddf6996552c5b4a375bd9d6ae845bf518db0"},
+      {"threads": 8, "seconds": 5, "sha256": "c4c48dda84f29ba6c8d0442b8553763400145dadc4f8aa4c94ae927dd23c15ed"},
+      {"threads": 8, "seconds": 60, "sha256": "d290cce4a6aea743fbf8cae88955068d893cf9c328f86f82009336651a37f868"}
+    ],
+    "baselineMatrixArtifact": {
+      "path": "D:\\GameDev\\DSPidle2-belt-conflict-profiler\\artifacts\\belt-conflict-profiler\\belt-conflict-qualification-20260830.json",
+      "sizeBytes": 13744,
+      "sha256": "a97aafa726a4004dc3ffb543772ef0283d41fb0c964c81497a5debf6d28332d2",
+      "commit": "9f3057d158eca962ed189cf6f7704446ba13a30d"
+    }
+  },
+  "performance": {
+    "method": "Independent release hosts, three samples each, interleaved order baseline,candidate,candidate,baseline,baseline,candidate, 8 threads, 1 exact second.",
+    "abArtifactSha256": "ef79c423d8124a777308dd0ffa029942eb9b315138e1074774ff4c16654b9930",
+    "nativeAdvanceDurationMs": {
+      "baselineSamples": [569.44, 569.27, 575.62],
+      "candidateSamples": [642.09, 625.62, 604.66],
+      "baselineMedian": 569.44,
+      "candidateMedian": 625.62,
+      "candidateReductionPercent": -9.865833099185155,
+      "medianGatePassed": false,
+      "baselineP95NearestRank": 575.62,
+      "candidateP95NearestRank": 642.09,
+      "p95RegressionPercent": 11.547548730064982,
+      "p95GatePassed": false
+    },
+    "wholeWorkflowPeakPrivateBytes": {
+      "definition": "max(openPeakPrivateBytes,nativeAdvancePeakPrivateBytes) per run",
+      "baselineSamples": [1084235776, 1084018688, 1084518400],
+      "candidateSamples": [1084399616, 1084243968, 1084080128],
+      "baselineMedian": 1084235776,
+      "candidateMedian": 1084243968,
+      "medianIncreaseBytes": 8192,
+      "baselineMaximum": 1084518400,
+      "candidateMaximum": 1084399616,
+      "maximumIncreaseBytes": -118784,
+      "gatePassed": true
+    },
+    "phaseDiagnosisMs": {
+      "baselineStableCommitPasses": [29.571, 65.228],
+      "candidateSplitPrivateComponentEvaluationPasses": [24.618, 15.415],
+      "candidateSplitPrivateComponentEvaluationTotal": 40.033,
+      "candidateSplitStableCommitPasses": [29.971, 67.677],
+      "candidateAggregateStableCommitPasses": [59.079, 83.961],
+      "conclusion": "The private stage adds about 40 ms while the original stable dynamic Value commit remains; an attempted aggregate replay was worse."
+    }
+  },
+  "failureHistory": [
+    {
+      "severity": "P0-resolved",
+      "event": "First candidate 8-thread/1-second smoke failed closed with native belt reservation cached target capacity is invalid.",
+      "cause": "The first conflict graph omitted different entities that share one logical target slot, including the planet tray.",
+      "resolution": "Added the target-slot conflict relation, then passed the complete matrix before performance measurement.",
+      "artifactSha256": "02c634b720622dee28158b2fe1ba4354a8082e13d3560cfd17b68efe1e31cb80"
+    },
+    {
+      "severity": "P1-decision",
+      "event": "Qualified candidate failed median and P95 timing gates.",
+      "resolution": "No-Go and full source revert."
+    },
+    {
+      "severity": "P2-not-attempted",
+      "event": "A meaningful speedup appears to require broader dynamic-map ownership/replay changes.",
+      "resolution": "Stopped at the requested architectural boundary instead of hard-rewriting or cloning the entity graph."
+    },
+    {
+      "severity": "infrastructure-corrected",
+      "event": "The first A/B invocation ran from a worktree without node_modules and failed before benchmarking.",
+      "artifactSha256": "4c3a44b651822f47794f662c69e686e443480a63bfc749697edb8346780166a5"
+    },
+    {
+      "severity": "invocation-corrected",
+      "event": "npm test -- --reporter=basic failed at startup because Vitest 4.1.10 treated basic as an unavailable custom reporter.",
+      "resolution": "The repository-prescribed npm test command then passed all 2472 tests (2403 passed, 69 skipped)."
+    }
+  ],
+  "rawEvidenceIdentities": {
+    "semanticSmokeCorrectedSha256": "e328fda2aba8217628512a56998a3d294bb3fd73b9bc87fbb503e51c4c279bd0",
+    "semanticSmokeAggregateSha256": "83fec3244d62ca070308ebad417b137d8626a44db6d9c897aca836b1930bd669",
+    "phaseBaselineSha256": "ed4ee4051795df308a8694c66d0f3c4b76e8ace9bf525367608fc9a8737f3588",
+    "phaseCandidateSha256": "e98eb71b99dbb721fddf96844fba373b4a673f2f034c00a7af4e5e8e340a5bde",
+    "phaseCandidateSplitSha256": "2af95f89ffce4c861ba93886bcc22aba7432d1f6c98be59103199500fad6b65d",
+    "phaseCandidateAggregateSha256": "0d569397fa5cbcb478eb2d3837df28468bea32ab6db9522b726953faa196c673"
+  },
+  "qualityGatesAfterProductRevert": [
+    {"command": "cargo fmt --manifest-path native/Cargo.toml --all -- --check", "exitCode": 0},
+    {"command": "cargo check --manifest-path native/Cargo.toml --workspace --locked", "exitCode": 0},
+    {"command": "cargo clippy --manifest-path native/Cargo.toml --workspace --all-targets --locked -- -D warnings", "exitCode": 0},
+    {"command": "npm run test:native-core:serial", "exitCode": 0, "corePassed": 682, "hostPassed": 172, "totalPassed": 854},
+    {"command": "npm run test:native", "exitCode": 0, "tests": 417, "passed": 410, "skipped": 7},
+    {"command": "npm test", "exitCode": 0, "filesPassed": 311, "filesSkipped": 16, "tests": 2472, "passed": 2403, "skipped": 69},
+    {"command": "npm run typecheck", "exitCode": 0},
+    {"command": "npm run build", "exitCode": 0, "startupBudgetPassed": true}
+  ],
+  "reproduction": {
+    "notes": [
+      "Run from an npm-ci-initialized checkout of commit 16e5583 unless evaluating a historical candidate patch.",
+      "Every output path must be new; the stress tool refuses replacement.",
+      "Set DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS to 1, 5, or 60 before each matrix cell.",
+      "For the known 60-second baseline Dyson divergence, set DSP_NATIVE_CORE_BENCHMARK_PROFILE_EQUIVALENCE=1 so the observer-equivalence evidence is recorded without masking the mismatch."
+    ],
+    "semanticCellPowerShell": "$env:DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS='1'; $env:DSP_NATIVE_CORE_BENCHMARK_PROFILE_EQUIVALENCE='1'; node scripts/stress-native-core-real-save.mjs --binary D:\\absolute\\dsp-native-host.exe --fixture C:\\absolute\\frozen-save.json --output D:\\absolute\\new-cell.json --runs 1 --scenario exact --threads 8",
+    "phaseProfilePowerShell": "$env:DSP_NATIVE_CORE_BENCHMARK_EXACT_SECONDS='1'; Remove-Item Env:DSP_NATIVE_CORE_BENCHMARK_PROFILE_EQUIVALENCE -ErrorAction SilentlyContinue; node scripts/stress-native-core-real-save.mjs --binary D:\\absolute\\dsp-native-host.exe --fixture C:\\absolute\\frozen-save.json --output D:\\absolute\\new-profile.json --runs 1 --scenario exact --threads 8 --profile",
+    "abPowerShell": "node scripts/benchmark-native-core-ab.mjs --baseline D:\\absolute\\baseline-host.exe --candidate D:\\absolute\\candidate-host.exe --fixture C:\\absolute\\frozen-save.json --output D:\\absolute\\new-ab.json --runs 3 --threads 8 --scenario exact --timeout-ms 600000",
+    "gateCommands": [
+      "cargo fmt --manifest-path native/Cargo.toml --all -- --check",
+      "cargo check --manifest-path native/Cargo.toml --workspace --locked",
+      "cargo clippy --manifest-path native/Cargo.toml --workspace --all-targets --locked -- -D warnings",
+      "npm run test:native-core:serial",
+      "npm run test:native",
+      "npm test",
+      "npm run typecheck",
+      "npm run build"
+    ]
+  }
+}

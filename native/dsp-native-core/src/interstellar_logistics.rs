@@ -337,6 +337,44 @@ pub(crate) struct InterstellarDispatchScan {
     pub directory_fallback: bool,
 }
 
+/// Borrowed, stable-order rows for the remote dispatch eligibility probe.
+/// Full plans borrow immutable topology/directory storage; pending plans borrow
+/// the transactional wake queue until probing completes.
+#[derive(Debug, Clone, Copy)]
+enum InterstellarDispatchProbePlan<'a> {
+    Full(&'a [usize]),
+    Pending(&'a [usize]),
+}
+
+impl<'a> InterstellarDispatchProbePlan<'a> {
+    fn rows(self) -> &'a [usize] {
+        match self {
+            Self::Full(rows) | Self::Pending(rows) => rows,
+        }
+    }
+
+    fn len(self) -> usize {
+        self.rows().len()
+    }
+}
+
+/// The dispatch body either borrows the full topology oracle or owns the
+/// genuinely selected demand results produced by the eligibility probes.
+enum InterstellarDispatchRows<'a> {
+    Full(&'a [usize]),
+    Selected(Vec<usize>),
+}
+
+impl InterstellarDispatchRows<'_> {
+    fn iter(&self) -> impl Iterator<Item = usize> + '_ {
+        match self {
+            Self::Full(rows) => rows.iter(),
+            Self::Selected(rows) => rows.iter(),
+        }
+        .copied()
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct WarperRefillScan {
     pub selected_station_rows: usize,
@@ -773,12 +811,17 @@ impl InterstellarRouteActivity {
         self.powered_station_indices = next_powered;
     }
 
-    fn take_dispatch_probe_indices(
-        &mut self,
-        directory: &InterstellarPeerDirectory,
-    ) -> (Vec<usize>, bool) {
+    fn dispatch_probe_plan<'a>(
+        &'a self,
+        all_station_indices: &'a [usize],
+        directory: &'a InterstellarPeerDirectory,
+    ) -> (InterstellarDispatchProbePlan<'a>, bool, bool) {
         if directory.fallback_full_scan {
-            return (Vec::new(), true);
+            return (
+                InterstellarDispatchProbePlan::Full(all_station_indices),
+                false,
+                false,
+            );
         }
         let active = self.pending_dispatch_demand_indices.len();
         let total = directory.demand_station_indices.len();
@@ -786,12 +829,16 @@ impl InterstellarRouteActivity {
             && active.saturating_mul(REMOTE_DISPATCH_DENSE_DENOMINATOR)
                 >= total.saturating_mul(REMOTE_DISPATCH_DENSE_NUMERATOR);
         if dense {
-            self.pending_dispatch_demand_indices.clear();
-            (directory.demand_station_indices.clone(), true)
+            (
+                InterstellarDispatchProbePlan::Full(&directory.demand_station_indices),
+                true,
+                true,
+            )
         } else {
             (
-                std::mem::take(&mut self.pending_dispatch_demand_indices),
+                InterstellarDispatchProbePlan::Pending(&self.pending_dispatch_demand_indices),
                 false,
+                true,
             )
         }
     }
@@ -3344,22 +3391,29 @@ fn plan_dispatch_demand_indices_with<L: InterstellarDispatchLedger + ?Sized>(
     peer_directory: &InterstellarPeerDirectory,
     ledger: &L,
 ) -> anyhow::Result<(Vec<usize>, InterstellarDispatchScan)> {
-    let (demand_rows, dense_fallback) = if peer_directory.fallback_full_scan {
-        (state.factory_topology.station_indices.clone(), false)
-    } else {
-        route_activity.take_dispatch_probe_indices(peer_directory)
+    let (probes, demand_rows_probed, dense_fallback, consume_pending) = {
+        let (plan, dense_fallback, consume_pending) = route_activity
+            .dispatch_probe_plan(&state.factory_topology.station_indices, peer_directory);
+        let demand_rows_probed = plan.len();
+        let probes = runtime.indexed_try_map(plan.rows(), |_, demand_index| {
+            probe_dispatch_demand(
+                state,
+                base,
+                entities,
+                powers,
+                *demand_index,
+                peer_directory,
+                ledger,
+            )
+        });
+        (probes, demand_rows_probed, dense_fallback, consume_pending)
     };
-    let probes = runtime.indexed_try_map(&demand_rows, |_, demand_index| {
-        probe_dispatch_demand(
-            state,
-            base,
-            entities,
-            powers,
-            *demand_index,
-            peer_directory,
-            ledger,
-        )
-    })?;
+    if consume_pending {
+        // The old materialized path moved or cleared the queue before probing,
+        // including when the earliest stable-order probe returned an error.
+        route_activity.pending_dispatch_demand_indices.clear();
+    }
+    let probes = probes?;
     let peer_candidate_rows_visited = probes
         .iter()
         .map(|probe| probe.peer_candidate_rows_visited)
@@ -3378,7 +3432,6 @@ fn plan_dispatch_demand_indices_with<L: InterstellarDispatchLedger + ?Sized>(
     } else {
         peer_directory.demand_station_indices.len()
     };
-    let demand_rows_probed = demand_rows.len();
     let selected_demands = selected.len();
     Ok((
         selected,
@@ -3414,9 +3467,9 @@ fn dispatch_with_ledger_mode<L: InterstellarDispatchLedger + ?Sized>(
     }) {
         return Ok(InterstellarDispatchScan::default());
     }
-    let (dispatch_demand_indices, mut dispatch_scan) = if force_full_scan {
+    let (dispatch_demand_rows, mut dispatch_scan) = if force_full_scan {
         (
-            station_indices.to_vec(),
+            InterstellarDispatchRows::Full(station_indices),
             InterstellarDispatchScan {
                 selected_demands: station_indices.len(),
                 total_demand_rows: station_indices.len(),
@@ -3426,7 +3479,7 @@ fn dispatch_with_ledger_mode<L: InterstellarDispatchLedger + ?Sized>(
             },
         )
     } else {
-        plan_dispatch_demand_indices_with(
+        let (selected, scan) = plan_dispatch_demand_indices_with(
             runtime,
             state,
             base,
@@ -3435,11 +3488,12 @@ fn dispatch_with_ledger_mode<L: InterstellarDispatchLedger + ?Sized>(
             route_activity,
             peer_directory,
             ledger,
-        )?
+        )?;
+        (InterstellarDispatchRows::Selected(selected), scan)
     };
     let indexes = &state.entity_index;
     let mut activated_remote_demands = Vec::new();
-    for demand_index in dispatch_demand_indices {
+    for demand_index in dispatch_demand_rows.iter() {
         let demand_snapshot = entities[demand_index]
             .as_object()
             .ok_or_else(|| anyhow!("native interstellar demand is invalid"))?
@@ -6758,6 +6812,180 @@ mod tests {
             .collect()
     }
 
+    fn materialized_dispatch_probe_plan_oracle(
+        activity: &InterstellarRouteActivity,
+        all_station_indices: &[usize],
+        directory: &InterstellarPeerDirectory,
+    ) -> (Vec<usize>, bool, bool) {
+        if directory.fallback_full_scan {
+            return (all_station_indices.to_vec(), false, false);
+        }
+        let active = activity.pending_dispatch_demand_indices.len();
+        let total = directory.demand_station_indices.len();
+        let dense = active > 0
+            && active.saturating_mul(REMOTE_DISPATCH_DENSE_DENOMINATOR)
+                >= total.saturating_mul(REMOTE_DISPATCH_DENSE_NUMERATOR);
+        if dense {
+            (directory.demand_station_indices.clone(), true, true)
+        } else {
+            (
+                activity.pending_dispatch_demand_indices.clone(),
+                false,
+                true,
+            )
+        }
+    }
+
+    #[test]
+    fn lazy_dispatch_scan_probe_plan_matches_materialized_full_pending_dense_and_order_oracle() {
+        fn assert_matches<'a>(
+            activity: &'a InterstellarRouteActivity,
+            all_station_indices: &'a [usize],
+            directory: &'a InterstellarPeerDirectory,
+        ) -> (InterstellarDispatchProbePlan<'a>, bool, bool) {
+            let expected =
+                materialized_dispatch_probe_plan_oracle(activity, all_station_indices, directory);
+            let actual = activity.dispatch_probe_plan(all_station_indices, directory);
+            assert_eq!(actual.0.rows(), expected.0);
+            assert_eq!((actual.1, actual.2), (expected.1, expected.2));
+            actual
+        }
+
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<InterstellarDispatchProbePlan<'_>>();
+        assert!(!std::mem::needs_drop::<InterstellarDispatchProbePlan<'_>>());
+        assert!(
+            std::mem::size_of::<InterstellarDispatchProbePlan<'_>>()
+                <= std::mem::size_of::<usize>() * 3
+        );
+
+        let entities = indexed_dispatch_matrix(9, &[]);
+        let state = dispatch_fixture_state(&entities);
+        let base = dispatch_fixture_base();
+        let mut directory =
+            InterstellarPeerDirectory::build(&state, base.as_object().unwrap(), &entities);
+        let mut activity = prepare_route_activity(&entities);
+
+        activity.pending_dispatch_demand_indices = vec![1, 3];
+        let pending = assert_matches(
+            &activity,
+            &state.factory_topology.station_indices,
+            &directory,
+        );
+        assert!(matches!(
+            pending.0,
+            InterstellarDispatchProbePlan::Pending(_)
+        ));
+        assert!(!pending.1);
+        assert!(pending.2);
+
+        activity.pending_dispatch_demand_indices.clear();
+        let empty = assert_matches(
+            &activity,
+            &state.factory_topology.station_indices,
+            &directory,
+        );
+        assert!(matches!(empty.0, InterstellarDispatchProbePlan::Pending(_)));
+        assert_eq!(empty.0.len(), 0);
+
+        activity.pending_dispatch_demand_indices = vec![7, 3, 7, 1];
+        let reversed_duplicate = assert_matches(
+            &activity,
+            &state.factory_topology.station_indices,
+            &directory,
+        );
+        assert!(matches!(
+            reversed_duplicate.0,
+            InterstellarDispatchProbePlan::Pending(_)
+        ));
+        assert_eq!(reversed_duplicate.0.rows(), [7, 3, 7, 1]);
+
+        activity.pending_dispatch_demand_indices = vec![1, 2, 3, 4, 5, 6];
+        let dense = assert_matches(
+            &activity,
+            &state.factory_topology.station_indices,
+            &directory,
+        );
+        assert!(matches!(dense.0, InterstellarDispatchProbePlan::Full(_)));
+        assert!(dense.1);
+        assert!(dense.2);
+
+        directory.fallback_full_scan = true;
+        let fallback = assert_matches(
+            &activity,
+            &state.factory_topology.station_indices,
+            &directory,
+        );
+        assert!(matches!(fallback.0, InterstellarDispatchProbePlan::Full(_)));
+        assert!(!fallback.1);
+        assert!(!fallback.2);
+        assert_eq!(
+            fallback.0.rows(),
+            state.factory_topology.station_indices.as_slice()
+        );
+
+        let full_dispatch = InterstellarDispatchRows::Full(&state.factory_topology.station_indices);
+        assert_eq!(
+            full_dispatch.iter().collect::<Vec<_>>(),
+            state.factory_topology.station_indices
+        );
+    }
+
+    #[test]
+    fn lazy_dispatch_scan_preserves_earliest_probe_error_and_reuses_pending_capacity() {
+        let entities = indexed_dispatch_matrix(9, &[]);
+        let state = dispatch_fixture_state(&entities);
+        let base = dispatch_fixture_base();
+        let directory =
+            InterstellarPeerDirectory::build(&state, base.as_object().unwrap(), &entities);
+        let local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let powers = route_activity_powers(entities.len(), 1.0);
+        let mut malformed = entities.clone();
+        malformed[3]["stationSlots"] = Value::Null;
+        malformed[7] = Value::Null;
+
+        let error_for = |pending: &[usize]| {
+            let mut activity = prepare_route_activity(&entities);
+            activity.pending_dispatch_demand_indices.clear();
+            activity.pending_dispatch_demand_indices.reserve(16);
+            activity
+                .pending_dispatch_demand_indices
+                .extend_from_slice(pending);
+            let pending_capacity = activity.pending_dispatch_demand_indices.capacity();
+            let ledger = StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+            let error = plan_dispatch_demand_indices_with(
+                &DeterministicRuntime::for_test(4),
+                &state,
+                base.as_object().unwrap(),
+                &malformed,
+                &powers,
+                &mut activity,
+                &directory,
+                &ledger,
+            )
+            .unwrap_err();
+            assert!(activity.pending_dispatch_demand_indices.is_empty());
+            assert_eq!(
+                activity.pending_dispatch_demand_indices.capacity(),
+                pending_capacity
+            );
+            error.to_string()
+        };
+
+        assert_eq!(
+            error_for(&[3, 7, 3]),
+            "native interstellar slots are missing"
+        );
+        assert_eq!(
+            error_for(&[7, 3, 7]),
+            "native interstellar demand is invalid"
+        );
+    }
+
     fn run_indexed_dispatch_at_workers(
         source: &[Value],
         workers: usize,
@@ -7325,7 +7553,7 @@ mod tests {
     }
 
     #[test]
-    fn active_station_power_selection_matches_full_dispatch_and_route_oracle_at_1_5_60() {
+    fn lazy_dispatch_scan_and_active_power_match_full_dispatch_route_oracle_at_1_5_60() {
         let mut entities = dispatch_fixture_entities();
         entities[1]["stationWarpers"] = Value::from(1.0);
         for index in 2..14 {
@@ -7480,6 +7708,22 @@ mod tests {
 
     #[test]
     fn late_readiness_wake_survives_dispatch_drain_and_power_recovery() {
+        fn consume_probe_plan(
+            activity: &mut InterstellarRouteActivity,
+            all_station_indices: &[usize],
+            directory: &InterstellarPeerDirectory,
+        ) {
+            let consume_pending = {
+                let (plan, _, consume_pending) =
+                    activity.dispatch_probe_plan(all_station_indices, directory);
+                let _ = plan.rows();
+                consume_pending
+            };
+            if consume_pending {
+                activity.pending_dispatch_demand_indices.clear();
+            }
+        }
+
         let mut entities = dispatch_fixture_entities();
         entities[0]["outputs"]["iron_ore"] = Value::from(0.0);
         entities[1]["stationWarpers"] = Value::from(1.0);
@@ -7519,7 +7763,11 @@ mod tests {
         .unwrap();
         assert!(initial_ready.is_empty());
         assert_eq!(initial_scan.selected_station_rows, 2);
-        activity.take_dispatch_probe_indices(&directory);
+        consume_probe_plan(
+            &mut activity,
+            &state.factory_topology.station_indices,
+            &directory,
+        );
         assert!(activity.pending_dispatch_demand_indices.is_empty());
         assert!(activity.pending_readiness_demand_indices.is_empty());
 
@@ -7530,7 +7778,11 @@ mod tests {
         activity.wake_dispatch_from_changed_stations(&directory, &[0]);
         assert_eq!(activity.pending_dispatch_demand_indices, vec![1]);
         assert_eq!(activity.pending_readiness_demand_indices, vec![1]);
-        activity.take_dispatch_probe_indices(&directory);
+        consume_probe_plan(
+            &mut activity,
+            &state.factory_topology.station_indices,
+            &directory,
+        );
         assert!(activity.pending_dispatch_demand_indices.is_empty());
         assert_eq!(activity.pending_readiness_demand_indices, vec![1]);
 

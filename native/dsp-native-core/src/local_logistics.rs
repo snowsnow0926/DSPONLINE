@@ -455,6 +455,239 @@ pub(crate) struct LocalDispatchScan {
     pub directory_fallback: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalDispatchScanSource<'a> {
+    Full(&'a [usize]),
+    Pending(&'a [usize]),
+    MergeUnique(LocalMergeUniquePlan<'a>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalDispatchScanPlan<'a> {
+    source: LocalDispatchScanSource<'a>,
+    len: usize,
+}
+
+impl<'a> LocalDispatchScanPlan<'a> {
+    fn full(indices: &'a [usize]) -> Self {
+        Self {
+            source: LocalDispatchScanSource::Full(indices),
+            len: indices.len(),
+        }
+    }
+
+    fn pending(indices: &'a [usize]) -> Self {
+        Self {
+            source: LocalDispatchScanSource::Pending(indices),
+            len: indices.len(),
+        }
+    }
+
+    fn merge_unique(
+        pending: &'a [usize],
+        power_wakes: &'a [usize],
+        station_ranks: &'a HashMap<usize, usize>,
+    ) -> Self {
+        let merge = LocalMergeUniquePlan::new(pending, power_wakes, station_ranks);
+        let len = merge.iter().count();
+        Self {
+            source: LocalDispatchScanSource::MergeUnique(merge),
+            len,
+        }
+    }
+
+    fn iter(self) -> LocalDispatchScanIter<'a> {
+        match self.source {
+            LocalDispatchScanSource::Full(indices) | LocalDispatchScanSource::Pending(indices) => {
+                LocalDispatchScanIter::Slice(indices.iter().copied())
+            }
+            LocalDispatchScanSource::MergeUnique(merge) => {
+                LocalDispatchScanIter::MergeUnique(merge.iter())
+            }
+        }
+    }
+
+    fn len(self) -> usize {
+        self.len
+    }
+
+    fn is_empty(self) -> bool {
+        self.len == 0
+    }
+}
+
+enum LocalDispatchScanIter<'a> {
+    Slice(std::iter::Copied<std::slice::Iter<'a, usize>>),
+    MergeUnique(LocalMergeUniqueIter<'a>),
+}
+
+impl Iterator for LocalDispatchScanIter<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Slice(indices) => indices.next(),
+            Self::MergeUnique(indices) => indices.next(),
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        match self {
+            Self::Slice(indices) => indices.size_hint(),
+            Self::MergeUnique(indices) => indices.size_hint(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalMergeUniquePlan<'a> {
+    pending: &'a [usize],
+    power_wakes: &'a [usize],
+    station_ranks: &'a HashMap<usize, usize>,
+    ordered: bool,
+}
+
+impl<'a> LocalMergeUniquePlan<'a> {
+    fn new(
+        pending: &'a [usize],
+        power_wakes: &'a [usize],
+        station_ranks: &'a HashMap<usize, usize>,
+    ) -> Self {
+        Self {
+            pending,
+            power_wakes,
+            station_ranks,
+            ordered: indices_are_rank_ordered(pending, station_ranks)
+                && indices_are_rank_ordered(power_wakes, station_ranks),
+        }
+    }
+
+    fn iter(self) -> LocalMergeUniqueIter<'a> {
+        if self.ordered {
+            LocalMergeUniqueIter::Ordered {
+                plan: self,
+                pending_offset: 0,
+                wake_offset: 0,
+                last: None,
+            }
+        } else {
+            LocalMergeUniqueIter::Unordered {
+                plan: self,
+                last_key: None,
+                last: None,
+            }
+        }
+    }
+}
+
+enum LocalMergeUniqueIter<'a> {
+    Ordered {
+        plan: LocalMergeUniquePlan<'a>,
+        pending_offset: usize,
+        wake_offset: usize,
+        last: Option<usize>,
+    },
+    Unordered {
+        plan: LocalMergeUniquePlan<'a>,
+        last_key: Option<(usize, usize)>,
+        last: Option<usize>,
+    },
+}
+
+impl Iterator for LocalMergeUniqueIter<'_> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Ordered {
+                plan,
+                pending_offset,
+                wake_offset,
+                last,
+            } => loop {
+                let pending = plan.pending.get(*pending_offset).copied();
+                let wake = plan.power_wakes.get(*wake_offset).copied();
+                let next = match (pending, wake) {
+                    (Some(pending), Some(wake))
+                        if station_rank(plan.station_ranks, pending)
+                            <= station_rank(plan.station_ranks, wake) =>
+                    {
+                        *pending_offset += 1;
+                        pending
+                    }
+                    (Some(_), Some(wake)) => {
+                        *wake_offset += 1;
+                        wake
+                    }
+                    (Some(pending), None) => {
+                        *pending_offset += 1;
+                        pending
+                    }
+                    (None, Some(wake)) => {
+                        *wake_offset += 1;
+                        wake
+                    }
+                    (None, None) => return None,
+                };
+                if *last == Some(next) {
+                    continue;
+                }
+                *last = Some(next);
+                return Some(next);
+            },
+            Self::Unordered {
+                plan,
+                last_key,
+                last,
+            } => loop {
+                let mut best = None;
+                for (ordinal, index) in plan
+                    .pending
+                    .iter()
+                    .chain(plan.power_wakes)
+                    .copied()
+                    .enumerate()
+                {
+                    let key = (station_rank(plan.station_ranks, index), ordinal);
+                    if last_key.is_some_and(|last_key| key <= last_key) {
+                        continue;
+                    }
+                    if best.is_none_or(|(best_key, _)| key < best_key) {
+                        best = Some((key, index));
+                    }
+                }
+                let (key, index) = best?;
+                *last_key = Some(key);
+                if *last == Some(index) {
+                    continue;
+                }
+                *last = Some(index);
+                return Some(index);
+            },
+        }
+    }
+}
+
+fn station_rank(station_ranks: &HashMap<usize, usize>, index: usize) -> usize {
+    station_ranks.get(&index).copied().unwrap_or(usize::MAX)
+}
+
+fn indices_are_rank_ordered(indices: &[usize], station_ranks: &HashMap<usize, usize>) -> bool {
+    indices
+        .windows(2)
+        .all(|pair| station_rank(station_ranks, pair[0]) <= station_rank(station_ranks, pair[1]))
+}
+
+fn indices_are_rank_ordered_and_unique(
+    indices: &[usize],
+    station_ranks: &HashMap<usize, usize>,
+) -> bool {
+    indices.windows(2).all(|pair| {
+        pair[0] != pair[1]
+            && station_rank(station_ranks, pair[0]) <= station_rank(station_ranks, pair[1])
+    })
+}
+
 impl LocalPeerDirectory {
     pub(crate) fn estimated_bytes(&self) -> u64 {
         let station_index_bytes = self.station_indices.len() * std::mem::size_of::<usize>()
@@ -824,12 +1057,12 @@ impl LocalPeerDirectory {
         (next_powered, dependencies, directory_fallback)
     }
 
-    fn dispatch_scan_indices(
-        &self,
-        power_wakes: &[usize],
+    fn dispatch_scan_plan<'a>(
+        &'a self,
+        power_wakes: &'a [usize],
         power_directory_fallback: bool,
         force_full_scan: bool,
-    ) -> (Vec<usize>, LocalDispatchScan) {
+    ) -> (LocalDispatchScanPlan<'a>, LocalDispatchScan) {
         let total_station_rows = self.station_indices.len();
         let total_demand_rows = self.local_waiting_station_indices.len();
         let mut directory_fallback = self.dispatch_full_scan_required
@@ -839,43 +1072,60 @@ impl LocalPeerDirectory {
                     .binary_search(index)
                     .is_err()
             });
-        let mut selected = if self.dispatch_all_pending {
-            self.local_waiting_station_indices.to_vec()
+        let pending = if self.dispatch_all_pending {
+            self.local_waiting_station_indices.as_ref()
         } else {
-            self.pending_dispatch_demand_indices.clone()
+            self.pending_dispatch_demand_indices.as_slice()
         };
+        let mut selected_demand_rows = pending.len();
+        let mut selected = None;
         if !directory_fallback {
-            selected.extend_from_slice(power_wakes);
-            selected
-                .sort_by_key(|index| self.station_ranks.get(index).copied().unwrap_or(usize::MAX));
-            selected.dedup();
-            directory_fallback |= selected.iter().any(|index| {
+            let plan = if power_wakes.is_empty()
+                && indices_are_rank_ordered_and_unique(pending, &self.station_ranks)
+            {
+                LocalDispatchScanPlan::pending(pending)
+            } else {
+                LocalDispatchScanPlan::merge_unique(pending, power_wakes, &self.station_ranks)
+            };
+            selected_demand_rows = plan.len();
+            directory_fallback |= plan.iter().any(|index| {
                 self.local_waiting_station_indices
-                    .binary_search(index)
+                    .binary_search(&index)
                     .is_err()
             });
+            selected = Some(plan);
         }
-        let selected_demand_rows = selected.len();
         let dense_fallback = !force_full_scan
             && !directory_fallback
-            && !selected.is_empty()
-            && selected
-                .len()
-                .saturating_mul(LOCAL_DISPATCH_DENSE_DENOMINATOR)
+            && selected.is_some_and(|plan| !plan.is_empty())
+            && selected_demand_rows.saturating_mul(LOCAL_DISPATCH_DENSE_DENOMINATOR)
                 >= total_station_rows.saturating_mul(LOCAL_DISPATCH_DENSE_NUMERATOR);
-        if force_full_scan || directory_fallback || dense_fallback {
-            selected.clear();
-            selected.extend_from_slice(&self.station_indices);
-        }
+        let plan = if force_full_scan || directory_fallback || dense_fallback {
+            LocalDispatchScanPlan::full(&self.station_indices)
+        } else {
+            selected.unwrap_or_else(|| LocalDispatchScanPlan::pending(pending))
+        };
         let scan = LocalDispatchScan {
-            selected_station_rows: selected.len(),
+            selected_station_rows: plan.len(),
             total_station_rows,
             selected_demand_rows,
             total_demand_rows,
             dense_fallback,
             directory_fallback,
         };
-        (selected, scan)
+        (plan, scan)
+    }
+
+    #[cfg(test)]
+    fn dispatch_scan_indices(
+        &self,
+        power_wakes: &[usize],
+        power_directory_fallback: bool,
+        force_full_scan: bool,
+    ) -> (Vec<usize>, LocalDispatchScan) {
+        let (plan, scan) =
+            self.dispatch_scan_plan(power_wakes, power_directory_fallback, force_full_scan);
+        (plan.iter().collect(), scan)
     }
 
     fn commit_dispatch(
@@ -2116,7 +2366,7 @@ fn dispatch_for_indices<L: LocalDispatchLedger + ?Sized>(
     entities: &mut [Value],
     powers: &HashMap<usize, f64>,
     directory: &LocalPeerDirectory,
-    demand_indices: &[usize],
+    demand_indices: LocalDispatchScanPlan<'_>,
     ledger: &mut L,
 ) -> anyhow::Result<Vec<usize>> {
     if !directory.has_local_pair() && !directory.has_local_routes() {
@@ -2126,7 +2376,7 @@ fn dispatch_for_indices<L: LocalDispatchLedger + ?Sized>(
     let cargo_capacity = cargo_capacity(base);
     let logistics_speed = logistics_speed(base);
     let mut activated_local_demands = Vec::new();
-    for &demand_index in demand_indices {
+    for demand_index in demand_indices.iter() {
         let (eligible, cursor, demand_id) = {
             let demand = entities[demand_index]
                 .as_object()
@@ -2378,15 +2628,15 @@ fn dispatch_with_ledger_mode<L: LocalDispatchLedger + ?Sized>(
 ) -> anyhow::Result<LocalDispatchScan> {
     let (next_powered, power_wakes, power_directory_fallback) =
         directory.plan_dispatch_power_wakes(powers);
-    let (dispatch_indices, scan) =
-        directory.dispatch_scan_indices(&power_wakes, power_directory_fallback, force_full_scan);
+    let (dispatch_plan, scan) =
+        directory.dispatch_scan_plan(&power_wakes, power_directory_fallback, force_full_scan);
     let activated_local_demands = dispatch_for_indices(
         state,
         base,
         entities,
         powers,
         directory,
-        &dispatch_indices,
+        dispatch_plan,
         ledger,
     )?;
     // The pending and power caches are candidate-local runtime state. Install
@@ -4392,8 +4642,156 @@ mod tests {
         )
     }
 
+    fn materialized_dispatch_scan_oracle(
+        directory: &LocalPeerDirectory,
+        power_wakes: &[usize],
+        power_directory_fallback: bool,
+        force_full_scan: bool,
+    ) -> (Vec<usize>, LocalDispatchScan) {
+        let total_station_rows = directory.station_indices.len();
+        let total_demand_rows = directory.local_waiting_station_indices.len();
+        let mut directory_fallback = directory.dispatch_full_scan_required
+            || power_directory_fallback
+            || directory
+                .pending_dispatch_demand_indices
+                .iter()
+                .any(|index| {
+                    directory
+                        .local_waiting_station_indices
+                        .binary_search(index)
+                        .is_err()
+                });
+        let mut selected = if directory.dispatch_all_pending {
+            directory.local_waiting_station_indices.to_vec()
+        } else {
+            directory.pending_dispatch_demand_indices.clone()
+        };
+        if !directory_fallback {
+            selected.extend_from_slice(power_wakes);
+            selected.sort_by_key(|index| {
+                directory
+                    .station_ranks
+                    .get(index)
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+            selected.dedup();
+            directory_fallback |= selected.iter().any(|index| {
+                directory
+                    .local_waiting_station_indices
+                    .binary_search(index)
+                    .is_err()
+            });
+        }
+        let selected_demand_rows = selected.len();
+        let dense_fallback = !force_full_scan
+            && !directory_fallback
+            && !selected.is_empty()
+            && selected
+                .len()
+                .saturating_mul(LOCAL_DISPATCH_DENSE_DENOMINATOR)
+                >= total_station_rows.saturating_mul(LOCAL_DISPATCH_DENSE_NUMERATOR);
+        if force_full_scan || directory_fallback || dense_fallback {
+            selected.clear();
+            selected.extend_from_slice(&directory.station_indices);
+        }
+        let scan = LocalDispatchScan {
+            selected_station_rows: selected.len(),
+            total_station_rows,
+            selected_demand_rows,
+            total_demand_rows,
+            dense_fallback,
+            directory_fallback,
+        };
+        (selected, scan)
+    }
+
     #[test]
-    fn persistent_dispatch_queue_matches_full_station_oracle_at_1_5_60_seconds() {
+    fn lazy_dispatch_scan_plan_matches_materialized_full_pending_merge_and_dense_oracle() {
+        fn assert_matches<'a>(
+            directory: &'a LocalPeerDirectory,
+            power_wakes: &'a [usize],
+            power_fallback: bool,
+            force_full: bool,
+        ) -> (LocalDispatchScanSource<'a>, LocalDispatchScan) {
+            let expected = materialized_dispatch_scan_oracle(
+                directory,
+                power_wakes,
+                power_fallback,
+                force_full,
+            );
+            let (plan, scan) =
+                directory.dispatch_scan_plan(power_wakes, power_fallback, force_full);
+            assert_eq!(plan.iter().collect::<Vec<_>>(), expected.0);
+            assert_eq!(scan, expected.1);
+            (plan.source, scan)
+        }
+
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<LocalDispatchScanPlan<'_>>();
+        assert!(!std::mem::needs_drop::<LocalDispatchScanPlan<'_>>());
+        assert!(!std::mem::needs_drop::<LocalDispatchScanIter<'_>>());
+        assert!(
+            std::mem::size_of::<LocalDispatchScanPlan<'_>>() <= std::mem::size_of::<usize>() * 8
+        );
+
+        let source = sparse_readiness_matrix(16, 3);
+        let directory =
+            prepare_step_directory(&source, &(0..source.len()).collect::<Vec<_>>()).unwrap();
+
+        let (pending, _) = assert_matches(&directory, &[], false, false);
+        assert!(matches!(pending, LocalDispatchScanSource::Pending(_)));
+
+        let mut empty = directory.clone();
+        empty.dispatch_all_pending = false;
+        empty.pending_dispatch_demand_indices.clear();
+        let (empty_plan, empty_scan) = assert_matches(&empty, &[], false, false);
+        assert!(matches!(empty_plan, LocalDispatchScanSource::Pending(_)));
+        assert_eq!(empty_scan.selected_station_rows, 0);
+
+        let mut reversed = directory.clone();
+        reversed.dispatch_all_pending = false;
+        reversed.pending_dispatch_demand_indices = vec![3, 1, 3, 2];
+        let (merged, merged_scan) = assert_matches(&reversed, &[2, 1, 2], false, false);
+        assert!(matches!(merged, LocalDispatchScanSource::MergeUnique(_)));
+        assert_eq!(merged_scan.selected_demand_rows, 3);
+
+        let unordered_pending = [3, 1];
+        let stable_rank_ties = [99, 1, 100, 99];
+        let mut materialized = unordered_pending.to_vec();
+        materialized.extend_from_slice(&stable_rank_ties);
+        materialized.sort_by_key(|index| station_rank(&directory.station_ranks, *index));
+        materialized.dedup();
+        assert_eq!(
+            LocalDispatchScanPlan::merge_unique(
+                &unordered_pending,
+                &stable_rank_ties,
+                &directory.station_ranks,
+            )
+            .iter()
+            .collect::<Vec<_>>(),
+            materialized
+        );
+
+        let (forced, forced_scan) = assert_matches(&directory, &[], false, true);
+        assert!(matches!(forced, LocalDispatchScanSource::Full(_)));
+        assert!(!forced_scan.dense_fallback);
+
+        let dense_source = sparse_readiness_matrix(16, 12);
+        let dense_directory =
+            prepare_step_directory(&dense_source, &(0..dense_source.len()).collect::<Vec<_>>())
+                .unwrap();
+        let (dense, dense_scan) = assert_matches(&dense_directory, &[], false, false);
+        assert!(matches!(dense, LocalDispatchScanSource::Full(_)));
+        assert!(dense_scan.dense_fallback);
+
+        let (fallback, fallback_scan) = assert_matches(&directory, &[], true, false);
+        assert!(matches!(fallback, LocalDispatchScanSource::Full(_)));
+        assert!(fallback_scan.directory_fallback);
+    }
+
+    #[test]
+    fn lazy_dispatch_scan_matches_full_station_oracle_at_1_5_60_seconds() {
         let count = 32;
         let mut source = sparse_readiness_matrix(count, 1);
         // Two complete drone fleets depart per cycle. Leaving another cycle's

@@ -22,6 +22,10 @@ const MAX_QUEUE_ROWS: usize = 64;
 const MAX_RESERVATION_ROWS: usize = 32;
 const MAX_TARGET_ROWS: usize = 128;
 const MAX_JOB_ROWS: usize = 64;
+const PLAYER_STATION_SLOT_COUNT: usize = 5;
+const MAX_PLAYER_STATION_STOCK: u64 = 100_000_000;
+const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT: &str = "7df8cf3a";
 
 fn valid_opaque_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_OPAQUE_ID_BYTES && !value.contains('\0')
@@ -82,7 +86,291 @@ fn position(value: Option<&Value>) -> Value {
     })
 }
 
-fn selected_entity_row(value: Value) -> anyhow::Result<Value> {
+fn required_safe_integer(value: Option<&Value>, label: &str, maximum: u64) -> anyhow::Result<u64> {
+    value
+        .and_then(Value::as_u64)
+        .filter(|value| *value <= maximum)
+        .ok_or_else(|| anyhow!("native factory read-model {label} is invalid"))
+}
+
+fn required_station_mode<'a>(value: Option<&'a Value>, label: &str) -> anyhow::Result<&'a str> {
+    value
+        .and_then(Value::as_str)
+        .filter(|mode| matches!(*mode, "supply" | "demand" | "storage"))
+        .ok_or_else(|| anyhow!("native factory read-model {label} is invalid"))
+}
+
+fn required_station_minimum_load(value: Option<&Value>, label: &str) -> anyhow::Result<f64> {
+    value
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && matches!(*value, 0.1 | 0.25 | 0.5 | 1.0))
+        .ok_or_else(|| anyhow!("native factory read-model {label} is invalid"))
+}
+
+fn station_configuration_with_scope(
+    state: &CoreState,
+    entity: &Map<String, Value>,
+    require_active_planet: bool,
+) -> anyhow::Result<Value> {
+    if state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    {
+        return Ok(Value::Null);
+    }
+    let Some(building_id) = entity.get("buildingId").and_then(Value::as_str) else {
+        return Ok(Value::Null);
+    };
+    let interstellar = match building_id {
+        "planetary_logistics_station" => false,
+        "interstellar_logistics_station" => true,
+        _ => return Ok(Value::Null),
+    };
+    if require_active_planet {
+        let active_planet_id = state
+            .base_value()
+            .get("activePlanetId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("native factory read-model active planet is invalid"))?;
+        if entity.get("planetId").and_then(Value::as_str) != Some(active_planet_id) {
+            return Ok(Value::Null);
+        }
+    }
+    if entity.get("kind").and_then(Value::as_str) != Some("station")
+        || state
+            .catalog
+            .buildings
+            .get(building_id)
+            .is_none_or(|building| building.kind != "station")
+        || !entity
+            .get("interactionLocked")
+            .is_some_and(Value::is_boolean)
+    {
+        bail!("native factory read-model built-in station identity is invalid");
+    }
+    let slots = entity
+        .get("stationSlots")
+        .and_then(Value::as_array)
+        .filter(|slots| slots.len() == PLAYER_STATION_SLOT_COUNT)
+        .ok_or_else(|| anyhow!("native factory read-model station must have exactly five slots"))?;
+    let mut configured_item_ids = HashSet::new();
+    let mut primary = None::<(String, String, String, f64)>;
+    let mut projected_slots = Vec::with_capacity(PLAYER_STATION_SLOT_COUNT);
+    for (slot_index, value) in slots.iter().enumerate() {
+        let slot = value
+            .as_object()
+            .ok_or_else(|| anyhow!("native factory read-model station slot is invalid"))?;
+        let item_id = match slot.get("itemId") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(item_id))
+                if valid_opaque_id(item_id) && state.catalog.items.contains_key(item_id) =>
+            {
+                if !configured_item_ids.insert(item_id.as_str()) {
+                    bail!("native factory read-model station slot item is repeated");
+                }
+                Some(item_id.clone())
+            }
+            _ => bail!("native factory read-model station slot item is invalid"),
+        };
+        let local_mode = required_station_mode(slot.get("localMode"), "station local mode")?;
+        let remote_mode = required_station_mode(slot.get("remoteMode"), "station remote mode")?;
+        let minimum_load =
+            required_station_minimum_load(slot.get("minimumLoad"), "station minimum load")?;
+        let min_stock = required_safe_integer(
+            slot.get("minStock"),
+            "station stock limit pair minimum",
+            MAX_PLAYER_STATION_STOCK,
+        )?;
+        let max_stock = required_safe_integer(
+            slot.get("maxStock"),
+            "station stock limit pair maximum",
+            MAX_PLAYER_STATION_STOCK,
+        )?;
+        if max_stock > 0 && min_stock > max_stock {
+            bail!("native factory read-model station stock limits are inconsistent");
+        }
+        let priority = required_safe_integer(slot.get("priority"), "station priority", 2)?;
+        let route_policy = slot
+            .get("routePolicy")
+            .and_then(Value::as_str)
+            .filter(|policy| matches!(*policy, "direct" | "relay-preferred" | "relay-required"))
+            .ok_or_else(|| anyhow!("native factory read-model station route policy is invalid"))?;
+        let warper_budget =
+            required_safe_integer(slot.get("warperBudget"), "station warper budget", 4)?;
+        if !(1..=4).contains(&warper_budget) {
+            bail!("native factory read-model station warper budget is invalid");
+        }
+        if primary.is_none()
+            && let Some(item_id) = item_id.as_ref()
+        {
+            primary = Some((
+                item_id.clone(),
+                local_mode.to_owned(),
+                remote_mode.to_owned(),
+                minimum_load,
+            ));
+        }
+        let mut projected = json!({
+            "slotIndex": slot_index,
+            "itemId": item_id,
+            "localMode": local_mode,
+            "remoteMode": remote_mode,
+            "minimumLoad": minimum_load,
+            "minStock": min_stock,
+            "maxStock": max_stock,
+            "priority": priority,
+        });
+        if interstellar {
+            projected["routePolicy"] = Value::from(route_policy);
+            projected["warperBudget"] = Value::from(warper_budget);
+        }
+        projected_slots.push(projected);
+    }
+    if let Some((item_id, local_mode, remote_mode, minimum_load)) = primary {
+        if entity.get("storedItemId").and_then(Value::as_str) != Some(item_id.as_str()) {
+            bail!("native factory read-model station primary item mirror is inconsistent");
+        }
+        let expected_mode = if (!interstellar && local_mode == "demand")
+            || (interstellar && remote_mode == "demand")
+        {
+            "demand"
+        } else {
+            "supply"
+        };
+        if entity.get("stationMode").and_then(Value::as_str) != Some(expected_mode)
+            || required_station_minimum_load(
+                entity.get("stationMinimumLoad"),
+                "station legacy minimum load",
+            )? != minimum_load
+        {
+            bail!("native factory read-model station legacy mirrors are inconsistent");
+        }
+    } else if entity
+        .get("storedItemId")
+        .is_some_and(|value| !value.is_null())
+    {
+        bail!("native factory read-model empty station has a stored-item mirror");
+    }
+    let machine_count = required_safe_integer(
+        entity.get("machineCount"),
+        "station stack",
+        MAX_JAVASCRIPT_SAFE_INTEGER,
+    )?;
+    let drone_capacity = machine_count
+        .checked_mul(50)
+        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        .ok_or_else(|| anyhow!("native factory read-model station drone capacity overflows"))?;
+    let station_drones = required_safe_integer(
+        entity.get("stationDrones"),
+        "station drones",
+        drone_capacity,
+    )?;
+    let mut result = json!({
+        "schema": "station-configuration-v1",
+        "registryFingerprint": EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        "stationType": if interstellar { "interstellar" } else { "planetary" },
+        "stationDrones": station_drones,
+        "stationVessels": Value::Null,
+        "stationWarpers": Value::Null,
+        "slots": projected_slots,
+        "spaceWarpUnlocked": false,
+        "stationWarpEnabled": Value::Null,
+        "stationWarperAutoRefill": Value::Null,
+        "stationWarperTarget": Value::Null,
+        "stationHubEnabled": Value::Null,
+        "stationHubPriority": Value::Null,
+    });
+    if interstellar {
+        let vessel_capacity = machine_count
+            .checked_mul(10)
+            .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+            .ok_or_else(|| {
+                anyhow!("native factory read-model station vessel capacity overflows")
+            })?;
+        let warper_capacity = machine_count
+            .checked_mul(50)
+            .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER && *value > 0)
+            .ok_or_else(|| {
+                anyhow!("native factory read-model station warper capacity is invalid")
+            })?;
+        result["stationVessels"] = Value::from(required_safe_integer(
+            entity.get("stationVessels"),
+            "station vessels",
+            vessel_capacity,
+        )?);
+        result["stationWarpers"] = Value::from(required_safe_integer(
+            entity.get("stationWarpers"),
+            "station warpers",
+            warper_capacity,
+        )?);
+        result["stationWarpEnabled"] = Value::from(
+            entity
+                .get("stationWarpEnabled")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| {
+                    anyhow!("native factory read-model station warp toggle is invalid")
+                })?,
+        );
+        result["stationWarperAutoRefill"] = Value::from(
+            entity
+                .get("stationWarperAutoRefill")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| {
+                    anyhow!("native factory read-model station auto refill is invalid")
+                })?,
+        );
+        let warper_target = required_safe_integer(
+            entity.get("stationWarperTarget"),
+            "station warper target",
+            warper_capacity,
+        )?;
+        if warper_target == 0 {
+            bail!("native factory read-model station warper target is invalid");
+        }
+        result["stationWarperTarget"] = Value::from(warper_target);
+        result["stationHubEnabled"] = Value::from(
+            entity
+                .get("stationHubEnabled")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| {
+                    anyhow!("native factory read-model station hub toggle is invalid")
+                })?,
+        );
+        result["stationHubPriority"] = Value::from(required_safe_integer(
+            entity.get("stationHubPriority"),
+            "current station hub priority",
+            2,
+        )?);
+        result["spaceWarpUnlocked"] = Value::from(
+            state
+                .base_value()
+                .get("research")
+                .and_then(Value::as_object)
+                .and_then(|research| research.get("completedTechIds"))
+                .and_then(Value::as_array)
+                .is_some_and(|rows| rows.iter().any(|row| row.as_str() == Some("space_warp"))),
+        );
+    }
+    Ok(result)
+}
+
+pub(crate) fn station_configuration(
+    state: &CoreState,
+    entity: &Map<String, Value>,
+) -> anyhow::Result<Value> {
+    station_configuration_with_scope(state, entity, true)
+}
+
+pub(crate) fn validate_station_configuration_for_command(
+    state: &CoreState,
+    entity: &Map<String, Value>,
+) -> anyhow::Result<()> {
+    if station_configuration_with_scope(state, entity, false)?.is_null() {
+        bail!("native player-authority station target is foreign or malformed")
+    }
+    Ok(())
+}
+
+fn selected_entity_row(state: &CoreState, value: Value) -> anyhow::Result<Value> {
     let object = value
         .as_object()
         .ok_or_else(|| anyhow!("native factory read-model entity is not an object"))?;
@@ -101,6 +389,7 @@ fn selected_entity_row(value: Value) -> anyhow::Result<Value> {
         .and_then(Value::as_str)
         .filter(|id| valid_opaque_id(id))
         .unwrap_or("unknown");
+    let station_configuration = station_configuration(state, object)?;
     Ok(json!({
         "entityId": entity_id,
         "planetId": planet_id,
@@ -120,6 +409,7 @@ fn selected_entity_row(value: Value) -> anyhow::Result<Value> {
         "powerFactor": object.get("powerFactor").and_then(Value::as_f64).filter(|value| value.is_finite()),
         "inputItems": numeric_rows(object.get("inputs"), MAX_ITEM_ROWS, "itemId"),
         "outputItems": numeric_rows(object.get("outputs"), MAX_ITEM_ROWS, "itemId"),
+        "stationConfiguration": station_configuration,
     }))
 }
 
@@ -402,7 +692,10 @@ impl CoreState {
         let entity_rows = entity_ids
             .iter()
             .filter_map(|id| self.entity_index.get(id).copied())
-            .map(|index| self.parse_entity(index).and_then(selected_entity_row))
+            .map(|index| {
+                self.parse_entity(index)
+                    .and_then(|entity| selected_entity_row(self, entity))
+            })
             .collect::<anyhow::Result<Vec<_>>>()?;
         let entity_row_count = entity_rows.len();
         let belt_rows = belt_ids
@@ -522,6 +815,136 @@ mod tests {
                 technologies: Vec::new(),
             },
             "factory-read-model-test",
+        )
+        .unwrap()
+    }
+
+    fn station_catalog(registry_fingerprint: &str) -> RuntimeCatalog {
+        let mut snapshot = catalog().snapshot;
+        snapshot.registry_fingerprint = registry_fingerprint.to_owned();
+        snapshot.buildings.extend([
+            BuildingDefinition {
+                id: "planetary_logistics_station".to_owned(),
+                kind: "station".to_owned(),
+                speed: 1.0,
+                input_capacity: 100_000_000.0,
+                output_capacity: 100_000_000.0,
+                power_demand_kw: 0.0,
+                power_generation_kw: 0.0,
+                power_charge_kw: 0.0,
+                energy_capacity_mj: 0.0,
+                fuel_item_ids: Vec::new(),
+                fuel_efficiency: 1.0,
+                family: None,
+                accepts: None,
+            },
+            BuildingDefinition {
+                id: "interstellar_logistics_station".to_owned(),
+                kind: "station".to_owned(),
+                speed: 1.0,
+                input_capacity: 100_000_000.0,
+                output_capacity: 100_000_000.0,
+                power_demand_kw: 0.0,
+                power_generation_kw: 0.0,
+                power_charge_kw: 0.0,
+                energy_capacity_mj: 0.0,
+                fuel_item_ids: Vec::new(),
+                fuel_efficiency: 1.0,
+                family: None,
+                accepts: None,
+            },
+        ]);
+        RuntimeCatalog::validate(snapshot, registry_fingerprint).unwrap()
+    }
+
+    fn station_slots(primary_slot_index: usize, interstellar: bool) -> Value {
+        Value::Array(
+            (0..PLAYER_STATION_SLOT_COUNT)
+                .map(|slot_index| {
+                    let configured = slot_index == primary_slot_index;
+                    json!({
+                        "itemId": configured.then_some("iron_ore"),
+                        "localMode": if configured { "demand" } else { "storage" },
+                        "remoteMode": if configured && interstellar { "demand" } else { "storage" },
+                        "minimumLoad": if configured { 0.25 } else { 1.0 },
+                        "minStock": if configured { 25 } else { 0 },
+                        "maxStock": if configured { 100 } else { 0 },
+                        "priority": if configured { 2 } else { 1 },
+                        "routePolicy": if configured { "relay-required" } else { "relay-preferred" },
+                        "warperBudget": if configured { 4 } else { 2 },
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    fn station_state(registry_fingerprint: &str) -> CoreState {
+        let base = json!({
+            "version": 47,
+            "mode": "normal",
+            "activePlanetId": "home",
+            "elapsedSeconds": 0,
+            "paused": false,
+            "settings": { "simulationSpeed": 1 },
+            "research": { "completedTechIds": ["space_warp"] },
+            "constructionQueue": [],
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let station = |id: &str, building_id: &str, primary_slot_index, interstellar| {
+            json!({
+                "id": id,
+                "kind": "station",
+                "planetId": "home",
+                "position": { "x": primary_slot_index, "y": 0 },
+                "interactionLocked": false,
+                "buildingId": building_id,
+                "machineCount": 2,
+                "minerCount": 0,
+                "inputs": { "iron_ore": 777 },
+                "outputs": { "iron_ore": 888 },
+                "progress": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "stationSlots": station_slots(primary_slot_index, interstellar),
+                "storedItemId": "iron_ore",
+                "stationMode": "demand",
+                "stationMinimumLoad": 0.25,
+                "stationDrones": 12,
+                "stationVessels": 3,
+                "stationWarpers": 7,
+                "stationWarpEnabled": true,
+                "stationWarperAutoRefill": true,
+                "stationWarperTarget": 75,
+                "stationHubEnabled": true,
+                "stationHubPriority": 2,
+                "stationRoutes": [{
+                    "id": "must-never-cross-ipc",
+                    "cargo": 456,
+                    "modPayload": { "secret": "opaque" }
+                }],
+            })
+            .to_string()
+        };
+        CoreState::from_public_v47_parts(
+            CoreCheckpointIdentity {
+                slot: "normal-main".to_owned(),
+                generation: 1,
+                root_hash: "b".repeat(64),
+                revision: 11,
+                state_version: 47,
+                mode: "normal".to_owned(),
+                registry_fingerprint: registry_fingerprint.to_owned(),
+                base_primary_checksum: "12345678".to_owned(),
+            },
+            base,
+            vec![
+                station("pls", "planetary_logistics_station", 2, false),
+                station("ils", "interstellar_logistics_station", 0, true),
+            ],
+            Vec::new(),
+            station_catalog(registry_fingerprint),
         )
         .unwrap()
     }
@@ -724,5 +1147,118 @@ mod tests {
                 .is_err()
         );
         assert_eq!(state.summary().unwrap().canonical_sha256, before);
+    }
+
+    #[test]
+    fn built_in_station_projection_is_exactly_five_slots_and_never_exports_routes() {
+        let state = station_state(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
+        let before = state.summary().unwrap().canonical_sha256;
+        let projection = state
+            .factory_read_model_projection(&["pls".to_owned(), "ils".to_owned()], &[])
+            .unwrap();
+        let rows = projection["selection"]["entityRows"]["rows"]
+            .as_array()
+            .unwrap();
+        let pls = &rows[0]["stationConfiguration"];
+        let ils = &rows[1]["stationConfiguration"];
+        assert_eq!(pls["stationType"], "planetary");
+        assert_eq!(pls["slots"].as_array().unwrap().len(), 5);
+        assert_eq!(pls["slots"][2]["itemId"], "iron_ore");
+        assert!(pls["slots"][2].get("routePolicy").is_none());
+        assert!(pls["slots"][2].get("warperBudget").is_none());
+        assert!(pls["stationVessels"].is_null());
+        assert!(pls["stationWarpEnabled"].is_null());
+        assert_eq!(ils["stationType"], "interstellar");
+        assert_eq!(ils["slots"].as_array().unwrap().len(), 5);
+        assert_eq!(ils["slots"][0]["routePolicy"], "relay-required");
+        assert_eq!(ils["slots"][0]["warperBudget"], 4);
+        assert_eq!(ils["stationDrones"], 12);
+        assert_eq!(ils["stationVessels"], 3);
+        assert_eq!(ils["stationWarpers"], 7);
+        assert_eq!(ils["spaceWarpUnlocked"], true);
+        let encoded = serde_json::to_string(&projection).unwrap();
+        assert!(!encoded.contains("stationRoutes"));
+        assert!(!encoded.contains("must-never-cross-ipc"));
+        assert_eq!(state.summary().unwrap().canonical_sha256, before);
+    }
+
+    #[test]
+    fn station_projection_fails_closed_on_slot_or_legacy_mirror_drift_and_mod_registry() {
+        for mutate in [
+            |entity: &mut Value| {
+                entity["stationSlots"].as_array_mut().unwrap().pop();
+            },
+            |entity: &mut Value| {
+                entity["storedItemId"] = Value::from("wrong-item");
+            },
+            |entity: &mut Value| {
+                entity["stationMinimumLoad"] = Value::from(1);
+            },
+        ] {
+            let mut state = station_state(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
+            let index = *state.entity_index.get("pls").unwrap();
+            let mut entity = state.parse_entity(index).unwrap();
+            mutate(&mut entity);
+            let command = crate::command::SimulationCommandPatch {
+                protocol_version: crate::CORE_PROTOCOL_VERSION,
+                base_revision: state.revision,
+                top_level_changes: Vec::new(),
+                changed_entities: vec![crate::command::RecordPatch {
+                    id: "pls".to_owned(),
+                    changes: vec![crate::command::ValuePatch {
+                        path: Vec::new(),
+                        operation: "set".to_owned(),
+                        value: Some(entity),
+                    }],
+                }],
+                added_entities: Vec::new(),
+                removed_entity_ids: Vec::new(),
+                changed_belts: Vec::new(),
+                added_belts: Vec::new(),
+                removed_belt_ids: Vec::new(),
+            };
+            state.apply_command(&command).unwrap();
+            let before = state.summary().unwrap().canonical_sha256;
+            assert!(
+                state
+                    .factory_read_model_projection(&["pls".to_owned()], &[])
+                    .is_err()
+            );
+            assert_eq!(state.summary().unwrap().canonical_sha256, before);
+        }
+
+        let mod_state = station_state("mod-registry");
+        let projection = mod_state
+            .factory_read_model_projection(&["pls".to_owned()], &[])
+            .unwrap();
+        assert!(projection["selection"]["entityRows"]["rows"][0]["stationConfiguration"].is_null());
+
+        let mut remote_state = station_state(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
+        let index = *remote_state.entity_index.get("pls").unwrap();
+        let mut remote = remote_state.parse_entity(index).unwrap();
+        remote["planetId"] = Value::from("remote");
+        let command = crate::command::SimulationCommandPatch {
+            protocol_version: crate::CORE_PROTOCOL_VERSION,
+            base_revision: remote_state.revision,
+            top_level_changes: Vec::new(),
+            changed_entities: vec![crate::command::RecordPatch {
+                id: "pls".to_owned(),
+                changes: vec![crate::command::ValuePatch {
+                    path: Vec::new(),
+                    operation: "set".to_owned(),
+                    value: Some(remote),
+                }],
+            }],
+            added_entities: Vec::new(),
+            removed_entity_ids: Vec::new(),
+            changed_belts: Vec::new(),
+            added_belts: Vec::new(),
+            removed_belt_ids: Vec::new(),
+        };
+        remote_state.apply_command(&command).unwrap();
+        let projection = remote_state
+            .factory_read_model_projection(&["pls".to_owned()], &[])
+            .unwrap();
+        assert!(projection["selection"]["entityRows"]["rows"][0]["stationConfiguration"].is_null());
     }
 }

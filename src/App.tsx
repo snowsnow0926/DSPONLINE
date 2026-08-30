@@ -50,7 +50,10 @@ import { FactoryRunStatus } from "./components/FactoryRunStatus";
 import { ItemReferenceActionsProvider } from "./components/ItemReference";
 import { NativeResourceRail } from "./components/NativeResourceRail";
 import { NativeConstructionDock } from "./components/NativeConstructionDock";
-import { NativeFactoryInspectorPanel } from "./components/NativeFactoryInspectorPanel";
+import {
+  NativeFactoryInspectorPanel,
+  type NativeStationConfigurationUiAction,
+} from "./components/NativeFactoryInspectorPanel";
 import { createNativeRendererShellState } from "./game/nativeRendererShell";
 import { OnboardingCoach } from "./components/OnboardingCoach";
 import { SpeedrunStatusPanel } from "./components/SpeedrunStatusPanel";
@@ -537,6 +540,16 @@ import {
   type NativeProjectedEjectorOrbitIdentity,
   type NativeProjectedTimeWarpControllerBinding,
 } from "./game/nativeProjectedTimeWarpEjectorCommands";
+import {
+  createNativeProjectedStationScalarCommand,
+  createNativeProjectedStationSlotLimitsCommand,
+  createNativeProjectedStationSlotMinimumLoadCommand,
+  createNativeProjectedStationSlotPriorityCommand,
+  createNativeProjectedStationSlotRoutePolicyCommand,
+  createNativeProjectedStationSlotWarperBudgetCommand,
+  selectNativeProjectedStationConfigurationBinding,
+  type NativeProjectedStationConfigurationBinding,
+} from "./game/nativeProjectedStationConfigurationCommands";
 import { createNativeProjectedQuantumItemCapacityCommand } from "./game/nativeProjectedQuantumCommands";
 import {
   createNativeProjectedCargoReturnCommand,
@@ -16495,6 +16508,27 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativePlayerAuthorityActiveFrame,
     nativePlayerAuthorityOwnsRuntime,
   ]);
+  const nativeStationConfigurationProjectionBinding = useMemo<
+    NativeProjectedStationConfigurationBinding | null
+  >(() => {
+    if (!nativePlayerAuthorityOwnsRuntime || !nativePlayerAuthorityActiveFrame ||
+        factoryInteractionRows.source !== "native-authoritative") return null;
+    const commandIdentity = factoryInteractionRows.projectionIdentity;
+    if (!commandIdentity || commandIdentity.sessionId !== nativePlayerAuthorityActiveFrame.sessionId ||
+        commandIdentity.runId !== nativePlayerAuthorityActiveFrame.runId ||
+        commandIdentity.revision !== nativePlayerAuthorityActiveFrame.revision) return null;
+    return selectNativeProjectedStationConfigurationBinding({
+      commandIdentity,
+      inspector: factoryInspectorSummaryReadModel,
+      selection: factoryMultiSelectionSummaryReadModel,
+    });
+  }, [
+    factoryInspectorSummaryReadModel,
+    factoryInteractionRows,
+    factoryMultiSelectionSummaryReadModel,
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
   const nativeTimeWarpControllerProjectionBinding = useMemo<
     NativeProjectedTimeWarpControllerBinding | null
   >(() => {
@@ -17252,6 +17286,57 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativeEjectorOrbitFrame,
     nativeEjectorOrbitProjectionIdentity,
   ]);
+  const changeNativeStationConfiguration = useCallback((
+    entityId: string,
+    action: NativeStationConfigurationUiAction,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次物流站配置未提交");
+      return;
+    }
+    const binding = nativeStationConfigurationProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.entityId !== entityId || !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生物流站选择、session 或 revision 已变化；本次配置未提交");
+      return;
+    }
+    try {
+      const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) => {
+        if (baseRevision !== binding.revision) return null;
+        switch (action.kind) {
+          case "slot-priority":
+            return createNativeProjectedStationSlotPriorityCommand(binding, action.slotIndex, action.target);
+          case "slot-minimum-load":
+            return createNativeProjectedStationSlotMinimumLoadCommand(binding, action.slotIndex, action.target);
+          case "slot-limits":
+            return createNativeProjectedStationSlotLimitsCommand(
+              binding,
+              action.slotIndex,
+              action.minStock,
+              action.maxStock,
+            );
+          case "slot-route-policy":
+            return createNativeProjectedStationSlotRoutePolicyCommand(binding, action.slotIndex, action.target);
+          case "slot-warper-budget":
+            return createNativeProjectedStationSlotWarperBudgetCommand(binding, action.slotIndex, action.target);
+          case "station-scalar":
+            return createNativeProjectedStationScalarCommand(binding, action);
+        }
+      }, (receipt) => setNotice(
+        `已由 Rust 提交物流站配置 · durable revision ${receipt.revision}`,
+      ));
+      if (!accepted) setNotice("目标值与当前 Rust 投影相同；存档未改变");
+    } catch {
+      setNotice("原生物流站配置未通过同 revision 守恒校验；存档未改变");
+    }
+  }, [commitNativeProjectedCommand, nativeStationConfigurationProjectionBinding]);
   const selectedBelts = factoryInteractionRows.selectedBelts;
   const dockBeltTier = nativePlayerAuthorityOwnsRuntime
     ? nativeBeltPlacementTier ?? beltTier
@@ -18998,6 +19083,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           entityConfiguration={nativeEntityConfigurationProjectionBinding}
           timeWarpController={nativeTimeWarpControllerProjectionBinding}
           ejectorOrbitFrame={nativeEjectorOrbitFrame}
+          stationConfiguration={nativeStationConfigurationProjectionBinding}
           pending={nativeRemovalContextPending || nativeStackContextPending || nativeBeltLaneContextPending || nativePlayerAuthorityCommandPending}
           onEntityLockChange={(_entityId, locked) => void commitNativeSelectionInteractionLock(locked)}
           onRemoveEntity={(entityId) => void removeNativeOrdinaryBuilding(entityId)}
@@ -19010,6 +19096,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           onTimeWarpEnabledChange={changeNativeTimeWarpEnabled}
           onTimeWarpRequestedMultiplierChange={changeNativeTimeWarpRequestedMultiplier}
           onEjectorOrbitChange={changeNativeEjectorOrbit}
+          onStationConfigurationChange={changeNativeStationConfiguration}
           onBeltLaneCountChange={(beltId, targetLanes) => void changeNativeOrdinaryBeltLanes(beltId, targetLanes)}
           onBeltPriorityChange={changeNativeOrdinaryBeltPriority}
           onRemoveBelt={(beltId) => void removeNativeOrdinaryBelt(beltId)}

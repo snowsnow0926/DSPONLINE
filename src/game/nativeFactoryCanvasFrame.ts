@@ -4,7 +4,7 @@ import type {
   DesktopNativeCoreViewportProjectionV2Result,
 } from "../desktop";
 import type { BeltConnection, FactoryEntity, PlanetId } from "./types";
-import type { FactoryViewportReadModel } from "./factoryReadModels";
+import type { FactorySelectionReadModel, FactoryViewportReadModel } from "./factoryReadModels";
 import type { NativeFactoryThinViewSnapshot } from "./nativeFactoryThinViewStore";
 
 const ENTITY_KINDS = new Set(["vein", "machine", "power", "storage", "splitter", "station"]);
@@ -21,7 +21,7 @@ const ENTITY_KEYS = new Set([
   "elevatorOutputItems", "stationProgress", "stationTrips", "stationLastTransfer", "stationPeerId",
   "stationDrones", "stationVessels", "stationWarpers", "stationWarpEnabled",
   "stationWarperAutoRefill", "stationWarperTarget", "stationHubEnabled", "stationHubPriority",
-  "stationMinimumLoad", "stationSlots", "stationRoutes", "stationDispatchCursor",
+  "stationMinimumLoad", "stationSlots", "stationDispatchCursor",
   "stationLastSupplyPeerBySlot", "stationCongestion", "sprayCoaterInstalled", "proliferatorTier",
   "proliferatorMode", "proliferatorPoints", "proliferatorBonusProgress", "galacticExporterPaused",
   "blackHolePaused", "blackHoleActivationConfirmed", "blackHolePorts", "routingCursor", "machineCount",
@@ -62,7 +62,7 @@ const ENTITY_STRING_KEYS = new Set([
 ]);
 const ENTITY_ARRAY_KEYS = new Set([
   "deliveryItemIds", "deliverySlots", "orbitalCargoPortItems", "elevatorOutputItems", "stationSlots",
-  "stationRoutes", "blackHolePorts",
+  "blackHolePorts",
 ]);
 const ENTITY_RECORD_KEYS = new Set([
   "inputs", "outputs", "proliferatorBonusProgress", "stationLastSupplyPeerBySlot",
@@ -88,6 +88,8 @@ export interface NativeAuthoritativeFactoryCanvasFrame {
   readonly beltById: ReadonlyMap<string, BeltConnection>;
   readonly omittedCrossBoundaryBeltCount: number;
   readonly viewportReadModel: FactoryViewportReadModel;
+  /** Same-revision Rust selection projection; inspectors never reconstruct semantic config from viewport JSON. */
+  readonly factorySelection: FactorySelectionReadModel;
 }
 
 export interface NativeAuthoritativeFactoryCanvasBinding {
@@ -246,6 +248,7 @@ export function selectNativeAuthoritativeFactoryCanvasFrame(
     : null;
   const viewport = frame?.viewport;
   const shell = frame?.factory.shell;
+  const factorySelection = frame?.factory.selection;
   if (!frame || frame.authoritySessionId !== binding.sessionId || frame.authorityRunId !== binding.runId ||
     frame.revision !== binding.expectedRevision ||
     frame.planetId !== binding.planetId || !viewport || viewport.schemaVersion !== 2 ||
@@ -255,6 +258,8 @@ export function selectNativeAuthoritativeFactoryCanvasFrame(
     !sameIdSet(viewport.pinnedEntityIds, binding.requestedPinnedEntityIds) ||
     !sameIdSet(viewport.pinnedBeltIds, binding.requestedPinnedBeltIds) ||
     Reflect.ownKeys(viewport.base).length !== 0 || !shell || shell.source !== "native-core" ||
+    frame.factory.revision !== binding.expectedRevision || !factorySelection ||
+    factorySelection.schema !== "factory-read-model-v1" || factorySelection.activePlanetId !== binding.planetId ||
     shell.activePlanetId !== binding.planetId || viewport.planetTotals.entities < viewport.viewportTotals.entities ||
     viewport.planetTotals.belts < viewport.viewportTotals.belts) return null;
 
@@ -342,6 +347,7 @@ export function selectNativeAuthoritativeFactoryCanvasFrame(
     beltById: projectedBeltById,
     omittedCrossBoundaryBeltCount: projectedBeltById.size - belts.length,
     viewportReadModel,
+    factorySelection,
   });
 }
 

@@ -54,6 +54,7 @@ describe("native projected player command builders", () => {
     powerFactor: 1,
     inputItems: { rows: [], totalCount: 0, truncated: false },
     outputItems: { rows: [], totalCount: 0, truncated: false },
+    stationConfiguration: null,
   });
 
   const lockReadModels = (identity: NativeFactoryProjectionIdentity) => {

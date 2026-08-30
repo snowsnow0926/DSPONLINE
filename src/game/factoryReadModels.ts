@@ -153,6 +153,42 @@ export interface PlanetNavigationReadModel {
   readonly planets: BoundedReadModelRows<PlanetNavigationRowReadModel>;
 }
 
+export type NativeStationModeReadModel = "supply" | "demand" | "storage";
+export type NativeStationRoutePolicyReadModel = "direct" | "relay-preferred" | "relay-required";
+
+export interface NativeStationSlotConfigurationReadModel {
+  readonly slotIndex: number;
+  readonly itemId: string | null;
+  /** Inventory identity and direction remain read-only in the first station slice. */
+  readonly localMode: NativeStationModeReadModel;
+  readonly remoteMode: NativeStationModeReadModel;
+  readonly minimumLoad: 0.1 | 0.25 | 0.5 | 1;
+  readonly minStock: number;
+  readonly maxStock: number;
+  readonly priority: 0 | 1 | 2;
+  /** Present only for an interstellar station. */
+  readonly routePolicy?: NativeStationRoutePolicyReadModel;
+  /** Present only for an interstellar station. */
+  readonly warperBudget?: 1 | 2 | 3 | 4;
+}
+
+export interface NativeStationConfigurationReadModel {
+  readonly schema: "station-configuration-v1";
+  readonly registryFingerprint: "7df8cf3a";
+  readonly stationType: "planetary" | "interstellar";
+  /** Fleet and installed warpers are intentionally display-only. */
+  readonly stationDrones: number;
+  readonly stationVessels: number | null;
+  readonly stationWarpers: number | null;
+  readonly slots: readonly NativeStationSlotConfigurationReadModel[];
+  readonly spaceWarpUnlocked: boolean;
+  readonly stationWarpEnabled: boolean | null;
+  readonly stationWarperAutoRefill: boolean | null;
+  readonly stationWarperTarget: number | null;
+  readonly stationHubEnabled: boolean | null;
+  readonly stationHubPriority: 0 | 1 | 2 | null;
+}
+
 export interface SelectedEntityReadModel {
   readonly entityId: string;
   readonly planetId: string;
@@ -172,6 +208,8 @@ export interface SelectedEntityReadModel {
   readonly powerFactor: number | null;
   readonly inputItems: BoundedReadModelRows<ItemQuantityReadModel>;
   readonly outputItems: BoundedReadModelRows<ItemQuantityReadModel>;
+  /** Null for non-stations, MOD registries and stale cross-planet selections. */
+  readonly stationConfiguration: NativeStationConfigurationReadModel | null;
 }
 
 export interface SelectedBeltReadModel {

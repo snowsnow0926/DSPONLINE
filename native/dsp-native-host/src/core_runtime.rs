@@ -9166,6 +9166,257 @@ mod tests {
     }
 
     #[test]
+    fn remote_station_configuration_and_legacy_hub_pair_survive_cold_wal_reopen() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let mut catalog = player_authority_catalog();
+        catalog["planets"].as_array_mut().unwrap().push(json!({
+            "id": "ashen",
+            "name": "ashen",
+            "systemId": "helios",
+            "kind": "terrestrial",
+            "orbitIndex": 2,
+            "simulationOrder": 1,
+            "orbitalYields": {},
+        }));
+        catalog["buildings"].as_array_mut().unwrap().push(json!({
+            "id": "interstellar_logistics_station",
+            "kind": "station",
+            "speed": 1,
+            "inputCapacity": 100_000_000,
+            "outputCapacity": 100_000_000,
+            "powerDemandKw": 0,
+            "powerGenerationKw": 0
+        }));
+
+        let slots = Value::Array(
+            (0..5)
+                .map(|slot_index| {
+                    json!({
+                        "itemId": if slot_index == 0 { Some("iron_ore") } else { None },
+                        "localMode": if slot_index == 0 { "supply" } else { "storage" },
+                        "remoteMode": if slot_index == 0 { "demand" } else { "storage" },
+                        "minimumLoad": 0.5,
+                        "minStock": 0,
+                        "maxStock": if slot_index == 0 { 1000 } else { 0 },
+                        "priority": 1,
+                        "routePolicy": "relay-preferred",
+                        "warperBudget": 2
+                    })
+                })
+                .collect(),
+        );
+        let preserved_route = json!({
+            "id": "route-preserved-across-wal",
+            "slotIndex": 0,
+            "peerId": "station-peer",
+            "itemId": "iron_ore",
+            "scope": "remote",
+            "cargo": 100,
+            "vehicleCount": 1,
+            "progress": 0.4,
+            "duration": 10,
+            "requiresWarp": true,
+            "warpersPerVessel": 1,
+            "vehicleStationId": "station-remote",
+            "modPayload": { "opaque": "must-stay-in-checkpoint-only" }
+        });
+        let station = |id: &str, planet_id: &str, station_routes: Value| {
+            json!({
+                "id": id,
+                "kind": "station",
+                "planetId": planet_id,
+                "position": { "x": 7, "y": 2 },
+                "interactionLocked": false,
+                "buildingId": "interstellar_logistics_station",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": { "iron_ore": 321 },
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "stationSlots": slots.clone(),
+                "storedItemId": "iron_ore",
+                "stationMode": "demand",
+                "stationMinimumLoad": 0.5,
+                "stationProgress": 0.4,
+                "stationDrones": 5,
+                "stationVessels": 2,
+                "stationWarpers": 1,
+                "stationPeerId": null,
+                "stationRoutes": station_routes,
+                "stationWarpEnabled": true,
+                "stationWarperAutoRefill": false,
+                "stationWarperTarget": 50,
+                "stationHubEnabled": false,
+                "stationHubPriority": 1
+            })
+        };
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["entities"]
+            .as_array_mut()
+            .unwrap()
+            .extend([
+                station(
+                    "station-remote",
+                    "ashen",
+                    Value::Array(vec![preserved_route.clone()]),
+                ),
+                station("station-peer", "home", Value::Array(Vec::new())),
+            ]);
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                catalog.clone(),
+            )
+            .unwrap();
+        let checkpoint = imported.checkpoint.clone();
+        let remote_slot = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "baseRevision": checkpoint.revision,
+            "topLevelChanges": [],
+            "changedEntities": [{
+                "id": "station-remote",
+                "changes": [{
+                    "path": ["stationSlots", 0, "priority"],
+                    "operation": "set",
+                    "value": 2
+                }]
+            }],
+            "addedEntities": [],
+            "removedEntityIds": [],
+            "changedBelts": [],
+            "addedBelts": [],
+            "removedBeltIds": []
+        }))
+        .unwrap();
+        let remote_committed = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "remote-station-slot-before-cold-reopen".to_owned(),
+                    base_revision: checkpoint.revision,
+                    command: Some(remote_slot),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        let legacy_hub_pair = serde_json::from_value(json!({
+            "protocolVersion": 1,
+            "baseRevision": remote_committed.revision,
+            "topLevelChanges": [],
+            "changedEntities": [{
+                "id": "station-remote",
+                "changes": [
+                    { "path": ["stationHubEnabled"], "operation": "set", "value": true },
+                    { "path": ["stationHubPriority"], "operation": "set", "value": 2 }
+                ]
+            }],
+            "addedEntities": [],
+            "removedEntityIds": [],
+            "changedBelts": [],
+            "addedBelts": [],
+            "removedBeltIds": []
+        }))
+        .unwrap();
+        let committed = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "legacy-hub-pair-before-cold-reopen".to_owned(),
+                    base_revision: remote_committed.revision,
+                    command: Some(legacy_hub_pair),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        let live_hash = committed.summary.as_ref().unwrap().canonical_sha256.clone();
+        let projection = registry
+            .factory_read_model_projection(
+                &imported.session_id,
+                &["station-remote".to_owned()],
+                &[],
+            )
+            .unwrap();
+        assert!(projection["selection"]["entityRows"]["rows"][0]["stationConfiguration"].is_null());
+        assert!(
+            !serde_json::to_string(&projection)
+                .unwrap()
+                .contains("stationRoutes")
+        );
+        registry
+            .export_v47(&store, &imported.session_id, "station-live", 100)
+            .unwrap();
+        let live: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/station-live.json")).unwrap(),
+        )
+        .unwrap();
+        let remote = live["state"]["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["id"] == "station-remote")
+            .unwrap();
+        assert_eq!(remote["stationSlots"][0]["priority"], 2);
+        assert_eq!(remote["stationHubEnabled"], true);
+        assert_eq!(remote["stationHubPriority"], 2);
+        assert_eq!(remote["outputs"]["iron_ore"], 321);
+        assert_eq!(remote["stationRoutes"], Value::Array(vec![preserved_route]));
+        let live_state = live["state"].clone();
+
+        drop(registry);
+        drop(store);
+        let reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = CoreRegistry::default();
+        let reopened = reopened_registry
+            .open(
+                &reopened_store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                catalog,
+            )
+            .unwrap();
+        assert_eq!(reopened.replayed_wal_entries, 2);
+        assert_eq!(reopened.replayed_revision, committed.revision);
+        assert_eq!(reopened.summary.canonical_sha256, live_hash);
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &reopened.session_id,
+                "station-replayed",
+                100,
+            )
+            .unwrap();
+        let replayed: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/station-replayed.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replayed["state"], live_state);
+    }
+
+    #[test]
     fn black_hole_pause_intent_survives_host_wal_cold_reopen_without_touching_ledgers() {
         let root = tempdir().unwrap();
         let mut store = SaveStore::open(root.path()).unwrap();

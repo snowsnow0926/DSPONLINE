@@ -57,6 +57,16 @@ const DOMAIN_INTERNAL_CHECKPOINT_FORMAT_VERSION: u16 = 2;
 pub(crate) const PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS: f64 = 30.0;
 const PURE_IDLE_SESSION_FORMAT_VERSION: u8 = 1;
 
+/// Renderer projections never need route ledgers. They can be large, contain
+/// in-flight material accounting, and must not become an accidental command
+/// oracle. The authoritative record remains untouched.
+fn renderer_entity_projection(mut entity: Value) -> Value {
+    if let Some(object) = entity.as_object_mut() {
+        object.remove("stationRoutes");
+    }
+    entity
+}
+
 /// A cloneable synchronization cell for the two diagnostic/persistence caches
 /// that are reachable through shared `CoreState` references. Keeping interior
 /// mutability behind a mutex makes the immutable simulation catalog and
@@ -4555,7 +4565,7 @@ impl CoreState {
         let entities = entity_ids
             .iter()
             .filter_map(|id| self.entity_index.get(id).copied())
-            .map(|index| self.parse_entity(index))
+            .map(|index| self.parse_entity(index).map(renderer_entity_projection))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let belts = belt_ids
             .iter()
@@ -4676,7 +4686,7 @@ impl CoreState {
         let entities = selected_indices
             .iter()
             .copied()
-            .map(|index| self.parse_entity(index))
+            .map(|index| self.parse_entity(index).map(renderer_entity_projection))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let belts = selected_belts
             .iter()
@@ -4862,7 +4872,7 @@ impl CoreState {
         let entities = returned_entity_indices
             .iter()
             .copied()
-            .map(|index| self.parse_entity(index))
+            .map(|index| self.parse_entity(index).map(renderer_entity_projection))
             .collect::<anyhow::Result<Vec<_>>>()?;
         let belts = returned_belt_indices
             .iter()
@@ -6671,7 +6681,7 @@ mod tests {
         }
 
         let entities = json!([
-            {"id":"left","kind":"vein","planetId":"home","resourceId":"iron_ore","position":{"x":0,"y":0},"inputs":{},"outputs":{}},
+            {"id":"left","kind":"vein","planetId":"home","resourceId":"iron_ore","position":{"x":0,"y":0},"inputs":{},"outputs":{},"stationRoutes":[{"id":"must-not-cross-ipc","cargo":123}]},
             {"id":"right","kind":"vein","planetId":"home","resourceId":"iron_ore","position":{"x":900,"y":0},"inputs":{},"outputs":{}}
         ]);
         let belts = json!([
@@ -6709,8 +6719,23 @@ mod tests {
             .viewport_projection(&[], "home", -1.0, -1.0, 1_000.0, 1.0, 0, 2, 2)
             .unwrap();
         assert_eq!(legacy_projection["entities"].as_array().unwrap().len(), 2);
+        assert!(
+            legacy_projection["entities"][0]
+                .get("stationRoutes")
+                .is_none()
+        );
         assert_eq!(legacy_projection["belts"].as_array().unwrap().len(), 1);
         assert_eq!(legacy_projection["belts"][0]["id"], "line");
+        let bounded_projection = state.projection(&[], &["left".to_owned()], &[]).unwrap();
+        assert!(
+            bounded_projection["entities"][0]
+                .get("stationRoutes")
+                .is_none()
+        );
+        let v2 = state
+            .viewport_projection_v2(&[], "home", -1.0, -1.0, 1_000.0, 1.0, 0, 2, 0, 2, &[], &[])
+            .unwrap();
+        assert!(v2["entities"][0].get("stationRoutes").is_none());
     }
 
     #[test]

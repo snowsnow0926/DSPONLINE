@@ -8,6 +8,7 @@ import type {
   NativeProjectedEjectorOrbitFrame,
   NativeProjectedTimeWarpControllerBinding,
 } from "../game/nativeProjectedTimeWarpEjectorCommands";
+import type { NativeProjectedStationConfigurationBinding } from "../game/nativeProjectedStationConfigurationCommands";
 import type { FactoryEntity } from "../game/types";
 import { NativeFactoryInspectorPanel } from "./NativeFactoryInspectorPanel";
 
@@ -30,6 +31,7 @@ const entity = {
   powerFactor: 0.8,
   inputItems: { rows: [{ itemId: "MOD/输入", amount: 7 }], totalCount: 1, truncated: false },
   outputItems: { rows: [], totalCount: 0, truncated: false },
+  stationConfiguration: null,
 } as const;
 
 function inspector(overrides: Partial<FactoryInspectorSummaryReadModel> = {}): FactoryInspectorSummaryReadModel {
@@ -594,5 +596,89 @@ describe("NativeFactoryInspectorPanel", () => {
     render({ ...orbitFrame, revision: 9 });
     expect(host.querySelector('[aria-label="Windows 原生太阳帆目标轨道"]')).toBeNull();
     expect(host.textContent).toContain("旧网页存档不会作为备用来源");
+  });
+
+  it("renders exactly five Rust station slots, keeps material controls read-only, and waits for ACK", () => {
+    const onChange = vi.fn();
+    const stationConfiguration = {
+      schema: "station-configuration-v1",
+      registryFingerprint: "7df8cf3a",
+      stationType: "interstellar",
+      stationDrones: 5,
+      stationVessels: 2,
+      stationWarpers: 1,
+      slots: Array.from({ length: 5 }, (_, slotIndex) => ({
+        slotIndex,
+        itemId: slotIndex === 1 ? "iron_ore" : null,
+        localMode: slotIndex === 1 ? "supply" as const : "storage" as const,
+        remoteMode: slotIndex === 1 ? "demand" as const : "storage" as const,
+        minimumLoad: slotIndex === 1 ? 0.5 as const : 1 as const,
+        minStock: 0,
+        maxStock: slotIndex === 1 ? 100 : 0,
+        priority: 1 as const,
+        routePolicy: "relay-preferred" as const,
+        warperBudget: 2 as const,
+      })),
+      spaceWarpUnlocked: true,
+      stationWarpEnabled: true,
+      stationWarperAutoRefill: false,
+      stationWarperTarget: 25,
+      stationHubEnabled: false,
+      stationHubPriority: 1 as const,
+    } as const;
+    const stationSummary = {
+      ...entity,
+      entityId: "station-ils",
+      kind: "station",
+      buildingId: "interstellar_logistics_station",
+      recipeId: null,
+      storedItemId: "iron_ore",
+      machineCount: 1,
+      stationConfiguration,
+    } as const;
+    const binding: NativeProjectedStationConfigurationBinding = {
+      sessionId: "s",
+      runId: "r",
+      revision: 8,
+      activePlanetId: "home",
+      entity: stationSummary,
+      configuration: stationConfiguration,
+    };
+    const render = (projected: NativeProjectedStationConfigurationBinding | null, pending = false) => act(() => root.render(
+      <NativeFactoryInspectorPanel
+        inspector={inspector({ entity: stationSummary })}
+        multiSelection={multi({ entityRows: { rows: [stationSummary], totalCount: 1, truncated: false } })}
+        entityConfiguration={null}
+        stationConfiguration={projected}
+        pending={pending}
+        onEntityLockChange={vi.fn()}
+        onRemoveEntity={vi.fn()}
+        onStackCountChange={vi.fn()}
+        onEntityPowerPriorityChange={vi.fn()}
+        onSplitterDistributionModeChange={vi.fn()}
+        onEnergyExchangerModeChange={vi.fn()}
+        onFuelItemChange={vi.fn()}
+        onBlackHolePausedChange={vi.fn()}
+        onStationConfigurationChange={onChange}
+        onBeltLaneCountChange={vi.fn()}
+        onBeltPriorityChange={vi.fn()}
+        onRemoveBelt={vi.fn()}
+      />,
+    ));
+
+    render(binding);
+    expect(host.querySelectorAll("[data-native-station-configuration] fieldset")).toHaveLength(5);
+    expect([...host.querySelectorAll<HTMLSelectElement>('select[aria-label$="只读"]')].every((select) => select.disabled)).toBe(true);
+    expect([...host.querySelectorAll<HTMLButtonElement>('[aria-label="物流站舰队只读"] button')].every((button) => button.disabled)).toBe(true);
+    const priorityButtons = [...host.querySelectorAll<HTMLButtonElement>('[aria-label="物流站槽位 2 优先级"] button')];
+    act(() => priorityButtons[2].click());
+    expect(onChange).toHaveBeenLastCalledWith("station-ils", { kind: "slot-priority", slotIndex: 1, target: 2 });
+
+    render(binding, true);
+    expect([...host.querySelectorAll<HTMLButtonElement>('[aria-label="物流站槽位 2 优先级"] button')]
+      .every((button) => button.disabled)).toBe(true);
+    render({ ...binding, revision: 7 });
+    expect([...host.querySelectorAll<HTMLButtonElement>('[aria-label="物流站槽位 2 优先级"] button')]
+      .every((button) => button.disabled)).toBe(true);
   });
 });

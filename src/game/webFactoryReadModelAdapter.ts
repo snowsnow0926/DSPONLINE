@@ -262,6 +262,7 @@ function selectedEntityRow(entity: GameState["entities"][number]): SelectedEntit
     powerFactor: entity.powerFactor ?? null,
     inputItems: numericRecordRows(entity.inputs as NumericRecord, FACTORY_READ_MODEL_LIMITS.itemRows),
     outputItems: numericRecordRows(entity.outputs as NumericRecord, FACTORY_READ_MODEL_LIMITS.itemRows),
+    stationConfiguration: null,
   };
 }
 

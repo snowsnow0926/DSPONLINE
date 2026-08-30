@@ -4,6 +4,7 @@ const NATIVE_ERROR_CODE_PATTERN = /^NATIVE_[A-Z0-9_]{1,95}$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const CHECKSUM_PATTERN = /^[a-f0-9]{8,64}$/;
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
+const NATIVE_CATALOG_ID_PATTERN = /^[A-Za-z0-9_.:/-]+$/;
 const MAX_PROJECTION_DEPTH = 16;
 const MAX_PROJECTION_NODES = 300_000;
 const MAX_PROJECTION_ARRAY_ENTRIES = 16_384;
@@ -1587,11 +1588,43 @@ function normalizeFactoryPlanetNavigation(value, activePlanetId) {
   return { schema: "factory-read-model-v1", activePlanetId, planets };
 }
 
+function normalizeFactoryStationItemOptions(value, label) {
+  const source = exactObject(value, ["rows", "totalCount", "truncated", "limit"], label);
+  const limit = safeInteger(source.limit, `${label}.limit`, 1);
+  if (limit !== 128 || !Array.isArray(source.rows) || source.rows.length > limit) {
+    throw protocolError(`${label}.rows`);
+  }
+  const totalCount = safeInteger(source.totalCount, `${label}.totalCount`);
+  const truncated = boolean(source.truncated, `${label}.truncated`);
+  if (totalCount < source.rows.length || truncated !== (totalCount > limit) ||
+      (!truncated && source.rows.length !== totalCount) ||
+      (truncated && source.rows.length !== limit)) {
+    throw protocolError(`${label} cardinality`);
+  }
+  let previousItemId = null;
+  const rows = source.rows.map((value, index) => {
+    const rowLabel = `${label}.rows[${index}]`;
+    const row = exactObject(value, ["itemId", "name", "kind"], rowLabel);
+    const itemId = opaqueId(row.itemId, `${rowLabel}.itemId`, 160);
+    if (!NATIVE_CATALOG_ID_PATTERN.test(itemId) ||
+        previousItemId !== null && itemId <= previousItemId) {
+      throw protocolError(`${rowLabel}.itemId`);
+    }
+    previousItemId = itemId;
+    return {
+      itemId,
+      name: boundedReadModelText(row.name, `${rowLabel}.name`, 256, 1),
+      kind: oneOf(row.kind, ["solid", "fluid", "matrix"], `${rowLabel}.kind`),
+    };
+  });
+  return { rows, totalCount, truncated, limit };
+}
+
 function normalizeFactoryStationConfiguration(value, label, entity) {
   if (value === null) return null;
   const source = exactObject(value, [
     "schema", "registryFingerprint", "stationType", "stationDrones", "stationVessels",
-    "stationWarpers", "slots", "spaceWarpUnlocked", "stationWarpEnabled",
+    "stationWarpers", "itemOptions", "slots", "spaceWarpUnlocked", "stationWarpEnabled",
     "stationWarperAutoRefill", "stationWarperTarget", "stationHubEnabled",
     "stationHubPriority",
   ], label);
@@ -1613,6 +1646,8 @@ function normalizeFactoryStationConfiguration(value, label, entity) {
   const stationWarpers = source.stationWarpers === null
     ? null
     : safeInteger(source.stationWarpers, `${label}.stationWarpers`);
+  const itemOptions = normalizeFactoryStationItemOptions(source.itemOptions, `${label}.itemOptions`);
+  const projectedItemIds = new Set(itemOptions.rows.map((row) => row.itemId));
   const machineCount = safeInteger(entity.machineCount, `${label}.machineCount`);
   if (stationDrones > machineCount * 50) throw protocolError(`${label}.stationDrones capacity`);
   const itemIds = new Set();
@@ -1622,8 +1657,16 @@ function normalizeFactoryStationConfiguration(value, label, entity) {
       : ["slotIndex", "itemId", "localMode", "remoteMode", "minimumLoad", "minStock", "maxStock", "priority"];
     const slot = exactObject(value, keys, `${label}.slots[${slotIndex}]`);
     if (slot.slotIndex !== slotIndex) throw protocolError(`${label}.slots[${slotIndex}].slotIndex`);
-    const itemId = nullableReadModelId(slot.itemId, `${label}.slots[${slotIndex}].itemId`);
+    const itemId = slot.itemId === null
+      ? null
+      : opaqueId(slot.itemId, `${label}.slots[${slotIndex}].itemId`, 160);
+    if (itemId !== null && !NATIVE_CATALOG_ID_PATTERN.test(itemId)) {
+      throw protocolError(`${label}.slots[${slotIndex}].itemId`);
+    }
     if (itemId !== null && itemIds.has(itemId)) throw protocolError(`${label} duplicate slot item`);
+    if (itemId !== null && !itemOptions.truncated && !projectedItemIds.has(itemId)) {
+      throw protocolError(`${label}.slots[${slotIndex}].itemId binding`);
+    }
     if (itemId !== null) itemIds.add(itemId);
     const minimumLoad = oneOf(slot.minimumLoad, [0.1, 0.25, 0.5, 1], `${label}.slots[${slotIndex}].minimumLoad`);
     const minStock = safeInteger(slot.minStock, `${label}.slots[${slotIndex}].minStock`);
@@ -1659,7 +1702,7 @@ function normalizeFactoryStationConfiguration(value, label, entity) {
     }
     return {
       schema: "station-configuration-v1", registryFingerprint: "7df8cf3a", stationType,
-      stationDrones, stationVessels: null, stationWarpers: null, slots, spaceWarpUnlocked,
+      itemOptions, stationDrones, stationVessels: null, stationWarpers: null, slots, spaceWarpUnlocked,
       stationWarpEnabled: null, stationWarperAutoRefill: null, stationWarperTarget: null,
       stationHubEnabled: null, stationHubPriority: null,
     };
@@ -1673,7 +1716,7 @@ function normalizeFactoryStationConfiguration(value, label, entity) {
   }
   return {
     schema: "station-configuration-v1", registryFingerprint: "7df8cf3a", stationType,
-    stationDrones, stationVessels, stationWarpers, slots, spaceWarpUnlocked,
+    itemOptions, stationDrones, stationVessels, stationWarpers, slots, spaceWarpUnlocked,
     stationWarpEnabled: boolean(source.stationWarpEnabled, `${label}.stationWarpEnabled`),
     stationWarperAutoRefill: boolean(source.stationWarperAutoRefill, `${label}.stationWarperAutoRefill`),
     stationWarperTarget,

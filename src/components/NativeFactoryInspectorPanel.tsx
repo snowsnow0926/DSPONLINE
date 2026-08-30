@@ -1,4 +1,5 @@
 import { Atom, CircuitBoard, Flame, Gauge, Layers3, LockKeyhole, Minus, Orbit, Pause, Play, Plus, Route, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import { CONSTRUCTION, FUEL_ENERGY_MJ, ITEMS } from "../game/content";
 import type {
   FactoryInspectorSummaryReadModel,
@@ -28,7 +29,9 @@ import type {
   NativeProjectedStationInventoryAdjustment,
 } from "../game/nativeProjectedStationConfigurationCommands";
 import type { NativeStationFleetKind } from "../game/nativeStationInventoryIntentCommands";
+import type { NativeStationSlotMode, NativeStationSlotScope } from "../game/nativeStationSlotIntentCommands";
 import type { ItemId, LogisticsPriority, PowerPriority, StationMinimumLoad } from "../game/types";
+import { AccessibleDialog } from "./AccessibleDialog";
 import { PowerValue } from "./PowerValue";
 import { QuantityValue } from "./QuantityValue";
 
@@ -70,6 +73,13 @@ interface NativeFactoryInspectorPanelProps {
 }
 
 export type NativeStationConfigurationUiAction =
+  | Readonly<{
+      kind: "slot-mode";
+      slotIndex: number;
+      scope: NativeStationSlotScope;
+      target: NativeStationSlotMode;
+    }>
+  | Readonly<{ kind: "slot-item"; slotIndex: number; target: string | null }>
   | Readonly<{ kind: "slot-priority"; slotIndex: number; target: LogisticsPriority }>
   | Readonly<{ kind: "slot-minimum-load"; slotIndex: number; target: StationMinimumLoad }>
   | Readonly<{ kind: "slot-limits"; slotIndex: number; minStock: number; maxStock: number }>
@@ -113,6 +123,17 @@ function itemRows(label: string, rows: readonly ItemQuantityReadModel[], truncat
   </section>;
 }
 
+interface PendingNativeStationSlotItemChange {
+  readonly entityId: string;
+  readonly planetId: string;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly slotIndex: number;
+  readonly previousItemId: string | null;
+  readonly targetItemId: string | null;
+}
+
 function NativeStationConfiguration({
   entity,
   binding,
@@ -125,12 +146,60 @@ function NativeStationConfiguration({
   onChange?: (entityId: string, action: NativeStationConfigurationUiAction) => void;
 }) {
   const configuration = entity.stationConfiguration;
+  const [pendingSlotItemChange, setPendingSlotItemChange] = useState<PendingNativeStationSlotItemChange | null>(null);
+  const confirmationCancelRef = useRef<HTMLButtonElement | null>(null);
+  const confirmationSubmittingRef = useRef(false);
+  useEffect(() => {
+    setPendingSlotItemChange(null);
+    confirmationSubmittingRef.current = false;
+  }, [
+    binding?.activePlanetId,
+    binding?.revision,
+    binding?.runId,
+    binding?.sessionId,
+    entity.entityId,
+    entity.interactionLocked,
+    entity.planetId,
+    pending,
+  ]);
   if (!configuration) return null;
   const writable = Boolean(binding && onChange && !pending && !entity.interactionLocked);
   const submit = (action: NativeStationConfigurationUiAction) => {
     if (writable) onChange?.(entity.entityId, action);
   };
   const interstellar = configuration.stationType === "interstellar";
+  const optionById = new Map(configuration.itemOptions.rows.map((option) => [option.itemId, option]));
+  const configuredItemIds = new Set(configuration.slots.flatMap((slot) => slot.itemId ? [slot.itemId] : []));
+  const modeLabel = (mode: NativeStationSlotMode) => ({ supply: "供应", demand: "需求", storage: "仓储" })[mode];
+  const confirmationIsCurrent = Boolean(binding && pendingSlotItemChange &&
+    pendingSlotItemChange.entityId === entity.entityId &&
+    pendingSlotItemChange.planetId === entity.planetId &&
+    pendingSlotItemChange.sessionId === binding.sessionId &&
+    pendingSlotItemChange.runId === binding.runId &&
+    pendingSlotItemChange.revision === binding.revision &&
+    binding.activePlanetId === entity.planetId &&
+    configuration.slots[pendingSlotItemChange.slotIndex]?.itemId === pendingSlotItemChange.previousItemId);
+  const confirmSlotItemChange = () => {
+    if (!confirmationIsCurrent || !pendingSlotItemChange || !writable || confirmationSubmittingRef.current) {
+      setPendingSlotItemChange(null);
+      return;
+    }
+    confirmationSubmittingRef.current = true;
+    const action: NativeStationConfigurationUiAction = {
+      kind: "slot-item",
+      slotIndex: pendingSlotItemChange.slotIndex,
+      target: pendingSlotItemChange.targetItemId,
+    };
+    setPendingSlotItemChange(null);
+    try {
+      onChange?.(entity.entityId, action);
+    } finally {
+      // App may reject synchronously without entering the pending state. The
+      // closed dialog already prevents a double click, so release the local
+      // submission guard and allow an explicit retry from the same projection.
+      confirmationSubmittingRef.current = false;
+    }
+  };
   const adjustmentLabel = (adjustment: NativeProjectedStationInventoryAdjustment) => {
     if (adjustment === "zero") return "归零";
     if (adjustment === "capacity") return "填满";
@@ -162,12 +231,12 @@ function NativeStationConfiguration({
   const vesselCapacity = entity.machineCount * 10;
   const warperCapacity = entity.machineCount * 50;
   const stationWarpers = configuration.stationWarpers;
-  return <section
+  return <><section
     className="native-inspector-safe-actions native-station-configuration"
-    data-native-station-configuration="bounded-no-material-v1"
+    data-native-station-configuration="bounded-slot-intents-v1"
   >
     <strong>Rust 物流站配置</strong>
-    <p>物品与收发模式保持只读；舰队和站内翘曲器按钮只提交一个语义意图，由 Rust 按忙碌数量、容量和库存裁定，等待 durable ACK 后再刷新。</p>
+    <p>槽位、舰队和站内翘曲器都只提交一个语义意图，由 Rust 在最新 revision 重算路线、退款和库存；界面等待 durable ACK 后再刷新。</p>
     <dl className="metric-ledger">
       <div><dt>无人机</dt><dd>{configuration.stationDrones}</dd></div>
       <div><dt>运输船</dt><dd>{configuration.stationVessels ?? "-"}</dd></div>
@@ -242,15 +311,62 @@ function NativeStationConfiguration({
     </> : null}
     {configuration.slots.map((slot) => <fieldset key={slot.slotIndex} className="native-station-slot">
       <legend>槽位 {slot.slotIndex + 1}</legend>
-      <label><span>物品（只读）</span><select aria-label={`物流站槽位 ${slot.slotIndex + 1} 物品只读`} value={slot.itemId ?? ""} disabled>
-        <option value="">未配置</option>{slot.itemId ? <option value={slot.itemId}>{itemLabel(slot.itemId)}</option> : null}
+      <label><span>物品</span><select
+        aria-label={`物流站槽位 ${slot.slotIndex + 1} 物品`}
+        value={slot.itemId ?? ""}
+        disabled={!writable}
+        onChange={(event) => {
+          if (!binding || !writable) return;
+          const targetItemId = event.currentTarget.value || null;
+          if (targetItemId === slot.itemId) return;
+          setPendingSlotItemChange({
+            entityId: entity.entityId,
+            planetId: entity.planetId,
+            sessionId: binding.sessionId,
+            runId: binding.runId,
+            revision: binding.revision,
+            slotIndex: slot.slotIndex,
+            previousItemId: slot.itemId,
+            targetItemId,
+          });
+        }}
+      >
+        <option value="">未配置</option>
+        {slot.itemId && !optionById.has(slot.itemId)
+          ? <option value={slot.itemId}>{slot.itemId}（当前）</option>
+          : null}
+        {configuration.itemOptions.rows.map((option) => <option
+          value={option.itemId}
+          key={option.itemId}
+          disabled={option.itemId !== slot.itemId && configuredItemIds.has(option.itemId)}
+        >{option.name}</option>)}
       </select></label>
-      <label><span>本地模式（只读）</span><select aria-label={`物流站槽位 ${slot.slotIndex + 1} 本地模式只读`} value={slot.localMode} disabled>
-        <option value={slot.localMode}>{slot.localMode}</option>
+      <label><span>本地模式</span><select
+        aria-label={`物流站槽位 ${slot.slotIndex + 1} 本地模式`}
+        value={slot.localMode}
+        disabled={!writable}
+        onChange={(event) => submit({
+          kind: "slot-mode",
+          slotIndex: slot.slotIndex,
+          scope: "local",
+          target: event.currentTarget.value as NativeStationSlotMode,
+        })}
+      >
+        {(["supply", "demand", "storage"] as const).map((mode) => <option value={mode} key={mode}>{modeLabel(mode)}</option>)}
       </select></label>
-      <label><span>星际模式（只读）</span><select aria-label={`物流站槽位 ${slot.slotIndex + 1} 星际模式只读`} value={slot.remoteMode} disabled>
-        <option value={slot.remoteMode}>{slot.remoteMode}</option>
-      </select></label>
+      {interstellar ? <label><span>星际模式</span><select
+        aria-label={`物流站槽位 ${slot.slotIndex + 1} 星际模式`}
+        value={slot.remoteMode}
+        disabled={!writable}
+        onChange={(event) => submit({
+          kind: "slot-mode",
+          slotIndex: slot.slotIndex,
+          scope: "remote",
+          target: event.currentTarget.value as NativeStationSlotMode,
+        })}
+      >
+        {(["supply", "demand", "storage"] as const).map((mode) => <option value={mode} key={mode}>{modeLabel(mode)}</option>)}
+      </select></label> : null}
       <label><span>最低装载</span><select
         aria-label={`物流站槽位 ${slot.slotIndex + 1} 最低装载`}
         value={slot.minimumLoad}
@@ -296,7 +412,37 @@ function NativeStationConfiguration({
         >{([1, 2, 3, 4] as const).map((value) => <option value={value} key={value}>{value}</option>)}</select></label>
       </> : null}
     </fieldset>)}
-  </section>;
+    {configuration.itemOptions.truncated
+      ? <small>Rust 物品目录超过 {configuration.itemOptions.limit} 条；这里只允许选择本次有界投影中的前 {configuration.itemOptions.rows.length} 条，不会从旧网页状态补读。</small>
+      : null}
+  </section>
+  {confirmationIsCurrent && pendingSlotItemChange ? <AccessibleDialog
+    open
+    title="确认更换物流站槽位物品"
+    ariaLabel="确认更换物流站槽位物品"
+    role="alertdialog"
+    riskPolicy="explicit"
+    className="native-station-slot-item-confirm"
+    initialFocusRef={confirmationCancelRef}
+    onRequestClose={() => {
+      confirmationSubmittingRef.current = false;
+      setPendingSlotItemChange(null);
+    }}
+  >
+    <p>槽位 {pendingSlotItemChange.slotIndex + 1} 将从 <strong>{pendingSlotItemChange.previousItemId
+      ? optionById.get(pendingSlotItemChange.previousItemId)?.name ?? pendingSlotItemChange.previousItemId
+      : "未配置"}</strong> 改为 <strong>{pendingSlotItemChange.targetItemId
+      ? optionById.get(pendingSlotItemChange.targetItemId)?.name ?? pendingSlotItemChange.targetItemId
+      : "未配置"}</strong>。</p>
+    <p>确认后会取消相关物流路线、退款对应缓存与未使用的翘曲器，并拆除匹配旧物品的输入/输出线路。Rust 会从当前权威状态重新计算，界面不会预先修改库存。</p>
+    <footer>
+      <button ref={confirmationCancelRef} type="button" onClick={() => {
+        confirmationSubmittingRef.current = false;
+        setPendingSlotItemChange(null);
+      }}>取消</button>
+      <button className="danger" type="button" onClick={confirmSlotItemChange}>确认更换</button>
+    </footer>
+  </AccessibleDialog> : null}</>;
 }
 
 function NativeEntitySummary({

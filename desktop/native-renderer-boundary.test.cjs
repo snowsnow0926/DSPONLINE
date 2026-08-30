@@ -1206,6 +1206,15 @@ test("factory read model is strictly bounded and revision-bound before renderer 
     schema: "station-configuration-v1",
     registryFingerprint: "7df8cf3a",
     stationType: "interstellar",
+    itemOptions: {
+      rows: [
+        { itemId: "copper_ore", name: "铜矿", kind: "solid" },
+        { itemId: "iron_ore", name: "铁矿", kind: "solid" },
+      ],
+      totalCount: 2,
+      truncated: false,
+      limit: 128,
+    },
     stationDrones: 5,
     stationVessels: 2,
     stationWarpers: 1,
@@ -1230,6 +1239,10 @@ test("factory read model is strictly bounded and revision-bound before renderer 
   );
   assert.equal(normalizedStation.selection.entityRows.rows[0].stationConfiguration.slots.length, 5);
   assert.equal(normalizedStation.selection.entityRows.rows[0].stationConfiguration.slots[2].itemId, "iron_ore");
+  assert.deepEqual(
+    normalizedStation.selection.entityRows.rows[0].stationConfiguration.itemOptions,
+    stationConfiguration.itemOptions,
+  );
   assert.equal(Object.hasOwn(normalizedStation.selection.entityRows.rows[0].stationConfiguration, "stationRoutes"), false);
 
   const rejects = (value, requestContext = context) => assert.throws(
@@ -1289,6 +1302,32 @@ test("factory read model is strictly bounded and revision-bound before renderer 
   const malformedStationProjection = structuredClone(stationProjection);
   malformedStationProjection.selection.entityRows.rows[0].stationConfiguration.slots.pop();
   rejects(malformedStationProjection);
+  const unsortedStationOptions = structuredClone(stationProjection);
+  unsortedStationOptions.selection.entityRows.rows[0].stationConfiguration.itemOptions.rows.reverse();
+  rejects(unsortedStationOptions);
+  const oversizedStationOptions = structuredClone(stationProjection);
+  oversizedStationOptions.selection.entityRows.rows[0].stationConfiguration.itemOptions = {
+    rows: Array.from({ length: 129 }, (_, index) => ({
+      itemId: `item_${String(index).padStart(3, "0")}`,
+      name: `item ${index}`,
+      kind: "solid",
+    })),
+    totalCount: 129,
+    truncated: true,
+    limit: 128,
+  };
+  rejects(oversizedStationOptions);
+  const unboundStationItem = structuredClone(stationProjection);
+  unboundStationItem.selection.entityRows.rows[0].stationConfiguration.itemOptions = {
+    rows: [{ itemId: "copper_ore", name: "铜矿", kind: "solid" }],
+    totalCount: 1,
+    truncated: false,
+    limit: 128,
+  };
+  rejects(unboundStationItem);
+  const invalidStationLabel = structuredClone(stationProjection);
+  invalidStationLabel.selection.entityRows.rows[0].stationConfiguration.itemOptions.rows[0].name = "界".repeat(86);
+  rejects(invalidStationLabel);
   const forgedModStationProjection = structuredClone(stationProjection);
   forgedModStationProjection.selection.entityRows.rows[0].stationConfiguration.registryFingerprint = "MOD/forged";
   rejects(forgedModStationProjection);

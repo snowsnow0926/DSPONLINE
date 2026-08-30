@@ -10,8 +10,10 @@ import type {
 import {
   createNativeProjectedStationFleetAdjustmentCommand,
   createNativeProjectedStationScalarCommand,
+  createNativeProjectedStationSlotItemCommand,
   createNativeProjectedStationSlotLimitsCommand,
   createNativeProjectedStationSlotMinimumLoadCommand,
+  createNativeProjectedStationSlotModeCommand,
   createNativeProjectedStationSlotPriorityCommand,
   createNativeProjectedStationSlotRoutePolicyCommand,
   createNativeProjectedStationSlotWarperBudgetCommand,
@@ -32,6 +34,15 @@ function configuration(type: "planetary" | "interstellar" = "interstellar"): Nat
     schema: "station-configuration-v1",
     registryFingerprint: "7df8cf3a",
     stationType: type,
+    itemOptions: {
+      rows: [
+        { itemId: "copper_ore", name: "铜矿", kind: "solid" },
+        { itemId: "iron_ore", name: "铁矿", kind: "solid" },
+      ],
+      totalCount: 2,
+      truncated: false,
+      limit: 128,
+    },
     stationDrones: 5,
     stationVessels: interstellar ? 2 : null,
     stationWarpers: interstellar ? 1 : null,
@@ -119,6 +130,18 @@ describe("native projected station configuration commands", () => {
       ...models(),
     })!;
     expect(binding.configuration.slots).toHaveLength(5);
+    expect(createNativeProjectedStationSlotModeCommand(binding, 2, "remote", "supply")?.changedEntities)
+      .toEqual([{ id: "station-ils", changes: [{
+        path: ["stationSlotMode", "intent"],
+        operation: "set",
+        value: { slotIndex: 2, scope: "remote", mode: "supply" },
+      }] }]);
+    expect(createNativeProjectedStationSlotItemCommand(binding, 2, "copper_ore")?.changedEntities)
+      .toEqual([{ id: "station-ils", changes: [{
+        path: ["stationSlotItem", "intent"],
+        operation: "set",
+        value: { slotIndex: 2, itemId: "copper_ore" },
+      }] }]);
     expect(createNativeProjectedStationSlotPriorityCommand(binding, 2, 0)?.changedEntities[0].changes)
       .toEqual([{ path: ["stationSlots", 2, "priority"], operation: "set", value: 0 }]);
     expect(createNativeProjectedStationSlotMinimumLoadCommand(binding, 2, 0.25)?.changedEntities[0].changes)
@@ -143,6 +166,8 @@ describe("native projected station configuration commands", () => {
 
   it("returns no-op only for the projected current value and never emits material/route ledgers", () => {
     const binding = selectNativeProjectedStationConfigurationBinding({ commandIdentity: identity, ...models() })!;
+    expect(createNativeProjectedStationSlotModeCommand(binding, 2, "local", "supply")).toBeNull();
+    expect(createNativeProjectedStationSlotItemCommand(binding, 2, "iron_ore")).toBeNull();
     expect(createNativeProjectedStationSlotPriorityCommand(binding, 2, 2)).toBeNull();
     expect(createNativeProjectedStationScalarCommand(binding, { field: "stationWarpEnabled", target: true })).toBeNull();
     const command = createNativeProjectedStationScalarCommand(binding, { field: "stationWarperTarget", target: 50 })!;
@@ -218,8 +243,18 @@ describe("native projected station configuration commands", () => {
     expect(createNativeProjectedStationFleetAdjustmentCommand(binding, "drone", 1)?.changedEntities[0].changes[0].value)
       .toEqual({ kind: "drone", targetCount: 6 });
     expect(binding.configuration.stationDrones).toBe(5);
+    const itemIntent = createNativeProjectedStationSlotItemCommand(binding, 2, "copper_ore")!;
+    expect(itemIntent.changedEntities[0]?.changes[0]?.value).toEqual({ slotIndex: 2, itemId: "copper_ore" });
+    expect(binding.configuration.slots[2].itemId).toBe("iron_ore");
 
-    const acknowledgedConfiguration = { ...configuration(), stationDrones: 6 };
+    const acknowledgedBase = configuration();
+    const acknowledgedConfiguration = {
+      ...acknowledgedBase,
+      stationDrones: 6,
+      slots: acknowledgedBase.slots.map((slot) => slot.slotIndex === 2
+        ? { ...slot, itemId: "copper_ore" }
+        : slot),
+    };
     const acknowledgedIdentity = { ...identity, revision: 42 };
     const acknowledgedEntity = station(acknowledgedConfiguration);
     const acknowledged = selectNativeProjectedStationConfigurationBinding({
@@ -227,6 +262,7 @@ describe("native projected station configuration commands", () => {
       ...models(acknowledgedEntity, acknowledgedIdentity),
     })!;
     expect(acknowledged.configuration.stationDrones).toBe(6);
+    expect(acknowledged.configuration.slots[2].itemId).toBe("copper_ore");
     expect(createNativeProjectedStationFleetAdjustmentCommand(acknowledged, "drone", 1)?.changedEntities[0].changes[0].value)
       .toEqual({ kind: "drone", targetCount: 7 });
   });
@@ -262,6 +298,14 @@ describe("native projected station configuration commands", () => {
     }
     expect(selectNativeProjectedStationConfigurationBinding({ commandIdentity: identity, ...models(station(null)) }))
       .toBeNull();
+    const forgedModConfiguration = {
+      ...configuration(),
+      registryFingerprint: "MOD/forged",
+    } as unknown as NativeStationConfigurationReadModel;
+    expect(selectNativeProjectedStationConfigurationBinding({
+      commandIdentity: identity,
+      ...models(station(forgedModConfiguration)),
+    })).toBeNull();
     const malformed = configuration();
     const shortSlots = { ...malformed, slots: malformed.slots.slice(0, 4) } as NativeStationConfigurationReadModel;
     expect(selectNativeProjectedStationConfigurationBinding({
@@ -281,6 +325,31 @@ describe("native projected station configuration commands", () => {
       },
     };
     expect(selectNativeProjectedStationConfigurationBinding({ commandIdentity: identity, ...drift })).toBeNull();
+  });
+
+  it("keeps a configured item outside a truncated page clearable but never reassignable", () => {
+    const rows = Array.from({ length: 128 }, (_, index) => ({
+      itemId: `item_${String(index).padStart(3, "0")}`,
+      name: `物品 ${index}`,
+      kind: "solid" as const,
+    }));
+    const base = configuration();
+    const truncatedConfiguration: NativeStationConfigurationReadModel = {
+      ...base,
+      itemOptions: { rows, totalCount: 129, truncated: true, limit: 128 },
+      slots: base.slots.map((slot) => slot.slotIndex === 2
+        ? { ...slot, itemId: "zz_current" }
+        : slot),
+    };
+    const binding = selectNativeProjectedStationConfigurationBinding({
+      commandIdentity: identity,
+      ...models(station(truncatedConfiguration)),
+    })!;
+    expect(createNativeProjectedStationSlotItemCommand(binding, 2, null)?.changedEntities[0]?.changes[0]?.value)
+      .toEqual({ slotIndex: 2, itemId: null });
+    expect(createNativeProjectedStationSlotItemCommand(binding, 2, "zz_current")).toBeNull();
+    expect(() => createNativeProjectedStationSlotItemCommand(binding, 0, "zz_current"))
+      .toThrow(/有界 Rust 目录/);
   });
 
   it("blocks locked, out-of-range and warp-tech-forged commands before IPC", () => {

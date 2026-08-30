@@ -23,6 +23,8 @@ const MAX_RESERVATION_ROWS: usize = 32;
 const MAX_TARGET_ROWS: usize = 128;
 const MAX_JOB_ROWS: usize = 64;
 const PLAYER_STATION_SLOT_COUNT: usize = 5;
+const MAX_STATION_ITEM_OPTIONS: usize = 128;
+const MAX_STATION_ITEM_LABEL_BYTES: usize = 256;
 const MAX_PLAYER_STATION_STOCK: u64 = 100_000_000;
 const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT: &str = "7df8cf3a";
@@ -107,6 +109,47 @@ fn required_station_minimum_load(value: Option<&Value>, label: &str) -> anyhow::
         .ok_or_else(|| anyhow!("native factory read-model {label} is invalid"))
 }
 
+fn station_accepts_item(accepts: &str, item_kind: &str) -> bool {
+    accepts == "any" || accepts == item_kind || (accepts == "solid" && item_kind == "matrix")
+}
+
+fn station_item_options(state: &CoreState, accepts: &str) -> anyhow::Result<Value> {
+    let mut items = state
+        .catalog
+        .snapshot
+        .items
+        .iter()
+        .filter(|item| station_accepts_item(accepts, &item.kind))
+        .collect::<Vec<_>>();
+    items.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+    let total_count = items.len();
+    let rows = items
+        .into_iter()
+        .take(MAX_STATION_ITEM_OPTIONS)
+        .map(|item| {
+            let label = if item.name.is_empty() {
+                item.id.as_str()
+            } else {
+                item.name.as_str()
+            };
+            if label.len() > MAX_STATION_ITEM_LABEL_BYTES || label.contains('\0') {
+                bail!("native factory read-model station item label is invalid")
+            }
+            Ok(json!({
+                "itemId": item.id,
+                "name": label,
+                "kind": item.kind,
+            }))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(json!({
+        "rows": rows,
+        "totalCount": total_count,
+        "truncated": total_count > MAX_STATION_ITEM_OPTIONS,
+        "limit": MAX_STATION_ITEM_OPTIONS,
+    }))
+}
+
 fn station_configuration_with_scope(
     state: &CoreState,
     entity: &Map<String, Value>,
@@ -135,18 +178,20 @@ fn station_configuration_with_scope(
             return Ok(Value::Null);
         }
     }
+    let building = state
+        .catalog
+        .buildings
+        .get(building_id)
+        .filter(|building| building.kind == "station")
+        .ok_or_else(|| anyhow!("native factory read-model built-in station identity is invalid"))?;
     if entity.get("kind").and_then(Value::as_str) != Some("station")
-        || state
-            .catalog
-            .buildings
-            .get(building_id)
-            .is_none_or(|building| building.kind != "station")
         || !entity
             .get("interactionLocked")
             .is_some_and(Value::is_boolean)
     {
         bail!("native factory read-model built-in station identity is invalid");
     }
+    let accepts = building.accepts.as_deref().unwrap_or("any");
     let slots = entity
         .get("stationSlots")
         .and_then(Value::as_array)
@@ -161,12 +206,19 @@ fn station_configuration_with_scope(
             .ok_or_else(|| anyhow!("native factory read-model station slot is invalid"))?;
         let item_id = match slot.get("itemId") {
             None | Some(Value::Null) => None,
-            Some(Value::String(item_id))
-                if valid_opaque_id(item_id) && state.catalog.items.contains_key(item_id) =>
-            {
+            Some(Value::String(item_id)) if valid_opaque_id(item_id) => {
+                let item = state
+                    .catalog
+                    .items
+                    .get(item_id)
+                    .filter(|item| station_accepts_item(accepts, &item.kind))
+                    .ok_or_else(|| {
+                        anyhow!("native factory read-model station slot item is incompatible")
+                    })?;
                 if !configured_item_ids.insert(item_id.as_str()) {
                     bail!("native factory read-model station slot item is repeated");
                 }
+                debug_assert_eq!(item.id, *item_id);
                 Some(item_id.clone())
             }
             _ => bail!("native factory read-model station slot item is invalid"),
@@ -268,6 +320,7 @@ fn station_configuration_with_scope(
         "schema": "station-configuration-v1",
         "registryFingerprint": EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
         "stationType": if interstellar { "interstellar" } else { "planetary" },
+        "itemOptions": station_item_options(state, accepts)?,
         "stationDrones": station_drones,
         "stationVessels": Value::Null,
         "stationWarpers": Value::Null,
@@ -1162,6 +1215,12 @@ mod tests {
         let pls = &rows[0]["stationConfiguration"];
         let ils = &rows[1]["stationConfiguration"];
         assert_eq!(pls["stationType"], "planetary");
+        assert_eq!(pls["itemOptions"]["limit"], MAX_STATION_ITEM_OPTIONS);
+        assert_eq!(pls["itemOptions"]["totalCount"], 1);
+        assert_eq!(pls["itemOptions"]["truncated"], false);
+        assert_eq!(pls["itemOptions"]["rows"][0]["itemId"], "iron_ore");
+        assert_eq!(pls["itemOptions"]["rows"][0]["name"], "铁矿");
+        assert_eq!(pls["itemOptions"], ils["itemOptions"]);
         assert_eq!(pls["slots"].as_array().unwrap().len(), 5);
         assert_eq!(pls["slots"][2]["itemId"], "iron_ore");
         assert!(pls["slots"][2].get("routePolicy").is_none());
@@ -1179,6 +1238,52 @@ mod tests {
         let encoded = serde_json::to_string(&projection).unwrap();
         assert!(!encoded.contains("stationRoutes"));
         assert!(!encoded.contains("must-never-cross-ipc"));
+        assert_eq!(state.summary().unwrap().canonical_sha256, before);
+    }
+
+    #[test]
+    fn station_item_options_are_stable_bounded_and_truncated_without_mutation() {
+        let mut state = station_state(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
+        let mut snapshot = state.catalog.snapshot.clone();
+        snapshot
+            .items
+            .extend((0..MAX_STATION_ITEM_OPTIONS + 2).map(|index| {
+                ItemDefinition {
+                    id: format!("item_{index:03}"),
+                    name: format!("内置物品 {index:03}"),
+                    kind: match index % 3 {
+                        0 => "solid",
+                        1 => "fluid",
+                        _ => "matrix",
+                    }
+                    .to_owned(),
+                    fuel_energy_mj: 0.0,
+                }
+            }));
+        state.catalog = std::sync::Arc::new(
+            RuntimeCatalog::validate(snapshot, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT).unwrap(),
+        );
+        let before = state.summary().unwrap().canonical_sha256;
+        let first = state
+            .factory_read_model_projection(&["pls".to_owned()], &[])
+            .unwrap();
+        let second = state
+            .factory_read_model_projection(&["pls".to_owned()], &[])
+            .unwrap();
+        let options =
+            &first["selection"]["entityRows"]["rows"][0]["stationConfiguration"]["itemOptions"];
+        let rows = options["rows"].as_array().unwrap();
+        assert_eq!(options["limit"], MAX_STATION_ITEM_OPTIONS);
+        assert_eq!(options["totalCount"], MAX_STATION_ITEM_OPTIONS + 3);
+        assert_eq!(options["truncated"], true);
+        assert_eq!(rows.len(), MAX_STATION_ITEM_OPTIONS);
+        assert_eq!(rows[0]["itemId"], "iron_ore");
+        assert_eq!(rows[1]["itemId"], "item_000");
+        assert_eq!(rows[MAX_STATION_ITEM_OPTIONS - 1]["itemId"], "item_126");
+        assert!(rows.windows(2).all(|pair| {
+            pair[0]["itemId"].as_str().unwrap() < pair[1]["itemId"].as_str().unwrap()
+        }));
+        assert_eq!(first, second);
         assert_eq!(state.summary().unwrap().canonical_sha256, before);
     }
 

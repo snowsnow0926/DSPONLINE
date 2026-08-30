@@ -544,7 +544,9 @@ import {
   createNativeProjectedStationFleetAdjustmentCommand,
   createNativeProjectedStationScalarCommand,
   createNativeProjectedStationSlotLimitsCommand,
+  createNativeProjectedStationSlotItemCommand,
   createNativeProjectedStationSlotMinimumLoadCommand,
+  createNativeProjectedStationSlotModeCommand,
   createNativeProjectedStationSlotPriorityCommand,
   createNativeProjectedStationSlotRoutePolicyCommand,
   createNativeProjectedStationSlotWarperBudgetCommand,
@@ -17313,6 +17315,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) => {
         if (baseRevision !== binding.revision) return null;
         switch (action.kind) {
+          case "slot-mode":
+            return createNativeProjectedStationSlotModeCommand(
+              binding,
+              action.slotIndex,
+              action.scope,
+              action.target,
+            );
+          case "slot-item":
+            return createNativeProjectedStationSlotItemCommand(binding, action.slotIndex, action.target);
           case "slot-priority":
             return createNativeProjectedStationSlotPriorityCommand(binding, action.slotIndex, action.target);
           case "slot-minimum-load":

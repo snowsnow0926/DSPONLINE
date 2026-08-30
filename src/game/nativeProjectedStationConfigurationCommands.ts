@@ -7,6 +7,7 @@ import type {
   NativeStationSlotConfigurationReadModel,
   SelectedEntityReadModel,
 } from "./factoryReadModels";
+import { FACTORY_READ_MODEL_LIMITS as READ_MODEL_LIMITS } from "./factoryReadModels";
 import {
   createNativeProjectedStationLimitsCommand,
   createNativeProjectedStationMinimumLoadCommand,
@@ -20,6 +21,12 @@ import {
   type NativeStationFleetKind,
 } from "./nativeStationInventoryIntentCommands";
 import {
+  createNativeStationSlotItemIntentCommand,
+  createNativeStationSlotModeIntentCommand,
+  type NativeStationSlotMode,
+  type NativeStationSlotScope,
+} from "./nativeStationSlotIntentCommands";
+import {
   SIMULATION_RUNTIME_PROTOCOL_VERSION,
   type SimulationCommandPatch,
 } from "./simulationRuntimeProtocol";
@@ -27,6 +34,10 @@ import type { LogisticsPriority, StationMinimumLoad } from "./types";
 
 const BUILT_IN_REGISTRY_FINGERPRINT = "7df8cf3a";
 const MAX_STOCK = 100_000_000;
+const TEXT_ENCODER = new TextEncoder();
+const MAX_NATIVE_CATALOG_ID_BYTES = 160;
+const MAX_STATION_ITEM_LABEL_BYTES = 256;
+const NATIVE_CATALOG_ID_PATTERN = /^[A-Za-z0-9_.:/-]+$/u;
 
 export interface NativeProjectedStationConfigurationBinding {
   readonly sessionId: string;
@@ -54,6 +65,17 @@ function opaqueId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 512 && !value.includes("\0");
 }
 
+function nativeCatalogId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 &&
+    TEXT_ENCODER.encode(value).byteLength <= MAX_NATIVE_CATALOG_ID_BYTES &&
+    NATIVE_CATALOG_ID_PATTERN.test(value);
+}
+
+function boundedStationItemLabel(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && !value.includes("\0") &&
+    TEXT_ENCODER.encode(value).byteLength <= MAX_STATION_ITEM_LABEL_BYTES;
+}
+
 function sameIdentity(
   left: NativeFactoryProjectionIdentity | null,
   right: NativeFactoryProjectionIdentity,
@@ -72,6 +94,25 @@ function stationConfigurationIsStrict(
       !Number.isSafeInteger(configuration.stationDrones) || configuration.stationDrones < 0 ||
       typeof configuration.spaceWarpUnlocked !== "boolean" ||
       Object.hasOwn(configuration, "stationRoutes")) return false;
+  const options = configuration.itemOptions;
+  if (!options || Object.keys(options).length !== 4 ||
+      options.limit !== READ_MODEL_LIMITS.stationItemOptions ||
+      !Array.isArray(options.rows) || options.rows.length > options.limit ||
+      !Number.isSafeInteger(options.totalCount) || options.totalCount < options.rows.length ||
+      typeof options.truncated !== "boolean" ||
+      options.truncated !== (options.totalCount > options.limit) ||
+      (!options.truncated && options.rows.length !== options.totalCount) ||
+      (options.truncated && options.rows.length !== options.limit)) return false;
+  const projectedOptionIds = new Set<string>();
+  let previousOptionId: string | null = null;
+  for (const option of options.rows) {
+    if (!option || Object.keys(option).length !== 3 || !nativeCatalogId(option.itemId) ||
+        !boundedStationItemLabel(option.name) || !["solid", "fluid", "matrix"].includes(option.kind) ||
+        previousOptionId !== null && option.itemId <= previousOptionId ||
+        projectedOptionIds.has(option.itemId)) return false;
+    projectedOptionIds.add(option.itemId);
+    previousOptionId = option.itemId;
+  }
   const interstellar = configuration.stationType === "interstellar";
   if ((!interstellar && configuration.stationType !== "planetary") ||
       entity.kind !== "station" || entity.buildingId !== (interstellar
@@ -81,7 +122,7 @@ function stationConfigurationIsStrict(
   for (let index = 0; index < configuration.slots.length; index += 1) {
     const slot = configuration.slots[index];
     if (!slot || slot.slotIndex !== index || Object.hasOwn(slot, "stationRoutes") ||
-        slot.itemId !== null && !opaqueId(slot.itemId) ||
+        slot.itemId !== null && !nativeCatalogId(slot.itemId) ||
         !["supply", "demand", "storage"].includes(slot.localMode) ||
         !["supply", "demand", "storage"].includes(slot.remoteMode) ||
         ![0.1, 0.25, 0.5, 1].includes(slot.minimumLoad) ||
@@ -91,6 +132,7 @@ function stationConfigurationIsStrict(
         ![0, 1, 2].includes(slot.priority)) return false;
     if (slot.itemId !== null) {
       if (configuredItems.has(slot.itemId)) return false;
+      if (!options.truncated && !projectedOptionIds.has(slot.itemId)) return false;
       configuredItems.add(slot.itemId);
     }
     if (interstellar) {
@@ -111,6 +153,57 @@ function stationConfigurationIsStrict(
     Number.isSafeInteger(configuration.stationWarperTarget) && configuration.stationWarperTarget! >= 1 &&
     typeof configuration.stationHubEnabled === "boolean" &&
     configuration.stationHubPriority !== null && [0, 1, 2].includes(configuration.stationHubPriority);
+}
+
+export function createNativeProjectedStationSlotModeCommand(
+  binding: NativeProjectedStationConfigurationBinding,
+  slotIndex: number,
+  scope: NativeStationSlotScope,
+  target: NativeStationSlotMode,
+): SimulationCommandPatch | null {
+  const slot = slotAt(binding, slotIndex);
+  if ((scope !== "local" && scope !== "remote") ||
+      (target !== "supply" && target !== "demand" && target !== "storage")) {
+    throw new TypeError("原生物流站槽位模式目标无效");
+  }
+  if (scope === "remote" && binding.configuration.stationType !== "interstellar") {
+    throw new TypeError("行星物流站不支持星际槽位模式");
+  }
+  if ((scope === "local" ? slot.localMode : slot.remoteMode) === target) return null;
+  return createNativeStationSlotModeIntentCommand(
+    binding.revision,
+    binding.entity.entityId,
+    slotIndex,
+    scope,
+    target,
+  );
+}
+
+export function createNativeProjectedStationSlotItemCommand(
+  binding: NativeProjectedStationConfigurationBinding,
+  slotIndex: number,
+  itemId: string | null,
+): SimulationCommandPatch | null {
+  const slot = slotAt(binding, slotIndex);
+  if (itemId !== null && !nativeCatalogId(itemId)) {
+    throw new TypeError("原生物流站槽位物品目标无效");
+  }
+  if (slot.itemId === itemId) return null;
+  if (itemId !== null) {
+    if (!binding.configuration.itemOptions.rows.some((option) => option.itemId === itemId)) {
+      throw new TypeError("原生物流站槽位物品不在有界 Rust 目录中");
+    }
+    if (binding.configuration.slots.some((candidate) =>
+      candidate.slotIndex !== slotIndex && candidate.itemId === itemId)) {
+      throw new TypeError("原生物流站槽位物品已被其他槽位使用");
+    }
+  }
+  return createNativeStationSlotItemIntentCommand(
+    binding.revision,
+    binding.entity.entityId,
+    slotIndex,
+    itemId,
+  );
 }
 
 /**

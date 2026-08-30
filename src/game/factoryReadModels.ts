@@ -26,6 +26,7 @@ export const FACTORY_READ_MODEL_LIMITS = Object.freeze({
   constructionReservationRows: 32,
   constructionTargetRows: 128,
   constructionJobRows: 64,
+  stationItemOptions: 128,
 } as const);
 
 export interface BoundedReadModelRows<Row> {
@@ -156,6 +157,16 @@ export interface PlanetNavigationReadModel {
 export type NativeStationModeReadModel = "supply" | "demand" | "storage";
 export type NativeStationRoutePolicyReadModel = "direct" | "relay-preferred" | "relay-required";
 
+export interface NativeStationItemOptionReadModel {
+  readonly itemId: string;
+  readonly name: string;
+  readonly kind: "solid" | "fluid" | "matrix";
+}
+
+export interface NativeStationItemOptionsReadModel extends BoundedReadModelRows<NativeStationItemOptionReadModel> {
+  readonly limit: typeof FACTORY_READ_MODEL_LIMITS.stationItemOptions;
+}
+
 export interface NativeStationSlotConfigurationReadModel {
   readonly slotIndex: number;
   readonly itemId: string | null;
@@ -176,6 +187,8 @@ export interface NativeStationConfigurationReadModel {
   readonly schema: "station-configuration-v1";
   readonly registryFingerprint: "7df8cf3a";
   readonly stationType: "planetary" | "interstellar";
+  /** Stable built-in options projected by Rust; the renderer never fills this from GameState. */
+  readonly itemOptions: NativeStationItemOptionsReadModel;
   /** Fleet and installed warpers are intentionally display-only. */
   readonly stationDrones: number;
   readonly stationVessels: number | null;

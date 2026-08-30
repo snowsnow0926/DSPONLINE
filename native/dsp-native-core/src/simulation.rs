@@ -349,6 +349,7 @@ impl CoreState {
             let quantum_transition_runtime = prepared.quantum_transition_runtime.clone();
             let interstellar_peer_directory = prepared.interstellar_peer_directory.clone();
             let interstellar_route_activity = prepared.interstellar_route_activity.clone();
+            let mut power_wake_runtime = prepared.power_wake_runtime.clone();
             profile_mark!("simulate");
             let campaign_factory_metrics = self.record_production_history_with_campaign_metrics(
                 &mut prepared.base,
@@ -370,6 +371,8 @@ impl CoreState {
             let next_revision = previous_revision
                 .checked_add(1)
                 .ok_or_else(|| anyhow!("native core revision exhausted"))?;
+            std::sync::Arc::make_mut(&mut power_wake_runtime)
+                .commit_candidate(previous_revision, next_revision)?;
             let summary = self.commit_simulated_state(
                 prepared.base,
                 prepared.entities,
@@ -386,6 +389,7 @@ impl CoreState {
             self.install_prepared_quantum_transition_runtime(quantum_transition_runtime);
             self.install_prepared_interstellar_peer_directory(interstellar_peer_directory);
             self.install_prepared_interstellar_route_activity(interstellar_route_activity);
+            self.install_prepared_power_wake_runtime(power_wake_runtime);
             profile_mark!("commit-state");
             if request.include_diagnostics {
                 profile_last!("summary");

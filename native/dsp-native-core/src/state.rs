@@ -2491,6 +2491,11 @@ pub struct CoreState {
     /// route graph. It is installed only after a successful revision commit.
     prepared_belt_activity: Option<Arc<crate::belts::BeltActivitySnapshot>>,
     prepared_local_peer_directory: Option<Arc<crate::local_logistics::LocalPeerDirectory>>,
+    /// Runtime-only stable-rank grid/station -> dispatch-demand CSR plus
+    /// candidate-local generation scratch. Static graph identity follows the
+    /// prepared topology/catalog/registry directories; scratch is installed
+    /// only after the complete simulation candidate commits.
+    prepared_power_wake_runtime: Option<Arc<crate::simple_factory::PowerWakeRuntime>>,
     /// Runtime-only static quantum endpoint/slot directory plus active wake
     /// queues. Installed only after the complete simulation candidate commits.
     prepared_quantum_logistics_directory:
@@ -3164,6 +3169,7 @@ impl CoreState {
             prepared_belt_routes: None,
             prepared_belt_activity: None,
             prepared_local_peer_directory: None,
+            prepared_power_wake_runtime: None,
             prepared_quantum_logistics_directory: None,
             prepared_construction_runtime: None,
             prepared_station_mode_transition_runtime: None,
@@ -3217,6 +3223,19 @@ impl CoreState {
             state.prepared_interstellar_route_activity = Some(Arc::new(
                 crate::interstellar_logistics::prepare_route_activity(&parsed_entities),
             ));
+            state.prepared_power_wake_runtime =
+                Some(Arc::new(crate::simple_factory::PowerWakeRuntime::build(
+                    &state,
+                    &parsed_entities,
+                    state
+                        .prepared_local_peer_directory
+                        .as_deref()
+                        .expect("prepared local directory"),
+                    state
+                        .prepared_interstellar_peer_directory
+                        .as_deref()
+                        .expect("prepared interstellar directory"),
+                )));
         }
         // `coreOpen` must return a verified canonical proof. Reuse the parsed
         // entity graph while canonicalizing each raw belt independently.
@@ -3554,6 +3573,7 @@ impl CoreState {
         self.factory_static_admission_reason = None;
         self.prepared_belt_routes = None;
         self.prepared_belt_activity = None;
+        self.prepared_power_wake_runtime = None;
         self.prepared_quantum_logistics_directory = None;
         self.prepared_construction_runtime = None;
         self.prepared_quantum_transition_runtime = None;
@@ -3598,6 +3618,19 @@ impl CoreState {
         directory: Arc<crate::local_logistics::LocalPeerDirectory>,
     ) {
         self.prepared_local_peer_directory = Some(directory);
+    }
+
+    pub(crate) fn prepared_power_wake_runtime(
+        &self,
+    ) -> Option<Arc<crate::simple_factory::PowerWakeRuntime>> {
+        self.prepared_power_wake_runtime.clone()
+    }
+
+    pub(crate) fn install_prepared_power_wake_runtime(
+        &mut self,
+        runtime: Arc<crate::simple_factory::PowerWakeRuntime>,
+    ) {
+        self.prepared_power_wake_runtime = Some(runtime);
     }
 
     pub(crate) fn prepared_quantum_logistics_directory(
@@ -4003,6 +4036,7 @@ impl CoreState {
         // admitted advance recompiles this immutable directory from the new
         // records; keeping the previous one would route against stale topology.
         self.prepared_local_peer_directory = None;
+        self.prepared_power_wake_runtime = None;
         self.prepared_quantum_logistics_directory = None;
         self.prepared_construction_runtime = None;
         self.prepared_interstellar_peer_directory = None;
@@ -5690,6 +5724,11 @@ impl CoreState {
             .as_ref()
             .map(|directory| directory.estimated_bytes())
             .unwrap_or(0);
+        let prepared_power_wake_bytes = self
+            .prepared_power_wake_runtime
+            .as_ref()
+            .map(|runtime| runtime.estimated_bytes())
+            .unwrap_or(0);
         let prepared_quantum_logistics_bytes = self
             .prepared_quantum_logistics_directory
             .as_ref()
@@ -5723,6 +5762,7 @@ impl CoreState {
         let factory_topology_bytes = self.factory_topology.estimated_bytes();
         let topology_index_bytes = prepared_belt_route_bytes
             + prepared_local_peer_bytes
+            + prepared_power_wake_bytes
             + prepared_quantum_logistics_bytes
             + prepared_construction_runtime_bytes
             + prepared_station_mode_transition_bytes
@@ -5732,7 +5772,7 @@ impl CoreState {
             + factory_topology_bytes;
         if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
             eprintln!(
-                "DSP_NATIVE_CORE_PROFILE\tmemory-topology-breakdown\tbelts={prepared_belt_route_bytes},local={prepared_local_peer_bytes},quantum={prepared_quantum_logistics_bytes},construction={prepared_construction_runtime_bytes},stationMode={prepared_station_mode_transition_bytes},quantumTransition={prepared_quantum_transition_bytes},interstellar={prepared_interstellar_peer_bytes},activity={prepared_interstellar_activity_bytes},factory={factory_topology_bytes}"
+                "DSP_NATIVE_CORE_PROFILE\tmemory-topology-breakdown\tbelts={prepared_belt_route_bytes},local={prepared_local_peer_bytes},powerWake={prepared_power_wake_bytes},quantum={prepared_quantum_logistics_bytes},construction={prepared_construction_runtime_bytes},stationMode={prepared_station_mode_transition_bytes},quantumTransition={prepared_quantum_transition_bytes},interstellar={prepared_interstellar_peer_bytes},activity={prepared_interstellar_activity_bytes},factory={factory_topology_bytes}"
             );
         }
         let belt_activity_runtime_bytes = self
@@ -6654,6 +6694,11 @@ mod tests {
                     .prepared_local_peer_directory
                     .as_ref()
                     .map(|directory| directory.estimated_bytes())
+                    .unwrap_or(0)
+                + state
+                    .prepared_power_wake_runtime
+                    .as_ref()
+                    .map(|runtime| runtime.estimated_bytes())
                     .unwrap_or(0)
                 + state
                     .prepared_quantum_logistics_directory

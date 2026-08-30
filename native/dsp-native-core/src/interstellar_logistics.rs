@@ -301,6 +301,10 @@ impl RoutingBaseSignature {
 /// directory switches to the legacy full-scan oracle for the current step.
 #[derive(Debug, Default)]
 pub(crate) struct InterstellarPeerDirectory {
+    /// Exact process-local identity for the immutable peer key order. The
+    /// token survives ordinary candidate clones and changes on every rebuild,
+    /// allowing external CSR caches to validate in O(1).
+    power_wake_key_order_identity: Arc<()>,
     supply_by_item: HashMap<String, Vec<PeerSlotRef>>,
     demand_by_item: HashMap<String, Vec<PeerSlotRef>>,
     demand_stations_by_item: HashMap<String, Vec<usize>>,
@@ -335,6 +339,24 @@ pub(crate) struct InterstellarDispatchScan {
     pub peer_candidate_rows_visited: usize,
     pub peer_full_scan_rows_visited: usize,
     pub directory_fallback: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct InterstellarDispatchPowerPlan {
+    next_powered: Vec<usize>,
+    recovered_station_indices: Vec<usize>,
+    directory_fallback: bool,
+}
+
+impl InterstellarDispatchPowerPlan {
+    #[cfg(test)]
+    pub(crate) fn recovered_station_indices(&self) -> &[usize] {
+        &self.recovered_station_indices
+    }
+
+    pub(crate) fn take_recovered_station_indices(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.recovered_station_indices)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -749,6 +771,7 @@ impl InterstellarRouteActivity {
         }
     }
 
+    #[cfg(test)]
     fn refresh_power_wakes(
         &mut self,
         directory: &InterstellarPeerDirectory,
@@ -771,6 +794,61 @@ impl InterstellarRouteActivity {
             next_powered.push(station_index);
         }
         self.powered_station_indices = next_powered;
+    }
+
+    pub(crate) fn plan_dispatch_power_recoveries(
+        &self,
+        station_indices: &[usize],
+        powers: &HashMap<usize, f64>,
+    ) -> InterstellarDispatchPowerPlan {
+        let directory_fallback = !station_indices.windows(2).all(|pair| pair[0] < pair[1])
+            || !self
+                .powered_station_indices
+                .windows(2)
+                .all(|pair| pair[0] < pair[1]);
+        let mut next_powered = Vec::new();
+        let mut recovered_station_indices = Vec::new();
+        for &station_index in station_indices {
+            if powers.get(&station_index).copied().unwrap_or(0.0) <= EPSILON {
+                continue;
+            }
+            if self
+                .powered_station_indices
+                .binary_search(&station_index)
+                .is_err()
+            {
+                recovered_station_indices.push(station_index);
+            }
+            next_powered.push(station_index);
+        }
+        InterstellarDispatchPowerPlan {
+            next_powered,
+            recovered_station_indices,
+            directory_fallback,
+        }
+    }
+
+    pub(crate) fn commit_dispatch_power_recoveries(
+        &mut self,
+        directory: &InterstellarPeerDirectory,
+        plan: InterstellarDispatchPowerPlan,
+        demand_wakes: Option<&[usize]>,
+    ) {
+        self.powered_station_indices = plan.next_powered;
+        let Some(demand_wakes) = demand_wakes.filter(|_| !plan.directory_fallback) else {
+            self.wake_all_dispatch_demands(directory);
+            return;
+        };
+        if demand_wakes
+            .iter()
+            .any(|index| !directory.demand_station_set.contains(index))
+        {
+            self.wake_all_dispatch_demands(directory);
+            return;
+        }
+        for &demand_index in demand_wakes {
+            self.wake_dispatch_demand(demand_index);
+        }
     }
 
     fn take_dispatch_probe_indices(
@@ -942,6 +1020,18 @@ fn ordered_subset(subset: &[usize], superset: &[usize]) -> bool {
 }
 
 impl InterstellarPeerDirectory {
+    pub(crate) fn power_wake_key_order_identity(&self) -> &Arc<()> {
+        &self.power_wake_key_order_identity
+    }
+
+    pub(crate) fn dispatch_power_demand_indices(&self) -> &[usize] {
+        &self.demand_station_indices
+    }
+
+    pub(crate) fn dispatch_power_csr_supported(&self) -> bool {
+        !self.fallback_full_scan && self.station_power_index_valid
+    }
+
     pub(crate) fn build(state: &CoreState, base: &Map<String, Value>, entities: &[Value]) -> Self {
         let station_rows: &[usize] = &state.factory_topology.station_indices;
         let mut directory = Self {
@@ -1245,6 +1335,41 @@ impl InterstellarPeerDirectory {
         demands.dedup();
         self.append_power_dependencies_for_demands(&demands, target)
     }
+
+    pub(crate) fn append_dispatch_demand_dependencies_from_changed_stations(
+        &self,
+        changed_station_indices: &[usize],
+        target: &mut Vec<usize>,
+    ) -> bool {
+        if self.fallback_full_scan || !self.station_power_index_valid {
+            return false;
+        }
+        let mut wake_all_demands = false;
+        for &station_index in changed_station_indices {
+            if self.hub_station_set.contains(&station_index) {
+                wake_all_demands = true;
+                continue;
+            }
+            if self.demand_station_set.contains(&station_index) {
+                target.push(station_index);
+            }
+            let Some(items) = self.supply_items_by_station.get(&station_index) else {
+                continue;
+            };
+            for item_id in items {
+                if let Some(demands) = self.demand_stations_by_item.get(item_id) {
+                    target.extend_from_slice(demands);
+                }
+            }
+        }
+        if wake_all_demands {
+            target.clear();
+            target.extend_from_slice(&self.demand_station_indices);
+        }
+        target.sort_unstable();
+        target.dedup();
+        true
+    }
 }
 
 pub(crate) fn prepare_route_activity(entities: &[Value]) -> InterstellarRouteActivity {
@@ -1432,15 +1557,6 @@ pub(crate) fn wake_orbital_supply_demands(
         peer_directory,
         &peer_directory.orbital_supply_station_indices,
     );
-}
-
-pub(crate) fn refresh_dispatch_power_wakes(
-    station_indices: &[usize],
-    powers: &HashMap<usize, f64>,
-    peer_directory: &InterstellarPeerDirectory,
-    route_activity: &mut InterstellarRouteActivity,
-) {
-    route_activity.refresh_power_wakes(peer_directory, station_indices, powers);
 }
 
 /// Select the only station rows whose power can be observed by this step's
@@ -7400,6 +7516,22 @@ mod tests {
             let mut indexed_ledger = build_ledger(&indexed_entities, &indexes(&indexed_entities));
             let mut oracle_ledger = build_ledger(&oracle_entities, &indexes(&oracle_entities));
 
+            let mut power_plan =
+                indexed_activity.plan_dispatch_power_recoveries(&selected, &sparse_powers);
+            let recovered = power_plan.take_recovered_station_indices();
+            let mut precomputed_wakes = Vec::new();
+            assert!(
+                directory.append_dispatch_demand_dependencies_from_changed_stations(
+                    &recovered,
+                    &mut precomputed_wakes,
+                )
+            );
+            indexed_activity.commit_dispatch_power_recoveries(
+                &directory,
+                power_plan,
+                Some(&precomputed_wakes),
+            );
+
             dispatch_with_ledger(
                 &state,
                 &mut indexed_base,
@@ -7464,7 +7596,17 @@ mod tests {
             .iter()
             .map(|index| (*index, 0.0))
             .collect::<HashMap<_, _>>();
-        selection_activity.refresh_power_wakes(&directory, &selected, &off);
+        let mut off_plan = selection_activity.plan_dispatch_power_recoveries(&selected, &off);
+        assert!(off_plan.recovered_station_indices().is_empty());
+        let off_sources = off_plan.take_recovered_station_indices();
+        let mut off_wakes = Vec::new();
+        assert!(
+            directory.append_dispatch_demand_dependencies_from_changed_stations(
+                &off_sources,
+                &mut off_wakes,
+            )
+        );
+        selection_activity.commit_dispatch_power_recoveries(&directory, off_plan, Some(&off_wakes));
         assert!(
             selection_activity
                 .pending_dispatch_demand_indices
@@ -7474,8 +7616,25 @@ mod tests {
             .iter()
             .map(|index| (*index, 1.0))
             .collect::<HashMap<_, _>>();
-        selection_activity.refresh_power_wakes(&directory, &selected, &on);
+        let mut on_plan = selection_activity.plan_dispatch_power_recoveries(&selected, &on);
+        assert_eq!(on_plan.recovered_station_indices(), selected);
+        let on_sources = on_plan.take_recovered_station_indices();
+        let mut on_wakes = Vec::new();
+        assert!(
+            directory.append_dispatch_demand_dependencies_from_changed_stations(
+                &on_sources,
+                &mut on_wakes,
+            )
+        );
+        selection_activity.commit_dispatch_power_recoveries(&directory, on_plan, Some(&on_wakes));
         assert_eq!(selection_activity.pending_dispatch_demand_indices, vec![1]);
+        let narrowed_powers = HashMap::from([(1, 1.0)]);
+        let narrowed =
+            selection_activity.plan_dispatch_power_recoveries(&selected[1..], &narrowed_powers);
+        assert!(
+            !narrowed.directory_fallback,
+            "ordinary active-set shrinkage is not a cache mismatch"
+        );
     }
 
     #[test]

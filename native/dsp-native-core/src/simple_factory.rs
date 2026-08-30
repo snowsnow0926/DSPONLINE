@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use anyhow::{Context, anyhow, bail};
 use serde_json::{Map, Number, Value, json};
@@ -7,13 +8,497 @@ use crate::catalog::{BuildingDefinition, RecipeDefinition};
 use crate::deterministic_runtime::{
     DeterministicRuntime, PARALLEL_MIN_ITEMS, runtime as deterministic_runtime,
 };
-use crate::state::CoreState;
+use crate::state::{CoreState, FactoryTopology};
 
 const EPSILON: f64 = 0.0001;
 const MIN_BUILDING_BUFFER_LIMIT: f64 = 1_000.0;
 const DEFAULT_BUILDING_BUFFER_LIMIT: f64 = 1_000_000.0;
 const MAX_BUILDING_BUFFER_LIMIT: f64 = 100_000_000.0;
 const GRID_IDS: [&str; 3] = ["grid-a", "grid-b", "grid-c"];
+const POWER_WAKE_DENSE_NUMERATOR: usize = 3;
+const POWER_WAKE_DENSE_DENOMINATOR: usize = 4;
+
+#[derive(Debug)]
+struct PowerWakeSourceIdentity {
+    topology: Arc<FactoryTopology>,
+    local_key_order: Arc<()>,
+    remote_key_order: Arc<()>,
+    catalog_fingerprint: Box<str>,
+    registry_fingerprint: Box<str>,
+}
+
+impl PowerWakeSourceIdentity {
+    fn capture(
+        state: &CoreState,
+        local: &crate::local_logistics::LocalPeerDirectory,
+        remote: &crate::interstellar_logistics::InterstellarPeerDirectory,
+    ) -> Self {
+        Self {
+            topology: Arc::clone(&state.factory_topology),
+            local_key_order: Arc::clone(local.power_wake_key_order_identity()),
+            remote_key_order: Arc::clone(remote.power_wake_key_order_identity()),
+            catalog_fingerprint: state.catalog.fingerprint.clone().into_boxed_str(),
+            registry_fingerprint: state.identity.registry_fingerprint.clone().into_boxed_str(),
+        }
+    }
+
+    fn matches(
+        &self,
+        state: &CoreState,
+        local: &crate::local_logistics::LocalPeerDirectory,
+        remote: &crate::interstellar_logistics::InterstellarPeerDirectory,
+    ) -> bool {
+        Arc::ptr_eq(&self.topology, &state.factory_topology)
+            && self.catalog_fingerprint.as_ref() == state.catalog.fingerprint
+            && self.registry_fingerprint.as_ref() == state.identity.registry_fingerprint
+            && Arc::ptr_eq(&self.local_key_order, local.power_wake_key_order_identity())
+            && Arc::ptr_eq(
+                &self.remote_key_order,
+                remote.power_wake_key_order_identity(),
+            )
+    }
+}
+
+#[derive(Debug, Default)]
+struct StablePowerWakeCsr {
+    demand_station_indices: Box<[usize]>,
+    station_offsets: Box<[u32]>,
+    station_demand_ranks: Box<[u32]>,
+    grid_offsets: Box<[u32]>,
+    grid_demand_ranks: Box<[u32]>,
+    full_scan_required: bool,
+}
+
+impl StablePowerWakeCsr {
+    fn full(station_count: usize, grid_count: usize) -> Self {
+        Self {
+            station_offsets: vec![0; station_count.saturating_add(1)].into_boxed_slice(),
+            grid_offsets: vec![0; grid_count.saturating_add(1)].into_boxed_slice(),
+            full_scan_required: true,
+            ..Self::default()
+        }
+    }
+
+    fn build(
+        station_indices: &[usize],
+        entity_planet_indices: &[usize],
+        entity_grid_indices: &[usize],
+        planet_count: usize,
+        demand_station_indices: &[usize],
+        mut append_dependencies: impl FnMut(usize, &mut Vec<usize>) -> bool,
+    ) -> Option<Self> {
+        if !station_indices.windows(2).all(|pair| pair[0] < pair[1])
+            || !demand_station_indices
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+            || demand_station_indices
+                .iter()
+                .any(|index| station_indices.binary_search(index).is_err())
+        {
+            return None;
+        }
+        let grid_count = planet_count.checked_mul(GRID_IDS.len())?;
+        let mut station_offsets = Vec::with_capacity(station_indices.len().saturating_add(1));
+        let mut station_demand_ranks = Vec::<u32>::new();
+        let mut grid_ranks = vec![Vec::<u32>::new(); grid_count];
+        let mut dependencies = Vec::<usize>::new();
+        station_offsets.push(0);
+        for &station_index in station_indices {
+            let planet_index = entity_planet_indices.get(station_index).copied()?;
+            let grid_index = entity_grid_indices.get(station_index).copied()?;
+            if planet_index >= planet_count || grid_index >= GRID_IDS.len() {
+                return None;
+            }
+            dependencies.clear();
+            if !append_dependencies(station_index, &mut dependencies) {
+                return None;
+            }
+            dependencies.sort_unstable();
+            dependencies.dedup();
+            let grid_rank = planet_index.checked_mul(GRID_IDS.len())? + grid_index;
+            for &demand_index in &dependencies {
+                let demand_rank = demand_station_indices.binary_search(&demand_index).ok()?;
+                let demand_rank = u32::try_from(demand_rank).ok()?;
+                station_demand_ranks.push(demand_rank);
+                grid_ranks[grid_rank].push(demand_rank);
+            }
+            station_offsets.push(u32::try_from(station_demand_ranks.len()).ok()?);
+        }
+        let mut grid_offsets = Vec::with_capacity(grid_count.saturating_add(1));
+        let mut grid_demand_ranks = Vec::<u32>::new();
+        grid_offsets.push(0);
+        for ranks in &mut grid_ranks {
+            ranks.sort_unstable();
+            ranks.dedup();
+            grid_demand_ranks.extend_from_slice(ranks);
+            grid_offsets.push(u32::try_from(grid_demand_ranks.len()).ok()?);
+        }
+        Some(Self {
+            demand_station_indices: demand_station_indices.to_vec().into_boxed_slice(),
+            station_offsets: station_offsets.into_boxed_slice(),
+            station_demand_ranks: station_demand_ranks.into_boxed_slice(),
+            grid_offsets: grid_offsets.into_boxed_slice(),
+            grid_demand_ranks: grid_demand_ranks.into_boxed_slice(),
+            full_scan_required: false,
+        })
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        (self.demand_station_indices.len() * std::mem::size_of::<usize>()
+            + (self.station_offsets.len()
+                + self.station_demand_ranks.len()
+                + self.grid_offsets.len()
+                + self.grid_demand_ranks.len())
+                * std::mem::size_of::<u32>()) as u64
+    }
+}
+
+#[derive(Debug)]
+struct PowerWakeCsr {
+    identity: PowerWakeSourceIdentity,
+    local: StablePowerWakeCsr,
+    remote: StablePowerWakeCsr,
+    full_scan_required: bool,
+}
+
+impl PowerWakeCsr {
+    fn build(
+        state: &CoreState,
+        entities: &[Value],
+        local: &crate::local_logistics::LocalPeerDirectory,
+        remote: &crate::interstellar_logistics::InterstellarPeerDirectory,
+    ) -> Self {
+        let identity = PowerWakeSourceIdentity::capture(state, local, remote);
+        let station_indices = state.factory_topology.station_indices.as_slice();
+        let grid_count = state.catalog.planets.len().saturating_mul(GRID_IDS.len());
+        let mut full_scan_required = !station_indices.windows(2).all(|pair| pair[0] < pair[1]);
+        for &station_index in station_indices {
+            let Some(entity) = entities.get(station_index).and_then(Value::as_object) else {
+                full_scan_required = true;
+                break;
+            };
+            let built_in_station = string_at(entity, "kind") == Some("station")
+                && matches!(
+                    string_at(entity, "buildingId"),
+                    Some(
+                        "planetary_logistics_station"
+                            | "interstellar_logistics_station"
+                            | "orbital_collector"
+                    )
+                );
+            if !built_in_station {
+                full_scan_required = true;
+                break;
+            }
+        }
+        let local = (!full_scan_required && local.dispatch_power_csr_supported())
+            .then(|| {
+                StablePowerWakeCsr::build(
+                    station_indices,
+                    &state.factory_topology.entity_planet_indices,
+                    &state.factory_topology.entity_grid_indices,
+                    state.catalog.planets.len(),
+                    local.dispatch_power_demand_indices(),
+                    |station_index, target| {
+                        local.append_dispatch_demand_dependencies(&[station_index], target)
+                    },
+                )
+            })
+            .flatten()
+            .unwrap_or_else(|| StablePowerWakeCsr::full(station_indices.len(), grid_count));
+        let remote = (!full_scan_required && remote.dispatch_power_csr_supported())
+            .then(|| {
+                StablePowerWakeCsr::build(
+                    station_indices,
+                    &state.factory_topology.entity_planet_indices,
+                    &state.factory_topology.entity_grid_indices,
+                    state.catalog.planets.len(),
+                    remote.dispatch_power_demand_indices(),
+                    |station_index, target| {
+                        remote.append_dispatch_demand_dependencies_from_changed_stations(
+                            &[station_index],
+                            target,
+                        )
+                    },
+                )
+            })
+            .flatten()
+            .unwrap_or_else(|| StablePowerWakeCsr::full(station_indices.len(), grid_count));
+        full_scan_required |= local.full_scan_required || remote.full_scan_required;
+        Self {
+            identity,
+            local,
+            remote,
+            full_scan_required,
+        }
+    }
+
+    fn matches(
+        &self,
+        state: &CoreState,
+        local: &crate::local_logistics::LocalPeerDirectory,
+        remote: &crate::interstellar_logistics::InterstellarPeerDirectory,
+    ) -> bool {
+        self.identity.matches(state, local, remote)
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        self.local.estimated_bytes()
+            + self.remote.estimated_bytes()
+            + self.identity.catalog_fingerprint.len() as u64
+            + self.identity.registry_fingerprint.len() as u64
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PowerWakeGenerationScratch {
+    generation: u32,
+    seen_generation_by_demand_rank: Vec<u32>,
+    touched_demand_ranks: Vec<u32>,
+    expanded_station_indices: Vec<usize>,
+}
+
+enum PowerWakeExpansion<'a> {
+    Sparse(&'a [usize]),
+    Full,
+}
+
+impl PowerWakeGenerationScratch {
+    fn reset_for(&mut self, demand_count: usize) {
+        self.generation = 0;
+        self.seen_generation_by_demand_rank.clear();
+        self.seen_generation_by_demand_rank.resize(demand_count, 0);
+        self.touched_demand_ranks.clear();
+        self.expanded_station_indices.clear();
+    }
+
+    fn next_generation(&mut self) -> u32 {
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.seen_generation_by_demand_rank.fill(0);
+            self.generation = 1;
+        }
+        self.generation
+    }
+
+    fn expand<'a>(
+        &'a mut self,
+        graph: &PowerWakeCsr,
+        csr: &StablePowerWakeCsr,
+        source_keys: &[usize],
+        use_grid_keys: bool,
+    ) -> PowerWakeExpansion<'a> {
+        self.touched_demand_ranks.clear();
+        self.expanded_station_indices.clear();
+        if graph.full_scan_required
+            || csr.full_scan_required
+            || self.seen_generation_by_demand_rank.len() != csr.demand_station_indices.len()
+        {
+            return PowerWakeExpansion::Full;
+        }
+        let generation = self.next_generation();
+        let (offsets, edges) = if use_grid_keys {
+            (&csr.grid_offsets, &csr.grid_demand_ranks)
+        } else {
+            (&csr.station_offsets, &csr.station_demand_ranks)
+        };
+        for &source_key in source_keys {
+            let source_rank = if use_grid_keys {
+                source_key
+            } else {
+                let Ok(rank) = graph
+                    .identity
+                    .topology
+                    .station_indices
+                    .binary_search(&source_key)
+                else {
+                    return PowerWakeExpansion::Full;
+                };
+                rank
+            };
+            let Some(range) = offsets.get(source_rank..=source_rank.saturating_add(1)) else {
+                return PowerWakeExpansion::Full;
+            };
+            let start = range[0] as usize;
+            let end = range[1] as usize;
+            let Some(source_edges) = edges.get(start..end) else {
+                return PowerWakeExpansion::Full;
+            };
+            for &demand_rank in source_edges {
+                let Some(seen) = self
+                    .seen_generation_by_demand_rank
+                    .get_mut(demand_rank as usize)
+                else {
+                    return PowerWakeExpansion::Full;
+                };
+                if *seen != generation {
+                    *seen = generation;
+                    self.touched_demand_ranks.push(demand_rank);
+                }
+            }
+        }
+        if !self.touched_demand_ranks.is_empty()
+            && self
+                .touched_demand_ranks
+                .len()
+                .saturating_mul(POWER_WAKE_DENSE_DENOMINATOR)
+                >= csr
+                    .demand_station_indices
+                    .len()
+                    .saturating_mul(POWER_WAKE_DENSE_NUMERATOR)
+        {
+            return PowerWakeExpansion::Full;
+        }
+        self.touched_demand_ranks.sort_unstable();
+        self.expanded_station_indices.extend(
+            self.touched_demand_ranks
+                .iter()
+                .map(|rank| csr.demand_station_indices[*rank as usize]),
+        );
+        PowerWakeExpansion::Sparse(&self.expanded_station_indices)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PowerWakeRuntime {
+    graph: Arc<PowerWakeCsr>,
+    local_scratch: PowerWakeGenerationScratch,
+    remote_scratch: PowerWakeGenerationScratch,
+    committed_revision: u64,
+    candidate_source_revision: Option<u64>,
+    candidate_force_full_scan: bool,
+}
+
+impl PowerWakeRuntime {
+    pub(crate) fn build(
+        state: &CoreState,
+        entities: &[Value],
+        local: &crate::local_logistics::LocalPeerDirectory,
+        remote: &crate::interstellar_logistics::InterstellarPeerDirectory,
+    ) -> Self {
+        let graph = Arc::new(PowerWakeCsr::build(state, entities, local, remote));
+        let mut local_scratch = PowerWakeGenerationScratch::default();
+        local_scratch.reset_for(graph.local.demand_station_indices.len());
+        let mut remote_scratch = PowerWakeGenerationScratch::default();
+        remote_scratch.reset_for(graph.remote.demand_station_indices.len());
+        Self {
+            graph,
+            local_scratch,
+            remote_scratch,
+            committed_revision: state.revision,
+            candidate_source_revision: None,
+            candidate_force_full_scan: false,
+        }
+    }
+
+    fn begin_candidate(&mut self, source_revision: u64) {
+        self.candidate_source_revision = Some(source_revision);
+        self.candidate_force_full_scan = self.committed_revision != source_revision;
+    }
+
+    fn refresh_graph_if_needed(
+        &mut self,
+        state: &CoreState,
+        entities: &[Value],
+        local: &crate::local_logistics::LocalPeerDirectory,
+        remote: &crate::interstellar_logistics::InterstellarPeerDirectory,
+    ) {
+        if self.graph.matches(state, local, remote) {
+            return;
+        }
+        self.graph = Arc::new(PowerWakeCsr::build(state, entities, local, remote));
+        self.local_scratch
+            .reset_for(self.graph.local.demand_station_indices.len());
+        self.remote_scratch
+            .reset_for(self.graph.remote.demand_station_indices.len());
+    }
+
+    fn with_station_expansion<R>(
+        &mut self,
+        local_sources: &[usize],
+        remote_sources: &[usize],
+        apply: impl FnOnce(Option<&[usize]>, Option<&[usize]>) -> R,
+    ) -> R {
+        if self.candidate_force_full_scan {
+            return apply(None, None);
+        }
+        let local = self
+            .local_scratch
+            .expand(&self.graph, &self.graph.local, local_sources, false);
+        let remote =
+            self.remote_scratch
+                .expand(&self.graph, &self.graph.remote, remote_sources, false);
+        apply(
+            match local {
+                PowerWakeExpansion::Sparse(indices) => Some(indices),
+                PowerWakeExpansion::Full => None,
+            },
+            match remote {
+                PowerWakeExpansion::Sparse(indices) => Some(indices),
+                PowerWakeExpansion::Full => None,
+            },
+        )
+    }
+
+    #[cfg(test)]
+    fn with_grid_expansion<R>(
+        &mut self,
+        local_grid_ranks: &[usize],
+        remote_grid_ranks: &[usize],
+        apply: impl FnOnce(Option<&[usize]>, Option<&[usize]>) -> R,
+    ) -> R {
+        if self.candidate_force_full_scan {
+            return apply(None, None);
+        }
+        let local =
+            self.local_scratch
+                .expand(&self.graph, &self.graph.local, local_grid_ranks, true);
+        let remote =
+            self.remote_scratch
+                .expand(&self.graph, &self.graph.remote, remote_grid_ranks, true);
+        apply(
+            match local {
+                PowerWakeExpansion::Sparse(indices) => Some(indices),
+                PowerWakeExpansion::Full => None,
+            },
+            match remote {
+                PowerWakeExpansion::Sparse(indices) => Some(indices),
+                PowerWakeExpansion::Full => None,
+            },
+        )
+    }
+
+    pub(crate) fn commit_candidate(
+        &mut self,
+        source_revision: u64,
+        next_revision: u64,
+    ) -> anyhow::Result<()> {
+        if self.candidate_source_revision != Some(source_revision)
+            || source_revision.checked_add(1) != Some(next_revision)
+        {
+            bail!("native power wake candidate identity is invalid");
+        }
+        self.committed_revision = next_revision;
+        self.candidate_source_revision = None;
+        self.candidate_force_full_scan = false;
+        Ok(())
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> u64 {
+        self.graph.estimated_bytes()
+            + ((self.local_scratch.seen_generation_by_demand_rank.capacity()
+                + self.local_scratch.touched_demand_ranks.capacity()
+                + self
+                    .remote_scratch
+                    .seen_generation_by_demand_rank
+                    .capacity()
+                + self.remote_scratch.touched_demand_ranks.capacity())
+                * std::mem::size_of::<u32>()) as u64
+            + ((self.local_scratch.expanded_station_indices.capacity()
+                + self.remote_scratch.expanded_station_indices.capacity())
+                * std::mem::size_of::<usize>()) as u64
+    }
+}
 
 fn collect_indexed_power_probes<T, R, F>(values: &[T], probe: F) -> Vec<R>
 where
@@ -3909,6 +4394,7 @@ fn simulate_step(
     interstellar_route_activity: &mut std::sync::Arc<
         crate::interstellar_logistics::InterstellarRouteActivity,
     >,
+    power_wake_runtime: &mut std::sync::Arc<PowerWakeRuntime>,
     seconds: f64,
 ) -> anyhow::Result<()> {
     let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
@@ -5220,12 +5706,6 @@ fn simulate_step(
             station_power_scan.runtime_fallback,
         );
     }
-    crate::interstellar_logistics::refresh_dispatch_power_wakes(
-        &station_power_indices,
-        &station_powers,
-        interstellar_peer_directory,
-        std::sync::Arc::make_mut(interstellar_route_activity),
-    );
     let (warper_changed_station_indices, warper_refill_scan) =
         crate::interstellar_logistics::refill_station_warpers(
             base,
@@ -5256,13 +5736,40 @@ fn simulate_step(
             scan.selected_demands, scan.total_candidate_rows, scan.dense_fallback
         );
     }
-    let local_dispatch_scan = crate::local_logistics::dispatch(
+    let mut local_power_plan = local_step_runtime.plan_dispatch_power_recoveries(&station_powers);
+    let local_power_sources = local_power_plan.take_recovered_station_indices();
+    let interstellar_step_runtime = std::sync::Arc::make_mut(interstellar_route_activity);
+    let mut interstellar_power_plan = interstellar_step_runtime
+        .plan_dispatch_power_recoveries(&station_power_indices, &station_powers);
+    let interstellar_power_sources = interstellar_power_plan.take_recovered_station_indices();
+    let candidate_power_wake_runtime = std::sync::Arc::make_mut(power_wake_runtime);
+    candidate_power_wake_runtime.refresh_graph_if_needed(
         state,
-        base,
         entities,
-        &station_powers,
         local_step_runtime,
-        &mut step_route_ledger,
+        interstellar_peer_directory,
+    );
+    let local_dispatch_scan = candidate_power_wake_runtime.with_station_expansion(
+        &local_power_sources,
+        &interstellar_power_sources,
+        |local_power_wakes, interstellar_power_wakes| {
+            let scan = crate::local_logistics::dispatch_with_csr_power_wakes(
+                state,
+                base,
+                entities,
+                &station_powers,
+                local_step_runtime,
+                &mut step_route_ledger,
+                local_power_plan,
+                local_power_wakes,
+            )?;
+            interstellar_step_runtime.commit_dispatch_power_recoveries(
+                interstellar_peer_directory,
+                interstellar_power_plan,
+                interstellar_power_wakes,
+            );
+            Ok::<_, anyhow::Error>(scan)
+        },
     )?;
     if profile_enabled {
         eprintln!(
@@ -5276,7 +5783,6 @@ fn simulate_step(
         );
     }
     profile_mark!("local-dispatch");
-    let interstellar_step_runtime = std::sync::Arc::make_mut(interstellar_route_activity);
     let interstellar_dispatch_scan = crate::interstellar_logistics::dispatch(
         state,
         base,
@@ -5673,6 +6179,7 @@ pub(crate) struct PreparedFactoryAdvance {
         std::sync::Arc<crate::interstellar_logistics::InterstellarPeerDirectory>,
     pub interstellar_route_activity:
         std::sync::Arc<crate::interstellar_logistics::InterstellarRouteActivity>,
+    pub power_wake_runtime: std::sync::Arc<PowerWakeRuntime>,
 }
 
 pub(crate) fn prepare_advance(
@@ -5798,6 +6305,22 @@ pub(crate) fn prepare_advance(
         &mut interstellar_peer_directory,
         &mut interstellar_route_activity,
     );
+    let mut power_wake_runtime = state.prepared_power_wake_runtime().unwrap_or_else(|| {
+        std::sync::Arc::new(PowerWakeRuntime::build(
+            state,
+            &entities,
+            &local_peer_directory,
+            &interstellar_peer_directory,
+        ))
+    });
+    let candidate_power_wake_runtime = std::sync::Arc::make_mut(&mut power_wake_runtime);
+    candidate_power_wake_runtime.begin_candidate(state.revision);
+    candidate_power_wake_runtime.refresh_graph_if_needed(
+        state,
+        &entities,
+        &local_peer_directory,
+        &interstellar_peer_directory,
+    );
     let mut belt_runtime = crate::belts::BeltRuntime::from_state(
         state,
         &entities,
@@ -5899,6 +6422,7 @@ pub(crate) fn prepare_advance(
             &mut quantum_transition_runtime,
             &mut interstellar_peer_directory,
             &mut interstellar_route_activity,
+            &mut power_wake_runtime,
             step,
         )
         .context("advance native simple factory step")?;
@@ -5991,6 +6515,7 @@ pub(crate) fn prepare_advance(
         quantum_transition_runtime,
         interstellar_peer_directory,
         interstellar_route_activity,
+        power_wake_runtime,
     })
 }
 
@@ -6399,6 +6924,277 @@ pub(crate) mod tests {
             fixture_catalog(),
         )
         .unwrap()
+    }
+
+    fn power_wake_station(index: usize, grid_id: &str, configured: &[(&str, &str)]) -> Value {
+        let mut slots = configured
+            .iter()
+            .map(|(item_id, mode)| {
+                json!({
+                    "itemId": item_id,
+                    "localMode": mode,
+                    "remoteMode": mode,
+                    "minimumLoad": 0.1,
+                    "minStock": 0,
+                    "maxStock": 1000000,
+                    "priority": 1,
+                    "routePolicy": "direct",
+                    "warperBudget": 0
+                })
+            })
+            .collect::<Vec<_>>();
+        while slots.len() < 5 {
+            slots.push(json!({
+                "itemId": null,
+                "localMode": "storage",
+                "remoteMode": "storage",
+                "minimumLoad": 0.1,
+                "minStock": 0,
+                "maxStock": 0,
+                "priority": 1,
+                "routePolicy": "direct",
+                "warperBudget": 0
+            }));
+        }
+        json!({
+            "id": format!("power-wake-station-{index:02}"),
+            "kind": "station",
+            "planetId": "home",
+            "powerGridId": grid_id,
+            "buildingId": "interstellar_logistics_station",
+            "stationTier": 2,
+            "stationOperationMode": "legacy",
+            "stationHubEnabled": false,
+            "machineCount": 1,
+            "stationSlots": slots,
+            "stationRoutes": [],
+            "stationDrones": 50,
+            "stationVessels": 10,
+            "stationWarpEnabled": false,
+            "stationWarpers": 0,
+            "stationDispatchCursor": 0,
+            "stationLastSupplyPeerBySlot": {},
+            "stationProgress": 0,
+            "stationCongestion": 0,
+            "stationTrips": 0,
+            "stationLastTransfer": 0,
+            "inputs": {
+                "iron_ore": 0,
+                "iron_ingot": 0,
+                "solar_sail": 0,
+                "small_carrier_rocket": 0
+            },
+            "outputs": {
+                "iron_ore": 1000,
+                "iron_ingot": 1000,
+                "solar_sail": 1000,
+                "small_carrier_rocket": 1000
+            },
+            "utilization": 0,
+            "productionRate": 0,
+            "routingCursor": 0,
+            "mod:opaque": { "signedZero": -0.0, "text": "保持原样" }
+        })
+    }
+
+    fn power_wake_fixture() -> (
+        CoreState,
+        Vec<Value>,
+        Map<String, Value>,
+        crate::local_logistics::LocalPeerDirectory,
+        crate::interstellar_logistics::InterstellarPeerDirectory,
+    ) {
+        let entities = vec![
+            power_wake_station(
+                0,
+                "grid-a",
+                &[
+                    ("iron_ore", "supply"),
+                    ("iron_ingot", "supply"),
+                    ("solar_sail", "supply"),
+                ],
+            ),
+            power_wake_station(1, "grid-a", &[("iron_ore", "demand")]),
+            power_wake_station(2, "grid-b", &[("small_carrier_rocket", "supply")]),
+            power_wake_station(3, "grid-a", &[("iron_ingot", "demand")]),
+            power_wake_station(4, "grid-a", &[("solar_sail", "demand")]),
+            power_wake_station(5, "grid-b", &[("small_carrier_rocket", "demand")]),
+        ];
+        let state = fixture_state(&entities);
+        let mut base = fixture_base().as_object().unwrap().clone();
+        base.insert(
+            "exploration".to_owned(),
+            json!({ "unlockedSystemIds": ["helios"] }),
+        );
+        base.insert(
+            "settings".to_owned(),
+            json!({ "difficulty": "standard", "logisticsBufferLimit": 1000000 }),
+        );
+        let local = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let remote = crate::interstellar_logistics::InterstellarPeerDirectory::build(
+            &state, &base, &entities,
+        );
+        (state, entities, base, local, remote)
+    }
+
+    #[test]
+    fn csr_power_wake_expansion_is_stable_unique_dense_and_allocation_bounded() {
+        let (state, entities, _base, local, remote) = power_wake_fixture();
+        let mut runtime = PowerWakeRuntime::build(&state, &entities, &local, &remote);
+        runtime.begin_candidate(state.revision);
+        assert!(!runtime.graph.full_scan_required);
+        assert_eq!(
+            runtime.graph.local.demand_station_indices.as_ref(),
+            [1, 3, 4, 5]
+        );
+        assert_eq!(
+            runtime.graph.remote.demand_station_indices.as_ref(),
+            [1, 3, 4, 5]
+        );
+
+        runtime.with_station_expansion(&[2, 2], &[2, 2], |local, remote| {
+            assert_eq!(local, Some([5].as_slice()));
+            assert_eq!(remote, Some([5].as_slice()));
+        });
+        let capacities = (
+            runtime.local_scratch.touched_demand_ranks.capacity(),
+            runtime.local_scratch.expanded_station_indices.capacity(),
+            runtime.remote_scratch.touched_demand_ranks.capacity(),
+            runtime.remote_scratch.expanded_station_indices.capacity(),
+        );
+        for _ in 0..32 {
+            runtime.with_station_expansion(&[2, 2], &[2, 2], |local, remote| {
+                assert_eq!(local, Some([5].as_slice()));
+                assert_eq!(remote, Some([5].as_slice()));
+            });
+        }
+        assert_eq!(
+            capacities,
+            (
+                runtime.local_scratch.touched_demand_ranks.capacity(),
+                runtime.local_scratch.expanded_station_indices.capacity(),
+                runtime.remote_scratch.touched_demand_ranks.capacity(),
+                runtime.remote_scratch.expanded_station_indices.capacity(),
+            ),
+            "generation scratch must reuse its bounded buffers"
+        );
+
+        runtime.with_station_expansion(&[], &[], |local, remote| {
+            assert_eq!(local, Some([].as_slice()));
+            assert_eq!(remote, Some([].as_slice()));
+        });
+        runtime.with_station_expansion(&[0], &[0], |local, remote| {
+            assert!(local.is_none(), "exact 3/4 local fanout must scan fully");
+            assert!(remote.is_none(), "exact 3/4 remote fanout must scan fully");
+        });
+        runtime.with_grid_expansion(&[0], &[0], |local, remote| {
+            assert!(local.is_none(), "grid-a reaches exactly 3/4 local demands");
+            assert!(
+                remote.is_none(),
+                "grid-a reaches exactly 3/4 remote demands"
+            );
+        });
+        runtime.with_station_expansion(&[usize::MAX], &[usize::MAX], |local, remote| {
+            assert!(local.is_none());
+            assert!(remote.is_none());
+        });
+    }
+
+    #[test]
+    fn csr_power_wake_reuses_graph_across_revisions_and_rebuilds_on_key_order_change() {
+        let (mut state, entities, base, local, remote) = power_wake_fixture();
+        let mut runtime = PowerWakeRuntime::build(&state, &entities, &local, &remote);
+        let original_graph = Arc::clone(&runtime.graph);
+        runtime.begin_candidate(state.revision);
+        runtime
+            .commit_candidate(state.revision, state.revision + 1)
+            .unwrap();
+        state.revision += 1;
+        runtime.begin_candidate(state.revision);
+        runtime.refresh_graph_if_needed(&state, &entities, &local, &remote);
+        assert!(Arc::ptr_eq(&runtime.graph, &original_graph));
+
+        let rebuilt_local = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        runtime.refresh_graph_if_needed(&state, &entities, &rebuilt_local, &remote);
+        assert!(!Arc::ptr_eq(&runtime.graph, &original_graph));
+        let local_rebuilt_graph = Arc::clone(&runtime.graph);
+
+        let rebuilt_remote = crate::interstellar_logistics::InterstellarPeerDirectory::build(
+            &state, &base, &entities,
+        );
+        runtime.refresh_graph_if_needed(&state, &entities, &rebuilt_local, &rebuilt_remote);
+        assert!(!Arc::ptr_eq(&runtime.graph, &local_rebuilt_graph));
+    }
+
+    #[test]
+    fn csr_power_wake_mismatch_and_mod_rows_fail_closed_without_committing_scratch() {
+        let (state, entities, base, local, remote) = power_wake_fixture();
+        let source = Arc::new(PowerWakeRuntime::build(&state, &entities, &local, &remote));
+        let source_local_scratch = source.local_scratch.clone();
+        let source_remote_scratch = source.remote_scratch.clone();
+        let mut candidate = Arc::clone(&source);
+        let candidate_runtime = Arc::make_mut(&mut candidate);
+        candidate_runtime.begin_candidate(state.revision);
+        let failure = candidate_runtime.with_station_expansion(
+            &[2],
+            &[2],
+            |local, remote| -> anyhow::Result<()> {
+                assert_eq!(local, Some([5].as_slice()));
+                assert_eq!(remote, Some([5].as_slice()));
+                bail!("synthetic earliest dispatch failure")
+            },
+        );
+        assert_eq!(
+            failure.unwrap_err().to_string(),
+            "synthetic earliest dispatch failure"
+        );
+        drop(candidate);
+        assert_eq!(source.local_scratch, source_local_scratch);
+        assert_eq!(source.remote_scratch, source_remote_scratch);
+
+        let mut mismatched = PowerWakeRuntime::build(&state, &entities, &local, &remote);
+        mismatched.begin_candidate(state.revision + 1);
+        mismatched.with_station_expansion(&[2], &[2], |local, remote| {
+            assert!(local.is_none());
+            assert!(remote.is_none());
+        });
+        assert_eq!(
+            mismatched
+                .commit_candidate(state.revision, state.revision + 1)
+                .unwrap_err()
+                .to_string(),
+            "native power wake candidate identity is invalid"
+        );
+
+        let mut mod_entities = entities.clone();
+        mod_entities[2]["buildingId"] = Value::from("mod:opaque-logistics-station");
+        mod_entities[4]["powerGridId"] = Value::from("mod:grid-opaque");
+        let mod_state = fixture_state(&mod_entities);
+        let mod_local = crate::local_logistics::prepare_step_directory(
+            &mod_entities,
+            &mod_state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let mod_remote = crate::interstellar_logistics::InterstellarPeerDirectory::build(
+            &mod_state,
+            &base,
+            &mod_entities,
+        );
+        let mut mod_runtime =
+            PowerWakeRuntime::build(&mod_state, &mod_entities, &mod_local, &mod_remote);
+        mod_runtime.begin_candidate(mod_state.revision);
+        mod_runtime.with_station_expansion(&[2], &[2], |local, remote| {
+            assert!(local.is_none());
+            assert!(remote.is_none());
+        });
     }
 
     fn fixture_profile() -> PlanetProfile {

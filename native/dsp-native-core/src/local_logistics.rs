@@ -379,6 +379,11 @@ fn station_indices(entities: &[Value]) -> Vec<usize> {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LocalPeerDirectory {
+    /// Exact process-local identity for the immutable station/slot key order.
+    /// Cloned candidate runtimes retain this token; any directory rebuild
+    /// mints a new token so external CSR caches fail closed without rescanning
+    /// every key on ordinary revisions.
+    power_wake_key_order_identity: Arc<()>,
     station_indices: Arc<[usize]>,
     runtime_station_indices: Arc<[usize]>,
     station_ranks: Arc<HashMap<usize, usize>>,
@@ -455,7 +460,32 @@ pub(crate) struct LocalDispatchScan {
     pub directory_fallback: bool,
 }
 
+#[derive(Debug)]
+pub(crate) struct LocalDispatchPowerPlan {
+    next_powered: Vec<usize>,
+    recovered_station_indices: Vec<usize>,
+    directory_fallback: bool,
+}
+
+impl LocalDispatchPowerPlan {
+    pub(crate) fn take_recovered_station_indices(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.recovered_station_indices)
+    }
+}
+
 impl LocalPeerDirectory {
+    pub(crate) fn power_wake_key_order_identity(&self) -> &Arc<()> {
+        &self.power_wake_key_order_identity
+    }
+
+    pub(crate) fn dispatch_power_demand_indices(&self) -> &[usize] {
+        &self.local_waiting_station_indices
+    }
+
+    pub(crate) fn dispatch_power_csr_supported(&self) -> bool {
+        !self.dispatch_full_scan_required
+    }
+
     pub(crate) fn estimated_bytes(&self) -> u64 {
         let station_index_bytes = self.station_indices.len() * std::mem::size_of::<usize>()
             + self.runtime_station_indices.len() * std::mem::size_of::<usize>()
@@ -586,7 +616,7 @@ impl LocalPeerDirectory {
     /// one of the supplied station rows changes. Demand-side capacity and
     /// vehicle changes wake that row; supply-side inventory and vehicle
     /// changes follow the immutable `(planet, item)` reverse directory.
-    fn append_dispatch_demand_dependencies(
+    pub(crate) fn append_dispatch_demand_dependencies(
         &self,
         changed_station_indices: &[usize],
         target: &mut Vec<usize>,
@@ -783,10 +813,10 @@ impl LocalPeerDirectory {
         self.readiness_signature = Some(signature);
     }
 
-    fn plan_dispatch_power_wakes(
+    pub(crate) fn plan_dispatch_power_recoveries(
         &self,
         powers: &HashMap<usize, f64>,
-    ) -> (Vec<usize>, Vec<usize>, bool) {
+    ) -> LocalDispatchPowerPlan {
         let mut next_powered = powers
             .iter()
             .filter_map(|(station_index, power)| {
@@ -797,7 +827,7 @@ impl LocalPeerDirectory {
         next_powered
             .sort_by_key(|index| self.station_ranks.get(index).copied().unwrap_or(usize::MAX));
         next_powered.dedup();
-        let mut directory_fallback = self
+        let directory_fallback = self
             .powered_dispatch_station_indices
             .iter()
             .any(|index| !self.station_ranks.contains_key(index));
@@ -810,9 +840,25 @@ impl LocalPeerDirectory {
                     .is_err()
             })
             .collect::<Vec<_>>();
+        LocalDispatchPowerPlan {
+            next_powered,
+            recovered_station_indices: recovered,
+            directory_fallback,
+        }
+    }
+
+    #[cfg(test)]
+    fn plan_dispatch_power_wakes(
+        &self,
+        powers: &HashMap<usize, f64>,
+    ) -> (Vec<usize>, Vec<usize>, bool) {
+        let plan = self.plan_dispatch_power_recoveries(powers);
         let mut dependencies = Vec::new();
-        directory_fallback |=
-            !self.append_dispatch_demand_dependencies(&recovered, &mut dependencies);
+        let mut directory_fallback = plan.directory_fallback
+            || !self.append_dispatch_demand_dependencies(
+                &plan.recovered_station_indices,
+                &mut dependencies,
+            );
         dependencies
             .sort_by_key(|index| self.station_ranks.get(index).copied().unwrap_or(usize::MAX));
         dependencies.dedup();
@@ -821,7 +867,7 @@ impl LocalPeerDirectory {
                 .binary_search(index)
                 .is_err()
         });
-        (next_powered, dependencies, directory_fallback)
+        (plan.next_powered, dependencies, directory_fallback)
     }
 
     fn dispatch_scan_indices(
@@ -1248,6 +1294,7 @@ fn build_peer_directory(
     let dispatch_full_scan_required =
         readiness_full_scan_required || has_opaque_local_dispatch_shape(entities, station_indices);
     Ok(LocalPeerDirectory {
+        power_wake_key_order_identity: Arc::new(()),
         station_indices: Arc::from(station_indices),
         runtime_station_indices: Arc::from(runtime_station_indices),
         station_ranks: Arc::new(station_ranks),
@@ -2367,6 +2414,7 @@ fn dispatch_for_indices<L: LocalDispatchLedger + ?Sized>(
     Ok(activated_local_demands)
 }
 
+#[cfg(test)]
 fn dispatch_with_ledger_mode<L: LocalDispatchLedger + ?Sized>(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -2378,8 +2426,43 @@ fn dispatch_with_ledger_mode<L: LocalDispatchLedger + ?Sized>(
 ) -> anyhow::Result<LocalDispatchScan> {
     let (next_powered, power_wakes, power_directory_fallback) =
         directory.plan_dispatch_power_wakes(powers);
-    let (dispatch_indices, scan) =
-        directory.dispatch_scan_indices(&power_wakes, power_directory_fallback, force_full_scan);
+    let power_plan = LocalDispatchPowerPlan {
+        next_powered,
+        recovered_station_indices: Vec::new(),
+        directory_fallback: power_directory_fallback,
+    };
+    dispatch_with_precomputed_power_plan(
+        state,
+        base,
+        entities,
+        powers,
+        directory,
+        ledger,
+        power_plan,
+        Some(&power_wakes),
+        power_directory_fallback,
+        force_full_scan,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_with_precomputed_power_plan<L: LocalDispatchLedger + ?Sized>(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    powers: &HashMap<usize, f64>,
+    directory: &mut LocalPeerDirectory,
+    ledger: &mut L,
+    power_plan: LocalDispatchPowerPlan,
+    power_wakes: Option<&[usize]>,
+    power_directory_fallback: bool,
+    force_full_scan: bool,
+) -> anyhow::Result<LocalDispatchScan> {
+    let (dispatch_indices, scan) = directory.dispatch_scan_indices(
+        power_wakes.unwrap_or_default(),
+        power_directory_fallback,
+        force_full_scan,
+    );
     let activated_local_demands = dispatch_for_indices(
         state,
         base,
@@ -2392,13 +2475,14 @@ fn dispatch_with_ledger_mode<L: LocalDispatchLedger + ?Sized>(
     // The pending and power caches are candidate-local runtime state. Install
     // their next values only after every JSON/ledger mutation above succeeds.
     directory.commit_dispatch(
-        next_powered,
+        power_plan.next_powered,
         &activated_local_demands,
         scan.directory_fallback,
     );
     Ok(scan)
 }
 
+#[cfg(test)]
 fn dispatch_with_ledger<L: LocalDispatchLedger + ?Sized>(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -2422,6 +2506,7 @@ fn dispatch_full_scan_oracle<L: LocalDispatchLedger + ?Sized>(
     dispatch_with_ledger_mode(state, base, entities, powers, directory, ledger, true)
 }
 
+#[cfg(test)]
 pub(crate) fn dispatch(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -2431,6 +2516,33 @@ pub(crate) fn dispatch(
     route_ledger: &mut StationRouteLedger,
 ) -> anyhow::Result<LocalDispatchScan> {
     dispatch_with_ledger(state, base, entities, powers, directory, route_ledger)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn dispatch_with_csr_power_wakes(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    powers: &HashMap<usize, f64>,
+    directory: &mut LocalPeerDirectory,
+    route_ledger: &mut StationRouteLedger,
+    power_plan: LocalDispatchPowerPlan,
+    power_wakes: Option<&[usize]>,
+) -> anyhow::Result<LocalDispatchScan> {
+    let plan_fallback = power_plan.directory_fallback;
+    let force_full_scan = power_wakes.is_none();
+    dispatch_with_precomputed_power_plan(
+        state,
+        base,
+        entities,
+        powers,
+        directory,
+        route_ledger,
+        power_plan,
+        power_wakes,
+        plan_fallback,
+        force_full_scan,
+    )
 }
 
 struct LocalRouteAdvanceOutcome {
@@ -4392,6 +4504,81 @@ mod tests {
         )
     }
 
+    fn run_local_csr_power_recovery_slice(
+        source: &[Value],
+        seconds: usize,
+        force_full_scan: bool,
+    ) -> Vec<u8> {
+        let state = route_fixture_state(source);
+        let mut base = route_fixture_base();
+        let mut entities = source.to_vec();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let run_dispatch = |powers: &HashMap<usize, f64>,
+                            entities: &mut Vec<Value>,
+                            base: &mut Value,
+                            directory: &mut LocalPeerDirectory| {
+            let remote_activity = crate::interstellar_logistics::prepare_route_activity(entities);
+            let mut ledger =
+                StationRouteLedger::build(&state, entities, directory, &remote_activity);
+            if force_full_scan {
+                dispatch_full_scan_oracle(
+                    &state,
+                    base.as_object_mut().unwrap(),
+                    entities,
+                    powers,
+                    directory,
+                    &mut ledger,
+                )
+            } else {
+                let mut plan = directory.plan_dispatch_power_recoveries(powers);
+                let recovered = plan.take_recovered_station_indices();
+                let mut precomputed_wakes = Vec::new();
+                assert!(
+                    directory
+                        .append_dispatch_demand_dependencies(&recovered, &mut precomputed_wakes)
+                );
+                precomputed_wakes.sort_by_key(|index| {
+                    directory
+                        .station_ranks
+                        .get(index)
+                        .copied()
+                        .unwrap_or(usize::MAX)
+                });
+                precomputed_wakes.dedup();
+                dispatch_with_csr_power_wakes(
+                    &state,
+                    base.as_object_mut().unwrap(),
+                    entities,
+                    powers,
+                    directory,
+                    &mut ledger,
+                    plan,
+                    Some(&precomputed_wakes),
+                )
+            }
+            .unwrap();
+        };
+
+        let off = route_powers(source.len(), 0.0);
+        run_dispatch(&off, &mut entities, &mut base, &mut directory);
+        let on = route_powers(source.len(), 1.0);
+        for _ in 0..seconds {
+            run_dispatch(&on, &mut entities, &mut base, &mut directory);
+            let changed = advance_routes(
+                &state,
+                base.as_object_mut().unwrap(),
+                &mut entities,
+                1.0,
+                &on,
+                &mut directory,
+            )
+            .unwrap();
+            directory.wake_ready_from_changed_stations(&changed);
+        }
+        serde_json::to_vec(&json!({ "base": base, "entities": entities })).unwrap()
+    }
+
     #[test]
     fn persistent_dispatch_queue_matches_full_station_oracle_at_1_5_60_seconds() {
         let count = 32;
@@ -4433,6 +4620,96 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn csr_power_recovery_matches_full_scan_oracle_at_1_5_60_seconds() {
+        let mut source = sparse_readiness_matrix(32, 1);
+        source[0]["outputs"]["iron_ore"] = Value::from(5_000.0);
+        for seconds in [1_usize, 5, 60] {
+            assert_eq!(
+                run_local_csr_power_recovery_slice(&source, seconds, false),
+                run_local_csr_power_recovery_slice(&source, seconds, true),
+                "CSR local power recovery diverged from full scan at {seconds}s"
+            );
+        }
+    }
+
+    #[test]
+    fn csr_power_wake_preserves_full_scan_earliest_error_order() {
+        let source = sparse_readiness_matrix(8, 2);
+        let state = route_fixture_state(&source);
+        let powers = route_powers(source.len(), 1.0);
+        let run = |force_full_scan: bool| {
+            let mut base = route_fixture_base();
+            let mut entities = source.clone();
+            let mut directory =
+                prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+            let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+            let mut ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+            entities[1] = Value::Null;
+            entities[2]["stationLastSupplyPeerBySlot"] = Value::Null;
+            if force_full_scan {
+                dispatch_full_scan_oracle(
+                    &state,
+                    base.as_object_mut().unwrap(),
+                    &mut entities,
+                    &powers,
+                    &mut directory,
+                    &mut ledger,
+                )
+            } else {
+                let mut plan = directory.plan_dispatch_power_recoveries(&powers);
+                let recovered = plan.take_recovered_station_indices();
+                let mut wakes = Vec::new();
+                assert!(directory.append_dispatch_demand_dependencies(&recovered, &mut wakes));
+                wakes.sort_by_key(|index| directory.station_ranks[index]);
+                wakes.dedup();
+                dispatch_with_csr_power_wakes(
+                    &state,
+                    base.as_object_mut().unwrap(),
+                    &mut entities,
+                    &powers,
+                    &mut directory,
+                    &mut ledger,
+                    plan,
+                    Some(&wakes),
+                )
+            }
+            .unwrap_err()
+            .to_string()
+        };
+        assert_eq!(run(false), "native local demand station is invalid");
+        assert_eq!(run(false), run(true));
+    }
+
+    #[test]
+    fn csr_power_dense_fallback_is_current_step_only() {
+        let source = sparse_readiness_matrix(8, 2);
+        let state = route_fixture_state(&source);
+        let mut base = route_fixture_base();
+        let mut entities = source.clone();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        let powers = route_powers(source.len(), 0.0);
+        let plan = directory.plan_dispatch_power_recoveries(&powers);
+        let scan = dispatch_with_csr_power_wakes(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            &powers,
+            &mut directory,
+            &mut ledger,
+            plan,
+            None,
+        )
+        .unwrap();
+        assert_eq!(scan.selected_station_rows, source.len());
+        assert!(!scan.directory_fallback);
+        assert!(!directory.dispatch_full_scan_required);
+        assert!(!directory.dispatch_all_pending);
     }
 
     #[test]

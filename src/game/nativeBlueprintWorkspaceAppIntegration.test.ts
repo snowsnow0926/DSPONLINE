@@ -63,6 +63,7 @@ describe("native blueprint workspace App integration", () => {
     expect(commandBlock).toMatch(/acknowledgeNativeBlueprintRename\(current, submissionId, receipt\)/);
     expect(commandBlock).toMatch(/settleNativeBlueprintRenameFailure\(current, submissionId, failure\)/);
     expect(app).toMatch(/entry\.source\.reconcileCommand\(entry\.command\)/);
+    expect(app).toMatch(/reconciliationAttempts >= 8[\s\S]*?已停止轮询/);
     expect(app).toMatch(/outcome\.status === "committed"[\s\S]*?acknowledgeNativeBlueprintRename/);
     expect(app).toMatch(/outcome\.status === "not-committed"[\s\S]*?settleNativeBlueprintRenameFailure/);
     expect(commandBlock).toMatch(/status: "accepted",[\s\S]*?submissionId,[\s\S]*?commandRevision: command\.baseRevision/);

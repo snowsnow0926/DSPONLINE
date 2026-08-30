@@ -8,7 +8,8 @@
  * owner ID or access to the raw authority lease. The broker binds the caller,
  * session, base revision and deterministic command ID to the active runtime;
  * the runtime then owns FIFO ordering and the durable stage/WAL/checkpoint/ACK
- * transaction. A lost IPC response can safely resend the identical patch.
+ * transaction. A lost IPC response is reconciled through a main-owned,
+ * read-only receipt lookup; the renderer never resends the mutation.
  */
 
 const { createHash } = require("node:crypto");

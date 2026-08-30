@@ -1610,10 +1610,7 @@ mod tests {
         let tray_before = state.base_value()["tray"].clone();
         let valid = command(
             7,
-            vec![set(
-                &["settings", "productionBufferLimit"],
-                json!(10_000),
-            )],
+            vec![set(&["settings", "productionBufferLimit"], json!(10_000))],
         );
         state.apply_player_authority_command(&valid).unwrap();
         assert_eq!(
@@ -1629,17 +1626,11 @@ mod tests {
         let invalid = [
             command(
                 7,
-                vec![set(
-                    &["settings", "productionBufferLimit"],
-                    json!(20_000),
-                )],
+                vec![set(&["settings", "productionBufferLimit"], json!(20_000))],
             ),
             command(
                 8,
-                vec![set(
-                    &["settings", "productionBufferLimit"],
-                    json!(999),
-                )],
+                vec![set(&["settings", "productionBufferLimit"], json!(999))],
             ),
             command(
                 8,
@@ -1650,32 +1641,20 @@ mod tests {
             ),
             command(
                 8,
-                vec![set(
-                    &["settings", "productionBufferLimit"],
-                    json!(10_000),
-                )],
+                vec![set(&["settings", "productionBufferLimit"], json!(10_000))],
             ),
             command(
                 8,
-                vec![set(
-                    &["settings", "productionBufferLimit"],
-                    json!(10_000.5),
-                )],
+                vec![set(&["settings", "productionBufferLimit"], json!(10_000.5))],
             ),
             command(
                 8,
                 vec![
-                    set(
-                        &["settings", "productionBufferLimit"],
-                        json!(20_000),
-                    ),
+                    set(&["settings", "productionBufferLimit"], json!(20_000)),
                     set(&["planetTrayItemLimits", "home"], json!(20_000)),
                 ],
             ),
-            command(
-                8,
-                vec![set(&["settings", "simulationSpeed"], json!(2))],
-            ),
+            command(8, vec![set(&["settings", "simulationSpeed"], json!(2))]),
         ];
         for forged in invalid {
             let before = state.summary().unwrap().canonical_sha256;

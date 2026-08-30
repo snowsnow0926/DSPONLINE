@@ -90,6 +90,12 @@ function canonicalFields(value: GameState): Record<string, string> {
   return Object.fromEntries(Object.entries(persisted).map(([key, field]) => [key, canonicalSha256(field)]));
 }
 
+function rendererProjectedEntities(entities: GameState["entities"]): Array<Record<string, unknown>> {
+  const projected = JSON.parse(JSON.stringify(entities)) as Array<Record<string, unknown>>;
+  for (const entity of projected) delete entity.stationRoutes;
+  return projected;
+}
+
 function quiescentState(): GameState {
   const state = createInitialState(0x1a2b3c4d);
   state.entities = [];
@@ -1620,7 +1626,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         beltIds: expected.belts.map((belt) => belt.id),
         baseFields: [],
       });
-      expect(projection.entities, `${seconds} 秒实体投影`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `${seconds} 秒实体投影`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.belts, `${seconds} 秒线路投影`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
       expect(advanced.summary.canonicalFields, `${seconds} 秒顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `${seconds} 秒完整哈希`).toBe(canonicalSha256(expected));
@@ -1668,7 +1674,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         entityIds: expected.entities.map((entity) => entity.id), beltIds: [],
         baseFields: ["productionHistory", "timeWarp"],
       });
-      expect(projection.entities, `inactive-time-warp-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `inactive-time-warp-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.productionHistory, `inactive-time-warp-${seconds} 生产历史`).toEqual(JSON.parse(JSON.stringify(expected.productionHistory)));
       expect(projection.base.timeWarp, `inactive-time-warp-${seconds} 状态`).toEqual(JSON.parse(JSON.stringify(expected.timeWarp)));
       expect(advanced.summary.canonicalFields, `inactive-time-warp-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
@@ -1697,7 +1703,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
           "totalProduced", "productionHistory", "metrics", "planetMetrics", "powerGridMetrics",
         ],
       });
-      expect(projection.entities, `dyson-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `dyson-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.dysonSwarm, `dyson-${seconds} 戴森云`).toEqual(JSON.parse(JSON.stringify(expected.dysonSwarm)));
       expect(projection.base.dysonSphere, `dyson-${seconds} 戴森球`).toEqual(JSON.parse(JSON.stringify(expected.dysonSphere)));
       expect(projection.base.dysonEngineering, `dyson-${seconds} 工程`).toEqual(JSON.parse(JSON.stringify(expected.dysonEngineering)));
@@ -1741,7 +1747,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         entityIds: expected.entities.map((entity) => entity.id),
         beltIds: expected.belts.map((belt) => belt.id), baseFields: [],
       });
-      expect(projection.entities, `finite-${seconds} 实体投影`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `finite-${seconds} 实体投影`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.belts, `finite-${seconds} 线路投影`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
       expect(advanced.summary.canonicalFields, `finite-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `finite-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
@@ -1765,7 +1771,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         entityIds: expected.entities.map((entity) => entity.id),
         beltIds: expected.belts.map((belt) => belt.id), baseFields: ["research", "construction"],
       });
-      expect(projection.entities, `research-${seconds} 实体投影`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `research-${seconds} 实体投影`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.belts, `research-${seconds} 线路投影`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
       expect(projection.base.research, `research-${seconds} 科研状态`).toEqual(JSON.parse(JSON.stringify(expected.research)));
       expect(projection.base.construction, `research-${seconds} 科研奖励`).toEqual(JSON.parse(JSON.stringify(expected.construction)));
@@ -1843,7 +1849,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["endgame", "tray", "planetTrays", "campaign", "productionHistory"],
       });
-      expect(projection.entities, `legacy-export-${seconds} 实体库存`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `legacy-export-${seconds} 实体库存`).toEqual(rendererProjectedEntities(expected.entities));
       for (const field of ["endgame", "tray", "planetTrays", "campaign", "productionHistory"] as const) {
         expect(projection.base[field], `legacy-export-${seconds} ${field}`).toEqual(JSON.parse(JSON.stringify(expected[field])));
       }
@@ -1869,7 +1875,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["endgame", "campaign", "productionHistory", "planetMetrics", "powerGridMetrics"],
       });
-      expect(projection.entities, `physical-export-${seconds} 出口建筑`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `physical-export-${seconds} 出口建筑`).toEqual(rendererProjectedEntities(expected.entities));
       for (const field of ["endgame", "campaign", "productionHistory", "planetMetrics", "powerGridMetrics"] as const) {
         expect(projection.base[field], `physical-export-${seconds} ${field}`).toEqual(JSON.parse(JSON.stringify(expected[field])));
       }
@@ -1901,7 +1907,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["speedrun", "campaign", "productionHistory", "orbitalStation"],
       });
-      expect(projection.entities, `speedrun-${label} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `speedrun-${label} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       for (const field of ["speedrun", "campaign", "productionHistory", "orbitalStation"] as const) {
         expect(projection.base[field], `speedrun-${label} ${field}`).toEqual(JSON.parse(JSON.stringify(expected[field])));
       }
@@ -1987,7 +1993,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
           entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
           baseFields: ["totalProduced", "planetMetrics", "powerGridMetrics"],
         });
-        expect(projection.entities, `content-pack-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+        expect(projection.entities, `content-pack-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
         expect(projection.belts, `content-pack-${seconds} 线路`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
         expect(advanced.summary.catalogSha256, `content-pack-${seconds} 目录哈希`).toBe(opened.summary.catalogSha256);
         expect(advanced.summary.catalogSha256).toMatch(/^[0-9a-f]{64}$/);
@@ -2022,7 +2028,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["endgame", "research"],
       });
-      expect(projection.entities, `infinite-research-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `infinite-research-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.endgame, `infinite-research-${seconds} 无限科研`).toEqual(JSON.parse(JSON.stringify(expected.endgame)));
       expect(advanced.summary.canonicalFields, `infinite-research-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `infinite-research-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
@@ -2062,7 +2068,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["metrics", "planetMetrics", "powerGridMetrics", "totalProduced"],
       });
-      expect(projection.entities, `power-${seconds} 实体投影`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `power-${seconds} 实体投影`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.metrics, `power-${seconds} 活跃星球指标`).toEqual(JSON.parse(JSON.stringify(expected.metrics)));
       expect(projection.base.planetMetrics, `power-${seconds} 星球指标`).toEqual(JSON.parse(JSON.stringify(expected.planetMetrics)));
       expect(projection.base.powerGridMetrics, `power-${seconds} 电网指标`).toEqual(JSON.parse(JSON.stringify(expected.powerGridMetrics)));
@@ -2111,7 +2117,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["nextId", "metrics", "planetMetrics", "powerGridMetrics"],
       });
-      expect(projection.entities, `local-logistics-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `local-logistics-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.belts, `local-logistics-${seconds} 线路`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
       expect(projection.base.nextId, `local-logistics-${seconds} 路线 ID`).toBe(expected.nextId);
       expect(advanced.summary.canonicalFields, `local-logistics-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
@@ -2153,7 +2159,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["nextId", "metrics", "planetMetrics", "powerGridMetrics"],
       });
-      expect(projection.entities, `interstellar-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `interstellar-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.nextId, `interstellar-${seconds} 路线 ID`).toBe(expected.nextId);
       expect(advanced.summary.canonicalFields, `interstellar-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `interstellar-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
@@ -2194,7 +2200,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["nextId", "metrics", "planetMetrics", "powerGridMetrics"],
       });
-      expect(projection.entities, `warped-interstellar-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `warped-interstellar-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.nextId, `warped-interstellar-${seconds} 路线 ID`).toBe(expected.nextId);
       expect(advanced.summary.canonicalFields, `warped-interstellar-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `warped-interstellar-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
@@ -2235,7 +2241,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["nextId", "planetTrays", "metrics", "planetMetrics", "powerGridMetrics"],
       });
-      expect(projection.entities, `warper-refill-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `warper-refill-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.planetTrays, `warper-refill-${seconds} 行星托盘`).toEqual(JSON.parse(JSON.stringify(expected.planetTrays)));
       expect(projection.base.nextId, `warper-refill-${seconds} 路线 ID`).toBe(expected.nextId);
       expect(advanced.summary.canonicalFields, `warper-refill-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
@@ -2277,7 +2283,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["nextId", "metrics", "planetMetrics", "powerGridMetrics"],
       });
-      expect(projection.entities, `relay-interstellar-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `relay-interstellar-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.nextId, `relay-interstellar-${seconds} 路线 ID`).toBe(expected.nextId);
       expect(advanced.summary.canonicalFields, `relay-interstellar-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `relay-interstellar-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
@@ -2318,7 +2324,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["nextId", "totalProduced", "metrics", "planetMetrics", "powerGridMetrics"],
       });
-      expect(projection.entities, `orbital-collector-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `orbital-collector-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.totalProduced, `orbital-collector-${seconds} 产量`).toEqual(JSON.parse(JSON.stringify(expected.totalProduced)));
       expect(advanced.summary.canonicalFields, `orbital-collector-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `orbital-collector-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
@@ -2359,7 +2365,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["quantumLogisticsNetwork", "totalProduced", "metrics", "planetMetrics", "powerGridMetrics"],
       });
-      expect(projection.entities, `quantum-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `quantum-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.quantumLogisticsNetwork, `quantum-${seconds} 网络`).toEqual(JSON.parse(JSON.stringify(expected.quantumLogisticsNetwork)));
       expect(projection.base.planetMetrics, `quantum-${seconds} 行星指标`).toEqual(JSON.parse(JSON.stringify(expected.planetMetrics)));
       expect(advanced.summary.canonicalFields, `quantum-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
@@ -2401,7 +2407,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["nextId", "quantumLogisticsNetwork", "metrics", "planetMetrics", "powerGridMetrics"],
       });
-      expect(projection.entities, `quantum-local-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `quantum-local-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.quantumLogisticsNetwork, `quantum-local-${seconds} 网络`).toEqual(JSON.parse(JSON.stringify(expected.quantumLogisticsNetwork)));
       expect(advanced.summary.canonicalFields, `quantum-local-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `quantum-local-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
@@ -2442,7 +2448,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["quantumLogisticsNetwork", "metrics", "planetMetrics", "powerGridMetrics"],
       });
-      expect(projection.entities, `quantum-belt-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `quantum-belt-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.belts, `quantum-belt-${seconds} 线路`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
       expect(projection.base.quantumLogisticsNetwork, `quantum-belt-${seconds} 网络`).toEqual(JSON.parse(JSON.stringify(expected.quantumLogisticsNetwork)));
       expect(advanced.summary.canonicalFields, `quantum-belt-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
@@ -2487,7 +2493,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
           "totalProduced", "productionHistory", "metrics", "planetMetrics", "powerGridMetrics",
         ],
       });
-      expect(projection.entities, `quantum-construction-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `quantum-construction-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.constructionAutomation, `quantum-construction-${seconds} 自动制造`).toEqual(JSON.parse(JSON.stringify(expected.constructionAutomation)));
       expect(projection.base.construction, `quantum-construction-${seconds} 建筑库存`).toEqual(JSON.parse(JSON.stringify(expected.construction)));
       expect(projection.base.quantumLogisticsNetwork, `quantum-construction-${seconds} 网络`).toEqual(JSON.parse(JSON.stringify(expected.quantumLogisticsNetwork)));
@@ -2550,7 +2556,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         "planetMetrics", "powerGridMetrics",
       ],
     });
-    expect(projection.entities).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+    expect(projection.entities).toEqual(rendererProjectedEntities(expected.entities));
     expect(projection.base.constructionAutomation).toEqual(
       JSON.parse(JSON.stringify(expected.constructionAutomation)),
     );
@@ -2613,7 +2619,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         "planetMetrics", "powerGridMetrics",
       ],
     });
-    expect(projection.entities).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+    expect(projection.entities).toEqual(rendererProjectedEntities(expected.entities));
     expect(projection.base.constructionAutomation).toEqual(
       JSON.parse(JSON.stringify(expected.constructionAutomation)),
     );
@@ -2645,7 +2651,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
           "totalProduced", "productionHistory", "metrics", "planetMetrics", "powerGridMetrics",
         ],
       });
-      expect(projection.entities, `dynamic-construction-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `dynamic-construction-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.constructionAutomation, `dynamic-construction-${seconds} 自动制造`).toEqual(JSON.parse(JSON.stringify(expected.constructionAutomation)));
       expect(projection.base.construction, `dynamic-construction-${seconds} 建筑库存`).toEqual(JSON.parse(JSON.stringify(expected.construction)));
       expect(projection.base.portableFleet, `dynamic-construction-${seconds} 便携舰队`).toEqual(JSON.parse(JSON.stringify(expected.portableFleet)));
@@ -2673,7 +2679,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         beltIds: [],
         baseFields: ["constructionAutomation", "construction", "tray", "planetTrays", "totalProduced"],
       });
-      expect(projection.entities, `million-construction-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `million-construction-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.constructionAutomation, `million-construction-${seconds} 自动制造`).toEqual(JSON.parse(JSON.stringify(expected.constructionAutomation)));
       expect(projection.base.construction, `million-construction-${seconds} 建筑库存`).toEqual(JSON.parse(JSON.stringify(expected.construction)));
       expect(projection.base.tray, `million-construction-${seconds} 托盘`).toEqual(JSON.parse(JSON.stringify(expected.tray)));
@@ -2709,7 +2715,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         "powerGridMetrics",
       ],
     });
-    expect(projection.entities).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+    expect(projection.entities).toEqual(rendererProjectedEntities(expected.entities));
     expect(projection.base.constructionAutomation).toEqual(
       JSON.parse(JSON.stringify(expected.constructionAutomation)),
     );
@@ -2761,7 +2767,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
           "planetMetrics", "powerGridMetrics", "nextId",
         ],
       });
-      expect(projection.entities, `quantum-transition-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `quantum-transition-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.quantumLogisticsNetwork, `quantum-transition-${seconds} 网络`).toEqual(JSON.parse(JSON.stringify(expected.quantumLogisticsNetwork)));
       expect(advanced.summary.canonicalFields, `quantum-transition-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `quantum-transition-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
@@ -2802,7 +2808,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["orbitalStation", "metrics", "planetMetrics", "powerGridMetrics"],
       });
-      expect(projection.entities, `orbital-cargo-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `orbital-cargo-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.belts, `orbital-cargo-${seconds} 线路`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
       expect(projection.base.orbitalStation, `orbital-cargo-${seconds} 空间站`).toEqual(JSON.parse(JSON.stringify(expected.orbitalStation)));
       expect(advanced.summary.canonicalFields, `orbital-cargo-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
@@ -2828,7 +2834,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["orbitalStation", "metrics", "planetMetrics", "powerGridMetrics"],
       });
-      expect(projection.entities, `orbital-contract-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `orbital-contract-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.orbitalStation, `orbital-contract-${seconds} 空间站`).toEqual(JSON.parse(JSON.stringify(expected.orbitalStation)));
       expect(advanced.summary.canonicalFields, `orbital-contract-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `orbital-contract-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
@@ -2854,7 +2860,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["orbitalStation", "metrics", "planetMetrics", "powerGridMetrics"],
       });
-      expect(projection.entities, `${label} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `${label} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.orbitalStation, `${label} 合同板`).toEqual(JSON.parse(JSON.stringify(expected.orbitalStation)));
       expect(advanced.summary.canonicalFields, `${label} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `${label} 完整哈希`).toBe(canonicalSha256(expected));
@@ -2878,7 +2884,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["systemSpaceStations", "metrics", "planetMetrics", "powerGridMetrics"],
       });
-      expect(projection.entities, `system-construction-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `system-construction-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.systemSpaceStations, `system-construction-${seconds} 空间站`).toEqual(JSON.parse(JSON.stringify(expected.systemSpaceStations)));
       expect(advanced.summary.canonicalFields, `system-construction-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `system-construction-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
@@ -2902,7 +2908,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["systemSpaceStations", "galacticHubNetwork", "metrics", "planetMetrics", "powerGridMetrics"],
       });
-      expect(projection.entities, `system-hub-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `system-hub-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.belts, `system-hub-${seconds} 线路`).toEqual(JSON.parse(JSON.stringify(expected.belts)));
       expect(projection.base.systemSpaceStations, `system-hub-${seconds} 空间站`).toEqual(JSON.parse(JSON.stringify(expected.systemSpaceStations)));
       expect(projection.base.galacticHubNetwork, `system-hub-${seconds} 舰队`).toEqual(JSON.parse(JSON.stringify(expected.galacticHubNetwork)));
@@ -2928,7 +2934,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         entityIds: expected.entities.map((entity) => entity.id), beltIds: expected.belts.map((belt) => belt.id),
         baseFields: ["timeWarp", "metrics", "planetMetrics", "powerGridMetrics"],
       });
-      expect(projection.entities, `time-warp-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `time-warp-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(projection.base.timeWarp, `time-warp-${seconds} 控制器`).toEqual(JSON.parse(JSON.stringify(expected.timeWarp)));
       expect(advanced.summary.canonicalFields, `time-warp-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `time-warp-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
@@ -2993,7 +2999,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         beltIds: [],
         baseFields: [],
       });
-      expect(projection.entities, `dormant-wake-${seconds} 实体`).toEqual(JSON.parse(JSON.stringify(expected.entities)));
+      expect(projection.entities, `dormant-wake-${seconds} 实体`).toEqual(rendererProjectedEntities(expected.entities));
       expect(advanced.summary.canonicalFields, `dormant-wake-${seconds} 顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `dormant-wake-${seconds} 完整哈希`).toBe(canonicalSha256(expected));
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });

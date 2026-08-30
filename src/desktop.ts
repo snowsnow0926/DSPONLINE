@@ -2600,6 +2600,7 @@ export interface DesktopNativeBeltSchedulerDiagnostics {
   reservationRouteChecks: number;
   reservationAllowanceEntries: number;
   reservationCreditEntries: number;
+  /** Transfer/reservation route scans omitted; a reverse-wake clock catch-up may still touch a subset. */
   stableRoutesSkipped: number;
   wakeCount: number;
   sleepCount: number;

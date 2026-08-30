@@ -18,6 +18,7 @@ use crate::state::{
 const EPSILON: f64 = 0.0001;
 const SOURCE_SNAPSHOT_ROWS_PER_CHUNK: usize = 1_024;
 const TARGET_CAPACITY_ROWS_PER_CHUNK: usize = 1_024;
+const EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT: &str = "7df8cf3a";
 
 #[inline]
 fn persisted_belt_dimensions(belt: &Map<String, Value>) -> (f64, f64) {
@@ -250,6 +251,11 @@ pub struct BeltSchedulerDiagnostics {
     pub reservation_route_checks: u64,
     pub reservation_allowance_entries: usize,
     pub reservation_credit_entries: usize,
+    /// Sum, across transfer and reservation passes, of topology routes omitted
+    /// from the captured selection. A newly reverse-woken ordinary producer
+    /// may still receive one bounded clock catch-up after that transfer pass;
+    /// this is a route-scan saving counter, not a promise that every omitted
+    /// route was completely untouched by the revision.
     pub stable_routes_skipped: u64,
     pub wake_count: u64,
     pub sleep_count: u64,
@@ -467,30 +473,81 @@ impl SealedTouchedRoutes {
 #[derive(Debug)]
 pub(crate) struct BeltActivitySnapshot {
     routes: Arc<PreparedRoutes>,
-    active_group_indices: Box<[u32]>,
+    active_group_indices: Arc<[u32]>,
     active_queue_enabled: bool,
-    reusable_runtime: Mutex<Option<BeltReusableRuntime>>,
+    reusable_pool: Arc<BeltReusablePool>,
+}
+
+#[derive(Debug, Default)]
+struct BeltReusablePool {
+    runtime: Mutex<Option<BeltReusableRuntime>>,
 }
 
 #[derive(Debug)]
 struct BeltReusableRuntime {
     active_groups: Vec<bool>,
+    occupied_group_indices: Arc<[u32]>,
     workspace: BeltWorkspace,
 }
 
 impl BeltActivitySnapshot {
+    fn matches_topology(&self, prepared_routes: &Arc<PreparedRoutes>) -> bool {
+        Arc::ptr_eq(&self.routes, prepared_routes)
+            && self
+                .active_group_indices
+                .iter()
+                .all(|&index| expand_compact_index(index) < prepared_routes.groups.len())
+            && self
+                .active_group_indices
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+    }
+
+    #[cfg(test)]
     fn take_reusable_runtime(&self) -> Option<BeltReusableRuntime> {
-        self.reusable_runtime.lock().ok()?.take()
+        self.reusable_pool.take()
     }
 
     pub(crate) fn estimated_bytes(&self) -> u64 {
         (self.active_group_indices.len() * size_of::<u32>()) as u64
             + self
-                .reusable_runtime
-                .lock()
-                .ok()
-                .and_then(|buffers| buffers.as_ref().map(BeltReusableRuntime::estimated_bytes))
-                .unwrap_or(0)
+                .reusable_pool
+                .estimated_bytes(&self.active_group_indices)
+    }
+}
+
+impl BeltReusablePool {
+    fn take(&self) -> Option<BeltReusableRuntime> {
+        self.runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
+    fn put_if_empty(&self, runtime: BeltReusableRuntime) {
+        let mut slot = self
+            .runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.is_none() {
+            *slot = Some(runtime);
+        }
+    }
+
+    fn estimated_bytes(&self, viewing_indices: &Arc<[u32]>) -> u64 {
+        self.runtime
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|runtime| {
+                runtime.estimated_bytes()
+                    + if Arc::ptr_eq(&runtime.occupied_group_indices, viewing_indices) {
+                        0
+                    } else {
+                        (runtime.occupied_group_indices.len() * size_of::<u32>()) as u64
+                    }
+            })
+            .unwrap_or(0)
     }
 }
 
@@ -574,6 +631,16 @@ impl ActiveSelection {
         }
     }
 
+    fn contains_group(&self, group_index: u32) -> bool {
+        match self {
+            Self::All | Self::Dense { .. } => true,
+            Self::Mask {
+                selected_group_indices,
+                ..
+            } => selected_group_indices.binary_search(&group_index).is_ok(),
+        }
+    }
+
     fn route_indices(&self, route_count: usize) -> ActiveRouteIndices<'_> {
         match self {
             Self::All | Self::Dense { .. } => ActiveRouteIndices::All(0..route_count),
@@ -612,6 +679,9 @@ impl ActiveSelection {
 
 #[derive(Debug)]
 pub(crate) struct BeltRuntime {
+    /// Shared scratch pool for the exact prepared topology. When armed, Drop
+    /// is the transactional rollback boundary for every early `?`.
+    reusable_pool: Option<Arc<BeltReusablePool>>,
     source: Option<BeltCommitSource>,
     progress: BeltPagedColumn<f64>,
     total_transferred: BeltPagedColumn<f64>,
@@ -650,13 +720,30 @@ impl BeltRuntime {
         let reusable = reusable.filter(|buffers| {
             buffers.active_groups.len() == group_count
                 && buffers
+                    .occupied_group_indices
+                    .iter()
+                    .all(|&index| expand_compact_index(index) < group_count)
+                && buffers
+                    .occupied_group_indices
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+                && buffers
                     .workspace
                     .matches_dimensions(belt_count, group_count, target_slot_count)
         });
         #[cfg(test)]
         let runtime_workspace_reused = reusable.is_some();
         let (active_groups, workspace) = reusable
-            .map(|buffers| (buffers.active_groups, buffers.workspace))
+            .map(|mut buffers| {
+                // A pool may have been returned by a divergent disposable
+                // clone. Clear exactly the resident snapshot's proven true
+                // bits before finish_activity seeds this borrower's immutable
+                // activity set; no factory-wide fill is needed on success.
+                for &group_index in buffers.occupied_group_indices.iter() {
+                    buffers.active_groups[expand_compact_index(group_index)] = false;
+                }
+                (buffers.active_groups, buffers.workspace)
+            })
             .unwrap_or_else(|| {
                 (
                     vec![false; group_count],
@@ -664,6 +751,7 @@ impl BeltRuntime {
                 )
             });
         Self {
+            reusable_pool: None,
             source: None,
             progress: BeltPagedColumn::default(),
             total_transferred: BeltPagedColumn::default(),
@@ -717,17 +805,8 @@ impl BeltRuntime {
         if self.progress.len() != prepared_routes.routes.len() {
             bail!("native belt runtime topology changed");
         }
-        if let Some(carried) = carried.filter(|snapshot| {
-            Arc::ptr_eq(&snapshot.routes, prepared_routes)
-                && snapshot
-                    .active_group_indices
-                    .iter()
-                    .all(|&index| expand_compact_index(index) < prepared_routes.groups.len())
-                && snapshot
-                    .active_group_indices
-                    .windows(2)
-                    .all(|pair| pair[0] < pair[1])
-        }) {
+        if let Some(carried) = carried.filter(|snapshot| snapshot.matches_topology(prepared_routes))
+        {
             for &group_index in carried.active_group_indices.iter() {
                 self.active_groups[expand_compact_index(group_index)] = true;
             }
@@ -759,8 +838,13 @@ impl BeltRuntime {
                     || self.last_flow[belt_index].abs() > EPSILON
                     || self.congestion[belt_index].abs() > EPSILON
             });
-            self.active_groups[group_index] =
-                has_source_output || has_source_input || has_runtime_signal || group.always_awake;
+            let has_complete_ordinary_input =
+                ordinary_machine_has_complete_input_cycle(state, source, item_id);
+            self.active_groups[group_index] = has_source_output
+                || has_source_input
+                || has_runtime_signal
+                || has_complete_ordinary_input
+                || group.always_awake;
             if self.active_groups[group_index] {
                 self.active_group_indices
                     .push(compact_index(group_index, "active group index")?);
@@ -786,11 +870,13 @@ impl BeltRuntime {
         carried: Option<Arc<BeltActivitySnapshot>>,
     ) -> anyhow::Result<Self> {
         let belt_count = state.validate_belt_runtime_topology()?;
-        let reusable = carried
+        let reusable_pool = carried
             .as_ref()
-            .filter(|snapshot| Arc::ptr_eq(&snapshot.routes, prepared_routes))
-            .and_then(|snapshot| snapshot.take_reusable_runtime());
+            .filter(|snapshot| snapshot.matches_topology(prepared_routes))
+            .map(|snapshot| Arc::clone(&snapshot.reusable_pool));
+        let reusable = reusable_pool.as_ref().and_then(|pool| pool.take());
         let mut runtime = Self::empty_with_reusable(belt_count, prepared_routes, reusable);
+        runtime.reusable_pool = reusable_pool;
         runtime.source = Some(state.belt_commit_source());
         // Each clone copies only the fixed 64-entry top directory. Pages stay
         // shared with the source revision until an active route writes them.
@@ -850,15 +936,23 @@ impl BeltRuntime {
         &mut self,
         routes: &Arc<PreparedRoutes>,
     ) -> Arc<BeltActivitySnapshot> {
+        let active_group_indices: Arc<[u32]> =
+            std::mem::take(&mut self.active_group_indices).into();
         let reusable_runtime = BeltReusableRuntime {
             active_groups: std::mem::take(&mut self.active_groups),
+            occupied_group_indices: Arc::clone(&active_group_indices),
             workspace: std::mem::take(&mut self.workspace),
         };
+        let reusable_pool = self
+            .reusable_pool
+            .take()
+            .unwrap_or_else(|| Arc::new(BeltReusablePool::default()));
+        reusable_pool.put_if_empty(reusable_runtime);
         Arc::new(BeltActivitySnapshot {
             routes: Arc::clone(routes),
-            active_group_indices: std::mem::take(&mut self.active_group_indices).into_boxed_slice(),
+            active_group_indices,
             active_queue_enabled: self.active_queue_enabled,
-            reusable_runtime: Mutex::new(Some(reusable_runtime)),
+            reusable_pool,
         })
     }
 
@@ -881,6 +975,7 @@ impl BeltRuntime {
             }
         }
         let mut runtime = Self {
+            reusable_pool: None,
             source: Some(state.belt_commit_source()),
             progress: dynamics.progress,
             total_transferred: dynamics.total_transferred,
@@ -1174,10 +1269,10 @@ impl BeltRuntime {
             );
         }
         let mut dynamics = BeltDynamicColumns::from_runtime_columns(
-            self.progress,
-            self.total_transferred,
-            self.congestion,
-            self.last_flow,
+            std::mem::take(&mut self.progress),
+            std::mem::take(&mut self.total_transferred),
+            std::mem::take(&mut self.congestion),
+            std::mem::take(&mut self.last_flow),
             number_mask,
         );
         self.diagnostics.dynamic_cow_pages = dynamics.dynamic_dirty_page_count();
@@ -1190,7 +1285,7 @@ impl BeltRuntime {
             .take()
             .ok_or_else(|| anyhow!("native belt runtime source proof is missing"))?;
         let batch = BeltCommitBatch::seal(source, patches, dynamics);
-        Ok((batch, prepared_flow, self.diagnostics))
+        Ok((batch, prepared_flow, std::mem::take(&mut self.diagnostics)))
     }
 
     #[cfg(test)]
@@ -1205,6 +1300,27 @@ impl BeltRuntime {
             flow_requirement,
             &DeterministicRuntime::for_test(workers),
         )
+    }
+}
+
+impl Drop for BeltRuntime {
+    fn drop(&mut self) {
+        let Some(pool) = self.reusable_pool.take() else {
+            return;
+        };
+        // Drop means the candidate never published an activity snapshot.
+        // Restore a topology-sized but logically empty scratch lease to the
+        // shared committed pool. The immutable source snapshot will seed its
+        // own active indices on the next retry, so a failed or discarded clone
+        // cannot leak candidate activity into another revision.
+        self.active_groups.fill(false);
+        self.active_group_indices.clear();
+        self.workspace.reset_after_failed_candidate();
+        pool.put_if_empty(BeltReusableRuntime {
+            active_groups: std::mem::take(&mut self.active_groups),
+            occupied_group_indices: Arc::from([]),
+            workspace: std::mem::take(&mut self.workspace),
+        });
     }
 }
 
@@ -1578,6 +1694,25 @@ impl BeltWorkspace {
         self.active_candidate_indices.clear();
         self.pending_wake_group_indices.clear();
     }
+
+    /// A failed disposable candidate may stop at any `?` inside transfer or
+    /// reservation, before the ordinary success path has recycled its sparse
+    /// buffers. Failure is rare, so use a complete logical reset while
+    /// retaining every factory-sized allocation for the committed snapshot's
+    /// next retry.
+    fn reset_after_failed_candidate(&mut self) {
+        self.post_actions.fill(BeltPostAction::None);
+        self.target_free.fill(f64::NAN);
+        self.touched_target_slots.clear();
+        for group in &mut self.groups {
+            group.reset(0.0, false);
+        }
+        self.usable_candidate_indices.clear();
+        self.active_candidate_indices.clear();
+        self.selected_group_indices.clear();
+        self.selected_route_indices.clear();
+        self.pending_wake_group_indices.clear();
+    }
 }
 
 #[inline]
@@ -1690,6 +1825,61 @@ fn advance_belt_clocks(
         seconds,
         belt_limit,
         deterministic_runtime(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn catch_up_newly_woken_ordinary_producer_clocks(
+    runtime: &mut BeltRuntime,
+    state: &CoreState,
+    entities: &[Value],
+    prepared_routes: &PreparedRoutes,
+    captured_selection: &ActiveSelection,
+    pending_wakes: &[u32],
+    seconds: f64,
+    belt_limit: f64,
+) -> anyhow::Result<()> {
+    if seconds <= 0.0 || captured_selection.is_full_scan() || pending_wakes.is_empty() {
+        return Ok(());
+    }
+    let mut missed_group_indices = Vec::new();
+    for group_index in pending_wakes.iter().copied() {
+        if captured_selection.contains_group(group_index) {
+            continue;
+        }
+        let group = prepared_routes
+            .groups
+            .get(expand_compact_index(group_index))
+            .ok_or_else(|| anyhow!("native pending belt wake is outside the topology"))?;
+        let item_id = state
+            .symbols
+            .resolve(group.item_symbol)
+            .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
+        let source = entities[expand_compact_index(group.source_index)]
+            .as_object()
+            .ok_or_else(|| anyhow!("native belt source is not an object"))?;
+        if ordinary_machine_produces(state, source, item_id) {
+            missed_group_indices.push(group_index);
+        }
+    }
+    if missed_group_indices.is_empty() {
+        return Ok(());
+    }
+    debug_assert!(
+        missed_group_indices
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+    );
+    let catch_up_selection = ActiveSelection::Mask {
+        selected_group_indices: missed_group_indices,
+        selected_route_indices: Vec::new(),
+    };
+    advance_belt_clocks(
+        runtime,
+        prepared_routes,
+        &catch_up_selection,
+        seconds,
+        belt_limit,
     )
 }
 
@@ -1855,9 +2045,9 @@ fn select_active_groups(
     prepared_routes: &PreparedRoutes,
     mut selected_group_indices: Vec<u32>,
     mut selected_route_indices: Vec<u32>,
-) -> anyhow::Result<ActiveSelection> {
+) -> ActiveSelection {
     if !runtime.active_queue_enabled {
-        return Ok(ActiveSelection::All);
+        return ActiveSelection::All;
     }
     selected_group_indices.clear();
     selected_route_indices.clear();
@@ -1878,21 +2068,50 @@ fn select_active_groups(
         // is cheaper than repeatedly chasing per-group slices. Keep both
         // scratch allocations attached to the selection so the next sparse
         // pass can reuse them without rebuilding a factory-sized mask.
-        Ok(ActiveSelection::Dense {
+        ActiveSelection::Dense {
             selected_group_indices,
             selected_route_indices,
-        })
+        }
     } else {
         // Reservation capacity is shared by target slot and historically
         // consumed in persisted belt-row order. Group slices are sorted for
         // source fairness, not globally by row, so recover the old stable
         // order before the sparse reservation pass skips dormant routes.
         selected_route_indices.sort_unstable();
-        Ok(ActiveSelection::Mask {
+        ActiveSelection::Mask {
             selected_group_indices,
             selected_route_indices,
-        })
+        }
     }
+}
+
+fn with_active_selection<T>(
+    runtime: &mut BeltRuntime,
+    prepared_routes: &PreparedRoutes,
+    operation: impl FnOnce(&mut BeltRuntime, &ActiveSelection) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let selected_group_index_scratch = if runtime.active_queue_enabled {
+        std::mem::take(&mut runtime.workspace.selected_group_indices)
+    } else {
+        Vec::new()
+    };
+    let selected_route_index_scratch = if runtime.active_queue_enabled {
+        std::mem::take(&mut runtime.workspace.selected_route_indices)
+    } else {
+        Vec::new()
+    };
+    let selection = select_active_groups(
+        runtime,
+        prepared_routes,
+        selected_group_index_scratch,
+        selected_route_index_scratch,
+    );
+    let result = operation(runtime, &selection);
+    selection.recycle_into(
+        &mut runtime.workspace.selected_group_indices,
+        &mut runtime.workspace.selected_route_indices,
+    );
+    result
 }
 
 fn refresh_active_groups(
@@ -1917,6 +2136,7 @@ fn refresh_active_groups(
             .ok_or_else(|| anyhow!("native belt source is not an object"))?;
         let next = group.always_awake
             || output_amount(source, item_id) > EPSILON
+            || ordinary_machine_has_complete_input_cycle(state, source, item_id)
             // Storage/splitter inputs are promoted to outputs at the start of
             // the next exact step. Keep an incoming wake alive across the
             // intervening zero-second post-production transfer.
@@ -2431,18 +2651,41 @@ fn move_to_target(
 }
 
 #[inline]
-fn queue_target_source_wake(
+fn queue_target_source_wakes(
+    state: &CoreState,
+    entities: &[Value],
     prepared_routes: &PreparedRoutes,
     route: &Route,
     item_symbol: u32,
     pending: &mut Vec<u32>,
-) {
+) -> anyhow::Result<()> {
     if let Some(&group_index) = prepared_routes
         .group_by_key
         .get(&(route.target_index, item_symbol))
     {
         pending.push(group_index);
     }
+    let target = entities[route.target_index()]
+        .as_object()
+        .ok_or_else(|| anyhow!("native belt target is not an object"))?;
+    if let Some(recipe) = ordinary_machine_recipe(state, target) {
+        for output in &recipe.outputs {
+            let Some(output_symbol) = state.symbols.lookup(&output.item_id) else {
+                // An unconnected co-product need not be interned in the belt
+                // symbol table. With no source/item group there is nothing to
+                // wake, and the ordinary production path still accounts for
+                // that output through its entity-local buffer.
+                continue;
+            };
+            if let Some(&group_index) = prepared_routes
+                .group_by_key
+                .get(&(route.target_index, output_symbol))
+            {
+                pending.push(group_index);
+            }
+        }
+    }
+    Ok(())
 }
 
 #[inline]
@@ -2499,6 +2742,87 @@ fn source_produces(state: &CoreState, source: &Map<String, Value>, item_id: &str
     }
 }
 
+fn ordinary_machine_recipe<'a>(
+    state: &'a CoreState,
+    source: &Map<String, Value>,
+) -> Option<&'a crate::catalog::RecipeDefinition> {
+    // Content packs may attach opaque production behavior to otherwise
+    // ordinary-looking rows. Until that behavior supplies its own closed wake
+    // proof, retain the historical always-awake fallback. The empty registry
+    // fingerprint identifies the built-in catalog on both the checkpoint and
+    // the validated runtime snapshot.
+    if state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || string_at(source, "kind") != Some("machine")
+        || matches!(
+            string_at(source, "buildingId"),
+            Some(
+                "construction_center"
+                    | "time_warp_device"
+                    | "ray_receiver"
+                    | "galactic_material_exporter"
+                    | "micro_black_hole_connector"
+            )
+        )
+    {
+        return None;
+    }
+    let entity_index =
+        string_at(source, "id").and_then(|id| state.entity_index.get(id).copied())?;
+    if state
+        .factory_topology
+        .ordinary_machine_indices
+        .binary_search(&entity_index)
+        .is_err()
+    {
+        return None;
+    }
+    let recipe_id = string_at(source, "recipeId")?;
+    if matches!(
+        recipe_id,
+        "matrix_research" | "solar_sail_launch" | "carrier_rocket_launch"
+    ) {
+        return None;
+    }
+    state.catalog.recipes.get(recipe_id)
+}
+
+fn ordinary_machine_produces(
+    state: &CoreState,
+    source: &Map<String, Value>,
+    item_id: &str,
+) -> bool {
+    ordinary_machine_recipe(state, source).is_some_and(|recipe| {
+        recipe
+            .outputs
+            .iter()
+            .any(|output| output.item_id == item_id)
+    })
+}
+
+fn ordinary_machine_has_complete_input_cycle(
+    state: &CoreState,
+    source: &Map<String, Value>,
+    item_id: &str,
+) -> bool {
+    ordinary_machine_recipe(state, source)
+        .filter(|recipe| {
+            recipe
+                .outputs
+                .iter()
+                .any(|output| output.item_id == item_id)
+        })
+        .is_some_and(|recipe| {
+            let input_cycles = recipe
+                .inputs
+                .iter()
+                .fold(f64::INFINITY, |available, input| {
+                    available.min(input_amount(source, &input.item_id) / input.amount)
+                });
+            (input_cycles + EPSILON).floor() >= 1.0
+        })
+}
+
 fn source_may_produce_during_step(
     state: &CoreState,
     source: &Map<String, Value>,
@@ -2506,6 +2830,14 @@ fn source_may_produce_during_step(
 ) -> bool {
     if string_at(source, "kind") == Some("vein") {
         return string_at(source, "resourceId") == Some(item_id);
+    }
+    if ordinary_machine_produces(state, source, item_id) {
+        // Built-in ordinary machines have a closed reverse dependency below:
+        // complete checkpoint inputs seed the group, while a real incoming
+        // belt movement wakes every recipe output and catches up this step's
+        // belt clock before reservation. They no longer need to stay awake
+        // merely because a recipe could produce eventually.
+        return false;
     }
     if string_at(source, "recipeId")
         .and_then(|id| state.catalog.recipes.get(id))
@@ -3548,276 +3880,157 @@ pub(crate) fn transfer_with_bandwidth(
             .and_then(Value::as_object)
             .and_then(|settings| settings.get("beltBufferLimit")),
     );
-    let selected_group_index_scratch = if belt_runtime.active_queue_enabled {
-        std::mem::take(&mut belt_runtime.workspace.selected_group_indices)
-    } else {
-        Vec::new()
-    };
-    let selected_route_index_scratch = if belt_runtime.active_queue_enabled {
-        std::mem::take(&mut belt_runtime.workspace.selected_route_indices)
-    } else {
-        Vec::new()
-    };
-    let selection = select_active_groups(
-        belt_runtime,
-        prepared_routes,
-        selected_group_index_scratch,
-        selected_route_index_scratch,
-    )?;
-    belt_runtime.record_selection(prepared_routes, &selection, false);
-    advance_belt_clocks(
-        belt_runtime,
-        prepared_routes,
-        &selection,
-        seconds,
-        belt_limit,
-    )?;
-    profiler.mark("belt-transfer-select-and-clock");
-    let progress = &belt_runtime.progress;
-    belt_runtime
-        .workspace
-        .reset_transfer_buffers(prepared_routes, &selection);
-    let BeltWorkspace {
-        post_actions,
-        target_free,
-        touched_target_slots,
-        groups,
-        usable_candidate_indices,
-        active_candidate_indices,
-        pending_wake_group_indices,
-        ..
-    } = &mut belt_runtime.workspace;
-    debug_assert_eq!(groups.len(), prepared_routes.groups.len());
-    reset_belt_source_snapshots_with_runtime(
-        entities,
-        prepared_routes,
-        &selection,
-        groups,
-        deterministic_runtime(),
-        |item_symbol| state.symbols.resolve(item_symbol),
-    )?;
-    profiler.mark("belt-transfer-source-snapshot");
+    with_active_selection(belt_runtime, prepared_routes, |belt_runtime, selection| {
+        belt_runtime.record_selection(prepared_routes, selection, false);
+        advance_belt_clocks(
+            belt_runtime,
+            prepared_routes,
+            selection,
+            seconds,
+            belt_limit,
+        )?;
+        profiler.mark("belt-transfer-select-and-clock");
+        let progress = &belt_runtime.progress;
+        belt_runtime
+            .workspace
+            .reset_transfer_buffers(prepared_routes, selection);
+        let BeltWorkspace {
+            post_actions,
+            target_free,
+            touched_target_slots,
+            groups,
+            usable_candidate_indices,
+            active_candidate_indices,
+            pending_wake_group_indices,
+            ..
+        } = &mut belt_runtime.workspace;
+        debug_assert_eq!(groups.len(), prepared_routes.groups.len());
+        reset_belt_source_snapshots_with_runtime(
+            entities,
+            prepared_routes,
+            selection,
+            groups,
+            deterministic_runtime(),
+            |item_symbol| state.symbols.resolve(item_symbol),
+        )?;
+        profiler.mark("belt-transfer-source-snapshot");
 
-    let target_capacity_diagnostics = prepare_transfer_target_capacities_with_runtime(
-        state,
-        base,
-        entities,
-        prepared_routes,
-        &selection,
-        groups,
-        target_free,
-        touched_target_slots,
-        &mut quantum_session,
-        deterministic_runtime(),
-    )?;
-    profiler.mark("belt-transfer-target-capacity-plan");
-    profiler.target_capacity_plan(target_capacity_diagnostics);
+        let target_capacity_diagnostics = prepare_transfer_target_capacities_with_runtime(
+            state,
+            base,
+            entities,
+            prepared_routes,
+            selection,
+            groups,
+            target_free,
+            touched_target_slots,
+            &mut quantum_session,
+            deterministic_runtime(),
+        )?;
+        profiler.mark("belt-transfer-target-capacity-plan");
+        profiler.target_capacity_plan(target_capacity_diagnostics);
 
-    for index in selection.group_indices(prepared_routes.groups.len()) {
-        for route_index in prepared_routes.groups[index]
-            .route_indices
-            .iter()
-            .copied()
-            .map(expand_compact_index)
-        {
-            let route = &routes[route_index];
-            if groups[index].available < 1.0 {
-                if !defer_source_depletion_reset {
-                    post_actions[route_index] = BeltPostAction::ResetProgress;
-                }
-                continue;
-            }
-            let target_slot = route.target_slot();
-            if !target_free[target_slot].is_finite() {
-                bail!("native belt target-capacity plan is incomplete");
-            }
-            if target_free[target_slot] < 1.0 {
-                post_actions[route_index] = BeltPostAction::ResetProgress;
-                continue;
-            }
-            let cap = reservation
-                .and_then(|reservation| {
-                    reservation
-                        .allowance_by_belt
-                        .get(&u32::try_from(route_index).ok()?)
-                        .copied()
-                })
-                .filter(|value| value.is_finite())
-                .unwrap_or(9_007_199_254_740_991.0);
-            let allowance = (progress[route_index] + EPSILON).floor().min(cap);
-            if allowance < 1.0 {
-                if groups[index].first_inactive_route.is_none() {
-                    groups[index].first_inactive_route = Some(route_index);
-                } else {
-                    groups[index].inactive_routes.push(route_index);
-                }
-                continue;
-            }
-            let candidate = Candidate {
-                route_index,
-                allowance,
-                moved: 0.0,
-            };
-            if groups[index].first_candidate.is_none() {
-                groups[index].first_candidate = Some(candidate);
-            } else {
-                groups[index].candidates.push(candidate);
-            }
-        }
-    }
-    profiler.mark("belt-transfer-candidate-scan");
-
-    // These persistent scratch buffers retain the canonical candidate order;
-    // cursor rotation and every floating point operation therefore remain
-    // byte-for-byte equivalent across workspace reuse.
-    for group_index in selection.group_indices(prepared_routes.groups.len()) {
-        let group = &mut groups[group_index];
-        let prepared_group = &prepared_routes.groups[group_index];
-        let item_id = state
-            .symbols
-            .resolve(prepared_group.item_symbol)
-            .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
-        let Some(first_candidate) = group.first_candidate.take() else {
-            if group.source_had_output || group.available > 0.0 {
-                set_output(
-                    entities[expand_compact_index(prepared_group.source_index)]
-                        .as_object_mut()
-                        .ok_or_else(|| anyhow!("native belt source is not an object"))?,
-                    item_id,
-                    group.available,
-                )?;
-            }
-            for route_index in group
-                .first_inactive_route
+        for index in selection.group_indices(prepared_routes.groups.len()) {
+            for route_index in prepared_routes.groups[index]
+                .route_indices
                 .iter()
                 .copied()
-                .chain(group.inactive_routes.iter().copied())
+                .map(expand_compact_index)
             {
                 let route = &routes[route_index];
-                post_actions[route_index] = BeltPostAction::Flow {
-                    available: group.available,
-                    free: target_free[route.target_slot()],
+                if groups[index].available < 1.0 {
+                    if !defer_source_depletion_reset {
+                        post_actions[route_index] = BeltPostAction::ResetProgress;
+                    }
+                    continue;
+                }
+                let target_slot = route.target_slot();
+                if !target_free[target_slot].is_finite() {
+                    bail!("native belt target-capacity plan is incomplete");
+                }
+                if target_free[target_slot] < 1.0 {
+                    post_actions[route_index] = BeltPostAction::ResetProgress;
+                    continue;
+                }
+                let cap = reservation
+                    .and_then(|reservation| {
+                        reservation
+                            .allowance_by_belt
+                            .get(&u32::try_from(route_index).ok()?)
+                            .copied()
+                    })
+                    .filter(|value| value.is_finite())
+                    .unwrap_or(9_007_199_254_740_991.0);
+                let allowance = (progress[route_index] + EPSILON).floor().min(cap);
+                if allowance < 1.0 {
+                    if groups[index].first_inactive_route.is_none() {
+                        groups[index].first_inactive_route = Some(route_index);
+                    } else {
+                        groups[index].inactive_routes.push(route_index);
+                    }
+                    continue;
+                }
+                let candidate = Candidate {
+                    route_index,
+                    allowance,
                     moved: 0.0,
                 };
+                if groups[index].first_candidate.is_none() {
+                    groups[index].first_candidate = Some(candidate);
+                } else {
+                    groups[index].candidates.push(candidate);
+                }
             }
-            continue;
-        };
-        if group.candidates.is_empty() {
-            let route = &routes[first_candidate.route_index];
-            let target_slot = route.target_slot();
-            let free = target_free[target_slot];
-            let requested = group
-                .available
-                .min(first_candidate.allowance)
-                .min(free)
-                .floor()
-                .max(0.0);
-            let moved = if requested > 0.0 {
-                move_to_target(
-                    state,
-                    base,
-                    entities,
-                    quantum_bandwidth,
-                    &mut quantum_session,
-                    route,
-                    item_id,
-                    requested,
-                )?
-            } else {
-                0.0
-            };
-            let available = (group.available - moved).max(0.0);
-            if moved > 0.0 {
-                record_material_movement(
-                    changed_entity_indices,
-                    expand_compact_index(prepared_group.source_index),
-                    route.target_index(),
-                    moved,
-                );
-                target_free[target_slot] -= moved;
-                queue_target_source_wake(
-                    prepared_routes,
-                    route,
-                    prepared_group.item_symbol,
-                    pending_wake_group_indices,
-                );
-                set_number(
-                    entities[expand_compact_index(prepared_group.source_index)]
-                        .as_object_mut()
-                        .ok_or_else(|| anyhow!("native belt source is not an object"))?,
-                    "routingCursor",
-                    0.0,
-                )?;
-            }
-            if group.source_had_output || group.available > 0.0 {
-                set_output(
-                    entities[expand_compact_index(prepared_group.source_index)]
-                        .as_object_mut()
-                        .ok_or_else(|| anyhow!("native belt source is not an object"))?,
-                    item_id,
-                    available,
-                )?;
-            }
-            post_actions[first_candidate.route_index] = BeltPostAction::Flow {
-                available,
-                free: target_free[target_slot],
-                moved,
-            };
-            for route_index in group
-                .first_inactive_route
-                .iter()
-                .copied()
-                .chain(group.inactive_routes.iter().copied())
-            {
-                let inactive_route = &routes[route_index];
-                post_actions[route_index] = BeltPostAction::Flow {
-                    available,
-                    free: target_free[inactive_route.target_slot()],
-                    moved: 0.0,
-                };
-            }
-            continue;
         }
-        group.candidates.push(first_candidate);
-        group
-            .candidates
-            .sort_by_key(|candidate| routes[candidate.route_index].belt_sort_rank());
-        let mut available = group.available;
-        let priorities: &[u8] = if group.candidates.len() == 1 || prepared_group.balanced_splitter {
-            &[3]
-        } else {
-            &[2, 1, 0]
-        };
-        for &priority in priorities {
-            usable_candidate_indices.clear();
-            usable_candidate_indices.extend(group.candidates.iter().enumerate().filter_map(
-                |(index, candidate)| {
-                    let route = &routes[candidate.route_index];
-                    (priority == 3 || route.priority == priority)
-                        .then_some(index)
-                        .filter(|&index| {
-                            let route = &routes[group.candidates[index].route_index];
-                            group.candidates[index].allowance > 0.0
-                                && target_free[route.target_slot()] > 0.0
-                        })
-                },
-            ));
-            if usable_candidate_indices.is_empty() || available <= 0.0 {
+        profiler.mark("belt-transfer-candidate-scan");
+
+        // These persistent scratch buffers retain the canonical candidate order;
+        // cursor rotation and every floating point operation therefore remain
+        // byte-for-byte equivalent across workspace reuse.
+        for group_index in selection.group_indices(prepared_routes.groups.len()) {
+            let group = &mut groups[group_index];
+            let prepared_group = &prepared_routes.groups[group_index];
+            let item_id = state
+                .symbols
+                .resolve(prepared_group.item_symbol)
+                .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
+            let Some(first_candidate) = group.first_candidate.take() else {
+                if group.source_had_output || group.available > 0.0 {
+                    set_output(
+                        entities[expand_compact_index(prepared_group.source_index)]
+                            .as_object_mut()
+                            .ok_or_else(|| anyhow!("native belt source is not an object"))?,
+                        item_id,
+                        group.available,
+                    )?;
+                }
+                for route_index in group
+                    .first_inactive_route
+                    .iter()
+                    .copied()
+                    .chain(group.inactive_routes.iter().copied())
+                {
+                    let route = &routes[route_index];
+                    post_actions[route_index] = BeltPostAction::Flow {
+                        available: group.available,
+                        free: target_free[route.target_slot()],
+                        moved: 0.0,
+                    };
+                }
                 continue;
-            }
-            if usable_candidate_indices.len() == 1 {
-                let index = usable_candidate_indices[0];
-                let candidate = &mut group.candidates[index];
-                let route = &routes[candidate.route_index];
+            };
+            if group.candidates.is_empty() {
+                let route = &routes[first_candidate.route_index];
                 let target_slot = route.target_slot();
                 let free = target_free[target_slot];
-                let requested = available
-                    .min(candidate.allowance)
+                let requested = group
+                    .available
+                    .min(first_candidate.allowance)
                     .min(free)
                     .floor()
                     .max(0.0);
-                if requested > 0.0 {
-                    let moved = move_to_target(
+                let moved = if requested > 0.0 {
+                    move_to_target(
                         state,
                         base,
                         entities,
@@ -3826,10 +4039,12 @@ pub(crate) fn transfer_with_bandwidth(
                         route,
                         item_id,
                         requested,
-                    )?;
-                    if moved <= 0.0 {
-                        continue;
-                    }
+                    )?
+                } else {
+                    0.0
+                };
+                let available = (group.available - moved).max(0.0);
+                if moved > 0.0 {
                     record_material_movement(
                         changed_entity_indices,
                         expand_compact_index(prepared_group.source_index),
@@ -3837,15 +4052,14 @@ pub(crate) fn transfer_with_bandwidth(
                         moved,
                     );
                     target_free[target_slot] -= moved;
-                    queue_target_source_wake(
+                    queue_target_source_wakes(
+                        state,
+                        entities,
                         prepared_routes,
                         route,
                         prepared_group.item_symbol,
                         pending_wake_group_indices,
-                    );
-                    candidate.allowance -= moved;
-                    candidate.moved += moved;
-                    available -= moved;
+                    )?;
                     set_number(
                         entities[expand_compact_index(prepared_group.source_index)]
                             .as_object_mut()
@@ -3854,167 +4068,295 @@ pub(crate) fn transfer_with_bandwidth(
                         0.0,
                     )?;
                 }
+                if group.source_had_output || group.available > 0.0 {
+                    set_output(
+                        entities[expand_compact_index(prepared_group.source_index)]
+                            .as_object_mut()
+                            .ok_or_else(|| anyhow!("native belt source is not an object"))?,
+                        item_id,
+                        available,
+                    )?;
+                }
+                post_actions[first_candidate.route_index] = BeltPostAction::Flow {
+                    available,
+                    free: target_free[target_slot],
+                    moved,
+                };
+                for route_index in group
+                    .first_inactive_route
+                    .iter()
+                    .copied()
+                    .chain(group.inactive_routes.iter().copied())
+                {
+                    let inactive_route = &routes[route_index];
+                    post_actions[route_index] = BeltPostAction::Flow {
+                        available,
+                        free: target_free[inactive_route.target_slot()],
+                        moved: 0.0,
+                    };
+                }
                 continue;
             }
-            let source_cursor = finite_number(
-                entities[expand_compact_index(prepared_group.source_index)]
-                    .as_object()
-                    .and_then(|source| source.get("routingCursor")),
-            )
-            .floor()
-            .max(0.0) as usize;
-            let mut cursor = source_cursor % usable_candidate_indices.len();
-            while available > 0.0 {
-                active_candidate_indices.clear();
-                active_candidate_indices.extend(usable_candidate_indices.iter().copied().filter(
-                    |&index| {
-                        let route = &routes[group.candidates[index].route_index];
-                        group.candidates[index].allowance > 0.0
-                            && target_free[route.target_slot()] > 0.0
+            group.candidates.push(first_candidate);
+            group
+                .candidates
+                .sort_by_key(|candidate| routes[candidate.route_index].belt_sort_rank());
+            let mut available = group.available;
+            let priorities: &[u8] =
+                if group.candidates.len() == 1 || prepared_group.balanced_splitter {
+                    &[3]
+                } else {
+                    &[2, 1, 0]
+                };
+            for &priority in priorities {
+                usable_candidate_indices.clear();
+                usable_candidate_indices.extend(group.candidates.iter().enumerate().filter_map(
+                    |(index, candidate)| {
+                        let route = &routes[candidate.route_index];
+                        (priority == 3 || route.priority == priority)
+                            .then_some(index)
+                            .filter(|&index| {
+                                let route = &routes[group.candidates[index].route_index];
+                                group.candidates[index].allowance > 0.0
+                                    && target_free[route.target_slot()] > 0.0
+                            })
                     },
                 ));
-                if active_candidate_indices.is_empty() {
-                    break;
+                if usable_candidate_indices.is_empty() || available <= 0.0 {
+                    continue;
                 }
-                let start = cursor % active_candidate_indices.len();
-                let fair_share = (available / active_candidate_indices.len() as f64)
-                    .floor()
-                    .max(1.0);
-                let mut successful = 0;
-                for offset in 0..active_candidate_indices.len() {
-                    if available <= 0.0 {
-                        break;
-                    }
-                    let index =
-                        active_candidate_indices[(start + offset) % active_candidate_indices.len()];
+                if usable_candidate_indices.len() == 1 {
+                    let index = usable_candidate_indices[0];
                     let candidate = &mut group.candidates[index];
                     let route = &routes[candidate.route_index];
                     let target_slot = route.target_slot();
                     let free = target_free[target_slot];
                     let requested = available
-                        .min(fair_share)
                         .min(candidate.allowance)
                         .min(free)
                         .floor()
                         .max(0.0);
-                    if requested <= 0.0 {
-                        continue;
+                    if requested > 0.0 {
+                        let moved = move_to_target(
+                            state,
+                            base,
+                            entities,
+                            quantum_bandwidth,
+                            &mut quantum_session,
+                            route,
+                            item_id,
+                            requested,
+                        )?;
+                        if moved <= 0.0 {
+                            continue;
+                        }
+                        record_material_movement(
+                            changed_entity_indices,
+                            expand_compact_index(prepared_group.source_index),
+                            route.target_index(),
+                            moved,
+                        );
+                        target_free[target_slot] -= moved;
+                        queue_target_source_wakes(
+                            state,
+                            entities,
+                            prepared_routes,
+                            route,
+                            prepared_group.item_symbol,
+                            pending_wake_group_indices,
+                        )?;
+                        candidate.allowance -= moved;
+                        candidate.moved += moved;
+                        available -= moved;
+                        set_number(
+                            entities[expand_compact_index(prepared_group.source_index)]
+                                .as_object_mut()
+                                .ok_or_else(|| anyhow!("native belt source is not an object"))?,
+                            "routingCursor",
+                            0.0,
+                        )?;
                     }
-                    let moved = move_to_target(
-                        state,
-                        base,
-                        entities,
-                        quantum_bandwidth,
-                        &mut quantum_session,
-                        route,
-                        item_id,
-                        requested,
-                    )?;
-                    if moved <= 0.0 {
-                        continue;
-                    }
-                    record_material_movement(
-                        changed_entity_indices,
-                        expand_compact_index(prepared_group.source_index),
-                        route.target_index(),
-                        moved,
-                    );
-                    target_free[target_slot] -= moved;
-                    queue_target_source_wake(
-                        prepared_routes,
-                        route,
-                        prepared_group.item_symbol,
-                        pending_wake_group_indices,
-                    );
-                    candidate.allowance -= moved;
-                    candidate.moved += moved;
-                    available -= moved;
-                    successful += 1;
-                    cursor = (cursor + 1) % usable_candidate_indices.len();
+                    continue;
                 }
-                if successful == 0 {
+                let source_cursor = finite_number(
+                    entities[expand_compact_index(prepared_group.source_index)]
+                        .as_object()
+                        .and_then(|source| source.get("routingCursor")),
+                )
+                .floor()
+                .max(0.0) as usize;
+                let mut cursor = source_cursor % usable_candidate_indices.len();
+                while available > 0.0 {
+                    active_candidate_indices.clear();
+                    active_candidate_indices.extend(
+                        usable_candidate_indices.iter().copied().filter(|&index| {
+                            let route = &routes[group.candidates[index].route_index];
+                            group.candidates[index].allowance > 0.0
+                                && target_free[route.target_slot()] > 0.0
+                        }),
+                    );
+                    if active_candidate_indices.is_empty() {
+                        break;
+                    }
+                    let start = cursor % active_candidate_indices.len();
+                    let fair_share = (available / active_candidate_indices.len() as f64)
+                        .floor()
+                        .max(1.0);
+                    let mut successful = 0;
+                    for offset in 0..active_candidate_indices.len() {
+                        if available <= 0.0 {
+                            break;
+                        }
+                        let index = active_candidate_indices
+                            [(start + offset) % active_candidate_indices.len()];
+                        let candidate = &mut group.candidates[index];
+                        let route = &routes[candidate.route_index];
+                        let target_slot = route.target_slot();
+                        let free = target_free[target_slot];
+                        let requested = available
+                            .min(fair_share)
+                            .min(candidate.allowance)
+                            .min(free)
+                            .floor()
+                            .max(0.0);
+                        if requested <= 0.0 {
+                            continue;
+                        }
+                        let moved = move_to_target(
+                            state,
+                            base,
+                            entities,
+                            quantum_bandwidth,
+                            &mut quantum_session,
+                            route,
+                            item_id,
+                            requested,
+                        )?;
+                        if moved <= 0.0 {
+                            continue;
+                        }
+                        record_material_movement(
+                            changed_entity_indices,
+                            expand_compact_index(prepared_group.source_index),
+                            route.target_index(),
+                            moved,
+                        );
+                        target_free[target_slot] -= moved;
+                        queue_target_source_wakes(
+                            state,
+                            entities,
+                            prepared_routes,
+                            route,
+                            prepared_group.item_symbol,
+                            pending_wake_group_indices,
+                        )?;
+                        candidate.allowance -= moved;
+                        candidate.moved += moved;
+                        available -= moved;
+                        successful += 1;
+                        cursor = (cursor + 1) % usable_candidate_indices.len();
+                    }
+                    if successful == 0 {
+                        break;
+                    }
+                }
+                set_number(
+                    entities[expand_compact_index(prepared_group.source_index)]
+                        .as_object_mut()
+                        .ok_or_else(|| anyhow!("native belt source is not an object"))?,
+                    "routingCursor",
+                    cursor as f64,
+                )?;
+                if available <= 0.0 {
                     break;
                 }
             }
-            set_number(
-                entities[expand_compact_index(prepared_group.source_index)]
-                    .as_object_mut()
-                    .ok_or_else(|| anyhow!("native belt source is not an object"))?,
-                "routingCursor",
-                cursor as f64,
-            )?;
-            if available <= 0.0 {
-                break;
+
+            // The JS active-route queue does not materialize a missing output key
+            // when a completely idle source has no cargo. Preserve that sparse
+            // object shape; once a key existed (including a positive source that
+            // was drained to zero), it must still be written back.
+            if group.source_had_output || group.available > 0.0 {
+                set_output(
+                    entities[expand_compact_index(prepared_group.source_index)]
+                        .as_object_mut()
+                        .ok_or_else(|| anyhow!("native belt source is not an object"))?,
+                    item_id,
+                    available,
+                )?;
+            }
+            for candidate in &group.candidates {
+                let route = &routes[candidate.route_index];
+                let free = target_free[route.target_slot()];
+                post_actions[candidate.route_index] = BeltPostAction::Flow {
+                    available,
+                    free,
+                    moved: candidate.moved,
+                };
+            }
+            for route_index in group
+                .first_inactive_route
+                .iter()
+                .copied()
+                .chain(group.inactive_routes.iter().copied())
+            {
+                let route = &routes[route_index];
+                let free = target_free[route.target_slot()];
+                post_actions[route_index] = BeltPostAction::Flow {
+                    available,
+                    free,
+                    moved: 0.0,
+                };
             }
         }
-
-        // The JS active-route queue does not materialize a missing output key
-        // when a completely idle source has no cargo. Preserve that sparse
-        // object shape; once a key existed (including a positive source that
-        // was drained to zero), it must still be written back.
-        if group.source_had_output || group.available > 0.0 {
-            set_output(
-                entities[expand_compact_index(prepared_group.source_index)]
-                    .as_object_mut()
-                    .ok_or_else(|| anyhow!("native belt source is not an object"))?,
-                item_id,
-                available,
+        profiler.mark("belt-transfer-stable-apply");
+        pending_wake_group_indices.sort_unstable();
+        pending_wake_group_indices.dedup();
+        let mut pending_wakes = std::mem::take(pending_wake_group_indices);
+        let finalize_result = (|| -> anyhow::Result<()> {
+            apply_belt_post_actions(
+                belt_runtime,
+                prepared_routes,
+                selection,
+                seconds,
+                defer_source_depletion_reset,
+                flow_window_seconds,
             )?;
-        }
-        for candidate in &group.candidates {
-            let route = &routes[candidate.route_index];
-            let free = target_free[route.target_slot()];
-            post_actions[candidate.route_index] = BeltPostAction::Flow {
-                available,
-                free,
-                moved: candidate.moved,
-            };
-        }
-        for route_index in group
-            .first_inactive_route
-            .iter()
-            .copied()
-            .chain(group.inactive_routes.iter().copied())
-        {
-            let route = &routes[route_index];
-            let free = target_free[route.target_slot()];
-            post_actions[route_index] = BeltPostAction::Flow {
-                available,
-                free,
-                moved: 0.0,
-            };
-        }
-    }
-    profiler.mark("belt-transfer-stable-apply");
-    pending_wake_group_indices.sort_unstable();
-    pending_wake_group_indices.dedup();
-    let mut pending_wakes = std::mem::take(pending_wake_group_indices);
-    apply_belt_post_actions(
-        belt_runtime,
-        prepared_routes,
-        &selection,
-        seconds,
-        defer_source_depletion_reset,
-        flow_window_seconds,
-    )?;
-    crate::quantum_logistics::finish_supply_deposit_session(base, quantum_session)?;
-    refresh_active_groups(belt_runtime, state, entities, prepared_routes, &selection)?;
-    for group_index in pending_wakes.iter().copied() {
-        belt_runtime.wake_group(group_index)?;
-    }
-    pending_wakes.clear();
-    belt_runtime.workspace.pending_wake_group_indices = pending_wakes;
-    selection.recycle_into(
-        &mut belt_runtime.workspace.selected_group_indices,
-        &mut belt_runtime.workspace.selected_route_indices,
-    );
-    // Each successful route contributes at most two indices, so temporary
-    // evidence is bounded by twice the prepared route count. Canonicalizing
-    // here gives downstream wake caches stable topology order and excludes
-    // probes that did not actually move material.
-    finalize_material_movement_evidence(changed_entity_indices);
-    profiler.mark("belt-transfer-finalize");
-    Ok(())
+            // The captured selection predates this phase's actual input movement.
+            // A dormant ordinary producer may therefore become eligible only
+            // after one of its inputs arrives. Full-scan semantics already
+            // advanced every one of its output routes at the start of the phase;
+            // catch up only groups absent from that immutable selection, then let
+            // reservation grant same-step output credit. Zero-second output
+            // phases only carry the wake into the next exact step.
+            catch_up_newly_woken_ordinary_producer_clocks(
+                belt_runtime,
+                state,
+                entities,
+                prepared_routes,
+                selection,
+                &pending_wakes,
+                seconds,
+                belt_limit,
+            )?;
+            crate::quantum_logistics::finish_supply_deposit_session(base, quantum_session)?;
+            refresh_active_groups(belt_runtime, state, entities, prepared_routes, selection)?;
+            for group_index in pending_wakes.iter().copied() {
+                belt_runtime.wake_group(group_index)?;
+            }
+            Ok(())
+        })();
+        pending_wakes.clear();
+        belt_runtime.workspace.pending_wake_group_indices = pending_wakes;
+        finalize_result?;
+        // Each successful route contributes at most two indices, so temporary
+        // evidence is bounded by twice the prepared route count. Canonicalizing
+        // here gives downstream wake caches stable topology order and excludes
+        // probes that did not actually move material.
+        finalize_material_movement_evidence(changed_entity_indices);
+        profiler.mark("belt-transfer-finalize");
+        Ok(())
+    })
 }
 
 pub(crate) fn reserve(
@@ -4030,108 +4372,90 @@ pub(crate) fn reserve(
             .and_then(Value::as_object)
             .and_then(|settings| settings.get("beltBufferLimit")),
     );
-    let mut result = BeltStepReservation {
-        allowance_by_belt: HashMap::new(),
-        output_credits: OutputCredits {
-            group_by_key: Arc::clone(&prepared_routes.group_by_key),
-            by_group: HashMap::new(),
-            active_source_items: Vec::new(),
-        },
-    };
     let mut profiler = BeltTransferProfiler::new();
     let mut quantum_session = None;
-    let selected_group_index_scratch = if belt_runtime.active_queue_enabled {
-        std::mem::take(&mut belt_runtime.workspace.selected_group_indices)
-    } else {
-        Vec::new()
-    };
-    let selected_route_index_scratch = if belt_runtime.active_queue_enabled {
-        std::mem::take(&mut belt_runtime.workspace.selected_route_indices)
-    } else {
-        Vec::new()
-    };
-    let selection = select_active_groups(
-        belt_runtime,
-        prepared_routes,
-        selected_group_index_scratch,
-        selected_route_index_scratch,
-    )?;
-    belt_runtime.record_selection(prepared_routes, &selection, true);
-    let progress = &belt_runtime.progress;
-    let target_free = &mut belt_runtime.workspace.target_free;
-    let touched_target_slots = &mut belt_runtime.workspace.touched_target_slots;
-    let target_capacity_diagnostics = prepare_reservation_target_capacities_with_runtime(
-        state,
-        base,
-        entities,
-        prepared_routes,
-        &selection,
-        progress,
-        target_free,
-        touched_target_slots,
-        &mut quantum_session,
-        deterministic_runtime(),
-    )?;
-    profiler.mark("belt-reservation-target-capacity-plan");
-    profiler.reservation_target_capacity_plan(target_capacity_diagnostics);
+    with_active_selection(belt_runtime, prepared_routes, |belt_runtime, selection| {
+        let mut result = BeltStepReservation {
+            allowance_by_belt: HashMap::new(),
+            output_credits: OutputCredits {
+                group_by_key: Arc::clone(&prepared_routes.group_by_key),
+                by_group: HashMap::new(),
+                active_source_items: Vec::new(),
+            },
+        };
+        belt_runtime.record_selection(prepared_routes, selection, true);
+        let progress = &belt_runtime.progress;
+        let target_free = &mut belt_runtime.workspace.target_free;
+        let touched_target_slots = &mut belt_runtime.workspace.touched_target_slots;
+        let target_capacity_diagnostics = prepare_reservation_target_capacities_with_runtime(
+            state,
+            base,
+            entities,
+            prepared_routes,
+            selection,
+            progress,
+            target_free,
+            touched_target_slots,
+            &mut quantum_session,
+            deterministic_runtime(),
+        )?;
+        profiler.mark("belt-reservation-target-capacity-plan");
+        profiler.reservation_target_capacity_plan(target_capacity_diagnostics);
 
-    for belt_index in selection.route_indices(routes.len()) {
-        let route = &routes[belt_index];
-        let source_group = route.source_group();
-        let allowance = (progress[belt_index] + EPSILON).floor().max(0.0);
-        if allowance < 1.0 {
-            continue;
+        for belt_index in selection.route_indices(routes.len()) {
+            let route = &routes[belt_index];
+            let source_group = route.source_group();
+            let allowance = (progress[belt_index] + EPSILON).floor().max(0.0);
+            if allowance < 1.0 {
+                continue;
+            }
+            let _target = entities[route.target_index()]
+                .as_object()
+                .ok_or_else(|| anyhow!("native belt target is not an object"))?;
+            let prepared_group = &prepared_routes.groups[source_group];
+            let _item_id = state
+                .symbols
+                .resolve(prepared_group.item_symbol)
+                .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
+            let target_slot = route.target_slot();
+            if !target_free[target_slot].is_finite() {
+                bail!("native belt reservation target-capacity plan is incomplete");
+            }
+            let free = target_free[target_slot];
+            let reserved = allowance.min(free.floor().max(0.0));
+            if reserved < 1.0 {
+                continue;
+            }
+            result.allowance_by_belt.insert(
+                compact_index(belt_index, "reservation route index")?,
+                reserved,
+            );
+            target_free[target_slot] -= reserved;
+            let source_group = route.source_group;
+            let credit = result
+                .output_credits
+                .by_group
+                .entry(source_group)
+                .or_insert(0.0);
+            *credit = (*credit + reserved).min(belt_limit);
         }
-        let _target = entities[route.target_index()]
-            .as_object()
-            .ok_or_else(|| anyhow!("native belt target is not an object"))?;
-        let prepared_group = &prepared_routes.groups[source_group];
-        let _item_id = state
-            .symbols
-            .resolve(prepared_group.item_symbol)
-            .ok_or_else(|| anyhow!("native prepared belt item is missing"))?;
-        let target_slot = route.target_slot();
-        if !target_free[target_slot].is_finite() {
-            bail!("native belt reservation target-capacity plan is incomplete");
-        }
-        let free = target_free[target_slot];
-        let reserved = allowance.min(free.floor().max(0.0));
-        if reserved < 1.0 {
-            continue;
-        }
-        result.allowance_by_belt.insert(
-            compact_index(belt_index, "reservation route index")?,
-            reserved,
-        );
-        target_free[target_slot] -= reserved;
-        let source_group = route.source_group;
-        let credit = result
+        profiler.mark("belt-reservation-stable-apply");
+        belt_runtime.diagnostics.reservation_allowance_entries = result.allowance_by_belt.len();
+        let mut credited_group_indices = result
             .output_credits
             .by_group
-            .entry(source_group)
-            .or_insert(0.0);
-        *credit = (*credit + reserved).min(belt_limit);
-    }
-    profiler.mark("belt-reservation-stable-apply");
-    belt_runtime.diagnostics.reservation_allowance_entries = result.allowance_by_belt.len();
-    let mut credited_group_indices = result
-        .output_credits
-        .by_group
-        .iter()
-        .filter_map(|(&group_index, &credit)| (credit > EPSILON).then_some(group_index))
-        .collect::<Vec<_>>();
-    credited_group_indices.sort_unstable();
-    result.output_credits.active_source_items = credited_group_indices
-        .into_iter()
-        .filter_map(|group_index| prepared_routes.groups.get(group_index as usize))
-        .map(|group| (group.source_index, group.item_symbol))
-        .collect();
-    belt_runtime.diagnostics.reservation_credit_entries = result.output_credits.by_group.len();
-    selection.recycle_into(
-        &mut belt_runtime.workspace.selected_group_indices,
-        &mut belt_runtime.workspace.selected_route_indices,
-    );
-    Ok(result)
+            .iter()
+            .filter_map(|(&group_index, &credit)| (credit > EPSILON).then_some(group_index))
+            .collect::<Vec<_>>();
+        credited_group_indices.sort_unstable();
+        result.output_credits.active_source_items = credited_group_indices
+            .into_iter()
+            .filter_map(|group_index| prepared_routes.groups.get(group_index as usize))
+            .map(|group| (group.source_index, group.item_symbol))
+            .collect();
+        belt_runtime.diagnostics.reservation_credit_entries = result.output_credits.by_group.len();
+        Ok(result)
+    })
 }
 
 pub(crate) fn output_credit(
@@ -4182,6 +4506,145 @@ pub(crate) fn aggregate_flow_from_state(state: &CoreState) -> anyhow::Result<Bel
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn builtin_ordinary_machine_state(input_amount: f64) -> (CoreState, Value) {
+        let entity = json!({
+            "id": "ordinary-epsilon-machine",
+            "kind": "machine",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "arc_smelter",
+            "recipeId": "iron_ingot",
+            "machineCount": 1,
+            "minerCount": 0,
+            "inputs": { "iron_ore": input_amount },
+            "outputs": { "iron_ingot": 0 },
+            "progress": 0,
+            "utilization": 0,
+            "productionRate": 0,
+            "routingCursor": 0,
+            "proliferatorBonusProgress": { "iron_ingot": 0 }
+        });
+        let mut state = crate::simple_factory::tests::fixture_state(std::slice::from_ref(&entity));
+        state.identity.registry_fingerprint = EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned();
+        let catalog = Arc::make_mut(&mut state.catalog);
+        catalog.snapshot.registry_fingerprint = EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned();
+        catalog
+            .recipes
+            .get_mut("iron_ingot")
+            .expect("fixture iron recipe")
+            .inputs[0]
+            .amount = 2.0;
+        (state, entity)
+    }
+
+    #[test]
+    fn ordinary_producer_complete_input_seed_matches_settlement_cycle_floor() {
+        for (amount, expected) in [(1.9997, false), (1.9998, true), (1.9999, true), (2.0, true)] {
+            let (state, entity) = builtin_ordinary_machine_state(amount);
+            let source = entity.as_object().unwrap();
+            assert_eq!(
+                ordinary_machine_has_complete_input_cycle(&state, source, "iron_ingot"),
+                expected,
+                "input={amount}"
+            );
+            assert!(
+                !source_may_produce_during_step(&state, source, "iron_ingot"),
+                "built-in ordinary output must use the closed reverse wake"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_producer_mod_registry_fails_closed_to_always_awake() {
+        let (mut state, entity) = builtin_ordinary_machine_state(0.0);
+        state.identity.registry_fingerprint = "mod:opaque-v1".to_owned();
+        let source = entity.as_object().unwrap();
+        assert!(!ordinary_machine_has_complete_input_cycle(
+            &state,
+            source,
+            "iron_ingot"
+        ));
+        assert!(source_may_produce_during_step(&state, source, "iron_ingot"));
+    }
+
+    #[test]
+    fn ordinary_producer_global_barrier_recipes_remain_always_awake() {
+        for recipe_id in [
+            "matrix_research",
+            "solar_sail_launch",
+            "carrier_rocket_launch",
+        ] {
+            let (mut state, mut entity) = builtin_ordinary_machine_state(0.0);
+            Arc::make_mut(&mut state.catalog)
+                .recipes
+                .get_mut(recipe_id)
+                .unwrap()
+                .outputs
+                .push(crate::catalog::ItemAmount {
+                    item_id: "iron_ingot".to_owned(),
+                    amount: 1.0,
+                });
+            entity
+                .as_object_mut()
+                .unwrap()
+                .insert("recipeId".to_owned(), Value::from(recipe_id));
+            let source = entity.as_object().unwrap();
+            assert!(!ordinary_machine_has_complete_input_cycle(
+                &state,
+                source,
+                "iron_ingot"
+            ));
+            assert!(
+                source_may_produce_during_step(&state, source, "iron_ingot"),
+                "global barrier {recipe_id} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_producer_wake_skips_an_unrouted_uninterned_sibling_output() {
+        let (mut state, entity) = builtin_ordinary_machine_state(0.0);
+        Arc::make_mut(&mut state.catalog)
+            .recipes
+            .get_mut("iron_ingot")
+            .unwrap()
+            .outputs
+            .push(crate::catalog::ItemAmount {
+                item_id: "unrouted_co_product".to_owned(),
+                amount: 1.0,
+            });
+        assert!(state.symbols.lookup("unrouted_co_product").is_none());
+        let output_symbol = state.symbols.lookup("iron_ingot").unwrap();
+        let prepared = PreparedRoutes {
+            routes: Vec::new(),
+            groups: Vec::new(),
+            target_slot_count: 0,
+            total_capacity: 0.0,
+            group_by_key: Arc::new(HashMap::from([((0, output_symbol), 7)])),
+        };
+        let route = Route {
+            capacity: 6.0,
+            source_index: 0,
+            target_index: 0,
+            source_group: 0,
+            target_slot: 0,
+            belt_sort_rank: 0,
+            target_port_index: None,
+            priority: 1,
+        };
+        let mut pending = Vec::new();
+        queue_target_source_wakes(
+            &state,
+            std::slice::from_ref(&entity),
+            &prepared,
+            &route,
+            u32::MAX,
+            &mut pending,
+        )
+        .unwrap();
+        assert_eq!(pending, vec![7]);
+    }
 
     #[test]
     fn material_movement_evidence_requires_real_flow_and_is_sorted_deduplicated() {
@@ -4255,6 +4718,7 @@ mod tests {
 
     fn kernel_runtime(route_count: usize) -> BeltRuntime {
         BeltRuntime {
+            reusable_pool: None,
             source: None,
             progress: (0..route_count)
                 .map(|index| index as f64 * 0.03125 - 2.0)
@@ -4277,6 +4741,74 @@ mod tests {
             diagnostics: BeltSchedulerDiagnostics::default(),
             workspace: BeltWorkspace::new(route_count, 0, 0),
         }
+    }
+
+    #[test]
+    fn ordinary_producer_catchup_advances_only_groups_absent_from_captured_selection() {
+        let (_, first) = builtin_ordinary_machine_state(0.0);
+        let mut second = first.clone();
+        second.as_object_mut().unwrap().insert(
+            "id".to_owned(),
+            Value::from("ordinary-epsilon-machine-second"),
+        );
+        let entities = vec![first, second];
+        let mut state = crate::simple_factory::tests::fixture_state(&entities);
+        state.identity.registry_fingerprint = EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned();
+        Arc::make_mut(&mut state.catalog)
+            .snapshot
+            .registry_fingerprint = EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned();
+        let item_symbol = state.symbols.lookup("iron_ingot").unwrap();
+        let route = |index: usize| Route {
+            capacity: 6.0,
+            source_index: compact_index(index, "ordinary catch-up source").unwrap(),
+            target_index: compact_index(index, "ordinary catch-up target").unwrap(),
+            source_group: compact_index(index, "ordinary catch-up group").unwrap(),
+            target_slot: compact_index(index, "ordinary catch-up slot").unwrap(),
+            belt_sort_rank: 0,
+            target_port_index: None,
+            priority: 1,
+        };
+        let prepared = PreparedRoutes {
+            routes: vec![route(0), route(1)],
+            groups: (0..2)
+                .map(|index| PreparedGroup {
+                    source_index: compact_index(index, "ordinary catch-up source").unwrap(),
+                    item_symbol,
+                    balanced_splitter: false,
+                    always_awake: false,
+                    route_indices: vec![compact_index(index, "ordinary catch-up route").unwrap()]
+                        .into_boxed_slice(),
+                })
+                .collect(),
+            target_slot_count: 2,
+            total_capacity: 12.0,
+            group_by_key: Arc::new(HashMap::from([
+                ((0, item_symbol), 0),
+                ((1, item_symbol), 1),
+            ])),
+        };
+        let mut runtime = kernel_runtime(2);
+        // Group 0 models the clock already applied by the captured selection;
+        // group 1 is the newly reverse-woken producer output.
+        runtime.progress[0] = 6.0;
+        runtime.progress[1] = 0.0;
+        catch_up_newly_woken_ordinary_producer_clocks(
+            &mut runtime,
+            &state,
+            &entities,
+            &prepared,
+            &ActiveSelection::Mask {
+                selected_group_indices: vec![0],
+                selected_route_indices: vec![0],
+            },
+            &[0, 1],
+            1.0,
+            100.0,
+        )
+        .unwrap();
+        assert_eq!(runtime.progress[0].to_bits(), 6.0_f64.to_bits());
+        assert_eq!(runtime.progress[1].to_bits(), 6.0_f64.to_bits());
+        assert_eq!(runtime.touched_routes.signature(), Some(vec![1]));
     }
 
     #[test]
@@ -5208,12 +5740,339 @@ mod tests {
             second.diagnostics.runtime_workspace_initialized_target_rows,
             0
         );
-        assert_eq!(second.active_groups, [true, false, true]);
+        // Pool provenance is cleared before a borrower seeds its own immutable
+        // snapshot indices in finish_activity.
+        assert_eq!(second.active_groups, [false, false, false]);
         assert_eq!(second.workspace.post_actions.as_ptr(), post_actions_ptr);
         assert_eq!(second.workspace.groups.as_ptr(), groups_ptr);
         assert_eq!(second.workspace.target_free.as_ptr(), target_free_ptr);
         assert!(snapshot.take_reusable_runtime().is_none());
         assert_eq!(snapshot.estimated_bytes(), (2 * size_of::<u32>()) as u64);
+    }
+
+    #[test]
+    fn failed_and_discarded_candidates_return_clean_clone_safe_workspace() {
+        let belt_count = 128;
+        let target_slot_count = 8;
+        let mut prepared = kernel_prepared_routes(belt_count);
+        prepared.groups = (0..3)
+            .map(|index| PreparedGroup {
+                source_index: compact_index(index, "pool test source").unwrap(),
+                item_symbol: 0,
+                balanced_splitter: false,
+                always_awake: false,
+                route_indices: vec![compact_index(index, "pool test route").unwrap()]
+                    .into_boxed_slice(),
+            })
+            .collect();
+        prepared.target_slot_count = compact_index(target_slot_count, "pool test targets").unwrap();
+        let prepared = Arc::new(prepared);
+
+        let mut first = BeltRuntime::empty(belt_count, &prepared);
+        first.active_groups[0] = true;
+        first.active_groups[2] = true;
+        first.active_group_indices = vec![0, 2];
+        let post_actions_ptr = first.workspace.post_actions.as_ptr();
+        let selected_groups_ptr = first.workspace.selected_group_indices.as_ptr();
+        let selected_routes_ptr = first.workspace.selected_route_indices.as_ptr();
+        let pending_wakes_ptr = first.workspace.pending_wake_group_indices.as_ptr();
+        let original = first.activity_snapshot(&prepared);
+        let pool = Arc::clone(&original.reusable_pool);
+
+        let reusable = original.take_reusable_runtime().unwrap();
+        let mut failed = BeltRuntime::empty_with_reusable(belt_count, &prepared, Some(reusable));
+        failed.reusable_pool = Some(Arc::clone(&pool));
+        failed.active_queue_enabled = true;
+        failed.active_groups[1] = true;
+        failed.active_group_indices = vec![1];
+        failed.workspace.post_actions[7] = BeltPostAction::ResetProgress;
+        failed.workspace.target_free[2] = 1.0;
+        failed.workspace.touched_target_slots.push(2);
+        failed.workspace.groups[1].reset(5.0, true);
+        failed.workspace.groups[1].inactive_routes.push(1);
+        failed.workspace.usable_candidate_indices.push(1);
+        failed.workspace.active_candidate_indices.push(1);
+        let injected =
+            with_active_selection(&mut failed, &prepared, |runtime, _| -> anyhow::Result<()> {
+                runtime.workspace.pending_wake_group_indices.push(1);
+                bail!("injected reusable candidate failure")
+            });
+        assert_eq!(
+            injected.unwrap_err().to_string(),
+            "injected reusable candidate failure"
+        );
+        assert_eq!(
+            failed.workspace.selected_route_indices.as_ptr(),
+            selected_routes_ptr,
+            "Result failure must recycle selection scratch before runtime rollback"
+        );
+        drop(failed);
+
+        let returned = original.take_reusable_runtime().unwrap();
+        assert_eq!(returned.workspace.post_actions.as_ptr(), post_actions_ptr);
+        assert_eq!(
+            returned.workspace.selected_group_indices.as_ptr(),
+            selected_groups_ptr
+        );
+        assert_eq!(
+            returned.workspace.selected_route_indices.as_ptr(),
+            selected_routes_ptr
+        );
+        assert_eq!(
+            returned.workspace.pending_wake_group_indices.as_ptr(),
+            pending_wakes_ptr
+        );
+        assert!(returned.active_groups.iter().all(|active| !*active));
+        assert!(returned.occupied_group_indices.is_empty());
+        assert!(
+            returned
+                .workspace
+                .post_actions
+                .iter()
+                .all(|action| matches!(action, BeltPostAction::None))
+        );
+        assert!(
+            returned
+                .workspace
+                .target_free
+                .iter()
+                .all(|free| free.is_nan())
+        );
+        assert!(returned.workspace.touched_target_slots.is_empty());
+        assert!(returned.workspace.groups.iter().all(|group| {
+            group.available == 0.0
+                && !group.source_had_output
+                && group.first_candidate.is_none()
+                && group.candidates.is_empty()
+                && group.first_inactive_route.is_none()
+                && group.inactive_routes.is_empty()
+        }));
+        assert!(returned.workspace.usable_candidate_indices.is_empty());
+        assert!(returned.workspace.active_candidate_indices.is_empty());
+        assert!(returned.workspace.selected_group_indices.is_empty());
+        assert!(returned.workspace.selected_route_indices.is_empty());
+        assert!(returned.workspace.pending_wake_group_indices.is_empty());
+
+        let mut discarded = BeltRuntime::empty_with_reusable(belt_count, &prepared, Some(returned));
+        discarded.reusable_pool = Some(Arc::clone(&pool));
+        discarded.active_groups[1] = true;
+        discarded.active_group_indices = vec![1];
+        let child = discarded.activity_snapshot(&prepared);
+        assert!(Arc::ptr_eq(&child.reusable_pool, &original.reusable_pool));
+        assert_eq!(&*child.active_group_indices, &[1]);
+        drop(child);
+
+        let divergent = original.take_reusable_runtime().unwrap();
+        assert_eq!(&*divergent.occupied_group_indices, &[1]);
+        assert_eq!(divergent.active_groups, [false, true, false]);
+        let mut retargeted =
+            BeltRuntime::empty_with_reusable(belt_count, &prepared, Some(divergent));
+        assert_eq!(retargeted.active_groups, [false, false, false]);
+        assert!(retargeted.diagnostics.runtime_workspace_reused);
+        assert_eq!(
+            retargeted
+                .diagnostics
+                .runtime_workspace_initialized_route_rows,
+            0
+        );
+        assert_eq!(
+            retargeted
+                .diagnostics
+                .runtime_workspace_initialized_group_rows,
+            0
+        );
+        assert_eq!(
+            retargeted
+                .diagnostics
+                .runtime_workspace_initialized_target_rows,
+            0
+        );
+        assert_eq!(retargeted.workspace.post_actions.as_ptr(), post_actions_ptr);
+        assert_eq!(
+            retargeted.workspace.selected_group_indices.as_ptr(),
+            selected_groups_ptr
+        );
+        assert_eq!(
+            retargeted.workspace.selected_route_indices.as_ptr(),
+            selected_routes_ptr
+        );
+        assert_eq!(
+            retargeted.workspace.pending_wake_group_indices.as_ptr(),
+            pending_wakes_ptr
+        );
+
+        // The real success path publishes its activity snapshot before belt
+        // patch sealing. A later write-back error must leave the shared pool
+        // reachable through the source snapshot rather than drain it.
+        retargeted.reusable_pool = Some(Arc::clone(&pool));
+        retargeted.active_groups[0] = true;
+        retargeted.active_group_indices = vec![0];
+        let failed_writeback_snapshot = retargeted.activity_snapshot(&prepared);
+        let (zero_belt_state, _) = builtin_ordinary_machine_state(0.0);
+        let writeback_error = retargeted
+            .into_patches(&zero_belt_state, BeltFlowRequirement::NotRequired)
+            .unwrap_err();
+        assert!(
+            writeback_error
+                .to_string()
+                .contains("native belt runtime source changed before commit sealing")
+        );
+        drop(failed_writeback_snapshot);
+        let after_writeback_failure = original.take_reusable_runtime().unwrap();
+        assert_eq!(
+            after_writeback_failure.workspace.post_actions.as_ptr(),
+            post_actions_ptr
+        );
+        assert_eq!(&*after_writeback_failure.occupied_group_indices, &[0]);
+    }
+
+    #[test]
+    fn overlapping_candidate_returns_keep_the_first_valid_pool_slot() {
+        let belt_count = 128;
+        let mut prepared = kernel_prepared_routes(belt_count);
+        prepared.groups = (0..2)
+            .map(|index| PreparedGroup {
+                source_index: compact_index(index, "overlap pool source").unwrap(),
+                item_symbol: 0,
+                balanced_splitter: false,
+                always_awake: false,
+                route_indices: vec![compact_index(index, "overlap pool route").unwrap()]
+                    .into_boxed_slice(),
+            })
+            .collect();
+        prepared.target_slot_count = 2;
+        let prepared = Arc::new(prepared);
+
+        let mut seed = BeltRuntime::empty(belt_count, &prepared);
+        seed.active_groups[0] = true;
+        seed.active_group_indices = vec![0];
+        let source = seed.activity_snapshot(&prepared);
+        let pool = Arc::clone(&source.reusable_pool);
+
+        let resident = source.take_reusable_runtime().unwrap();
+        let mut first = BeltRuntime::empty_with_reusable(belt_count, &prepared, Some(resident));
+        first.reusable_pool = Some(Arc::clone(&pool));
+        first.active_groups[0] = true;
+        first.active_group_indices = vec![0];
+
+        // The pool is checked out, so an overlapping disposable clone gets a
+        // correctly sized fresh workspace. Returning this clone first must
+        // occupy the one slot; the later original return may not overwrite it.
+        assert!(source.take_reusable_runtime().is_none());
+        let mut second = BeltRuntime::empty_with_reusable(belt_count, &prepared, None);
+        second.reusable_pool = Some(Arc::clone(&pool));
+        second.active_groups[1] = true;
+        second.active_group_indices = vec![1];
+        let second_post_actions_ptr = second.workspace.post_actions.as_ptr();
+        let second_snapshot = second.activity_snapshot(&prepared);
+        let first_snapshot = first.activity_snapshot(&prepared);
+        assert!(Arc::ptr_eq(
+            &first_snapshot.reusable_pool,
+            &second_snapshot.reusable_pool
+        ));
+        drop(first_snapshot);
+        drop(second_snapshot);
+
+        let winner = source.take_reusable_runtime().unwrap();
+        assert_eq!(
+            winner.workspace.post_actions.as_ptr(),
+            second_post_actions_ptr
+        );
+        assert_eq!(&*winner.occupied_group_indices, &[1]);
+        assert_eq!(winner.active_groups, [false, true]);
+        let retargeted = BeltRuntime::empty_with_reusable(belt_count, &prepared, Some(winner));
+        assert_eq!(retargeted.active_groups, [false, false]);
+        assert_eq!(
+            retargeted.workspace.post_actions.as_ptr(),
+            second_post_actions_ptr
+        );
+    }
+
+    #[test]
+    fn concurrent_candidate_checkouts_share_no_mutable_workspace() {
+        let belt_count = 128;
+        let mut prepared = kernel_prepared_routes(belt_count);
+        prepared.groups = (0..2)
+            .map(|index| PreparedGroup {
+                source_index: compact_index(index, "concurrent pool source").unwrap(),
+                item_symbol: 0,
+                balanced_splitter: false,
+                always_awake: false,
+                route_indices: vec![compact_index(index, "concurrent pool route").unwrap()]
+                    .into_boxed_slice(),
+            })
+            .collect();
+        prepared.target_slot_count = 2;
+        let prepared = Arc::new(prepared);
+
+        let mut seed = BeltRuntime::empty(belt_count, &prepared);
+        seed.active_groups[0] = true;
+        seed.active_group_indices = vec![0];
+        let source = seed.activity_snapshot(&prepared);
+        let pool = Arc::clone(&source.reusable_pool);
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let borrowed = Arc::new(std::sync::Barrier::new(3));
+
+        let spawn_candidate = |group_index: usize| {
+            let prepared = Arc::clone(&prepared);
+            let pool = Arc::clone(&pool);
+            let start = Arc::clone(&start);
+            let borrowed = Arc::clone(&borrowed);
+            std::thread::spawn(move || {
+                start.wait();
+                let reusable = pool.take();
+                let reused = reusable.is_some();
+                let mut runtime = BeltRuntime::empty_with_reusable(belt_count, &prepared, reusable);
+                runtime.reusable_pool = Some(Arc::clone(&pool));
+                runtime.active_groups[group_index] = true;
+                runtime.active_group_indices = vec![group_index as u32];
+                // Both candidates must complete checkout before either can
+                // publish, proving that only one owns the resident workspace.
+                borrowed.wait();
+                let snapshot = runtime.activity_snapshot(&prepared);
+                (reused, snapshot)
+            })
+        };
+
+        let first = spawn_candidate(0);
+        let second = spawn_candidate(1);
+        start.wait();
+        borrowed.wait();
+        let (first_reused, first_snapshot) = first.join().unwrap();
+        let (second_reused, second_snapshot) = second.join().unwrap();
+        assert_ne!(first_reused, second_reused);
+        assert!(Arc::ptr_eq(
+            &first_snapshot.reusable_pool,
+            &second_snapshot.reusable_pool
+        ));
+        drop(first_snapshot);
+        drop(second_snapshot);
+
+        let winner = source.take_reusable_runtime().unwrap();
+        assert!(matches!(&*winner.occupied_group_indices, [0] | [1]));
+        let winner_group = winner.occupied_group_indices[0] as usize;
+        assert_eq!(winner.active_groups, [winner_group == 0, winner_group == 1]);
+        let retargeted = BeltRuntime::empty_with_reusable(belt_count, &prepared, Some(winner));
+        assert!(retargeted.diagnostics.runtime_workspace_reused);
+        assert_eq!(retargeted.active_groups, [false, false]);
+        assert_eq!(
+            retargeted
+                .diagnostics
+                .runtime_workspace_initialized_route_rows,
+            0
+        );
+        assert_eq!(
+            retargeted
+                .diagnostics
+                .runtime_workspace_initialized_group_rows,
+            0
+        );
+        assert_eq!(
+            retargeted
+                .diagnostics
+                .runtime_workspace_initialized_target_rows,
+            0
+        );
     }
 
     #[test]

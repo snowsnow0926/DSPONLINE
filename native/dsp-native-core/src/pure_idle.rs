@@ -11785,6 +11785,44 @@ mod tests {
     }
 
     #[test]
+    fn discarded_three_window_probe_keeps_live_belt_workspace_reusable() {
+        let multiplier = 8.0;
+        let mut live = productive_closed_recipe_macro_fixture(multiplier);
+        let first = live
+            .advance_exact(&CoreAdvanceRequest {
+                include_diagnostics: true,
+                ..exact_request(live.revision, 1.0, 1.0 / multiplier)
+            })
+            .unwrap();
+        assert!(first.supported, "reason={:?}", first.reason);
+        let first_activity = live.prepared_belt_activity().unwrap();
+        let resident_bytes = first_activity.estimated_bytes();
+        assert!(resident_bytes > 0);
+
+        let probe_request = pure_idle_macro_request(live.revision, 600.0, 600.0 / multiplier);
+        let snapshots = exact_three_window_probe(&live, &probe_request).unwrap();
+        assert_eq!(snapshots.len(), 4);
+        assert!(
+            live.prepared_belt_activity().unwrap().estimated_bytes() >= resident_bytes,
+            "a disposable probe must return the shared factory-sized scratch pool"
+        );
+
+        let revision = live.revision;
+        let second = live
+            .advance_exact(&CoreAdvanceRequest {
+                include_diagnostics: true,
+                ..exact_request(revision, 1.0, 1.0 / multiplier)
+            })
+            .unwrap();
+        assert!(second.supported, "reason={:?}", second.reason);
+        let scheduler = second.belt_scheduler.expect("belt diagnostics");
+        assert!(scheduler.runtime_workspace_reused);
+        assert_eq!(scheduler.runtime_workspace_initialized_route_rows, 0);
+        assert_eq!(scheduler.runtime_workspace_initialized_group_rows, 0);
+        assert_eq!(scheduler.runtime_workspace_initialized_target_rows, 0);
+    }
+
+    #[test]
     fn macro_v10_certifies_finite_research_sink_at_supported_multipliers() {
         for multiplier in [8.0, 12.0, 15.0, 16.0] {
             let initial =

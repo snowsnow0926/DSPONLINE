@@ -268,6 +268,47 @@ function dormantBeltWakeState(): GameState {
   return state;
 }
 
+function dormantOrdinaryProducerWakeState(): GameState {
+  const state = simpleMiningState();
+  const ironVein = state.entities.find((entity) => entity.id === "vein_iron")!;
+  const smelter = state.entities.find((entity) => entity.buildingId === "arc_smelter")!;
+  const storage = state.entities.find((entity) => entity.buildingId === "storage_mk1")!;
+  const template = state.belts.find((belt) =>
+    belt.source === smelter.id && belt.itemId === "iron_ingot")!;
+  // The native exact step transfers belts before it runs this step's mining
+  // cycle. Seed real upstream cargo so the original smelter is woken during
+  // the positive-seconds transfer phase, not only during the zero-second
+  // post-production phase.
+  ironVein.outputs.iron_ore = 12;
+  // The original smelter starts without ore and receives it through its active
+  // mining route during the first belt phase. Its output route therefore
+  // exercises same-step reverse wake plus clock catch-up. The cloned machines
+  // have no input route or complete input cycle and prove that ordinary recipe
+  // outputs no longer keep a large idle cohort permanently awake.
+  for (let index = 0; index < 96; index += 1) {
+    const producer = structuredClone(smelter);
+    producer.id = `native_dormant_producer_${String(index).padStart(3, "0")}`;
+    producer.position = { x: 900 + index * 4, y: 420 };
+    producer.inputs = { iron_ore: 0 };
+    producer.outputs = { iron_ingot: 0 };
+    producer.progress = 0;
+    producer.utilization = 0;
+    producer.productionRate = 0;
+    state.entities.push(producer);
+    state.belts.push({
+      ...template,
+      id: `native_dormant_producer_output_${String(index).padStart(3, "0")}`,
+      source: producer.id,
+      target: storage.id,
+      progress: 0,
+      totalTransferred: 0,
+      lastFlow: 0,
+      congestion: 0,
+    });
+  }
+  return state;
+}
+
 function inactiveTimeWarpControllerState(): GameState {
   const state = simpleMiningState();
   const template = state.entities.find((entity) => entity.kind === "machine")!;
@@ -3005,6 +3046,94 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       await client.request({ operation: "coreClose", sessionId: opened.sessionId });
     }
   }, 90_000);
+
+  it("sleeps empty ordinary producer outputs and catches up a real first-phase input at 1/5/60", async () => {
+    const initial = dormantOrdinaryProducerWakeState();
+    const checkpoint = await seed(initial, 221);
+    for (const seconds of [1, 5, 60]) {
+      const opened = await open(checkpoint);
+      const expected = advanceSimulationBudget(initial, seconds, seconds);
+      const fullScanSession = createSimulationAdvanceSession(initial, seconds, {
+        wallSeconds: seconds,
+        indexedLogistics: false,
+      });
+      advanceSimulationSession(fullScanSession, Number.MAX_SAFE_INTEGER);
+      const fullScan = completeSimulationAdvanceSession(fullScanSession);
+      expect(canonicalSha256(expected), `ordinary-wake-${seconds} JS active/full scan`)
+        .toBe(canonicalSha256(fullScan));
+      const advanced = await client.request({
+        operation: "coreAdvance", sessionId: opened.sessionId,
+        request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
+      });
+      expect(advanced.supported, `ordinary-wake-${seconds}: ${advanced.reason ?? ""}`).toBe(true);
+      expect(advanced.beltScheduler).toMatchObject({
+        activeQueueEnabled: true,
+        routeCount: initial.belts.length,
+      });
+      expect(advanced.beltScheduler.stableRoutesSkipped).toBeGreaterThanOrEqual(96);
+      expect(advanced.beltScheduler.transferRouteChecks + advanced.beltScheduler.reservationRouteChecks)
+        .toBeLessThan(advanced.beltScheduler.routeCount *
+          (advanced.beltScheduler.transferPasses + advanced.beltScheduler.reservationPasses));
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: expected.entities.slice(0, 32).map((entity) => entity.id),
+        beltIds: expected.belts.slice(0, 64).map((belt) => belt.id),
+        baseFields: [],
+      });
+      expect(projection.entities, `ordinary-wake-${seconds} entities`)
+        .toEqual(rendererProjectedEntities(expected.entities.slice(0, 32)));
+      expect(projection.belts, `ordinary-wake-${seconds} belts`)
+        .toEqual(JSON.parse(JSON.stringify(expected.belts.slice(0, 64))));
+      expect(advanced.summary.canonicalFields, `ordinary-wake-${seconds} top-level`)
+        .toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `ordinary-wake-${seconds} canonical hash`)
+        .toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+    for (const sequence of [
+      { label: "ordinary-wake-60x1", steps: Array.from({ length: 60 }, () => 1) },
+      { label: "ordinary-wake-12x5", steps: Array.from({ length: 12 }, () => 5) },
+    ]) {
+      const opened = await open(checkpoint);
+      let expected = initial;
+      let fullScanExpected = initial;
+      let revision = checkpoint.revision;
+      let advanced: any = null;
+      for (const seconds of sequence.steps) {
+        expected = advanceSimulationBudget(expected, seconds, seconds);
+        const fullScanSession = createSimulationAdvanceSession(fullScanExpected, seconds, {
+          wallSeconds: seconds,
+          indexedLogistics: false,
+        });
+        advanceSimulationSession(fullScanSession, Number.MAX_SAFE_INTEGER);
+        fullScanExpected = completeSimulationAdvanceSession(fullScanSession);
+        advanced = await client.request({
+          operation: "coreAdvance", sessionId: opened.sessionId,
+          request: { baseRevision: revision, simulationSeconds: seconds, wallSeconds: seconds },
+        });
+        expect(advanced.supported, `${sequence.label}: ${advanced.reason ?? ""}`).toBe(true);
+        expect(advanced.beltScheduler, `${sequence.label} carried activity`).toMatchObject({
+          activeQueueEnabled: true,
+          routeCount: initial.belts.length,
+        });
+        expect(advanced.beltScheduler.stableRoutesSkipped, `${sequence.label} skipped routes`)
+          .toBeGreaterThanOrEqual(96);
+        expect(
+          advanced.beltScheduler.transferRouteChecks + advanced.beltScheduler.reservationRouteChecks,
+          `${sequence.label} sparse route checks`,
+        ).toBeLessThan(advanced.beltScheduler.routeCount *
+          (advanced.beltScheduler.transferPasses + advanced.beltScheduler.reservationPasses));
+        revision = advanced.revision;
+      }
+      expect(canonicalSha256(expected), `${sequence.label} JS active/full scan`)
+        .toBe(canonicalSha256(fullScanExpected));
+      expect(advanced.summary.canonicalFields, `${sequence.label} top-level`)
+        .toEqual(canonicalFields(expected));
+      expect(advanced.summary.canonicalSha256, `${sequence.label} canonical hash`)
+        .toBe(canonicalSha256(expected));
+      await client.request({ operation: "coreClose", sessionId: opened.sessionId });
+    }
+  }, 120_000);
 
   it.skipIf(process.env.DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL !== "1")(
     "matches long mining boundaries and segmented offline settlement",

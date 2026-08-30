@@ -124,6 +124,26 @@ async function seedCanvas(page: Page, options: { count: number; exactStack?: num
   await page.setViewportSize(options.viewport ?? { width: 1440, height: 900 });
   await page.goto("/");
   await expect(page.locator(".game-shell")).toBeVisible();
+  const offlineReport = page.getByRole("dialog", { name: "离线结算报告" });
+  await offlineReport.waitFor({ state: "visible", timeout: 1_500 }).catch(() => undefined);
+  if (await offlineReport.isVisible().catch(() => false)) {
+    const originalDuration = await offlineReport.locator(".offline-runtime > strong").innerText();
+    const seconds = Number(/^([1-9]\d*) 秒$/.exec(originalDuration)?.[1] ?? Number.NaN);
+    expect(Number.isInteger(seconds) && seconds <= 10).toBe(true);
+    await expect(offlineReport.locator(".offline-runtime > small")).toHaveText(`实际提交 ${seconds} 秒`);
+    const method = offlineReport.locator(".offline-report-method");
+    await expect(method).toHaveClass(/offline-report-method--exact/);
+    await expect(method.locator("header strong")).toHaveText("精确结算");
+    await expect(method.locator("dl > div").filter({ hasText: "精确校准" }).locator("dd")).toHaveText("全程精确");
+    await expect(method.locator("dl > div").filter({ hasText: "宏观覆盖" }).locator("dd")).toHaveText("未使用");
+    await expect(method.locator("dl > div").filter({ hasText: "估计最大误差" }).locator("dd")).toHaveText("0.00%");
+    await expect(method.locator("dl > div").filter({ hasText: "算法版本" }).locator("dd")).toHaveText("deterministic-exact");
+    await expect(method.locator("dl > div").filter({ hasText: "收益提交" }).locator("dd")).toHaveText("已验证提交");
+    await expect(method.locator("dl > div").filter({ hasText: "结算状态" }).locator("dd")).toHaveText("精确");
+    await expect(method.locator(".offline-report-warning")).toHaveCount(0);
+    await offlineReport.getByRole("button", { name: "确认结算" }).click();
+    await expect(offlineReport).toBeHidden();
+  }
   await expect(page.locator(".game-shell")).toHaveAttribute("data-active-planet-node-count", String(options.count + 6));
 }
 

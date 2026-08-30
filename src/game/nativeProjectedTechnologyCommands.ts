@@ -1,5 +1,6 @@
 import type { DesktopNativeCoreTechnologyProjectionResult } from "../desktop";
 import { getTechnology, isDeprecatedTechnology } from "./content";
+import { isInfiniteResearchComplete } from "./infiniteResearch";
 import {
   SIMULATION_RUNTIME_PROTOCOL_VERSION,
   type SimulationCommandPatch,
@@ -8,7 +9,7 @@ import {
   selectNativeTechnologyWorkspaceReadModel,
   type TechnologyWorkspaceReadModel,
 } from "./technologyWorkspaceReadModel";
-import type { TechId } from "./types";
+import type { InfiniteResearchId, TechId } from "./types";
 
 const COMMAND_PROJECTION_SESSION_ID = "native-technology-command";
 
@@ -32,6 +33,11 @@ export interface NativeProjectedRemoveQueuedTechnologyCommandInput
 export interface NativeProjectedInfiniteResearchAutomationCommandInput
   extends NativeProjectedTechnologyCommandInput {
   readonly enabled: boolean;
+}
+
+export interface NativeProjectedSelectInfiniteResearchCommandInput
+  extends NativeProjectedTechnologyCommandInput {
+  readonly researchId: InfiniteResearchId;
 }
 
 function emptyCommand(baseRevision: number): SimulationCommandPatch {
@@ -111,13 +117,7 @@ function selectedResearchBoundaryIsDue(
     Math.floor(progress[cost.itemId] ?? 0) >= cost.amount);
 }
 
-/**
- * Appends one finite technology while another finite technology is active.
- * This is the only `selectTechnology()` branch that does not reset every
- * matrix-lab cycle. Starting/resuming/selecting research remains read-only
- * until a future research-lab projection or semantic command opcode carries
- * the affected entity IDs into the durable receipt.
- */
+/** Appends one finite technology while another finite technology is active. */
 export function createNativeProjectedQueueTechnologyCommand(
   input: NativeProjectedQueueTechnologyCommandInput,
 ): SimulationCommandPatch | null {
@@ -140,6 +140,118 @@ export function createNativeProjectedQueueTechnologyCommand(
     path: ["research", "queuedTechIds"],
     operation: "set",
     value: [...readModel.research.queuedTechIds, input.techId],
+  });
+  return command;
+}
+
+/** Starts or resumes finite research, or appends when one is already active. */
+export function createNativeProjectedSelectTechnologyCommand(
+  input: NativeProjectedQueueTechnologyCommandInput,
+): SimulationCommandPatch | null {
+  const readModel = requireExactNativeReadModel(input);
+  if (readModel.research.selectedTechId) {
+    return createNativeProjectedQueueTechnologyCommand(input);
+  }
+  if (readModel.activeInfiniteResearchId) return null;
+  const technology = requireKnownActiveTechnology(input.techId);
+  requireCanonicalFinitePlan(readModel);
+  const completed = new Set(readModel.research.completedTechIds);
+  if (completed.has(input.techId) || readModel.research.queuedTechIds.includes(input.techId) ||
+      !technology.prerequisites.every((id) => completed.has(id))) return null;
+  const command = emptyCommand(input.baseRevision);
+  command.topLevelChanges.push({
+    path: ["research", "selectedTechId"],
+    operation: "set",
+    value: input.techId,
+  });
+  return command;
+}
+
+/** Pauses the current finite target, or stops the current infinite target. */
+export function createNativeProjectedPauseResearchCommand(
+  input: NativeProjectedTechnologyCommandInput,
+): SimulationCommandPatch | null {
+  const readModel = requireExactNativeReadModel(input);
+  requireCanonicalFinitePlan(readModel);
+  const command = emptyCommand(input.baseRevision);
+  if (readModel.research.selectedTechId) {
+    command.topLevelChanges.push({
+      path: ["research", "pausedTechId"],
+      operation: "set",
+      value: readModel.research.selectedTechId,
+    });
+    return command;
+  }
+  if (readModel.activeInfiniteResearchId) {
+    command.topLevelChanges.push({
+      path: ["endgame", "activeInfiniteResearchId"],
+      operation: "set",
+      value: null,
+    });
+    return command;
+  }
+  return null;
+}
+
+/** Cancels finite research, or stops infinite research, while preserving progress. */
+export function createNativeProjectedCancelResearchCommand(
+  input: NativeProjectedTechnologyCommandInput,
+): SimulationCommandPatch | null {
+  const readModel = requireExactNativeReadModel(input);
+  requireCanonicalFinitePlan(readModel);
+  const command = emptyCommand(input.baseRevision);
+  if (readModel.research.selectedTechId) {
+    command.topLevelChanges.push({
+      path: ["research", "selectedTechId"],
+      operation: "set",
+      value: null,
+    });
+    return command;
+  }
+  if (readModel.activeInfiniteResearchId) {
+    // `cancelCurrentResearch()` also promotes the first currently legal queue
+    // row. Keep cancellation distinct from the simpler infinite stop/pause
+    // intent so Rust can reproduce that lifecycle transition exactly.
+    command.topLevelChanges.push({
+      path: ["research", "selectedTechId"],
+      operation: "set",
+      value: null,
+    });
+    return command;
+  }
+  return null;
+}
+
+export function createNativeProjectedResumeResearchCommand(
+  input: NativeProjectedTechnologyCommandInput,
+): SimulationCommandPatch | null {
+  const readModel = requireExactNativeReadModel(input);
+  requireCanonicalFinitePlan(readModel);
+  const target = readModel.research.pausedTechId;
+  if (!target || readModel.research.selectedTechId || readModel.activeInfiniteResearchId) return null;
+  const command = emptyCommand(input.baseRevision);
+  command.topLevelChanges.push({
+    path: ["research", "selectedTechId"],
+    operation: "set",
+    value: target,
+  });
+  return command;
+}
+
+export function createNativeProjectedSelectInfiniteResearchCommand(
+  input: NativeProjectedSelectInfiniteResearchCommandInput,
+): SimulationCommandPatch | null {
+  const readModel = requireExactNativeReadModel(input);
+  requireCanonicalFinitePlan(readModel);
+  const progress = readModel.infiniteResearch[input.researchId];
+  if (!progress || !readModel.research.completedTechIds.includes("universe_matrix") ||
+      readModel.research.selectedTechId || readModel.activeInfiniteResearchId === input.researchId ||
+      isInfiniteResearchComplete(input.researchId, progress.level)) return null;
+  const command = emptyCommand(input.baseRevision);
+  command.topLevelChanges.push({
+    path: ["endgame", "activeInfiniteResearchId"],
+    operation: "set",
+    value: input.researchId,
   });
   return command;
 }

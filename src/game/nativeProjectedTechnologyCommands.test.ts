@@ -1,9 +1,21 @@
 import { describe, expect, it } from "vitest";
 import type { DesktopNativeCoreTechnologyProjectionResult } from "../desktop";
+import { TECHNOLOGIES } from "./content";
 import {
+  cancelCurrentResearch,
+  createInitialState,
+  pauseCurrentResearch,
+  selectTechnology,
+} from "./engine";
+import {
+  createNativeProjectedCancelResearchCommand,
   createNativeProjectedInfiniteResearchAutomationCommand,
+  createNativeProjectedPauseResearchCommand,
   createNativeProjectedQueueTechnologyCommand,
   createNativeProjectedRemoveQueuedTechnologyCommand,
+  createNativeProjectedResumeResearchCommand,
+  createNativeProjectedSelectInfiniteResearchCommand,
+  createNativeProjectedSelectTechnologyCommand,
 } from "./nativeProjectedTechnologyCommands";
 
 function projection(
@@ -62,6 +74,122 @@ function projection(
 }
 
 describe("native projected technology commands", () => {
+  it("uses the existing JavaScript lifecycle as the pause, cancel, and alternate-target oracle", () => {
+    const alternateSource = createInitialState();
+    alternateSource.research.completedTechIds = ["electromagnetism"];
+    alternateSource.research.selectedTechId = null;
+    alternateSource.research.pausedTechId = "basic_logistics";
+    const alternate = selectTechnology(alternateSource, "thermal_power");
+    expect(alternate.research).toMatchObject({
+      selectedTechId: "thermal_power",
+      pausedTechId: "basic_logistics",
+    });
+
+    const infiniteSource = createInitialState();
+    infiniteSource.research.completedTechIds = ["electromagnetism"];
+    infiniteSource.research.selectedTechId = null;
+    infiniteSource.research.queuedTechIds = ["basic_logistics"];
+    infiniteSource.endgame.activeInfiniteResearchId = "matrix_compression";
+    const paused = pauseCurrentResearch(infiniteSource);
+    expect(paused.research).toMatchObject({
+      selectedTechId: null,
+      queuedTechIds: ["basic_logistics"],
+    });
+    expect(paused.endgame.activeInfiniteResearchId).toBeNull();
+    const canceled = cancelCurrentResearch(infiniteSource);
+    expect(canceled.research).toMatchObject({
+      selectedTechId: "basic_logistics",
+      queuedTechIds: [],
+    });
+    expect(canceled.endgame.activeInfiniteResearchId).toBeNull();
+  });
+
+  it("uses JavaScript completion as the construction, exploration, and exporter reward oracle", () => {
+    const complete = (techId: keyof typeof TECHNOLOGIES) => {
+      const source = createInitialState();
+      source.research.selectedTechId = techId;
+      source.research.progressByTech[techId] = Object.fromEntries(
+        TECHNOLOGIES[techId].costs.map((cost) => [cost.itemId, cost.amount]),
+      );
+      source.research.completedTechIds = [];
+      return cancelCurrentResearch(source);
+    };
+
+    const constructionSource = createInitialState();
+    const beltBefore = constructionSource.construction.conveyor_belt_mk1 ?? 0;
+    constructionSource.research.selectedTechId = "basic_logistics";
+    constructionSource.research.progressByTech.basic_logistics = { electromagnetic_matrix: 8 };
+    constructionSource.research.completedTechIds = ["electromagnetic_matrix", "electromagnetism"];
+    expect(cancelCurrentResearch(constructionSource).construction.conveyor_belt_mk1)
+      .toBe(beltBefore + 2);
+
+    expect(complete("interstellar_logistics").exploration.colonizedPlanetIds)
+      .toEqual(expect.arrayContaining(["ashen", "giant"]));
+    expect(complete("universe_matrix").construction.galactic_material_exporter).toBe(1);
+  });
+
+  it("submits only the finite lifecycle intent and lets Rust derive lab resets", () => {
+    const paused = projection({ selectedTechId: null, pausedTechId: "research_speed_2" });
+    expect(createNativeProjectedResumeResearchCommand({ baseRevision: 7, projection: paused })?.topLevelChanges)
+      .toEqual([{ path: ["research", "selectedTechId"], operation: "set", value: "research_speed_2" }]);
+    expect(createNativeProjectedSelectTechnologyCommand({
+      baseRevision: 7,
+      projection: paused,
+      techId: "electromagnetic_matrix",
+    })?.topLevelChanges).toEqual([{
+      path: ["research", "selectedTechId"],
+      operation: "set",
+      value: "electromagnetic_matrix",
+    }]);
+
+    const active = projection();
+    expect(createNativeProjectedPauseResearchCommand({ baseRevision: 7, projection: active })?.topLevelChanges)
+      .toEqual([{ path: ["research", "pausedTechId"], operation: "set", value: "research_speed_2" }]);
+    expect(createNativeProjectedCancelResearchCommand({ baseRevision: 7, projection: active })?.topLevelChanges)
+      .toEqual([{ path: ["research", "selectedTechId"], operation: "set", value: null }]);
+  });
+
+  it("distinguishes pausing infinite research from cancellation that may promote its queue", () => {
+    const activeInfinite = projection({
+      selectedTechId: null,
+      activeInfiniteResearchId: "matrix_compression",
+      queuedTechIds: ["electromagnetic_matrix"],
+    });
+    expect(createNativeProjectedPauseResearchCommand({
+      baseRevision: 7,
+      projection: activeInfinite,
+    })?.topLevelChanges).toEqual([{
+      path: ["endgame", "activeInfiniteResearchId"],
+      operation: "set",
+      value: null,
+    }]);
+    expect(createNativeProjectedCancelResearchCommand({
+      baseRevision: 7,
+      projection: activeInfinite,
+    })?.topLevelChanges).toEqual([{
+      path: ["research", "selectedTechId"],
+      operation: "set",
+      value: null,
+    }]);
+  });
+
+  it("selects an unlocked infinite target but conservatively blocks it during finite research", () => {
+    expect(createNativeProjectedSelectInfiniteResearchCommand({
+      baseRevision: 7,
+      projection: projection({ selectedTechId: null }),
+      researchId: "matrix_compression",
+    })?.topLevelChanges).toEqual([{
+      path: ["endgame", "activeInfiniteResearchId"],
+      operation: "set",
+      value: "matrix_compression",
+    }]);
+    expect(createNativeProjectedSelectInfiniteResearchCommand({
+      baseRevision: 7,
+      projection: projection(),
+      researchId: "matrix_compression",
+    })).toBeNull();
+  });
+
   it("appends a queue row from one exact current projection without predicting lab state", () => {
     const command = createNativeProjectedQueueTechnologyCommand({
       baseRevision: 7,

@@ -58,7 +58,7 @@ describe("TechnologyWorkspace", () => {
     expect(onLayoutChange).toHaveBeenCalledWith("compact");
   });
 
-  it("exposes only the proven native queue and automation mutations", () => {
+  it("exposes the native research lifecycle while retaining native-only guards", () => {
     const game = createInitialState();
     game.research.selectedTechId = "electromagnetic_matrix";
     game.research.queuedTechIds = ["electromagnetism"];
@@ -89,8 +89,14 @@ describe("TechnologyWorkspace", () => {
       />,
     ));
 
-    expect(Array.from(host.querySelectorAll<HTMLButtonElement>(".research-current-actions button"))
-      .every((button) => button.disabled)).toBe(true);
+    const currentActions = Array.from(
+      host.querySelectorAll<HTMLButtonElement>(".research-current-actions button"),
+    );
+    expect(currentActions.every((button) => !button.disabled)).toBe(true);
+    act(() => currentActions.find((button) => button.textContent?.includes("暂停"))!.click());
+    act(() => currentActions.find((button) => button.textContent?.includes("取消"))!.click());
+    expect(onPauseResearch).toHaveBeenCalledOnce();
+    expect(onCancelResearch).toHaveBeenCalledOnce();
     expect(Array.from(host.querySelectorAll<HTMLButtonElement>(".technology-layout-toggle button"))
       .every((button) => button.disabled)).toBe(true);
 
@@ -111,10 +117,38 @@ describe("TechnologyWorkspace", () => {
     expect(onInfiniteResearchAutomation).toHaveBeenCalledWith(!readModel.autoResearch);
     expect(Array.from(host.querySelectorAll<HTMLButtonElement>(".infinite-research-console button"))
       .every((button) => button.disabled)).toBe(true);
-    expect(onPauseResearch).not.toHaveBeenCalled();
-    expect(onCancelResearch).not.toHaveBeenCalled();
     expect(onResumeResearch).not.toHaveBeenCalled();
     expect(onSelectInfiniteResearch).not.toHaveBeenCalled();
     expect(onLayoutChange).not.toHaveBeenCalled();
+  });
+
+  it("does not apply the conservative native infinite-research guard to Web play", () => {
+    const game = createInitialState();
+    game.research.selectedTechId = "electromagnetic_matrix";
+    game.research.completedTechIds.push("universe_matrix");
+    const onSelectInfiniteResearch = vi.fn();
+    act(() => root.render(
+      <TechnologyWorkspace
+        open
+        readModel={createWebTechnologyWorkspaceReadModel(game)}
+        onClose={vi.fn()}
+        onSelect={vi.fn()}
+        onPauseResearch={vi.fn()}
+        onCancelResearch={vi.fn()}
+        onResumeResearch={vi.fn()}
+        onRemoveQueued={vi.fn()}
+        onSelectInfiniteResearch={onSelectInfiniteResearch}
+        onInfiniteResearchAutomation={vi.fn()}
+        onLayoutChange={vi.fn()}
+      />,
+    ));
+
+    act(() => host.querySelector<HTMLButtonElement>(".research-advanced-toggle")!.click());
+    const matrixCompression = host.querySelector<HTMLButtonElement>(
+      ".infinite-research-console button",
+    )!;
+    expect(matrixCompression.disabled).toBe(false);
+    act(() => matrixCompression.click());
+    expect(onSelectInfiniteResearch).toHaveBeenCalledWith("matrix_compression");
   });
 });

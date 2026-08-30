@@ -2219,6 +2219,100 @@ fn reset_research_machine_progress(entities: &mut [Value]) -> anyhow::Result<()>
     Ok(())
 }
 
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) enum PlayerResearchTransition {
+    SelectFinite(String),
+    PauseCurrent,
+    CancelCurrent,
+    SelectInfinite(Option<String>),
+}
+
+/// Applies the exact player-facing research lifecycle rules to a disposable
+/// command candidate. The command layer deliberately calls this shared helper
+/// instead of reimplementing completion rewards or matrix-lab resets.
+pub(crate) fn apply_player_research_transition(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    transition: &PlayerResearchTransition,
+) -> anyhow::Result<()> {
+    match transition {
+        PlayerResearchTransition::SelectFinite(technology_id) => {
+            let research = base
+                .get_mut("research")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow!("native research state is missing"))?;
+            research.insert(
+                "selectedTechId".to_owned(),
+                Value::from(technology_id.as_str()),
+            );
+            if research.get("pausedTechId").and_then(Value::as_str) == Some(technology_id.as_str())
+            {
+                research.insert("pausedTechId".to_owned(), Value::Null);
+            }
+            reset_research_machine_progress(entities)?;
+            settle_completed_research_boundaries(state, base, entities)?;
+        }
+        PlayerResearchTransition::PauseCurrent => {
+            let selected = selected_technology_id(base).map(str::to_owned);
+            let research = base
+                .get_mut("research")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow!("native research state is missing"))?;
+            if let Some(technology_id) = selected {
+                research.insert("pausedTechId".to_owned(), Value::from(technology_id));
+                research.insert("selectedTechId".to_owned(), Value::Null);
+            }
+            base.get_mut("endgame")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow!("native endgame state is missing"))?
+                .insert("activeInfiniteResearchId".to_owned(), Value::Null);
+            reset_research_machine_progress(entities)?;
+        }
+        PlayerResearchTransition::CancelCurrent => {
+            let completed_before = base
+                .get("research")
+                .and_then(Value::as_object)
+                .and_then(|research| research.get("completedTechIds"))
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .ok_or_else(|| anyhow!("native completed technology list is missing"))?;
+            settle_completed_research_boundaries(state, base, entities)?;
+            let completed_after = base
+                .get("research")
+                .and_then(Value::as_object)
+                .and_then(|research| research.get("completedTechIds"))
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .ok_or_else(|| anyhow!("native completed technology list is missing"))?;
+            if completed_after > completed_before {
+                return Ok(());
+            }
+            base.get_mut("research")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow!("native research state is missing"))?
+                .insert("selectedTechId".to_owned(), Value::Null);
+            base.get_mut("endgame")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow!("native endgame state is missing"))?
+                .insert("activeInfiniteResearchId".to_owned(), Value::Null);
+            activate_next_queued_technology(state, base)?;
+            reset_research_machine_progress(entities)?;
+        }
+        PlayerResearchTransition::SelectInfinite(target) => {
+            base.get_mut("endgame")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| anyhow!("native endgame state is missing"))?
+                .insert(
+                    "activeInfiniteResearchId".to_owned(),
+                    target.as_deref().map(Value::from).unwrap_or(Value::Null),
+                );
+            reset_research_machine_progress(entities)?;
+        }
+    }
+    Ok(())
+}
+
 fn reset_indexed_research_machine_progress(
     entities: &mut [Value],
     research_entity_indexes: &[usize],

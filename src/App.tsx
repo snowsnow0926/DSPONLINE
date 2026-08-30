@@ -537,9 +537,13 @@ import {
   createNativeProjectedTrayToEntityInputCommand,
 } from "./game/nativeProjectedFactoryInventoryCommands";
 import {
+  createNativeProjectedCancelResearchCommand,
   createNativeProjectedInfiniteResearchAutomationCommand,
-  createNativeProjectedQueueTechnologyCommand,
+  createNativeProjectedPauseResearchCommand,
   createNativeProjectedRemoveQueuedTechnologyCommand,
+  createNativeProjectedResumeResearchCommand,
+  createNativeProjectedSelectInfiniteResearchCommand,
+  createNativeProjectedSelectTechnologyCommand,
 } from "./game/nativeProjectedTechnologyCommands";
 import { createNativeProjectedActivePlanetCommand } from "./game/nativeProjectedPlanetNavigationCommands";
 import {
@@ -19039,6 +19043,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             open
             readModel={technologyWorkspaceReadModel}
             nativeAuthorityRequired={Boolean(nativePlayerAuthorityBoundFrame)}
+            nativeCommandPending={nativePlayerAuthorityCommandPending}
             mobile={nextMobileShell}
             mobileSubview={mobileWorkspaceSubview}
             onMobileOpenDetail={mobileNavigation.openWorkspaceSubview}
@@ -19052,7 +19057,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
                   return;
                 }
                 const accepted = commitNativeProjectedCommand(projection.revision, (baseRevision) =>
-                  createNativeProjectedQueueTechnologyCommand({ baseRevision, projection, techId }));
+                  createNativeProjectedSelectTechnologyCommand({ baseRevision, projection, techId }));
                 if (!accepted) return;
                 trackAnalyticsEvent("research_queue");
                 recordBasicOnboardingEvent("research-selected");
@@ -19067,7 +19072,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             }}
             onPauseResearch={() => {
               if (nativePlayerAuthorityBoundFrame) {
-                setNotice("原生权威暂未开放暂停科研；当前权威状态未改变");
+                const projection = nativeTechnologyCommandProjection;
+                if (!projection) {
+                  setNotice("原生科研投影尚未完成当前 revision 校验；本次操作未应用");
+                  return;
+                }
+                commitNativeProjectedCommand(projection.revision, (baseRevision) =>
+                  createNativeProjectedPauseResearchCommand({ baseRevision, projection }), () => {
+                    setNotice("科研已暂停，已投入矩阵与科技进度均已保留");
+                  });
                 return;
               }
               commitGame((current) => pauseCurrentResearch(current));
@@ -19075,7 +19088,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             }}
             onCancelResearch={() => {
               if (nativePlayerAuthorityBoundFrame) {
-                setNotice("原生权威暂未开放取消科研；当前权威状态未改变");
+                const projection = nativeTechnologyCommandProjection;
+                if (!projection) {
+                  setNotice("原生科研投影尚未完成当前 revision 校验；本次操作未应用");
+                  return;
+                }
+                commitNativeProjectedCommand(projection.revision, (baseRevision) =>
+                  createNativeProjectedCancelResearchCommand({ baseRevision, projection }), () => {
+                    setNotice("当前科研已取消，重新选择时会从已有进度继续");
+                  });
                 return;
               }
               commitGame((current) => cancelCurrentResearch(current));
@@ -19083,7 +19104,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             }}
             onResumeResearch={() => {
               if (nativePlayerAuthorityBoundFrame) {
-                setNotice("原生权威暂未开放继续科研；当前权威状态未改变");
+                const projection = nativeTechnologyCommandProjection;
+                if (!projection) {
+                  setNotice("原生科研投影尚未完成当前 revision 校验；本次操作未应用");
+                  return;
+                }
+                commitNativeProjectedCommand(projection.revision, (baseRevision) =>
+                  createNativeProjectedResumeResearchCommand({ baseRevision, projection }), () => {
+                    setNotice("已从保留进度继续科研");
+                  });
                 return;
               }
               commitGame((current) => resumePausedResearch(current));
@@ -19104,7 +19133,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             }}
             onSelectInfiniteResearch={(researchId: InfiniteResearchId) => {
               if (nativePlayerAuthorityBoundFrame) {
-                setNotice("原生权威暂未开放无限科研目标切换；当前权威状态未改变");
+                const projection = nativeTechnologyCommandProjection;
+                if (!projection) {
+                  setNotice("原生科研投影尚未完成当前 revision 校验；本次操作未应用");
+                  return;
+                }
+                commitNativeProjectedCommand(projection.revision, (baseRevision) =>
+                  createNativeProjectedSelectInfiniteResearchCommand({ baseRevision, projection, researchId }));
                 return;
               }
               commitGame((current) => selectInfiniteResearch(current, researchId));

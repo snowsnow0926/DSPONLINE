@@ -17,8 +17,9 @@ import { WorkspaceFrame } from "./WorkspaceFrame";
 interface TechnologyWorkspaceProps {
   open: boolean;
   readModel: TechnologyWorkspaceReadModel;
-  /** Native authority currently exposes only append/remove queue and auto-research commands. */
+  /** Native authority owns all research mutations; the renderer submits intent only. */
   nativeAuthorityRequired?: boolean;
+  nativeCommandPending?: boolean;
   onClose: () => void;
   onSelect: (techId: TechId) => void;
   onPauseResearch: () => void;
@@ -62,7 +63,7 @@ function infiniteResearchLevel(readModel: TechnologyWorkspaceReadModel, id: Infi
   );
 }
 
-export function TechnologyWorkspace({ open, readModel, nativeAuthorityRequired = false, onClose, onSelect, onPauseResearch, onCancelResearch, onResumeResearch, onRemoveQueued, onSelectInfiniteResearch, onInfiniteResearchAutomation, onLayoutChange, focusTechId, mobile = false, mobileSubview, onMobileOpenDetail }: TechnologyWorkspaceProps) {
+export function TechnologyWorkspace({ open, readModel, nativeAuthorityRequired = false, nativeCommandPending = false, onClose, onSelect, onPauseResearch, onCancelResearch, onResumeResearch, onRemoveQueued, onSelectInfiniteResearch, onInfiniteResearchAutomation, onLayoutChange, focusTechId, mobile = false, mobileSubview, onMobileOpenDetail }: TechnologyWorkspaceProps) {
   const [focusedTechId, setFocusedTechId] = useState<TechId | null>(null);
   const [advancedExpanded, setAdvancedExpanded] = useState(false);
   const [mobileFilter, setMobileFilter] = useState<"available" | "active" | "all">("available");
@@ -151,8 +152,8 @@ export function TechnologyWorkspace({ open, readModel, nativeAuthorityRequired =
     : activeInfinite && activeInfiniteProgress ? getInfiniteResearchCompletion(activeInfiniteProgress, activeInfinite.id) * 100 : 0;
   const maximumTier = Math.max(...TECHNOLOGY_LIST.map((technology) => technology.tier));
   const activeCompletedCount = readModel.research.completedTechIds.filter((techId) => !isDeprecatedTechnology(techId)).length;
-  const finiteQueueMutationReady = !nativeAuthorityRequired || Boolean(
-    readModel.research.selectedTechId && !readModel.activeInfiniteResearchId,
+  const finiteQueueMutationReady = !nativeCommandPending && (
+    !nativeAuthorityRequired || !readModel.activeInfiniteResearchId
   );
 
   if (mobile) {
@@ -185,7 +186,7 @@ export function TechnologyWorkspace({ open, readModel, nativeAuthorityRequired =
           <section className="mobile-detail-section"><header>研究状态</header><div className="mobile-tech-cost-list"><span><ItemGlyph itemId="universe_matrix" /><em>{ITEMS.universe_matrix.name}</em><strong><QuantityValue value={readModel.infiniteResearch[detailInfinite.id].progress} /> / <QuantityValue value={getInfiniteResearchCostString(detailInfinite.id, infiniteResearchLevel(readModel, detailInfinite.id))} /></strong></span></div></section>
           <section className="mobile-detail-section"><header>前置科技</header><div className="mobile-tech-prerequisites"><span className={unlockedEndgame ? "complete" : ""}>{unlockedEndgame ? <Check size={15} /> : <LockKeyhole size={15} />}<strong>完成宇宙矩阵科技</strong></span></div></section>
           <div className="mobile-detail-spacer" />
-          <footer className="mobile-detail-actionbar"><button className="primary" type="button" disabled={nativeAuthorityRequired || !unlockedEndgame || isInfiniteResearchComplete(detailInfinite.id, infiniteResearchLevel(readModel, detailInfinite.id)) || readModel.activeInfiniteResearchId === detailInfinite.id} onClick={() => onSelectInfiniteResearch(detailInfinite.id)} title={nativeAuthorityRequired ? "原生权威暂未开放无限科研目标切换" : undefined}><Rocket size={18} />{nativeAuthorityRequired ? "原生只读" : !unlockedEndgame ? "需要宇宙矩阵科技" : isInfiniteResearchComplete(detailInfinite.id, infiniteResearchLevel(readModel, detailInfinite.id)) ? "已达等级上限" : readModel.activeInfiniteResearchId === detailInfinite.id ? "正在研究" : "开始无限研究"}</button></footer>
+          <footer className="mobile-detail-actionbar"><button className="primary" type="button" disabled={nativeCommandPending || !unlockedEndgame || (nativeAuthorityRequired && Boolean(readModel.research.selectedTechId)) || isInfiniteResearchComplete(detailInfinite.id, infiniteResearchLevel(readModel, detailInfinite.id)) || readModel.activeInfiniteResearchId === detailInfinite.id} onClick={() => onSelectInfiniteResearch(detailInfinite.id)} title={nativeCommandPending ? "等待上一条原生科研命令确认" : nativeAuthorityRequired && readModel.research.selectedTechId ? "请先暂停或取消当前有限科研，再开始无限科研" : undefined}><Rocket size={18} />{nativeCommandPending ? "正在确认" : !unlockedEndgame ? "需要宇宙矩阵科技" : nativeAuthorityRequired && readModel.research.selectedTechId ? "先暂停有限科研" : isInfiniteResearchComplete(detailInfinite.id, infiniteResearchLevel(readModel, detailInfinite.id)) ? "已达等级上限" : readModel.activeInfiniteResearchId === detailInfinite.id ? "正在研究" : "开始无限研究"}</button></footer>
         </div> : detailTechnology ? <div className="mobile-workspace-scroll mobile-technology-detail">
           <header className="mobile-detail-heading"><i>{technologyCompleted(readModel, detailTechnology.id) ? <Check size={20} /> : <FlaskConical size={20} />}</i><span><small>科技层级 {String(detailTechnology.tier + 1).padStart(2, "0")}</small><strong>{detailTechnology.name}</strong></span></header>
           <p className="mobile-detail-summary">{detailTechnology.summary}</p>
@@ -195,10 +196,10 @@ export function TechnologyWorkspace({ open, readModel, nativeAuthorityRequired =
           <div className="mobile-detail-spacer" />
           <footer className="mobile-detail-actionbar">
             {technologyCompleted(readModel, detailTechnology.id) ? <button type="button" disabled><Check size={18} />科技已完成</button>
-              : readModel.research.selectedTechId === detailTechnology.id ? <><button type="button" disabled={nativeAuthorityRequired} onClick={onPauseResearch} title={nativeAuthorityRequired ? "原生权威暂未开放暂停科研" : undefined}><Pause size={18} />暂停研究</button><button className="warning" type="button" disabled={nativeAuthorityRequired} onClick={onCancelResearch} title={nativeAuthorityRequired ? "原生权威暂未开放取消科研" : undefined}><X size={18} />取消并保留进度</button></>
-                : readModel.research.pausedTechId === detailTechnology.id ? <button className="primary" type="button" disabled={nativeAuthorityRequired || Boolean(selected || activeInfinite)} onClick={onResumeResearch} title={nativeAuthorityRequired ? "原生权威暂未开放继续科研" : undefined}><Play size={18} />继续研究</button>
-                  : readModel.research.queuedTechIds.includes(detailTechnology.id) ? <button className="warning" type="button" onClick={() => onRemoveQueued(detailTechnology.id)}><X size={18} />移出科研队列</button>
-                    : <button className="primary" type="button" disabled={!finiteQueueMutationReady || !technologyCanQueue(readModel, detailTechnology.id)} onClick={() => onSelect(detailTechnology.id)} title={nativeAuthorityRequired && !finiteQueueMutationReady ? "原生权威当前只开放向已有有限科研追加队列" : undefined}><FlaskConical size={18} />{nativeAuthorityRequired && !finiteQueueMutationReady ? "原生只读" : readModel.research.selectedTechId || activeInfinite ? "加入科研队列" : "开始研究"}</button>}
+              : readModel.research.selectedTechId === detailTechnology.id ? <><button type="button" disabled={nativeCommandPending} onClick={onPauseResearch} title={nativeCommandPending ? "等待上一条原生科研命令确认" : undefined}><Pause size={18} />暂停研究</button><button className="warning" type="button" disabled={nativeCommandPending} onClick={onCancelResearch} title={nativeCommandPending ? "等待上一条原生科研命令确认" : undefined}><X size={18} />取消并保留进度</button></>
+                : readModel.research.pausedTechId === detailTechnology.id ? <button className="primary" type="button" disabled={nativeCommandPending || Boolean(selected || activeInfinite)} onClick={onResumeResearch} title={nativeCommandPending ? "等待上一条原生科研命令确认" : selected || activeInfinite ? "请先暂停或取消当前研究" : undefined}><Play size={18} />继续研究</button>
+                  : readModel.research.queuedTechIds.includes(detailTechnology.id) ? <button className="warning" type="button" disabled={nativeCommandPending} onClick={() => onRemoveQueued(detailTechnology.id)} title={nativeCommandPending ? "等待上一条原生科研命令确认" : undefined}><X size={18} />移出科研队列</button>
+                    : <button className="primary" type="button" disabled={!finiteQueueMutationReady || !technologyCanQueue(readModel, detailTechnology.id)} onClick={() => onSelect(detailTechnology.id)} title={nativeCommandPending ? "等待上一条原生科研命令确认" : nativeAuthorityRequired && activeInfinite ? "请先暂停或取消无限科研，再开始有限科研" : undefined}><FlaskConical size={18} />{nativeCommandPending ? "正在确认" : nativeAuthorityRequired && activeInfinite ? "先暂停无限科研" : readModel.research.selectedTechId || activeInfinite ? "加入科研队列" : "开始研究"}</button>}
           </footer>
         </div> : <div className="mobile-workspace-scroll" ref={mobileListRef}>
           <section className="mobile-research-status">
@@ -278,9 +279,9 @@ export function TechnologyWorkspace({ open, readModel, nativeAuthorityRequired =
           {!displayedTechnology && activeInfinite ? <span><ItemHoverCard itemId="universe_matrix"><ItemGlyph itemId="universe_matrix" /></ItemHoverCard><QuantityValue value={activeInfiniteProgress?.progress ?? "0"} />/<QuantityValue value={selectedCostTotal} /></span> : null}
         </div>
         <div className="research-current-actions">
-          {selected || activeInfinite ? <button type="button" disabled={nativeAuthorityRequired} onClick={onPauseResearch} title={nativeAuthorityRequired ? "原生权威暂未开放暂停科研" : "停止消耗矩阵并保留研究进度"}><Pause size={13} />暂停</button> : null}
-          {selected || activeInfinite ? <button type="button" disabled={nativeAuthorityRequired} onClick={onCancelResearch} title={nativeAuthorityRequired ? "原生权威暂未开放取消科研" : "取消当前项目，已投入矩阵仍会保留"}><X size={13} />取消</button> : null}
-          {!selected && !activeInfinite && paused ? <button className="confirm" type="button" disabled={nativeAuthorityRequired} onClick={onResumeResearch} title={nativeAuthorityRequired ? "原生权威暂未开放继续科研" : `从现有进度继续研究${paused.name}`}><Play size={13} />继续研究</button> : null}
+          {selected || activeInfinite ? <button type="button" disabled={nativeCommandPending} onClick={onPauseResearch} title={nativeCommandPending ? "等待上一条原生科研命令确认" : "停止消耗矩阵并保留研究进度"}><Pause size={13} />暂停</button> : null}
+          {selected || activeInfinite ? <button type="button" disabled={nativeCommandPending} onClick={onCancelResearch} title={nativeCommandPending ? "等待上一条原生科研命令确认" : "取消当前项目，已投入矩阵仍会保留"}><X size={13} />取消</button> : null}
+          {!selected && !activeInfinite && paused ? <button className="confirm" type="button" disabled={nativeCommandPending} onClick={onResumeResearch} title={nativeCommandPending ? "等待上一条原生科研命令确认" : `从现有进度继续研究${paused.name}`}><Play size={13} />继续研究</button> : null}
         </div>
         {paused && (selected || activeInfinite) ? <div className="research-paused-summary"><Pause size={12} /><span>已暂停：<strong>{paused.name}</strong></span><button type="button" disabled title="先暂停或取消当前项目后再继续">等待当前项目</button></div> : null}
         <button className="research-advanced-toggle" type="button" onClick={() => setAdvancedExpanded((expanded) => !expanded)} title={advancedExpanded ? "收起升级与无限科研" : "展开升级与无限科研"} aria-label={advancedExpanded ? "收起科研详情" : "展开科研详情"} aria-expanded={advancedExpanded}>
@@ -293,7 +294,7 @@ export function TechnologyWorkspace({ open, readModel, nativeAuthorityRequired =
               <div className="research-queue__item" key={techId}>
                 <b>{index + 1}</b>
                 <span>{getTechnology(techId)?.name}</span>
-                <button type="button" onClick={() => onRemoveQueued(techId)} title={`从科研队列移除${getTechnology(techId)?.name}`} aria-label={`从科研队列移除${getTechnology(techId)?.name}`}><X size={12} /></button>
+                <button type="button" disabled={nativeCommandPending} onClick={() => onRemoveQueued(techId)} title={nativeCommandPending ? "等待上一条原生科研命令确认" : `从科研队列移除${getTechnology(techId)?.name}`} aria-label={`从科研队列移除${getTechnology(techId)?.name}`}><X size={12} /></button>
               </div>
             ))}
           </div>
@@ -312,7 +313,7 @@ export function TechnologyWorkspace({ open, readModel, nativeAuthorityRequired =
           </div>
           </section>
           <section className="infinite-research-console" aria-label="无限科技">
-          <header><span><Rocket size={13} />无限科技</span><strong>{endgameUnlocked(readModel) ? "可持续研究" : "宇宙矩阵后解锁"}</strong><label><input type="checkbox" checked={readModel.autoResearch} disabled={!endgameUnlocked(readModel)} onChange={(event) => onInfiniteResearchAutomation(event.target.checked)} />自动续研</label></header>
+          <header><span><Rocket size={13} />无限科技</span><strong>{endgameUnlocked(readModel) ? "可持续研究" : "宇宙矩阵后解锁"}</strong><label><input type="checkbox" checked={readModel.autoResearch} disabled={nativeCommandPending || !endgameUnlocked(readModel)} onChange={(event) => onInfiniteResearchAutomation(event.target.checked)} />自动续研</label></header>
           <div>
             {INFINITE_RESEARCH_DEFINITIONS.map((definition) => {
               const progress = readModel.infiniteResearch[definition.id];
@@ -320,7 +321,7 @@ export function TechnologyWorkspace({ open, readModel, nativeAuthorityRequired =
               const level = infiniteResearchLevel(readModel, definition.id);
               const cost = getInfiniteResearchCostString(definition.id, level);
               const capped = isInfiniteResearchComplete(definition.id, level);
-              return <button type="button" key={definition.id} className={active ? "active" : ""} disabled={nativeAuthorityRequired || !endgameUnlocked(readModel) || capped} onClick={() => onSelectInfiniteResearch(definition.id)} title={nativeAuthorityRequired ? "原生权威暂未开放无限科研目标切换" : active ? definition.summary : `${definition.summary} · ${formatQuantityExact(cost)} 矩阵`}>
+              return <button type="button" key={definition.id} className={active ? "active" : ""} disabled={nativeCommandPending || !endgameUnlocked(readModel) || capped || (nativeAuthorityRequired && (Boolean(selected) || active))} onClick={() => onSelectInfiniteResearch(definition.id)} title={nativeCommandPending ? "等待上一条原生科研命令确认" : nativeAuthorityRequired && selected ? "请先暂停或取消当前有限科研，再开始无限科研" : active ? definition.summary : `${definition.summary} · ${formatQuantityExact(cost)} 矩阵`}>
                 <i style={{ color: definition.color }}>{definition.symbol}</i><span><strong>{definition.name}</strong><small>Lv.{level}{progress.historicalLevel && progress.historicalLevel > level ? `（历史 Lv.${progress.historicalLevel}）` : ""} · {definition.effect}</small></span><em>{capped ? "已达上限" : active ? `${Math.round(getInfiniteResearchCompletion(progress, definition.id) * 100)}%` : `${formatQuantityCompact(cost)} 矩阵`}</em>
               </button>;
             })}
@@ -357,9 +358,9 @@ export function TechnologyWorkspace({ open, readModel, nativeAuthorityRequired =
                     type="button"
                     key={technology.id}
                     data-tech-id={technology.id}
-                    disabled={isPaused ? nativeAuthorityRequired || Boolean(selected || activeInfinite) : !finiteQueueMutationReady || !available || active || queued}
+                    disabled={nativeCommandPending || (isPaused ? Boolean(selected || activeInfinite) : !finiteQueueMutationReady || !available || active || queued)}
                     onClick={() => isPaused ? onResumeResearch() : onSelect(technology.id)}
-                    title={nativeAuthorityRequired && (isPaused || !finiteQueueMutationReady) ? "原生权威当前只开放向已有有限科研追加队列" : isPaused ? selected || activeInfinite ? "先暂停或取消当前研究" : `继续研究：${technology.name}` : available ? readModel.research.selectedTechId ? `加入科研队列：${technology.name}` : `开始研究：${technology.name}` : undefined}
+                    title={nativeCommandPending ? "等待上一条原生科研命令确认" : nativeAuthorityRequired && activeInfinite ? "请先暂停或取消无限科研，再开始有限科研" : isPaused ? selected || activeInfinite ? "先暂停或取消当前研究" : `继续研究：${technology.name}` : available ? readModel.research.selectedTechId ? `加入科研队列：${technology.name}` : `开始研究：${technology.name}` : undefined}
                   >
                     <header>
                       <i>{complete ? <Check size={15} /> : active ? <Play size={15} /> : isPaused ? <Pause size={15} /> : queued ? <ListOrdered size={15} /> : available ? <FlaskConical size={15} /> : <LockKeyhole size={15} />}</i>

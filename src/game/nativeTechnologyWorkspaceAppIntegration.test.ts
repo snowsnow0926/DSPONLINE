@@ -22,21 +22,29 @@ describe("native technology workspace App integration", () => {
     expect(workspace).not.toMatch(/networkMatrixStock/);
   });
 
-  it("routes only the proven native research subset through exact projected commands", () => {
+  it("routes the native research lifecycle through exact projected intent commands", () => {
     expect(app).toMatch(/nativeAuthorityRequired=\{Boolean\(nativePlayerAuthorityBoundFrame\)\}/);
-    expect(app).toMatch(/createNativeProjectedQueueTechnologyCommand\(\{ baseRevision, projection, techId \}\)/);
+    expect(app).toMatch(/nativeCommandPending=\{nativePlayerAuthorityCommandPending\}/);
+    expect(app).toMatch(/createNativeProjectedSelectTechnologyCommand\(\{ baseRevision, projection, techId \}\)/);
+    expect(app).toMatch(/createNativeProjectedPauseResearchCommand\(\{ baseRevision, projection \}\)/);
+    expect(app).toMatch(/createNativeProjectedCancelResearchCommand\(\{ baseRevision, projection \}\)/);
+    expect(app).toMatch(/createNativeProjectedResumeResearchCommand\(\{ baseRevision, projection \}\)/);
+    expect(app).toMatch(/createNativeProjectedSelectInfiniteResearchCommand\(\{ baseRevision, projection, researchId \}\)/);
     expect(app).toMatch(/createNativeProjectedRemoveQueuedTechnologyCommand\(\{ baseRevision, projection, techId \}\)/);
     expect(app).toMatch(/createNativeProjectedInfiniteResearchAutomationCommand\(\{ baseRevision, projection, enabled \}\)/);
     expect(app).toMatch(/nativeTechnologyWorkspaceReadModel\.revision === factoryThinViewExpectedRevision[\s\S]*?nativeTechnologyWorkspaceSnapshot\.frame\?\.projection/);
   });
 
-  it("keeps unsupported native research mutations visibly read-only", () => {
-    expect(workspace).toMatch(/nativeAuthorityRequired \|\| !unlockedEndgame/);
-    expect(workspace).toMatch(/disabled=\{nativeAuthorityRequired\} onClick=\{onPauseResearch\}/);
-    expect(workspace).toMatch(/disabled=\{nativeAuthorityRequired\} onClick=\{onCancelResearch\}/);
-    expect(workspace).toMatch(/disabled=\{nativeAuthorityRequired \|\| Boolean\(selected \|\| activeInfinite\)\} onClick=\{onResumeResearch\}/);
-    expect(workspace).toMatch(/finiteQueueMutationReady = !nativeAuthorityRequired \|\| Boolean/);
-    expect(app).toMatch(/原生权威暂未开放暂停科研；当前权威状态未改变/);
-    expect(app).toMatch(/原生权威暂未开放无限科研目标切换；当前权威状态未改变/);
+  it("keeps pending commands single-flight and explains the native-only infinite guard", () => {
+    expect(workspace).toMatch(/nativeCommandPending \? "等待上一条原生科研命令确认"/);
+    expect(workspace).toMatch(/nativeAuthorityRequired && readModel\.research\.selectedTechId \? "请先暂停或取消当前有限科研，再开始无限科研"/);
+    expect(workspace).toMatch(/finiteQueueMutationReady = !nativeCommandPending && \([\s\S]*?!nativeAuthorityRequired \|\| !readModel\.activeInfiniteResearchId/);
+    expect(workspace).not.toMatch(/原生权威暂未开放暂停科研/);
+    expect(app).not.toMatch(/原生权威暂未开放无限科研目标切换/);
+  });
+
+  it("does not apply the conservative native infinite guard to the Web workspace", () => {
+    expect(workspace).toMatch(/nativeAuthorityRequired && Boolean\(readModel\.research\.selectedTechId\)/);
+    expect(workspace).toMatch(/nativeAuthorityRequired && \(Boolean\(selected\) \|\| active\)/);
   });
 });

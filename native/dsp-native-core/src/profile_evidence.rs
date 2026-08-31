@@ -11,6 +11,7 @@ const MAX_PROFILE_OPERATION_RECORDS: usize = 2;
 pub enum ProfileOperationPurpose {
     LocalDispatchTimingV1,
     LocalDispatchShapeV1,
+    QuantumOactiveShapeV1,
 }
 
 impl ProfileOperationPurpose {
@@ -18,6 +19,7 @@ impl ProfileOperationPurpose {
         match self {
             Self::LocalDispatchTimingV1 => "local-dispatch-timing-v1",
             Self::LocalDispatchShapeV1 => "local-dispatch-shape-v1",
+            Self::QuantumOactiveShapeV1 => "quantum-oactive-shape-v1",
         }
     }
 }
@@ -131,6 +133,14 @@ pub(crate) fn current_profile_operation_binding() -> Option<ProfileOperationBind
         slot.borrow()
             .as_ref()
             .map(|context| context.binding.clone())
+    })
+}
+
+pub(crate) fn current_profile_operation_purpose() -> Option<ProfileOperationPurpose> {
+    PROFILE_OPERATION.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|context| context.binding.purpose())
     })
 }
 

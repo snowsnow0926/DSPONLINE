@@ -4031,6 +4031,10 @@ fn simulate_step(
         quantum_runtime_bandwidth,
         false,
     )?;
+    crate::quantum_logistics::record_quantum_oactive_scan(
+        crate::quantum_logistics::QuantumOactiveProfileStage::SupplyFlush,
+        quantum_flush_scan,
+    );
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tquantum-flush-active\t{}/{}\tdense={}\tdirectory-fallback={}",
@@ -5101,6 +5105,10 @@ fn simulate_step(
             quantum_step_runtime,
             &step_route_ledger,
         )?;
+        crate::quantum_logistics::record_quantum_oactive_scan(
+            crate::quantum_logistics::QuantumOactiveProfileStage::Download,
+            scan,
+        );
         if profile_enabled {
             eprintln!(
                 "DSP_NATIVE_CORE_PROFILE\tquantum-download-active\t{}/{}\tdense={}\tdirectory-fallback={}",
@@ -5331,7 +5339,10 @@ fn simulate_step(
             local_dispatch_scan.dense_fallback,
             local_dispatch_scan.directory_fallback,
         );
-        if let Some(binding) = profile_operation.as_ref() {
+        if let Some(binding) = profile_operation
+            .as_ref()
+            .filter(|_| timing_profile || shape_profile)
+        {
             let operation_binding = json!({
                 "protocol": "native-core-advance-profile-v1",
                 "requestId": binding.request_id(),
@@ -5725,6 +5736,10 @@ fn simulate_step(
                 &congestion_route_ledger,
                 post_research_quantum_runtime_bandwidth,
             )?;
+            crate::quantum_logistics::record_quantum_oactive_scan(
+                crate::quantum_logistics::QuantumOactiveProfileStage::Upload,
+                quantum_upload_flush_scan,
+            );
             if profile_enabled {
                 eprintln!(
                     "DSP_NATIVE_CORE_PROFILE\tquantum-upload-flush-active\t{}/{}\tdense={}\tdirectory-fallback={}",
@@ -5820,6 +5835,8 @@ pub(crate) fn prepare_advance(
     isolate_construction_automation: bool,
 ) -> anyhow::Result<PreparedFactoryAdvance> {
     let profile_enabled = crate::profile_evidence::profile_environment_enabled();
+    let quantum_oactive_profile =
+        crate::quantum_logistics::QuantumOactiveProfileGuard::begin_if_requested();
     let mut profile_checkpoint = profile_enabled.then(std::time::Instant::now);
     if profile_enabled {
         let runtime = crate::deterministic_runtime::runtime();
@@ -6124,6 +6141,35 @@ pub(crate) fn prepare_advance(
         && station.get("status").and_then(Value::as_str) == Some("locked")
     {
         station.insert("status".to_owned(), Value::from("eligible"));
+    }
+    if let Some(mut structured_profile) = quantum_oactive_profile.finish() {
+        let binding = crate::profile_evidence::current_profile_operation_binding()
+            .filter(|binding| {
+                binding.purpose()
+                    == crate::profile_evidence::ProfileOperationPurpose::QuantumOactiveShapeV1
+            })
+            .expect("quantum O(active) profile binding must remain installed");
+        structured_profile
+            .as_object_mut()
+            .expect("quantum O(active) profile evidence must be an object")
+            .insert(
+                "operationBinding".to_owned(),
+                json!({
+                    "protocol": "native-core-advance-profile-v1",
+                    "requestId": binding.request_id(),
+                    "sessionIdSha256": hex::encode(binding.session_id_sha256()),
+                    "baseRevision": binding.base_revision(),
+                    "expectedMeasuredRevision": binding.expected_measured_revision(),
+                    "profilePurpose": binding.purpose().as_str(),
+                }),
+            );
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE_RECORD_DIAGNOSTIC\t{}",
+            structured_profile,
+        );
+        let captured =
+            crate::profile_evidence::record_profile_operation_evidence(structured_profile);
+        eprintln!("DSP_NATIVE_CORE_PROFILE_RECORD_CAPTURED\t{captured}");
     }
     Ok(PreparedFactoryAdvance {
         base,
@@ -6875,6 +6921,87 @@ pub(crate) mod tests {
             wall_seconds: 5.1,
             advance_mode: CoreAdvanceMode::Exact,
             include_diagnostics: false,
+        }
+    }
+
+    #[test]
+    fn quantum_oactive_profile_is_single_response_bound_and_state_neutral_at_1_5_60_seconds() {
+        for (request_id, seconds) in [(101_u64, 1.0), (105, 5.0), (160, 60.0)] {
+            let source = construction_isolation_fixture();
+            let mut ordinary = source.clone();
+            let mut profiled = source;
+            let base_revision = ordinary.revision;
+            let request = CoreAdvanceRequest {
+                base_revision,
+                simulation_seconds: seconds,
+                wall_seconds: seconds,
+                advance_mode: CoreAdvanceMode::Exact,
+                include_diagnostics: false,
+            };
+            let ordinary_result = ordinary.advance(&request).expect("ordinary exact advance");
+            let session_id = format!("quantum-oactive-{seconds}");
+            let binding = crate::profile_evidence::ProfileOperationBinding::new(
+                request_id,
+                &session_id,
+                base_revision,
+                crate::profile_evidence::ProfileOperationPurpose::QuantumOactiveShapeV1,
+            )
+            .expect("profile binding");
+            let capture = crate::profile_evidence::with_profile_operation_binding(binding, || {
+                profiled.advance(&request)
+            });
+            let profiled_result = capture.result.expect("profiled exact advance");
+
+            assert!(!capture.overflowed, "{seconds}s");
+            assert_eq!(capture.records.len(), 1, "{seconds}s");
+            assert_eq!(
+                profiled_result.revision, ordinary_result.revision,
+                "{seconds}s"
+            );
+            assert_eq!(
+                profiled.canonical_sha256().unwrap(),
+                ordinary.canonical_sha256().unwrap(),
+                "canonical hash at {seconds}s"
+            );
+            assert_eq!(
+                profiled.domain_sha256().unwrap(),
+                ordinary.domain_sha256().unwrap(),
+                "domain hash at {seconds}s"
+            );
+            assert_eq!(
+                profiled.materialize().unwrap(),
+                ordinary.materialize().unwrap(),
+                "materialized state at {seconds}s"
+            );
+            let evidence = capture.records.first().expect("one profile record");
+            assert_eq!(evidence["recordType"], "quantum-oactive-shape");
+            assert_eq!(evidence["operationBinding"]["requestId"], request_id);
+            assert_eq!(
+                evidence["operationBinding"]["sessionIdSha256"],
+                hex::encode(<sha2::Sha256 as sha2::Digest>::digest(
+                    session_id.as_bytes()
+                ))
+            );
+            assert_eq!(evidence["operationBinding"]["baseRevision"], base_revision);
+            assert_eq!(
+                evidence["operationBinding"]["expectedMeasuredRevision"],
+                ordinary_result.revision
+            );
+            assert_eq!(
+                evidence["operationBinding"]["profilePurpose"],
+                "quantum-oactive-shape-v1"
+            );
+            assert!(
+                evidence["activeScanCalls"]
+                    .as_u64()
+                    .is_some_and(|calls| calls >= seconds as u64),
+                "{seconds}s"
+            );
+            assert!(
+                evidence["perItemFanout"]
+                    .as_array()
+                    .is_some_and(|rows| rows.len() <= 64)
+            );
         }
     }
 

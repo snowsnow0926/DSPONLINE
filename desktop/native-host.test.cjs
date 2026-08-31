@@ -1620,14 +1620,32 @@ test("structured profile request is bound to its response frame and ignores late
         expectedMeasuredRevision: 12,
         profilePurpose: request.profilePurpose,
       };
-      const record = {
-        schemaVersion: 2,
-        recordType: "local-dispatch-timing",
-        instrumentationVersion: "local-dispatch-profile-v3",
-        measurementScope: "production-dispatch-only-observer-excluded",
-        stageDurationNs: 100,
-        operationBinding,
-      };
+      const record = request.profilePurpose === "quantum-oactive-shape-v1"
+        ? {
+            schemaVersion: 2,
+            recordType: "quantum-oactive-shape",
+            instrumentationVersion: "quantum-oactive-profile-v1",
+            workScope: "shape-proxy-only-not-time-or-speedup",
+            activeScanCalls: 84,
+            networkParseSelectedRows: 12,
+            networkParseTotalRows: 120,
+            networkWriteDirtyRows: 12,
+            networkWriteTotalRows: 120,
+            zeroNormalizationRows: 2,
+            linearOrderRows: 12,
+            fullSortRows: 0,
+            sortComparisons: 0,
+            perItemFanout: [],
+            operationBinding,
+          }
+        : {
+            schemaVersion: 2,
+            recordType: "local-dispatch-timing",
+            instrumentationVersion: "local-dispatch-profile-v3",
+            measurementScope: "production-dispatch-only-observer-excluded",
+            stageDurationNs: 100,
+            operationBinding,
+          };
       const records = request.sessionId === "session-response-duplicate"
         ? [record, record]
         : [record];
@@ -1673,6 +1691,18 @@ test("structured profile request is bound to its response frame and ignores late
   assert.ok(result.operationDurationNs > 0);
   await new Promise((resolve) => setTimeout(resolve, 40));
   assert.equal(result.profileChannel.records.length, 1);
+
+  const quantum = await client.requestWithStructuredProfileEvidence({
+    operation: "coreAdvance",
+    profilePurpose: "quantum-oactive-shape-v1",
+    sessionId: "session-quantum-response-bound",
+    request: { baseRevision: 11, simulationSeconds: 60, wallSeconds: 60, includeDiagnostics: false },
+  });
+  assert.equal(quantum.value.revision, 12);
+  assert.equal(quantum.operationBinding.profilePurpose, "quantum-oactive-shape-v1");
+  assert.equal(quantum.profileChannel.responseBound, true);
+  assert.equal(quantum.profileChannel.records.length, 1);
+  assert.equal(quantum.profileChannel.records[0].record.recordType, "quantum-oactive-shape");
 
   for (const [sessionId, expected] of [
     ["session-response-missing", { responseBound: false, malformedCount: 1, dropped: false, records: 0 }],

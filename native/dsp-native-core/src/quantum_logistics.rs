@@ -1,5 +1,6 @@
 #[cfg(test)]
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::mem::size_of;
@@ -8,7 +9,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail};
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
-use serde_json::{Map, Number, Value};
+use serde_json::{Map, Number, Value, json};
 
 use crate::deterministic_runtime::DeterministicRuntime;
 use crate::state::{CoreState, FactoryTopology};
@@ -74,6 +75,7 @@ const QUANTUM_ACTIVE_DENSE_NUMERATOR: usize = 3;
 const QUANTUM_ACTIVE_DENSE_DENOMINATOR: usize = 4;
 const QUANTUM_PLAN_VALIDATION_ROWS_PER_CHUNK: usize = 1_024;
 const QUANTUM_FLUSH_PROBE_ROWS_PER_CHUNK: usize = 1_024;
+const MAX_QUANTUM_OACTIVE_PROFILE_FANOUT_ROWS: usize = 64;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct QuantumActiveScan {
@@ -92,6 +94,277 @@ pub(crate) struct QuantumActiveScan {
     pub network_parse_selected_rows: usize,
     pub network_parse_total_rows: usize,
     pub network_parse_full_scan_fallback: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuantumOactiveProfileStage {
+    SupplyFlush,
+    Download,
+    Upload,
+}
+
+impl QuantumOactiveProfileStage {
+    const fn index(self) -> usize {
+        match self {
+            Self::SupplyFlush => 0,
+            Self::Download => 1,
+            Self::Upload => 2,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct QuantumOactiveStageProfile {
+    calls: u64,
+    selected_rows: u64,
+    total_rows: u64,
+    dense_fallbacks: u64,
+    directory_fallbacks: u64,
+    network_parse_selected_rows: u64,
+    network_parse_total_rows: u64,
+    network_parse_full_scan_fallbacks: u64,
+    linear_order_rows: u64,
+    full_sort_rows: u64,
+}
+
+#[derive(Debug, Default)]
+struct QuantumOactiveProfileContext {
+    stages: [QuantumOactiveStageProfile; 3],
+    network_write_calls: u64,
+    network_write_dirty_rows: u64,
+    network_write_total_rows: u64,
+    network_write_dense_fallbacks: u64,
+    network_write_signature_fallbacks: u64,
+    zero_normalization_rows: u64,
+    request_rows: u64,
+    sort_comparisons: u64,
+    per_item_fanout: BTreeMap<[u8; 32], u64>,
+    per_item_fanout_omitted_request_rows: u64,
+}
+
+thread_local! {
+    static QUANTUM_OACTIVE_PROFILE: RefCell<Option<QuantumOactiveProfileContext>> = const { RefCell::new(None) };
+}
+
+#[derive(Debug)]
+pub(crate) struct QuantumOactiveProfileGuard {
+    active: bool,
+    previous: Option<QuantumOactiveProfileContext>,
+}
+
+impl QuantumOactiveProfileGuard {
+    pub(crate) fn begin_if_requested() -> Self {
+        let active = crate::profile_evidence::current_profile_operation_purpose()
+            == Some(crate::profile_evidence::ProfileOperationPurpose::QuantumOactiveShapeV1);
+        let previous = active
+            .then(|| {
+                QUANTUM_OACTIVE_PROFILE
+                    .with(|slot| slot.replace(Some(QuantumOactiveProfileContext::default())))
+            })
+            .flatten();
+        Self { active, previous }
+    }
+
+    pub(crate) fn finish(mut self) -> Option<Value> {
+        if !self.active {
+            return None;
+        }
+        let context = QUANTUM_OACTIVE_PROFILE.with(|slot| slot.replace(self.previous.take()))?;
+        self.active = false;
+        Some(quantum_oactive_profile_value(context))
+    }
+}
+
+impl Drop for QuantumOactiveProfileGuard {
+    fn drop(&mut self) {
+        if self.active {
+            QUANTUM_OACTIVE_PROFILE.with(|slot| {
+                slot.replace(self.previous.take());
+            });
+        }
+    }
+}
+
+fn saturating_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+fn add_counter(target: &mut u64, value: usize) {
+    *target = target.saturating_add(saturating_u64(value));
+}
+
+pub(crate) fn record_quantum_oactive_scan(
+    stage: QuantumOactiveProfileStage,
+    scan: QuantumActiveScan,
+) {
+    QUANTUM_OACTIVE_PROFILE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(context) = slot.as_mut() else {
+            return;
+        };
+        let target = &mut context.stages[stage.index()];
+        target.calls = target.calls.saturating_add(1);
+        add_counter(&mut target.selected_rows, scan.selected_rows);
+        add_counter(&mut target.total_rows, scan.total_rows);
+        target.dense_fallbacks = target
+            .dense_fallbacks
+            .saturating_add(u64::from(scan.dense_fallback));
+        target.directory_fallbacks = target
+            .directory_fallbacks
+            .saturating_add(u64::from(scan.directory_fallback));
+        add_counter(
+            &mut target.network_parse_selected_rows,
+            scan.network_parse_selected_rows,
+        );
+        add_counter(
+            &mut target.network_parse_total_rows,
+            scan.network_parse_total_rows,
+        );
+        target.network_parse_full_scan_fallbacks = target
+            .network_parse_full_scan_fallbacks
+            .saturating_add(u64::from(scan.network_parse_full_scan_fallback));
+        add_counter(&mut target.linear_order_rows, scan.linear_order_rows);
+        add_counter(&mut target.full_sort_rows, scan.full_sort_rows);
+    });
+}
+
+fn record_quantum_oactive_write(scan: NetworkWriteScan) {
+    QUANTUM_OACTIVE_PROFILE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(context) = slot.as_mut() else {
+            return;
+        };
+        context.network_write_calls = context.network_write_calls.saturating_add(1);
+        add_counter(&mut context.network_write_dirty_rows, scan.dirty_rows);
+        add_counter(&mut context.network_write_total_rows, scan.total_rows);
+        context.network_write_dense_fallbacks = context
+            .network_write_dense_fallbacks
+            .saturating_add(u64::from(scan.dense_fallback));
+        context.network_write_signature_fallbacks = context
+            .network_write_signature_fallbacks
+            .saturating_add(u64::from(scan.signature_fallback));
+        add_counter(
+            &mut context.zero_normalization_rows,
+            scan.zero_normalization_rows,
+        );
+    });
+}
+
+fn record_quantum_oactive_request_fanout(requests: &[Request]) {
+    QUANTUM_OACTIVE_PROFILE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(context) = slot.as_mut() else {
+            return;
+        };
+        add_counter(&mut context.request_rows, requests.len());
+        for request in requests {
+            let item_sha256: [u8; 32] =
+                <sha2::Sha256 as sha2::Digest>::digest(request.item_id.as_bytes()).into();
+            if let Some(fanout) = context.per_item_fanout.get_mut(&item_sha256) {
+                *fanout = fanout.saturating_add(1);
+            } else if context.per_item_fanout.len() < MAX_QUANTUM_OACTIVE_PROFILE_FANOUT_ROWS {
+                context.per_item_fanout.insert(item_sha256, 1);
+            } else {
+                context.per_item_fanout_omitted_request_rows = context
+                    .per_item_fanout_omitted_request_rows
+                    .saturating_add(1);
+            }
+        }
+    });
+}
+
+fn quantum_oactive_profile_active() -> bool {
+    QUANTUM_OACTIVE_PROFILE.with(|slot| slot.borrow().is_some())
+}
+
+fn record_quantum_oactive_sort_comparisons(comparisons: usize) {
+    QUANTUM_OACTIVE_PROFILE.with(|slot| {
+        if let Some(context) = slot.borrow_mut().as_mut() {
+            add_counter(&mut context.sort_comparisons, comparisons);
+        }
+    });
+}
+
+fn stage_profile_value(profile: QuantumOactiveStageProfile) -> Value {
+    json!({
+        "calls": profile.calls,
+        "selectedRows": profile.selected_rows,
+        "totalRows": profile.total_rows,
+        "denseFallbacks": profile.dense_fallbacks,
+        "directoryFallbacks": profile.directory_fallbacks,
+        "networkParseSelectedRows": profile.network_parse_selected_rows,
+        "networkParseTotalRows": profile.network_parse_total_rows,
+        "networkParseFullScanFallbacks": profile.network_parse_full_scan_fallbacks,
+        "linearOrderRows": profile.linear_order_rows,
+        "fullSortRows": profile.full_sort_rows,
+    })
+}
+
+fn quantum_oactive_profile_value(context: QuantumOactiveProfileContext) -> Value {
+    let active_scan_calls = context
+        .stages
+        .iter()
+        .fold(0_u64, |total, stage| total.saturating_add(stage.calls));
+    let selected_rows = context.stages.iter().fold(0_u64, |total, stage| {
+        total.saturating_add(stage.selected_rows)
+    });
+    let total_rows = context
+        .stages
+        .iter()
+        .fold(0_u64, |total, stage| total.saturating_add(stage.total_rows));
+    let network_parse_selected_rows = context.stages.iter().fold(0_u64, |total, stage| {
+        total.saturating_add(stage.network_parse_selected_rows)
+    });
+    let network_parse_total_rows = context.stages.iter().fold(0_u64, |total, stage| {
+        total.saturating_add(stage.network_parse_total_rows)
+    });
+    let linear_order_rows = context.stages.iter().fold(0_u64, |total, stage| {
+        total.saturating_add(stage.linear_order_rows)
+    });
+    let full_sort_rows = context.stages.iter().fold(0_u64, |total, stage| {
+        total.saturating_add(stage.full_sort_rows)
+    });
+    let fanout_truncated = context.per_item_fanout_omitted_request_rows > 0;
+    let per_item_fanout = context
+        .per_item_fanout
+        .into_iter()
+        .map(|(item_sha256, request_rows)| {
+            json!({
+                "itemIdSha256": hex::encode(item_sha256),
+                "requestRows": request_rows,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "schemaVersion": 2,
+        "recordType": "quantum-oactive-shape",
+        "instrumentationVersion": "quantum-oactive-profile-v1",
+        "workScope": "shape-proxy-only-not-time-or-speedup",
+        "activeScanCalls": active_scan_calls,
+        "selectedRows": selected_rows,
+        "totalRows": total_rows,
+        "networkParseSelectedRows": network_parse_selected_rows,
+        "networkParseTotalRows": network_parse_total_rows,
+        "networkWriteCalls": context.network_write_calls,
+        "networkWriteDirtyRows": context.network_write_dirty_rows,
+        "networkWriteTotalRows": context.network_write_total_rows,
+        "networkWriteDenseFallbacks": context.network_write_dense_fallbacks,
+        "networkWriteSignatureFallbacks": context.network_write_signature_fallbacks,
+        "zeroNormalizationRows": context.zero_normalization_rows,
+        "linearOrderRows": linear_order_rows,
+        "fullSortRows": full_sort_rows,
+        "sortComparisons": context.sort_comparisons,
+        "requestRows": context.request_rows,
+        "perItemFanout": per_item_fanout,
+        "perItemFanoutLimit": MAX_QUANTUM_OACTIVE_PROFILE_FANOUT_ROWS,
+        "perItemFanoutTruncated": fanout_truncated,
+        "perItemFanoutOmittedRequestRows": context.per_item_fanout_omitted_request_rows,
+        "stages": {
+            "supplyFlush": stage_profile_value(context.stages[0]),
+            "download": stage_profile_value(context.stages[1]),
+            "upload": stage_profile_value(context.stages[2]),
+        },
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -360,6 +633,7 @@ struct Network {
     dirty_routing_cursors: BTreeSet<String>,
     dirty_upload_routing_cursors: BTreeSet<String>,
     runtime_flow_dirty: bool,
+    zero_normalization_rows: usize,
     /// Partial sessions contain only keys selected by a topology-proven
     /// active boundary (plus every known zero key required by legacy deposit
     /// normalization). Such a session may only use the in-place patch writer.
@@ -490,6 +764,7 @@ struct NetworkWriteScan {
     total_rows: usize,
     dense_fallback: bool,
     signature_fallback: bool,
+    zero_normalization_rows: usize,
 }
 
 #[derive(Debug)]
@@ -884,6 +1159,7 @@ impl Network {
         for item_id in zero_items {
             self.inventory.remove(&item_id);
             self.dirty_inventory.insert(item_id);
+            self.zero_normalization_rows = self.zero_normalization_rows.saturating_add(1);
         }
     }
 
@@ -1587,6 +1863,7 @@ fn write_network_with_scan(
         total_rows: network.mutable_record_rows,
         dense_fallback,
         signature_fallback,
+        zero_normalization_rows: network.zero_normalization_rows,
     };
     if dense_fallback || signature_fallback {
         if network.partial {
@@ -1595,6 +1872,7 @@ fn write_network_with_scan(
             ));
         }
         write_network_full(base, network)?;
+        record_quantum_oactive_write(scan);
         return Ok(scan);
     }
 
@@ -1646,6 +1924,7 @@ fn write_network_with_scan(
             raw.remove("runtimeFlow");
         }
     }
+    record_quantum_oactive_write(scan);
     Ok(scan)
 }
 
@@ -3128,7 +3407,16 @@ fn take_request_order_comparisons() -> usize {
 }
 
 fn sorted_requests(requests: &mut [Request]) {
-    requests.sort_by(request_order);
+    if quantum_oactive_profile_active() {
+        let mut comparisons = 0_usize;
+        requests.sort_by(|left, right| {
+            comparisons = comparisons.saturating_add(1);
+            request_order(left, right)
+        });
+        record_quantum_oactive_sort_comparisons(comparisons);
+    } else {
+        requests.sort_by(request_order);
+    }
 }
 
 fn request_indices_by_topology_rank(
@@ -4041,6 +4329,7 @@ fn settle_downloads_with_request_count(
             Request::construction(demand),
         );
     }
+    record_quantum_oactive_request_fanout(&requests);
     let mut allocation_requests = requests.clone();
     sorted_requests(&mut allocation_requests);
     let delivered = settle_outputs(
@@ -4392,6 +4681,7 @@ pub(crate) fn settle_active_downloads(
             linear_order_eligible = false;
         }
     }
+    record_quantum_oactive_request_fanout(&requests);
     let linear_allocation_requests = (!scan.dense_fallback
         && !scan.directory_fallback
         && linear_order_eligible
@@ -4730,6 +5020,7 @@ pub(crate) fn settle_uploads(
             }
         }
     }
+    record_quantum_oactive_request_fanout(&requests);
     let linear_allocation_requests = (use_index
         && !upload_scan.dense_fallback
         && !upload_scan.directory_fallback
@@ -5327,6 +5618,25 @@ pub(crate) fn admission_reason(state: &CoreState) -> anyhow::Result<Option<&'sta
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    fn capture_quantum_oactive_profile<T>(operation: impl FnOnce() -> T) -> (T, Value) {
+        let binding = crate::profile_evidence::ProfileOperationBinding::new(
+            17,
+            "quantum-oactive-test-session",
+            41,
+            crate::profile_evidence::ProfileOperationPurpose::QuantumOactiveShapeV1,
+        )
+        .expect("quantum profile binding");
+        let capture = crate::profile_evidence::with_profile_operation_binding(binding, || {
+            let guard = QuantumOactiveProfileGuard::begin_if_requested();
+            let result = operation();
+            let evidence = guard.finish().expect("quantum profile evidence");
+            (result, evidence)
+        });
+        assert!(capture.records.is_empty());
+        assert!(!capture.overflowed);
+        capture.result
+    }
 
     fn active_quantum_base(level: u64) -> Map<String, Value> {
         serde_json::json!({
@@ -6015,6 +6325,65 @@ mod tests {
     }
 
     #[test]
+    fn quantum_oactive_profile_is_explicit_and_bounds_per_item_fanout() {
+        assert!(
+            QuantumOactiveProfileGuard::begin_if_requested()
+                .finish()
+                .is_none()
+        );
+        let (signature, evidence) = capture_quantum_oactive_profile(|| {
+            let mut requests = (0..70)
+                .rev()
+                .map(|index| {
+                    item_request(
+                        &format!("station-{index:03}"),
+                        &format!("mod:item-{index:03}"),
+                        index + 1,
+                        (index % 3) as i64,
+                    )
+                })
+                .collect::<Vec<_>>();
+            record_quantum_oactive_request_fanout(&requests);
+            sorted_requests(&mut requests);
+            record_quantum_oactive_scan(
+                QuantumOactiveProfileStage::Upload,
+                QuantumActiveScan {
+                    selected_rows: requests.len(),
+                    total_rows: requests.len(),
+                    full_sort_rows: requests.len(),
+                    ..QuantumActiveScan::default()
+                },
+            );
+            request_signature(&requests)
+        });
+
+        assert_eq!(signature.len(), 70);
+        assert_eq!(evidence["requestRows"], 70);
+        assert_eq!(evidence["fullSortRows"], 70);
+        assert!(
+            evidence["sortComparisons"]
+                .as_u64()
+                .is_some_and(|value| value > 0)
+        );
+        assert_eq!(
+            evidence["perItemFanout"].as_array().map(Vec::len),
+            Some(MAX_QUANTUM_OACTIVE_PROFILE_FANOUT_ROWS)
+        );
+        assert_eq!(evidence["perItemFanoutTruncated"], true);
+        assert_eq!(evidence["perItemFanoutOmittedRequestRows"], 6);
+        assert!(
+            evidence["perItemFanout"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().all(|row| {
+                    row["itemIdSha256"]
+                        .as_str()
+                        .is_some_and(|value| value.len() == 64)
+                        && row["requestRows"] == 1
+                }))
+        );
+    }
+
+    #[test]
     fn linear_station_construction_merge_preserves_priority_and_fair_cursor_long_run() {
         let station_requests = vec![
             item_request("tower-z:iron_ore", "iron_ore", 97, 1),
@@ -6294,7 +6663,16 @@ mod tests {
             ..BoundaryFlow::default()
         });
 
-        assert!(write_network_with_scan(&mut base, &network).is_err());
+        let (result, evidence) =
+            capture_quantum_oactive_profile(|| write_network_with_scan(&mut base, &network));
+        assert!(result.is_err());
+        assert_eq!(evidence["networkWriteCalls"], 0);
+        assert_eq!(evidence["networkWriteDirtyRows"], 0);
+        assert!(
+            QuantumOactiveProfileGuard::begin_if_requested()
+                .finish()
+                .is_none()
+        );
         assert_eq!(
             serde_json::to_vec(&base).expect("source bytes after failed write"),
             before
@@ -6895,17 +7273,23 @@ mod tests {
             directory.construction_download_all_pending = false;
             directory.pending_download.insert(0);
 
-            let (_, scan) = settle_active_downloads(
-                &state,
-                &mut active_base,
-                &mut active_entities,
-                &credits,
-                seconds,
-                seconds,
-                &mut directory,
-                &route_ledger,
-            )
-            .expect("sparse network download");
+            let (profiled_result, evidence) = capture_quantum_oactive_profile(|| {
+                let result = settle_active_downloads(
+                    &state,
+                    &mut active_base,
+                    &mut active_entities,
+                    &credits,
+                    seconds,
+                    seconds,
+                    &mut directory,
+                    &route_ledger,
+                );
+                if let Ok((_, scan)) = &result {
+                    record_quantum_oactive_scan(QuantumOactiveProfileStage::Download, *scan);
+                }
+                result
+            });
+            let (_, scan) = profiled_result.expect("sparse network download");
             settle_downloads(
                 &state,
                 &mut oracle_base,
@@ -6924,6 +7308,17 @@ mod tests {
                 scan.network_parse_total_rows
             );
             assert_eq!(scan.network_parse_selected_rows, 2, "{seconds}s");
+            assert_eq!(evidence["recordType"], "quantum-oactive-shape");
+            assert_eq!(evidence["activeScanCalls"], 1);
+            assert_eq!(evidence["networkParseSelectedRows"], 2);
+            assert_eq!(
+                evidence["networkParseTotalRows"],
+                Value::from(scan.network_parse_total_rows as u64)
+            );
+            assert_eq!(evidence["networkWriteCalls"], 1);
+            assert_eq!(evidence["requestRows"], 1);
+            assert_eq!(evidence["perItemFanout"].as_array().map(Vec::len), Some(1));
+            assert_eq!(evidence["perItemFanoutTruncated"], false);
             assert_eq!(
                 quantum_oracle_bytes(&active_base, &active_entities),
                 quantum_oracle_bytes(&oracle_base, &oracle_entities),
@@ -7184,21 +7579,32 @@ mod tests {
         let route_ledger = crate::station_route_ledger::StationRouteLedger::default();
         let bandwidth = directory.legacy_runtime_bandwidth(&state, &active_base, &active_entities);
 
-        let scan = flush_active_supply_buffers(
-            &state,
-            &mut active_base,
-            &mut active_entities,
-            &mut directory,
-            &route_ledger,
-            bandwidth,
-            false,
-        )
-        .expect("sparse zero-normalizing deposit");
+        let (profiled_result, evidence) = capture_quantum_oactive_profile(|| {
+            let result = flush_active_supply_buffers(
+                &state,
+                &mut active_base,
+                &mut active_entities,
+                &mut directory,
+                &route_ledger,
+                bandwidth,
+                false,
+            );
+            if let Ok(scan) = &result {
+                record_quantum_oactive_scan(QuantumOactiveProfileStage::SupplyFlush, *scan);
+            }
+            result
+        });
+        let scan = profiled_result.expect("sparse zero-normalizing deposit");
         flush_supply_buffers_for_index(&mut oracle_base, &mut oracle_entities, None)
             .expect("full zero-normalizing deposit oracle");
 
         assert!(!scan.network_parse_full_scan_fallback);
         assert!(scan.network_parse_selected_rows < scan.network_parse_total_rows);
+        assert_eq!(evidence["zeroNormalizationRows"], 2);
+        assert_eq!(evidence["networkWriteCalls"], 1);
+        assert_eq!(evidence["networkWriteDirtyRows"], 2);
+        assert_eq!(evidence["networkWriteDenseFallbacks"], 0);
+        assert_eq!(evidence["networkWriteSignatureFallbacks"], 0);
         assert!(
             active_base["quantumLogisticsNetwork"]["inventory"]
                 .get("mod:dormant-zero/Ω")

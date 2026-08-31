@@ -27,6 +27,22 @@ enum HostAction {
     Shutdown(Value),
 }
 
+fn profile_operation_duration_is_valid(
+    purpose: dsp_native_core::ProfileOperationPurpose,
+    request: &dsp_native_core::CoreAdvanceRequest,
+) -> bool {
+    match purpose {
+        dsp_native_core::ProfileOperationPurpose::QuantumOactiveShapeV1 => {
+            request.simulation_seconds == request.wall_seconds
+                && matches!(request.simulation_seconds, 1.0 | 5.0 | 60.0)
+        }
+        dsp_native_core::ProfileOperationPurpose::LocalDispatchTimingV1
+        | dsp_native_core::ProfileOperationPurpose::LocalDispatchShapeV1 => {
+            request.simulation_seconds == 1.0 && request.wall_seconds == 1.0
+        }
+    }
+}
+
 fn parse_serve_root() -> anyhow::Result<PathBuf> {
     let mut arguments = env::args_os().skip(1);
     let command = arguments
@@ -616,12 +632,13 @@ fn handle_request(
                 if std::env::var("DSP_NATIVE_CORE_PROFILE").as_deref() != Ok("1") {
                     bail!("native core profile purpose requires the fixed profile environment");
                 }
-                if request.simulation_seconds != 1.0
-                    || request.wall_seconds != 1.0
+                if !profile_operation_duration_is_valid(purpose, &request)
                     || request.advance_mode != dsp_native_core::CoreAdvanceMode::Exact
                     || request.include_diagnostics
                 {
-                    bail!("native core profile purpose requires one exact diagnostic-free second");
+                    bail!(
+                        "native core profile purpose requires an approved exact diagnostic-free duration"
+                    );
                 }
                 let binding = dsp_native_core::ProfileOperationBinding::new(
                     request_id,
@@ -803,5 +820,48 @@ fn main() {
     if let Err(error) = parse_serve_root().and_then(serve) {
         eprintln!("dsp-native-host: {error:#}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn profile_request(
+        simulation_seconds: f64,
+        wall_seconds: f64,
+    ) -> dsp_native_core::CoreAdvanceRequest {
+        dsp_native_core::CoreAdvanceRequest {
+            base_revision: 7,
+            simulation_seconds,
+            wall_seconds,
+            advance_mode: dsp_native_core::CoreAdvanceMode::Exact,
+            include_diagnostics: false,
+        }
+    }
+
+    #[test]
+    fn quantum_profile_accepts_only_the_bounded_1_5_60_matrix() {
+        for seconds in [1.0, 5.0, 60.0] {
+            assert!(profile_operation_duration_is_valid(
+                dsp_native_core::ProfileOperationPurpose::QuantumOactiveShapeV1,
+                &profile_request(seconds, seconds),
+            ));
+        }
+        for (simulation_seconds, wall_seconds) in [(0.0, 0.0), (2.0, 2.0), (61.0, 61.0), (5.0, 1.0)]
+        {
+            assert!(!profile_operation_duration_is_valid(
+                dsp_native_core::ProfileOperationPurpose::QuantumOactiveShapeV1,
+                &profile_request(simulation_seconds, wall_seconds),
+            ));
+        }
+        assert!(!profile_operation_duration_is_valid(
+            dsp_native_core::ProfileOperationPurpose::LocalDispatchShapeV1,
+            &profile_request(5.0, 5.0),
+        ));
+        assert!(profile_operation_duration_is_valid(
+            dsp_native_core::ProfileOperationPurpose::LocalDispatchTimingV1,
+            &profile_request(1.0, 1.0),
+        ));
     }
 }

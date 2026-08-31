@@ -276,7 +276,7 @@ class NativeHostClient {
     requestTimeoutMs = this.requestTimeoutMs,
   } = {}) {
     if (this.structuredProfileRequestActive || request?.operation !== "coreAdvance" ||
-        !["local-dispatch-timing-v1", "local-dispatch-shape-v1"].includes(request?.profilePurpose) ||
+        !["local-dispatch-timing-v1", "local-dispatch-shape-v1", "quantum-oactive-shape-v1"].includes(request?.profilePurpose) ||
         typeof request?.sessionId !== "string" || request.sessionId.length === 0 ||
         !Number.isSafeInteger(request?.request?.baseRevision) || request.request.baseRevision < 0) {
       throw new TypeError("native structured profile request binding is invalid");

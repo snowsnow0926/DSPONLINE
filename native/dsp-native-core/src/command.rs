@@ -25,7 +25,7 @@ const BELT_ROUTE_MODES: &[&str] = &["bezier", "auto", "upper", "lower", "manual"
 /// stack changes are only provable when no content pack can have overridden a
 /// core building's limit.  Non-empty registries remain fail-closed until that
 /// bound is carried by a future, explicitly versioned catalog protocol.
-const EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT: &str = "7df8cf3a";
+pub(crate) const EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT: &str = "7df8cf3a";
 
 const DEPRECATED_PLAYER_TECHNOLOGIES: &[&str] = &[
     "orbital_elevator_engineering",
@@ -560,7 +560,7 @@ fn exact_patch_sets_match(actual: &[ValuePatch], expected: &[ValuePatch]) -> any
     Ok(())
 }
 
-fn create_expected_value_patches(
+pub(crate) fn create_expected_value_patches(
     previous: &Value,
     current: &Value,
     path: Vec<PathSegment>,
@@ -673,7 +673,7 @@ fn finite_json_number(value: Option<&Value>, label: &str) -> anyhow::Result<f64>
         .ok_or_else(|| anyhow!("native player-authority {label} is not a finite number"))
 }
 
-fn normalized_construction_inventory(value: Option<&Value>) -> anyhow::Result<u64> {
+pub(crate) fn normalized_construction_inventory(value: Option<&Value>) -> anyhow::Result<u64> {
     let Some(value) = value else {
         return Ok(0);
     };
@@ -691,7 +691,7 @@ fn normalized_construction_inventory(value: Option<&Value>) -> anyhow::Result<u6
     Ok(value as u64)
 }
 
-fn technology_is_completed(state: &CoreState, technology_id: &str) -> bool {
+pub(crate) fn technology_is_completed(state: &CoreState, technology_id: &str) -> bool {
     state
         .base_value()
         .get("research")
@@ -748,7 +748,7 @@ impl OrdinaryPlacementUnsupportedReason {
     }
 }
 
-fn recipe_building_base<'a>(building_id: &'a str, family: Option<&str>) -> &'a str {
+pub(crate) fn recipe_building_base<'a>(building_id: &'a str, family: Option<&str>) -> &'a str {
     match family {
         Some("smelter") => "arc_smelter",
         Some("assembler") => "assembling_machine_mk1",
@@ -8167,7 +8167,10 @@ fn player_belt_value(state: &CoreState, belt_id: &str) -> anyhow::Result<Value> 
     Ok(belt)
 }
 
-fn builtin_belt_construction_id(state: &CoreState, tier: u8) -> anyhow::Result<&'static str> {
+pub(crate) fn builtin_belt_construction_id(
+    state: &CoreState,
+    tier: u8,
+) -> anyhow::Result<&'static str> {
     // The current catalog snapshot carries a belt tier and speed but not the
     // matching construction ID.  Built-in tiers are stable and can therefore
     // prove their debit/refund.  A content pack may register an arbitrary ID
@@ -8514,6 +8517,9 @@ impl CoreState {
         if crate::blueprint_command::command_contains_intent(command) {
             return crate::blueprint_command::validate_command(self, command);
         }
+        if crate::recipe_command::command_contains_intent(command) {
+            return crate::recipe_command::validate_command(self, command);
+        }
         if command_contains_black_hole_pause_intent(command) {
             return validate_black_hole_pause_command(self, command);
         }
@@ -8767,6 +8773,16 @@ impl CoreState {
         revision: u64,
     ) -> anyhow::Result<CommandApplyResult> {
         let mut result = command.deterministic_apply_result(previous_revision, revision)?;
+        if crate::recipe_command::command_contains_intent(command) {
+            let entity_id = crate::recipe_command::validate_resume_marker(command)?;
+            result.changed_entity_ids.push(entity_id);
+            result.changed_entity_ids.sort_unstable();
+            result.changed_entity_ids.dedup();
+            // The semantic marker does not retain removed belt IDs. Force a
+            // complete topology refresh after cold recovery instead.
+            result.topology_dirty = true;
+            return Ok(result);
+        }
         if crate::blueprint_command::command_contains_intent(command) {
             crate::blueprint_command::validate_resume_marker(command)?;
             result.topology_dirty = true;
@@ -8927,6 +8943,8 @@ impl CoreState {
         let expanded_black_hole_pause_intent;
         let expanded_time_warp_intent;
         let expanded_blueprint_rename_intent;
+        let expanded_entity_recipe_intent;
+        let mut compact_entity_recipe_receipt_id = None;
         let applied_command = if command_contains_active_planet_intent(command) {
             expanded_active_planet_intent = expand_active_planet_intent(self, command)?;
             &expanded_active_planet_intent
@@ -8959,6 +8977,11 @@ impl CoreState {
             expanded_construction_automation_intent =
                 expand_construction_automation_intent(self, command)?;
             &expanded_construction_automation_intent
+        } else if crate::recipe_command::command_contains_intent(command) {
+            compact_entity_recipe_receipt_id =
+                Some(crate::recipe_command::validate_resume_marker(command)?);
+            expanded_entity_recipe_intent = crate::recipe_command::expand_intent(self, command)?;
+            &expanded_entity_recipe_intent
         } else if crate::blueprint_command::command_contains_intent(command) {
             expanded_blueprint_rename_intent =
                 crate::blueprint_command::expand_intent(self, command)?;
@@ -9137,8 +9160,19 @@ impl CoreState {
         // Derive the deterministic receipt before publishing the candidate.
         // Even a malformed future command shape must therefore leave the
         // source state untouched if receipt construction fails.
-        let result =
+        let mut result =
             applied_command.deterministic_apply_result(previous_revision, next.revision)?;
+        if let Some(entity_id) = compact_entity_recipe_receipt_id {
+            // The semantic recipe transition may remove thousands of opaque-ID
+            // belts. The durable Host receipt has a much smaller byte budget
+            // than the authoritative topology, so expose the same compact
+            // invalidation for live apply and cold resume: refresh the changed
+            // entity directly and re-read the complete topology.
+            result.changed_entity_ids.clear();
+            result.changed_entity_ids.push(entity_id);
+            result.changed_belt_ids.clear();
+            result.topology_dirty = true;
+        }
         *self = next;
         Ok(result)
     }

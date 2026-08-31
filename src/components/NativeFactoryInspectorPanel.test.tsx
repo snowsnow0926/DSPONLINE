@@ -9,6 +9,7 @@ import type {
   SelectedEntityReadModel,
 } from "../game/factoryReadModels";
 import type { NativeProjectedEntityConfigurationBinding } from "../game/nativeProjectedEntityConfigurationCommands";
+import type { NativeProjectedEntityRecipeBinding } from "../game/nativeProjectedEntityRecipeCommands";
 import type {
   NativeProjectedEjectorOrbitFrame,
   NativeProjectedTimeWarpControllerBinding,
@@ -87,6 +88,38 @@ function configuration(
     activePlanetId: "home",
     entity: projected,
     ...overrides,
+  };
+}
+
+function recipeBinding(
+  projected = projectedEntity(),
+  overrides: Partial<NativeProjectedEntityRecipeBinding> = {},
+): NativeProjectedEntityRecipeBinding {
+  return {
+    sessionId: "s",
+    runId: "r",
+    revision: 8,
+    registryFingerprint: "7df8cf3a",
+    activePlanetId: "home",
+    entity: projected,
+    ...overrides,
+  };
+}
+
+function projectedSummary(projected = projectedEntity()): SelectedEntityReadModel {
+  return {
+    ...entity,
+    entityId: projected.id,
+    planetId: projected.planetId,
+    kind: projected.kind,
+    interactionLocked: projected.interactionLocked,
+    buildingId: projected.buildingId ?? null,
+    resourceId: projected.resourceId ?? null,
+    recipeId: projected.recipeId ?? null,
+    storedItemId: projected.storedItemId ?? null,
+    fuelItemId: projected.fuelItemId ?? null,
+    machineCount: projected.machineCount,
+    minerCount: projected.minerCount,
   };
 }
 
@@ -190,6 +223,162 @@ describe("NativeFactoryInspectorPanel", () => {
     expect(stack).toHaveBeenNthCalledWith(2, "MOD/设备-一", 4);
     act(() => host.querySelector<HTMLButtonElement>('[data-native-entity-lock] button')!.click());
     expect(lock).toHaveBeenCalledWith("MOD/设备-一", true);
+    expect(host.querySelector("[data-native-entity-recipe]")).toBeNull();
+  });
+
+  it("requires explicit confirmation before switching one exact-lineage built-in recipe", () => {
+    const onRecipeChange = vi.fn();
+    const render = (
+      projected: FactoryEntity,
+      recipe: NativeProjectedEntityRecipeBinding | null,
+      pending = false,
+      revision = 8,
+    ) => {
+      const summary = projectedSummary(projected);
+      act(() => root.render(<NativeFactoryInspectorPanel
+        inspector={inspector({ revision, entity: summary })}
+        multiSelection={multi({
+          revision,
+          projectionIdentity: { sessionId: "s", runId: "r", revision, planetId: "home" },
+          entityRows: { rows: [summary], totalCount: 1, truncated: false },
+        })}
+        entityConfiguration={configuration(projected, { revision })}
+        entityRecipeBinding={recipe}
+        pending={pending}
+        onEntityLockChange={vi.fn()}
+        onRemoveEntity={vi.fn()}
+        onStackCountChange={vi.fn()}
+        onEntityPowerPriorityChange={vi.fn()}
+        onSplitterDistributionModeChange={vi.fn()}
+        onEnergyExchangerModeChange={vi.fn()}
+        onFuelItemChange={vi.fn()}
+        onEntityRecipeChange={onRecipeChange}
+        onBlackHolePausedChange={vi.fn()}
+        onBeltLaneCountChange={vi.fn()}
+        onBeltPriorityChange={vi.fn()}
+        onRemoveBelt={vi.fn()}
+      />));
+    };
+
+    const smelter = projectedEntity();
+    render(smelter, recipeBinding(smelter));
+    const select = host.querySelector<HTMLSelectElement>('[aria-label="Windows 原生生产配方"]')!;
+    expect(select.disabled).toBe(false);
+    expect(select.value).toBe("iron_ingot");
+    expect(select.querySelector('option[value="copper_ingot"]')?.textContent).toContain("铜块");
+    act(() => {
+      select.value = "copper_ingot";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(onRecipeChange).not.toHaveBeenCalled();
+    expect(select.value).toBe("iron_ingot");
+    expect(document.querySelector('[role="alertdialog"]')?.textContent)
+      .toContain("拆除所有相邻传送带");
+    const dialogButton = (label: string) => [...document.querySelectorAll<HTMLButtonElement>(
+      '[role="alertdialog"] button',
+    )].find((button) => button.textContent === label)!;
+    act(() => dialogButton("取消").click());
+    expect(onRecipeChange).not.toHaveBeenCalled();
+
+    act(() => {
+      select.value = "copper_ingot";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const confirm = dialogButton("确认更换配方");
+    act(() => {
+      confirm.click();
+      confirm.click();
+    });
+    expect(onRecipeChange).toHaveBeenCalledTimes(1);
+    expect(onRecipeChange).toHaveBeenCalledWith("smelter-a", "copper_ingot");
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(select.value).toBe("iron_ingot");
+
+    render(smelter, recipeBinding(smelter), true);
+    expect(host.querySelector<HTMLSelectElement>('[aria-label="Windows 原生生产配方"]')?.disabled).toBe(true);
+    expect(host.querySelector<HTMLSelectElement>('[aria-label="Windows 原生生产配方"]')?.value).toBe("iron_ingot");
+
+    const acknowledged = projectedEntity({ recipeId: "copper_ingot" });
+    render(acknowledged, recipeBinding(acknowledged, { revision: 9 }), false, 9);
+    expect(host.querySelector<HTMLSelectElement>('[aria-label="Windows 原生生产配方"]')?.value)
+      .toBe("copper_ingot");
+  });
+
+  it("cancels a recipe draft on pending or projection drift and keeps non-built-in rows fail-closed", () => {
+    const smelter = projectedEntity();
+    const onRecipeChange = vi.fn();
+    const render = (
+      recipe: NativeProjectedEntityRecipeBinding | null,
+      pending = false,
+      projected: FactoryEntity = smelter,
+    ) => act(() => root.render(
+      <NativeFactoryInspectorPanel
+        inspector={inspector({ entity: projectedSummary(projected) })}
+        multiSelection={multi({
+          entityRows: { rows: [projectedSummary(projected)], totalCount: 1, truncated: false },
+        })}
+        entityConfiguration={configuration(projected)}
+        entityRecipeBinding={recipe}
+        pending={pending}
+        onEntityLockChange={vi.fn()}
+        onRemoveEntity={vi.fn()}
+        onStackCountChange={vi.fn()}
+        onEntityPowerPriorityChange={vi.fn()}
+        onSplitterDistributionModeChange={vi.fn()}
+        onEnergyExchangerModeChange={vi.fn()}
+        onFuelItemChange={vi.fn()}
+        onEntityRecipeChange={onRecipeChange}
+        onBlackHolePausedChange={vi.fn()}
+        onBeltLaneCountChange={vi.fn()}
+        onBeltPriorityChange={vi.fn()}
+        onRemoveBelt={vi.fn()}
+      />));
+
+    const openDraft = () => {
+      const select = host.querySelector<HTMLSelectElement>('[aria-label="Windows 原生生产配方"]')!;
+      act(() => {
+        select.value = "copper_ingot";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      expect(document.querySelector('[role="alertdialog"]')).not.toBeNull();
+    };
+    render(recipeBinding(smelter));
+    openDraft();
+    render(recipeBinding(smelter), true);
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(onRecipeChange).not.toHaveBeenCalled();
+
+    render(recipeBinding(smelter));
+    openDraft();
+    render(recipeBinding(smelter, { revision: 7 }));
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(onRecipeChange).not.toHaveBeenCalled();
+
+    render(recipeBinding(smelter));
+    openDraft();
+    const replacement = projectedEntity({ id: "smelter-b" });
+    render(recipeBinding(replacement), false, replacement);
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(onRecipeChange).not.toHaveBeenCalled();
+
+    render(recipeBinding(smelter));
+    openDraft();
+    render(recipeBinding(smelter, { registryFingerprint: "MOD/forged" }));
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    render(recipeBinding(smelter));
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(onRecipeChange).not.toHaveBeenCalled();
+
+    for (const unavailable of [
+      null,
+      recipeBinding(smelter, { revision: 7 }),
+      recipeBinding(smelter, { registryFingerprint: "MOD/forged" }),
+    ]) {
+      render(unavailable);
+      const select = host.querySelector<HTMLSelectElement>('[aria-label="Windows 原生生产配方"]')!;
+      expect(select.disabled).toBe(true);
+      expect(host.textContent).toContain("旧 JavaScript 存档不会作为候选来源");
+    }
   });
 
   it("fails closed for a mismatched revision and never exposes the removal action", () => {

@@ -37,6 +37,7 @@ const MAX_VALUE_PATCHES = 65_536;
 const MAX_RECORD_CHANGES = 16_384;
 const MAX_PATCH_PATH_DEPTH = 64;
 const MAX_OPAQUE_ID_BYTES = 512;
+const MAX_RECIPE_ID_BYTES = 160;
 const MAX_PATH_KEY_BYTES = 512;
 const MAX_JSON_DEPTH = 96;
 const COMMAND_ID_PATTERN = /^renderer-local-[0-9a-z]+-[0-9a-z]+$/;
@@ -394,6 +395,30 @@ function commandTopologyIsDirty(command: SimulationCommandPatch): boolean {
     typeof change.path[0] !== "string" || !SAFE_BELT_PROJECTION_ROOTS.has(change.path[0])));
 }
 
+function validEntityRecipeIntentId(value: unknown, maximumBytes: number): value is string {
+  if (!validBoundedString(value, maximumBytes)) return false;
+  for (const character of value) {
+    const codePoint = character.codePointAt(0)!;
+    if (codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f)) return false;
+  }
+  return true;
+}
+
+function exactEntityRecipeIntentEntityId(command: SimulationCommandPatch): string | null {
+  if (command.topLevelChanges.length !== 1 || command.changedEntities.length !== 0 ||
+    command.addedEntities.length !== 0 || command.removedEntityIds.length !== 0 ||
+    command.changedBelts.length !== 0 || command.addedBelts.length !== 0 ||
+    command.removedBeltIds.length !== 0) return null;
+  const [change] = command.topLevelChanges;
+  if (!change || change.operation !== "set" || change.path.length !== 2 ||
+    change.path[0] !== "entityRecipe" || change.path[1] !== "intent" ||
+    !isRecord(change.value) ||
+    !hasExactKeys(change.value, ["entityId", "targetRecipeId"]) ||
+    !validEntityRecipeIntentId(change.value.entityId, MAX_OPAQUE_ID_BYTES) ||
+    !validEntityRecipeIntentId(change.value.targetRecipeId, MAX_RECIPE_ID_BYTES)) return null;
+  return change.value.entityId;
+}
+
 function assertCommandStructure(value: unknown, expectedRevision: number): NormalizedCommand {
   if (!isRecord(value) || !hasExactKeys(value, COMMAND_KEYS) ||
     value.protocolVersion !== SIMULATION_RUNTIME_PROTOCOL_VERSION ||
@@ -478,11 +503,16 @@ function assertCommandStructure(value: unknown, expectedRevision: number): Norma
   if (valuePatchCount === 0 && entityIds.size === 0 && beltIds.size === 0) {
     throw sourceError("NATIVE_PLAYER_AUTHORITY_COMMAND_INVALID", "原生玩家命令为空");
   }
+  const recipeIntentEntityId = exactEntityRecipeIntentEntityId(command);
   return {
     command,
-    changedEntityIds: stableSortedIds(entityIds),
-    changedBeltIds: stableSortedIds(beltIds),
-    topologyDirty: commandTopologyIsDirty(command),
+    changedEntityIds: recipeIntentEntityId === null
+      ? stableSortedIds(entityIds)
+      : Object.freeze([recipeIntentEntityId]),
+    changedBeltIds: recipeIntentEntityId === null
+      ? stableSortedIds(beltIds)
+      : Object.freeze([]),
+    topologyDirty: recipeIntentEntityId === null ? commandTopologyIsDirty(command) : true,
   };
 }
 

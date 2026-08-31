@@ -553,6 +553,10 @@ import {
   type NativeProjectedSplitterDistributionMode,
 } from "./game/nativeProjectedEntityConfigurationCommands";
 import {
+  type NativeProjectedEntityRecipeBinding,
+} from "./game/nativeProjectedEntityRecipeCommands";
+import { useNativeEntityRecipeCommandTransaction } from "./game/useNativeEntityRecipeCommandTransaction";
+import {
   createNativeProjectedEjectorOrbitCommand,
   createNativeProjectedTimeWarpRequestedMultiplierCommand,
   readNativeProjectedEjectorOrbitFrame,
@@ -17137,6 +17141,48 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativePlayerAuthorityActiveFrame,
     nativePlayerAuthorityOwnsRuntime,
   ]);
+  const nativeEntityRecipeProjectionBinding = useMemo<NativeProjectedEntityRecipeBinding | null>(() => {
+    const entityBinding = nativeEntityConfigurationProjectionBinding;
+    const inventoryIdentity = nativeFactoryInventoryIdentity;
+    if (!entityBinding || !inventoryIdentity ||
+        inventoryIdentity.sessionId !== entityBinding.sessionId ||
+        inventoryIdentity.runId !== entityBinding.runId ||
+        inventoryIdentity.revision !== entityBinding.revision) return null;
+    return Object.freeze({
+      sessionId: entityBinding.sessionId,
+      runId: entityBinding.runId,
+      revision: entityBinding.revision,
+      registryFingerprint: inventoryIdentity.registryFingerprint,
+      activePlanetId: entityBinding.activePlanetId,
+      entity: entityBinding.entity,
+    });
+  }, [nativeEntityConfigurationProjectionBinding, nativeFactoryInventoryIdentity]);
+  const nativeEntityRecipeAuthorityObservation = useMemo(() => nativePlayerAuthorityActiveFrame &&
+      typeof nativePlayerAuthorityActiveFrame.sessionId === "string" &&
+      typeof nativePlayerAuthorityActiveFrame.runId === "string" &&
+      typeof nativePlayerAuthorityActiveFrame.revision === "number" &&
+      Number.isSafeInteger(nativePlayerAuthorityActiveFrame.revision)
+    ? Object.freeze({
+        sessionId: nativePlayerAuthorityActiveFrame.sessionId,
+        runId: nativePlayerAuthorityActiveFrame.runId,
+        revision: nativePlayerAuthorityActiveFrame.revision,
+      })
+    : null, [nativePlayerAuthorityActiveFrame]);
+  const {
+    pending: nativeEntityRecipePending,
+    commit: commitNativeEntityRecipeCommand,
+  } = useNativeEntityRecipeCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    projection: nativeEntityRecipeProjectionBinding,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    invalidateProjection: invalidateFactoryAlertProjection,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+  });
   const nativeStationConfigurationProjectionBinding = useMemo<
     NativeProjectedStationConfigurationBinding | null
   >(() => {
@@ -17768,6 +17814,29 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     );
     if (!accepted) setNotice("Rust 没有接受这次燃料类型命令；存档未改变");
   }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
+  const changeNativeEntityRecipe = useCallback((
+    entityId: string,
+    targetRecipeId: RecipeId,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次配方未提交");
+      return;
+    }
+    const binding = nativeEntityRecipeProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.id !== entityId || !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生建筑选择、目录、session 或 revision 已变化；本次配方未提交");
+      return;
+    }
+    commitNativeEntityRecipeCommand(binding, targetRecipeId);
+  }, [commitNativeEntityRecipeCommand, nativeEntityRecipeProjectionBinding]);
   const changeNativeBlackHolePaused = useCallback((
     entityId: string,
     paused: boolean,
@@ -19729,10 +19798,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           inspector={factoryInspectorSummaryReadModel}
           multiSelection={factoryMultiSelectionSummaryReadModel}
           entityConfiguration={nativeEntityConfigurationProjectionBinding}
+          entityRecipeBinding={nativeEntityRecipeProjectionBinding}
           timeWarpController={nativeTimeWarpControllerProjectionBinding}
           ejectorOrbitFrame={nativeEjectorOrbitFrame}
           stationConfiguration={nativeStationConfigurationProjectionBinding}
-          pending={nativeRemovalContextPending || nativeStackContextPending || nativeBeltLaneContextPending || nativePlayerAuthorityCommandPending}
+          pending={nativeRemovalContextPending || nativeStackContextPending || nativeBeltLaneContextPending ||
+            nativePlayerAuthorityCommandPending || nativeEntityRecipePending !== null}
           onEntityLockChange={(_entityId, locked) => void commitNativeSelectionInteractionLock(locked)}
           onRemoveEntity={(entityId) => void removeNativeOrdinaryBuilding(entityId)}
           onStackCountChange={(entityId, targetCount) => void changeNativeOrdinaryBuildingStack(entityId, targetCount)}
@@ -19740,6 +19811,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           onSplitterDistributionModeChange={changeNativeSplitterDistributionMode}
           onEnergyExchangerModeChange={changeNativeEnergyExchangerMode}
           onFuelItemChange={changeNativeFuelItem}
+          onEntityRecipeChange={changeNativeEntityRecipe}
           onBlackHolePausedChange={changeNativeBlackHolePaused}
           onTimeWarpEnabledChange={changeNativeTimeWarpEnabled}
           onTimeWarpRequestedMultiplierChange={changeNativeTimeWarpRequestedMultiplier}

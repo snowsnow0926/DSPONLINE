@@ -20,6 +20,11 @@ import {
   type NativeProjectedSplitterDistributionMode,
 } from "../game/nativeProjectedEntityConfigurationCommands";
 import {
+  getNativeProjectedEntityRecipeConfiguration,
+  isNativeProjectedOrdinaryRecipeBuilding,
+  type NativeProjectedEntityRecipeBinding,
+} from "../game/nativeProjectedEntityRecipeCommands";
+import {
   getNativeProjectedTimeWarpControllerState,
   type NativeProjectedEjectorOrbitFrame,
   type NativeProjectedTimeWarpControllerBinding,
@@ -30,7 +35,7 @@ import type {
 } from "../game/nativeProjectedStationConfigurationCommands";
 import type { NativeStationFleetKind } from "../game/nativeStationInventoryIntentCommands";
 import type { NativeStationSlotMode, NativeStationSlotScope } from "../game/nativeStationSlotIntentCommands";
-import type { ItemId, LogisticsPriority, PowerPriority, StationMinimumLoad } from "../game/types";
+import type { ItemId, LogisticsPriority, PowerPriority, RecipeId, StationMinimumLoad } from "../game/types";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { PowerValue } from "./PowerValue";
 import { QuantityValue } from "./QuantityValue";
@@ -39,6 +44,7 @@ interface NativeFactoryInspectorPanelProps {
   inspector: FactoryInspectorSummaryReadModel;
   multiSelection: FactoryMultiSelectionSummaryReadModel;
   entityConfiguration: NativeProjectedEntityConfigurationBinding | null;
+  entityRecipeBinding?: NativeProjectedEntityRecipeBinding | null;
   timeWarpController?: NativeProjectedTimeWarpControllerBinding | null;
   ejectorOrbitFrame?: NativeProjectedEjectorOrbitFrame | null;
   stationConfiguration?: NativeProjectedStationConfigurationBinding | null;
@@ -56,6 +62,7 @@ interface NativeFactoryInspectorPanelProps {
     targetMode: NativeProjectedEnergyExchangerMode,
   ) => void;
   onFuelItemChange: (entityId: string, targetItemId: ItemId) => void;
+  onEntityRecipeChange?: (entityId: string, targetRecipeId: RecipeId) => void;
   onBlackHolePausedChange: (
     entityId: string,
     paused: boolean,
@@ -132,6 +139,18 @@ interface PendingNativeStationSlotItemChange {
   readonly slotIndex: number;
   readonly previousItemId: string | null;
   readonly targetItemId: string | null;
+}
+
+interface PendingNativeEntityRecipeChange {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly registryFingerprint: string;
+  readonly activePlanetId: string;
+  readonly entityId: string;
+  readonly planetId: string;
+  readonly currentRecipeId: RecipeId | null;
+  readonly targetRecipeId: RecipeId;
 }
 
 function NativeStationConfiguration({
@@ -448,6 +467,7 @@ function NativeStationConfiguration({
 function NativeEntitySummary({
   entity,
   configuration,
+  recipeBinding,
   timeWarpController,
   ejectorOrbitFrame,
   stationConfiguration,
@@ -459,6 +479,7 @@ function NativeEntitySummary({
   onSplitterDistributionModeChange,
   onEnergyExchangerModeChange,
   onFuelItemChange,
+  onEntityRecipeChange,
   onBlackHolePausedChange,
   onTimeWarpEnabledChange,
   onTimeWarpRequestedMultiplierChange,
@@ -467,6 +488,7 @@ function NativeEntitySummary({
 }: {
   entity: SelectedEntityReadModel;
   configuration: NativeProjectedEntityConfigurationBinding | null;
+  recipeBinding: NativeProjectedEntityRecipeBinding | null;
   timeWarpController: NativeProjectedTimeWarpControllerBinding | null;
   ejectorOrbitFrame: NativeProjectedEjectorOrbitFrame | null;
   stationConfiguration: NativeProjectedStationConfigurationBinding | null;
@@ -484,6 +506,7 @@ function NativeEntitySummary({
     targetMode: NativeProjectedEnergyExchangerMode,
   ) => void;
   onFuelItemChange: (entityId: string, targetItemId: ItemId) => void;
+  onEntityRecipeChange?: (entityId: string, targetRecipeId: RecipeId) => void;
   onBlackHolePausedChange: (
     entityId: string,
     paused: boolean,
@@ -501,6 +524,60 @@ function NativeEntitySummary({
   const energyExchangerMode = getNativeProjectedEnergyExchangerMode(configuration);
   const energyExchangerSwitchable = canNativeProjectedEnergyExchangerModeChange(configuration);
   const fuelConfiguration = getNativeProjectedFuelItemConfiguration(configuration);
+  const recipeConfiguration = getNativeProjectedEntityRecipeConfiguration(recipeBinding);
+  const recipeEligible = entity.kind === "machine" &&
+    isNativeProjectedOrdinaryRecipeBuilding(entity.buildingId);
+  const [pendingRecipeChange, setPendingRecipeChange] = useState<PendingNativeEntityRecipeChange | null>(null);
+  const recipeConfirmationCancelRef = useRef<HTMLButtonElement | null>(null);
+  const recipeConfirmationSubmittingRef = useRef(false);
+  useEffect(() => {
+    setPendingRecipeChange(null);
+    recipeConfirmationSubmittingRef.current = false;
+  }, [
+    entity.buildingId,
+    entity.entityId,
+    entity.interactionLocked,
+    entity.planetId,
+    entity.recipeId,
+    pending,
+    recipeBinding?.activePlanetId,
+    recipeBinding?.entity.buildingId,
+    recipeBinding?.entity.id,
+    recipeBinding?.entity.interactionLocked,
+    recipeBinding?.entity.planetId,
+    recipeBinding?.entity.recipeId,
+    recipeBinding?.registryFingerprint,
+    recipeBinding?.revision,
+    recipeBinding?.runId,
+    recipeBinding?.sessionId,
+  ]);
+  const recipeWritable = Boolean(recipeBinding && recipeConfiguration && onEntityRecipeChange && !pending);
+  const recipeConfirmationIsCurrent = Boolean(recipeBinding && recipeConfiguration && pendingRecipeChange &&
+    !pending && pendingRecipeChange.sessionId === recipeBinding.sessionId &&
+    pendingRecipeChange.runId === recipeBinding.runId &&
+    pendingRecipeChange.revision === recipeBinding.revision &&
+    pendingRecipeChange.registryFingerprint === recipeBinding.registryFingerprint &&
+    pendingRecipeChange.activePlanetId === recipeBinding.activePlanetId &&
+    pendingRecipeChange.entityId === entity.entityId &&
+    pendingRecipeChange.entityId === recipeBinding.entity.id &&
+    pendingRecipeChange.planetId === entity.planetId &&
+    pendingRecipeChange.planetId === recipeBinding.entity.planetId &&
+    pendingRecipeChange.currentRecipeId === entity.recipeId &&
+    pendingRecipeChange.currentRecipeId === (recipeBinding.entity.recipeId ?? null) &&
+    pendingRecipeChange.currentRecipeId === recipeConfiguration.currentRecipeId &&
+    pendingRecipeChange.targetRecipeId !== pendingRecipeChange.currentRecipeId &&
+    recipeConfiguration.options.some((option) => option.recipeId === pendingRecipeChange.targetRecipeId));
+  const confirmRecipeChange = () => {
+    if (!recipeConfirmationIsCurrent || !pendingRecipeChange || !recipeWritable ||
+        recipeConfirmationSubmittingRef.current) {
+      setPendingRecipeChange(null);
+      return;
+    }
+    recipeConfirmationSubmittingRef.current = true;
+    const { entityId, targetRecipeId } = pendingRecipeChange;
+    setPendingRecipeChange(null);
+    onEntityRecipeChange?.(entityId, targetRecipeId);
+  };
   const blackHoleState = configuration?.entity.buildingId === "micro_black_hole_connector" &&
     typeof configuration.entity.blackHolePaused === "boolean" &&
     typeof configuration.entity.blackHoleActivationConfirmed === "boolean"
@@ -566,6 +643,75 @@ function NativeEntitySummary({
         >{priority === 3 ? "高" : priority === 2 ? "中" : "低"}</button>)}
       </div>
     </section>}
+    {!recipeEligible ? null : <section
+      className="native-inspector-safe-actions"
+      data-native-entity-recipe="semantic-intent-v1"
+    >
+      <strong>Rust 生产配方</strong>
+      <p>{recipeConfiguration
+        ? "候选只来自已验证的内置目录；锁定科技、建筑族和当前配方会由 Rust 在最新 revision 再次校验，界面不会预先退款、拆线或改写进度。"
+        : "当前配方行、内置目录指纹或同 revision 选择尚未完整核对；旧 JavaScript 存档不会作为候选来源。"}</p>
+      <label>
+        <span>当前配方</span>
+        <select
+          aria-label="Windows 原生生产配方"
+          value={recipeConfiguration?.currentRecipeId ?? entity.recipeId ?? ""}
+          disabled={!recipeWritable}
+          onChange={(event) => {
+            if (!recipeBinding || !recipeConfiguration || !recipeWritable) return;
+            const targetRecipeId = event.currentTarget.value as RecipeId;
+            if (targetRecipeId === recipeConfiguration.currentRecipeId ||
+                !recipeConfiguration.options.some((option) => option.recipeId === targetRecipeId)) return;
+            recipeConfirmationSubmittingRef.current = false;
+            setPendingRecipeChange({
+              sessionId: recipeBinding.sessionId,
+              runId: recipeBinding.runId,
+              revision: recipeBinding.revision,
+              registryFingerprint: recipeBinding.registryFingerprint,
+              activePlanetId: recipeBinding.activePlanetId,
+              entityId: recipeBinding.entity.id,
+              planetId: recipeBinding.entity.planetId,
+              currentRecipeId: recipeConfiguration.currentRecipeId,
+              targetRecipeId,
+            });
+          }}
+        >
+          {!recipeConfiguration ? <option value={entity.recipeId ?? ""}>
+            {entity.recipeId ? `${entity.recipeId}（等待原生目录）` : "等待原生配方目录"}
+          </option> : <>
+            {recipeConfiguration.currentRecipeId === null ? <option value="" disabled>选择配方</option> : null}
+            {recipeConfiguration.options.map((option) => <option value={option.recipeId} key={option.recipeId}>
+              {option.name}
+            </option>)}
+          </>}
+        </select>
+      </label>
+    </section>}
+    {recipeConfirmationIsCurrent && pendingRecipeChange ? <AccessibleDialog
+      open
+      title="确认更换生产配方"
+      ariaLabel="确认更换生产配方"
+      role="alertdialog"
+      riskPolicy="explicit"
+      className="native-entity-recipe-confirm"
+      initialFocusRef={recipeConfirmationCancelRef}
+      onRequestClose={() => {
+        recipeConfirmationSubmittingRef.current = false;
+        setPendingRecipeChange(null);
+      }}
+    >
+      <p>当前建筑将从 <strong>{recipeConfiguration?.options.find((option) =>
+        option.recipeId === pendingRecipeChange.currentRecipeId)?.name ?? pendingRecipeChange.currentRecipeId ?? "未配置"}</strong> 改为 <strong>{recipeConfiguration?.options.find((option) =>
+        option.recipeId === pendingRecipeChange.targetRecipeId)?.name ?? pendingRecipeChange.targetRecipeId}</strong>。</p>
+      <p>确认后 Rust 会从最新权威状态退款该建筑的输入、输出缓存，拆除所有相邻传送带并返还线路物资，同时重置生产进度；界面不会预先改写这些数据。</p>
+      <footer>
+        <button ref={recipeConfirmationCancelRef} type="button" onClick={() => {
+          recipeConfirmationSubmittingRef.current = false;
+          setPendingRecipeChange(null);
+        }}>取消</button>
+        <button className="danger" type="button" onClick={confirmRecipeChange}>确认更换配方</button>
+      </footer>
+    </AccessibleDialog> : null}
     {splitterDistributionMode === null ? null : <section
       className="native-inspector-safe-actions"
       data-native-splitter-mode="ordinary-single-v1"
@@ -822,6 +968,7 @@ export function NativeFactoryInspectorPanel({
   inspector,
   multiSelection,
   entityConfiguration,
+  entityRecipeBinding = null,
   timeWarpController = null,
   ejectorOrbitFrame = null,
   stationConfiguration = null,
@@ -833,6 +980,7 @@ export function NativeFactoryInspectorPanel({
   onSplitterDistributionModeChange,
   onEnergyExchangerModeChange,
   onFuelItemChange,
+  onEntityRecipeChange,
   onBlackHolePausedChange,
   onTimeWarpEnabledChange,
   onTimeWarpRequestedMultiplierChange,
@@ -858,9 +1006,27 @@ export function NativeFactoryInspectorPanel({
     entityConfiguration.entity.planetId === inspector.entity.planetId &&
     entityConfiguration.entity.kind === inspector.entity.kind &&
     entityConfiguration.entity.buildingId === (inspector.entity.buildingId ?? undefined) &&
+    (entityConfiguration.entity.recipeId ?? null) === inspector.entity.recipeId &&
     (entityConfiguration.entity.fuelItemId ?? null) === inspector.entity.fuelItemId &&
     entityConfiguration.entity.interactionLocked === inspector.entity.interactionLocked
     ? entityConfiguration
+    : null;
+  const currentEntityRecipeBinding = currentEntityConfiguration && entityRecipeBinding && projectionIdentity &&
+    entityRecipeBinding.sessionId === projectionIdentity.sessionId &&
+    entityRecipeBinding.runId === projectionIdentity.runId &&
+    entityRecipeBinding.revision === projectionIdentity.revision &&
+    entityRecipeBinding.activePlanetId === projectionIdentity.planetId &&
+    entityRecipeBinding.sessionId === currentEntityConfiguration.sessionId &&
+    entityRecipeBinding.runId === currentEntityConfiguration.runId &&
+    entityRecipeBinding.revision === currentEntityConfiguration.revision &&
+    entityRecipeBinding.activePlanetId === currentEntityConfiguration.activePlanetId &&
+    entityRecipeBinding.entity.id === currentEntityConfiguration.entity.id &&
+    entityRecipeBinding.entity.planetId === currentEntityConfiguration.entity.planetId &&
+    entityRecipeBinding.entity.kind === currentEntityConfiguration.entity.kind &&
+    entityRecipeBinding.entity.buildingId === currentEntityConfiguration.entity.buildingId &&
+    (entityRecipeBinding.entity.recipeId ?? null) === (currentEntityConfiguration.entity.recipeId ?? null) &&
+    entityRecipeBinding.entity.interactionLocked === currentEntityConfiguration.entity.interactionLocked
+    ? entityRecipeBinding
     : null;
   const currentTimeWarpController = currentEntityConfiguration && timeWarpController &&
     timeWarpController.sessionId === currentEntityConfiguration.sessionId &&
@@ -915,6 +1081,7 @@ export function NativeFactoryInspectorPanel({
     content = <NativeEntitySummary
       entity={inspector.entity}
       configuration={currentEntityConfiguration}
+      recipeBinding={currentEntityRecipeBinding}
       timeWarpController={currentTimeWarpController}
       ejectorOrbitFrame={currentEjectorOrbitFrame}
       stationConfiguration={currentStationConfiguration}
@@ -926,6 +1093,7 @@ export function NativeFactoryInspectorPanel({
       onSplitterDistributionModeChange={onSplitterDistributionModeChange}
       onEnergyExchangerModeChange={onEnergyExchangerModeChange}
       onFuelItemChange={onFuelItemChange}
+      onEntityRecipeChange={onEntityRecipeChange}
       onBlackHolePausedChange={onBlackHolePausedChange}
       onTimeWarpEnabledChange={onTimeWarpEnabledChange}
       onTimeWarpRequestedMultiplierChange={onTimeWarpRequestedMultiplierChange}

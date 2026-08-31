@@ -4512,6 +4512,22 @@ mod tests {
         catalog
     }
 
+    fn player_authority_recipe_catalog() -> Value {
+        let mut catalog = player_authority_catalog();
+        catalog["items"].as_array_mut().unwrap().extend([
+            json!({ "id": "copper_ore", "name": "copper_ore", "kind": "solid" }),
+            json!({ "id": "copper_ingot", "name": "copper_ingot", "kind": "solid" }),
+        ]);
+        catalog["recipes"].as_array_mut().unwrap().push(json!({
+            "id": "copper_ingot",
+            "buildingId": "arc_smelter",
+            "duration": 1,
+            "inputs": [{ "itemId": "copper_ore", "amount": 1 }],
+            "outputs": [{ "itemId": "copper_ingot", "amount": 1 }]
+        }));
+        catalog
+    }
+
     fn player_authority_fuel_catalog() -> Value {
         let mut catalog = player_authority_catalog();
         catalog["items"].as_array_mut().unwrap().extend([
@@ -5384,6 +5400,59 @@ mod tests {
         serde_json::to_vec(&envelope).unwrap()
     }
 
+    fn player_authority_recipe_envelope() -> Vec<u8> {
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["tray"] = json!({ "iron_ore": 4, "iron_ingot": 7 });
+        envelope["state"]["construction"]["conveyor_belt_mk1"] = Value::from(5);
+        envelope["state"]["entities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "smelter-recipe-host",
+                "kind": "machine",
+                "planetId": "home",
+                "position": { "x": 5, "y": 2 },
+                "interactionLocked": false,
+                "buildingId": "arc_smelter",
+                "powerGridId": "grid-a",
+                "powerPriority": 2,
+                "recipeId": "iron_ingot",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": { "iron_ore": 3 },
+                "outputs": { "iron_ingot": 2 },
+                "progress": 0.5,
+                "proliferatorBonusProgress": { "iron_ingot": 0.25 },
+                "routingCursor": 0,
+                "utilization": 0.5,
+                "productionRate": 2
+            }));
+        // Public-v47 row IDs are opaque and the Core supports more bytes than
+        // the durable change-receipt ID leaf. Recipe receipts must therefore
+        // stay compact even when a removed belt cannot be listed directly.
+        envelope["state"]["belts"] = json!([{
+            "id": "b".repeat(513),
+            "planetId": "home",
+            "source": "vein",
+            "target": "smelter-recipe-host",
+            "itemId": "iron_ore",
+            "lanes": 2,
+            "tier": 1,
+            "sorterTier": 1,
+            "progress": 0,
+            "priority": 1,
+            "stackSize": 1,
+            "monitorEnabled": false,
+            "routeMode": "auto",
+            "lastFlow": 0
+        }]);
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        serde_json::to_vec(&envelope).unwrap()
+    }
+
     fn player_authority_blueprint_rename_envelope() -> Vec<u8> {
         let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
         envelope["state"]["blueprints"] = json!([
@@ -5500,6 +5569,19 @@ mod tests {
         player_authority_fixture_from_parts(
             player_authority_construction_automation_envelope(),
             player_authority_construction_automation_catalog(),
+        )
+    }
+
+    fn player_authority_recipe_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        player_authority_fixture_from_parts(
+            player_authority_recipe_envelope(),
+            player_authority_recipe_catalog(),
         )
     }
 
@@ -6185,6 +6267,38 @@ mod tests {
                     "path": ["constructionAutomation", "intent"],
                     "operation": "set",
                     "value": intent
+                }],
+                "changedEntities": [],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn player_authority_recipe_intent_command(
+        base_revision: u64,
+        command_id: &str,
+        entity_id: &str,
+        target_recipe_id: &str,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [{
+                    "path": ["entityRecipe", "intent"],
+                    "operation": "set",
+                    "value": {
+                        "entityId": entity_id,
+                        "targetRecipeId": target_recipe_id
+                    }
                 }],
                 "changedEntities": [],
                 "addedEntities": [],
@@ -10015,6 +10129,181 @@ mod tests {
         )
         .unwrap();
         assert_eq!(replayed["state"], live_state);
+    }
+
+    #[test]
+    fn entity_recipe_intent_is_durable_idempotent_and_replays_from_cold_host_wal() {
+        let command_id = "entity-recipe-durable-boundary";
+        let (clean_root, mut clean_store, mut clean_registry, clean_session, clean_checkpoint) =
+            player_authority_recipe_fixture();
+        let clean_request = || {
+            player_authority_recipe_intent_command(
+                clean_checkpoint.revision,
+                command_id,
+                "smelter-recipe-host",
+                "copper_ingot",
+            )
+        };
+        let clean = clean_registry
+            .commit_player_authority_command(&mut clean_store, &clean_session, clean_request())
+            .unwrap();
+        assert_eq!(clean.changed_entity_ids, ["smelter-recipe-host"]);
+        assert!(clean.changed_belt_ids.is_empty());
+        assert!(clean.topology_dirty);
+        let duplicate = clean_registry
+            .commit_player_authority_command(&mut clean_store, &clean_session, clean_request())
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.revision, clean.revision);
+        assert_eq!(
+            duplicate.summary.canonical_sha256,
+            clean.summary.canonical_sha256
+        );
+        assert_eq!(duplicate.changed_entity_ids, clean.changed_entity_ids);
+        assert!(duplicate.changed_belt_ids.is_empty());
+        assert!(duplicate.topology_dirty);
+        clean_registry
+            .export_v47(&clean_store, &clean_session, "entity-recipe-clean", 100)
+            .unwrap();
+        let clean_export: Value = serde_json::from_slice(
+            &std::fs::read(clean_root.path().join("exports/entity-recipe-clean.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(clean_export["state"].get("entityRecipe").is_none());
+        assert!(
+            clean_export["state"]["belts"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(clean_export["state"]["tray"]["iron_ore"], 7);
+        assert_eq!(clean_export["state"]["tray"]["iron_ingot"], 9);
+        assert_eq!(
+            clean_export["state"]["construction"]["conveyor_belt_mk1"],
+            7
+        );
+        let clean_entity = clean_export["state"]["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["id"] == "smelter-recipe-host")
+            .unwrap();
+        assert_eq!(clean_entity["recipeId"], "copper_ingot");
+        assert_eq!(clean_entity["inputs"], json!({}));
+        assert_eq!(clean_entity["outputs"], json!({}));
+        assert_eq!(clean_entity["progress"], 0);
+        assert_eq!(clean_entity["proliferatorBonusProgress"], json!({}));
+        let clean_state = clean_export["state"].clone();
+        let clean_hash = clean.summary.canonical_sha256.clone();
+
+        for (fault, label) in [
+            (PlayerAuthorityCommandFault::AfterStage, "after-stage"),
+            (PlayerAuthorityCommandFault::AfterWal, "after-wal"),
+            (
+                PlayerAuthorityCommandFault::AfterCheckpoint,
+                "after-checkpoint",
+            ),
+            (PlayerAuthorityCommandFault::AfterReceipt, "after-receipt"),
+            (
+                PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
+                "after-lease-acknowledge",
+            ),
+        ] {
+            let (root, mut store, mut registry, session_id, checkpoint) =
+                player_authority_recipe_fixture();
+            let before = registry.status(&session_id).unwrap();
+            let request = || {
+                player_authority_recipe_intent_command(
+                    checkpoint.revision,
+                    command_id,
+                    "smelter-recipe-host",
+                    "copper_ingot",
+                )
+            };
+            let error = registry
+                .commit_player_authority_command_internal(
+                    &mut store,
+                    &session_id,
+                    request(),
+                    PlayerAuthorityCommandKind::Gameplay,
+                    fault,
+                )
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("lost response"),
+                "{fault:?}: {error:#}"
+            );
+            if fault == PlayerAuthorityCommandFault::AfterStage {
+                let after = registry.status(&session_id).unwrap();
+                assert_eq!(after.revision, before.revision, "{fault:?}");
+                assert_eq!(after.canonical_sha256, before.canonical_sha256, "{fault:?}");
+            }
+            if fault == PlayerAuthorityCommandFault::AfterWal {
+                let wal = store.read_wal("normal-main", checkpoint.revision).unwrap();
+                assert_eq!(wal.len(), 1);
+                let wal_payload = serde_json::to_string(&wal).unwrap();
+                assert!(wal_payload.contains("entityRecipe"));
+                assert!(wal_payload.contains("smelter-recipe-host"));
+                assert!(wal_payload.contains("copper_ingot"));
+                assert!(!wal_payload.contains(&"b".repeat(513)));
+                assert!(!wal_payload.contains("iron_ore"));
+                assert!(!wal_payload.contains("conveyor_belt_mk1"));
+            }
+
+            // Reopen through the ordinary published-checkpoint path. This
+            // exercises every durable boundary rather than relying on the
+            // specialized in-process pending-command recovery helper.
+            drop(registry);
+            drop(store);
+            let mut store = SaveStore::open(root.path()).unwrap();
+            let mut reopened = resumable_player_authority_registry_for_test();
+            let startup = reopened
+                .recover_player_authority_pending_command_on_startup(&mut store)
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"))
+                .unwrap_or_else(|| panic!("{fault:?}: startup receipt missing"));
+            assert_eq!(startup.revision, clean.revision, "{fault:?}");
+            assert_eq!(startup.summary.canonical_sha256, clean_hash, "{fault:?}");
+            assert_eq!(startup.command_id.as_deref(), Some(command_id), "{fault:?}");
+            assert_eq!(
+                startup.changed_entity_ids,
+                ["smelter-recipe-host"],
+                "{fault:?}"
+            );
+            assert!(startup.changed_belt_ids.is_empty(), "{fault:?}");
+            assert!(startup.topology_dirty, "{fault:?}");
+            let recovered = reopened
+                .commit_player_authority_command(&mut store, &startup.session_id, request())
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
+            assert!(recovered.duplicate, "{fault:?}");
+            assert_eq!(recovered.base_revision, clean.base_revision, "{fault:?}");
+            assert_eq!(recovered.revision, clean.revision, "{fault:?}");
+            assert_eq!(recovered.summary.canonical_sha256, clean_hash, "{fault:?}");
+            assert_eq!(
+                recovered.changed_entity_ids,
+                ["smelter-recipe-host"],
+                "{fault:?}"
+            );
+            assert!(recovered.changed_belt_ids.is_empty(), "{fault:?}");
+            assert!(recovered.topology_dirty, "{fault:?}");
+            let lease = store.require_exact_realtime_lease().unwrap();
+            assert_eq!(lease.acknowledged.revision, recovered.revision, "{fault:?}");
+            assert!(lease.pending_command.is_none(), "{fault:?}");
+
+            let export_id = format!("entity-recipe-replayed-{label}");
+            reopened
+                .export_v47(&store, &startup.session_id, &export_id, 100)
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
+            let replayed: Value = serde_json::from_slice(
+                &std::fs::read(root.path().join(format!("exports/{export_id}.json"))).unwrap(),
+            )
+            .unwrap();
+            assert!(replayed["state"].get("entityRecipe").is_none(), "{fault:?}");
+            assert_eq!(replayed["state"], clean_state, "{fault:?}");
+            assert!(replayed["state"]["belts"].as_array().unwrap().is_empty());
+            assert_eq!(replayed["state"]["tray"]["iron_ore"], 7);
+            assert_eq!(replayed["state"]["tray"]["iron_ingot"], 9);
+            assert_eq!(replayed["state"]["construction"]["conveyor_belt_mk1"], 7);
+        }
     }
 
     #[test]

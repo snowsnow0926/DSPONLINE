@@ -91,6 +91,42 @@ function metadataPatch(baseRevision = 10): SimulationCommandPatch {
   };
 }
 
+function recipeIntentPatch(
+  baseRevision = 10,
+  entityId = "smelter-recipe-a",
+): SimulationCommandPatch {
+  return {
+    protocolVersion: 1,
+    baseRevision,
+    topLevelChanges: [{
+      path: ["entityRecipe", "intent"],
+      operation: "set",
+      value: { entityId, targetRecipeId: "copper_ingot" },
+    }],
+    changedEntities: [],
+    addedEntities: [],
+    removedEntityIds: [],
+    changedBelts: [],
+    addedBelts: [],
+    removedBeltIds: [],
+  };
+}
+
+function recipeIntentReceipt(
+  patch: SimulationCommandPatch,
+  overrides: Partial<DesktopNativeCoreCommandResult> = {},
+): DesktopNativeCoreCommandResult {
+  const value = patch.topLevelChanges[0]?.value as { entityId: string };
+  return {
+    previousRevision: patch.baseRevision,
+    revision: patch.baseRevision + 1,
+    changedEntityIds: [value.entityId],
+    changedBeltIds: [],
+    topologyDirty: true,
+    ...overrides,
+  };
+}
+
 function receiptForPatch(
   patch: SimulationCommandPatch,
   topologyDirty: boolean,
@@ -200,6 +236,133 @@ function stationSlotPatchFixture() {
 }
 
 describe("native player-authority command source", () => {
+  it("accepts the exact entity-recipe marker with its compact live receipt", async () => {
+    const patch = recipeIntentPatch();
+    const harness = sourceHarness(patch, { receipt: recipeIntentReceipt(patch) });
+
+    await expect(harness.source.applyCommand(patch)).resolves.toMatchObject({
+      previousRevision: 10,
+      revision: 11,
+      changedEntityIds: ["smelter-recipe-a"],
+      changedBeltIds: [],
+      topologyDirty: true,
+    });
+    expect(harness.bridge.applyNativeCoreCommand).toHaveBeenCalledOnce();
+  });
+
+  it("rejects incomplete or forged entity-recipe compact live receipts", async () => {
+    const patch = recipeIntentPatch();
+    const valid = recipeIntentReceipt(patch);
+    const cases: DesktopNativeCoreCommandResult[] = [
+      { ...valid, changedEntityIds: [] },
+      { ...valid, changedEntityIds: ["aa-forged", "smelter-recipe-a"] },
+      { ...valid, changedEntityIds: ["wrong-entity"] },
+      { ...valid, changedBeltIds: ["forged-belt"] },
+      { ...valid, topologyDirty: false },
+    ];
+
+    for (const receipt of cases) {
+      const harness = sourceHarness(patch, { receipt });
+      await expect(harness.source.applyCommand(patch)).rejects.toMatchObject({
+        code: "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+        commandId: expect.stringMatching(/^renderer-local-/),
+      });
+      expect(harness.bridge.applyNativeCoreCommand).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("accepts only the exact entity-recipe marker shape for compact receipt derivation", async () => {
+    const exact = recipeIntentPatch();
+    const compactReceipt = recipeIntentReceipt(exact);
+    const malformed: SimulationCommandPatch[] = [
+      {
+        ...exact,
+        topLevelChanges: [{
+          ...exact.topLevelChanges[0]!,
+          value: {
+            entityId: "smelter-recipe-a",
+            targetRecipeId: "copper_ingot",
+            refund: true,
+          },
+        }],
+      },
+      {
+        ...exact,
+        topLevelChanges: [{ path: ["entityRecipe", "intent", "extra"], operation: "set", value: {
+          entityId: "smelter-recipe-a",
+          targetRecipeId: "copper_ingot",
+        } }],
+      },
+      {
+        ...exact,
+        topLevelChanges: [{ path: ["entityRecipe", "intent"], operation: "delete" }],
+      },
+      {
+        ...exact,
+        topLevelChanges: [{
+          ...exact.topLevelChanges[0]!,
+          value: { entityId: "bad\u0001entity", targetRecipeId: "copper_ingot" },
+        }],
+      },
+      {
+        ...exact,
+        changedEntities: [{ id: "foreign-entity", changes: [{
+          path: ["inputs", "iron_ore"],
+          operation: "set",
+          value: 1,
+        }] }],
+      },
+    ];
+
+    for (const patch of malformed) {
+      const harness = sourceHarness(patch, { receipt: compactReceipt });
+      await expect(harness.source.applyCommand(patch)).rejects.toMatchObject({
+        code: "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+      });
+    }
+  });
+
+  it("accepts and validates the compact entity-recipe committed reconciliation receipt", async () => {
+    const patch = recipeIntentPatch();
+    const frame = activeFrame();
+    const valid = recipeIntentReceipt(patch);
+    const committedBridge = {
+      getNativePlayerAuthorityState: vi.fn(async () => frame),
+      applyNativeCoreCommand: vi.fn(async () => valid),
+      reconcileNativeCoreCommand: vi.fn(async () => ({ status: "committed" as const, receipt: valid })),
+    } satisfies Pick<
+      DesktopBridge,
+      "getNativePlayerAuthorityState" | "applyNativeCoreCommand" | "reconcileNativeCoreCommand"
+    >;
+    const source = createNativePlayerAuthorityCommandSource(committedBridge, frame)!;
+    await expect(source.reconcileCommand(patch)).resolves.toEqual({
+      status: "committed",
+      receipt: valid,
+    });
+
+    const invalidReceipts: DesktopNativeCoreCommandResult[] = [
+      { ...valid, changedEntityIds: [] },
+      { ...valid, changedEntityIds: ["aa-forged", "smelter-recipe-a"] },
+      { ...valid, changedEntityIds: ["wrong-entity"] },
+      { ...valid, changedBeltIds: ["forged-belt"] },
+      { ...valid, topologyDirty: false },
+    ];
+    for (const receipt of invalidReceipts) {
+      const bridge = {
+        getNativePlayerAuthorityState: vi.fn(async () => frame),
+        applyNativeCoreCommand: vi.fn(async () => receipt),
+        reconcileNativeCoreCommand: vi.fn(async () => ({ status: "committed" as const, receipt })),
+      } satisfies Pick<
+        DesktopBridge,
+        "getNativePlayerAuthorityState" | "applyNativeCoreCommand" | "reconcileNativeCoreCommand"
+      >;
+      await expect(
+        createNativePlayerAuthorityCommandSource(bridge, frame)!.reconcileCommand(patch),
+      ).rejects.toMatchObject({ code: "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID" });
+      expect(bridge.applyNativeCoreCommand).not.toHaveBeenCalled();
+    }
+  });
+
   it("requires topologyDirty for the minimal blueprint rename marker", async () => {
     const patch = createNativeBlueprintRenameIntentCommand(10, "mod:opaque/rocket", "新蓝图名🚀");
     const accepted = sourceHarness(patch, {

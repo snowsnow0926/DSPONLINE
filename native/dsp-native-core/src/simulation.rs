@@ -366,6 +366,7 @@ impl CoreState {
             let belt_routes = prepared.belt_routes.clone();
             let belt_activity = prepared.belt_activity.clone();
             let logistics_buffer_runtime = prepared.logistics_buffer_runtime.clone();
+            let material_delivery_runtime = prepared.material_delivery_runtime.clone();
             let ordinary_production_runtime = prepared.ordinary_production_runtime.clone();
             let local_peer_directory = prepared.local_peer_directory.clone();
             let quantum_logistics_directory = prepared.quantum_logistics_directory.clone();
@@ -405,6 +406,7 @@ impl CoreState {
             self.install_prepared_belt_routes(belt_routes);
             self.install_prepared_belt_activity(belt_activity);
             self.install_prepared_logistics_buffer_runtime(logistics_buffer_runtime);
+            self.install_prepared_material_delivery_runtime(material_delivery_runtime);
             self.install_prepared_ordinary_production_runtime(ordinary_production_runtime);
             self.install_prepared_local_peer_directory(local_peer_directory);
             self.install_prepared_quantum_logistics_directory(quantum_logistics_directory);

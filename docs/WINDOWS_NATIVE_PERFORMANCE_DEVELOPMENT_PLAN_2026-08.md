@@ -2052,3 +2052,18 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 5. 两个请求精确绑定 `sessionId/runId/revision/registryFingerprint`。preload、main broker、Host exact-realtime lease、Rust 与 renderer boundary 逐层重验；异步 read 前后 authority snapshot 都必须一致。旧 run 同 revision ABA、stale registry/revision、额外字段、payload 超限、重复任务、计数不一致或 `truncated=true` 均整页失败关闭，不能拼接 Web GameState。Web fallback 行为保持原样。
 6. 门禁覆盖 Core、Host、Node boundary、组件与 App：有界/只读/源 hash 不变；四重 lineage/ABA；truncated、重复 ID、counts、difficulty、decimal、unsafe count、主档兼容 flag；native route 只挂 Native workspace；失败页不暴露任务/账户操作；组件无 GameState 与主档 writer。冻结前 fresh focused 为 Core `3/3`、Host exact lease `1/1`、Host bin `3/3`、Node `62 passed / 6 skipped / 0 failed`（6 个 release Host 集成测试因本工作树未建该二进制而明确跳过）、Vitest `12/12`；typecheck、strict clippy、fmt、production build/startup budget 与 diff check 通过。它们不替代 root 的组合全量、E2E、长跑、多硬件、签名或灰度门禁。
 7. 本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、固定能力百分比或 `authorityEligible=false`；不使用真实玩家存档，不连接生产，不部署、不签名。
+
+### 24.29 Material-delivery hub 双阶段确定性活动队列（2026-09-01，开发候选）
+
+本纵切只关闭 `simple_factory` 中 built-in material-delivery hub 每拍前后两次无条件全扫；不修改枢纽配送公式、持久格式、目录 admission 或固定能力百分比，也不把 opaque/MOD hub、连续生产或全部物流写成已经 `O(active)`。
+
+1. 运行时新增 session-only、按持久实体行号排序的 `MaterialDeliveryRuntime`。冷启动或 runtime 失效后的第一拍仍在两个历史 drain 阶段各遍历全部 hub，保留原行序与缺失/旧显示字段的归一语义。第一阶段选中的每一行都必须带入第二阶段，即使它已把输入清空；这样同拍末尾仍会按旧路径把 `utilization`、`productionRate` 和 `progress` 归零。
+2. 第二阶段完成后，只有实体身份属于内置 `material_delivery_hub`、三个 `deliverySlots` 形状合法、全部 `inputs` 值均为有限数值零，且每个已配置的普通物料目标行星托盘仍未满时才允许休眠。任何残留输入都继续常醒；托盘满也继续常醒，因此不需要证明托盘的全部潜在 writer。运输机/运输船仍按既有 portable-fleet 语义处理。
+3. 输入与输出两次真实 `belts::transfer_with_bandwidth` 都会清空并重新生成精确的 source/target changed-entity 集合。每一段在对应 drain 前把其中的 hub 行加入 wake queue；后段不是前段事件的追加集合。真实合成链分别使用 feeder→relay→hub 和 producer→hub，证明 relay 的前段移动与 producer 的后段移动都能在同拍唤醒，而不是通过测试专用 wake API 伪造事件。
+4. 活动达到精确 `75%` 时按全 hub 持久行序执行 full scan。非空 registry、顶层/slot MOD 字段、legacy/opaque slot、未知物料、非有限输入或托盘、entity count/ID/building/planet 漂移、topology Arc 或目录数量漂移，以及任何无法闭合的形状都保持常醒或稳定回到 full-scan oracle；候选不能基于“不确定但当前恰好为零”进入休眠。
+5. runtime 只在完整 simulation candidate 与外层 revision commit 成功后安装；它不进入 GameState、WAL、checkpoint、增量 chunk、v47 导出、canonical 或 domain hash。第一、第二阶段的 wake 更新都发生在 candidate-owned Arc 上；后段 readiness 在验证选中行与结果行完全同序后才原子替换队列。后续生产/全局结算失败时，源状态字节、Arc 身份、pending wake 和 scan history 均保持不变。
+6. 独立 force-full oracle 不复用 indexed selection：测试令每次 drain 都选择全部 1,024 hub。`1/5/60` 秒分别产生 `2/10/120` 次 drain；indexed 冷拍两次均选 `1024`，随后每阶段最多选 `1`，oracle 每次均选 `1024`。两者完整物化 bytes、canonical SHA-256、domain SHA-256 与合成物料守恒 SHA-256 完全一致；60 秒结果在 1/2/4/8 workers 下相同。
+7. 边界回归另覆盖精确 `6/8` 的 75% 稠密回退、托盘满且输入为零仍保持全部 hub 常醒、零显示字段规范化、MOD registry、opaque entity、选中 ID 漂移、topology identity 漂移，以及失败候选保留 wake。真实两段 belt 的 5 秒 indexed/force-full 还逐字比较四类结果，并观察到 steady drain pair `(1,1)`。
+8. 最终新鲜门禁为 Core 串行全量 `899/899`、0 失败、0 忽略（278.82 秒），Rust fmt 和 workspace `--all-targets --all-features -D warnings` strict clippy 通过。strict clippy 首轮只发现新增测试使用 `iter().any` 而可等价改为 `contains`；机械修正后重跑转绿，失败史保留。本切片没有运行 Host、Node、renderer、E2E、打包、安装、24 小时、多硬件、签名或灰度门禁。
+
+GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host/renderer 协议和 `authorityEligible=false` 均未改变；本切片未连接生产、未部署、未签名，也未读取或修改真实玩家存档。

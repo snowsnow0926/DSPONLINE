@@ -52,6 +52,7 @@ mod station_contracts;
 mod station_route_ledger;
 mod stellar_workspace;
 mod system_space_station;
+mod system_space_station_workspace;
 pub mod v47_import;
 
 pub use belts::BeltSchedulerDiagnostics;

@@ -306,6 +306,7 @@ import { compressSaveTextToGzipBlob } from "./game/saveFileCodec";
 import { alignToDevicePixel } from "./game/displayPixels";
 import {
   getDesktopBridge,
+  type DesktopNativeSystemSpaceStationIntent,
   type DesktopNativePlayerAuthorityHandoffRequest,
   type DesktopNativePlayerAuthorityHandoffResult,
   type DesktopNativeSaveCommitResult,
@@ -9065,6 +9066,58 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     });
     return true;
   }, [invalidateFactoryAlertProjection, rejectPlayerStateEditDuringPrimarySave]);
+
+  const commitNativeSystemSpaceStationIntent = useCallback((
+    intent: DesktopNativeSystemSpaceStationIntent,
+    successNotice: string,
+  ): boolean => {
+    if (rejectPlayerStateEditDuringPrimarySave()) return false;
+    const identity = nativeSystemSpaceStationIdentity;
+    const commitIntent = desktopBridge?.commitNativeSystemSpaceStationIntent;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || !systemSpaceStationOpen ||
+        !identity || identity.systemId !== systemSpaceStationId || typeof commitIntent !== "function") {
+      setNotice("原生空间站权威会话或耐久命令通道尚未就绪；本次操作未提交");
+      return false;
+    }
+    if (nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一条命令；本次空间站操作未提交");
+      return false;
+    }
+    nativePlayerAuthorityCommandInFlightRef.current = true;
+    setNativePlayerAuthorityCommandPending(true);
+    void commitIntent({
+      expectedRevision: identity.revision,
+      expectedRegistryFingerprint: identity.registryFingerprint,
+      intent,
+    }).then((receipt) => {
+      if (receipt.previousRevision !== identity.revision || receipt.revision !== identity.revision + 1) {
+        throw new Error("native system-space-station receipt revision drifted");
+      }
+      invalidateFactoryAlertProjection();
+      setNotice(successNotice);
+    }).catch(() => {
+      // The Host may have durably committed even when its renderer response
+      // was lost. The renderer never creates a second mutation; main may only
+      // reconcile the byte-identical idempotent intent. The clock refresh
+      // below then treats the next exact projection as truth.
+      setNotice("空间站命令未通过校验或结果暂时无法确认；不会自动重发，正在核对权威 revision");
+    }).finally(async () => {
+      try {
+        await nativePlayerAuthorityClockRef.current?.refresh();
+      } finally {
+        nativePlayerAuthorityCommandInFlightRef.current = false;
+        setNativePlayerAuthorityCommandPending(false);
+      }
+    });
+    return true;
+  }, [
+    desktopBridge,
+    invalidateFactoryAlertProjection,
+    nativeSystemSpaceStationIdentity,
+    rejectPlayerStateEditDuringPrimarySave,
+    systemSpaceStationId,
+    systemSpaceStationOpen,
+  ]);
 
   const submitNativeBlueprintRenameIntent = useCallback((
     identity: NativeBlueprintRenameIdentity,
@@ -21695,7 +21748,36 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           identity={nativeSystemSpaceStationIdentity}
           fetchProjection={nativeSystemSpaceStationFetchProjection}
           mobile={nextMobileShell}
+          pending={nativePlayerAuthorityCommandPending}
+          commandsAvailable={typeof desktopBridge?.commitNativeSystemSpaceStationIntent === "function"}
           onClose={() => { setSystemSpaceStationOpen(false); setSystemSpaceStationId(null); }}
+          onStartConstruction={(systemId) => systemId === nativeSystemSpaceStationIdentity?.systemId
+            ? commitNativeSystemSpaceStationIntent({ type: "start", systemId }, "系统空间站施工已由 Rust 耐久启动")
+            : false}
+          onDeliverMaterial={(systemId, planetId, itemId, amount) => systemId === nativeSystemSpaceStationIdentity?.systemId
+            ? commitNativeSystemSpaceStationIntent({
+              type: "deliver-from-tray",
+              systemId,
+              planetId,
+              itemId,
+              requestedAmount: amount,
+            }, "空间站施工物料已由 Rust 守恒交付")
+            : false}
+          onSetModuleCount={(systemId, module, target) => systemId === nativeSystemSpaceStationIdentity?.systemId
+            ? commitNativeSystemSpaceStationIntent({ type: "module-target", systemId, module, target }, "空间站模块数量已由 Rust 更新")
+            : false}
+          onUpgradeStation={(entityId) => commitNativeSystemSpaceStationIntent({ type: "upgrade-one", entityId }, "星际物流站已由 Rust 升级")}
+          onUpgradeAllStations={(systemId) => systemId === nativeSystemSpaceStationIdentity?.systemId
+            ? commitNativeSystemSpaceStationIntent({ type: "upgrade-all", systemId }, "本恒星系物流站升级已由 Rust 耐久提交")
+            : false}
+          onRequestMode={(entityId, mode) => commitNativeSystemSpaceStationIntent({ type: "mode-target", entityId, mode }, "物流站运行模式已由 Rust 更新")}
+          onSetOutput={(entityId, portIndex, itemId) => commitNativeSystemSpaceStationIntent({
+            type: "output-target",
+            entityId,
+            portIndex,
+            itemId,
+            confirmations: 2,
+          }, "太空电梯输出口已由 Rust 守恒更新")}
         /> : <SystemSpaceStationWorkspace
           open
           game={game}

@@ -301,6 +301,38 @@ describe("NativeSystemSpaceStationWorkspace", () => {
 
   });
 
+  it("keeps every mutation control disabled when the durable intent bridge is unavailable", async () => {
+    const onSetModuleCount = vi.fn(() => true);
+    const onUpgradeStation = vi.fn(() => true);
+    const onUpgradeAllStations = vi.fn(() => true);
+    const onRequestMode = vi.fn(() => true);
+    const onSetOutput = vi.fn(() => true);
+    renderWorkspace({
+      commandsAvailable: false,
+      fetchProjection: vi.fn(async (request) => operationalProjection(request)),
+      onSetModuleCount,
+      onUpgradeStation,
+      onUpgradeAllStations,
+      onRequestMode,
+      onSetOutput,
+    });
+    await settle();
+
+    expect(host.querySelector("[data-native-system-space-station-command-unavailable]")).not.toBeNull();
+    const mutationControls = host.querySelectorAll<HTMLButtonElement>(
+      "[data-native-system-station-command], [data-native-system-station-output-submit]",
+    );
+    expect(mutationControls.length).toBeGreaterThan(0);
+    expect(Array.from(mutationControls).every((button) => button.disabled)).toBe(true);
+
+    act(() => mutationControls[0]!.click());
+    expect(onSetModuleCount).not.toHaveBeenCalled();
+    expect(onUpgradeStation).not.toHaveBeenCalled();
+    expect(onUpgradeAllStations).not.toHaveBeenCalled();
+    expect(onRequestMode).not.toHaveBeenCalled();
+    expect(onSetOutput).not.toHaveBeenCalled();
+  });
+
   it("moves each page lane independently and preserves the other three cursors", async () => {
     const fetchProjection = vi.fn(async (request: NativeSystemSpaceStationWorkspaceProjectionRequest) => projection(request));
     renderWorkspace({ fetchProjection });

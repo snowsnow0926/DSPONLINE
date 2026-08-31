@@ -33,6 +33,7 @@ export interface NativeSystemSpaceStationWorkspaceProps {
   readonly fetchProjection: NativeSystemSpaceStationWorkspaceFetchProjection | null;
   readonly mobile?: boolean;
   readonly pending?: boolean;
+  readonly commandsAvailable?: boolean;
   readonly onClose: () => void;
   readonly onStartConstruction?: (systemId: string) => boolean | void;
   readonly onDeliverMaterial?: (systemId: string, planetId: string, itemId: string, amount: number) => boolean | void;
@@ -173,6 +174,7 @@ export function NativeSystemSpaceStationWorkspace({
   fetchProjection,
   mobile = false,
   pending = false,
+  commandsAvailable = true,
   onClose,
   onStartConstruction,
   onDeliverMaterial,
@@ -195,7 +197,7 @@ export function NativeSystemSpaceStationWorkspace({
     snapshot.status === "empty" && open;
   const commandsEnabled = Boolean(projection && identity && frame &&
     frame.sessionId === identity.sessionId && frame.runId === identity.runId &&
-    frame.revision === identity.revision && !loading && !pending);
+    frame.revision === identity.revision && commandsAvailable && !loading && !pending);
 
   return <WorkspaceFrame
     open={open}
@@ -225,6 +227,14 @@ export function NativeSystemSpaceStationWorkspace({
       </section> : null}
 
       {projection ? <>
+        {!commandsAvailable ? <section
+          className="system-space-station-card"
+          role="status"
+          data-native-system-space-station-command-unavailable
+        >
+          <header><ShieldCheck size={17} /><strong>当前桌面外壳仅开放只读投影</strong><span>所有写入按钮已关闭；升级到包含 Rust 空间站耐久命令的外壳后再操作。</span></header>
+        </section> : null}
+
         <section className="system-space-station-overview" data-native-system-space-station-overview>
           <div className="system-space-station-overview-main">
             <span>联合施工 · 阶段 {projection.station.phaseIndex + 1}</span>

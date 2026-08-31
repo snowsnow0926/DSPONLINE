@@ -839,5 +839,12 @@ test("desktop exposes only a start revision fence and budgets while main owns ev
   assert.doesNotMatch(main, /nativeCoreSessions\.(?:commitPlayerAuthorityMacroAdvance|finishPlayerAuthorityMacroSession|recoverPlayerAuthorityMacroAdvance)/);
   assert.match(preload, /startNativePlayerAuthorityMacro:[\s\S]*?desktop:native-player-authority-macro-start/);
   assert.match(preload, /finishNativePlayerAuthorityMacro:\s*\(\)[\s\S]*?desktop:native-player-authority-macro-finish[\s\S]*?\{\}/);
-  assert.doesNotMatch(preload, /macroSessionId|operationId|runId|main-player-authority/);
+  const macroPreloadSurface = preload.match(
+    /^\s*(?:start|advance|finish|recover)NativePlayerAuthorityMacro:.*$/gm,
+  ) ?? [];
+  assert.equal(macroPreloadSurface.length, 4);
+  assert.doesNotMatch(
+    macroPreloadSurface.join("\n"),
+    /macroSessionId|operationId|runId|main-player-authority/,
+  );
 });

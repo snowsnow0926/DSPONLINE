@@ -1,5 +1,11 @@
 # DSP极简网络项目现状
 
+> **Windows 恒星系空间站 Rust 写面 P1 收口（2026-09-01，开发候选，未发布）**：原生星图现在有真实可达的“管理本系空间站”入口；七类空间站操作经过有界 Rust 投影、main-owned FIFO、Host WAL/checkpoint/receipt 和冷恢复提交，renderer 不提供 patch、完整状态、库存结果或派生升级范围。投影的 session/run/revision/registry/system 五重身份进入命令哈希并由 Rust 重新验证实体所属恒星系，避免旧窗口、跨存档同 revision 和跨系点击误写。
+>
+> 可预期的缺科技、库存不足、目标未变化等语义失败只在 Rust 证明 durable stage 尚未开始时返回 typed definite rejection；main 保留原 revision/checkpoint、取消依赖该失败 revision 的排队命令并立即恢复权威时钟。EPIPE、普通命令伪造同 code、pending replay 和五个 durable 故障边界继续 uncertain/recoverable。独立终审对合并态给出 GO、未发现 P0/P1；当前组合定向为 Node `74/74`、Rust Core `13/13`、Host 空间站 `6/6`、Host typed response `1/1`、UI/store/App `34/34`，typecheck、Host clippy 与 diff check 通过。Rust fmt 首次检查发现新增测试夹具只缺机械排版，执行标准格式化后已提交；该失败史保留。
+>
+> 仍有非阻塞 P2：preload 方法恒定暴露，若人为混装旧 Host，UI 会先显示按钮再收到 capability 拒绝；匹配构建没有该问题。固定能力百分比等待 WIN-430 合并后的统一加权复审，不以这个单一写面临时抬高。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 和 `authorityEligible=false` 均不改变；未连接生产、未部署、未签名，也未读取或修改玩家存档。
+
 > **Windows ordinary storage/splitter 活动队列（2026-09-01，开发候选，未发布）**：Rust 精确模拟原先每个模拟步都会扫描全部普通 `storage`/`splitter`，把对应物料从 `inputs` 搬到 `outputs`。现在该桥接阶段使用 session-only、按实体持久行号排序的确定性 wake queue：冷启动先完整执行一次旧语义；此后只有传送带真实搬运所触及的 storage/splitter 行会被唤醒。一次旧语义桥接必然已经“搬空当前可搬输入”或“填满输出容量”，因此在下一次库存事件前可以安全休眠。
 >
 > 队列不进入 GameState、WAL、checkpoint、v47 导出或 canonical hash。候选只在完整 simulation revision 提交后安装；失败候选不清 wake。活动行达到 75% 时稳定退化为原全扫描，目录/实体数量/拓扑身份不一致也失败关闭。合成 1,024 行稳态证据为 `selected=1 / total=1024 / skipped=1023`，即少访问 `99.90234375%` 的桥接行；无事件时为 `0/1024`。`1/5/60` 秒、5 个随机种子各 120 步的逐步 full-scan byte oracle、重复 SHA-256、精确 75% 稠密退化和失败候选保留 wake 均已覆盖；这只是 ordinary buffer 纵切，不把连续生产、电力、物料投递枢纽、量子高扇出或 fail-closed 路径写成全部 `O(active)` 完成。

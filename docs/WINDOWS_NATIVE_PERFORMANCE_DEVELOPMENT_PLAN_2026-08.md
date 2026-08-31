@@ -1987,3 +1987,15 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版�
 5. 回归使用不含玩家数据的 4,096+ ordinary machines、97 veins 合成夹具，比较一次完整候选提交在 1/2/4/8 workers 下的序列化状态字节、canonical SHA-256、domain SHA-256 和物料投影 SHA-256，并重复 8-worker 运行。另有跨领域双失败回归证明所有闭包均已 join 后仍按固定域/行选择错误，以及两类原子性回归：第一分区失败和较晚 local 分区失败时，源 revision、规范哈希、完整字节和全部 prepared cache 均不改变。实际门禁计数在提交前以最终源码重跑结果为准，不复用此前切片记录。
 6. 本切片仍不等于全领域权威并行。共享 inventory/production/Dyson 的确定性写入、belt reservation/commit 冲突、全部物流提交、pure-idle/offline/time-warp、跨 CPU 与 Windows 10/11 调度矩阵、24 小时压力、真实档性能和全进程树内存仍未关闭；这些门禁未通过前 WIN-430 继续标记“部分完成”，`authorityEligible=false` 不得放开。
 7. GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host/renderer 协议和玩家存档均未改变。本切片不连接生产、不部署、不签名、不读取或修改真实玩家存档。
+
+### 24.24 恒星系空间站可达写面、跨存档围栏与 definite rejection（2026-09-01，开发候选）
+
+本切片把已经存在的有界空间站投影和七类 durable intent 从“有代码但玩家没有可靠入口”闭合为星图可达链，同时修复两项会阻止正式接管的 P1：旧投影可能在新存档同 revision 上重新绑定，以及普通业务拒绝会把整个 Rust authority 误判为 uncertain。固定能力百分比等待 24.23 与本节的统一加权复审后再更新，不按文件数临时抬高。
+
+1. 已发现的内置恒星系在 native/legacy 星图都显示“管理本系空间站”。原生 authority 打开 `system-space-station-workspace-v1`；Web/接管前继续使用既有 workspace。原生 UI 不读取完整 `GameState` 提交写入，也不把 patch、余额、奖励或升级范围发给 Host。
+2. renderer 的请求精确携带投影 `sessionId/runId/revision/registryFingerprint/systemId` 和一个 intent。broker 必须在调用时逐项匹配当前 main-owned runtime；system ID 同时进入语义摘要、command ID、Host 请求和 Rust request。Start/Deliver/Module/UpgradeAll 的 system 参数必须与投影一致；UpgradeOne/Mode/Output 由 Rust 从实体→行星→恒星系重新推导并限制在同一 system。旧窗口、session/run 切换、跨存档同 revision、跨系实体和全银河批量都失败关闭。
+3. `prepare_system_space_station_command` 与隔离 clone 的 apply 发生的缺科技、库存不足、unchanged/max/非法目标等错误，在 durable pending command 创建前包装为专用 Rust error type。Host 只用 `downcast_ref` 映射 `NATIVE_CORE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED`，禁止按消息字符串猜测。
+4. main runtime 只有在 active entry 是 `system-space-station` 且 error code 精确匹配时才把结果当 definite：拒绝当前 promise，取消所有依赖其预期 revision 的排队命令，保持 published checkpoint/revision/sequence，恢复 active 并重新启动时钟。普通 generic command 即使收到同 code 仍 uncertain。
+5. 首次响应 EPIPE 时仍进入 uncertain 并保留原字节请求；只有 byte-identical retry 真正取得 typed pre-stage rejection 后才恢复 active。已经 pending/ACK 的 replay、协议畸形以及 AfterStage/AfterWal/AfterCheckpoint/AfterReceipt/AfterLeaseAcknowledge 全部不得降级为 definite，继续使用既有幂等恢复。
+6. 当前组合 fresh 门禁为 typecheck、Node `74/74`、Rust Core 空间站 `13/13`、Host 空间站 `6/6`、Host typed response `1/1`、UI/store/App `34/34`，独立终审 P0/P1 为零。Rust fmt 首轮只发现测试夹具机械排版，标准格式化后提交；失败史保留。非阻塞 P2 是 preload 方法恒定存在导致人为混装旧 Host 时按钮可能先显示再被 capability 拒绝，匹配构建无影响。
+7. 本节不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；没有连接生产、部署、签名、读取或修改真实玩家存档。完整 orbital contract、运营/银河、MOD、productive pure-idle/offline/time-warp 和正式发布门禁继续按后续工作包推进。

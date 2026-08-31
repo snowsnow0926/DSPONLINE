@@ -1,5 +1,9 @@
 # 系统架构
 
+> **Windows Rust 恒星系空间站可达写面与明确拒绝边界（2026-09-01，开发候选，未发布）**：原生星图的已发现内置恒星系现在直接提供“管理本系空间站”入口；native/legacy 星图都复用同一打开动作，原生权威模式只渲染有界 `system-space-station-workspace-v1`，renderer 不读取完整 `GameState` 来提交空间站写入。七类操作——开工、托盘交付、模块目标、单站/本系批量升级、模式切换和二次确认的输出口修改——只形成最小 intent。每个 intent 同时绑定投影的 session、run、revision、registry fingerprint 与 system ID；这些字段进入命令摘要和 Host 请求，Rust 再从实体所属行星推导恒星系并拒绝跨系实体、跨系批量或过期投影。这样旧窗口、重新导入后的同 revision 以及跨存档 ABA 都不能把一次点击绑定到新权威会话。
+>
+> Rust 只有在 `prepare_system_space_station_command` 或隔离副本的 apply 失败、且尚未创建 durable pending command 时，才以专用 typed error 标记“明确未写入”。Host 只通过 Rust error type 映射该 code，main runtime 又必须同时看到该精确 code 和当前 active entry 的 `kind=system-space-station` 才会丢弃本操作及依赖它 revision 的排队操作、保持 checkpoint/revision 不变并恢复时钟。普通命令伪造同 code、响应丢失、协议畸形以及 AfterStage/WAL/checkpoint/receipt/lease-ACK 五个故障边界仍保持 uncertain，并且只允许原字节幂等重试。当前仍有一个非阻塞 P2：preload 方法恒定存在，混装旧 Host 时按钮可能先显示可用、随后由真实 capability 门拒绝；匹配构建不受影响。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不改变。
+
 > **Windows Rust 固定分区 prepare/串行提交边界（2026-09-01，开发候选，未发布）**：`DeterministicRuntime` 现在可以在同一个进程生命周期、最多 8 线程的 Rayon 池中并发执行固定 4/8 个异构只读 prepare 分区。工厂打开或缓存失效时，线路路由、普通物流 buffer、本地/量子目录、施工、站点/量子过渡和星际目录/活动从同一不可变 revision 生成私有结果；每个模拟步的 ready station、矿脉和普通机器电力需求同样先生成独立事件缓冲。所有分区必须全部 join，随后才按历史领域顺序检查错误并串行回放；任何失败都丢弃整组结果，不安装先完成的缓存，也不改源 revision。
 >
 > 分区少于 2 个、总工作量少于 4,096 或线程策略为 1 时自动走调用线程；其他情况仍只使用同一有界池，不创建临时线程池。profile 只报告活动分区、工作量、策略选择、实际参与外层分区的 worker 数和是否并行，不把扫描计数冒充墙钟收益。合成完整候选回归覆盖 1/2/4/8 worker 的完整状态字节、规范 SHA-256、领域 SHA-256 和物料投影 SHA-256 一致，并覆盖“较晚领域失败但较早领域成功”时所有 prepared cache 仍为空。该切片只并行无共享写的准备阶段；共享物料提交、线路冲突提交、完整 pure-idle/offline/time-warp 和跨 CPU/Windows 版本长跑仍未闭合，所以 `authorityEligible=false` 保持不变，GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 1.2.3 均不改变。

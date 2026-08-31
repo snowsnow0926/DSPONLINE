@@ -40,11 +40,13 @@ const PROJECTION_METHODS = Object.freeze({
   "system-space-station-workspace-v1": "systemSpaceStationWorkspaceProjection",
   "orbital-contract-workspace-v1": "orbitalContractWorkspaceProjection",
   "campaign-workspace-v1": "campaignWorkspaceProjection",
+  "operations-workspace-v1": "operationsWorkspaceProjection",
   "galaxy-account-workspace-v1": "galaxyAccountWorkspaceProjection",
 });
 const EXACT_LINEAGE_WORKSPACE_PROJECTIONS = new Set([
   "orbital-contract-workspace-v1",
   "campaign-workspace-v1",
+  "operations-workspace-v1",
   "galaxy-account-workspace-v1",
 ]);
 

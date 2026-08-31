@@ -10,6 +10,10 @@ const {
   deriveOrbitalContractCommandIdentity,
   normalizeOrbitalContractIntent,
 } = require("./native-orbital-contract-intent.cjs");
+const {
+  deriveOperationsSettingCommandIdentity,
+  normalizeOperationsSettingIntent,
+} = require("./native-operations-setting-intent.cjs");
 
 const FRAME_MAGIC = Buffer.from("DSPNATV1", "ascii");
 const FRAME_HEADER_BYTES = 36;
@@ -37,6 +41,8 @@ const NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY =
   "native-core-player-authority-system-space-station-command-v1";
 const NATIVE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_COMMAND_CAPABILITY =
   "native-core-player-authority-orbital-contract-command-v1";
+const NATIVE_PLAYER_AUTHORITY_OPERATIONS_SETTING_COMMAND_CAPABILITY =
+  "native-core-player-authority-operations-setting-command-v1";
 const NATIVE_PLAYER_AUTHORITY_PAUSE_CAPABILITY =
   "native-core-player-authority-pause-lifecycle-v1";
 const NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY =
@@ -52,6 +58,8 @@ const NATIVE_ORBITAL_CONTRACT_WORKSPACE_CAPABILITY =
   "native-core-orbital-contract-workspace-projection-v1";
 const NATIVE_CAMPAIGN_WORKSPACE_CAPABILITY =
   "native-core-campaign-workspace-projection-v1";
+const NATIVE_OPERATIONS_WORKSPACE_CAPABILITY =
+  "native-core-operations-workspace-projection-v1";
 const NATIVE_GALAXY_ACCOUNT_WORKSPACE_CAPABILITY =
   "native-core-galaxy-account-workspace-projection-v1";
 const NATIVE_BLUEPRINT_CAPTURE_CONTEXT_CAPABILITY =
@@ -1991,6 +1999,36 @@ class NativeCoreSessionRegistry {
     return this.requestOwned(ownerId, request.sessionId, hostRequest);
   }
 
+  operationsWorkspaceProjection(ownerId, request) {
+    const session = this.assertOwner(ownerId, request?.sessionId);
+    exactObjectKeys(request, [
+      "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint",
+    ], "native operations workspace projection request");
+    if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID || session.slot !== "normal-main" ||
+      !validLogicalId(request.runId, 128) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256)) {
+      throw new TypeError("native operations workspace projection request is invalid");
+    }
+    if (!this.client.hello?.capabilities?.includes(NATIVE_OPERATIONS_WORKSPACE_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide the operations workspace projection",
+        "NATIVE_CORE_CAPABILITY_MISSING",
+      );
+    }
+    const hostRequest = {
+      operation: "coreOperationsWorkspaceProjection",
+      sessionId: request.sessionId,
+      runId: request.runId,
+      expectedRevision: request.expectedRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+    };
+    if (Buffer.byteLength(JSON.stringify(hostRequest), "utf8") > MAX_STELLAR_PROJECTION_REQUEST_BYTES) {
+      throw new RangeError("native operations workspace request exceeds the bounded IPC limit");
+    }
+    return this.requestOwned(ownerId, request.sessionId, hostRequest);
+  }
+
   commandPaletteEntitySearchProjection(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     const allowedKeys = new Set([
@@ -2308,6 +2346,49 @@ class NativeCoreSessionRegistry {
         baseRevision: request.baseRevision,
         expectedRegistryFingerprint: request.expectedRegistryFingerprint,
         confirmedWallClockMs: request.confirmedWallClockMs,
+        intent: identity.semantic.intent,
+      },
+    }, 300_000);
+  }
+
+  commitPlayerAuthorityOperationsSettingCommand(ownerId, request) {
+    const session = this.assertOwner(ownerId, request?.sessionId);
+    if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID || session.slot !== "normal-main") {
+      throw new NativeHostError(
+        "operations setting commands require the main normal-main authority owner",
+        "NATIVE_CORE_PLAYER_AUTHORITY_OWNER_REQUIRED",
+      );
+    }
+    if (!this.client.hello?.capabilities?.includes(
+      NATIVE_PLAYER_AUTHORITY_OPERATIONS_SETTING_COMMAND_CAPABILITY,
+    )) {
+      throw new NativeHostError(
+        "native host does not provide durable operations setting commands",
+        "NATIVE_CORE_PLAYER_AUTHORITY_OPERATIONS_SETTING_COMMAND_UNAVAILABLE",
+      );
+    }
+    exactObjectKeys(request, [
+      "sessionId", "runId", "commandId", "baseRevision",
+      "expectedRegistryFingerprint", "intent",
+    ], "native player-authority operations setting command request");
+    const identity = deriveOperationsSettingCommandIdentity({
+      sessionId: request.sessionId,
+      runId: request.runId,
+      expectedRevision: request.baseRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      intent: normalizeOperationsSettingIntent(request.intent),
+    });
+    if (request.commandId !== identity.commandId) {
+      throw new TypeError("native player-authority operations setting command ID conflicts with its intent");
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreCommitPlayerAuthorityOperationsSettingCommand",
+      sessionId: request.sessionId,
+      request: {
+        runId: request.runId,
+        commandId: request.commandId,
+        baseRevision: request.baseRevision,
+        expectedRegistryFingerprint: request.expectedRegistryFingerprint,
         intent: identity.semantic.intent,
       },
     }, 300_000);
@@ -2693,6 +2774,7 @@ module.exports = {
   NATIVE_BLUEPRINT_WORKSPACE_CAPABILITY,
   NATIVE_ORBITAL_CONTRACT_WORKSPACE_CAPABILITY,
   NATIVE_CAMPAIGN_WORKSPACE_CAPABILITY,
+  NATIVE_OPERATIONS_WORKSPACE_CAPABILITY,
   NATIVE_GALAXY_ACCOUNT_WORKSPACE_CAPABILITY,
   NATIVE_SYSTEM_SPACE_STATION_WORKSPACE_CAPABILITY,
   NATIVE_BLUEPRINT_CAPTURE_CONTEXT_CAPABILITY,
@@ -2711,6 +2793,7 @@ module.exports = {
   NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_COMMAND_CAPABILITY,
+  NATIVE_PLAYER_AUTHORITY_OPERATIONS_SETTING_COMMAND_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_PAUSE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,

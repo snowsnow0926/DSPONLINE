@@ -10,12 +10,15 @@ use dsp_native_host::core_runtime::{
     CorePlayerAuthorityStartupRecoveryReceipt, CoreRegistry,
     NATIVE_CORE_VIEWPORT_ENTITY_PRESENTATION_V1_CAPABILITY, PLAYER_AUTHORITY_COMMAND_CAPABILITY,
     PLAYER_AUTHORITY_GATE_CAPABILITY, PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
+    PLAYER_AUTHORITY_OPERATIONS_SETTING_COMMAND_CAPABILITY,
+    PLAYER_AUTHORITY_OPERATIONS_SETTING_PRE_STAGE_REJECTED_CODE,
     PLAYER_AUTHORITY_ORBITAL_CONTRACT_COMMAND_CAPABILITY,
     PLAYER_AUTHORITY_ORBITAL_CONTRACT_PRE_STAGE_REJECTED_CODE, PLAYER_AUTHORITY_PAUSE_CAPABILITY,
     PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
     PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY,
     PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
-    PLAYER_AUTHORITY_TICK_CAPABILITY, PlayerAuthorityOrbitalContractPreStageRejected,
+    PLAYER_AUTHORITY_TICK_CAPABILITY, PlayerAuthorityOperationsSettingPreStageRejected,
+    PlayerAuthorityOrbitalContractPreStageRejected,
     PlayerAuthoritySystemSpaceStationPreStageRejected,
 };
 use dsp_native_host::exact_realtime_lease::{
@@ -139,6 +142,7 @@ fn handle_request(
                     "native-core-system-space-station-workspace-projection-v1",
                     "native-core-orbital-contract-workspace-projection-v1",
                     "native-core-campaign-workspace-projection-v1",
+                    "native-core-operations-workspace-projection-v1",
                     "native-core-galaxy-account-workspace-projection-v1",
                     "native-core-authority-wal-v1",
                     "native-core-checkpoint-v1",
@@ -151,6 +155,7 @@ fn handle_request(
                     PLAYER_AUTHORITY_COMMAND_CAPABILITY,
                     PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY,
                     PLAYER_AUTHORITY_ORBITAL_CONTRACT_COMMAND_CAPABILITY,
+                    PLAYER_AUTHORITY_OPERATIONS_SETTING_COMMAND_CAPABILITY,
                     PLAYER_AUTHORITY_PAUSE_CAPABILITY,
                     PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
                     PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
@@ -752,6 +757,18 @@ fn handle_request(
             expected_revision,
             &expected_registry_fingerprint,
         )?,
+        ControlRequest::CoreOperationsWorkspaceProjection {
+            session_id,
+            run_id,
+            expected_revision,
+            expected_registry_fingerprint,
+        } => cores.operations_workspace_projection(
+            store,
+            &session_id,
+            &run_id,
+            expected_revision,
+            &expected_registry_fingerprint,
+        )?,
         ControlRequest::CoreGalaxyAccountWorkspaceProjection {
             session_id,
             run_id,
@@ -842,6 +859,13 @@ fn handle_request(
         }
         ControlRequest::CoreCommitPlayerAuthorityOrbitalContractCommand(control) => {
             to_value(cores.commit_player_authority_orbital_contract_command(
+                store,
+                &control.session_id,
+                control.request,
+            )?)?
+        }
+        ControlRequest::CoreCommitPlayerAuthorityOperationsSettingCommand(control) => {
+            to_value(cores.commit_player_authority_operations_setting_command(
                 store,
                 &control.session_id,
                 control.request,
@@ -938,6 +962,11 @@ fn response_bytes(result: anyhow::Result<HostAction>) -> anyhow::Result<(Vec<u8>
                 .is_some()
             {
                 PLAYER_AUTHORITY_ORBITAL_CONTRACT_PRE_STAGE_REJECTED_CODE
+            } else if error
+                .downcast_ref::<PlayerAuthorityOperationsSettingPreStageRejected>()
+                .is_some()
+            {
+                PLAYER_AUTHORITY_OPERATIONS_SETTING_PRE_STAGE_REJECTED_CODE
             } else {
                 "NATIVE_OPERATION_FAILED"
             };

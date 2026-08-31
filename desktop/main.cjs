@@ -67,6 +67,9 @@ const {
   NativePlayerAuthorityOrbitalContractBroker,
 } = require("./native-player-authority-orbital-contract-broker.cjs");
 const {
+  NativePlayerAuthorityOperationsSettingBroker,
+} = require("./native-player-authority-operations-setting-broker.cjs");
+const {
   NativePlayerAuthorityMacroBroker,
 } = require("./native-player-authority-macro-broker.cjs");
 const {
@@ -180,6 +183,7 @@ let nativePlayerAuthorityRuntime = null;
 let nativePlayerAuthorityCommandBroker = null;
 let nativePlayerAuthoritySystemSpaceStationBroker = null;
 let nativePlayerAuthorityOrbitalContractBroker = null;
+let nativePlayerAuthorityOperationsSettingBroker = null;
 let nativePlayerAuthorityMacroBroker = null;
 let nativePlayerAuthorityProjectionBroker = null;
 let nativePlayerAuthorityPersistenceBroker = null;
@@ -813,6 +817,13 @@ async function initializeNativeHost() {
           mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
         ),
       });
+    nativePlayerAuthorityOperationsSettingBroker =
+      new NativePlayerAuthorityOperationsSettingBroker({
+        runtime: nativePlayerAuthorityRuntime,
+        isTrustedRendererOwner: (ownerId) => Boolean(
+          mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
+        ),
+      });
     // Main-process-owned. The renderer IPC/preload surface supplies only
     // bounded integer millisecond budgets plus the start revision it observed;
     // session/operation IDs, the current authoritative revision, durable retry
@@ -927,6 +938,7 @@ async function initializeNativeHost() {
     nativePlayerAuthorityCommandBroker = null;
     nativePlayerAuthoritySystemSpaceStationBroker = null;
     nativePlayerAuthorityOrbitalContractBroker = null;
+    nativePlayerAuthorityOperationsSettingBroker = null;
     nativePlayerAuthorityMacroBroker = null;
     nativePlayerAuthorityProjectionBroker = null;
     nativePlayerAuthorityPersistenceBroker = null;
@@ -1359,6 +1371,15 @@ function nativeOrbitalContractWorkspaceProjectionResultContext(request) {
 }
 
 function nativeCampaignWorkspaceProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    runId: request?.runId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+  };
+}
+
+function nativeOperationsWorkspaceProjectionResultContext(request) {
   return {
     sessionId: request?.sessionId,
     runId: request?.runId,
@@ -2426,6 +2447,20 @@ ipcMain.handle("desktop:native-core-galaxy-account-workspace-projection", async 
   });
 });
 
+ipcMain.handle("desktop:native-core-operations-workspace-projection", async (event, request) => {
+  return runRendererNativeOperation("coreOperationsWorkspaceProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生运营中心投影请求失败，请重试",
+    resultContext: nativeOperationsWorkspaceProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      throw new Error("原生运营中心投影仅对当前玩家权威会话开放");
+    }
+    return await nativePlayerAuthorityProjectionBroker.read(ownerId, "operations-workspace-v1", request);
+  });
+});
+
 ipcMain.handle("desktop:native-core-command-palette-entity-search", async (event, request) => {
   return runRendererNativeOperation("coreCommandPaletteEntitySearchProjection", {
     fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
@@ -2711,6 +2746,17 @@ ipcMain.handle("desktop:native-player-authority-orbital-contract-intent", async 
       throw new Error("原生轨道合同权威命令不可用");
     }
     return nativePlayerAuthorityOrbitalContractBroker.commit(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-player-authority-operations-setting-intent", async (event, request) => {
+  return runRendererNativeOperation("coreCommand", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_OPERATIONS_SETTING_COMMAND_FAILED",
+    message: "原生运营设置提交失败，请重试",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityOperationsSettingBroker) throw new Error("原生运营设置权威命令不可用");
+    return nativePlayerAuthorityOperationsSettingBroker.commit(ownerId, request);
   });
 });
 

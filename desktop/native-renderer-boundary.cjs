@@ -93,6 +93,8 @@ const PUBLIC_NATIVE_ERROR_CODES = new Set([
   "NATIVE_PLAYER_AUTHORITY_PAUSE_REQUEST_INVALID", "NATIVE_PLAYER_AUTHORITY_PAUSE_UNAVAILABLE",
   "NATIVE_PLAYER_AUTHORITY_PAUSE_UNCERTAIN", "NATIVE_PLAYER_AUTHORITY_RESUME_UNCERTAIN",
   "NATIVE_PLAYER_AUTHORITY_CHECKPOINT_FAILED", "NATIVE_PLAYER_AUTHORITY_EXPORT_FAILED",
+  "NATIVE_PLAYER_AUTHORITY_OPERATIONS_SETTING_COMMAND_FAILED",
+  "NATIVE_CORE_PLAYER_AUTHORITY_OPERATIONS_SETTING_PRE_STAGE_REJECTED",
   "NATIVE_PLAYER_AUTHORITY_MACRO_START_REBASE_REQUIRED",
   "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY", "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_STALE",
   "NATIVE_PROTOCOL_INVALID", "NATIVE_SAVE_ABORT_FAILED", "NATIVE_SAVE_BEGIN_FAILED",
@@ -8097,6 +8099,103 @@ function normalizeCoreCampaignWorkspaceProjection(value, context) {
   };
 }
 
+function normalizeCoreOperationsWorkspaceProjection(value, context) {
+  const label = "native operations workspace projection";
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "sessionId", "runId", "revision",
+    "registryFingerprint", "stateVersion", "truncated", "settings", "summary", "alerts", "limits",
+  ], label);
+  requireProjectionByteBudget(source, label);
+  const identity = normalizeBoundWorkspaceIdentity(source, context, label, "operations-workspace-v1");
+  const limitsSource = exactObject(source.limits, ["alertRows", "projectionBytes"], `${label}.limits`);
+  const limits = {
+    alertRows: safeInteger(limitsSource.alertRows, `${label}.limits.alertRows`, 1),
+    projectionBytes: safeInteger(limitsSource.projectionBytes, `${label}.limits.projectionBytes`, 1),
+  };
+  if (limits.alertRows !== 1024 || limits.projectionBytes !== 512 * 1024 ||
+      boolean(source.truncated, `${label}.truncated`) !== false ||
+      Buffer.byteLength(JSON.stringify(source), "utf8") > limits.projectionBytes) {
+    throw protocolError(`${label} complete atom`);
+  }
+  const setting = exactObject(source.settings, [
+    "simulationSpeed", "technologyLayout", "defaultBeltRouteMode", "productionBufferLimit",
+    "logisticsBufferLimit", "beltBufferLimit", "proliferatorBufferLimit",
+  ], `${label}.settings`);
+  const boundedLimit = (value, key, minimum) => {
+    const result = safeInteger(value, `${label}.settings.${key}`, minimum);
+    if (result > 100_000_000) throw protocolError(`${label}.settings.${key}`);
+    return result;
+  };
+  const settings = {
+    simulationSpeed: oneOf(setting.simulationSpeed, [1, 2, 4], `${label}.settings.simulationSpeed`),
+    technologyLayout: oneOf(setting.technologyLayout, ["standard", "compact"], `${label}.settings.technologyLayout`),
+    defaultBeltRouteMode: oneOf(setting.defaultBeltRouteMode, ["auto", "bezier", "upper", "lower"], `${label}.settings.defaultBeltRouteMode`),
+    productionBufferLimit: boundedLimit(setting.productionBufferLimit, "productionBufferLimit", 1000),
+    logisticsBufferLimit: boundedLimit(setting.logisticsBufferLimit, "logisticsBufferLimit", 1000),
+    beltBufferLimit: boundedLimit(setting.beltBufferLimit, "beltBufferLimit", 1000),
+    proliferatorBufferLimit: boundedLimit(setting.proliferatorBufferLimit, "proliferatorBufferLimit", 1),
+  };
+  const summarySource = exactObject(source.summary, [
+    "paused", "elapsedSeconds", "entityCount", "beltCount", "activePlanetId",
+    "activePlanetEntityCount", "activePlanetBeltCount", "constructionQueueCount",
+  ], `${label}.summary`);
+  const summary = {
+    paused: boolean(summarySource.paused, `${label}.summary.paused`),
+    elapsedSeconds: finiteNumber(summarySource.elapsedSeconds, `${label}.summary.elapsedSeconds`),
+    entityCount: safeInteger(summarySource.entityCount, `${label}.summary.entityCount`),
+    beltCount: safeInteger(summarySource.beltCount, `${label}.summary.beltCount`),
+    activePlanetId: logicalId(summarySource.activePlanetId, `${label}.summary.activePlanetId`, 160),
+    activePlanetEntityCount: safeInteger(summarySource.activePlanetEntityCount, `${label}.summary.activePlanetEntityCount`),
+    activePlanetBeltCount: safeInteger(summarySource.activePlanetBeltCount, `${label}.summary.activePlanetBeltCount`),
+    constructionQueueCount: safeInteger(summarySource.constructionQueueCount, `${label}.summary.constructionQueueCount`),
+  };
+  if (summary.activePlanetEntityCount > summary.entityCount || summary.activePlanetBeltCount > summary.beltCount) {
+    throw protocolError(`${label}.summary counts`);
+  }
+  const alertsSource = exactObject(source.alerts, [
+    "status", "totalCount", "criticalCount", "warningCount", "rows",
+  ], `${label}.alerts`);
+  const status = oneOf(alertsSource.status, ["complete", "overflow"], `${label}.alerts.status`);
+  const totalCount = safeInteger(alertsSource.totalCount, `${label}.alerts.totalCount`);
+  const criticalCount = safeInteger(alertsSource.criticalCount, `${label}.alerts.criticalCount`);
+  const warningCount = safeInteger(alertsSource.warningCount, `${label}.alerts.warningCount`);
+  if (criticalCount + warningCount !== totalCount || !Array.isArray(alertsSource.rows) ||
+      alertsSource.rows.length > limits.alertRows ||
+      (status === "overflow" ? alertsSource.rows.length !== 0 || totalCount <= limits.alertRows : alertsSource.rows.length !== totalCount)) {
+    throw protocolError(`${label}.alerts count binding`);
+  }
+  const seen = new Set();
+  const rows = alertsSource.rows.map((value, index) => {
+    const rowLabel = `${label}.alerts.rows[${index}]`;
+    const row = exactObject(value, [
+      "entityId", "planetId", "buildingId", "recipeId", "resourceId", "severity", "code", "label",
+    ], rowLabel);
+    const entityId = opaqueId(row.entityId, `${rowLabel}.entityId`);
+    if (seen.has(entityId)) throw protocolError(`${rowLabel}.entityId`);
+    seen.add(entityId);
+    const optionalId = (value, field) => value === null ? null : logicalId(value, `${rowLabel}.${field}`, 160);
+    return {
+      entityId,
+      planetId: logicalId(row.planetId, `${rowLabel}.planetId`, 160),
+      buildingId: optionalId(row.buildingId, "buildingId"),
+      recipeId: optionalId(row.recipeId, "recipeId"),
+      resourceId: optionalId(row.resourceId, "resourceId"),
+      severity: oneOf(row.severity, ["critical", "warning"], `${rowLabel}.severity`),
+      code: logicalId(row.code, `${rowLabel}.code`, 128),
+      label: boundedString(row.label, `${rowLabel}.label`, 512),
+    };
+  });
+  if (status === "complete") {
+    const projectedCritical = rows.filter((row) => row.severity === "critical").length;
+    if (projectedCritical !== criticalCount) throw protocolError(`${label}.alerts severity binding`);
+  }
+  return {
+    schemaVersion: 1, projectionType: "operations-workspace-v1", source: "native-core",
+    stateVersion: 47, ...identity, truncated: false, settings, summary,
+    alerts: { status, totalCount, criticalCount, warningCount, rows }, limits,
+  };
+}
+
 function normalizeCoreGalaxyAccountWorkspaceProjection(value, context) {
   const label = "native galaxy account workspace projection";
   const source = exactObject(value, [
@@ -8861,6 +8960,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreSystemSpaceStationWorkspaceProjection: normalizeCoreSystemSpaceStationWorkspaceProjection,
   coreOrbitalContractWorkspaceProjection: normalizeCoreOrbitalContractWorkspaceProjection,
   coreCampaignWorkspaceProjection: normalizeCoreCampaignWorkspaceProjection,
+  coreOperationsWorkspaceProjection: normalizeCoreOperationsWorkspaceProjection,
   coreGalaxyAccountWorkspaceProjection: normalizeCoreGalaxyAccountWorkspaceProjection,
   coreCommandPaletteEntitySearchProjection: normalizeCoreCommandPaletteEntitySearchProjection,
   coreCommand: normalizeCoreCommand,

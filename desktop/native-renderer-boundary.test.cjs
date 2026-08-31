@@ -1795,7 +1795,7 @@ test("Electron main uses the dedicated native renderer boundary", () => {
     .map((match) => match[1]);
   const preloadChannels = [...preload.matchAll(/invokeNative\("(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  assert.equal(mainChannels.length, 64);
+  assert.equal(mainChannels.length, 66);
   assert.ok(mainChannels.includes("desktop:native-core-reconcile-command"));
   assert.ok(preloadChannels.includes("desktop:native-core-reconcile-command"));
   assert.ok(mainChannels.includes("desktop:native-player-authority-set-paused"));
@@ -1848,6 +1848,10 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.ok(preloadChannels.includes("desktop:native-player-authority-orbital-contract-intent"));
   assert.ok(mainChannels.includes("desktop:native-core-campaign-workspace-projection"));
   assert.ok(preloadChannels.includes("desktop:native-core-campaign-workspace-projection"));
+  assert.ok(mainChannels.includes("desktop:native-core-operations-workspace-projection"));
+  assert.ok(preloadChannels.includes("desktop:native-core-operations-workspace-projection"));
+  assert.ok(mainChannels.includes("desktop:native-player-authority-operations-setting-intent"));
+  assert.ok(preloadChannels.includes("desktop:native-player-authority-operations-setting-intent"));
   assert.ok(mainChannels.includes("desktop:native-core-galaxy-account-workspace-projection"));
   assert.ok(preloadChannels.includes("desktop:native-core-galaxy-account-workspace-projection"));
   assert.deepEqual(new Set(preloadChannels), new Set(mainChannels));

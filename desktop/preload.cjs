@@ -81,6 +81,40 @@ function normalizeAuthorityWorkspacePreloadRequest(request) {
   return normalized;
 }
 
+function normalizeOperationsSettingPreloadRequest(request) {
+  if (!hasExactKeys(request, [
+    "expectedSessionId", "expectedRunId", "expectedRevision", "expectedRegistryFingerprint", "intent",
+  ]) || !validLogicalPreloadId(request.expectedSessionId, 128) ||
+      !validLogicalPreloadId(request.expectedRunId, 128) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      request.expectedRevision >= Number.MAX_SAFE_INTEGER ||
+      !validLogicalPreloadId(request.expectedRegistryFingerprint, 256) ||
+      !hasExactKeys(request.intent, ["type", "value"])) {
+    throw new TypeError("原生运营设置请求无效");
+  }
+  const { type, value } = request.intent;
+  const validIntent = type === "set-simulation-speed"
+    ? value === 1 || value === 2 || value === 4
+    : type === "set-technology-layout"
+      ? value === "standard" || value === "compact"
+      : type === "set-default-belt-route-mode"
+        ? value === "auto" || value === "bezier" || value === "upper" || value === "lower"
+        : type === "set-proliferator-buffer-limit"
+          ? Number.isSafeInteger(value) && value >= 1 && value <= 100_000_000
+          : type === "set-production-buffer-limit" || type === "set-logistics-buffer-limit" ||
+              type === "set-belt-buffer-limit"
+            ? Number.isSafeInteger(value) && value >= 1_000 && value <= 100_000_000
+            : false;
+  if (!validIntent) throw new TypeError("原生运营设置意图无效");
+  return {
+    expectedSessionId: request.expectedSessionId,
+    expectedRunId: request.expectedRunId,
+    expectedRevision: request.expectedRevision,
+    expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+    intent: { type: request.intent.type, value: request.intent.value },
+  };
+}
+
 function normalizeBlueprintCapturePreloadRequest(request) {
   if (!hasExactKeys(request, [
     "sessionId",
@@ -429,6 +463,7 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   getNativeCoreSystemSpaceStationWorkspaceProjection: (request) => invokeNative("desktop:native-core-system-space-station-workspace-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生恒星系空间站工作区投影请求失败，请重试" }, request),
   getNativeCoreOrbitalContractWorkspaceProjection: (request) => invokeNative("desktop:native-core-orbital-contract-workspace-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生轨道合同工作区投影请求失败，请重试" }, request),
   getNativeCoreCampaignWorkspaceProjection: (request) => invokeNative("desktop:native-core-campaign-workspace-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生主线任务工作区投影请求失败，请重试" }, normalizeAuthorityWorkspacePreloadRequest(request)),
+  getNativeCoreOperationsWorkspaceProjection: (request) => invokeNative("desktop:native-core-operations-workspace-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生运营中心投影请求失败，请重试" }, normalizeAuthorityWorkspacePreloadRequest(request)),
   getNativeCoreGalaxyAccountWorkspaceProjection: (request) => invokeNative("desktop:native-core-galaxy-account-workspace-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生银河账户工作区投影请求失败，请重试" }, normalizeAuthorityWorkspacePreloadRequest(request)),
   getNativeCoreCommandPaletteEntitySearch: (request) => invokeNative("desktop:native-core-command-palette-entity-search", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生命令面板设备搜索失败，请重试" }, request),
   requestNativeCoreProjectionTransfer,
@@ -436,6 +471,7 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   reconcileNativeCoreCommand: (request) => invokeNative("desktop:native-core-reconcile-command", { fallbackCode: "NATIVE_CORE_COMMAND_RECONCILE_FAILED", message: "原生权威命令耐久收据对账失败" }, request),
   commitNativeSystemSpaceStationIntent: (request) => invokeNative("desktop:native-player-authority-system-space-station-intent", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_FAILED", message: "原生恒星系空间站命令提交失败，请重试" }, request),
   commitNativeOrbitalContractIntent: (request) => invokeNative("desktop:native-player-authority-orbital-contract-intent", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_COMMAND_FAILED", message: "原生轨道合同命令提交失败，请重试" }, request),
+  commitNativeOperationsSettingIntent: (request) => invokeNative("desktop:native-player-authority-operations-setting-intent", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_OPERATIONS_SETTING_COMMAND_FAILED", message: "原生运营设置提交失败，请重试" }, normalizeOperationsSettingPreloadRequest(request)),
   advanceNativeCore: (request) => invokeNative("desktop:native-core-advance", { fallbackCode: "NATIVE_CORE_ADVANCE_FAILED", message: "原生影子模拟推进失败，请重试" }, request),
   commitNativeCoreOperation: (request) => invokeNative("desktop:native-core-commit-operation", { fallbackCode: "NATIVE_CORE_COMMIT_FAILED", message: "原生影子事务提交失败，请重新检查影子状态" }, request),
   checkpointNativeCore: (request) => invokeNative("desktop:native-core-checkpoint", { fallbackCode: "NATIVE_CORE_CHECKPOINT_FAILED", message: "原生影子检查点生成失败，请重试" }, request),

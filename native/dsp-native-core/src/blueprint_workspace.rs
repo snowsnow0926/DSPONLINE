@@ -6,12 +6,12 @@
 //! to display-only fields; any material reference that the active registry
 //! cannot prove makes that one detail explicitly unsupported.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Value, json};
 
-use crate::state::CoreState;
+use crate::{catalog::RecipeDefinition, state::CoreState};
 
 const BLUEPRINT_WORKSPACE_PROJECTION: &str = "blueprint-workspace-v1";
 const MAX_PROJECTION_BYTES: usize = 1_048_576;
@@ -26,6 +26,10 @@ const MAX_NAME_BYTES: usize = 256;
 const MAX_BELT_LANES: u64 = 4_096;
 const MAX_BUILDING_STACK_COUNT: u64 = 100_000_000;
 const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const MAX_RECIPE_OVERRIDE_ENTRIES: usize = MAX_DETAIL_ENTITIES;
+const MAX_RECIPE_OVERRIDE_OPTIONS: usize = MAX_SOURCE_ROWS;
+const MAX_RECIPE_OVERRIDE_TOTAL_OPTIONS: usize = MAX_SOURCE_ROWS;
+const MAX_RECIPE_OVERRIDE_CONSTRUCTION_BYTES: usize = MAX_PROJECTION_BYTES / 2;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -286,25 +290,84 @@ fn expected_extractor_building_id(resource_id: &str) -> &'static str {
     }
 }
 
+fn recipe_supports_building_base(building_base_id: &str, recipe: &RecipeDefinition) -> bool {
+    building_base_id == recipe.building_id
+}
+
+fn completed_technology_ids(state: &CoreState) -> anyhow::Result<HashSet<String>> {
+    let Some(research) = state.base_value().get("research") else {
+        return Ok(HashSet::new());
+    };
+    let Some(research) = research.as_object() else {
+        bail!("native blueprint workspace research is invalid");
+    };
+    let Some(completed) = research.get("completedTechIds") else {
+        return Ok(HashSet::new());
+    };
+    let Some(completed) = completed.as_array() else {
+        bail!("native blueprint workspace completed technologies are invalid");
+    };
+    if completed.len() > MAX_SOURCE_ROWS {
+        bail!("native blueprint workspace completed technology limit is exceeded");
+    }
+    let mut ids = HashSet::with_capacity(completed.len());
+    for value in completed {
+        let id = value
+            .as_str()
+            .filter(|value| valid_opaque_text(value, MAX_OPAQUE_ID_BYTES))
+            .ok_or_else(|| anyhow!("native blueprint workspace completed technology is invalid"))?;
+        if !state.catalog.technologies.contains_key(id) {
+            bail!("native blueprint workspace completed technology is unknown");
+        }
+        ids.insert(id.to_owned());
+    }
+    Ok(ids)
+}
+
+fn recipe_is_unlocked(recipe: &RecipeDefinition, completed_tech_ids: &HashSet<String>) -> bool {
+    recipe
+        .required_tech_id
+        .as_ref()
+        .is_none_or(|technology_id| completed_tech_ids.contains(technology_id))
+}
+
+fn empty_recipe_override_detail(summary: Value, status: &str, reason: &str) -> Value {
+    json!({
+        "summary": summary,
+        "status": status,
+        "unsupportedReason": reason,
+        "entities": [],
+        "belts": [],
+        "resourceAnchors": [],
+        "externalPorts": [],
+        "recipeOverrideGroups": [],
+    })
+}
+
 fn compact_detail(state: &CoreState, blueprint: &Map<String, Value>) -> anyhow::Result<Value> {
     let counts = blueprint_counts(blueprint)?;
     let summary = library_summary(blueprint)?;
     if detail_limit_exceeded(counts) {
-        return Ok(json!({
-            "summary": summary,
-            "status": "truncated",
-            "unsupportedReason": "detail-limits-exceeded",
-            "entities": [],
-            "belts": [],
-            "resourceAnchors": [],
-            "externalPorts": [],
-        }));
+        return Ok(empty_recipe_override_detail(
+            summary,
+            "truncated",
+            "detail-limits-exceeded",
+        ));
     }
 
     let mut all_keys = HashSet::with_capacity(counts.0 + counts.2);
     let mut entity_keys = HashSet::with_capacity(counts.0);
     let mut entities = Vec::with_capacity(counts.0);
+    let mut source_recipe_ids = Vec::new();
+    let mut source_recipe_building_bases = Vec::<Vec<String>>::new();
     let mut unsupported = false;
+    let completed_tech_ids = match completed_technology_ids(state) {
+        Ok(ids) => ids,
+        Err(_) => {
+            unsupported = true;
+            HashSet::new()
+        }
+    };
     for value in required_array(blueprint, "entities", "blueprint entities")? {
         let object = required_object(value, "blueprint entity")?;
         let key = required_text(object, "key", MAX_OPAQUE_ID_BYTES, "blueprint entity key")?;
@@ -321,6 +384,9 @@ fn compact_detail(state: &CoreState, blueprint: &Map<String, Value>) -> anyhow::
         if building.is_none() {
             unsupported = true;
         }
+        let building_base_id = building.map(|definition| {
+            crate::command::recipe_building_base(building_id, definition.family.as_deref())
+        });
         let recipe_id = optional_text(
             object,
             "recipeId",
@@ -328,14 +394,31 @@ fn compact_detail(state: &CoreState, blueprint: &Map<String, Value>) -> anyhow::
             "blueprint recipe ID",
         )?;
         let recipe_supported = recipe_id.is_none_or(|recipe_id| {
-            state
-                .catalog
-                .recipes
-                .get(recipe_id)
-                .is_some_and(|recipe| recipe.building_id == building_id)
+            state.catalog.recipes.get(recipe_id).is_some_and(|recipe| {
+                building_base_id
+                    .is_some_and(|base_id| recipe_supports_building_base(base_id, recipe))
+            })
         });
         if !recipe_supported {
             unsupported = true;
+        }
+        if let Some(recipe_id) = recipe_id {
+            if let Some(index) = source_recipe_ids
+                .iter()
+                .position(|source_id| source_id == recipe_id)
+            {
+                if let Some(building_base_id) = building_base_id
+                    && !source_recipe_building_bases[index]
+                        .iter()
+                        .any(|candidate| candidate == building_base_id)
+                {
+                    source_recipe_building_bases[index].push(building_base_id.to_owned());
+                }
+            } else {
+                source_recipe_ids.push(recipe_id.to_owned());
+                source_recipe_building_bases
+                    .push(building_base_id.map(str::to_owned).into_iter().collect());
+            }
         }
         let operation_enabled = match object.get("operationEnabledOnDeploy") {
             None | Some(Value::Null) => None,
@@ -362,6 +445,142 @@ fn compact_detail(state: &CoreState, blueprint: &Map<String, Value>) -> anyhow::
             "operationEnabledOnDeploy": operation_enabled,
         }));
     }
+
+    let mut recipe_overrides = HashMap::new();
+    match blueprint.get("recipeOverrides") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(values)) if values.len() <= MAX_RECIPE_OVERRIDE_ENTRIES => {
+            for (source_id, target_value) in values {
+                let Some(target_id) = target_value
+                    .as_str()
+                    .filter(|value| valid_opaque_text(value, MAX_OPAQUE_ID_BYTES))
+                else {
+                    unsupported = true;
+                    continue;
+                };
+                if !valid_opaque_text(source_id, MAX_OPAQUE_ID_BYTES)
+                    || !state.catalog.recipes.contains_key(source_id)
+                    || !state.catalog.recipes.contains_key(target_id)
+                    || !source_recipe_ids.iter().any(|id| id == source_id)
+                {
+                    unsupported = true;
+                    continue;
+                }
+                recipe_overrides.insert(source_id.clone(), target_id.to_owned());
+            }
+        }
+        Some(Value::Object(_)) | Some(_) => unsupported = true,
+    }
+
+    let recipe_override_groups = if unsupported {
+        Vec::new()
+    } else {
+        let mut groups = Vec::with_capacity(source_recipe_ids.len());
+        let mut total_option_count = 0_usize;
+        let mut estimated_construction_bytes = 0_usize;
+        if source_recipe_ids.len() > MAX_RECIPE_OVERRIDE_ENTRIES {
+            unsupported = true;
+            Vec::new()
+        } else {
+            for (index, source_recipe_id) in source_recipe_ids.iter().enumerate() {
+                let Some(source_recipe) = state.catalog.recipes.get(source_recipe_id) else {
+                    unsupported = true;
+                    break;
+                };
+                let building_bases = &source_recipe_building_bases[index];
+                if !recipe_is_unlocked(source_recipe, &completed_tech_ids)
+                    || building_bases.is_empty()
+                    || building_bases
+                        .iter()
+                        .any(|base_id| !recipe_supports_building_base(base_id, source_recipe))
+                {
+                    unsupported = true;
+                    break;
+                }
+                let target_recipe_id = recipe_overrides
+                    .get(source_recipe_id)
+                    .map(String::as_str)
+                    .unwrap_or(source_recipe_id);
+                let Some(target_recipe) = state.catalog.recipes.get(target_recipe_id) else {
+                    unsupported = true;
+                    break;
+                };
+                if !recipe_is_unlocked(target_recipe, &completed_tech_ids)
+                    || building_bases
+                        .iter()
+                        .any(|base_id| !recipe_supports_building_base(base_id, target_recipe))
+                {
+                    unsupported = true;
+                    break;
+                }
+
+                let compatible_options = state
+                    .catalog
+                    .snapshot
+                    .recipes
+                    .iter()
+                    .filter(|recipe| {
+                        recipe_is_unlocked(recipe, &completed_tech_ids)
+                            && building_bases
+                                .iter()
+                                .all(|base_id| recipe_supports_building_base(base_id, recipe))
+                    })
+                    .take(MAX_RECIPE_OVERRIDE_OPTIONS + 1)
+                    .collect::<Vec<_>>();
+                if compatible_options.is_empty()
+                    || compatible_options.len() > MAX_RECIPE_OVERRIDE_OPTIONS
+                    || compatible_options
+                        .iter()
+                        .any(|recipe| !valid_opaque_text(&recipe.name, MAX_NAME_BYTES))
+                {
+                    unsupported = true;
+                    break;
+                }
+                let Some(next_option_count) =
+                    total_option_count.checked_add(compatible_options.len())
+                else {
+                    unsupported = true;
+                    break;
+                };
+                let group_bytes = compatible_options.iter().try_fold(
+                    64_usize
+                        .saturating_add(source_recipe_id.len().saturating_mul(2))
+                        .saturating_add(target_recipe_id.len().saturating_mul(2)),
+                    |total, recipe| {
+                        total
+                            .checked_add(32)
+                            .and_then(|value| value.checked_add(recipe.id.len().saturating_mul(2)))
+                            .and_then(|value| {
+                                value.checked_add(recipe.name.len().saturating_mul(2))
+                            })
+                    },
+                );
+                let Some(next_construction_bytes) = group_bytes
+                    .and_then(|group_bytes| estimated_construction_bytes.checked_add(group_bytes))
+                else {
+                    unsupported = true;
+                    break;
+                };
+                if next_option_count > MAX_RECIPE_OVERRIDE_TOTAL_OPTIONS
+                    || next_construction_bytes > MAX_RECIPE_OVERRIDE_CONSTRUCTION_BYTES
+                {
+                    unsupported = true;
+                    break;
+                }
+                total_option_count = next_option_count;
+                estimated_construction_bytes = next_construction_bytes;
+                groups.push(json!({
+                    "sourceRecipeId": source_recipe_id,
+                    "targetRecipeId": target_recipe_id,
+                    "options": compatible_options
+                        .iter()
+                        .map(|recipe| json!({ "id": recipe.id, "name": recipe.name }))
+                        .collect::<Vec<_>>(),
+                }));
+            }
+            groups
+        }
+    };
 
     let mut anchors = Vec::with_capacity(counts.2);
     for value in optional_array(blueprint, "resourceAnchors", "blueprint resource anchors")? {
@@ -492,15 +711,11 @@ fn compact_detail(state: &CoreState, blueprint: &Map<String, Value>) -> anyhow::
     }
 
     if unsupported {
-        return Ok(json!({
-            "summary": summary,
-            "status": "unsupported",
-            "unsupportedReason": "unproven-catalog-semantics",
-            "entities": [],
-            "belts": [],
-            "resourceAnchors": [],
-            "externalPorts": [],
-        }));
+        return Ok(empty_recipe_override_detail(
+            summary,
+            "unsupported",
+            "unproven-catalog-semantics",
+        ));
     }
     Ok(json!({
         "summary": summary,
@@ -510,6 +725,7 @@ fn compact_detail(state: &CoreState, blueprint: &Map<String, Value>) -> anyhow::
         "belts": belts,
         "resourceAnchors": anchors,
         "externalPorts": ports,
+        "recipeOverrideGroups": recipe_override_groups,
     }))
 }
 
@@ -538,6 +754,7 @@ fn truncate_detail_for_projection_byte_budget(value: &mut Value) -> anyhow::Resu
         "belts": [],
         "resourceAnchors": [],
         "externalPorts": [],
+        "recipeOverrideGroups": [],
     });
     Ok(true)
 }
@@ -938,19 +1155,25 @@ mod tests {
             ],
             "items": [
                 { "id": "iron_ore", "name": "铁矿", "kind": "solid" },
+                { "id": "copper_ore", "name": "铜矿", "kind": "solid" },
                 { "id": "MOD/item-beta", "name": "模组物品", "kind": "solid" }
             ],
             "buildings": [
                 { "id": "mining_machine", "kind": "machine", "speed": 1, "inputCapacity": 100, "outputCapacity": 100 },
                 { "id": "arc_smelter", "kind": "machine", "speed": 1, "inputCapacity": 100, "outputCapacity": 100 },
-                { "id": "MOD/machine-beta", "kind": "machine", "speed": 1, "inputCapacity": 100, "outputCapacity": 100 }
+                { "id": "plane_smelter", "kind": "machine", "speed": 1, "inputCapacity": 100, "outputCapacity": 100 },
+                { "id": "assembling_machine_mk1", "kind": "machine", "family": "assembler", "speed": 1, "inputCapacity": 100, "outputCapacity": 100 },
+                { "id": "MOD/machine-beta", "kind": "machine", "family": "assembler", "speed": 1, "inputCapacity": 100, "outputCapacity": 100 }
             ],
             "recipes": [
-                { "id": "smelt_iron", "name": "冶炼", "buildingId": "arc_smelter", "duration": 1, "inputs": [{ "itemId": "iron_ore", "amount": 1 }], "outputs": [{ "itemId": "iron_ore", "amount": 1 }] }
+                { "id": "smelt_iron", "name": "冶炼", "buildingId": "arc_smelter", "duration": 1, "inputs": [{ "itemId": "iron_ore", "amount": 1 }], "outputs": [{ "itemId": "iron_ore", "amount": 1 }] },
+                { "id": "smelt_copper", "name": "铜冶炼", "buildingId": "arc_smelter", "duration": 1, "inputs": [{ "itemId": "copper_ore", "amount": 1 }], "outputs": [{ "itemId": "copper_ore", "amount": 1 }] },
+                { "id": "smelt_locked", "name": "高级冶炼", "buildingId": "arc_smelter", "duration": 1, "requiredTechId": "advanced_smelting", "inputs": [{ "itemId": "iron_ore", "amount": 1 }], "outputs": [{ "itemId": "iron_ore", "amount": 1 }] },
+                { "id": "MOD/assemble-beta", "name": "模组装配", "buildingId": "assembling_machine_mk1", "duration": 1, "inputs": [{ "itemId": "MOD/item-beta", "amount": 1 }], "outputs": [{ "itemId": "MOD/item-beta", "amount": 1 }] }
             ],
             "constructions": [],
             "belts": [{ "tier": 1, "speed": 6 }],
-            "technologies": []
+            "technologies": [{ "id": "advanced_smelting", "name": "高级冶炼", "costs": [{ "itemId": "iron_ore", "amount": 1 }] }]
         }))
         .unwrap();
         RuntimeCatalog::validate(snapshot, REGISTRY).unwrap()
@@ -1016,7 +1239,12 @@ mod tests {
         state(vec![value], Vec::new(), Vec::new())
     }
 
-    fn state(blueprints: Vec<Value>, versions: Vec<Value>, queue: Vec<Value>) -> CoreState {
+    fn state_with_catalog(
+        blueprints: Vec<Value>,
+        versions: Vec<Value>,
+        queue: Vec<Value>,
+        catalog: RuntimeCatalog,
+    ) -> CoreState {
         let base = json!({
             "version": 47,
             "mode": "normal",
@@ -1047,9 +1275,13 @@ mod tests {
             base,
             Vec::new(),
             Vec::new(),
-            catalog(),
+            catalog,
         )
         .unwrap()
+    }
+
+    fn state(blueprints: Vec<Value>, versions: Vec<Value>, queue: Vec<Value>) -> CoreState {
+        state_with_catalog(blueprints, versions, queue, catalog())
     }
 
     fn project(
@@ -1104,6 +1336,196 @@ mod tests {
         assert_eq!(queue["page"]["rows"][0]["id"], "queue-z");
         assert_eq!(queue["page"]["rows"][1]["id"], "queue-a");
         assert_eq!(state.summary().unwrap().canonical_sha256, before);
+    }
+
+    #[test]
+    fn recipe_override_groups_are_catalog_ordered_family_compatible_and_tech_filtered() {
+        let mut value = blueprint("recipe-groups", "plane_smelter");
+        value["entities"] = json!([
+            {
+                "key": "first",
+                "buildingId": "plane_smelter",
+                "recipeId": "smelt_iron",
+                "offset": { "x": 0, "y": 0 },
+                "machineCount": 1
+            },
+            {
+                "key": "second",
+                "buildingId": "arc_smelter",
+                "recipeId": "smelt_copper",
+                "offset": { "x": 1, "y": 0 },
+                "machineCount": 1
+            },
+            {
+                "key": "third",
+                "buildingId": "arc_smelter",
+                "recipeId": "smelt_iron",
+                "offset": { "x": 2, "y": 0 },
+                "machineCount": 1
+            }
+        ]);
+        value["recipeOverrides"] = json!({ "smelt_iron": "smelt_copper" });
+        let state = state(vec![value], Vec::new(), Vec::new());
+        let before = state.summary().unwrap().canonical_sha256;
+        let detail = project(&state, "detail", Some("recipe-groups"), 0);
+        assert_eq!(detail["page"]["rows"][0]["status"], "supported");
+        assert_eq!(
+            detail["page"]["rows"][0]["recipeOverrideGroups"],
+            json!([
+                {
+                    "sourceRecipeId": "smelt_iron",
+                    "targetRecipeId": "smelt_copper",
+                    "options": [
+                        { "id": "smelt_iron", "name": "冶炼" },
+                        { "id": "smelt_copper", "name": "铜冶炼" }
+                    ]
+                },
+                {
+                    "sourceRecipeId": "smelt_copper",
+                    "targetRecipeId": "smelt_copper",
+                    "options": [
+                        { "id": "smelt_iron", "name": "冶炼" },
+                        { "id": "smelt_copper", "name": "铜冶炼" }
+                    ]
+                }
+            ])
+        );
+        assert_eq!(state.summary().unwrap().canonical_sha256, before);
+    }
+
+    #[test]
+    fn recipe_override_groups_honor_registry_backed_mod_building_families() {
+        let mut value = blueprint("mod-family-recipe", "MOD/machine-beta");
+        value["entities"][0]["recipeId"] = json!("MOD/assemble-beta");
+        let state = state(vec![value], Vec::new(), Vec::new());
+        let before = state.summary().unwrap().canonical_sha256;
+        let detail = project(&state, "detail", Some("mod-family-recipe"), 0);
+        assert_eq!(detail["page"]["rows"][0]["status"], "supported");
+        assert_eq!(
+            detail["page"]["rows"][0]["recipeOverrideGroups"],
+            json!([{
+                "sourceRecipeId": "MOD/assemble-beta",
+                "targetRecipeId": "MOD/assemble-beta",
+                "options": [{
+                    "id": "MOD/assemble-beta",
+                    "name": "模组装配"
+                }]
+            }])
+        );
+        assert_eq!(state.summary().unwrap().canonical_sha256, before);
+    }
+
+    #[test]
+    fn recipe_override_groups_fail_closed_before_aggregate_option_count_allocation() {
+        let mut snapshot = catalog().snapshot;
+        for index in 0..80 {
+            snapshot.recipes.push(
+                serde_json::from_value(json!({
+                    "id": format!("aggregate_recipe_{index:02}"),
+                    "name": format!("聚合配方 {index:02}"),
+                    "buildingId": "arc_smelter",
+                    "duration": 1,
+                    "inputs": [{ "itemId": "iron_ore", "amount": 1 }],
+                    "outputs": [{ "itemId": "iron_ore", "amount": 1 }]
+                }))
+                .unwrap(),
+            );
+        }
+        let catalog = RuntimeCatalog::validate(snapshot, REGISTRY).unwrap();
+        let mut value = blueprint("aggregate-option-count", "arc_smelter");
+        value["entities"] = Value::Array(
+            (0..80)
+                .map(|index| {
+                    json!({
+                        "key": format!("node-{index:02}"),
+                        "buildingId": "arc_smelter",
+                        "recipeId": format!("aggregate_recipe_{index:02}"),
+                        "offset": { "x": index, "y": 0 },
+                        "machineCount": 1
+                    })
+                })
+                .collect(),
+        );
+        let state = state_with_catalog(vec![value], Vec::new(), Vec::new(), catalog);
+        let before = state.summary().unwrap().canonical_sha256;
+        let detail = project(&state, "detail", Some("aggregate-option-count"), 0);
+        assert_eq!(detail["page"]["rows"][0]["status"], "unsupported");
+        assert_eq!(detail["page"]["rows"][0]["recipeOverrideGroups"], json!([]));
+        assert_eq!(state.summary().unwrap().canonical_sha256, before);
+    }
+
+    #[test]
+    fn recipe_override_groups_fail_closed_before_aggregate_byte_allocation() {
+        let mut snapshot = catalog().snapshot;
+        for index in 0..32 {
+            snapshot.recipes.push(
+                serde_json::from_value(json!({
+                    "id": fixed_width_id(&format!("wide_recipe_{index:02}_"), 150),
+                    "name": fixed_width_id(&format!("宽配方-{index:02}-"), MAX_NAME_BYTES),
+                    "buildingId": "arc_smelter",
+                    "duration": 1,
+                    "inputs": [{ "itemId": "iron_ore", "amount": 1 }],
+                    "outputs": [{ "itemId": "iron_ore", "amount": 1 }]
+                }))
+                .unwrap(),
+            );
+        }
+        let catalog = RuntimeCatalog::validate(snapshot, REGISTRY).unwrap();
+        let mut value = blueprint("aggregate-option-bytes", "arc_smelter");
+        let wide_recipe_ids = catalog
+            .snapshot
+            .recipes
+            .iter()
+            .filter(|recipe| recipe.id.starts_with("wide_recipe_"))
+            .map(|recipe| recipe.id.clone())
+            .collect::<Vec<_>>();
+        value["entities"] = Value::Array(
+            wide_recipe_ids
+                .into_iter()
+                .enumerate()
+                .map(|(index, recipe_id)| {
+                    json!({
+                        "key": format!("node-{index:02}"),
+                        "buildingId": "arc_smelter",
+                        "recipeId": recipe_id,
+                        "offset": { "x": index, "y": 0 },
+                        "machineCount": 1
+                    })
+                })
+                .collect(),
+        );
+        let state = state_with_catalog(vec![value], Vec::new(), Vec::new(), catalog);
+        let before = state.summary().unwrap().canonical_sha256;
+        let detail = project(&state, "detail", Some("aggregate-option-bytes"), 0);
+        assert_eq!(detail["page"]["rows"][0]["status"], "unsupported");
+        assert_eq!(detail["page"]["rows"][0]["recipeOverrideGroups"], json!([]));
+        assert_eq!(state.summary().unwrap().canonical_sha256, before);
+    }
+
+    #[test]
+    fn recipe_override_semantics_fail_closed_without_leaking_groups() {
+        let mut locked = blueprint("locked-override", "plane_smelter");
+        locked["entities"][0]["recipeId"] = json!("smelt_iron");
+        locked["recipeOverrides"] = json!({ "smelt_iron": "smelt_locked" });
+        let locked_state = state(vec![locked], Vec::new(), Vec::new());
+        let detail = project(&locked_state, "detail", Some("locked-override"), 0);
+        assert_eq!(detail["page"]["rows"][0]["status"], "unsupported");
+        assert_eq!(detail["page"]["rows"][0]["recipeOverrideGroups"], json!([]));
+
+        let mut malformed = blueprint("malformed-override", "plane_smelter");
+        malformed["entities"][0]["recipeId"] = json!("smelt_iron");
+        malformed["recipeOverrides"] = json!({ "smelt_iron": "missing-recipe" });
+        let malformed_state = state(vec![malformed], Vec::new(), Vec::new());
+        let detail = project(&malformed_state, "detail", Some("malformed-override"), 0);
+        assert_eq!(detail["page"]["rows"][0]["status"], "unsupported");
+        assert_eq!(detail["page"]["rows"][0]["recipeOverrideGroups"], json!([]));
+
+        let mut orphaned = blueprint("orphaned-override", "plane_smelter");
+        orphaned["recipeOverrides"] = json!({ "smelt_iron": "smelt_copper" });
+        let orphaned_state = state(vec![orphaned], Vec::new(), Vec::new());
+        let detail = project(&orphaned_state, "detail", Some("orphaned-override"), 0);
+        assert_eq!(detail["page"]["rows"][0]["status"], "unsupported");
+        assert_eq!(detail["page"]["rows"][0]["recipeOverrideGroups"], json!([]));
     }
 
     #[test]

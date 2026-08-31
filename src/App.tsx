@@ -459,12 +459,14 @@ import {
 import {
   NativeBlueprintWorkspaceStore,
   createNativePlayerAuthorityBlueprintWorkspaceSource,
+  nativeBlueprintRecipeOverrideBindingMatchesFrame,
   nativeConstructionQueueCancelBindingMatchesFrame,
   selectNativeBlueprintDeleteBinding,
   selectNativeBlueprintTransformBinding,
   selectNativeBlueprintWorkspaceFrame,
   type NativeBlueprintDeleteBinding,
   type NativeBlueprintMirror,
+  type NativeBlueprintRecipeOverrideBinding,
   type NativeBlueprintRenameIdentity,
   type NativeBlueprintRotation,
   type NativeBlueprintTransformBinding,
@@ -483,6 +485,7 @@ import {
   type NativeBlueprintRenameSubmitOutcome,
 } from "./game/nativeBlueprintRenameWorkflow";
 import { useNativeBlueprintDeleteCommandTransaction } from "./game/useNativeBlueprintDeleteCommandTransaction";
+import { useNativeBlueprintRecipeOverrideCommandTransaction } from "./game/useNativeBlueprintRecipeOverrideCommandTransaction";
 import { useNativeBlueprintTransformCommandTransaction } from "./game/useNativeBlueprintTransformCommandTransaction";
 import { useNativeConstructionQueueCancelCommandTransaction } from "./game/useNativeConstructionQueueCancelCommandTransaction";
 import {
@@ -17244,6 +17247,34 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     return commitNativeBlueprintTransformCommand(binding, rotation, mirror);
   }, [commitNativeBlueprintTransformCommand]);
   const {
+    pending: nativeBlueprintRecipeOverridePending,
+    commit: commitNativeBlueprintRecipeOverrideCommand,
+  } = useNativeBlueprintRecipeOverrideCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    frame: nativeBlueprintWorkspaceFrame,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+  });
+  const submitNativeBlueprintRecipeOverrideIntent = useCallback((
+    binding: NativeBlueprintRecipeOverrideBinding,
+    targetRecipeId: string,
+  ): boolean => {
+    if (!blueprintsOpenRef.current || nativeBlueprintRenamePendingIdentityRef.current ||
+        !nativeBlueprintRecipeOverrideBindingMatchesFrame(binding, nativeBlueprintWorkspaceFrame)) {
+      setNotice("蓝图工作区、配方组或 revision 已漂移；本次配方覆盖未提交");
+      return false;
+    }
+    return commitNativeBlueprintRecipeOverrideCommand(binding, targetRecipeId);
+  }, [
+    commitNativeBlueprintRecipeOverrideCommand,
+    nativeBlueprintWorkspaceFrame,
+  ]);
+  const {
     pending: nativeBlueprintDeletePending,
     commit: commitNativeBlueprintDeleteCommand,
   } = useNativeBlueprintDeleteCommandTransaction({
@@ -20215,7 +20246,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       <NativeBlueprintWorkspace
         open={blueprintsOpen && (nativePlayerAuthorityOwnsRuntime ||
           nativeBlueprintRenamePendingIdentity !== null || nativeBlueprintRenameResolution !== null ||
-          nativeBlueprintTransformPending !== null || nativeBlueprintDeletePending !== null ||
+          nativeBlueprintTransformPending !== null || nativeBlueprintRecipeOverridePending !== null ||
+          nativeBlueprintDeletePending !== null ||
           nativeConstructionQueueCancelPending !== null)}
         status={nativeBlueprintWorkspaceSnapshot.status}
         frame={nativeBlueprintWorkspaceFrame}
@@ -20224,23 +20256,27 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         onSelectBlueprint={setNativeBlueprintSelectedId}
         onLibraryCursorChange={(cursor) => {
           if (nativeBlueprintRenamePendingIdentity || nativeBlueprintTransformPending ||
-              nativeBlueprintDeletePending || nativeConstructionQueueCancelPending ||
+              nativeBlueprintRecipeOverridePending || nativeBlueprintDeletePending ||
+              nativeConstructionQueueCancelPending ||
               nativePlayerAuthorityCommandPending) return;
           setNativeBlueprintSelectedId(null);
           setNativeBlueprintLibraryCursor(cursor);
         }}
         onQueueCursorChange={(cursor) => {
           if (nativeBlueprintRenamePendingIdentity || nativeBlueprintTransformPending ||
-              nativeBlueprintDeletePending || nativeConstructionQueueCancelPending ||
+              nativeBlueprintRecipeOverridePending || nativeBlueprintDeletePending ||
+              nativeConstructionQueueCancelPending ||
               nativePlayerAuthorityCommandPending) return;
           setNativeBlueprintQueueCursor(cursor);
         }}
         onSubmitRenameIntent={submitNativeBlueprintRenameIntent}
         onSubmitTransformIntent={submitNativeBlueprintTransformIntent}
+        onSubmitRecipeOverrideIntent={submitNativeBlueprintRecipeOverrideIntent}
         onSubmitDeleteIntent={submitNativeBlueprintDeleteIntent}
         onSubmitQueueCancelIntent={submitNativeConstructionQueueCancelIntent}
         pendingIdentity={nativeBlueprintRenamePendingIdentity}
         transformPending={nativeBlueprintTransformPending}
+        recipeOverridePending={nativeBlueprintRecipeOverridePending}
         deletePending={nativeBlueprintDeletePending}
         queueCancelPending={nativeConstructionQueueCancelPending}
         resolution={nativeBlueprintRenameResolution}
@@ -20249,6 +20285,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       />
       {!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&
         !nativeBlueprintTransformPending &&
+        !nativeBlueprintRecipeOverridePending &&
         !nativeBlueprintDeletePending &&
         !nativeConstructionQueueCancelPending &&
         !nativeBlueprintRenameResolution ? <BlueprintWorkspace

@@ -1130,6 +1130,22 @@ export interface DesktopNativeCoreBlueprintDetailPort {
   offset: { x: number; y: number };
 }
 
+export interface DesktopNativeCoreBlueprintRecipeOption {
+  id: string;
+  name: string;
+}
+
+/**
+ * Rust-derived target-state recipe group for one source recipe present in the
+ * selected blueprint. The renderer may choose only one listed target; Rust
+ * revalidates the complete template and catalog again at command time.
+ */
+export interface DesktopNativeCoreBlueprintRecipeOverrideGroup {
+  sourceRecipeId: string;
+  targetRecipeId: string;
+  options: DesktopNativeCoreBlueprintRecipeOption[];
+}
+
 export interface DesktopNativeCoreBlueprintDetail {
   summary: DesktopNativeCoreBlueprintSummary;
   status: "supported" | "truncated" | "unsupported";
@@ -1138,6 +1154,7 @@ export interface DesktopNativeCoreBlueprintDetail {
   belts: DesktopNativeCoreBlueprintDetailBelt[];
   resourceAnchors: DesktopNativeCoreBlueprintDetailAnchor[];
   externalPorts: DesktopNativeCoreBlueprintDetailPort[];
+  recipeOverrideGroups: DesktopNativeCoreBlueprintRecipeOverrideGroup[];
 }
 
 export interface DesktopNativeCoreBlueprintQueueRow {

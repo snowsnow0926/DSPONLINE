@@ -11936,6 +11936,28 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   font-size: 8px;
 }
 
+.blueprint-external-ports .native-blueprint-recipe-control {
+  display: grid;
+  min-width: min(100%, 280px);
+  flex: 1 1 220px;
+  gap: 5px;
+}
+
+.blueprint-external-ports .native-blueprint-recipe-control > span {
+  overflow-wrap: anywhere;
+}
+
+.blueprint-external-ports .native-blueprint-recipe-control > select {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--surface-raised);
+  color: var(--text-soft);
+  font-size: 8px;
+}
+
 .blueprint-requirements {
   padding: 11px 12px;
 }

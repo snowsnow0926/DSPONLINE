@@ -753,7 +753,12 @@ pub(crate) fn recipe_building_base<'a>(building_id: &'a str, family: Option<&str
         Some("smelter") => "arc_smelter",
         Some("assembler") => "assembling_machine_mk1",
         Some("chemical") => "chemical_plant",
-        _ => building_id,
+        _ => match building_id {
+            "plane_smelter" => "arc_smelter",
+            "assembling_machine_mk2" | "assembling_machine_mk3" => "assembling_machine_mk1",
+            "quantum_chemical_plant" => "chemical_plant",
+            _ => building_id,
+        },
     }
 }
 
@@ -19033,6 +19038,348 @@ mod tests {
             })),
         }];
         command
+    }
+
+    fn blueprint_recipe_override_state() -> CoreState {
+        let mut state = blueprint_rename_state();
+        let mut catalog = serde_json::to_value(state.catalog.snapshot.clone()).unwrap();
+        catalog["buildings"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "plane_smelter",
+                "kind": "machine",
+                "family": "smelter",
+                "speed": 2,
+                "inputCapacity": 100,
+                "outputCapacity": 100
+            }));
+        catalog["recipes"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "alternate_ingot",
+                "buildingId": "arc_smelter",
+                "duration": 2,
+                "requiredTechId": "gravity_matrix",
+                "inputs": [],
+                "outputs": []
+            }));
+        state.catalog = Arc::new(
+            RuntimeCatalog::from_value(catalog, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT).unwrap(),
+        );
+        state.base_value_mut()["research"]["completedTechIds"] =
+            serde_json::json!(["gravity_matrix"]);
+        state.base_value_mut()["blueprints"][1] = serde_json::json!({
+            "id": "builtin-second",
+            "name": "第二张蓝图",
+            "revision": 7,
+            "rotation": 90,
+            "mirror": "horizontal",
+            "entities": [
+                {
+                    "key": "arc-template",
+                    "buildingId": "arc_smelter",
+                    "recipeId": "iron_ingot",
+                    "opaqueEntityPayload": { "retain": [1, 2, 3] }
+                },
+                {
+                    "key": "plane-template",
+                    "buildingId": "plane_smelter",
+                    "recipeId": "iron_ingot",
+                    "opaqueEntityPayload": { "retain": true }
+                }
+            ],
+            "belts": [],
+            "resourceAnchors": [],
+            "externalPorts": [],
+            "recipeOverrides": {
+                "unrelated_source": "unrelated_target"
+            },
+            "futureBuiltinPayload": "keep-byte-for-byte"
+        });
+        state
+    }
+
+    fn blueprint_recipe_override_intent_command(
+        revision: u64,
+        id: &str,
+        source_recipe_id: &str,
+        target_recipe_id: &str,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("blueprints".to_owned()),
+                PathSegment::Key("intent".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(serde_json::json!({
+                "kind": "recipe-override",
+                "id": id,
+                "sourceRecipeId": source_recipe_id,
+                "targetRecipeId": target_recipe_id
+            })),
+        }];
+        command
+    }
+
+    #[test]
+    fn player_authority_blueprint_recipe_override_is_minimal_atomic_and_family_compatible() {
+        let mut state = blueprint_recipe_override_state();
+        let command = blueprint_recipe_override_intent_command(
+            9,
+            "builtin-second",
+            "iron_ingot",
+            "alternate_ingot",
+        );
+        let encoded = serde_json::to_string(&command).unwrap();
+        assert!(encoded.contains("\"kind\":\"recipe-override\""));
+        assert!(!encoded.contains("arc-template"));
+        assert!(!encoded.contains("opaqueEntityPayload"));
+        assert!(!encoded.contains("blueprintVersions"));
+        assert!(!encoded.contains("constructionQueue"));
+
+        let before = state.base_value().clone();
+        let receipt = state.apply_player_authority_command(&command).unwrap();
+        assert_eq!(receipt.previous_revision, 9);
+        assert_eq!(receipt.revision, 10);
+        assert!(receipt.changed_entity_ids.is_empty());
+        assert!(receipt.changed_belt_ids.is_empty());
+        assert!(receipt.topology_dirty);
+        assert_eq!(
+            state.base_value()["blueprints"][1]["recipeOverrides"]["iron_ingot"],
+            "alternate_ingot"
+        );
+        assert_eq!(
+            state.base_value()["blueprints"][1]["recipeOverrides"]["unrelated_source"],
+            before["blueprints"][1]["recipeOverrides"]["unrelated_source"]
+        );
+        assert_eq!(state.base_value()["blueprints"][1]["revision"], 8);
+        assert_eq!(
+            state.base_value()["blueprints"][1]["entities"],
+            before["blueprints"][1]["entities"]
+        );
+        assert_eq!(state.base_value()["blueprints"][0], before["blueprints"][0]);
+        assert_eq!(
+            state.base_value()["blueprintVersions"],
+            before["blueprintVersions"]
+        );
+        assert_eq!(
+            state.base_value()["constructionQueue"],
+            before["constructionQueue"]
+        );
+    }
+
+    #[test]
+    fn player_authority_blueprint_recipe_override_creates_optional_v47_map_atomically() {
+        for existing in [None, Some(Value::Null)] {
+            let mut state = blueprint_recipe_override_state();
+            let row = state.base_value_mut()["blueprints"][1]
+                .as_object_mut()
+                .unwrap();
+            if let Some(value) = existing.clone() {
+                row.insert("recipeOverrides".to_owned(), value);
+            } else {
+                row.remove("recipeOverrides");
+            }
+            let before = state.base_value().clone();
+            let receipt = state
+                .apply_player_authority_command(&blueprint_recipe_override_intent_command(
+                    9,
+                    "builtin-second",
+                    "iron_ingot",
+                    "alternate_ingot",
+                ))
+                .unwrap();
+            assert_eq!(receipt.revision, 10);
+            assert_eq!(
+                state.base_value()["blueprints"][1]["recipeOverrides"],
+                serde_json::json!({ "iron_ingot": "alternate_ingot" })
+            );
+            assert_eq!(state.base_value()["blueprints"][1]["revision"], 8);
+            assert_eq!(
+                state.base_value()["blueprints"][1]["entities"],
+                before["blueprints"][1]["entities"]
+            );
+            assert_eq!(
+                state.base_value()["constructionQueue"],
+                before["constructionQueue"]
+            );
+        }
+    }
+
+    #[test]
+    fn player_authority_blueprint_recipe_override_replays_identically_from_semantic_wal_marker() {
+        let command = blueprint_recipe_override_intent_command(
+            9,
+            "builtin-second",
+            "iron_ingot",
+            "alternate_ingot",
+        );
+        let durable = serde_json::to_string(&command).unwrap();
+        let replayed: SimulationCommandPatch = serde_json::from_str(&durable).unwrap();
+        let mut live = blueprint_recipe_override_state();
+        let mut replay = live.clone();
+        let live_receipt = live.apply_player_authority_command(&command).unwrap();
+        let replay_receipt = replay.apply_command(&replayed).unwrap();
+        assert_eq!(live_receipt, replay_receipt);
+        assert_eq!(
+            live.canonical_sha256().unwrap(),
+            replay.canonical_sha256().unwrap()
+        );
+        assert_eq!(live.base_value(), replay.base_value());
+    }
+
+    #[test]
+    fn player_authority_blueprint_recipe_override_deletes_only_requested_source() {
+        let mut state = blueprint_recipe_override_state();
+        state.base_value_mut()["blueprints"][1]["recipeOverrides"]["iron_ingot"] =
+            Value::from("alternate_ingot");
+        let before = state.base_value().clone();
+        let receipt = state
+            .apply_player_authority_command(&blueprint_recipe_override_intent_command(
+                9,
+                "builtin-second",
+                "iron_ingot",
+                "iron_ingot",
+            ))
+            .unwrap();
+        assert_eq!(receipt.revision, 10);
+        assert!(
+            state.base_value()["blueprints"][1]["recipeOverrides"]
+                .get("iron_ingot")
+                .is_none()
+        );
+        assert_eq!(
+            state.base_value()["blueprints"][1]["recipeOverrides"]["unrelated_source"],
+            before["blueprints"][1]["recipeOverrides"]["unrelated_source"]
+        );
+        assert_eq!(
+            state.base_value()["blueprints"][1]["entities"],
+            before["blueprints"][1]["entities"]
+        );
+        assert_eq!(state.base_value()["blueprints"][0], before["blueprints"][0]);
+    }
+
+    #[test]
+    fn player_authority_blueprint_recipe_override_rejects_new_source_when_map_is_full() {
+        let mut state = blueprint_recipe_override_state();
+        let overrides = (0..4_096)
+            .map(|index| {
+                (
+                    format!("opaque-source-{index}"),
+                    Value::from(format!("opaque-target-{index}")),
+                )
+            })
+            .collect::<serde_json::Map<String, Value>>();
+        state.base_value_mut()["blueprints"][1]["recipeOverrides"] = Value::Object(overrides);
+        let before_revision = state.revision;
+        let before_row_revision = state.base_value()["blueprints"][1]["revision"].clone();
+        let before_hash = state.canonical_sha256().unwrap();
+
+        assert!(
+            state
+                .apply_player_authority_command(&blueprint_recipe_override_intent_command(
+                    9,
+                    "builtin-second",
+                    "iron_ingot",
+                    "alternate_ingot",
+                ))
+                .is_err()
+        );
+        assert_eq!(state.revision, before_revision);
+        assert_eq!(
+            state.base_value()["blueprints"][1]["revision"],
+            before_row_revision
+        );
+        assert_eq!(state.canonical_sha256().unwrap(), before_hash);
+    }
+
+    #[test]
+    fn player_authority_blueprint_recipe_override_fails_closed_and_preserves_source() {
+        let mut cases = vec![
+            blueprint_recipe_override_intent_command(9, "missing", "iron_ingot", "alternate_ingot"),
+            blueprint_recipe_override_intent_command(9, "builtin-second", "iron_ingot", "missing"),
+            blueprint_recipe_override_intent_command(
+                9,
+                "builtin-second",
+                "iron_ingot",
+                "iron_ingot",
+            ),
+        ];
+        let mut extra = blueprint_recipe_override_intent_command(
+            9,
+            "builtin-second",
+            "iron_ingot",
+            "alternate_ingot",
+        );
+        extra.top_level_changes[0].value.as_mut().unwrap()["forged"] = Value::from(true);
+        cases.push(extra);
+
+        for command in cases {
+            let mut state = blueprint_recipe_override_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut incompatible = blueprint_recipe_override_state();
+        incompatible.base_value_mut()["blueprints"][1]["entities"][1]["buildingId"] =
+            Value::from("em_rail_ejector");
+        let before = incompatible.canonical_sha256().unwrap();
+        assert!(
+            incompatible
+                .apply_player_authority_command(&blueprint_recipe_override_intent_command(
+                    9,
+                    "builtin-second",
+                    "iron_ingot",
+                    "alternate_ingot",
+                ))
+                .is_err()
+        );
+        assert_eq!(incompatible.revision, 9);
+        assert_eq!(incompatible.canonical_sha256().unwrap(), before);
+
+        let mut locked_source = blueprint_recipe_override_state();
+        locked_source.base_value_mut()["research"]["completedTechIds"] = serde_json::json!([]);
+        for template in locked_source.base_value_mut()["blueprints"][1]["entities"]
+            .as_array_mut()
+            .unwrap()
+        {
+            template["recipeId"] = Value::from("alternate_ingot");
+        }
+        let before = locked_source.canonical_sha256().unwrap();
+        assert!(
+            locked_source
+                .apply_player_authority_command(&blueprint_recipe_override_intent_command(
+                    9,
+                    "builtin-second",
+                    "alternate_ingot",
+                    "iron_ingot",
+                ))
+                .is_err()
+        );
+        assert_eq!(locked_source.revision, 9);
+        assert_eq!(locked_source.canonical_sha256().unwrap(), before);
+
+        let mut malformed_directory = blueprint_recipe_override_state();
+        malformed_directory.base_value_mut()["blueprints"][0]["recipeOverrides"] =
+            Value::from("not-an-object");
+        let before = malformed_directory.canonical_sha256().unwrap();
+        assert!(
+            malformed_directory
+                .apply_player_authority_command(&blueprint_recipe_override_intent_command(
+                    9,
+                    "builtin-second",
+                    "iron_ingot",
+                    "alternate_ingot",
+                ))
+                .is_err()
+        );
+        assert_eq!(malformed_directory.revision, 9);
+        assert_eq!(malformed_directory.canonical_sha256().unwrap(), before);
     }
 
     #[test]

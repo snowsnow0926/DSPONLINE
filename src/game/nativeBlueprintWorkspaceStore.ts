@@ -48,6 +48,18 @@ export interface NativeBlueprintTransformBinding {
   readonly currentMirror: NativeBlueprintMirror;
 }
 
+/** Exact selected detail group bound to one Rust-derived recipe target state. */
+export interface NativeBlueprintRecipeOverrideBinding {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly registryFingerprint: string;
+  readonly blueprintId: string;
+  readonly currentRowRevision: number;
+  readonly sourceRecipeId: string;
+  readonly currentTargetRecipeId: string;
+}
+
 /** Exact selected-row compare-and-delete binding for one library entry. */
 export interface NativeBlueprintDeleteBinding {
   readonly sessionId: string;
@@ -123,8 +135,9 @@ function validLogicalId(value: string, maximumLength = 256): boolean {
   return value.length > 0 && value.length <= maximumLength && LOGICAL_ID.test(value);
 }
 
-function validOpaqueText(value: string, maximumBytes: number): boolean {
-  if (value.length === 0 || UTF8_ENCODER.encode(value).byteLength > maximumBytes ||
+function validOpaqueText(value: unknown, maximumBytes: number): value is string {
+  if (typeof value !== "string" || value.length === 0 ||
+      UTF8_ENCODER.encode(value).byteLength > maximumBytes ||
       /[\u0000-\u001f\u007f-\u009f]/u.test(value)) return false;
   for (let index = 0; index < value.length; index += 1) {
     const unit = value.charCodeAt(index);
@@ -180,6 +193,34 @@ function validSummary(value: DesktopNativeCoreBlueprintSummary): boolean {
   return value.detailStatus === (overLimit ? "truncated" : "candidate");
 }
 
+function validRecipeOverrideGroups(value: DesktopNativeCoreBlueprintDetail): boolean {
+  if (!Array.isArray(value.recipeOverrideGroups) ||
+      value.recipeOverrideGroups.length > value.entities.length) return false;
+  const sources = new Set<string>();
+  let totalOptionCount = 0;
+  const entityRecipes = new Set(value.entities.flatMap((entity) =>
+    entity.recipeId === null ? [] : [entity.recipeId]));
+  for (const group of value.recipeOverrideGroups) {
+    if (!validOpaqueText(group.sourceRecipeId, 512) ||
+        !validOpaqueText(group.targetRecipeId, 512) ||
+        !entityRecipes.has(group.sourceRecipeId) || sources.has(group.sourceRecipeId) ||
+        !Array.isArray(group.options) || group.options.length === 0 ||
+        group.options.length > NATIVE_BLUEPRINT_MAX_SOURCE_ROWS) return false;
+    totalOptionCount += group.options.length;
+    if (!Number.isSafeInteger(totalOptionCount) ||
+        totalOptionCount > NATIVE_BLUEPRINT_MAX_SOURCE_ROWS) return false;
+    sources.add(group.sourceRecipeId);
+    const optionIds = new Set<string>();
+    for (const option of group.options) {
+      if (!validOpaqueText(option.id, 512) || !validOpaqueText(option.name, 256) ||
+          optionIds.has(option.id)) return false;
+      optionIds.add(option.id);
+    }
+    if (!optionIds.has(group.targetRecipeId)) return false;
+  }
+  return true;
+}
+
 function validDetail(value: DesktopNativeCoreBlueprintDetail, selectedBlueprintId: string): boolean {
   if (!validSummary(value.summary) || value.summary.id !== selectedBlueprintId ||
       !["supported", "truncated", "unsupported"].includes(value.status)) return false;
@@ -190,17 +231,19 @@ function validDetail(value: DesktopNativeCoreBlueprintDetail, selectedBlueprintI
       : "unproven-catalog-semantics";
   if (value.unsupportedReason !== expectedReason || !Array.isArray(value.entities) ||
       !Array.isArray(value.belts) || !Array.isArray(value.resourceAnchors) ||
-      !Array.isArray(value.externalPorts)) return false;
+      !Array.isArray(value.externalPorts) || !Array.isArray(value.recipeOverrideGroups)) return false;
   if (value.status !== "supported") {
     return value.entities.length === 0 && value.belts.length === 0 &&
       value.resourceAnchors.length === 0 && value.externalPorts.length === 0 &&
+      value.recipeOverrideGroups.length === 0 &&
       (value.status === "truncated" || value.summary.detailStatus === "candidate");
   }
   return value.summary.detailStatus === "candidate" &&
     value.entities.length === value.summary.counts.entities &&
     value.belts.length === value.summary.counts.belts &&
     value.resourceAnchors.length === value.summary.counts.resourceAnchors &&
-    value.externalPorts.length === value.summary.counts.externalPorts;
+    value.externalPorts.length === value.summary.counts.externalPorts &&
+    validRecipeOverrideGroups(value);
 }
 
 function validQueueRow(value: DesktopNativeCoreBlueprintQueueRow): boolean {
@@ -430,6 +473,69 @@ export function selectNativeBlueprintTransformBinding(
     currentMirror: row.mirror as NativeBlueprintMirror,
   });
   return nativeBlueprintTransformBindingMatchesFrame(binding, frame) ? binding : null;
+}
+
+export function nativeBlueprintRecipeOverrideBindingMatchesFrame(
+  binding: NativeBlueprintRecipeOverrideBinding,
+  frame: NativeBlueprintWorkspaceFrame | null,
+): boolean {
+  if (!frame || frame.sessionId !== binding.sessionId || frame.runId !== binding.runId ||
+      frame.revision !== binding.revision ||
+      frame.registryFingerprint !== binding.registryFingerprint ||
+      !validOpaqueText(binding.blueprintId, 512) ||
+      !validOpaqueText(binding.sourceRecipeId, 512) ||
+      !validOpaqueText(binding.currentTargetRecipeId, 512) ||
+      !Number.isSafeInteger(binding.currentRowRevision) || binding.currentRowRevision < 1 ||
+      frame.selectedBlueprintId !== binding.blueprintId ||
+      frame.detail?.status !== "supported" ||
+      frame.detail.summary.id !== binding.blueprintId) return false;
+  const row = frame.libraryById.get(binding.blueprintId);
+  const group = frame.detail.recipeOverrideGroups.find((candidate) =>
+    candidate.sourceRecipeId === binding.sourceRecipeId);
+  return row?.revision === binding.currentRowRevision &&
+    frame.detail.summary.revision === binding.currentRowRevision &&
+    group?.targetRecipeId === binding.currentTargetRecipeId &&
+    group.options.some((option) => option.id === binding.currentTargetRecipeId);
+}
+
+function selectNativeBlueprintRecipeOverrideBindingInternal(
+  frame: NativeBlueprintWorkspaceFrame | null,
+  sourceRecipeId: string,
+  writable: boolean,
+): NativeBlueprintRecipeOverrideBinding | null {
+  if (!frame || frame.selectedBlueprintId === null || !validOpaqueText(sourceRecipeId, 512) ||
+      frame.detail?.status !== "supported") return null;
+  const row = frame.libraryById.get(frame.selectedBlueprintId);
+  const group = frame.detail.recipeOverrideGroups.find((candidate) =>
+    candidate.sourceRecipeId === sourceRecipeId);
+  if (!row || !group || (writable && row.revision >= Number.MAX_SAFE_INTEGER)) return null;
+  const binding: NativeBlueprintRecipeOverrideBinding = Object.freeze({
+    sessionId: frame.sessionId,
+    runId: frame.runId,
+    revision: frame.revision,
+    registryFingerprint: frame.registryFingerprint,
+    blueprintId: row.id,
+    currentRowRevision: row.revision,
+    sourceRecipeId: group.sourceRecipeId,
+    currentTargetRecipeId: group.targetRecipeId,
+  });
+  return nativeBlueprintRecipeOverrideBindingMatchesFrame(binding, frame) ? binding : null;
+}
+
+/** Selects a writable group; a terminal row revision remains readable but cannot increment again. */
+export function selectNativeBlueprintRecipeOverrideBinding(
+  frame: NativeBlueprintWorkspaceFrame | null,
+  sourceRecipeId: string,
+): NativeBlueprintRecipeOverrideBinding | null {
+  return selectNativeBlueprintRecipeOverrideBindingInternal(frame, sourceRecipeId, true);
+}
+
+/** Read-only target projection used only to confirm the final safe revision after durable ACK. */
+export function selectNativeBlueprintRecipeOverrideProjectionBinding(
+  frame: NativeBlueprintWorkspaceFrame | null,
+  sourceRecipeId: string,
+): NativeBlueprintRecipeOverrideBinding | null {
+  return selectNativeBlueprintRecipeOverrideBindingInternal(frame, sourceRecipeId, false);
 }
 
 export function nativeBlueprintDeleteBindingMatchesFrame(

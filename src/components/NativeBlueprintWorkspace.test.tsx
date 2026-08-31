@@ -13,6 +13,7 @@ import type {
 import type {
   NativeBlueprintDeleteBinding,
   NativeBlueprintMirror,
+  NativeBlueprintRecipeOverrideBinding,
   NativeBlueprintRenameIdentity,
   NativeBlueprintRotation,
   NativeBlueprintTransformBinding,
@@ -21,6 +22,7 @@ import type {
   NativeConstructionQueueCancelBinding,
 } from "../game/nativeBlueprintWorkspaceStore";
 import type { NativeBlueprintTransformPendingCommand } from "../game/nativeBlueprintTransformCommandReconciliation";
+import type { NativeBlueprintRecipeOverridePendingCommand } from "../game/nativeBlueprintRecipeOverrideCommandReconciliation";
 import type { NativeBlueprintDeletePendingCommand } from "../game/nativeBlueprintDeleteCommandReconciliation";
 import type { NativeConstructionQueueCancelPendingCommand } from "../game/nativeConstructionQueueCancelCommandReconciliation";
 import type {
@@ -57,6 +59,14 @@ function detail(status: DesktopNativeCoreBlueprintDetail["status"] = "supported"
     belts: status === "supported" ? [{ key: "belt-z", sourceKey: "entity-z", targetKey: "entity-a", itemId: "mod:item", lanes: 2, tier: 3 }] : [],
     resourceAnchors: status === "supported" ? [{ key: "anchor-z", resourceId: "mod:ore", extractorBuildingId: "mod:miner", offset: { x: 5, y: 6 }, minerCount: 2 }] : [],
     externalPorts: status === "supported" ? [{ key: "port-z", entityKey: "entity-a", direction: "output", itemId: "mod:item", offset: { x: 7, y: 8 } }] : [],
+    recipeOverrideGroups: status === "supported" ? [{
+      sourceRecipeId: "mod:recipe",
+      targetRecipeId: "mod:recipe",
+      options: [
+        { id: "mod:recipe", name: "模组配方" },
+        { id: "mod:recipe-fast", name: "高速模组配方" },
+      ],
+    }] : [],
   };
 }
 
@@ -171,10 +181,15 @@ describe("NativeBlueprintWorkspace", () => {
         rotation: NativeBlueprintRotation,
         mirror: NativeBlueprintMirror,
       ) => boolean;
+      onSubmitRecipeOverrideIntent?: (
+        binding: NativeBlueprintRecipeOverrideBinding,
+        targetRecipeId: string,
+      ) => boolean;
       onSubmitDeleteIntent?: (binding: NativeBlueprintDeleteBinding) => boolean;
       onSubmitQueueCancelIntent?: (binding: NativeConstructionQueueCancelBinding) => boolean;
       pendingIdentity?: NativeBlueprintRenamePendingIdentity | null;
       transformPending?: NativeBlueprintTransformPendingCommand | null;
+      recipeOverridePending?: NativeBlueprintRecipeOverridePendingCommand | null;
       deletePending?: NativeBlueprintDeletePendingCommand | null;
       queueCancelPending?: NativeConstructionQueueCancelPendingCommand | null;
       latestIdentity?: NativeBlueprintWorkspaceIdentity | null;
@@ -197,6 +212,9 @@ describe("NativeBlueprintWorkspace", () => {
     const onSubmitTransformIntent = callbacks.onSubmitTransformIntent ??
       vi.fn<(binding: NativeBlueprintTransformBinding, rotation: NativeBlueprintRotation,
         mirror: NativeBlueprintMirror) => boolean>().mockReturnValue(true);
+    const onSubmitRecipeOverrideIntent = callbacks.onSubmitRecipeOverrideIntent ??
+      vi.fn<(binding: NativeBlueprintRecipeOverrideBinding, targetRecipeId: string) => boolean>()
+        .mockReturnValue(true);
     const onSubmitDeleteIntent = callbacks.onSubmitDeleteIntent ??
       vi.fn<(binding: NativeBlueprintDeleteBinding) => boolean>().mockReturnValue(true);
     const onSubmitQueueCancelIntent = callbacks.onSubmitQueueCancelIntent ??
@@ -221,10 +239,12 @@ describe("NativeBlueprintWorkspace", () => {
       onQueueCursorChange={onQueueCursorChange}
       onSubmitRenameIntent={onSubmitRenameIntent}
       onSubmitTransformIntent={onSubmitTransformIntent}
+      onSubmitRecipeOverrideIntent={onSubmitRecipeOverrideIntent}
       onSubmitDeleteIntent={onSubmitDeleteIntent}
       onSubmitQueueCancelIntent={onSubmitQueueCancelIntent}
       pendingIdentity={callbacks.pendingIdentity ?? null}
       transformPending={callbacks.transformPending ?? null}
+      recipeOverridePending={callbacks.recipeOverridePending ?? null}
       deletePending={callbacks.deletePending ?? null}
       queueCancelPending={callbacks.queueCancelPending ?? null}
       resolution={callbacks.resolution ?? null}
@@ -237,6 +257,7 @@ describe("NativeBlueprintWorkspace", () => {
       onQueueCursorChange,
       onSubmitRenameIntent,
       onSubmitTransformIntent,
+      onSubmitRecipeOverrideIntent,
       onSubmitDeleteIntent,
       onSubmitQueueCancelIntent,
       onConsumeRenameResolution,
@@ -293,6 +314,64 @@ describe("NativeBlueprintWorkspace", () => {
     expect(host.querySelector("[data-native-blueprint-port-key='port-z']")).not.toBeNull();
   });
 
+  it("submits one Rust-derived recipe target from the exact selected detail group and locks while pending", () => {
+    const onSubmitRecipeOverrideIntent = vi.fn<(
+      binding: NativeBlueprintRecipeOverrideBinding,
+      targetRecipeId: string,
+    ) => boolean>().mockReturnValue(true);
+    const selected = frame();
+    renderWorkspace(selected, "ready", { onSubmitRecipeOverrideIntent });
+    const picker = host.querySelector<HTMLSelectElement>(
+      "[data-native-blueprint-recipe-target='mod:recipe']",
+    )!;
+    expect([...picker.options].map((option) => option.value)).toEqual([
+      "mod:recipe",
+      "mod:recipe-fast",
+    ]);
+    act(() => {
+      picker.value = "mod:recipe-fast";
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(onSubmitRecipeOverrideIntent).toHaveBeenCalledOnce();
+    expect(onSubmitRecipeOverrideIntent).toHaveBeenCalledWith({
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 47,
+      registryFingerprint: "registry-a",
+      blueprintId: "mod:Ω/🚀",
+      currentRowRevision: 4,
+      sourceRecipeId: "mod:recipe",
+      currentTargetRecipeId: "mod:recipe",
+    }, "mod:recipe-fast");
+    expect(picker.value).toBe("mod:recipe");
+
+    const recipeOverridePending = Object.freeze({
+      token: 1,
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 47,
+      registryFingerprint: "registry-a",
+      blueprintId: "mod:Ω/🚀",
+      currentRowRevision: 4,
+      sourceRecipeId: "mod:recipe",
+      currentTargetRecipeId: "mod:recipe",
+      targetRecipeId: "mod:recipe-fast",
+      phase: "reconciling",
+      receipt: null,
+      blockedReason: null,
+      source: {},
+      command: {},
+    }) as unknown as NativeBlueprintRecipeOverridePendingCommand;
+    renderWorkspace(selected, "ready", {
+      onSubmitRecipeOverrideIntent,
+      recipeOverridePending,
+    });
+    expect(host.querySelector<HTMLSelectElement>(
+      "[data-native-blueprint-recipe-target='mod:recipe']",
+    )?.disabled).toBe(true);
+    expect(host.textContent).toContain("蓝图配方结果不确定");
+  });
+
   it.each([
     ["truncated", "\u84dd\u56fe\u89c4\u6a21\u8d85\u8fc7\u539f\u751f\u8be6\u60c5\u4e0a\u9650"],
     ["unsupported", "\u65e0\u6cd5\u8bc1\u660e\u8be5\u5185\u5efa / MOD \u84dd\u56fe\u8bed\u4e49"],
@@ -301,6 +380,7 @@ describe("NativeBlueprintWorkspace", () => {
     expect(host.querySelector(`[data-native-blueprint-detail-status='${detailStatus}']`)).not.toBeNull();
     expect(host.textContent).toContain(copy);
     expect(host.querySelector("[data-native-blueprint-entity-key]")).toBeNull();
+    expect(host.querySelector("[data-native-blueprint-recipe-target]")).toBeNull();
   });
 
   it("preserves one focused IME draft from active N through inFlight to active N+1 and submits once", () => {
@@ -673,7 +753,7 @@ describe("NativeBlueprintWorkspace", () => {
     });
     expect([...host.querySelectorAll<HTMLElement>("[data-native-blueprint-library-id]")]
       .some((node) => node.dataset.nativeBlueprintLibraryId === "mod:Ω/🚀")).toBe(true);
-    expect(host.textContent).toContain("名称、方向与删除由 Rust 权威提交");
+    expect(host.textContent).toContain("名称、方向、配方与删除由 Rust 权威提交");
 
     const deletePending = Object.freeze({
       token: 1,
@@ -720,6 +800,7 @@ describe("NativeBlueprintWorkspace", () => {
     expect(source).not.toMatch(/on(?:Capture|Import|Transform|Delete|Remove|Deploy|Place|Undo|Ghost|Fund|Cancel|Export)\b/);
     expect(source).toMatch(/onSubmitRenameIntent/);
     expect(source).toMatch(/onSubmitTransformIntent/);
+    expect(source).toMatch(/onSubmitRecipeOverrideIntent/);
     expect(source).toMatch(/onSubmitDeleteIntent/);
     expect(source).toMatch(/onSubmitQueueCancelIntent/);
     expect(source).not.toMatch(/onBlur=|onKeyDown=/);

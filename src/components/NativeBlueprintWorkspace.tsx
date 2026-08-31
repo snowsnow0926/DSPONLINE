@@ -17,10 +17,14 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { canonicalizeNativeBlueprintName } from "../game/nativeBlueprintRenameIntentCommands";
-import { NATIVE_BLUEPRINT_PAGE_ROWS } from "../game/nativeBlueprintWorkspaceStore";
+import {
+  NATIVE_BLUEPRINT_PAGE_ROWS,
+  selectNativeBlueprintRecipeOverrideBinding,
+} from "../game/nativeBlueprintWorkspaceStore";
 import type {
   NativeBlueprintDeleteBinding,
   NativeBlueprintMirror,
+  NativeBlueprintRecipeOverrideBinding,
   NativeBlueprintRenameIdentity,
   NativeBlueprintRotation,
   NativeBlueprintTransformBinding,
@@ -32,6 +36,9 @@ import type {
 import type {
   NativeBlueprintTransformPendingCommand,
 } from "../game/nativeBlueprintTransformCommandReconciliation";
+import type {
+  NativeBlueprintRecipeOverridePendingCommand,
+} from "../game/nativeBlueprintRecipeOverrideCommandReconciliation";
 import type {
   NativeBlueprintDeletePendingCommand,
 } from "../game/nativeBlueprintDeleteCommandReconciliation";
@@ -66,10 +73,15 @@ export interface NativeBlueprintWorkspaceProps {
     rotation: NativeBlueprintRotation,
     mirror: NativeBlueprintMirror,
   ) => boolean;
+  onSubmitRecipeOverrideIntent: (
+    binding: NativeBlueprintRecipeOverrideBinding,
+    targetRecipeId: string,
+  ) => boolean;
   onSubmitDeleteIntent: (binding: NativeBlueprintDeleteBinding) => boolean;
   onSubmitQueueCancelIntent: (binding: NativeConstructionQueueCancelBinding) => boolean;
   pendingIdentity: NativeBlueprintRenamePendingIdentity | null;
   transformPending: NativeBlueprintTransformPendingCommand | null;
+  recipeOverridePending: NativeBlueprintRecipeOverridePendingCommand | null;
   deletePending: NativeBlueprintDeletePendingCommand | null;
   queueCancelPending: NativeConstructionQueueCancelPendingCommand | null;
   resolution: NativeBlueprintRenameResolution | null;
@@ -161,7 +173,15 @@ function DetailOverflow({ total }: { total: number }) {
   return <span className="blueprint-composition-more">其余 {total - DETAIL_PREVIEW_ROWS} 项由原生投影汇总</span>;
 }
 
-function NativeBlueprintDetail({ frame }: { frame: NativeBlueprintWorkspaceFrame }) {
+function NativeBlueprintDetail({
+  frame,
+  locked,
+  onSubmitRecipeOverrideIntent,
+}: {
+  frame: NativeBlueprintWorkspaceFrame;
+  locked: boolean;
+  onSubmitRecipeOverrideIntent: NativeBlueprintWorkspaceProps["onSubmitRecipeOverrideIntent"];
+}) {
   const detail = frame.detail;
   if (!detail) return null;
   const statusCopy = detail.status === "supported"
@@ -192,6 +212,28 @@ function NativeBlueprintDetail({ frame }: { frame: NativeBlueprintWorkspaceFrame
         <strong>外部端口 · {detail.externalPorts.length}</strong>
         <div>{detail.externalPorts.slice(0, DETAIL_PREVIEW_ROWS).map((port) => <span key={port.key} data-native-blueprint-port-key={port.key}><Network size={11} />{port.direction === "input" ? "输入" : "输出"} · {port.itemId} · {port.entityKey}</span>)}<DetailOverflow total={detail.externalPorts.length} /></div>
       </div>
+      {detail.recipeOverrideGroups.length > 0 ? <div className="blueprint-external-ports">
+        <strong>配方覆盖 · {detail.recipeOverrideGroups.length}</strong>
+        <div>{detail.recipeOverrideGroups.map((group) => <label
+          className="native-blueprint-recipe-control"
+          key={group.sourceRecipeId}
+          data-native-blueprint-recipe-source={group.sourceRecipeId}
+        >
+          <span>{group.sourceRecipeId}</span>
+          <select
+            aria-label={`蓝图配方${group.sourceRecipeId}的目标配方`}
+            value={group.targetRecipeId}
+            disabled={locked || group.options.length <= 1}
+            data-native-blueprint-recipe-target={group.sourceRecipeId}
+            onChange={(event) => {
+              const binding = selectNativeBlueprintRecipeOverrideBinding(frame, group.sourceRecipeId);
+              if (binding) onSubmitRecipeOverrideIntent(binding, event.currentTarget.value);
+            }}
+          >
+            {group.options.map((option) => <option key={option.id} value={option.id}>{option.name} · {option.id}</option>)}
+          </select>
+        </label>)}</div>
+      </div> : null}
     </> : null}
   </section>;
 }
@@ -223,10 +265,12 @@ export function NativeBlueprintWorkspace({
   onQueueCursorChange,
   onSubmitRenameIntent,
   onSubmitTransformIntent,
+  onSubmitRecipeOverrideIntent,
   onSubmitDeleteIntent,
   onSubmitQueueCancelIntent,
   pendingIdentity,
   transformPending,
+  recipeOverridePending,
   deletePending,
   queueCancelPending,
   resolution,
@@ -297,7 +341,8 @@ export function NativeBlueprintWorkspace({
 
   if (!open) return null;
   const interactionLocked = commandPending || pendingIdentity !== null ||
-    transformPending !== null || deletePending !== null || queueCancelPending !== null ||
+    transformPending !== null || recipeOverridePending !== null || deletePending !== null ||
+    queueCancelPending !== null ||
     renameEditor !== null;
   const editorTargetState = renameEditor?.conflict === "lineage"
     ? "lineage-conflict"
@@ -305,7 +350,7 @@ export function NativeBlueprintWorkspace({
   const editorAccepted = Boolean(renameEditor && renameEditor.acceptedSubmissionId !== null);
   const editorConflict = editorTargetState === "lineage-conflict" || editorTargetState === "row-conflict";
   const editorLocked = Boolean(
-    editorAccepted || pendingIdentity || transformPending || deletePending ||
+    editorAccepted || pendingIdentity || transformPending || recipeOverridePending || deletePending ||
     queueCancelPending || editorConflict,
   );
   const canonicalDraft = renameEditor ? canonicalizeNativeBlueprintName(renameEditor.draft) : null;
@@ -320,6 +365,15 @@ export function NativeBlueprintWorkspace({
         : transformPending.phase === "awaiting-projection"
           ? `蓝图方向已耐久提交；等待同 lineage revision ${transformPending.receipt?.revision} 投影确认`
           : "蓝图方向回执或投影无法证明；当前 lineage 保持锁定"
+    : null;
+  const recipeOverridePendingCopy = recipeOverridePending
+    ? recipeOverridePending.phase === "dispatching"
+      ? "蓝图配方正在等待 main-owned durable ACK"
+      : recipeOverridePending.phase === "reconciling"
+        ? "蓝图配方结果不确定；仅进行六次有界只读对账，绝不自动重发"
+        : recipeOverridePending.phase === "awaiting-projection"
+          ? `蓝图配方已耐久提交；等待同 lineage revision ${recipeOverridePending.receipt?.revision} 投影确认`
+          : "蓝图配方回执或投影无法证明；当前 lineage 保持锁定"
     : null;
   const deletePendingCopy = deletePending
     ? deletePending.phase === "dispatching"
@@ -347,9 +401,10 @@ export function NativeBlueprintWorkspace({
         : pendingIdentity.phase === "uncertain"
           ? "重命名结果无法确认；保持锁定并仅等待权威对账，绝不自动重发"
           : "重命名身份或投影发生冲突；保持锁定并停止猜测"
-    : transformPendingCopy ?? deletePendingCopy ?? queueCancelPendingCopy ?? (commandPending
+    : transformPendingCopy ?? recipeOverridePendingCopy ?? deletePendingCopy ??
+      queueCancelPendingCopy ?? (commandPending
       ? "另一条原生命令正在等待 durable ACK"
-      : "页面按存储顺序显示；名称、方向与删除由 Rust 权威提交。");
+      : "页面按存储顺序显示；名称、方向、配方与删除由 Rust 权威提交。");
   const editorCopy = renameEditor
     ? pendingIdentity?.phase === "uncertain"
       ? "提交结果不确定：草稿已保留，禁止自动重发"
@@ -487,7 +542,11 @@ export function NativeBlueprintWorkspace({
             <span>设备 {summary.counts.entities}</span><span>线路 {summary.counts.belts}</span><span>资源锚点 {summary.counts.resourceAnchors}</span><span>外部端口 {summary.counts.externalPorts}</span>
             {summary.detailStatus === "truncated" ? <span className="blueprint-composition-more">详情超限</span> : null}
           </div>
-          {selected ? <NativeBlueprintDetail frame={readyFrame} /> : null}
+          {selected ? <NativeBlueprintDetail
+            frame={readyFrame}
+            locked={interactionLocked}
+            onSubmitRecipeOverrideIntent={onSubmitRecipeOverrideIntent}
+          /> : null}
           <footer>
             <button
               type="button"

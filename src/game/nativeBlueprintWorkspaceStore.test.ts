@@ -10,8 +10,11 @@ import {
   NATIVE_BLUEPRINT_PAGE_ROWS,
   NativeBlueprintWorkspaceStore,
   createNativePlayerAuthorityBlueprintWorkspaceSource,
+  nativeBlueprintRecipeOverrideBindingMatchesFrame,
   nativeBlueprintRenameIdentityMatchesFrame,
   nativeBlueprintTransformBindingMatchesFrame,
+  selectNativeBlueprintRecipeOverrideBinding,
+  selectNativeBlueprintRecipeOverrideProjectionBinding,
   selectNativeBlueprintTransformBinding,
   selectNativeBlueprintWorkspaceFrame,
   type NativeBlueprintWorkspaceIdentity,
@@ -58,6 +61,7 @@ function detail(value: DesktopNativeCoreBlueprintSummary): DesktopNativeCoreBlue
     belts: [],
     resourceAnchors: [],
     externalPorts: [],
+    recipeOverrideGroups: [],
   };
 }
 
@@ -280,6 +284,7 @@ describe("NativeBlueprintWorkspaceStore", () => {
       belts: [],
       resourceAnchors: [],
       externalPorts: [],
+      recipeOverrideGroups: [],
     };
     const byteStore = new NativeBlueprintWorkspaceStore();
     await expect(byteStore.refresh(
@@ -483,6 +488,7 @@ describe("NativeBlueprintWorkspaceStore", () => {
       belts: [],
       resourceAnchors: [],
       externalPorts: [],
+      recipeOverrideGroups: [],
     }]]);
     await expect(store.refresh(fixtureSource(IDENTITY, [row], [], details), IDENTITY, row.id))
       .resolves.toBe("committed");
@@ -513,5 +519,160 @@ describe("NativeBlueprintWorkspaceStore", () => {
       ...frame,
       selectedBlueprintId: null,
     })).toBeNull();
+  });
+
+  it("binds one Rust-derived recipe group and rejects option or target drift", async () => {
+    const row = {
+      ...summary("blueprint-recipe", "配方蓝图"),
+      revision: 6,
+      counts: { entities: 1, belts: 0, resourceAnchors: 0, externalPorts: 0 },
+    };
+    const projected: DesktopNativeCoreBlueprintDetail = {
+      summary: row,
+      status: "supported",
+      unsupportedReason: null,
+      entities: [{
+        key: "smelter",
+        buildingId: "arc_smelter",
+        buildingLabel: "电弧熔炉",
+        offset: { x: 0, y: 0 },
+        machineCount: 1,
+        recipeId: "iron_ingot",
+        operationEnabledOnDeploy: null,
+      }],
+      belts: [],
+      resourceAnchors: [],
+      externalPorts: [],
+      recipeOverrideGroups: [{
+        sourceRecipeId: "iron_ingot",
+        targetRecipeId: "magnet",
+        options: [
+          { id: "iron_ingot", name: "铁块" },
+          { id: "magnet", name: "磁铁" },
+        ],
+      }],
+    };
+    const store = new NativeBlueprintWorkspaceStore();
+    await expect(store.refresh(
+      fixtureSource(IDENTITY, [row], [], new Map([[row.id, projected]])),
+      IDENTITY,
+      row.id,
+    )).resolves.toBe("committed");
+    const frame = store.getSnapshot().frame;
+    const binding = selectNativeBlueprintRecipeOverrideBinding(frame, "iron_ingot");
+    expect(binding).toEqual({
+      sessionId: IDENTITY.sessionId,
+      runId: IDENTITY.runId,
+      revision: IDENTITY.revision,
+      registryFingerprint: IDENTITY.registryFingerprint,
+      blueprintId: row.id,
+      currentRowRevision: 6,
+      sourceRecipeId: "iron_ingot",
+      currentTargetRecipeId: "magnet",
+    });
+    expect(nativeBlueprintRecipeOverrideBindingMatchesFrame(binding!, frame)).toBe(true);
+    expect(nativeBlueprintRecipeOverrideBindingMatchesFrame({
+      ...binding!, currentTargetRecipeId: "iron_ingot",
+    }, frame)).toBe(false);
+    expect(selectNativeBlueprintRecipeOverrideBinding(frame, "missing")).toBeNull();
+
+    const terminalRow: DesktopNativeCoreBlueprintSummary = {
+      ...row,
+      revision: Number.MAX_SAFE_INTEGER,
+    };
+    const terminalDetail: DesktopNativeCoreBlueprintDetail = {
+      ...projected,
+      summary: terminalRow,
+    };
+    const terminalFrame = {
+      ...frame!,
+      library: [terminalRow],
+      libraryById: new Map([[terminalRow.id, terminalRow]]),
+      detail: terminalDetail,
+    };
+    expect(selectNativeBlueprintRecipeOverrideBinding(
+      terminalFrame,
+      "iron_ingot",
+    )).toBeNull();
+    const terminalProjection = selectNativeBlueprintRecipeOverrideProjectionBinding(
+      terminalFrame,
+      "iron_ingot",
+    );
+    expect(terminalProjection?.currentRowRevision).toBe(Number.MAX_SAFE_INTEGER);
+    expect(nativeBlueprintRecipeOverrideBindingMatchesFrame(
+      terminalProjection!,
+      terminalFrame,
+    )).toBe(true);
+
+    const forged: DesktopNativeCoreBlueprintDetail = {
+      ...projected,
+      recipeOverrideGroups: [{
+        ...projected.recipeOverrideGroups[0],
+        targetRecipeId: "not-listed",
+      }],
+    };
+    const rejected = new NativeBlueprintWorkspaceStore();
+    await expect(rejected.refresh(
+      fixtureSource(IDENTITY, [row], [], new Map([[row.id, forged]])),
+      IDENTITY,
+      row.id,
+    )).resolves.toBe("unavailable");
+
+    const numeric: DesktopNativeCoreBlueprintDetail = {
+      ...projected,
+      recipeOverrideGroups: [{
+        sourceRecipeId: 7 as unknown as string,
+        targetRecipeId: "magnet",
+        options: [
+          { id: "iron_ingot", name: "铁块" },
+          { id: "magnet", name: "磁铁" },
+        ],
+      }],
+    };
+    const numericRejected = new NativeBlueprintWorkspaceStore();
+    await expect(numericRejected.refresh(
+      fixtureSource(IDENTITY, [row], [], new Map([[row.id, numeric]])),
+      IDENTITY,
+      row.id,
+    )).resolves.toBe("unavailable");
+
+    const aggregateRow: DesktopNativeCoreBlueprintSummary = {
+      ...row,
+      counts: { ...row.counts, entities: 2 },
+    };
+    const aggregateOversized: DesktopNativeCoreBlueprintDetail = {
+      ...projected,
+      summary: aggregateRow,
+      entities: [
+        { ...projected.entities[0], recipeId: "source-a" },
+        { ...projected.entities[0], key: "smelter-b", recipeId: "source-b" },
+      ],
+      recipeOverrideGroups: [
+        {
+          sourceRecipeId: "source-a",
+          targetRecipeId: "option-0",
+          options: Array.from({ length: 4_096 }, (_, index) => ({
+            id: `option-${index}`,
+            name: `配方 ${index}`,
+          })),
+        },
+        {
+          sourceRecipeId: "source-b",
+          targetRecipeId: "source-b",
+          options: [{ id: "source-b", name: "第二配方" }],
+        },
+      ],
+    };
+    const aggregateRejected = new NativeBlueprintWorkspaceStore();
+    await expect(aggregateRejected.refresh(
+      fixtureSource(
+        IDENTITY,
+        [aggregateRow],
+        [],
+        new Map([[aggregateRow.id, aggregateOversized]]),
+      ),
+      IDENTITY,
+      aggregateRow.id,
+    )).resolves.toBe("unavailable");
   });
 });

@@ -1,5 +1,13 @@
 # DSP极简网络项目现状
 
+> **Windows 量子脏键证明与蓝图配方覆盖权威（2026-08-31，开发候选，未发布）**：提交 `c9be64f` 把量子网络稀疏写回证明收敛为只访问本步 dirty inventory key；三分之四稠密退化、MOD/非规范失败关闭、稳定顺序和 full-oracle 一致性不变。没有执行新的可信固定输入 A/B，因此没有新增速度百分比。
+>
+> 蓝图详情现在由 Rust 投影按源配方生成有界候选，内置及 registry 明确 family 的 MOD 建筑均按当前 catalog、完成科技和全部匹配模板验证。renderer 只提交 `{kind:"recipe-override",id,sourceRecipeId,targetRecipeId}`；Rust 再重验完整目录、源/目标配方、科技、building family、当前覆盖和安全整数 revision，只新增/删除对应的一个 map 键。缺失/null 的可选 v47 map 可原子创建首项，已有 4,096 项时不能扩成 4,097；失败不改变源 revision 或规范哈希。
+>
+> UI 不乐观显示，pending 会锁住同工作区写操作；未知结果只做六次有界只读 receipt/projection reconciliation，绝不重发 mutation。最终安全行 revision `MAX_SAFE` 仍能用于确认从 `MAX_SAFE-1` 提交成功的事务，但不能再写。Rust 构造期把跨组 option 总数限制为 4,096、配方区域保守预算限制为 512 KiB；TypeScript IPC parser 镜像总数门禁并拒绝数字冒充字符串，避免异常投影先分配或渲染百万级选项。
+>
+> 当前新跑 Rust workspace 串行 Core `786/786`、Host library `183/183`、Host main `1/1`，合计 `970/970`；蓝图配方聚焦 Rust 投影 `13/13`、权威命令 `6/6`、Vitest `70/70`。fresh Release Host 和长差分下，完整 Vitest 为 `333` 文件通过、`13` 文件条件跳过，`2,598` 项通过、`28` 项跳过、`0` 失败（`403.05s`）；Windows native/desktop Node 为 `484/1/0`；完整 Chromium E2E 为 `433/27/0`（`6.6m`），耐久 WAL E2E 为 `7/7`（`46.8s`）。TypeScript、fmt、strict clippy、diff check 与 production build/startup budget 通过；build 为 `2,063` modules，startup gzip 为 `180,398 / 86,811 / 93,587 B`，menu `257,772 B`、forbidden `0`。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均未改变；未连接生产、未部署、未签名、未读取或修改玩家存档。固定进度仍为 `Rust 83% / 薄 UI 96% / O(active) 96% / 并行 72% / 综合开发 88% / 发布成熟度 60%`。
+
 > **Windows 量子物流形状证据与施工队列取消退款（2026-08-31，开发候选，未发布）**：提交 `188f406` 增加 opt-in `quantum-oactive-shape-v1`，在同一个 `coreAdvance` 响应内返回一条与 request/session hash、base/measured revision 和 purpose 绑定的聚合记录；它覆盖 selected/total owner、网络解析、dirty/dense 写回、零归一化、排序比较和有界 fanout。普通路径不构造证据，既有 comparator 不变。本轮没有正式固定输入 `2 + 6` A/B，也没有新的速度收益宣称。
 >
 > 提交 `4ea78d5` 让 Windows 薄 UI 可直接打开原生蓝图工作区，并由 Rust 权威取消施工队列订单和完整退款。renderer 只提交 `{kind:"cancel",id,revision}`；Rust 从 v47 当前状态计算 `reservedConstruction → construction`、`reservedFleet → portableFleet`，原子删除订单并清理无人引用的 blueprint version，不回滚已放置建筑、实体或线路。WAL 不保存退款正文或下标，未知结果只做六次有界只读 reconciliation，绝不重发或乐观改写。

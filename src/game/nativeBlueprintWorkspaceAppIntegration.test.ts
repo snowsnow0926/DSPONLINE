@@ -20,6 +20,14 @@ describe("native blueprint workspace App integration", () => {
     fileURLToPath(new URL("./nativeBlueprintTransformCommandReconciliation.ts", import.meta.url)),
     "utf8",
   );
+  const recipeOverrideHook = readFileSync(
+    fileURLToPath(new URL("./useNativeBlueprintRecipeOverrideCommandTransaction.ts", import.meta.url)),
+    "utf8",
+  );
+  const recipeOverrideReconciliation = readFileSync(
+    fileURLToPath(new URL("./nativeBlueprintRecipeOverrideCommandReconciliation.ts", import.meta.url)),
+    "utf8",
+  );
   const deleteHook = readFileSync(
     fileURLToPath(new URL("./useNativeBlueprintDeleteCommandTransaction.ts", import.meta.url)),
     "utf8",
@@ -57,7 +65,7 @@ describe("native blueprint workspace App integration", () => {
   });
 
   it("keeps the native editor owner mounted through authority handoff and admits legacy only after reconciliation", () => {
-    expect(app).toMatch(/<NativeBlueprintWorkspace[\s\S]*?open=\{blueprintsOpen && \(nativePlayerAuthorityOwnsRuntime \|\|[\s\S]*?nativeBlueprintRenamePendingIdentity !== null \|\| nativeBlueprintRenameResolution !== null \|\|[\s\S]*?nativeBlueprintTransformPending !== null \|\| nativeBlueprintDeletePending !== null \|\|[\s\S]*?nativeConstructionQueueCancelPending !== null\)\}/);
+    expect(app).toMatch(/<NativeBlueprintWorkspace[\s\S]*?open=\{blueprintsOpen && \(nativePlayerAuthorityOwnsRuntime \|\|[\s\S]*?nativeBlueprintRenamePendingIdentity !== null \|\| nativeBlueprintRenameResolution !== null \|\|[\s\S]*?nativeBlueprintTransformPending !== null \|\| nativeBlueprintRecipeOverridePending !== null \|\|[\s\S]*?nativeBlueprintDeletePending !== null \|\|[\s\S]*?nativeConstructionQueueCancelPending !== null\)\}/);
     const nativeTag = app.match(/(\n\s*<NativeBlueprintWorkspace[\s\S]*?\/>)/)?.[1] ?? "";
     expect(nativeTag).toContain("status={nativeBlueprintWorkspaceSnapshot.status}");
     expect(nativeTag).toContain("frame={nativeBlueprintWorkspaceFrame}");
@@ -65,20 +73,22 @@ describe("native blueprint workspace App integration", () => {
     expect(nativeTag).toContain("onSelectBlueprint={setNativeBlueprintSelectedId}");
     expect(nativeTag).toContain("onLibraryCursorChange=");
     expect(nativeTag).toContain("onQueueCursorChange=");
-    expect(nativeTag).toMatch(/nativeBlueprintRenamePendingIdentity \|\| nativeBlueprintTransformPending \|\|[\s\S]*?nativeBlueprintDeletePending \|\| nativeConstructionQueueCancelPending \|\|[\s\S]*?nativePlayerAuthorityCommandPending[\s\S]*?setNativeBlueprintQueueCursor/);
+    expect(nativeTag).toMatch(/nativeBlueprintRenamePendingIdentity \|\| nativeBlueprintTransformPending \|\|[\s\S]*?nativeBlueprintRecipeOverridePending \|\| nativeBlueprintDeletePending \|\|[\s\S]*?nativeConstructionQueueCancelPending \|\|[\s\S]*?nativePlayerAuthorityCommandPending[\s\S]*?setNativeBlueprintQueueCursor/);
     expect(nativeTag).toContain("onSubmitRenameIntent={submitNativeBlueprintRenameIntent}");
     expect(nativeTag).toContain("onSubmitTransformIntent={submitNativeBlueprintTransformIntent}");
+    expect(nativeTag).toContain("onSubmitRecipeOverrideIntent={submitNativeBlueprintRecipeOverrideIntent}");
     expect(nativeTag).toContain("onSubmitDeleteIntent={submitNativeBlueprintDeleteIntent}");
     expect(nativeTag).toContain("onSubmitQueueCancelIntent={submitNativeConstructionQueueCancelIntent}");
     expect(nativeTag).toContain("pendingIdentity={nativeBlueprintRenamePendingIdentity}");
     expect(nativeTag).toContain("transformPending={nativeBlueprintTransformPending}");
+    expect(nativeTag).toContain("recipeOverridePending={nativeBlueprintRecipeOverridePending}");
     expect(nativeTag).toContain("deletePending={nativeBlueprintDeletePending}");
     expect(nativeTag).toContain("queueCancelPending={nativeConstructionQueueCancelPending}");
     expect(nativeTag).toContain("resolution={nativeBlueprintRenameResolution}");
     expect(nativeTag).toContain("onConsumeRenameResolution={consumeNativeBlueprintRenameResolution}");
     expect(nativeTag).toContain("commandPending={nativePlayerAuthorityCommandPending}");
     expect(nativeTag).not.toMatch(/\bgame=|onDeploy=|onRemove=|onRename=|onTransform=|onFund|onCancel=|onExport=|onImport=/);
-    expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintTransformPending &&[\s\S]*?!nativeBlueprintDeletePending &&[\s\S]*?!nativeConstructionQueueCancelPending &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace[\s\S]*?game=\{game\}[\s\S]*?onDeploy=\{deployBlueprint\}/);
+    expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintTransformPending &&[\s\S]*?!nativeBlueprintRecipeOverridePending &&[\s\S]*?!nativeBlueprintDeletePending &&[\s\S]*?!nativeConstructionQueueCancelPending &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace[\s\S]*?game=\{game\}[\s\S]*?onDeploy=\{deployBlueprint\}/);
   });
 
   it("keeps the native component detached from GameState and exposes only bounded semantic intents", () => {
@@ -86,6 +96,7 @@ describe("native blueprint workspace App integration", () => {
     expect(component).not.toMatch(/on(?:Capture|Import|Transform|Remove|Deploy|Place|Undo|Ghost|Fund|Cancel|Export)\b/);
     expect(component).toMatch(/onSubmitRenameIntent/);
     expect(component).toMatch(/onSubmitTransformIntent/);
+    expect(component).toMatch(/onSubmitRecipeOverrideIntent/);
     expect(component).toMatch(/onSubmitDeleteIntent/);
     expect(component).toMatch(/onSubmitQueueCancelIntent/);
     expect(component).toMatch(/readOnly !== true/);
@@ -107,6 +118,24 @@ describe("native blueprint workspace App integration", () => {
     expect(transformReconciliation).toMatch(/projection\.currentMirror !== pending\.targetMirror/);
     expect(component).toMatch(/data-native-blueprint-action="rotate-transform"/);
     expect(component).toMatch(/data-native-blueprint-action="mirror-transform"/);
+  });
+
+  it("routes recipe override through one semantic marker and the matching Rust-derived group", () => {
+    expect(app).toMatch(/useNativeBlueprintRecipeOverrideCommandTransaction\(\{[\s\S]*?authority: nativeEntityRecipeAuthorityObservation,[\s\S]*?frame: nativeBlueprintWorkspaceFrame,[\s\S]*?commandInFlightRef: nativePlayerAuthorityCommandInFlightRef/);
+    expect(app).toMatch(/const submitNativeBlueprintRecipeOverrideIntent = useCallback[\s\S]*?nativeBlueprintRecipeOverrideBindingMatchesFrame[\s\S]*?commitNativeBlueprintRecipeOverrideCommand\(binding, targetRecipeId\)/);
+    expect(recipeOverrideHook.match(/\.applyCommand\(/g)).toHaveLength(1);
+    expect(recipeOverrideHook).toMatch(/reconcileNativeBlueprintRecipeOverridePendingCommand/);
+    const reconcileBlock = recipeOverrideHook.slice(
+      recipeOverrideHook.indexOf("const reconcileTransport"),
+      recipeOverrideHook.indexOf("const handleDispatchFailure"),
+    );
+    expect(reconcileBlock).not.toMatch(/applyCommand\(/);
+    expect(recipeOverrideReconciliation).toMatch(/\[\s*0,\s*100,\s*250,\s*500,\s*1_000,\s*2_000,/);
+    expect(recipeOverrideReconciliation).toMatch(/projection\.currentRowRevision !== pending\.currentRowRevision \+ 1/);
+    expect(recipeOverrideReconciliation).toMatch(/projection\.sourceRecipeId !== pending\.sourceRecipeId/);
+    expect(recipeOverrideReconciliation).toMatch(/projection\.currentTargetRecipeId !== pending\.targetRecipeId/);
+    expect(component).toMatch(/selectNativeBlueprintRecipeOverrideBinding\(frame, group\.sourceRecipeId\)/);
+    expect(component).toMatch(/data-native-blueprint-recipe-target/);
   });
 
   it("routes delete through one mutation and read-only bounded reconciliation until an exact absence projection", () => {

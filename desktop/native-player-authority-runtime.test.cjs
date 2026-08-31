@@ -95,12 +95,14 @@ function systemSpaceStationRequest(baseRevision, intent) {
     runId: "player-run-1",
     expectedRevision: baseRevision,
     expectedRegistryFingerprint: "7df8cf3a",
+    expectedSystemId: "helios",
     intent,
   });
   return {
     commandId: identity.commandId,
     baseRevision,
     expectedRegistryFingerprint: "7df8cf3a",
+    expectedSystemId: "helios",
     intent,
   };
 }

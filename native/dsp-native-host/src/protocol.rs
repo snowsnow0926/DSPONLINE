@@ -586,7 +586,27 @@ impl ControlResponse<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core_runtime::PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE;
     use serde_json::json;
+
+    #[test]
+    fn failure_protocol_preserves_the_explicit_station_pre_stage_code() {
+        let response = ControlResponse::failure(
+            PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
+            "native system-space-station module target is unchanged",
+        );
+        let encoded = serde_json::to_value(response).unwrap();
+        assert_eq!(encoded["ok"], false);
+        assert_eq!(
+            encoded["error"]["code"],
+            PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE
+        );
+        assert_eq!(
+            encoded["error"]["message"],
+            "native system-space-station module target is unchanged"
+        );
+        assert!(encoded.get("value").is_none());
+    }
 
     #[test]
     fn player_authority_prepare_protocol_rejects_caller_supplied_proof() {

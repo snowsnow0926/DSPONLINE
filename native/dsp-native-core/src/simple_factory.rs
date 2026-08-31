@@ -5,7 +5,8 @@ use serde_json::{Map, Number, Value, json};
 
 use crate::catalog::{BuildingDefinition, RecipeDefinition};
 use crate::deterministic_runtime::{
-    DeterministicRuntime, PARALLEL_MIN_ITEMS, runtime as deterministic_runtime,
+    DeterministicRuntime, PARALLEL_MIN_ITEMS, PartitionedPrepareDiagnostics,
+    runtime as deterministic_runtime,
 };
 use crate::state::CoreState;
 
@@ -14,15 +15,6 @@ const MIN_BUILDING_BUFFER_LIMIT: f64 = 1_000.0;
 const DEFAULT_BUILDING_BUFFER_LIMIT: f64 = 1_000_000.0;
 const MAX_BUILDING_BUFFER_LIMIT: f64 = 100_000_000.0;
 const GRID_IDS: [&str; 3] = ["grid-a", "grid-b", "grid-c"];
-
-fn collect_indexed_power_probes<T, R, F>(values: &[T], probe: F) -> Vec<R>
-where
-    T: Sync,
-    R: Send,
-    F: Fn(&T) -> R + Send + Sync,
-{
-    collect_indexed_power_probes_with_runtime(deterministic_runtime(), values, probe)
-}
 
 fn collect_indexed_power_probes_with_runtime<T, R, F>(
     runtime: &DeterministicRuntime,
@@ -1190,6 +1182,95 @@ fn probe_machine_demand(
         demand_active: true,
         zero_if_disconnected: true,
     }))
+}
+
+struct PreparedPowerDemandProbes {
+    ready_stations: Vec<anyhow::Result<PowerDemandProbe>>,
+    veins: Vec<anyhow::Result<Option<PowerDemandProbe>>>,
+    machines: Vec<anyhow::Result<Option<PowerDemandProbe>>>,
+    scheduler: PartitionedPrepareDiagnostics,
+}
+
+/// Captures three independent power-demand domains into owned event buffers.
+/// No grid, entity or CoreState field is written here. The caller validates
+/// the buffers in ready-station -> vein -> machine order and only then replays
+/// them into the candidate grid, retaining the historical error and floating-
+/// point accumulation order regardless of worker scheduling.
+#[allow(clippy::too_many_arguments)]
+fn prepare_power_demand_probes_with_runtime(
+    runtime: &DeterministicRuntime,
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    profiles: &[PlanetProfile],
+    ready_station_indices: &[usize],
+    production_buffer_limit: f64,
+    power_demand_multiplier: f64,
+    industrial_speed: f64,
+    research_speed: f64,
+    seconds: f64,
+) -> PreparedPowerDemandProbes {
+    let vein_indices = &state.factory_topology.vein_indices;
+    let machine_indices = &state.factory_topology.ordinary_machine_indices;
+    let active_mask = u8::from(!ready_station_indices.is_empty())
+        | (u8::from(!vein_indices.is_empty()) << 1)
+        | (u8::from(!machine_indices.is_empty()) << 2);
+    let work_items = ready_station_indices
+        .len()
+        .saturating_add(vein_indices.len())
+        .saturating_add(machine_indices.len());
+    let ((ready_stations, veins, machines, ()), scheduler) = runtime.partitioned_prepare4(
+        active_mask,
+        work_items,
+        || {
+            collect_indexed_power_probes_with_runtime(
+                runtime,
+                ready_station_indices,
+                |&entity_index| {
+                    probe_ready_station_demand(
+                        state,
+                        entities,
+                        power_demand_multiplier,
+                        entity_index,
+                    )
+                },
+            )
+        },
+        || {
+            collect_indexed_power_probes_with_runtime(runtime, vein_indices, |&entity_index| {
+                probe_vein_demand(
+                    state,
+                    entities,
+                    production_buffer_limit,
+                    power_demand_multiplier,
+                    entity_index,
+                )
+            })
+        },
+        || {
+            collect_indexed_power_probes_with_runtime(runtime, machine_indices, |&entity_index| {
+                probe_machine_demand(
+                    state,
+                    base,
+                    entities,
+                    profiles,
+                    production_buffer_limit,
+                    power_demand_multiplier,
+                    industrial_speed,
+                    research_speed,
+                    seconds,
+                    entity_index,
+                )
+            })
+        },
+        || (),
+    );
+    PreparedPowerDemandProbes {
+        ready_stations,
+        veins,
+        machines,
+        scheduler,
+    }
 }
 
 fn apply_power_demand_probe(
@@ -3847,6 +3928,7 @@ fn simulate_step(
     interstellar_route_activity: &mut std::sync::Arc<
         crate::interstellar_logistics::InterstellarRouteActivity,
     >,
+    runtime: &DeterministicRuntime,
     seconds: f64,
     isolate_construction_automation: bool,
 ) -> anyhow::Result<bool> {
@@ -3867,7 +3949,7 @@ fn simulate_step(
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tfactory-power-probe-workers\t{}",
-            deterministic_runtime().worker_limit()
+            runtime.worker_limit()
         );
     }
     let elapsed_before_step = finite_number(base.get("elapsedSeconds"));
@@ -4096,7 +4178,8 @@ fn simulate_step(
     let mut grids = vec![GridRuntime::default(); planet_ids.len() * GRID_IDS.len()];
     let grid_slot = |planet: usize, grid: usize| planet * GRID_IDS.len() + grid;
 
-    let power_source_probes = collect_indexed_power_probes(
+    let power_source_probes = collect_indexed_power_probes_with_runtime(
+        runtime,
         &state.factory_topology.power_source_indices,
         |&entity_index| {
             probe_power_source(
@@ -4176,51 +4259,48 @@ fn simulate_step(
     let mut ready_station_indices = ready_stations.into_iter().collect::<Vec<_>>();
     ready_station_indices.sort_unstable();
     let mut disconnected_power_factor_indices = Vec::new();
-    let ready_station_probes =
-        collect_indexed_power_probes(&ready_station_indices, |&entity_index| {
-            probe_ready_station_demand(state, entities, power_demand_multiplier, entity_index)
-        })
+    let industrial_speed = industrial_speed_multiplier(base);
+    let research_speed = research_speed_multiplier(base);
+    let prepared_power_demands = prepare_power_demand_probes_with_runtime(
+        runtime,
+        state,
+        base,
+        entities,
+        &profiles,
+        &ready_station_indices,
+        production_buffer_limit,
+        power_demand_multiplier,
+        industrial_speed,
+        research_speed,
+        seconds,
+    );
+    if profile_enabled {
+        let scheduler = prepared_power_demands.scheduler;
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tpartitioned-power-demand-prepare\tactive={}/3\twork-items={}\tselected-workers={}\tobserved-workers={}\tparallel={}",
+            scheduler.active_partitions,
+            scheduler.work_items,
+            scheduler.selected_worker_count,
+            scheduler.observed_worker_count,
+            scheduler.parallel,
+        );
+    }
+    profile_mark!("power-demand-prepare");
+    // Stable validation is the transaction boundary. Even if workers finish
+    // in a different order, the first visible error remains ready station,
+    // then vein, then ordinary machine, exactly as before this scheduler.
+    let ready_station_probes = prepared_power_demands
+        .ready_stations
         .into_iter()
         .collect::<anyhow::Result<Vec<_>>>()?;
-
-    let vein_probe_results =
-        collect_indexed_power_probes(&state.factory_topology.vein_indices, |&entity_index| {
-            probe_vein_demand(
-                state,
-                entities,
-                production_buffer_limit,
-                power_demand_multiplier,
-                entity_index,
-            )
-        });
-    let mut vein_probes = Vec::with_capacity(vein_probe_results.len());
-    for probe in vein_probe_results {
+    let mut vein_probes = Vec::with_capacity(prepared_power_demands.veins.len());
+    for probe in prepared_power_demands.veins {
         if let Some(probe) = probe? {
             vein_probes.push(probe);
         }
     }
-
-    let industrial_speed = industrial_speed_multiplier(base);
-    let research_speed = research_speed_multiplier(base);
-    let machine_probe_results = collect_indexed_power_probes(
-        &state.factory_topology.ordinary_machine_indices,
-        |&entity_index| {
-            probe_machine_demand(
-                state,
-                base,
-                entities,
-                &profiles,
-                production_buffer_limit,
-                power_demand_multiplier,
-                industrial_speed,
-                research_speed,
-                seconds,
-                entity_index,
-            )
-        },
-    );
-    let mut machine_probes = Vec::with_capacity(machine_probe_results.len());
-    for probe in machine_probe_results {
+    let mut machine_probes = Vec::with_capacity(prepared_power_demands.machines.len());
+    for probe in prepared_power_demands.machines {
         if let Some(probe) = probe? {
             machine_probes.push(probe);
         }
@@ -4236,7 +4316,8 @@ fn simulate_step(
         .use_aggregated_power_factors(use_construction_aggregates);
     let mut ready_station_probes = ready_station_probes;
     if !use_construction_aggregates && construction_power_plan.has_deficit {
-        let center_probes = collect_indexed_power_probes(
+        let center_probes = collect_indexed_power_probes_with_runtime(
+            runtime,
             &state.factory_topology.construction_center_indices,
             |&entity_index| {
                 probe_ready_station_demand(state, entities, power_demand_multiplier, entity_index)
@@ -4461,7 +4542,7 @@ fn simulate_step(
         seconds,
     };
     let vein_settlement_outcomes = collect_vein_settlement_outcomes(
-        deterministic_runtime(),
+        runtime,
         &state.factory_topology.vein_indices,
         &VeinProbeEnvironment {
             state,
@@ -4475,12 +4556,11 @@ fn simulate_step(
     );
     let mut vein_settlement_outcomes = vein_settlement_outcomes.into_iter().peekable();
     profile_mark!("vein-settlement-probes");
-    let local_machine_settlement_plan =
-        plan_local_machine_settlement(state, deterministic_runtime());
+    let local_machine_settlement_plan = plan_local_machine_settlement(state, runtime);
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tfactory-local-machine-settlement\tworkers={}\tparallel={}\tfallback={}\tbarriers={}\tbatches={}",
-            deterministic_runtime().worker_limit(),
+            runtime.worker_limit(),
             local_machine_settlement_plan.parallel_entity_count,
             local_machine_settlement_plan.serial_fallback_count,
             local_machine_settlement_plan.global_barrier_count,
@@ -4500,16 +4580,12 @@ fn simulate_step(
         .is_some()
         .then(Vec::<MachineProductionEvent>::new);
     profile_mark!("machine-local-settlement-plan");
-    let renewable_power_facility_patches = collect_renewable_power_facility_patches_with_runtime(
-        deterministic_runtime(),
-        state,
-        entities,
-        &grids,
-    )?;
+    let renewable_power_facility_patches =
+        collect_renewable_power_facility_patches_with_runtime(runtime, state, entities, &grids)?;
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tfactory-renewable-power-patches\tworkers={}\tcandidates={}",
-            deterministic_runtime().worker_limit(),
+            runtime.worker_limit(),
             renewable_power_facility_patches.len(),
         );
     }
@@ -4937,7 +5013,7 @@ fn simulate_step(
     }
     if let Some(events) = machine_production_events {
         let outcomes = execute_local_machine_settlement_tasks_with_runtime(
-            deterministic_runtime(),
+            runtime,
             state,
             entities,
             &mut local_machine_settlement_tasks,
@@ -5036,12 +5112,7 @@ fn simulate_step(
     // observable. Probe on the shared deterministic pool and replay the
     // ordered scalar results exactly as the former serial scan did.
     let (total_items_before_global, power_reserves_by_planet) =
-        collect_planet_metrics_with_runtime(
-            deterministic_runtime(),
-            state,
-            entities,
-            planet_ids.len(),
-        )?;
+        collect_planet_metrics_with_runtime(runtime, state, entities, planet_ids.len())?;
     profile_mark!("planet-metrics-probe");
 
     let quantum_flow = if crossed_quantum_boundary {
@@ -5758,6 +5829,175 @@ fn simulate_step(
     Ok(station_mode_topology_changed)
 }
 
+pub(crate) struct PreparedFactoryDomains {
+    pub(crate) belt_routes: std::sync::Arc<crate::belts::PreparedRoutes>,
+    pub(crate) logistics_buffer_runtime:
+        std::sync::Arc<crate::logistics_buffers::LogisticsBufferRuntime>,
+    pub(crate) local_peer_directory: std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
+    pub(crate) quantum_logistics_directory:
+        std::sync::Arc<crate::quantum_logistics::QuantumLogisticsDirectory>,
+    pub(crate) construction_runtime: std::sync::Arc<crate::construction::ConstructionRuntime>,
+    pub(crate) station_mode_transition_runtime:
+        std::sync::Arc<crate::system_space_station::ModeTransitionRuntime>,
+    pub(crate) quantum_transition_runtime:
+        std::sync::Arc<crate::quantum_logistics::QuantumTransitionRuntime>,
+    pub(crate) interstellar_peer_directory:
+        std::sync::Arc<crate::interstellar_logistics::InterstellarPeerDirectory>,
+    pub(crate) interstellar_route_activity:
+        std::sync::Arc<crate::interstellar_logistics::InterstellarRouteActivity>,
+    pub(crate) scheduler: PartitionedPrepareDiagnostics,
+}
+
+/// Builds independent factory-domain directories against one immutable source
+/// revision. Results remain candidate-local until the complete advance commits;
+/// the fixed unwrap order preserves the former serial error priority.
+pub(crate) fn prepare_factory_domains_with_runtime(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    runtime: &DeterministicRuntime,
+) -> anyhow::Result<PreparedFactoryDomains> {
+    let cached_belt_routes = state.prepared_belt_routes();
+    let cached_logistics_buffer_runtime = state.prepared_logistics_buffer_runtime();
+    let cached_local_peer_directory = state.prepared_local_peer_directory();
+    let cached_quantum_logistics_directory = state.prepared_quantum_logistics_directory();
+    let cached_construction_runtime = state.prepared_construction_runtime();
+    let cached_station_mode_transition_runtime = state.prepared_station_mode_transition_runtime();
+    let cached_quantum_transition_runtime = state.prepared_quantum_transition_runtime();
+    let cached_interstellar_peer_directory = state.prepared_interstellar_peer_directory();
+    let cached_interstellar_route_activity = state.prepared_interstellar_route_activity();
+    let interstellar_is_cold = cached_interstellar_peer_directory.is_none()
+        || cached_interstellar_route_activity.is_none();
+    let active_mask = u8::from(cached_belt_routes.is_none())
+        | (u8::from(cached_logistics_buffer_runtime.is_none()) << 1)
+        | (u8::from(cached_local_peer_directory.is_none()) << 2)
+        | (u8::from(cached_quantum_logistics_directory.is_none()) << 3)
+        | (u8::from(cached_construction_runtime.is_none()) << 4)
+        | (u8::from(cached_station_mode_transition_runtime.is_none()) << 5)
+        | (u8::from(cached_quantum_transition_runtime.is_none()) << 6)
+        | (u8::from(interstellar_is_cold) << 7);
+    let work_items = entities.len().saturating_add(state.belts.ids.len());
+    let (
+        (
+            belt_routes,
+            logistics_buffer_runtime,
+            local_peer_directory,
+            quantum_logistics_directory,
+            construction_runtime,
+            station_mode_transition_runtime,
+            quantum_transition_runtime,
+            interstellar,
+        ),
+        scheduler,
+    ) = runtime.partitioned_prepare8(
+        active_mask,
+        work_items,
+        || {
+            cached_belt_routes.map_or_else(
+                || {
+                    crate::belts::prepare_routes_from_state(state, entities)
+                        .map(std::sync::Arc::new)
+                },
+                Ok,
+            )
+        },
+        || {
+            cached_logistics_buffer_runtime.unwrap_or_else(|| {
+                std::sync::Arc::new(crate::logistics_buffers::LogisticsBufferRuntime::build(
+                    state, entities,
+                ))
+            })
+        },
+        || {
+            cached_local_peer_directory.map_or_else(
+                || {
+                    crate::local_logistics::prepare_step_directory(
+                        entities,
+                        &state.factory_topology.station_indices,
+                    )
+                    .map(std::sync::Arc::new)
+                },
+                Ok,
+            )
+        },
+        || {
+            cached_quantum_logistics_directory.unwrap_or_else(|| {
+                std::sync::Arc::new(crate::quantum_logistics::QuantumLogisticsDirectory::build(
+                    state, entities,
+                ))
+            })
+        },
+        || {
+            cached_construction_runtime.unwrap_or_else(|| {
+                std::sync::Arc::new(crate::construction::ConstructionRuntime::build(
+                    state, base, entities,
+                ))
+            })
+        },
+        || {
+            cached_station_mode_transition_runtime.unwrap_or_else(|| {
+                std::sync::Arc::new(
+                    crate::system_space_station::ModeTransitionRuntime::from_entities(entities),
+                )
+            })
+        },
+        || {
+            cached_quantum_transition_runtime.unwrap_or_else(|| {
+                std::sync::Arc::new(crate::quantum_logistics::QuantumTransitionRuntime::build(
+                    entities,
+                ))
+            })
+        },
+        || {
+            let mut activity = cached_interstellar_route_activity.unwrap_or_else(|| {
+                std::sync::Arc::new(crate::interstellar_logistics::prepare_route_activity(
+                    entities,
+                ))
+            });
+            let directory = cached_interstellar_peer_directory.unwrap_or_else(|| {
+                let directory = std::sync::Arc::new(
+                    crate::interstellar_logistics::InterstellarPeerDirectory::build(
+                        state, base, entities,
+                    ),
+                );
+                crate::interstellar_logistics::reset_dispatch_wakes(
+                    &directory,
+                    std::sync::Arc::make_mut(&mut activity),
+                );
+                directory
+            });
+            (directory, activity)
+        },
+    );
+
+    // Stable serial validation is also the candidate publication boundary.
+    // A later Result never wins over an earlier partition, and no prepared
+    // cache is installed into CoreState until the full revision commits.
+    let belt_routes = belt_routes?;
+    let local_peer_directory = local_peer_directory?;
+    let (mut interstellar_peer_directory, mut interstellar_route_activity) = interstellar;
+    crate::interstellar_logistics::refresh_peer_directory(
+        state,
+        base,
+        entities,
+        false,
+        &mut interstellar_peer_directory,
+        &mut interstellar_route_activity,
+    );
+    Ok(PreparedFactoryDomains {
+        belt_routes,
+        logistics_buffer_runtime,
+        local_peer_directory,
+        quantum_logistics_directory,
+        construction_runtime,
+        station_mode_transition_runtime,
+        quantum_transition_runtime,
+        interstellar_peer_directory,
+        interstellar_route_activity,
+        scheduler,
+    })
+}
+
 pub(crate) struct PreparedFactoryAdvance {
     pub base: Map<String, Value>,
     pub entities: Vec<Value>,
@@ -5787,19 +6027,34 @@ pub(crate) fn prepare_advance(
     wall_seconds: f64,
     isolate_construction_automation: bool,
 ) -> anyhow::Result<PreparedFactoryAdvance> {
+    prepare_advance_with_runtime(
+        state,
+        simulation_seconds,
+        wall_seconds,
+        isolate_construction_automation,
+        deterministic_runtime(),
+    )
+}
+
+fn prepare_advance_with_runtime(
+    state: &CoreState,
+    simulation_seconds: f64,
+    wall_seconds: f64,
+    isolate_construction_automation: bool,
+    deterministic_runtime: &DeterministicRuntime,
+) -> anyhow::Result<PreparedFactoryAdvance> {
     let profile_enabled = crate::profile_evidence::profile_environment_enabled();
     let quantum_oactive_profile =
         crate::quantum_logistics::QuantumOactiveProfileGuard::begin_if_requested();
     let mut profile_checkpoint = profile_enabled.then(std::time::Instant::now);
     if profile_enabled {
-        let runtime = crate::deterministic_runtime::runtime();
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\truntime-worker-limit\t{}",
-            runtime.worker_limit()
+            deterministic_runtime.worker_limit()
         );
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\truntime-observed-workers\t{}",
-            runtime.observed_worker_count()
+            deterministic_runtime.observed_worker_count()
         );
     }
     macro_rules! profile_mark {
@@ -5818,7 +6073,10 @@ pub(crate) fn prepare_advance(
     // JS copyState() materializes both sparse runtime maps before either a
     // simulation step or a wall-clock-only speedrun advance. Mirror that
     // shape here so a zero-simulation budget remains canonically exact.
-    for entity in entities.iter_mut().filter_map(Value::as_object_mut) {
+    deterministic_runtime.indexed_for_each_mut(&mut entities, |_, entity| {
+        let Some(entity) = entity.as_object_mut() else {
+            return;
+        };
         if !entity.contains_key("stationLastSupplyPeerBySlot") {
             entity.insert(
                 "stationLastSupplyPeerBySlot".to_owned(),
@@ -5831,90 +6089,32 @@ pub(crate) fn prepare_advance(
                 Value::Object(Map::new()),
             );
         }
-    }
+    });
     let mut base = state.base_value().clone();
     profile_mark!("parse-records");
-    let mut belt_routes = if let Some(routes) = state.prepared_belt_routes() {
-        routes
-    } else {
-        std::sync::Arc::new(crate::belts::prepare_routes_from_state(state, &entities)?)
-    };
-    let mut logistics_buffer_runtime =
-        state
-            .prepared_logistics_buffer_runtime()
-            .unwrap_or_else(|| {
-                std::sync::Arc::new(crate::logistics_buffers::LogisticsBufferRuntime::build(
-                    state, &entities,
-                ))
-            });
-    let mut local_peer_directory = if let Some(directory) = state.prepared_local_peer_directory() {
-        directory
-    } else {
-        std::sync::Arc::new(crate::local_logistics::prepare_step_directory(
-            &entities,
-            &state.factory_topology.station_indices,
-        )?)
-    };
-    let mut quantum_logistics_directory =
-        if let Some(directory) = state.prepared_quantum_logistics_directory() {
-            directory
-        } else {
-            std::sync::Arc::new(crate::quantum_logistics::QuantumLogisticsDirectory::build(
-                state, &entities,
-            ))
-        };
-    let mut construction_runtime = if let Some(runtime) = state.prepared_construction_runtime() {
-        runtime
-    } else {
-        std::sync::Arc::new(crate::construction::ConstructionRuntime::build(
-            state, &base, &entities,
-        ))
-    };
-    let mut station_mode_transition_runtime = state
-        .prepared_station_mode_transition_runtime()
-        .unwrap_or_else(|| {
-            std::sync::Arc::new(
-                crate::system_space_station::ModeTransitionRuntime::from_entities(&entities),
-            )
-        });
-    let mut quantum_transition_runtime = state
-        .prepared_quantum_transition_runtime()
-        .unwrap_or_else(|| {
-            std::sync::Arc::new(crate::quantum_logistics::QuantumTransitionRuntime::build(
-                &entities,
-            ))
-        });
-    let mut interstellar_route_activity =
-        if let Some(activity) = state.prepared_interstellar_route_activity() {
-            activity
-        } else {
-            std::sync::Arc::new(crate::interstellar_logistics::prepare_route_activity(
-                &entities,
-            ))
-        };
-    let mut interstellar_peer_directory =
-        if let Some(directory) = state.prepared_interstellar_peer_directory() {
-            directory
-        } else {
-            let directory = std::sync::Arc::new(
-                crate::interstellar_logistics::InterstellarPeerDirectory::build(
-                    state, &base, &entities,
-                ),
-            );
-            crate::interstellar_logistics::reset_dispatch_wakes(
-                &directory,
-                std::sync::Arc::make_mut(&mut interstellar_route_activity),
-            );
-            directory
-        };
-    crate::interstellar_logistics::refresh_peer_directory(
-        state,
-        &base,
-        &entities,
-        false,
-        &mut interstellar_peer_directory,
-        &mut interstellar_route_activity,
-    );
+    let prepared_domains =
+        prepare_factory_domains_with_runtime(state, &base, &entities, deterministic_runtime)?;
+    if profile_enabled {
+        let scheduler = prepared_domains.scheduler;
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tpartitioned-factory-domain-prepare\tactive={}/8\twork-items={}\tselected-workers={}\tobserved-workers={}\tparallel={}",
+            scheduler.active_partitions,
+            scheduler.work_items,
+            scheduler.selected_worker_count,
+            scheduler.observed_worker_count,
+            scheduler.parallel,
+        );
+    }
+    let mut belt_routes = prepared_domains.belt_routes;
+    let mut logistics_buffer_runtime = prepared_domains.logistics_buffer_runtime;
+    let mut local_peer_directory = prepared_domains.local_peer_directory;
+    let mut quantum_logistics_directory = prepared_domains.quantum_logistics_directory;
+    let mut construction_runtime = prepared_domains.construction_runtime;
+    let mut station_mode_transition_runtime = prepared_domains.station_mode_transition_runtime;
+    let mut quantum_transition_runtime = prepared_domains.quantum_transition_runtime;
+    let mut interstellar_peer_directory = prepared_domains.interstellar_peer_directory;
+    let mut interstellar_route_activity = prepared_domains.interstellar_route_activity;
+    profile_mark!("partitioned-domain-prepare");
     let mut belt_runtime = crate::belts::BeltRuntime::from_state(
         state,
         &entities,
@@ -6017,6 +6217,7 @@ pub(crate) fn prepare_advance(
             &mut quantum_transition_runtime,
             &mut interstellar_peer_directory,
             &mut interstellar_route_activity,
+            deterministic_runtime,
             step,
             isolate_construction_automation,
         )
@@ -6885,6 +7086,55 @@ pub(crate) mod tests {
         )
     }
 
+    fn partitioned_factory_fixture() -> CoreState {
+        let machine_count = PARALLEL_MIN_ITEMS + 73;
+        let vein_count = 97;
+        let mut entities = Vec::with_capacity(machine_count + vein_count + 3);
+        entities.push(json!({
+            "id": "partitioned-wind",
+            "kind": "power",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "wind_turbine",
+            "machineCount": 1,
+            "minerCount": 0,
+            "inputs": {},
+            "outputs": {},
+            "progress": 0,
+            "routingCursor": 0,
+            "utilization": 0,
+            "productionRate": 0
+        }));
+        entities.extend((0..machine_count).map(|index| {
+            machine_entity(
+                format!("partitioned-machine-{index:05}"),
+                "arc_smelter",
+                "iron_ingot",
+            )
+        }));
+        entities.extend((0..vein_count).map(|index| {
+            let mut vein = vein_entity(index);
+            vein["id"] = Value::from(format!("partitioned-vein-{index:05}"));
+            vein
+        }));
+        entities.push(json!({
+            "id": "partitioned-construction-center",
+            "kind": "machine",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "construction_center",
+            "machineCount": 1,
+            "minerCount": 0,
+            "inputs": {},
+            "outputs": {},
+            "progress": 0,
+            "routingCursor": 0,
+            "utilization": 0,
+            "productionRate": 0
+        }));
+        fixture_state_from_base(construction_isolation_base(), &entities)
+    }
+
     fn construction_exact_request(base_revision: u64) -> CoreAdvanceRequest {
         CoreAdvanceRequest {
             base_revision,
@@ -7103,6 +7353,268 @@ pub(crate) mod tests {
             json!(0)
         );
         assert_eq!(source.base_value()["tray"]["iron_ore"], json!(10));
+    }
+
+    fn assert_prepared_factory_domains_are_clear(state: &CoreState) {
+        assert!(state.prepared_belt_routes().is_none());
+        assert!(state.prepared_logistics_buffer_runtime().is_none());
+        assert!(state.prepared_local_peer_directory().is_none());
+        assert!(state.prepared_quantum_logistics_directory().is_none());
+        assert!(state.prepared_construction_runtime().is_none());
+        assert!(state.prepared_station_mode_transition_runtime().is_none());
+        assert!(state.prepared_quantum_transition_runtime().is_none());
+        assert!(state.prepared_interstellar_peer_directory().is_none());
+        assert!(state.prepared_interstellar_route_activity().is_none());
+    }
+
+    fn synthetic_conservation_sha256(state: &CoreState) -> String {
+        let materialized = state.materialize().unwrap();
+        let object = materialized.as_object().unwrap();
+        let mut projection = Map::new();
+        for key in [
+            "tray",
+            "planetTrays",
+            "quantumInventory",
+            "totalProduced",
+            "manualMined",
+            "galacticExports",
+            "constructionQueue",
+            "constructionProjects",
+            "dysonSphere",
+            "dysonSwarm",
+            "entities",
+            "belts",
+        ] {
+            if let Some(value) = object.get(key) {
+                projection.insert(key.to_owned(), value.clone());
+            }
+        }
+        crate::canonical::canonical_sha256(&Value::Object(projection))
+    }
+
+    fn run_partitioned_factory_advance(
+        worker_count: usize,
+    ) -> (
+        PartitionedPrepareDiagnostics,
+        String,
+        String,
+        String,
+        Vec<u8>,
+    ) {
+        let runtime = DeterministicRuntime::for_test(worker_count);
+        let mut state = partitioned_factory_fixture();
+        let source_revision = state.revision;
+        let source_hash = state.canonical_sha256().unwrap();
+        let source_bytes = serde_json::to_vec(&state.materialize().unwrap()).unwrap();
+        state.clear_prepared_factory_domains_for_test();
+        assert_prepared_factory_domains_are_clear(&state);
+        let entities = state.parse_entities_parallel().unwrap();
+        let domains =
+            prepare_factory_domains_with_runtime(&state, state.base_value(), &entities, &runtime)
+                .unwrap();
+        let scheduler = domains.scheduler;
+        drop(domains);
+        assert_eq!(state.revision, source_revision);
+        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+        assert_eq!(
+            serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+            source_bytes,
+            "read-only domain preparation must not publish a partial candidate"
+        );
+        assert_prepared_factory_domains_are_clear(&state);
+
+        let prepared = prepare_advance_with_runtime(&state, 1.0, 1.0, false, &runtime).unwrap();
+        let next_revision = source_revision + 1;
+        state
+            .commit_simulated_state(
+                prepared.base,
+                prepared.entities,
+                prepared.belt_commit,
+                next_revision,
+                false,
+            )
+            .unwrap();
+        assert_eq!(state.revision, next_revision);
+        (
+            scheduler,
+            state.canonical_sha256().unwrap(),
+            state.domain_sha256().unwrap(),
+            synthetic_conservation_sha256(&state),
+            serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+        )
+    }
+
+    #[test]
+    fn partitioned_factory_prepare_and_commit_are_byte_exact_at_one_two_four_eight_workers() {
+        let expected = run_partitioned_factory_advance(1);
+        assert_eq!(expected.0.active_partitions, 8);
+        assert!(!expected.0.parallel);
+        assert_eq!(expected.0.selected_worker_count, 1);
+        for worker_count in [2, 4, 8] {
+            let observed = run_partitioned_factory_advance(worker_count);
+            assert_eq!(observed.0.active_partitions, 8);
+            assert!(observed.0.parallel);
+            assert_eq!(observed.0.selected_worker_count, worker_count);
+            assert!((1..=worker_count).contains(&observed.0.observed_worker_count));
+            assert_eq!(
+                (&observed.1, &observed.2, &observed.3, &observed.4),
+                (&expected.1, &expected.2, &expected.3, &expected.4),
+                "authoritative bytes, canonical, domain or conservation hashes diverged at {worker_count} workers"
+            );
+        }
+        let repeated = run_partitioned_factory_advance(8);
+        assert_eq!(
+            (&repeated.1, &repeated.2, &repeated.3, &repeated.4),
+            (&expected.1, &expected.2, &expected.3, &expected.4),
+            "the same eight-worker schedule must remain repeatable"
+        );
+    }
+
+    #[test]
+    fn failed_partitioned_factory_prepare_is_atomic_at_every_worker_limit() {
+        for worker_count in [1, 2, 4, 8] {
+            let mut state = partitioned_factory_fixture();
+            let source_revision = state.revision;
+            let source_hash = state.canonical_sha256().unwrap();
+            let source_bytes = serde_json::to_vec(&state.materialize().unwrap()).unwrap();
+            state.clear_prepared_factory_domains_for_test();
+            assert_prepared_factory_domains_are_clear(&state);
+            let mut malformed_entities = state.parse_entities_parallel().unwrap();
+            malformed_entities.push(Value::Null);
+            let malformed_bytes = serde_json::to_vec(&malformed_entities).unwrap();
+            let failure = match prepare_factory_domains_with_runtime(
+                &state,
+                state.base_value(),
+                &malformed_entities,
+                &DeterministicRuntime::for_test(worker_count),
+            ) {
+                Ok(_) => panic!("malformed domain preparation unexpectedly succeeded"),
+                Err(failure) => failure,
+            };
+            assert_eq!(
+                failure.to_string(),
+                "native belt route entity topology changed",
+                "worker count {worker_count}"
+            );
+            assert_eq!(state.revision, source_revision);
+            assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+            assert_eq!(
+                serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+                source_bytes
+            );
+            assert_eq!(
+                serde_json::to_vec(&malformed_entities).unwrap(),
+                malformed_bytes
+            );
+            assert_prepared_factory_domains_are_clear(&state);
+        }
+    }
+
+    #[test]
+    fn failed_later_partition_never_publishes_an_earlier_successful_cache() {
+        for worker_count in [1, 2, 4, 8] {
+            let mut state = partitioned_factory_fixture();
+            state.clear_prepared_factory_domains_for_test();
+            let station_index = 1;
+            std::sync::Arc::make_mut(&mut state.factory_topology).station_indices =
+                vec![station_index];
+            let mut malformed_entities = state.parse_entities_parallel().unwrap();
+            malformed_entities[station_index] = json!({
+                "id": "partitioned-malformed-station",
+                "kind": "station",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "planetary_logistics_station",
+                "machineCount": 1
+            });
+            let source_revision = state.revision;
+            let source_hash = state.canonical_sha256().unwrap();
+            let source_bytes = serde_json::to_vec(&state.materialize().unwrap()).unwrap();
+
+            let failure = match prepare_factory_domains_with_runtime(
+                &state,
+                state.base_value(),
+                &malformed_entities,
+                &DeterministicRuntime::for_test(worker_count),
+            ) {
+                Ok(_) => panic!("later partition failure unexpectedly committed"),
+                Err(failure) => failure,
+            };
+            assert_eq!(
+                failure.to_string(),
+                "native local station slots are missing"
+            );
+            assert_eq!(state.revision, source_revision);
+            assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+            assert_eq!(
+                serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+                source_bytes
+            );
+            assert_prepared_factory_domains_are_clear(&state);
+        }
+    }
+
+    #[test]
+    fn parallel_power_demand_failures_join_then_keep_domain_and_row_priority() {
+        let state = partitioned_factory_fixture();
+        let state_hash = state.canonical_sha256().unwrap();
+        let mut entities = state.parse_entities_parallel().unwrap();
+        let first_failure = state.factory_topology.ordinary_machine_indices[17];
+        let later_failure = state.factory_topology.ordinary_machine_indices[PARALLEL_MIN_ITEMS + 7];
+        entities[first_failure]
+            .as_object_mut()
+            .unwrap()
+            .remove("buildingId");
+        entities[later_failure]
+            .as_object_mut()
+            .unwrap()
+            .remove("buildingId");
+        let entity_bytes = serde_json::to_vec(&entities).unwrap();
+        let ready_indices = state.factory_topology.ordinary_machine_indices.clone();
+        let profiles = [fixture_profile()];
+        for worker_count in [1, 2, 4, 8] {
+            let prepared = prepare_power_demand_probes_with_runtime(
+                &DeterministicRuntime::for_test(worker_count),
+                &state,
+                state.base_value(),
+                &entities,
+                &profiles,
+                &ready_indices,
+                DEFAULT_BUILDING_BUFFER_LIMIT,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+            );
+            assert_eq!(prepared.scheduler.active_partitions, 3);
+            assert_eq!(prepared.scheduler.parallel, worker_count != 1);
+            assert_eq!(prepared.ready_stations.len(), ready_indices.len());
+            assert_eq!(
+                prepared
+                    .ready_stations
+                    .into_iter()
+                    .collect::<anyhow::Result<Vec<_>>>()
+                    .unwrap_err()
+                    .to_string(),
+                "native local station building is missing"
+            );
+            assert_eq!(
+                prepared
+                    .machines
+                    .into_iter()
+                    .collect::<anyhow::Result<Vec<_>>>()
+                    .unwrap_err()
+                    .to_string(),
+                "native simple factory machine building is missing"
+            );
+            assert_eq!(
+                prepared.veins.len(),
+                state.factory_topology.vein_indices.len()
+            );
+            assert!(prepared.veins.into_iter().all(|result| result.is_ok()));
+            assert_eq!(serde_json::to_vec(&entities).unwrap(), entity_bytes);
+            assert_eq!(state.canonical_sha256().unwrap(), state_hash);
+        }
     }
 
     fn fixture_profile() -> PlanetProfile {

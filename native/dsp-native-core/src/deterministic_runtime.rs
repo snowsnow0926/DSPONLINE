@@ -18,6 +18,20 @@ pub(crate) struct JoinedDropDiagnostics {
     pub parallel: bool,
 }
 
+/// Diagnostics for one fixed, heterogeneous prepare stage.
+///
+/// The stage is deliberately separate from authoritative commit. Workers may
+/// only produce owned read-only results; callers inspect fallible results and
+/// replay them in a fixed serial order after every partition has joined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PartitionedPrepareDiagnostics {
+    pub active_partitions: usize,
+    pub work_items: usize,
+    pub selected_worker_count: usize,
+    pub observed_worker_count: usize,
+    pub parallel: bool,
+}
+
 /// One process-lifetime pool shared by every deterministic native-core phase.
 /// Indexed Rayon iterators preserve input order; fallible work is collected
 /// before errors are inspected so scheduling can never choose which error the
@@ -78,6 +92,228 @@ impl DeterministicRuntime {
         } else {
             self.worker_limit
         }
+    }
+
+    fn partitioned_prepare_diagnostics(
+        &self,
+        active_mask: u8,
+        work_items: usize,
+        worker_mask: &AtomicU16,
+        parallel: bool,
+    ) -> PartitionedPrepareDiagnostics {
+        let active_partitions = active_mask.count_ones() as usize;
+        PartitionedPrepareDiagnostics {
+            active_partitions,
+            work_items,
+            selected_worker_count: if active_partitions == 0 {
+                0
+            } else if parallel {
+                self.worker_limit.min(active_partitions)
+            } else {
+                1
+            },
+            observed_worker_count: if active_partitions == 0 {
+                0
+            } else if parallel {
+                worker_mask.load(Ordering::Relaxed).count_ones().max(1) as usize
+            } else {
+                1
+            },
+            parallel,
+        }
+    }
+
+    fn partitioned_prepare_is_parallel(&self, active_mask: u8, work_items: usize) -> bool {
+        active_mask.count_ones() >= 2 && self.worker_count_for_items(work_items) > 1
+    }
+
+    /// Runs four heterogeneous read-only prepare partitions on the bounded
+    /// process-lifetime pool. Fixed nesting is part of the scheduler contract:
+    /// scheduling may change elapsed time, but the returned tuple always keeps
+    /// partition order. Small work and a single active partition remain on the
+    /// caller thread so coordination cannot make the common case slower.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(crate) fn partitioned_prepare4<A, B, C, D, FA, FB, FC, FD>(
+        &self,
+        active_mask: u8,
+        work_items: usize,
+        first: FA,
+        second: FB,
+        third: FC,
+        fourth: FD,
+    ) -> ((A, B, C, D), PartitionedPrepareDiagnostics)
+    where
+        A: Send,
+        B: Send,
+        C: Send,
+        D: Send,
+        FA: FnOnce() -> A + Send,
+        FB: FnOnce() -> B + Send,
+        FC: FnOnce() -> C + Send,
+        FD: FnOnce() -> D + Send,
+    {
+        const SUPPORTED_MASK: u8 = 0b0000_1111;
+        assert_eq!(
+            active_mask & !SUPPORTED_MASK,
+            0,
+            "four-partition prepare mask exceeds its fixed domain"
+        );
+        let parallel = self.partitioned_prepare_is_parallel(active_mask, work_items);
+        let worker_mask = AtomicU16::new(0);
+        let mark = |partition: usize| {
+            if active_mask & (1 << partition) != 0
+                && let Some(worker_index) = rayon::current_thread_index()
+            {
+                worker_mask.fetch_or(1_u16 << worker_index, Ordering::Relaxed);
+            }
+        };
+        let first = || {
+            mark(0);
+            first()
+        };
+        let second = || {
+            mark(1);
+            second()
+        };
+        let third = || {
+            mark(2);
+            third()
+        };
+        let fourth = || {
+            mark(3);
+            fourth()
+        };
+        let values = if parallel {
+            let ((first, second), (third, fourth)) = self
+                .pool
+                .as_ref()
+                .expect("parallel deterministic runtime lost its worker pool")
+                .install(|| {
+                    rayon::join(|| rayon::join(first, second), || rayon::join(third, fourth))
+                });
+            (first, second, third, fourth)
+        } else {
+            (first(), second(), third(), fourth())
+        };
+        let diagnostics =
+            self.partitioned_prepare_diagnostics(active_mask, work_items, &worker_mask, parallel);
+        (values, diagnostics)
+    }
+
+    /// Eight-partition counterpart used by cold factory-domain preparation.
+    /// Every closure joins before the result tuple is returned. Callers must
+    /// inspect `Result` values in stable partition order; no worker is allowed
+    /// to mutate the live CoreState or publish a partial cache.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(crate) fn partitioned_prepare8<A, B, C, D, E, F, G, H, FA, FB, FC, FD, FE, FF, FG, FH>(
+        &self,
+        active_mask: u8,
+        work_items: usize,
+        first: FA,
+        second: FB,
+        third: FC,
+        fourth: FD,
+        fifth: FE,
+        sixth: FF,
+        seventh: FG,
+        eighth: FH,
+    ) -> ((A, B, C, D, E, F, G, H), PartitionedPrepareDiagnostics)
+    where
+        A: Send,
+        B: Send,
+        C: Send,
+        D: Send,
+        E: Send,
+        F: Send,
+        G: Send,
+        H: Send,
+        FA: FnOnce() -> A + Send,
+        FB: FnOnce() -> B + Send,
+        FC: FnOnce() -> C + Send,
+        FD: FnOnce() -> D + Send,
+        FE: FnOnce() -> E + Send,
+        FF: FnOnce() -> F + Send,
+        FG: FnOnce() -> G + Send,
+        FH: FnOnce() -> H + Send,
+    {
+        let parallel = self.partitioned_prepare_is_parallel(active_mask, work_items);
+        let worker_mask = AtomicU16::new(0);
+        let mark = |partition: usize| {
+            if active_mask & (1 << partition) != 0
+                && let Some(worker_index) = rayon::current_thread_index()
+            {
+                worker_mask.fetch_or(1_u16 << worker_index, Ordering::Relaxed);
+            }
+        };
+        let first = || {
+            mark(0);
+            first()
+        };
+        let second = || {
+            mark(1);
+            second()
+        };
+        let third = || {
+            mark(2);
+            third()
+        };
+        let fourth = || {
+            mark(3);
+            fourth()
+        };
+        let fifth = || {
+            mark(4);
+            fifth()
+        };
+        let sixth = || {
+            mark(5);
+            sixth()
+        };
+        let seventh = || {
+            mark(6);
+            seventh()
+        };
+        let eighth = || {
+            mark(7);
+            eighth()
+        };
+        let values = if parallel {
+            let (((first, second), (third, fourth)), ((fifth, sixth), (seventh, eighth))) = self
+                .pool
+                .as_ref()
+                .expect("parallel deterministic runtime lost its worker pool")
+                .install(|| {
+                    rayon::join(
+                        || {
+                            rayon::join(
+                                || rayon::join(first, second),
+                                || rayon::join(third, fourth),
+                            )
+                        },
+                        || {
+                            rayon::join(
+                                || rayon::join(fifth, sixth),
+                                || rayon::join(seventh, eighth),
+                            )
+                        },
+                    )
+                });
+            (first, second, third, fourth, fifth, sixth, seventh, eighth)
+        } else {
+            (
+                first(),
+                second(),
+                third(),
+                fourth(),
+                fifth(),
+                sixth(),
+                seventh(),
+                eighth(),
+            )
+        };
+        let diagnostics =
+            self.partitioned_prepare_diagnostics(active_mask, work_items, &worker_mask, parallel);
+        (values, diagnostics)
     }
 
     /// Returns the number of worker threads that actually answer a broadcast
@@ -704,6 +940,121 @@ mod tests {
         assert_eq!(resolve_worker_limit(Some("4"), 1), 4);
         assert_eq!(resolve_worker_limit(Some("8"), 1), 8);
         assert_eq!(resolve_worker_limit(Some("invalid"), 3), 3);
+    }
+
+    #[test]
+    fn heterogeneous_prepare_keeps_fixed_tuple_order_for_one_two_four_and_eight_workers() {
+        let expected = (
+            "first".to_owned(),
+            vec![2_u64, 3],
+            4_i64,
+            Some(5_u8),
+            "sixth".to_owned(),
+            vec![7_u16],
+            8_usize,
+            false,
+        );
+        for worker_limit in [1, 2, 4, 8] {
+            let runtime = DeterministicRuntime::for_test(worker_limit);
+            let (actual, diagnostics) = runtime.partitioned_prepare8(
+                0xff,
+                PARALLEL_MIN_ITEMS + 257,
+                || "first".to_owned(),
+                || vec![2_u64, 3],
+                || 4_i64,
+                || Some(5_u8),
+                || "sixth".to_owned(),
+                || vec![7_u16],
+                || 8_usize,
+                || false,
+            );
+            assert_eq!(actual, expected, "worker limit {worker_limit}");
+            assert_eq!(diagnostics.active_partitions, 8);
+            assert_eq!(diagnostics.work_items, PARALLEL_MIN_ITEMS + 257);
+            assert_eq!(diagnostics.parallel, worker_limit != 1);
+            assert_eq!(
+                diagnostics.selected_worker_count,
+                if worker_limit == 1 { 1 } else { worker_limit }
+            );
+            assert!(
+                (1..=diagnostics.selected_worker_count)
+                    .contains(&diagnostics.observed_worker_count)
+            );
+        }
+    }
+
+    #[test]
+    fn heterogeneous_prepare_falls_back_for_small_or_single_partition_work() {
+        let runtime = DeterministicRuntime::for_test(8);
+        let (_, small) = runtime.partitioned_prepare4(
+            0b1111,
+            PARALLEL_MIN_ITEMS - 1,
+            rayon::current_thread_index,
+            rayon::current_thread_index,
+            rayon::current_thread_index,
+            rayon::current_thread_index,
+        );
+        assert!(!small.parallel);
+        assert_eq!(small.selected_worker_count, 1);
+        assert_eq!(small.observed_worker_count, 1);
+
+        let (single_values, single) = runtime.partitioned_prepare4(
+            0b0010,
+            PARALLEL_MIN_ITEMS + 257,
+            rayon::current_thread_index,
+            rayon::current_thread_index,
+            rayon::current_thread_index,
+            rayon::current_thread_index,
+        );
+        assert_eq!(single_values, (None, None, None, None));
+        assert_eq!(single.active_partitions, 1);
+        assert!(!single.parallel);
+        assert_eq!(single.selected_worker_count, 1);
+        assert_eq!(single.observed_worker_count, 1);
+
+        let (_, cached) =
+            runtime.partitioned_prepare4(0, PARALLEL_MIN_ITEMS + 257, || (), || (), || (), || ());
+        assert_eq!(cached.active_partitions, 0);
+        assert_eq!(cached.selected_worker_count, 0);
+        assert_eq!(cached.observed_worker_count, 0);
+        assert!(!cached.parallel);
+    }
+
+    #[test]
+    fn heterogeneous_prepare_joins_every_result_then_allows_stable_error_selection() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        for worker_limit in [1, 2, 4, 8] {
+            calls.store(0, Ordering::SeqCst);
+            let runtime = DeterministicRuntime::for_test(worker_limit);
+            let task = |index: usize, fail: bool| {
+                let calls = Arc::clone(&calls);
+                move || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if index.is_multiple_of(2) {
+                        std::thread::yield_now();
+                    }
+                    if fail {
+                        anyhow::bail!("partition-{index}");
+                    }
+                    Ok(index)
+                }
+            };
+            let ((first, second, third, fourth), diagnostics) = runtime.partitioned_prepare4(
+                0b1111,
+                PARALLEL_MIN_ITEMS + 257,
+                task(0, false),
+                task(1, true),
+                task(2, true),
+                task(3, false),
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 4);
+            let lowest = [first, second, third, fourth]
+                .into_iter()
+                .collect::<anyhow::Result<Vec<_>>>()
+                .unwrap_err();
+            assert_eq!(lowest.to_string(), "partition-1");
+            assert_eq!(diagnostics.parallel, worker_limit != 1);
+        }
     }
 
     #[test]

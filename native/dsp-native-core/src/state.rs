@@ -3325,40 +3325,33 @@ impl CoreState {
         state.rebuild_indexes_from_parsed_entities(&parsed_entities)?;
         state.refresh_factory_static_admission_with_entities(&parsed_entities)?;
         if state.factory_static_admission_reason.is_none() {
-            state.prepared_belt_routes = Some(Arc::new(crate::belts::prepare_routes_from_state(
+            let prepared = crate::simple_factory::prepare_factory_domains_with_runtime(
                 &state,
+                &state.base,
                 &parsed_entities,
-            )?));
-            state.prepared_logistics_buffer_runtime = Some(Arc::new(
-                crate::logistics_buffers::LogisticsBufferRuntime::build(&state, &parsed_entities),
-            ));
-            state.prepared_local_peer_directory =
-                Some(Arc::new(crate::local_logistics::prepare_step_directory(
-                    &parsed_entities,
-                    &state.factory_topology.station_indices,
-                )?));
-            state.prepared_quantum_logistics_directory = Some(Arc::new(
-                crate::quantum_logistics::QuantumLogisticsDirectory::build(
-                    &state,
-                    &parsed_entities,
-                ),
-            ));
-            state.prepared_construction_runtime =
-                Some(Arc::new(crate::construction::ConstructionRuntime::build(
-                    &state,
-                    &state.base,
-                    &parsed_entities,
-                )));
-            state.prepared_interstellar_peer_directory = Some(Arc::new(
-                crate::interstellar_logistics::InterstellarPeerDirectory::build(
-                    &state,
-                    &state.base,
-                    &parsed_entities,
-                ),
-            ));
-            state.prepared_interstellar_route_activity = Some(Arc::new(
-                crate::interstellar_logistics::prepare_route_activity(&parsed_entities),
-            ));
+                crate::deterministic_runtime::runtime(),
+            )?;
+            if crate::profile_evidence::profile_environment_enabled() {
+                let scheduler = prepared.scheduler;
+                eprintln!(
+                    "DSP_NATIVE_CORE_PROFILE\tpartitioned-open-domain-prepare\tactive={}/8\twork-items={}\tselected-workers={}\tobserved-workers={}\tparallel={}",
+                    scheduler.active_partitions,
+                    scheduler.work_items,
+                    scheduler.selected_worker_count,
+                    scheduler.observed_worker_count,
+                    scheduler.parallel,
+                );
+            }
+            state.prepared_belt_routes = Some(prepared.belt_routes);
+            state.prepared_logistics_buffer_runtime = Some(prepared.logistics_buffer_runtime);
+            state.prepared_local_peer_directory = Some(prepared.local_peer_directory);
+            state.prepared_quantum_logistics_directory = Some(prepared.quantum_logistics_directory);
+            state.prepared_construction_runtime = Some(prepared.construction_runtime);
+            state.prepared_station_mode_transition_runtime =
+                Some(prepared.station_mode_transition_runtime);
+            state.prepared_quantum_transition_runtime = Some(prepared.quantum_transition_runtime);
+            state.prepared_interstellar_peer_directory = Some(prepared.interstellar_peer_directory);
+            state.prepared_interstellar_route_activity = Some(prepared.interstellar_route_activity);
         }
         // `coreOpen` must return a verified canonical proof. Reuse the parsed
         // entity graph while canonicalizing each raw belt independently.
@@ -3782,6 +3775,20 @@ impl CoreState {
         // routing settings, or tray-backed warper availability. Re-admit the
         // complete interstellar reverse graph and demand wake queue rather
         // than attempting to infer an unsafe partial invalidation here.
+        self.prepared_interstellar_peer_directory = None;
+        self.prepared_interstellar_route_activity = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_prepared_factory_domains_for_test(&mut self) {
+        self.prepared_belt_routes = None;
+        self.prepared_belt_activity = None;
+        self.prepared_logistics_buffer_runtime = None;
+        self.prepared_local_peer_directory = None;
+        self.prepared_quantum_logistics_directory = None;
+        self.prepared_construction_runtime = None;
+        self.prepared_station_mode_transition_runtime = None;
+        self.prepared_quantum_transition_runtime = None;
         self.prepared_interstellar_peer_directory = None;
         self.prepared_interstellar_route_activity = None;
     }

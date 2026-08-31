@@ -1975,3 +1975,15 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版�
 7. 首轮 Core 全量在较大的 4,096 行合成稀疏测试已经通过后，Windows 测试进程随后以 `STATUS_ACCESS_VIOLATION` 结束；当时同一模块 focused `5/5` 通过。为降低单进程组合测试压力，计数夹具收敛为仍能证明同一复杂度的 1,024 行。随后又加强失败候选重试断言并增加 MOD writer 失败关闭回归；最终 focused 为 `6/6`，workspace 串行全量为 Core `839/839`（211.68 秒）、Host library `203/203`（30.55 秒）、Host main `2/2`（0.00 秒），合计 `1044/1044`、0 失败、0 跳过；workspace strict clippy、Rust fmt 与 diff check 通过。该失败史保留，不能写成首轮全绿。
 
 仍未关闭的全扫域包括：连续生产/矿机/供电探针的合法活动集合，material-delivery hubs，量子高扇出与部分 inventory key parse/write，拓扑重建、75% 稠密和所有 fail-closed 退化。它们必须分别建立 writer-closed wake 证书和独立 flat oracle 后才能继续收敛；本节不能把整个物流系统或四大目标标成 100%。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 和 `authorityEligible=false` 均不变；本切片未连接生产、部署、签名或处理真实玩家存档。
+
+### 24.23 WIN-430 固定异构 prepare 与确定性串行提交（2026-09-01，开发候选）
+
+本切片选择的是能独立构造私有结果、并且能够恢复历史提交顺序的跨领域准备阶段；它没有跨越共享物料、浮点累加或线路冲突写屏障。固定能力百分比不因这一片单独重估，继续沿用 `Rust 唯一权威约 83% / 完整薄 UI 约 96% / 真正 O(active) 物流约 96% / 全领域确定性原生并行约 72% / 四项目标能力加权综合约 88% / 可放心发布成熟度约 60%`。
+
+1. `DeterministicRuntime::partitioned_prepare4/8` 使用进程生命周期内既有、最多 8 个 worker 的 Rayon 池，以固定二叉 join 拓扑运行异构只读闭包。返回值始终保持分区序号；所有任务必须完成后调用者才能检查 `Result`。活动分区少于 2、总工作量少于 4,096 或线程策略为 1 时自动在调用线程串行运行，不创建第二个池，也不让一次错误取消其他分区并由调度时序决定首个错误。
+2. 冷启动和缓存失效时，把 belt routes、ordinary logistics-buffer runtime、local peer directory、quantum directory、construction runtime、station-mode transition、quantum transition 以及 interstellar peer/activity 八类候选，从同一个不可变 Core revision 分区准备。belt 与 local 的可失败结果仍按旧 `belt → local` 顺序解包；星际目录刷新仍在 join 后的固定串行边界执行。只有整个 `PreparedFactoryAdvance` 成功并完成外层权威提交，这些候选才允许进入下一 revision；打开失败或推进失败不会安装部分缓存。
+3. 每个精确模拟步把 ready station、vein 和 ordinary machine 三类电力需求探针分区生成 owned event buffers。验证和电网累加继续严格按 `ready station → vein → machine` 以及各域原实体行顺序执行，因此 IEEE-754 加法、第一条可见错误和断电判定不受 worker 完成顺序影响。后续矿脉、普通机器、可再生能源和行星指标阶段共用同一个注入 runtime，1-thread 测试不再意外调用全局多线程 runtime。
+4. 可观测性新增 `partitioned-open-domain-prepare`、`partitioned-factory-domain-prepare` 和 `partitioned-power-demand-prepare` profile 行，包含活动分区、输入工作量、策略选中的外层 worker 数、实际执行外层分区的 worker 数和并行标记。它们只证明调度形状，不宣称真实档墙钟加速；冷启动同时构造多个目录可能增加短时 scratch overlap，需由固定真实输入的完整进程树 Private Bytes A/B 再决定是否接纳为默认性能收益。
+5. 回归使用不含玩家数据的 4,096+ ordinary machines、97 veins 合成夹具，比较一次完整候选提交在 1/2/4/8 workers 下的序列化状态字节、canonical SHA-256、domain SHA-256 和物料投影 SHA-256，并重复 8-worker 运行。另有跨领域双失败回归证明所有闭包均已 join 后仍按固定域/行选择错误，以及两类原子性回归：第一分区失败和较晚 local 分区失败时，源 revision、规范哈希、完整字节和全部 prepared cache 均不改变。实际门禁计数在提交前以最终源码重跑结果为准，不复用此前切片记录。
+6. 本切片仍不等于全领域权威并行。共享 inventory/production/Dyson 的确定性写入、belt reservation/commit 冲突、全部物流提交、pure-idle/offline/time-warp、跨 CPU 与 Windows 10/11 调度矩阵、24 小时压力、真实档性能和全进程树内存仍未关闭；这些门禁未通过前 WIN-430 继续标记“部分完成”，`authorityEligible=false` 不得放开。
+7. GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host/renderer 协议和玩家存档均未改变。本切片不连接生产、不部署、不签名、不读取或修改真实玩家存档。

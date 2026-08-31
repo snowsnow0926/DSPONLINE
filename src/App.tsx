@@ -22139,6 +22139,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         {operationsOpen && nativePlayerAuthorityOwnsRuntime ? (
           <NativeOperationsWorkspace
             open
+            tab={operationsTab}
+            onTabChange={setOperationsTab}
             identity={nativeOperationsIdentity}
             fetchProjection={nativeOperationsFetchProjection}
             commitSetting={nativeOperationsCommitSetting}

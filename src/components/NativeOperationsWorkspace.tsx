@@ -10,17 +10,18 @@ import { collectClientDiagnostics, downloadDiagnostics } from "../game/diagnosti
 import type { CanvasDetailPreference } from "../game/canvasDensityPresentation";
 import type { ConnectionHitArea, ConnectionPointSize } from "../game/uiPreferences";
 import type { AppLocale } from "../i18n/locale";
+import type { OperationsTab } from "./OperationsWorkspace";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { WindowsNativePerformancePolicySetting } from "./WindowsNativePerformancePolicySetting";
 
-type Tab = "alerts" | "settings" | "performance" | "saves" | "support";
+type Tab = Extract<OperationsTab, "alerts" | "settings" | "performance" | "saves" | "support">;
 type Status =
   | { phase: "loading" }
   | { phase: "ready"; projection: DesktopNativeCoreOperationsWorkspaceProjectionResult }
   | { phase: "unavailable"; message: string };
 
 type AuthoritySettingsDraft = DesktopNativeCoreOperationsWorkspaceProjectionResult["settings"] & {
-  identityKey: string;
+  scopeKey: string;
   productionBufferLimitInput: string;
   logisticsBufferLimitInput: string;
   beltBufferLimitInput: string;
@@ -38,6 +39,8 @@ type PendingCommit = {
 
 export interface NativeOperationsWorkspaceProps {
   open: boolean;
+  tab: OperationsTab;
+  onTabChange: (tab: OperationsTab) => void;
   identity: DesktopNativeCoreOperationsWorkspaceProjectionRequest | null;
   fetchProjection: ((request: DesktopNativeCoreOperationsWorkspaceProjectionRequest) => Promise<DesktopNativeCoreOperationsWorkspaceProjectionResult>) | null;
   commitSetting: ((request: {
@@ -104,7 +107,7 @@ function projectionScopeKey(projection: DesktopNativeCoreOperationsWorkspaceProj
 
 function createSettingsDraft(projection: DesktopNativeCoreOperationsWorkspaceProjectionResult): AuthoritySettingsDraft {
   return {
-    identityKey: projectionIdentityKey(projection),
+    scopeKey: projectionScopeKey(projection),
     ...projection.settings,
     productionBufferLimitInput: String(projection.settings.productionBufferLimit),
     logisticsBufferLimitInput: String(projection.settings.logisticsBufferLimit),
@@ -114,7 +117,6 @@ function createSettingsDraft(projection: DesktopNativeCoreOperationsWorkspacePro
 }
 
 export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps) {
-  const [tab, setTab] = useState<Tab>("alerts");
   const [status, setStatus] = useState<Status>({ phase: "loading" });
   const [settingsDraft, setSettingsDraft] = useState<AuthoritySettingsDraft | null>(null);
   const [pendingCommit, setPendingCommit] = useState<PendingCommit | null>(null);
@@ -176,13 +178,16 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
   const projection = status.phase === "ready" && props.identity && matchesIdentity(status.projection, props.identity)
     ? status.projection : null;
   const projectionKey = projection ? projectionIdentityKey(projection) : "missing";
+  const projectionScope = projection ? projectionScopeKey(projection) : "missing";
+  const tab: Tab = TABS.some((item) => item.id === props.tab) ? props.tab as Tab : "alerts";
   const activeSettingsDraft = projection
-    ? settingsDraft?.identityKey === projectionKey ? settingsDraft : createSettingsDraft(projection)
+    ? settingsDraft?.scopeKey === projectionScope ? settingsDraft : createSettingsDraft(projection)
     : null;
 
   useEffect(() => {
-    setSettingsDraft(projection ? createSettingsDraft(projection) : null);
-  }, [projectionKey]);
+    if (!projection) return;
+    setSettingsDraft((current) => current?.scopeKey === projectionScope ? current : createSettingsDraft(projection));
+  }, [projection, projectionScope]);
 
   useEffect(() => {
     if (!projection || !pendingCommit || pendingCommit.phase !== "awaiting-projection") return;
@@ -190,6 +195,7 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
       projection.revision <= pendingCommit.revision) return;
     commitLocked.current = false;
     setPendingCommit(null);
+    setSettingsDraft(createSettingsDraft(projection));
     setMessage(`设置已写入 Rust revision ${projection.revision}。`);
   }, [pendingCommit, projection, projectionKey]);
 
@@ -239,7 +245,7 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
       <button type="button" onClick={props.onClose} aria-label="关闭运营中心"><X size={18} /></button>
     </header>
     <nav className="operations-tabs" aria-label="运营中心页面">
-      {TABS.map((item) => <button key={item.id} type="button" className={tab === item.id ? "active" : ""} onClick={() => setTab(item.id)}>{item.label}</button>)}
+      {TABS.map((item) => <button key={item.id} type="button" className={tab === item.id ? "active" : ""} onClick={() => props.onTabChange(item.id)}>{item.label}</button>)}
     </nav>
     {!projection ? <div className="workspace-loading" role={status.phase === "loading" ? "status" : "alert"}>
       {status.phase === "loading" ? <i /> : <ShieldAlert size={22} />}
@@ -262,19 +268,19 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
         <label>模拟速度<select disabled={pending} value={activeSettingsDraft.simulationSpeed} onChange={(event) => {
           const value = Number(event.target.value) as 1 | 2 | 4;
           if (commit({ type: "set-simulation-speed", value })) {
-            setSettingsDraft((current) => current?.identityKey === projectionKey ? { ...current, simulationSpeed: value } : current);
+            setSettingsDraft((current) => current?.scopeKey === projectionScope ? { ...current, simulationSpeed: value } : current);
           }
         }}><option value={1}>1×</option><option value={2}>2×</option><option value={4}>4×</option></select></label>
         <label>科技布局<select disabled={pending} value={activeSettingsDraft.technologyLayout} onChange={(event) => {
           const value = event.target.value as "standard" | "compact";
           if (commit({ type: "set-technology-layout", value })) {
-            setSettingsDraft((current) => current?.identityKey === projectionKey ? { ...current, technologyLayout: value } : current);
+            setSettingsDraft((current) => current?.scopeKey === projectionScope ? { ...current, technologyLayout: value } : current);
           }
         }}><option value="standard">标准</option><option value="compact">紧凑</option></select></label>
         <label>默认传送带路线<select disabled={pending} value={activeSettingsDraft.defaultBeltRouteMode} onChange={(event) => {
           const value = event.target.value as "auto" | "bezier" | "upper" | "lower";
           if (commit({ type: "set-default-belt-route-mode", value })) {
-            setSettingsDraft((current) => current?.identityKey === projectionKey ? { ...current, defaultBeltRouteMode: value } : current);
+            setSettingsDraft((current) => current?.scopeKey === projectionScope ? { ...current, defaultBeltRouteMode: value } : current);
           }
         }}><option value="auto">自动</option><option value="bezier">曲线</option><option value="upper">上绕</option><option value="lower">下绕</option></select></label>
         {([
@@ -284,11 +290,11 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
           ["增产剂缓冲", "set-proliferator-buffer-limit", "proliferatorBufferLimit", "proliferatorBufferLimitInput", 1],
         ] as const).map(([label, type, valueKey, inputKey, min]) => <label key={type}>{label}<input type="number" min={min} max={100_000_000} step={1} disabled={pending} value={activeSettingsDraft[inputKey]} onChange={(event) => {
           const input = event.currentTarget.value;
-          setSettingsDraft((current) => current?.identityKey === projectionKey ? { ...current, [inputKey]: input } : current);
+          setSettingsDraft((current) => current?.scopeKey === projectionScope ? { ...current, [inputKey]: input } : current);
         }} onBlur={() => {
           const next = Number(activeSettingsDraft[inputKey]);
           if (Number.isSafeInteger(next) && next >= min && next <= 100_000_000 && next !== activeSettingsDraft[valueKey]) commit({ type, value: next });
-          else setSettingsDraft((current) => current?.identityKey === projectionKey ? { ...current, [inputKey]: String(activeSettingsDraft[valueKey]) } : current);
+          else setSettingsDraft((current) => current?.scopeKey === projectionScope ? { ...current, [inputKey]: String(activeSettingsDraft[valueKey]) } : current);
         }} /></label>)}
         <hr />
         <h3>设备 / renderer 偏好</h3>

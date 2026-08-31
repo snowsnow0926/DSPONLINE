@@ -34,6 +34,7 @@ function projection(overrides: Partial<DesktopNativeCoreOperationsWorkspaceProje
 function props(overrides: Partial<NativeOperationsWorkspaceProps> = {}): NativeOperationsWorkspaceProps {
   return {
     open: true,
+    tab: "alerts", onTabChange: vi.fn(),
     identity: { sessionId: "session-1", runId: "run-1", expectedRevision: 7, expectedRegistryFingerprint: "7df8cf3a" },
     fetchProjection: vi.fn(async () => projection()), commitSetting: vi.fn(async () => ({})),
     theme: "dark", fontScale: 1, factoryAlertsEnabled: true,
@@ -67,6 +68,13 @@ function inputInLabel(host: HTMLElement, text: string): HTMLInputElement {
   return value;
 }
 
+function setInputValue(input: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  if (!setter) throw new Error("missing native input value setter");
+  setter.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 describe("NativeOperationsWorkspace", () => {
   let host: HTMLDivElement;
   let root: Root;
@@ -98,7 +106,7 @@ describe("NativeOperationsWorkspace", () => {
     const overflow = projection({ alerts: { status: "overflow", totalCount: 1025, criticalCount: 1025, warningCount: 0, rows: [] } });
     await act(async () => { root.render(<NativeOperationsWorkspace {...props({ fetchProjection: vi.fn(async () => overflow) })} />); });
     expect(host.textContent).toContain("不会显示任何行");
-    await act(async () => button(host, "存档").click());
+    await act(async () => { root.render(<NativeOperationsWorkspace {...props({ tab: "saves", fetchProjection: vi.fn(async () => overflow) })} />); });
     expect(button(host, "导入 / 确认导入").disabled).toBe(true);
     expect(button(host, "恢复 / 覆盖").disabled).toBe(true);
     expect(host.textContent).not.toContain("无供电");
@@ -106,8 +114,7 @@ describe("NativeOperationsWorkspace", () => {
 
   it("submits one semantic leaf intent without a patch", async () => {
     const commitSetting = vi.fn(async (_request: unknown) => ({}));
-    await act(async () => { root.render(<NativeOperationsWorkspace {...props({ commitSetting })} />); });
-    await act(async () => button(host, "设置").click());
+    await act(async () => { root.render(<NativeOperationsWorkspace {...props({ tab: "settings", commitSetting })} />); });
     const select = selectInLabel(host, "模拟速度");
     await act(async () => { select.value = "2"; select.dispatchEvent(new Event("change", { bubbles: true })); });
     expect(commitSetting).toHaveBeenCalledWith({
@@ -117,12 +124,43 @@ describe("NativeOperationsWorkspace", () => {
     expect(JSON.stringify(commitSetting.mock.calls[0][0])).not.toContain("topLevelChanges");
   });
 
+  it("shares the controlled operations tab with App shortcuts", async () => {
+    const onTabChange = vi.fn();
+    const value = props({ onTabChange });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} />); });
+    expect(host.textContent).toContain("工厂警报");
+    await act(async () => button(host, "设置").click());
+    expect(onTabChange).toHaveBeenCalledWith("settings");
+    expect(host.textContent).toContain("工厂警报");
+
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} tab="settings" />); });
+    expect(host.textContent).toContain("权威叶设置");
+  });
+
+  it("preserves an in-progress numeric draft across ordinary authority revisions", async () => {
+    const value = props({ tab: "settings" });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} />); });
+    const buffer = inputInLabel(host, "生产缓冲");
+    await act(async () => {
+      setInputValue(buffer, "4321");
+    });
+    expect(inputInLabel(host, "生产缓冲").value).toBe("4321");
+
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value}
+      identity={{ sessionId: "session-1", runId: "run-1", expectedRevision: 8, expectedRegistryFingerprint: "7df8cf3a" }}
+      fetchProjection={vi.fn(async () => projection({
+        revision: 8,
+        settings: { ...projection().settings, productionBufferLimit: 9000 },
+      }))} />); });
+    expect(host.textContent).toContain("REV 8");
+    expect(inputInLabel(host, "生产缓冲").value).toBe("4321");
+  });
+
   it("keeps a durable ACK locked until a newer projection and rejects consecutive intents", async () => {
     let resolveCommit!: (value: unknown) => void;
     const commitSetting = vi.fn(() => new Promise((resolve) => { resolveCommit = resolve; }));
-    const value = props({ commitSetting });
+    const value = props({ tab: "settings", commitSetting });
     await act(async () => { root.render(<NativeOperationsWorkspace {...value} />); });
-    await act(async () => button(host, "设置").click());
     const speed = selectInLabel(host, "模拟速度");
     await act(async () => {
       speed.value = "2";
@@ -148,9 +186,8 @@ describe("NativeOperationsWorkspace", () => {
   it("resets controlled drafts on projection identity and ignores a stale commit completion", async () => {
     let resolveCommit!: (value: unknown) => void;
     const commitSetting = vi.fn(() => new Promise((resolve) => { resolveCommit = resolve; }));
-    const value = props({ commitSetting });
+    const value = props({ tab: "settings", commitSetting });
     await act(async () => { root.render(<NativeOperationsWorkspace {...value} />); });
-    await act(async () => button(host, "设置").click());
     const buffer = inputInLabel(host, "生产缓冲");
     await act(async () => {
       buffer.value = "4321";

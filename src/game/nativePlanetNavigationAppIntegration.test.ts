@@ -145,6 +145,7 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/galaxyOpen \? nativePlayerAuthorityOwnsRuntime \? \([\s\S]*?<NativeGalaxyWorkspace[\s\S]*?: \([\s\S]*?<GalaxyWorkspace/);
     expect(app).toMatch(/campaignOpen \? nativePlayerAuthorityOwnsRuntime \? \([\s\S]*?<NativeCampaignWorkspace[\s\S]*?: \([\s\S]*?<CampaignWorkspace/);
     expect(app).toMatch(/operationsOpen && nativePlayerAuthorityOwnsRuntime \? \([\s\S]*?<NativeOperationsWorkspace/);
+    expect(app).toMatch(/<NativeOperationsWorkspace[\s\S]*?tab=\{operationsTab\}[\s\S]*?onTabChange=\{setOperationsTab\}/);
     expect(app).toMatch(/operationsOpen && !nativePlayerAuthorityOwnsRuntime \? \([\s\S]*?<OperationsWorkspace/);
     const nativeGalaxy = app.slice(app.indexOf("<NativeGalaxyWorkspace"), app.indexOf("<GalaxyWorkspace"));
     const nativeCampaign = app.slice(app.indexOf("<NativeCampaignWorkspace"), app.indexOf("<CampaignWorkspace"));

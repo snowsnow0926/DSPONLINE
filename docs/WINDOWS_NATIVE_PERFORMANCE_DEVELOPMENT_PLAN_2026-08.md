@@ -1560,14 +1560,14 @@ E1a 只为未来的唯一权威晋升封闭双写风险；当前没有 main-owne
 
 | 目标 | 估算进度 | 已闭合的主要切片 | 仍未闭合 |
 | --- | ---: | --- | --- |
-| Rust 唯一玩家可见权威 | 约 83% | main-owned 连续时钟、durable 命令回执、耐久暂停/继续和启动恢复、同 revision 投影、接管前完整覆盖门禁；公开存档/云/恢复边界已在 native ownership 下失败关闭；既有行星、科研、建筑、空间站、制造、蓝图 rename/rotation/mirror/recipe override/delete 等最小语义意图由 Rust 验证并耐久提交；响应丢失只做 main-owned 只读 receipt 对账，renderer 不重发 mutation；普通闭合配方、科研、火箭、太阳帆和“已有施工库存”具备部分纯挂机守恒证书 | `authorityEligible=false`；完整 productive pure-idle/offline/time-warp、出口、合同、有限资源、公开主档写回和全部玩家命令覆盖仍不足；蓝图捕获/导入/部署等写面和若干跨域操作尚未闭合；接管前 legacy fallback 仍必须保留完整 GameState，因此不能把“单一写入机制”写成“全游戏已经 Rust 权威” |
-| 完整薄 UI | 约 96% | 主画布、minimap、运行状态、行星导航、科研、配方、生产缓存、星际工业、量子库存、普通建筑/线路及库存交互、星图、戴森、制造中心和内置空间站均可消费同 revision 有界 Rust 投影或提交最小意图；制造中心可用单条原子意图统一已解锁建筑目标；蓝图库/施工队列真分页，蓝图 rename/rotation/mirror/recipe override/delete 均等待 durable ACK、只读 reconciliation 和新投影，renderer 不乐观改写权威状态 | 蓝图捕获、导入、部署和其余队列操作仍未全部迁移；运营、银河、合同、MOD/其他批量操作和戴森完整几何仍未迁移；微型黑洞端口编辑及毁灭账本也未迁移；失败关闭不等于功能迁移完成，renderer 仍不是完整薄客户端 |
-| 真正 `O(active)` 物流 | 约 96% | 线路活动调度、本地/星际 ready 与 dispatch、peer directory、跨 revision demand queue、量子普通 flush/休眠 download、量子五秒上传和模式过渡均使用持久活动/待处理集合与反向唤醒；线路容量和量子合法性探测使用稳定分片；持久有序 active-route 索引已让无脏变化的线路选择热段由 `O(A log A)` 收敛为 `O(A)`；所有稀疏路径保留 75% 稠密退化和 MOD/失配失败关闭 | network parse/write 仍遍历部分库存键；拓扑重编、连续生产、高扇出、自然稠密和 fail-closed 路径按语义仍会全扫；冲突组件物料应用并行原型虽语义一致但实测中位慢 9.87%、P95 慢 11.55%，已拒绝而非冒充完成 |
-| 全领域确定性原生并行 | 约 72% | 普通机器和线路内核外，已并行或复用矿脉、物流 readiness/congestion、线路容量预留与源快照、本地站缓冲、曲速器预留、量子计划验证与供给探测、施工、轨道终端、射线接收器、银河出口、任务指标、历史诊断及生产历史刷新/重放；所有已接纳阶段使用固定分片、私有输出和原顺序提交；当前统一 runtime 的真实档 1/2/4/8 矩阵得到相同规范/领域/守恒哈希 | 共享物料和状态的固定顺序写入、完整离线/纯挂机及若干跨域阶段仍串行；传送带冲突组件候选已因退化拒绝；尚无跨 CPU、Windows 10/11、不同调度和 24 小时矩阵 |
-| 四目标能力加权本地开发 | 约 88% | 原生权威基础设施、薄 UI、活动物流、确定性并行、内存压缩、存档保护、耐久暂停、蓝图语义写面以及 JavaScript/Rust 完整一致性均有可回归提交 | 尚余约 12% 能力缺口，主要是剩余跨域 Rust 权威、玩家可达写面、物流末端全扫热点和共享状态确定性并行；不包含下行单列的真实发布门禁 |
+| Rust 唯一玩家可见权威 | 约 85% | main-owned 连续时钟、durable 命令回执、耐久暂停/继续和启动恢复、同 revision 投影、接管前完整覆盖门禁；公开存档/云/恢复边界已在 native ownership 下失败关闭；普通蓝图 capture/import/export/direct-deploy/queue/fund/deploy/cancel 生命周期和恒星系空间站七类可达 intent 均由 Rust 验证并耐久提交；响应丢失只做 main-owned 只读 receipt 对账，renderer 不重发 mutation；普通闭合配方、科研、火箭、太阳帆和“已有施工库存”具备部分纯挂机守恒证书 | `authorityEligible=false`；完整 productive pure-idle/offline/time-warp、出口合同、运营、银河、MOD、戴森完整几何、公开主档写回和全部玩家命令覆盖仍不足；接管前 legacy fallback 仍必须保留完整 GameState，因此不能把“单一写入机制”写成“全游戏已经 Rust 权威” |
+| 完整薄 UI | 约 97% | 主画布、minimap、运行状态、行星导航、科研、配方、生产缓存、星际工业、量子库存、普通建筑/线路及库存交互、星图、戴森、制造中心、普通蓝图完整生命周期和内置恒星系空间站均可消费同 revision 有界 Rust 投影或提交最小意图；写面等待 durable ACK、只读 reconciliation 和新投影，renderer 不乐观改写权威状态 | orbital contract、运营、银河、MOD/其他批量操作和戴森完整几何仍未迁移；微型黑洞端口编辑及毁灭账本也未迁移；失败关闭不等于功能迁移完成，renderer 仍不是完整薄客户端 |
+| 真正 `O(active)` 物流 | 约 97% | 线路活动调度、本地/星际 ready 与 dispatch、peer directory、跨 revision demand queue、量子普通 flush/休眠 download、量子五秒上传和模式过渡均使用持久活动/待处理集合与反向唤醒；持久有序 active-route 索引使无脏变化线路选择为 `O(A)`；ordinary storage/splitter bridge 也使用 writer-closed wake queue；所有稀疏路径保留 75% 稠密退化和 MOD/失配失败关闭 | network parse/write 仍遍历部分库存键；拓扑重编、连续生产、material-delivery hubs、量子高扇出、自然稠密和 fail-closed 路径按语义仍会全扫；冲突组件物料应用并行原型实测退化后已拒绝而非冒充完成 |
+| 全领域确定性原生并行 | 约 74% | 既有普通机器、线路、矿脉、物流、量子、施工、轨道终端、银河出口、任务指标和历史阶段之外，冷启动八类缓存与每模拟步 ready-station/vein/machine 三类电力需求已接入固定 4/8 异构只读 prepare；所有分区完整 join 后按历史顺序检查错误并串行提交，1/2/4/8 的核心工厂状态/规范/领域/守恒哈希一致 | 共享 inventory/production/Dyson 写入、belt conflict 与全部物流 commit、完整 pure-idle/offline/time-warp 仍串行；尚无跨 CPU、Windows 10/11、不同调度和 24 小时矩阵 |
+| 四目标能力加权本地开发 | 约 89% | 原生权威基础设施、薄 UI、活动物流、确定性并行、内存压缩、存档保护、耐久暂停、ordinary 蓝图完整生命周期和恒星系空间站写面均有可回归提交 | 尚余约 11% 能力缺口，主要是剩余跨域 Rust 权威、玩家可达写面、物流末端全扫热点和共享状态确定性并行；不包含下行单列的真实发布门禁 |
 | 可放心发布成熟度 | 约 60% | 本机类型、完整单元、native 边界、Rust core/Host、production build、启动预算、最终完整 E2E `433/27/0` 和耐久 E2E `7/7` 已有新鲜结果 | 真实大档全进程 24 小时、多硬件、Defender/磁盘故障、安装/覆盖升级、签名和灰度均未完成 |
 
-以上六行从本节起采用固定分母：四个困难目标、四目标能力加权本地开发和发布成熟度分别只与自身比较。旧 `98% / 96%` 是已经停用的小任务计数历史估算，不是当前进度基线；截至 2026-08-31，当前能力加权本地开发为约 `88%`、尚余约 `12%`，这次口径修正不代表已经完成的代码倒退或消失。
+以上六行从本节起采用固定分母：四个困难目标、四目标能力加权本地开发和发布成熟度分别只与自身比较。旧 `98% / 96%` 是已经停用的小任务计数历史估算，不是当前进度基线；截至 2026-09-01，经普通蓝图完整生命周期、恒星系空间站可达写面、ordinary buffer wake queue 与固定异构 prepare 独立复审后，当前能力加权本地开发为约 `89%`、尚余约 `11%`。发布成熟度仍为 `60%`，因为代码进度不能替代 24 小时、多硬件、安装、签名和灰度。
 
 ### 24.2 本轮关键实现
 
@@ -1978,19 +1978,19 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版�
 
 ### 24.23 WIN-430 固定异构 prepare 与确定性串行提交（2026-09-01，开发候选）
 
-本切片选择的是能独立构造私有结果、并且能够恢复历史提交顺序的跨领域准备阶段；它没有跨越共享物料、浮点累加或线路冲突写屏障。固定能力百分比不因这一片单独重估，继续沿用 `Rust 唯一权威约 83% / 完整薄 UI 约 96% / 真正 O(active) 物流约 96% / 全领域确定性原生并行约 72% / 四项目标能力加权综合约 88% / 可放心发布成熟度约 60%`。
+本切片选择的是能独立构造私有结果、并且能够恢复历史提交顺序的跨领域准备阶段；它没有跨越共享物料、浮点累加或线路冲突写屏障。与 24.24 及此前 ordinary 蓝图/O(active) 切片统一复审后，固定能力口径更新为 `Rust 唯一权威约 85% / 完整薄 UI 约 97% / 真正 O(active) 物流约 97% / 全领域确定性原生并行约 74% / 四项目标能力加权综合约 89% / 可放心发布成熟度约 60%`。
 
 1. `DeterministicRuntime::partitioned_prepare4/8` 使用进程生命周期内既有、最多 8 个 worker 的 Rayon 池，以固定二叉 join 拓扑运行异构只读闭包。返回值始终保持分区序号；所有任务必须完成后调用者才能检查 `Result`。活动分区少于 2、总工作量少于 4,096 或线程策略为 1 时自动在调用线程串行运行，不创建第二个池，也不让一次错误取消其他分区并由调度时序决定首个错误。
 2. 冷启动和缓存失效时，把 belt routes、ordinary logistics-buffer runtime、local peer directory、quantum directory、construction runtime、station-mode transition、quantum transition 以及 interstellar peer/activity 八类候选，从同一个不可变 Core revision 分区准备。belt 与 local 的可失败结果仍按旧 `belt → local` 顺序解包；星际目录刷新仍在 join 后的固定串行边界执行。只有整个 `PreparedFactoryAdvance` 成功并完成外层权威提交，这些候选才允许进入下一 revision；打开失败或推进失败不会安装部分缓存。
 3. 每个精确模拟步把 ready station、vein 和 ordinary machine 三类电力需求探针分区生成 owned event buffers。验证和电网累加继续严格按 `ready station → vein → machine` 以及各域原实体行顺序执行，因此 IEEE-754 加法、第一条可见错误和断电判定不受 worker 完成顺序影响。后续矿脉、普通机器、可再生能源和行星指标阶段共用同一个注入 runtime，1-thread 测试不再意外调用全局多线程 runtime。
-4. 可观测性新增 `partitioned-open-domain-prepare`、`partitioned-factory-domain-prepare` 和 `partitioned-power-demand-prepare` profile 行，包含活动分区、输入工作量、策略选中的外层 worker 数、实际执行外层分区的 worker 数和并行标记。它们只证明调度形状，不宣称真实档墙钟加速；冷启动同时构造多个目录可能增加短时 scratch overlap，需由固定真实输入的完整进程树 Private Bytes A/B 再决定是否接纳为默认性能收益。
-5. 回归使用不含玩家数据的 4,096+ ordinary machines、97 veins 合成夹具，比较一次完整候选提交在 1/2/4/8 workers 下的序列化状态字节、canonical SHA-256、domain SHA-256 和物料投影 SHA-256，并重复 8-worker 运行。另有跨领域双失败回归证明所有闭包均已 join 后仍按固定域/行选择错误，以及两类原子性回归：第一分区失败和较晚 local 分区失败时，源 revision、规范哈希、完整字节和全部 prepared cache 均不改变。实际门禁计数在提交前以最终源码重跑结果为准，不复用此前切片记录。
+4. 可观测性新增 `partitioned-open-domain-prepare`、`partitioned-factory-domain-prepare` 和 `partitioned-power-demand-prepare` profile 行，包含活动分区、以 `entities + belts` 作为 threshold source rows 的输入代理、按策略计算的 worker 上限、实际进入外层分区闭包的 worker 数代理和并行标记；它不表示预留了固定 worker 子集，也不等于八个领域的真实累计工作量。它们只证明调度形状，不宣称真实档墙钟加速；冷启动同时构造多个目录可能增加短时 scratch overlap，需由固定真实输入的完整进程树 Private Bytes A/B 再决定是否接纳为默认性能收益。
+5. 回归使用不含玩家数据的 4,096+ ordinary machines、97 veins 合成夹具，比较一次核心工厂候选提交在 1/2/4/8 workers 下的序列化状态字节、canonical SHA-256、domain SHA-256 和物料投影 SHA-256，并重复 8-worker 运行。该 helper 有意不冒充 public advance：production-history、campaign、speedrun finalizer 和正式 cache-install 路径仍由既有集成回归覆盖。另有跨领域双失败回归证明所有闭包均已 join 后仍按固定域/行选择错误，以及两类原子性回归：第一分区失败和较晚 local 分区失败时，源 revision、规范哈希、完整字节和全部 prepared cache 均不改变。
 6. 本切片仍不等于全领域权威并行。共享 inventory/production/Dyson 的确定性写入、belt reservation/commit 冲突、全部物流提交、pure-idle/offline/time-warp、跨 CPU 与 Windows 10/11 调度矩阵、24 小时压力、真实档性能和全进程树内存仍未关闭；这些门禁未通过前 WIN-430 继续标记“部分完成”，`authorityEligible=false` 不得放开。
 7. GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host/renderer 协议和玩家存档均未改变。本切片不连接生产、不部署、不签名、不读取或修改真实玩家存档。
 
 ### 24.24 恒星系空间站可达写面、跨存档围栏与 definite rejection（2026-09-01，开发候选）
 
-本切片把已经存在的有界空间站投影和七类 durable intent 从“有代码但玩家没有可靠入口”闭合为星图可达链，同时修复两项会阻止正式接管的 P1：旧投影可能在新存档同 revision 上重新绑定，以及普通业务拒绝会把整个 Rust authority 误判为 uncertain。固定能力百分比等待 24.23 与本节的统一加权复审后再更新，不按文件数临时抬高。
+本切片把已经存在的有界空间站投影和七类 durable intent 从“有代码但玩家没有可靠入口”闭合为星图可达链，同时修复两项会阻止正式接管的 P1：旧投影可能在新存档同 revision 上重新绑定，以及普通业务拒绝会把整个 Rust authority 误判为 uncertain。与 24.23 及此前 ordinary 蓝图/O(active) 切片统一复审后，采用上方 `85/97/97/74/89/60` 固定能力口径，不按文件数重复加点。
 
 1. 已发现的内置恒星系在 native/legacy 星图都显示“管理本系空间站”。原生 authority 打开 `system-space-station-workspace-v1`；Web/接管前继续使用既有 workspace。原生 UI 不读取完整 `GameState` 提交写入，也不把 patch、余额、奖励或升级范围发给 Host。
 2. renderer 的请求精确携带投影 `sessionId/runId/revision/registryFingerprint/systemId` 和一个 intent。broker 必须在调用时逐项匹配当前 main-owned runtime；system ID 同时进入语义摘要、command ID、Host 请求和 Rust request。Start/Deliver/Module/UpgradeAll 的 system 参数必须与投影一致；UpgradeOne/Mode/Output 由 Rust 从实体→行星→恒星系重新推导并限制在同一 system。旧窗口、session/run 切换、跨存档同 revision、跨系实体和全银河批量都失败关闭。

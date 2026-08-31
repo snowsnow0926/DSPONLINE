@@ -1,5 +1,7 @@
 # DSP极简网络项目现状
 
+> **Windows 四目标固定分母复审（2026-09-01）**：独立只读审计在 `7a359be` 产品源码与 `47fa7b9` docs-only HEAD 上均未发现 P0/P1；新口径为 `Rust 唯一玩家可见权威 85% / 完整薄 UI 97% / 真正 O(active) 物流 97% / 全领域确定性原生并行 74% / 四目标能力加权开发 89% / 发布成熟度 60%`。上调来自累计的 ordinary 蓝图完整生命周期、恒星系空间站可达七 intent、ordinary buffer wake queue，以及八类冷准备和三类电力需求固定分区；不是因为本轮改动行数多。剩余约 11% 仍含 productive pure-idle/offline/time-warp、合同/运营/银河/MOD/戴森几何、continuous production/material hubs/quantum fanout、共享 inventory/Dyson/belt-conflict/物流 commit。发布成熟度不动，因为 24 小时、多硬件/Win10/11、Defender/磁盘、安装/覆盖升级、签名和灰度仍未通过。
+
 > **Windows 恒星系空间站 Rust 写面 P1 收口（2026-09-01，开发候选，未发布）**：原生星图现在有真实可达的“管理本系空间站”入口；七类空间站操作经过有界 Rust 投影、main-owned FIFO、Host WAL/checkpoint/receipt 和冷恢复提交，renderer 不提供 patch、完整状态、库存结果或派生升级范围。投影的 session/run/revision/registry/system 五重身份进入命令哈希并由 Rust 重新验证实体所属恒星系，避免旧窗口、跨存档同 revision 和跨系点击误写。
 >
 > 可预期的缺科技、库存不足、目标未变化等语义失败只在 Rust 证明 durable stage 尚未开始时返回 typed definite rejection；main 保留原 revision/checkpoint、取消依赖该失败 revision 的排队命令并立即恢复权威时钟。EPIPE、普通命令伪造同 code、pending replay 和五个 durable 故障边界继续 uncertain/recoverable。独立终审对合并态给出 GO、未发现 P0/P1；当前组合定向为 Node `74/74`、Rust Core `13/13`、Host 空间站 `6/6`、Host typed response `1/1`、UI/store/App `34/34`，typecheck、Host clippy 与 diff check 通过。Rust fmt 首次检查发现新增测试夹具只缺机械排版，执行标准格式化后已提交；该失败史保留。

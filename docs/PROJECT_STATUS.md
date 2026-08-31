@@ -1,5 +1,11 @@
 # DSP极简网络项目现状
 
+> **Windows ordinary storage/splitter 活动队列（2026-09-01，开发候选，未发布）**：Rust 精确模拟原先每个模拟步都会扫描全部普通 `storage`/`splitter`，把对应物料从 `inputs` 搬到 `outputs`。现在该桥接阶段使用 session-only、按实体持久行号排序的确定性 wake queue：冷启动先完整执行一次旧语义；此后只有传送带真实搬运所触及的 storage/splitter 行会被唤醒。一次旧语义桥接必然已经“搬空当前可搬输入”或“填满输出容量”，因此在下一次库存事件前可以安全休眠。
+>
+> 队列不进入 GameState、WAL、checkpoint、v47 导出或 canonical hash。候选只在完整 simulation revision 提交后安装；失败候选不清 wake。活动行达到 75% 时稳定退化为原全扫描，目录/实体数量/拓扑身份不一致也失败关闭。合成 1,024 行稳态证据为 `selected=1 / total=1024 / skipped=1023`，即少访问 `99.90234375%` 的桥接行；无事件时为 `0/1024`。`1/5/60` 秒、5 个随机种子各 120 步的逐步 full-scan byte oracle、重复 SHA-256、精确 75% 稠密退化和失败候选保留 wake 均已覆盖；这只是 ordinary buffer 纵切，不把连续生产、电力、物料投递枢纽、量子高扇出或 fail-closed 路径写成全部 `O(active)` 完成。
+>
+> 当前切片 Rust workspace 串行全量为 Core `839/839`、Host library `203/203`、Host main `2/2`，合计 `1044/1044`、0 失败、0 跳过；workspace strict clippy 与 fmt 已通过。固定能力百分比暂不因一个纵切重新估算，GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不改变；未连接生产、未部署、未签名，也未读取或修改真实玩家存档。
+
 > **Windows Rust ordinary 蓝图完整生命周期（2026-09-01，开发候选，未发布）**：普通内置蓝图的 capture、严格 import、只读 export、direct deploy、queue-only enqueue、fund、queued deploy 和 cancel 已在同一条 Rust/Host/薄 UI 链中闭合。import/export 统一限制 512 entities、1,024 belts、1 MiB 和 64 library rows；Rust 独占解析、规范化、目录语义和跨实体/线路/蓝图/版本/队列八个持久 ID 域的分配复检。WAL 只保存已验证的语义 marker，live、cold-WAL、重复 command ID 与五个故障边界保持同状态/哈希；UI 一次操作只发一次 mutation，未知结果只做六次只读 receipt 对账，并在连续 ACK 后等待同 lineage/registry 的精确成员证明。拒绝保存时不会播放成功反馈或进入放置态。
 >
 > 独立审计结论为该开发切片 **GO、未发现 P0/P1**。当前最终组合源码已通过 Rust `1038/1038`、Windows native/desktop `491` 通过/`1` 个 symlink 权限条件跳过/`0` 失败、UI focused `190/190`、Node focused `58/58`、fresh Release Host integration `6/6`、完整 Vitest `2851` 通过/`28` 条件跳过/`0` 失败，以及 typecheck、Rust fmt、strict clippy、diff check 和 production build。生产构建为 2,088 modules，startup 总 gzip `180,576 B`、JavaScript `86,989 B`、CSS `93,587 B`、最大启动 JavaScript `58,974 B`、menu `257,943 B`、forbidden startup module `0`。完整 Chromium 与 durable E2E 的本轮最终计数记录在 `TESTING_RELEASE.md`；desktop pack/install/覆盖升级、24 小时、多硬件、真实 Defender/磁盘、签名和灰度仍是正式发布 No-Go 门禁。固定进度暂保持 `Rust 83% / 薄 UI 96% / O(active) 96% / 并行 72% / 综合开发 88% / 发布成熟度 60%`，不因单个工作包人为跳点。

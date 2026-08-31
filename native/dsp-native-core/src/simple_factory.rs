@@ -3560,69 +3560,6 @@ fn discharge_exchanger(
     Ok(completed)
 }
 
-fn transfer_logistics_buffers(
-    state: &CoreState,
-    base: &Map<String, Value>,
-    entities: &mut [Value],
-    entity_indices: &[usize],
-) -> anyhow::Result<()> {
-    let limit = normalized_buffer_limit(
-        base.get("settings")
-            .and_then(Value::as_object)
-            .and_then(|settings| settings.get("logisticsBufferLimit")),
-    );
-    for &entity_index in entity_indices {
-        let entity = entities[entity_index]
-            .as_object_mut()
-            .ok_or_else(|| anyhow!("native logistics buffer is invalid"))?;
-        let Some(item_id) = string_at(entity, "storedItemId").map(str::to_owned) else {
-            continue;
-        };
-        let building = string_at(entity, "buildingId")
-            .and_then(|id| state.catalog.buildings.get(id))
-            .ok_or_else(|| anyhow!("native logistics building is missing"))?;
-        let capacity = stacked_capacity(
-            building.output_capacity,
-            finite_number(entity.get("machineCount")),
-            limit,
-        );
-        let incoming = entity
-            .get("inputs")
-            .and_then(Value::as_object)
-            .and_then(|inputs| inputs.get(&item_id))
-            .map(|value| (finite_number(Some(value)) + EPSILON).floor())
-            .unwrap_or(0.0);
-        let stored = entity
-            .get("outputs")
-            .and_then(Value::as_object)
-            .and_then(|outputs| outputs.get(&item_id))
-            .map(|value| (finite_number(Some(value)) + EPSILON).floor())
-            .unwrap_or(0.0);
-        let moved = incoming.min((capacity - stored).max(0.0));
-        entity
-            .get_mut("inputs")
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| anyhow!("native logistics inputs are missing"))?
-            .insert(
-                item_id.clone(),
-                Number::from_f64(incoming - moved)
-                    .map(Value::Number)
-                    .unwrap_or(Value::from(0)),
-            );
-        entity
-            .get_mut("outputs")
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| anyhow!("native logistics outputs are missing"))?
-            .insert(
-                item_id,
-                Number::from_f64(stored + moved)
-                    .map(Value::Number)
-                    .unwrap_or(Value::from(0)),
-            );
-    }
-    Ok(())
-}
-
 fn material_delivery_items(state: &CoreState, entity: &Map<String, Value>) -> Vec<String> {
     let mut items = Vec::new();
     let mut append = |item_id: &str| {
@@ -3892,6 +3829,7 @@ fn simulate_step(
     entities: &mut [Value],
     belt_runtime: &mut crate::belts::BeltRuntime,
     belt_routes: &crate::belts::PreparedRoutes,
+    logistics_buffer_runtime: &mut std::sync::Arc<crate::logistics_buffers::LogisticsBufferRuntime>,
     local_step_directory: &mut std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
     quantum_logistics_directory: &mut std::sync::Arc<
         crate::quantum_logistics::QuantumLogisticsDirectory,
@@ -3990,12 +3928,22 @@ fn simulate_step(
     }
     profile_mark!("local-runtime-reset");
     profile_mark!("local-step-directory");
-    transfer_logistics_buffers(
+    let logistics_buffer_scan = crate::logistics_buffers::settle(
         state,
         base,
         entities,
-        &state.factory_topology.logistics_buffer_indices,
+        std::sync::Arc::make_mut(logistics_buffer_runtime),
     )?;
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tordinary-buffer-active\t{}/{}\tskipped={}\tdense={}\tdirectory-fallback={}",
+            logistics_buffer_scan.selected_rows,
+            logistics_buffer_scan.total_rows,
+            logistics_buffer_scan.stable_rows_skipped,
+            logistics_buffer_scan.dense_fallback,
+            logistics_buffer_scan.directory_fallback,
+        );
+    }
     profile_mark!("ordinary-logistics-buffers");
     // Only candidate-local wake vectors are mutable. Arc::make_mut preserves
     // the source revision's runtime cache if any later simulation stage fails.
@@ -4091,6 +4039,8 @@ fn simulate_step(
         &belt_changed_entity_indices,
         local_step_runtime,
     )?;
+    std::sync::Arc::make_mut(logistics_buffer_runtime)
+        .wake_from_changed_entities(state, &belt_changed_entity_indices);
     local_step_runtime.wake_ready_from_changed_stations(&belt_changed_entity_indices);
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
         &belt_changed_entity_indices,
@@ -5179,6 +5129,8 @@ fn simulate_step(
         &belt_changed_entity_indices,
         local_step_runtime,
     )?;
+    std::sync::Arc::make_mut(logistics_buffer_runtime)
+        .wake_from_changed_entities(state, &belt_changed_entity_indices);
     local_step_runtime.wake_ready_from_changed_stations(&late_logistics_changed_entity_indices);
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
         &late_logistics_changed_entity_indices,
@@ -5814,6 +5766,7 @@ pub(crate) struct PreparedFactoryAdvance {
     pub belt_scheduler: crate::belts::BeltSchedulerDiagnostics,
     pub belt_routes: std::sync::Arc<crate::belts::PreparedRoutes>,
     pub belt_activity: std::sync::Arc<crate::belts::BeltActivitySnapshot>,
+    pub logistics_buffer_runtime: std::sync::Arc<crate::logistics_buffers::LogisticsBufferRuntime>,
     pub local_peer_directory: std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
     pub quantum_logistics_directory:
         std::sync::Arc<crate::quantum_logistics::QuantumLogisticsDirectory>,
@@ -5886,6 +5839,14 @@ pub(crate) fn prepare_advance(
     } else {
         std::sync::Arc::new(crate::belts::prepare_routes_from_state(state, &entities)?)
     };
+    let mut logistics_buffer_runtime =
+        state
+            .prepared_logistics_buffer_runtime()
+            .unwrap_or_else(|| {
+                std::sync::Arc::new(crate::logistics_buffers::LogisticsBufferRuntime::build(
+                    state, &entities,
+                ))
+            });
     let mut local_peer_directory = if let Some(directory) = state.prepared_local_peer_directory() {
         directory
     } else {
@@ -6048,6 +6009,7 @@ pub(crate) fn prepare_advance(
             &mut entities,
             &mut belt_runtime,
             &belt_routes,
+            &mut logistics_buffer_runtime,
             &mut local_peer_directory,
             &mut quantum_logistics_directory,
             &mut construction_runtime,
@@ -6179,6 +6141,7 @@ pub(crate) fn prepare_advance(
         belt_scheduler,
         belt_routes,
         belt_activity,
+        logistics_buffer_runtime,
         local_peer_directory,
         quantum_logistics_directory,
         construction_runtime,
@@ -6322,7 +6285,13 @@ pub(crate) mod tests {
         let renewable = is_independent_renewable_power_facility(id);
         BuildingDefinition {
             id: id.to_owned(),
-            kind: if renewable { "power" } else { "machine" }.to_owned(),
+            kind: match id {
+                "storage_mk1" => "storage",
+                "splitter" => "splitter",
+                _ if renewable => "power",
+                _ => "machine",
+            }
+            .to_owned(),
             speed: 1.0,
             input_capacity: 100.0,
             output_capacity: 100.0,
@@ -6412,6 +6381,8 @@ pub(crate) mod tests {
                     "wind_turbine",
                     "solar_panel",
                     "geothermal_power_station",
+                    "storage_mk1",
+                    "splitter",
                 ]
                 .into_iter()
                 .map(fixture_building)

@@ -35,6 +35,7 @@ mod global_progress;
 mod infinite_research;
 mod interstellar_logistics;
 mod local_logistics;
+mod logistics_buffers;
 mod manual_mining;
 mod orbital_station;
 pub mod production_history;

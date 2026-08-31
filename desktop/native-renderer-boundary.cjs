@@ -1008,6 +1008,40 @@ function normalizeDysonWorkspaceProjectionContext(value, label) {
   };
 }
 
+function systemSpaceStationId(value, label) {
+  const result = opaqueId(value, label, 512);
+  if (/\p{Cc}/u.test(result)) throw protocolError(label);
+  return result;
+}
+
+function normalizeSystemSpaceStationWorkspaceProjectionContext(value, label) {
+  const source = exactObject(value, [
+    "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint", "systemId",
+    "requirementCursor", "requirementLimit", "inventoryCursor", "inventoryLimit",
+    "trayCursor", "trayLimit", "stationCursor", "stationLimit",
+  ], label);
+  requireStellarRequestByteBudget(source, label);
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    runId: logicalId(source.runId, `${label} run`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} registry fingerprint`,
+      256,
+    ),
+    systemId: systemSpaceStationId(source.systemId, `${label} system`),
+    requirementCursor: stellarCursor(source.requirementCursor, `${label} requirement cursor`),
+    requirementLimit: stellarPageLimit(source.requirementLimit, `${label} requirement limit`),
+    inventoryCursor: stellarCursor(source.inventoryCursor, `${label} inventory cursor`),
+    inventoryLimit: stellarPageLimit(source.inventoryLimit, `${label} inventory limit`),
+    trayCursor: stellarCursor(source.trayCursor, `${label} tray cursor`),
+    trayLimit: stellarPageLimit(source.trayLimit, `${label} tray limit`),
+    stationCursor: stellarCursor(source.stationCursor, `${label} station cursor`),
+    stationLimit: stellarPageLimit(source.stationLimit, `${label} station limit`),
+  };
+}
+
 function normalizeProjectionBase(value, allowedFields, label, budget) {
   const source = jsonObject(value, label);
   const keys = Reflect.ownKeys(source);
@@ -7409,6 +7443,330 @@ function normalizeCoreDysonWorkspaceProjection(value, context) {
   };
 }
 
+function normalizeCoreSystemSpaceStationWorkspaceProjection(value, context) {
+  const label = "native system-space-station workspace projection";
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "sessionId", "runId", "revision",
+    "registryFingerprint", "stateVersion", "limits", "request", "system", "technology",
+    "station", "hubNetwork", "summary", "requirements", "sharedInventory", "trayMaterials",
+    "interstellarStations",
+  ], label);
+  if (source.schemaVersion !== 1 || source.projectionType !== "system-space-station-workspace-v1" ||
+      source.source !== "native-core" || source.stateVersion !== 47) {
+    throw protocolError(`${label} identity`);
+  }
+  requireProjectionByteBudget(source, label);
+  const projectionContext = normalizeSystemSpaceStationWorkspaceProjectionContext(
+    context,
+    `${label} context`,
+  );
+  const revision = safeInteger(source.revision, `${label} revision`);
+  const sessionId = logicalId(source.sessionId, `${label} session`, 128);
+  const runId = logicalId(source.runId, `${label} run`, 128);
+  const registryFingerprint = logicalId(source.registryFingerprint, `${label} registry`, 256);
+  if (revision !== projectionContext.expectedRevision || sessionId !== projectionContext.sessionId ||
+      runId !== projectionContext.runId ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint) {
+    throw protocolError(`${label} identity binding`);
+  }
+  const limitsSource = exactObject(source.limits, [
+    "requestBytes", "projectionBytes", "pageRows", "totalRows", "idBytes", "labelBytes",
+    "decimalDigits",
+  ], `${label} limits`);
+  const limits = Object.fromEntries(Object.entries(limitsSource).map(([key, entry]) => [
+    key,
+    safeInteger(entry, `${label} limits.${key}`, 1),
+  ]));
+  if (limits.requestBytes !== 32_768 || limits.projectionBytes !== 1_048_576 ||
+      limits.pageRows !== 64 || limits.totalRows !== 65_536 || limits.idBytes !== 512 ||
+      limits.labelBytes !== 512 || limits.decimalDigits !== 256) {
+    throw protocolError(`${label} limit binding`);
+  }
+  const echoed = normalizeSystemSpaceStationWorkspaceProjectionContext(source.request, `${label} request`);
+  for (const key of Object.keys(projectionContext)) {
+    if (echoed[key] !== projectionContext[key]) throw protocolError(`${label} request binding`);
+  }
+  const systemSource = exactObject(source.system, [
+    "systemId", "displayName", "displayNameTruncated", "planetCount", "activePlanetId",
+    "activePlanetInSystem", "unlocked",
+  ], `${label} system`);
+  const system = {
+    systemId: systemSpaceStationId(systemSource.systemId, `${label} system ID`),
+    displayName: stellarLabel(systemSource.displayName, `${label} system name`, 1),
+    displayNameTruncated: boolean(systemSource.displayNameTruncated, `${label} system name truncation`),
+    planetCount: safeInteger(systemSource.planetCount, `${label} planet count`, 1),
+    activePlanetId: systemSpaceStationId(systemSource.activePlanetId, `${label} active planet`),
+    activePlanetInSystem: boolean(systemSource.activePlanetInSystem, `${label} active planet membership`),
+    unlocked: boolean(systemSource.unlocked, `${label} system unlocked`),
+  };
+  if (system.systemId !== projectionContext.systemId) throw protocolError(`${label} system binding`);
+  const technologySource = exactObject(source.technology, [
+    "constructionReady", "moduleAssemblyReady", "autonomousConstructionReady", "orbitalBusReady",
+  ], `${label} technology`);
+  const technology = Object.fromEntries(Object.entries(technologySource).map(([key, entry]) => [
+    key,
+    boolean(entry, `${label} technology.${key}`),
+  ]));
+  const stationSource = exactObject(source.station, [
+    "persisted", "status", "costRevision", "costMultiplierBasisPoints", "phaseIndex",
+    "canStartConstruction", "launcherPresent", "modules", "progress", "inventoryAmount",
+  ], `${label} station`);
+  const modulesSource = exactObject(stationSource.modules, [
+    "backbone", "energy", "interstellar",
+  ], `${label} modules`);
+  const modules = Object.fromEntries(Object.entries(modulesSource).map(([key, entry]) => {
+    const count = safeInteger(entry, `${label} modules.${key}`);
+    if (count > 1_000_000) throw protocolError(`${label} modules.${key}`);
+    return [key, count];
+  }));
+  const progressSource = exactObject(stationSource.progress, [
+    "basisPoints", "deliveredAmount", "requiredAmount", "constructionBufferAmount",
+  ], `${label} progress`);
+  const progress = {
+    basisPoints: safeInteger(progressSource.basisPoints, `${label} progress basis points`),
+    deliveredAmount: stellarDecimal(progressSource.deliveredAmount, `${label} delivered amount`),
+    requiredAmount: stellarDecimal(progressSource.requiredAmount, `${label} required amount`),
+    constructionBufferAmount: stellarDecimal(
+      progressSource.constructionBufferAmount,
+      `${label} construction buffer amount`,
+    ),
+  };
+  if (progress.basisPoints > 10_000) throw protocolError(`${label} progress basis points`);
+  const station = {
+    persisted: boolean(stationSource.persisted, `${label} persisted`),
+    status: oneOf(stationSource.status, ["not-started", "building", "operational"], `${label} status`),
+    costRevision: safeInteger(stationSource.costRevision, `${label} cost revision`),
+    costMultiplierBasisPoints: safeInteger(
+      stationSource.costMultiplierBasisPoints,
+      `${label} cost multiplier`,
+    ),
+    phaseIndex: safeInteger(stationSource.phaseIndex, `${label} phase index`),
+    canStartConstruction: boolean(stationSource.canStartConstruction, `${label} can start`),
+    launcherPresent: boolean(stationSource.launcherPresent, `${label} launcher present`),
+    modules,
+    progress,
+    inventoryAmount: stellarDecimal(stationSource.inventoryAmount, `${label} inventory amount`),
+  };
+  if (station.costMultiplierBasisPoints < 8_000 || station.costMultiplierBasisPoints > 10_000 ||
+      station.phaseIndex > 16 || (station.canStartConstruction && station.status !== "not-started")) {
+    throw protocolError(`${label} station binding`);
+  }
+  const hubSource = exactObject(source.hubNetwork, [
+    "fleetInstalled", "fleetBusy", "fleetReturnCount", "warpers", "warperTarget",
+  ], `${label} hub network`);
+  const hubNetwork = {
+    fleetInstalled: safeInteger(hubSource.fleetInstalled, `${label} fleet installed`),
+    fleetBusy: safeInteger(hubSource.fleetBusy, `${label} fleet busy`),
+    fleetReturnCount: safeInteger(hubSource.fleetReturnCount, `${label} fleet returns`),
+    warpers: stellarDecimal(hubSource.warpers, `${label} warpers`),
+    warperTarget: stellarDecimal(hubSource.warperTarget, `${label} warper target`),
+  };
+  if (hubNetwork.fleetBusy > hubNetwork.fleetInstalled || hubNetwork.fleetReturnCount > 65_536) {
+    throw protocolError(`${label} hub network binding`);
+  }
+  const summarySource = exactObject(source.summary, [
+    "requirementCount", "inventoryItemCount", "trayMaterialCount", "trayAvailableAmount",
+    "interstellarStationCount", "mk1StationCount", "mk2StationCount", "elevatorStationCount",
+    "transitioningStationCount",
+  ], `${label} summary`);
+  const summary = {
+    requirementCount: safeInteger(summarySource.requirementCount, `${label} requirement count`),
+    inventoryItemCount: safeInteger(summarySource.inventoryItemCount, `${label} inventory item count`),
+    trayMaterialCount: safeInteger(summarySource.trayMaterialCount, `${label} tray material count`),
+    trayAvailableAmount: stellarDecimal(summarySource.trayAvailableAmount, `${label} tray amount`),
+    interstellarStationCount: safeInteger(summarySource.interstellarStationCount, `${label} station count`),
+    mk1StationCount: safeInteger(summarySource.mk1StationCount, `${label} Mk.I count`),
+    mk2StationCount: safeInteger(summarySource.mk2StationCount, `${label} Mk.II count`),
+    elevatorStationCount: safeInteger(summarySource.elevatorStationCount, `${label} elevator count`),
+    transitioningStationCount: safeInteger(
+      summarySource.transitioningStationCount,
+      `${label} transition count`,
+    ),
+  };
+  if (Object.entries(summary).some(([key, entry]) => key !== "trayAvailableAmount" && entry > 65_536) ||
+      summary.mk1StationCount + summary.mk2StationCount !== summary.interstellarStationCount ||
+      summary.elevatorStationCount > summary.mk2StationCount ||
+      summary.transitioningStationCount > summary.mk2StationCount) {
+    throw protocolError(`${label} summary binding`);
+  }
+  const requirements = normalizeStellarPage(
+    source.requirements,
+    echoed.requirementCursor,
+    echoed.requirementLimit,
+    `${label} requirements`,
+    (row, rowLabel) => {
+      const entry = exactObject(row, [
+        "requirementIndex", "phaseName", "itemId", "itemName", "itemNameTruncated", "baseAmount",
+        "requiredAmount", "deliveredAmount", "constructionBufferAmount", "complete", "current",
+      ], rowLabel);
+      const requirementIndex = safeInteger(entry.requirementIndex, `${rowLabel}.requirementIndex`);
+      if (requirementIndex > 15) throw protocolError(`${rowLabel}.requirementIndex`);
+      return {
+        requirementIndex,
+        phaseName: stellarLabel(entry.phaseName, `${rowLabel}.phaseName`, 1),
+        itemId: systemSpaceStationId(entry.itemId, `${rowLabel}.itemId`),
+        itemName: stellarLabel(entry.itemName, `${rowLabel}.itemName`, 1),
+        itemNameTruncated: boolean(entry.itemNameTruncated, `${rowLabel}.itemNameTruncated`),
+        baseAmount: safeInteger(entry.baseAmount, `${rowLabel}.baseAmount`, 1),
+        requiredAmount: stellarDecimal(entry.requiredAmount, `${rowLabel}.requiredAmount`),
+        deliveredAmount: stellarDecimal(entry.deliveredAmount, `${rowLabel}.deliveredAmount`),
+        constructionBufferAmount: stellarDecimal(
+          entry.constructionBufferAmount,
+          `${rowLabel}.constructionBufferAmount`,
+        ),
+        complete: boolean(entry.complete, `${rowLabel}.complete`),
+        current: boolean(entry.current, `${rowLabel}.current`),
+      };
+    },
+  );
+  const sharedInventory = normalizeStellarPage(
+    source.sharedInventory,
+    echoed.inventoryCursor,
+    echoed.inventoryLimit,
+    `${label} shared inventory`,
+    (row, rowLabel) => {
+      const entry = exactObject(row, [
+        "itemId", "itemName", "itemNameTruncated", "amount", "policy",
+      ], rowLabel);
+      let policy = null;
+      if (entry.policy !== null) {
+        const policySource = exactObject(entry.policy, [
+          "interstellarEnabled", "reserve", "target",
+        ], `${rowLabel}.policy`);
+        policy = {
+          interstellarEnabled: boolean(policySource.interstellarEnabled, `${rowLabel}.policy.enabled`),
+          reserve: stellarDecimal(policySource.reserve, `${rowLabel}.policy.reserve`),
+          target: stellarDecimal(policySource.target, `${rowLabel}.policy.target`),
+        };
+      }
+      return {
+        itemId: systemSpaceStationId(entry.itemId, `${rowLabel}.itemId`),
+        itemName: stellarLabel(entry.itemName, `${rowLabel}.itemName`, 1),
+        itemNameTruncated: boolean(entry.itemNameTruncated, `${rowLabel}.itemNameTruncated`),
+        amount: stellarDecimal(entry.amount, `${rowLabel}.amount`),
+        policy,
+      };
+    },
+  );
+  const trayMaterials = normalizeStellarPage(
+    source.trayMaterials,
+    echoed.trayCursor,
+    echoed.trayLimit,
+    `${label} tray materials`,
+    (row, rowLabel) => {
+      const entry = exactObject(row, [
+        "planetId", "planetName", "planetNameTruncated", "activePlanet", "itemId", "itemName",
+        "itemNameTruncated", "amount", "constructionMaterial",
+      ], rowLabel);
+      return {
+        planetId: systemSpaceStationId(entry.planetId, `${rowLabel}.planetId`),
+        planetName: stellarLabel(entry.planetName, `${rowLabel}.planetName`, 1),
+        planetNameTruncated: boolean(entry.planetNameTruncated, `${rowLabel}.planetNameTruncated`),
+        activePlanet: boolean(entry.activePlanet, `${rowLabel}.activePlanet`),
+        itemId: systemSpaceStationId(entry.itemId, `${rowLabel}.itemId`),
+        itemName: stellarLabel(entry.itemName, `${rowLabel}.itemName`, 1),
+        itemNameTruncated: boolean(entry.itemNameTruncated, `${rowLabel}.itemNameTruncated`),
+        amount: safeInteger(entry.amount, `${rowLabel}.amount`),
+        constructionMaterial: boolean(entry.constructionMaterial, `${rowLabel}.constructionMaterial`),
+      };
+    },
+  );
+  const interstellarStations = normalizeStellarPage(
+    source.interstellarStations,
+    echoed.stationCursor,
+    echoed.stationLimit,
+    `${label} interstellar stations`,
+    (row, rowLabel) => {
+      const entry = exactObject(row, [
+        "entityId", "planetId", "planetName", "planetNameTruncated", "machineCount", "stationTier",
+        "operationMode", "modeTransition", "effectiveTargetMode", "outputTargets",
+        "outputConfigurationEnabled",
+      ], rowLabel);
+      if (!Array.isArray(entry.outputTargets) || entry.outputTargets.length !== 5) {
+        throw protocolError(`${rowLabel}.outputTargets`);
+      }
+      const outputTargets = entry.outputTargets.map((target, index) => {
+        const targetSource = exactObject(target, [
+          "portIndex", "itemId", "itemName", "itemNameTruncated",
+        ], `${rowLabel}.outputTargets[${index}]`);
+        const portIndex = safeInteger(targetSource.portIndex, `${rowLabel}.outputTargets[${index}].portIndex`);
+        if (portIndex !== index) throw protocolError(`${rowLabel}.outputTargets[${index}].portIndex`);
+        const itemId = targetSource.itemId === null
+          ? null
+          : systemSpaceStationId(targetSource.itemId, `${rowLabel}.outputTargets[${index}].itemId`);
+        const itemName = stellarLabel(
+          targetSource.itemName,
+          `${rowLabel}.outputTargets[${index}].itemName`,
+          0,
+        );
+        if ((itemId === null) !== (itemName === "")) {
+          throw protocolError(`${rowLabel}.outputTargets[${index}] binding`);
+        }
+        return {
+          portIndex,
+          itemId,
+          itemName,
+          itemNameTruncated: boolean(
+            targetSource.itemNameTruncated,
+            `${rowLabel}.outputTargets[${index}].itemNameTruncated`,
+          ),
+        };
+      });
+      const stationTier = safeInteger(entry.stationTier, `${rowLabel}.stationTier`, 1);
+      if (![1, 2].includes(stationTier)) throw protocolError(`${rowLabel}.stationTier`);
+      return {
+        entityId: systemSpaceStationId(entry.entityId, `${rowLabel}.entityId`),
+        planetId: systemSpaceStationId(entry.planetId, `${rowLabel}.planetId`),
+        planetName: stellarLabel(entry.planetName, `${rowLabel}.planetName`, 1),
+        planetNameTruncated: boolean(entry.planetNameTruncated, `${rowLabel}.planetNameTruncated`),
+        machineCount: safeInteger(entry.machineCount, `${rowLabel}.machineCount`, 1),
+        stationTier,
+        operationMode: oneOf(entry.operationMode, ["legacy", "elevator"], `${rowLabel}.operationMode`),
+        modeTransition: entry.modeTransition === null
+          ? null
+          : oneOf(entry.modeTransition, ["to-elevator", "to-legacy"], `${rowLabel}.modeTransition`),
+        effectiveTargetMode: oneOf(
+          entry.effectiveTargetMode,
+          ["legacy", "elevator"],
+          `${rowLabel}.effectiveTargetMode`,
+        ),
+        outputTargets,
+        outputConfigurationEnabled: boolean(
+          entry.outputConfigurationEnabled,
+          `${rowLabel}.outputConfigurationEnabled`,
+        ),
+      };
+    },
+  );
+  if (requirements.totalCount !== summary.requirementCount ||
+      sharedInventory.totalCount !== summary.inventoryItemCount ||
+      trayMaterials.totalCount !== summary.trayMaterialCount ||
+      interstellarStations.totalCount !== summary.interstellarStationCount) {
+    throw protocolError(`${label} page summary binding`);
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "system-space-station-workspace-v1",
+    source: "native-core",
+    sessionId,
+    runId,
+    revision,
+    registryFingerprint,
+    stateVersion: 47,
+    limits,
+    request: echoed,
+    system,
+    technology,
+    station,
+    hubNetwork,
+    summary,
+    requirements,
+    sharedInventory,
+    trayMaterials,
+    interstellarStations,
+  };
+}
+
 function normalizeCoreCommandPaletteEntitySearchProjection(value, context) {
   const source = exactObject(value, [
     "schemaVersion", "projectionType", "revision", "registryFingerprint", "limits",
@@ -8074,6 +8432,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreStellarIndustryProjectionV2: normalizeCoreStellarIndustryV2Projection,
   coreStellarQuantumProjection: normalizeCoreStellarQuantumProjection,
   coreDysonWorkspaceProjection: normalizeCoreDysonWorkspaceProjection,
+  coreSystemSpaceStationWorkspaceProjection: normalizeCoreSystemSpaceStationWorkspaceProjection,
   coreCommandPaletteEntitySearchProjection: normalizeCoreCommandPaletteEntitySearchProjection,
   coreCommand: normalizeCoreCommand,
   coreCommandReconcile: normalizeCoreCommandReconcile,

@@ -376,6 +376,8 @@ export interface DesktopBridge {
   getNativeCoreStellarQuantumProjection?: (request: DesktopNativeCoreStellarQuantumProjectionRequest) => Promise<DesktopNativeCoreStellarQuantumProjectionResult>;
   /** Read-only Dyson planner pages bound to one native session revision and catalog. */
   getNativeCoreDysonWorkspaceProjection?: (request: DesktopNativeCoreDysonWorkspaceProjectionRequest) => Promise<DesktopNativeCoreDysonWorkspaceProjectionResult>;
+  /** Bounded, independently paged system-space-station workspace; never a full GameState. */
+  getNativeCoreSystemSpaceStationWorkspaceProjection?: (request: DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest) => Promise<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult>;
   /** Current Windows thin-UI host only; native authority never falls back to a renderer entity scan. */
   getNativeCoreCommandPaletteEntitySearch?: (request: DesktopNativeCoreCommandPaletteEntitySearchRequest) => Promise<DesktopNativeCoreCommandPaletteEntitySearchResult>;
   requestNativeCoreProjectionTransfer?: (request: DesktopNativeCoreProjectionTransferRequest) => Promise<DesktopNativeCoreProjectionTransferResult>;
@@ -2627,6 +2629,149 @@ export interface DesktopNativeCoreDysonWorkspaceProjectionResult {
   shells: DesktopNativeCoreStellarPage<DesktopNativeCoreDysonShellRow>;
 }
 
+export interface DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest extends DesktopNativeCoreSessionRequest {
+  runId: string;
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  systemId: string;
+  requirementCursor: number;
+  requirementLimit: number;
+  inventoryCursor: number;
+  inventoryLimit: number;
+  trayCursor: number;
+  trayLimit: number;
+  stationCursor: number;
+  stationLimit: number;
+}
+
+export interface DesktopNativeCoreSystemSpaceStationRequirementRow {
+  requirementIndex: number;
+  phaseName: string;
+  itemId: string;
+  itemName: string;
+  itemNameTruncated: boolean;
+  baseAmount: number;
+  requiredAmount: string;
+  deliveredAmount: string;
+  constructionBufferAmount: string;
+  complete: boolean;
+  current: boolean;
+}
+
+export interface DesktopNativeCoreSystemSpaceStationInventoryRow {
+  itemId: string;
+  itemName: string;
+  itemNameTruncated: boolean;
+  amount: string;
+  policy: null | { interstellarEnabled: boolean; reserve: string; target: string };
+}
+
+export interface DesktopNativeCoreSystemSpaceStationTrayRow {
+  planetId: string;
+  planetName: string;
+  planetNameTruncated: boolean;
+  activePlanet: boolean;
+  itemId: string;
+  itemName: string;
+  itemNameTruncated: boolean;
+  amount: number;
+  constructionMaterial: boolean;
+}
+
+export interface DesktopNativeCoreSystemSpaceStationEntityRow {
+  entityId: string;
+  planetId: string;
+  planetName: string;
+  planetNameTruncated: boolean;
+  machineCount: number;
+  stationTier: 1 | 2;
+  operationMode: "legacy" | "elevator";
+  modeTransition: "to-elevator" | "to-legacy" | null;
+  effectiveTargetMode: "legacy" | "elevator";
+  outputTargets: Array<{
+    portIndex: number;
+    itemId: string | null;
+    itemName: string;
+    itemNameTruncated: boolean;
+  }>;
+  outputConfigurationEnabled: boolean;
+}
+
+export interface DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult {
+  schemaVersion: 1;
+  projectionType: "system-space-station-workspace-v1";
+  source: "native-core";
+  sessionId: string;
+  runId: string;
+  revision: number;
+  registryFingerprint: string;
+  stateVersion: 47;
+  limits: {
+    requestBytes: 32768;
+    projectionBytes: 1048576;
+    pageRows: 64;
+    totalRows: 65536;
+    idBytes: 512;
+    labelBytes: 512;
+    decimalDigits: 256;
+  };
+  request: DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest;
+  system: {
+    systemId: string;
+    displayName: string;
+    displayNameTruncated: boolean;
+    planetCount: number;
+    activePlanetId: string;
+    activePlanetInSystem: boolean;
+    unlocked: boolean;
+  };
+  technology: {
+    constructionReady: boolean;
+    moduleAssemblyReady: boolean;
+    autonomousConstructionReady: boolean;
+    orbitalBusReady: boolean;
+  };
+  station: {
+    persisted: boolean;
+    status: "not-started" | "building" | "operational";
+    costRevision: number;
+    costMultiplierBasisPoints: number;
+    phaseIndex: number;
+    canStartConstruction: boolean;
+    launcherPresent: boolean;
+    modules: { backbone: number; energy: number; interstellar: number };
+    progress: {
+      basisPoints: number;
+      deliveredAmount: string;
+      requiredAmount: string;
+      constructionBufferAmount: string;
+    };
+    inventoryAmount: string;
+  };
+  hubNetwork: {
+    fleetInstalled: number;
+    fleetBusy: number;
+    fleetReturnCount: number;
+    warpers: string;
+    warperTarget: string;
+  };
+  summary: {
+    requirementCount: number;
+    inventoryItemCount: number;
+    trayMaterialCount: number;
+    trayAvailableAmount: string;
+    interstellarStationCount: number;
+    mk1StationCount: number;
+    mk2StationCount: number;
+    elevatorStationCount: number;
+    transitioningStationCount: number;
+  };
+  requirements: DesktopNativeCoreStellarPage<DesktopNativeCoreSystemSpaceStationRequirementRow>;
+  sharedInventory: DesktopNativeCoreStellarPage<DesktopNativeCoreSystemSpaceStationInventoryRow>;
+  trayMaterials: DesktopNativeCoreStellarPage<DesktopNativeCoreSystemSpaceStationTrayRow>;
+  interstellarStations: DesktopNativeCoreStellarPage<DesktopNativeCoreSystemSpaceStationEntityRow>;
+}
+
 export interface DesktopNativeCoreCommandPaletteEntitySearchRequest extends DesktopNativeCoreSessionRequest {
   expectedRevision: number;
   expectedRegistryFingerprint: string;
@@ -2803,6 +2948,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
       sessionId: string;
       projectionType: "dyson-workspace-v1";
       payload: Omit<DesktopNativeCoreDysonWorkspaceProjectionRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      projectionType: "system-space-station-workspace-v1";
+      payload: Omit<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest, "sessionId">;
     };
 
 export interface DesktopNativeCoreProjectionTransferHeader {
@@ -2810,7 +2960,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "blueprint-workspace-v1" | "blueprint-capture-context-v1" | "blueprint-import-context-v1" | "blueprint-export-context-v1" | "blueprint-enqueue-context-v1" | "blueprint-direct-deploy-context-v1" | "construction-placement-context-v1" | "construction-belt-placement-context-v1" | "construction-belt-lane-context-v1" | "construction-belt-removal-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "blueprint-workspace-v1" | "blueprint-capture-context-v1" | "blueprint-import-context-v1" | "blueprint-export-context-v1" | "blueprint-enqueue-context-v1" | "blueprint-direct-deploy-context-v1" | "construction-placement-context-v1" | "construction-belt-placement-context-v1" | "construction-belt-lane-context-v1" | "construction-belt-removal-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1" | "system-space-station-workspace-v1";
   payloadLength: number;
   sha256: string;
 }

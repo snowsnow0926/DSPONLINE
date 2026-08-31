@@ -415,6 +415,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.ok(hello.capabilities.includes("native-core-stellar-industry-projection-v2"));
   assert.ok(hello.capabilities.includes("native-core-star-map-catalog-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-stellar-quantum-projection-v1"));
+  assert.ok(hello.capabilities.includes("native-core-system-space-station-workspace-projection-v1"));
   assert.ok(hello.capabilities.includes("native-core-v47-stream-export-v1"));
   assert.ok(hello.capabilities.includes("native-core-player-authority-tick-v1"));
   assert.ok(hello.capabilities.includes("native-core-player-authority-command-v1"));
@@ -422,6 +423,18 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.ok(hello.capabilities.includes("native-core-player-authority-startup-recovery-v1"));
   const base = JSON.stringify({
     version: 47, mode: "normal", activePlanetId: "home", elapsedSeconds: 2, paused: false,
+    contentPacks: [],
+    systemSpaceStations: {},
+    planetTrays: { home: {} },
+    research: { completedTechIds: [] },
+    exploration: { unlockedSystemIds: ["helios"] },
+    galacticHubNetwork: {
+      fleetInstalled: 0,
+      fleetBusy: 0,
+      fleetReturns: [],
+      warpers: "0",
+      warperTarget: "0",
+    },
     cargo: null,
     tray: { iron_ore: 3 },
     planetTrayItemLimits: { home: 1_000 },
@@ -497,7 +510,22 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
         simulationOrder: 0,
         orbitalYields: {},
       }],
-      items: [{ id: "iron_ore", kind: "solid" }],
+      items: [
+        "iron_ore",
+        "titanium_alloy",
+        "frame_material",
+        "small_carrier_rocket",
+        "universe_matrix",
+        "dyson_sphere_component",
+        "titanium_glass",
+        "quantum_chip",
+        "antimatter_fuel_rod",
+        "annihilation_constraint_sphere",
+        "strange_matter",
+        "plane_filter",
+        "processor",
+        "particle_broadband",
+      ].map((id) => ({ id, kind: "solid" })),
       buildings: [{ id: "mining_machine", kind: "miner", speed: 1, inputCapacity: 0, outputCapacity: 50, powerDemandKw: 1, powerGenerationKw: 0 }],
       recipes: [],
       constructions: [
@@ -971,9 +999,53 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
     },
   ));
   assert.equal(stellarQuantum.projectionType, "stellar-quantum-v1");
-  assert.deepEqual(stellarQuantum.items.rows.map((row) => row.itemId), ["iron_ore"]);
+  assert.equal(stellarQuantum.items.totalCount, 14);
+  assert.equal(stellarQuantum.items.rows[0].itemId, "iron_ore");
   assert.equal(stellarQuantum.items.rows[0].inventory, "0");
   assert.equal(stellarQuantum.collectors.totalCount, 0);
+
+  const systemSpaceStationRequest = {
+    operation: "coreSystemSpaceStationWorkspaceProjection",
+    sessionId: opened.sessionId,
+    runId: "integration-station-run",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    systemId: "helios",
+    requirementCursor: 0,
+    requirementLimit: 64,
+    inventoryCursor: 0,
+    inventoryLimit: 64,
+    trayCursor: 0,
+    trayLimit: 64,
+    stationCursor: 0,
+    stationLimit: 64,
+  };
+  const systemSpaceStation = await client.request(systemSpaceStationRequest);
+  const systemSpaceStationContext = {
+    sessionId: opened.sessionId,
+    runId: "integration-station-run",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+    systemId: "helios",
+    requirementCursor: 0,
+    requirementLimit: 64,
+    inventoryCursor: 0,
+    inventoryLimit: 64,
+    trayCursor: 0,
+    trayLimit: 64,
+    stationCursor: 0,
+    stationLimit: 64,
+  };
+  assert.doesNotThrow(() => normalizeRendererNativeResult(
+    "coreSystemSpaceStationWorkspaceProjection",
+    systemSpaceStation,
+    systemSpaceStationContext,
+  ));
+  assert.equal(systemSpaceStation.projectionType, "system-space-station-workspace-v1");
+  assert.equal(systemSpaceStation.sessionId, opened.sessionId);
+  assert.equal(systemSpaceStation.runId, "integration-station-run");
+  assert.equal(systemSpaceStation.system.systemId, "helios");
+  assert.equal(systemSpaceStation.station.persisted, false);
 
   await assert.rejects(
     client.request({ ...starMapRequest, expectedRevision: 1 }),

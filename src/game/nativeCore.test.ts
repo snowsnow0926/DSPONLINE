@@ -1,12 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DesktopNativeCoreProjectionTransferResult } from "../desktop";
 import {
   advanceNativeCoreSegmented,
+  attachWindowsNativeCoreMainOwnedAuthority,
   decodeNativeCoreProjectionTransfer,
   partitionNativeAdvanceBudget,
   type NativeCoreAdvanceSegmentExecutor,
 } from "./nativeCore";
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe("Windows native core segmented advance", () => {
   it("preserves exact simulation and wall totals across cancellable boundaries", () => {
@@ -148,6 +151,43 @@ async function transferFor(value: Record<string, unknown>): Promise<DesktopNativ
 }
 
 describe("native core transferable projections", () => {
+  it("routes the bounded system-space-station workspace through the binary thin-UI channel", async () => {
+    const value = {
+      schemaVersion: 1,
+      projectionType: "system-space-station-workspace-v1",
+      revision: 17,
+    } as const;
+    const transfer = await transferFor(value);
+    const requestNativeCoreProjectionTransfer = vi.fn(async () => transfer);
+    vi.stubGlobal("window", { dspDesktop: { requestNativeCoreProjectionTransfer } });
+    const shadow = attachWindowsNativeCoreMainOwnedAuthority("core-1", {
+      generation: 4,
+      rootHash: "a".repeat(64),
+      revision: 17,
+    });
+    const request = {
+      runId: "run-station-1",
+      expectedRevision: 17,
+      expectedRegistryFingerprint: "builtin:test",
+      systemId: "helios",
+      requirementCursor: 0,
+      requirementLimit: 8,
+      inventoryCursor: 0,
+      inventoryLimit: 8,
+      trayCursor: 0,
+      trayLimit: 8,
+      stationCursor: 0,
+      stationLimit: 8,
+    };
+
+    await expect(shadow.systemSpaceStationWorkspaceProjection?.(request)).resolves.toEqual(value);
+    expect(requestNativeCoreProjectionTransfer).toHaveBeenCalledWith({
+      sessionId: "core-1",
+      projectionType: "system-space-station-workspace-v1",
+      payload: request,
+    });
+  });
+
   it("verifies and decodes one bounded viewport block", async () => {
     const value = {
       schemaVersion: 1,
@@ -329,7 +369,7 @@ describe("native core transferable projections", () => {
     })).resolves.toEqual(value);
   });
 
-  it.each(["star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "dyson-workspace-v1"] as const)(
+  it.each(["star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "dyson-workspace-v1", "system-space-station-workspace-v1"] as const)(
     "verifies and decodes the bounded %s block",
     async (projectionType) => {
       const value = {

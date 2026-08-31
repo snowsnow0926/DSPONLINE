@@ -1303,6 +1303,24 @@ function nativeDysonWorkspaceProjectionResultContext(request) {
   };
 }
 
+function nativeSystemSpaceStationWorkspaceProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    runId: request?.runId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    systemId: request?.systemId,
+    requirementCursor: request?.requirementCursor,
+    requirementLimit: request?.requirementLimit,
+    inventoryCursor: request?.inventoryCursor,
+    inventoryLimit: request?.inventoryLimit,
+    trayCursor: request?.trayCursor,
+    trayLimit: request?.trayLimit,
+    stationCursor: request?.stationCursor,
+    stationLimit: request?.stationLimit,
+  };
+}
+
 function nativeCommandPaletteEntitySearchResultContext(request) {
   return {
     sessionId: request?.sessionId,
@@ -2281,6 +2299,24 @@ ipcMain.handle("desktop:native-core-dyson-workspace-projection", async (event, r
   });
 });
 
+ipcMain.handle("desktop:native-core-system-space-station-workspace-projection", async (event, request) => {
+  return runRendererNativeOperation("coreSystemSpaceStationWorkspaceProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生恒星系空间站工作区投影请求失败，请重试",
+    resultContext: nativeSystemSpaceStationWorkspaceProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "system-space-station-workspace-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.systemSpaceStationWorkspaceProjection(ownerId, request);
+  });
+});
+
 ipcMain.handle("desktop:native-core-command-palette-entity-search", async (event, request) => {
   return runRendererNativeOperation("coreCommandPaletteEntitySearchProjection", {
     fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
@@ -2311,7 +2347,7 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       ) ||
       !validNativeLogicalId(request.sessionId, 128) ||
       !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
-      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "blueprint-workspace-v1", "blueprint-capture-context-v1", "blueprint-import-context-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType) ||
+      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "blueprint-workspace-v1", "blueprint-capture-context-v1", "blueprint-import-context-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1", "system-space-station-workspace-v1"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object" ||
       Object.prototype.hasOwnProperty.call(request.payload, "sessionId")) {
       throw new Error("原生投影二进制请求无效");
@@ -2374,6 +2410,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       rawResult = await nativeCoreSessions.stellarQuantumProjection(ownerId, normalizedRequest);
     } else if (request.projectionType === "dyson-workspace-v1") {
       rawResult = await nativeCoreSessions.dysonWorkspaceProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "system-space-station-workspace-v1") {
+      rawResult = await nativeCoreSessions.systemSpaceStationWorkspaceProjection(ownerId, normalizedRequest);
     } else {
       rawResult = await nativeCoreSessions.technologyProjection(ownerId, normalizedRequest);
     }
@@ -2428,6 +2466,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                       ? "coreStellarQuantumProjection"
                       : request.projectionType === "dyson-workspace-v1"
                         ? "coreDysonWorkspaceProjection"
+                        : request.projectionType === "system-space-station-workspace-v1"
+                          ? "coreSystemSpaceStationWorkspaceProjection"
                         : "coreTechnologyProjection",
       rawResult,
       request.projectionType === "viewport-v1"
@@ -2480,6 +2520,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                       ? nativeStellarQuantumProjectionResultContext(normalizedRequest)
                       : request.projectionType === "dyson-workspace-v1"
                         ? nativeDysonWorkspaceProjectionResultContext(normalizedRequest)
+                        : request.projectionType === "system-space-station-workspace-v1"
+                          ? nativeSystemSpaceStationWorkspaceProjectionResultContext(normalizedRequest)
                         : nativeTechnologyProjectionResultContext(normalizedRequest),
     );
     const transfer = encodeNativeProjectionTransfer({

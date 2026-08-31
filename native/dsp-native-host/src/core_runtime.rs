@@ -3477,6 +3477,41 @@ impl CoreRegistry {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn system_space_station_workspace_projection(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        system_id: &str,
+        requirement_cursor: usize,
+        requirement_limit: usize,
+        inventory_cursor: usize,
+        inventory_limit: usize,
+        tray_cursor: usize,
+        tray_limit: usize,
+        station_cursor: usize,
+        station_limit: usize,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?
+            .system_space_station_workspace_projection(
+                session_id,
+                run_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                system_id,
+                requirement_cursor,
+                requirement_limit,
+                inventory_cursor,
+                inventory_limit,
+                tray_cursor,
+                tray_limit,
+                station_cursor,
+                station_limit,
+            )
+    }
+
     pub fn apply_command(
         &mut self,
         session_id: &str,

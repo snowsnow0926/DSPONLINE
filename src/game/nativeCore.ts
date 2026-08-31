@@ -60,6 +60,8 @@ import {
   type DesktopNativeCoreStellarQuantumProjectionResult,
   type DesktopNativeCoreDysonWorkspaceProjectionRequest,
   type DesktopNativeCoreDysonWorkspaceProjectionResult,
+  type DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest,
+  type DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult,
   type DesktopNativeSaveCommitResult,
 } from "../desktop";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
@@ -97,7 +99,8 @@ type NativeCoreTransferProjection =
   | DesktopNativeCoreStellarIndustryProjectionResult
   | DesktopNativeCoreStellarIndustryV2ProjectionResult
   | DesktopNativeCoreStellarQuantumProjectionResult
-  | DesktopNativeCoreDysonWorkspaceProjectionResult;
+  | DesktopNativeCoreDysonWorkspaceProjectionResult
+  | DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult;
 
 function projectionBodySchemaVersion(projectionType: NativeCoreTransferProjection["projectionType"]): 1 | 2 {
   return projectionType === "viewport-v2" || projectionType === "stellar-industry-v2" ? 2 : 1;
@@ -165,6 +168,7 @@ export interface WindowsNativeCoreShadow {
   stellarIndustryV2Projection(request: Omit<DesktopNativeCoreStellarIndustryV2ProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStellarIndustryV2ProjectionResult>;
   stellarQuantumProjection?(request: Omit<DesktopNativeCoreStellarQuantumProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStellarQuantumProjectionResult>;
   dysonWorkspaceProjection?(request: Omit<DesktopNativeCoreDysonWorkspaceProjectionRequest, "sessionId">): Promise<DesktopNativeCoreDysonWorkspaceProjectionResult>;
+  systemSpaceStationWorkspaceProjection?(request: Omit<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest, "sessionId">): Promise<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult>;
   applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }>;
   advance(request: {
     baseRevision: number;
@@ -925,6 +929,29 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
       throw new Error("Windows 原生戴森球工作区投影不可用");
     }
     return desktop.getNativeCoreDysonWorkspaceProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async systemSpaceStationWorkspaceProjection(
+    request: Omit<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "system-space-station-workspace-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "system-space-station-workspace-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreSystemSpaceStationWorkspaceProjection !== "function") {
+      throw new Error("Windows 原生恒星系空间站工作区投影不可用");
+    }
+    return desktop.getNativeCoreSystemSpaceStationWorkspaceProjection({ sessionId: this.sessionId, ...request });
   }
 
   async applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }> {

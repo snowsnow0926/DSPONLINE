@@ -457,6 +457,25 @@ pub enum ControlRequest {
         shell_cursor: usize,
         shell_limit: usize,
     },
+    CoreSystemSpaceStationWorkspaceProjection {
+        session_id: String,
+        run_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        system_id: String,
+        #[serde(default)]
+        requirement_cursor: usize,
+        requirement_limit: usize,
+        #[serde(default)]
+        inventory_cursor: usize,
+        inventory_limit: usize,
+        #[serde(default)]
+        tray_cursor: usize,
+        tray_limit: usize,
+        #[serde(default)]
+        station_cursor: usize,
+        station_limit: usize,
+    },
     CoreApplyCommand {
         session_id: String,
         command: SimulationCommandPatch,
@@ -1821,6 +1840,64 @@ mod tests {
                 );
             }
             _ => panic!("Dyson workspace decoded as the wrong variant"),
+        }
+    }
+
+    #[test]
+    fn system_space_station_workspace_protocol_preserves_lineage_and_all_page_selectors() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreSystemSpaceStationWorkspaceProjection",
+            "sessionId": "core-station",
+            "runId": "authority-run-7",
+            "expectedRevision": 47,
+            "expectedRegistryFingerprint": "builtin:test",
+            "systemId": "helios",
+            "requirementCursor": 1,
+            "requirementLimit": 2,
+            "inventoryCursor": 3,
+            "inventoryLimit": 4,
+            "trayCursor": 5,
+            "trayLimit": 6,
+            "stationCursor": 7,
+            "stationLimit": 8
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreSystemSpaceStationWorkspaceProjection {
+                session_id,
+                run_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                system_id,
+                requirement_cursor,
+                requirement_limit,
+                inventory_cursor,
+                inventory_limit,
+                tray_cursor,
+                tray_limit,
+                station_cursor,
+                station_limit,
+            } => {
+                assert_eq!(session_id, "core-station");
+                assert_eq!(run_id, "authority-run-7");
+                assert_eq!(expected_revision, 47);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(system_id, "helios");
+                assert_eq!(
+                    [
+                        requirement_cursor,
+                        requirement_limit,
+                        inventory_cursor,
+                        inventory_limit,
+                        tray_cursor,
+                        tray_limit,
+                        station_cursor,
+                        station_limit,
+                    ],
+                    [1, 2, 3, 4, 5, 6, 7, 8]
+                );
+            }
+            _ => panic!("system-space-station workspace decoded as the wrong variant"),
         }
     }
 }

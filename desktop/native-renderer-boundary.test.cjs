@@ -1795,7 +1795,7 @@ test("Electron main uses the dedicated native renderer boundary", () => {
     .map((match) => match[1]);
   const preloadChannels = [...preload.matchAll(/invokeNative\("(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  assert.equal(mainChannels.length, 58);
+  assert.equal(mainChannels.length, 59);
   assert.ok(mainChannels.includes("desktop:native-core-reconcile-command"));
   assert.ok(preloadChannels.includes("desktop:native-core-reconcile-command"));
   assert.ok(mainChannels.includes("desktop:native-player-authority-set-paused"));
@@ -1838,5 +1838,7 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.ok(preloadChannels.includes("desktop:native-core-stellar-quantum-projection"));
   assert.ok(mainChannels.includes("desktop:native-core-dyson-workspace-projection"));
   assert.ok(preloadChannels.includes("desktop:native-core-dyson-workspace-projection"));
+  assert.ok(mainChannels.includes("desktop:native-core-system-space-station-workspace-projection"));
+  assert.ok(preloadChannels.includes("desktop:native-core-system-space-station-workspace-projection"));
   assert.deepEqual(new Set(preloadChannels), new Set(mainChannels));
 });

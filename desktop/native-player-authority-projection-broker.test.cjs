@@ -123,6 +123,14 @@ function fixture(initialSnapshot = {}) {
       calls.push(["dyson-workspace-v1", ownerId, request]);
       return { projectionType: "dyson-workspace-v1", schemaVersion: 1, revision: request.expectedRevision };
     },
+    async systemSpaceStationWorkspaceProjection(ownerId, request) {
+      calls.push(["system-space-station-workspace-v1", ownerId, request]);
+      return {
+        projectionType: "system-space-station-workspace-v1",
+        schemaVersion: 1,
+        revision: request.expectedRevision,
+      };
+    },
   };
   const broker = new NativePlayerAuthorityProjectionBroker({
     runtime: { snapshot: () => ({ ...snapshot }) },
@@ -141,7 +149,7 @@ function fixture(initialSnapshot = {}) {
 
 test("active same-session same-revision reads use only the main owner identity", async () => {
   const value = fixture();
-  for (const projectionType of ["viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "blueprint-workspace-v1", "blueprint-capture-context-v1", "blueprint-import-context-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "command-palette-entity-search-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"]) {
+  for (const projectionType of ["viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "blueprint-workspace-v1", "blueprint-capture-context-v1", "blueprint-import-context-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "command-palette-entity-search-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1", "system-space-station-workspace-v1"]) {
     const request = { sessionId: "core-main-1", expectedRevision: 17 };
     const result = await value.broker.read(23, projectionType, request);
     assert.equal(result.revision, 17);
@@ -173,6 +181,7 @@ test("active same-session same-revision reads use only the main owner identity",
     ["stellar-industry-v2", "main-player-authority"],
     ["stellar-quantum-v1", "main-player-authority"],
     ["dyson-workspace-v1", "main-player-authority"],
+    ["system-space-station-workspace-v1", "main-player-authority"],
   ]);
 });
 
@@ -261,6 +270,7 @@ test("main routes matching authority reads and keeps identity-bearing control ou
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "stellar-industry-v2", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "stellar-quantum-v1", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "dyson-workspace-v1", request\)/);
+  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?"system-space-station-workspace-v1",[\s\S]*?request/);
   assert.match(preload, /getNativePlayerAuthorityState/);
   assert.match(preload, /onNativePlayerAuthorityState/);
   assert.doesNotMatch(preload, /activateNativePlayerAuthority|commitNativePlayerAuthority|retryNativePlayerAuthority/);

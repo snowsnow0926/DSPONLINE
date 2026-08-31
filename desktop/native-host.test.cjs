@@ -146,7 +146,7 @@ test("native projection transfer carries bounded identity and SHA-256 metadata",
   assert.equal(JSON.parse(factoryInventoryTransfer.payload).revision, 13);
   for (const projectionType of [
     "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1",
-    "dyson-workspace-v1",
+    "dyson-workspace-v1", "system-space-station-workspace-v1",
   ]) {
     const stellarTransfer = encodeNativeProjectionTransfer({
       sessionId: "core-1",
@@ -919,6 +919,51 @@ test("core registry forwards exact bounded Dyson workspace page selectors and re
     () => registry.dysonWorkspaceProjection(7, { ...request, unexpected: true }),
     /Dyson workspace projection request is invalid/,
   );
+});
+
+test("core registry forwards exact bounded system-space-station selectors and lineage", async () => {
+  const calls = [];
+  const registry = new NativeCoreSessionRegistry({
+    request(request) {
+      calls.push(request);
+      return Promise.resolve({
+        schemaVersion: 1,
+        projectionType: "system-space-station-workspace-v1",
+        revision: 8,
+      });
+    },
+  });
+  registry.sessions.set("core-station", {
+    ownerId: 7, slot: "normal-main", ownerEpoch: 1, state: "owned", inFlight: 0,
+  });
+  const request = {
+    sessionId: "core-station",
+    runId: "run-station-1",
+    expectedRevision: 8,
+    expectedRegistryFingerprint: "builtin:test",
+    systemId: "mod:星系/Ω🚀",
+    requirementCursor: 1,
+    requirementLimit: 2,
+    inventoryCursor: 3,
+    inventoryLimit: 4,
+    trayCursor: 5,
+    trayLimit: 6,
+    stationCursor: 7,
+    stationLimit: 8,
+  };
+  await registry.systemSpaceStationWorkspaceProjection(7, request);
+  assert.deepEqual(calls, [{ operation: "coreSystemSpaceStationWorkspaceProjection", ...request }]);
+  for (const invalid of [
+    { ...request, runId: "bad\nrun" },
+    { ...request, systemId: "bad\nidentifier" },
+    { ...request, stationLimit: 65 },
+    { ...request, unexpected: true },
+  ]) {
+    assert.throws(
+      () => registry.systemSpaceStationWorkspaceProjection(7, invalid),
+      /system-space-station workspace projection request is invalid/,
+    );
+  }
 });
 
 test("core owner transfer is atomic against in-flight requests and epoch-protected against ABA", async () => {

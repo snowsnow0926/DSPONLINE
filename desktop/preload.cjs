@@ -17,7 +17,7 @@ const NATIVE_CORE_TRANSFER_PROJECTION_TYPES = Object.freeze([
   "viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "blueprint-workspace-v1", "blueprint-capture-context-v1", "blueprint-import-context-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1",
   "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2",
   "stellar-quantum-v1",
-  "dyson-workspace-v1",
+  "dyson-workspace-v1", "system-space-station-workspace-v1",
 ]);
 let nativeProjectionSequence = 0;
 
@@ -253,7 +253,7 @@ function requestNativeCoreProjectionTransfer(request) {
         return;
       }
     }
-    if (["blueprint-workspace-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType)) {
+    if (["blueprint-workspace-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1", "system-space-station-workspace-v1"].includes(request.projectionType)) {
       let requestBytes;
       try {
         requestBytes = Buffer.byteLength(JSON.stringify({
@@ -404,6 +404,7 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   getNativeCoreStellarIndustryV2Projection: (request) => invokeNative("desktop:native-core-stellar-industry-v2-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生恒星工业 v2 投影请求失败，请重试" }, request),
   getNativeCoreStellarQuantumProjection: (request) => invokeNative("desktop:native-core-stellar-quantum-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生量子库存投影请求失败，请重试" }, request),
   getNativeCoreDysonWorkspaceProjection: (request) => invokeNative("desktop:native-core-dyson-workspace-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生戴森球工作区投影请求失败，请重试" }, request),
+  getNativeCoreSystemSpaceStationWorkspaceProjection: (request) => invokeNative("desktop:native-core-system-space-station-workspace-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生恒星系空间站工作区投影请求失败，请重试" }, request),
   getNativeCoreCommandPaletteEntitySearch: (request) => invokeNative("desktop:native-core-command-palette-entity-search", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生命令面板设备搜索失败，请重试" }, request),
   requestNativeCoreProjectionTransfer,
   applyNativeCoreCommand: (request) => invokeNative("desktop:native-core-apply-command", { fallbackCode: "NATIVE_CORE_COMMAND_FAILED", message: "原生影子命令执行失败，请重试" }, request),

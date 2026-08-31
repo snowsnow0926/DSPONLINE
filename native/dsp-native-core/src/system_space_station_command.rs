@@ -1790,11 +1790,14 @@ mod tests {
         let other = prepare_system_space_station_command(
             &changed,
             &authority(),
-            request_in_system("alpha", SystemSpaceStationIntent::ModuleTarget {
-                system_id: "alpha".to_owned(),
-                module: SystemSpaceStationModule::Backbone,
-                target: 1,
-            }),
+            request_in_system(
+                "alpha",
+                SystemSpaceStationIntent::ModuleTarget {
+                    system_id: "alpha".to_owned(),
+                    module: SystemSpaceStationModule::Backbone,
+                    target: 1,
+                },
+            ),
         )
         .unwrap();
         other.apply(&mut changed, &authority()).unwrap();
@@ -1848,11 +1851,14 @@ mod tests {
         let prepared = prepare_system_space_station_command(
             &state,
             &authority(),
-            request_in_system("alpha", SystemSpaceStationIntent::ModuleTarget {
-                system_id: "alpha".to_owned(),
-                module: SystemSpaceStationModule::Backbone,
-                target: 2,
-            }),
+            request_in_system(
+                "alpha",
+                SystemSpaceStationIntent::ModuleTarget {
+                    system_id: "alpha".to_owned(),
+                    module: SystemSpaceStationModule::Backbone,
+                    target: 2,
+                },
+            ),
         )
         .unwrap();
         prepared.apply(&mut state, &authority()).unwrap();
@@ -1860,11 +1866,14 @@ mod tests {
         assert_eq!(station["modules"]["backbone"], 2);
         assert_eq!(station["inventory"]["frame_material"], "999800000");
 
-        let mut down = request_in_system("alpha", SystemSpaceStationIntent::ModuleTarget {
-            system_id: "alpha".to_owned(),
-            module: SystemSpaceStationModule::Backbone,
-            target: 0,
-        });
+        let mut down = request_in_system(
+            "alpha",
+            SystemSpaceStationIntent::ModuleTarget {
+                system_id: "alpha".to_owned(),
+                module: SystemSpaceStationModule::Backbone,
+                target: 0,
+            },
+        );
         down.expected_revision = 8;
         let prepared = prepare_system_space_station_command(&state, &authority(), down).unwrap();
         prepared.apply(&mut state, &authority()).unwrap();
@@ -1883,11 +1892,14 @@ mod tests {
             prepare_system_space_station_command(
                 &poor,
                 &authority(),
-                request_in_system("alpha", SystemSpaceStationIntent::ModuleTarget {
-                    system_id: "alpha".to_owned(),
-                    module: SystemSpaceStationModule::Backbone,
-                    target: 1
-                })
+                request_in_system(
+                    "alpha",
+                    SystemSpaceStationIntent::ModuleTarget {
+                        system_id: "alpha".to_owned(),
+                        module: SystemSpaceStationModule::Backbone,
+                        target: 1
+                    }
+                )
             )
             .is_err()
         );
@@ -1895,11 +1907,14 @@ mod tests {
             prepare_system_space_station_command(
                 &poor,
                 &authority(),
-                request_in_system("alpha", SystemSpaceStationIntent::ModuleTarget {
-                    system_id: "alpha".to_owned(),
-                    module: SystemSpaceStationModule::Backbone,
-                    target: MAX_MODULE_COUNT + 1
-                })
+                request_in_system(
+                    "alpha",
+                    SystemSpaceStationIntent::ModuleTarget {
+                        system_id: "alpha".to_owned(),
+                        module: SystemSpaceStationModule::Backbone,
+                        target: MAX_MODULE_COUNT + 1
+                    }
+                )
             )
             .is_err()
         );
@@ -1920,11 +1935,14 @@ mod tests {
         let result = prepare_system_space_station_command(
             &state,
             &authority(),
-            request_in_system("alpha", SystemSpaceStationIntent::ModuleTarget {
-                system_id: "alpha".to_owned(),
-                module: SystemSpaceStationModule::Backbone,
-                target: 0,
-            }),
+            request_in_system(
+                "alpha",
+                SystemSpaceStationIntent::ModuleTarget {
+                    system_id: "alpha".to_owned(),
+                    module: SystemSpaceStationModule::Backbone,
+                    target: 0,
+                },
+            ),
         );
         assert!(result.is_err());
         assert_eq!(state.canonical_sha256().unwrap(), before);
@@ -2166,11 +2184,14 @@ mod tests {
     #[test]
     fn command_id_binding_is_replay_stable_and_detects_payload_collision() {
         let state = state_with(&[], vec![], vec![]);
-        let first_request = request_in_system("alpha", SystemSpaceStationIntent::ModuleTarget {
-            system_id: "alpha".to_owned(),
-            module: SystemSpaceStationModule::Backbone,
-            target: 1,
-        });
+        let first_request = request_in_system(
+            "alpha",
+            SystemSpaceStationIntent::ModuleTarget {
+                system_id: "alpha".to_owned(),
+                module: SystemSpaceStationModule::Backbone,
+                target: 1,
+            },
+        );
         let first =
             prepare_system_space_station_command(&state, &authority(), first_request.clone())
                 .unwrap();
@@ -2188,11 +2209,14 @@ mod tests {
         let collision = prepare_system_space_station_command(
             &state,
             &authority(),
-            request_in_system("alpha", SystemSpaceStationIntent::ModuleTarget {
-                system_id: "alpha".to_owned(),
-                module: SystemSpaceStationModule::Backbone,
-                target: 2,
-            }),
+            request_in_system(
+                "alpha",
+                SystemSpaceStationIntent::ModuleTarget {
+                    system_id: "alpha".to_owned(),
+                    module: SystemSpaceStationModule::Backbone,
+                    target: 2,
+                },
+            ),
         )
         .unwrap();
         assert_eq!(

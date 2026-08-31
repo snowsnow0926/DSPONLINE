@@ -93,6 +93,7 @@ function projection(
   counts: { library: number; queue: number },
   totalCount: number,
   overrides: Partial<DesktopNativeCoreBlueprintWorkspaceResult> = {},
+  queueEntryId: string | null = null,
 ): DesktopNativeCoreBlueprintWorkspaceResult {
   const pageCursor = totalCount === 0 ? 0
     : cursor < totalCount ? cursor
@@ -111,6 +112,7 @@ function projection(
       expectedRegistryFingerprint: identity.registryFingerprint,
       section,
       blueprintId,
+      queueEntryId,
       cursor,
       limit: NATIVE_BLUEPRINT_PAGE_ROWS,
     },
@@ -157,6 +159,13 @@ function fixtureSource(
         counts,
         sourceRows.length,
       );
+    },
+    async readVerifiedQueueMembership(queueEntryId) {
+      return {
+        ...identity,
+        queueEntryId,
+        present: queue.some((row) => row.id === queueEntryId),
+      };
     },
   };
 }
@@ -224,6 +233,7 @@ describe("NativeBlueprintWorkspaceStore", () => {
     }, 2);
     const duplicateSource: NativeBlueprintWorkspaceSource = {
       boundIdentity: IDENTITY,
+      readVerifiedQueueMembership: async () => null,
       readVerifiedBlueprintPage: async (section) => section === "library"
         ? duplicate
         : projection(IDENTITY, "queue", null, 0, [], { library: 2, queue: 0 }, 0),
@@ -235,6 +245,7 @@ describe("NativeBlueprintWorkspaceStore", () => {
     const ordinary = fixtureSource(IDENTITY, [summary("bp")], []);
     const driftSource: NativeBlueprintWorkspaceSource = {
       boundIdentity: IDENTITY,
+      readVerifiedQueueMembership: ordinary.readVerifiedQueueMembership,
       readVerifiedBlueprintPage: async (section, blueprintId, cursor) => {
         const page = await ordinary.readVerifiedBlueprintPage(section, blueprintId, cursor);
         return section === "queue" && page ? { ...page, counts: { ...page.counts, library: 2 } } : page;
@@ -284,6 +295,7 @@ describe("NativeBlueprintWorkspaceStore", () => {
     const oldBase = fixtureSource(IDENTITY, [oldBlueprint], []);
     const oldSource: NativeBlueprintWorkspaceSource = {
       boundIdentity: IDENTITY,
+      readVerifiedQueueMembership: oldBase.readVerifiedQueueMembership,
       readVerifiedBlueprintPage: async (section, blueprintId, cursor) => section === "detail"
         ? oldDetail.promise
         : oldBase.readVerifiedBlueprintPage(section, blueprintId, cursor),
@@ -320,6 +332,7 @@ describe("NativeBlueprintWorkspaceStore", () => {
       const counts = { library: 4_096, queue: 4_096 };
       const sourceValue: NativeBlueprintWorkspaceSource = {
         boundIdentity: identity,
+        readVerifiedQueueMembership: async () => null,
         async readVerifiedBlueprintPage(section, blueprintId, cursor) {
           calls.push(`${section}:${blueprintId ?? "-"}:${cursor}`);
           await new Promise((resolve) => setTimeout(resolve, 1));
@@ -367,12 +380,54 @@ describe("NativeBlueprintWorkspaceStore", () => {
       expectedRegistryFingerprint: IDENTITY.registryFingerprint,
       section: "library",
       blueprintId: null,
+      queueEntryId: null,
       cursor: 0,
       limit: 32,
     });
 
     reader.mockResolvedValueOnce({ ...valid, revision: IDENTITY.revision + 1 });
     await expect(sourceValue?.readVerifiedBlueprintPage("library", null, 0)).resolves.toBeNull();
+  });
+
+  it("returns a target-bound same-revision whole-queue membership proof", async () => {
+    const target = "queue-across-page";
+    const absent = projection(
+      IDENTITY,
+      "queue-membership",
+      null,
+      0,
+      [],
+      { library: 3, queue: 40 },
+      0,
+      {},
+      target,
+    );
+    const reader = vi.fn().mockResolvedValue(absent);
+    const sourceValue = createNativePlayerAuthorityBlueprintWorkspaceSource({
+      getNativeCoreBlueprintWorkspace: reader,
+    }, IDENTITY)!;
+
+    await expect(sourceValue.readVerifiedQueueMembership(target)).resolves.toEqual({
+      ...IDENTITY,
+      queueEntryId: target,
+      present: false,
+    });
+    expect(reader).toHaveBeenCalledWith({
+      sessionId: IDENTITY.sessionId,
+      expectedRevision: IDENTITY.revision,
+      expectedRegistryFingerprint: IDENTITY.registryFingerprint,
+      section: "queue-membership",
+      blueprintId: null,
+      queueEntryId: target,
+      cursor: 0,
+      limit: 32,
+    });
+
+    reader.mockResolvedValueOnce({
+      ...absent,
+      request: { ...absent.request, queueEntryId: "queue-other" },
+    });
+    await expect(sourceValue.readVerifiedQueueMembership(target)).resolves.toBeNull();
   });
 
   it("fails closed for a mismatched source identity", async () => {

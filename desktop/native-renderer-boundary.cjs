@@ -422,17 +422,25 @@ function normalizeBlueprintWorkspaceContext(value, label) {
     value,
     [
       "sessionId", "expectedRevision", "expectedRegistryFingerprint", "section",
-      "blueprintId", "cursor", "limit",
+      "blueprintId", "queueEntryId", "cursor", "limit",
     ],
     label,
   );
-  const section = oneOf(source.section, ["library", "detail", "queue"], `${label} section`);
+  const section = oneOf(
+    source.section,
+    ["library", "detail", "queue", "queue-membership"],
+    `${label} section`,
+  );
   const blueprintId = source.blueprintId === null
     ? null
     : blueprintOpaqueText(source.blueprintId, `${label} blueprint ID`, 512);
+  const queueEntryId = source.queueEntryId === null
+    ? null
+    : blueprintOpaqueText(source.queueEntryId, `${label} queue entry ID`, 512);
   const cursor = safeInteger(source.cursor, `${label} cursor`);
   if (cursor > 4_096 || (section === "detail") !== (blueprintId !== null) ||
-      section === "detail" && cursor !== 0 ||
+      (section === "queue-membership") !== (queueEntryId !== null) ||
+      ["detail", "queue-membership"].includes(section) && cursor !== 0 ||
       source.limit !== 32) throw protocolError(`${label} selector`);
   return {
     sessionId: logicalId(source.sessionId, `${label} session`, 128),
@@ -444,6 +452,7 @@ function normalizeBlueprintWorkspaceContext(value, label) {
     ),
     section,
     blueprintId,
+    queueEntryId,
     cursor,
     limit: 32,
   };
@@ -2873,7 +2882,7 @@ function normalizeCoreBlueprintWorkspaceProjection(value, context) {
     source.request,
     [
       "expectedRevision", "expectedRegistryFingerprint", "section", "blueprintId",
-      "cursor", "limit",
+      "queueEntryId", "cursor", "limit",
     ],
     "native blueprint workspace request echo",
   );
@@ -2881,6 +2890,7 @@ function normalizeCoreBlueprintWorkspaceProjection(value, context) {
       requestSource.expectedRegistryFingerprint !== projectionContext.expectedRegistryFingerprint ||
       requestSource.section !== projectionContext.section ||
       requestSource.blueprintId !== projectionContext.blueprintId ||
+      requestSource.queueEntryId !== projectionContext.queueEntryId ||
       requestSource.cursor !== projectionContext.cursor || requestSource.limit !== 32) {
     throw protocolError("native blueprint workspace request binding");
   }
@@ -2906,11 +2916,22 @@ function normalizeCoreBlueprintWorkspaceProjection(value, context) {
       totalCount !== expectedTotal || projectionContext.section === "detail" && totalCount > 1) {
     throw protocolError("native blueprint workspace page cardinality");
   }
+  if (projectionContext.section === "queue-membership" && totalCount > 1) {
+    throw protocolError("native blueprint workspace membership cardinality");
+  }
   const rows = pageSource.rows.map((row, index) => projectionContext.section === "library"
     ? normalizeBlueprintSummary(row, `native blueprint workspace library row[${index}]`)
     : projectionContext.section === "detail"
       ? normalizeBlueprintDetail(row, `native blueprint workspace detail row[${index}]`)
-      : normalizeBlueprintQueueRow(row, `native blueprint workspace queue row[${index}]`));
+      : projectionContext.section === "queue-membership"
+        ? {
+            id: blueprintOpaqueText(
+              exactObject(row, ["id"], `native blueprint workspace membership row[${index}]`).id,
+              `native blueprint workspace membership row[${index}] ID`,
+              512,
+            ),
+          }
+        : normalizeBlueprintQueueRow(row, `native blueprint workspace queue row[${index}]`));
   const expectedRows = Math.min(32, totalCount - expectedPageCursor);
   if (rows.length !== expectedRows) throw protocolError("native blueprint workspace page cardinality");
   const rowIds = new Set();
@@ -2922,6 +2943,10 @@ function normalizeCoreBlueprintWorkspaceProjection(value, context) {
   if (projectionContext.section === "detail" && rows.length === 1 &&
       rows[0].summary.id !== projectionContext.blueprintId) {
     throw protocolError("native blueprint workspace detail selection");
+  }
+  if (projectionContext.section === "queue-membership" && rows.length === 1 &&
+      rows[0].id !== projectionContext.queueEntryId) {
+    throw protocolError("native blueprint workspace membership selection");
   }
   const consumed = expectedPageCursor + rows.length;
   const expectedNextCursor = consumed < totalCount ? consumed : null;
@@ -2959,6 +2984,7 @@ function normalizeCoreBlueprintWorkspaceProjection(value, context) {
       expectedRegistryFingerprint: projectionContext.expectedRegistryFingerprint,
       section: projectionContext.section,
       blueprintId: projectionContext.blueprintId,
+      queueEntryId: projectionContext.queueEntryId,
       cursor: projectionContext.cursor,
       limit: 32,
     },

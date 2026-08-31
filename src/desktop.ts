@@ -1061,13 +1061,18 @@ export interface DesktopNativeCoreConstructionInventoryResult {
   };
 }
 
-export type DesktopNativeCoreBlueprintWorkspaceSection = "library" | "detail" | "queue";
+export type DesktopNativeCoreBlueprintWorkspaceSection =
+  | "library"
+  | "detail"
+  | "queue"
+  | "queue-membership";
 
 export interface DesktopNativeCoreBlueprintWorkspaceRequest extends DesktopNativeCoreSessionRequest {
   expectedRevision: number;
   expectedRegistryFingerprint: string;
   section: DesktopNativeCoreBlueprintWorkspaceSection;
   blueprintId: string | null;
+  queueEntryId: string | null;
   cursor: number;
   limit: 32;
 }
@@ -1156,6 +1161,11 @@ export interface DesktopNativeCoreBlueprintQueueRow {
   actionable: false;
 }
 
+/** Minimal same-revision global membership proof row; no mutable queue payload crosses IPC. */
+export interface DesktopNativeCoreBlueprintQueueMembershipRow {
+  id: string;
+}
+
 export interface DesktopNativeCoreBlueprintWorkspaceResult {
   schemaVersion: 1;
   projectionType: "blueprint-workspace-v1";
@@ -1170,7 +1180,8 @@ export interface DesktopNativeCoreBlueprintWorkspaceResult {
     cursor: number;
     limit: 32;
     totalCount: number;
-    rows: Array<DesktopNativeCoreBlueprintSummary | DesktopNativeCoreBlueprintDetail | DesktopNativeCoreBlueprintQueueRow>;
+    rows: Array<DesktopNativeCoreBlueprintSummary | DesktopNativeCoreBlueprintDetail |
+      DesktopNativeCoreBlueprintQueueRow | DesktopNativeCoreBlueprintQueueMembershipRow>;
     nextCursor: number | null;
     truncated: boolean;
   };

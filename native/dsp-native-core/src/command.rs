@@ -8517,6 +8517,9 @@ impl CoreState {
         if crate::blueprint_command::command_contains_intent(command) {
             return crate::blueprint_command::validate_command(self, command);
         }
+        if crate::construction_queue_command::command_contains_intent(command) {
+            return crate::construction_queue_command::validate_command(self, command);
+        }
         if crate::recipe_command::command_contains_intent(command) {
             return crate::recipe_command::validate_command(self, command);
         }
@@ -8788,6 +8791,11 @@ impl CoreState {
             result.topology_dirty = true;
             return Ok(result);
         }
+        if crate::construction_queue_command::command_contains_intent(command) {
+            crate::construction_queue_command::validate_resume_marker(command)?;
+            result.topology_dirty = true;
+            return Ok(result);
+        }
         if command_contains_station_warper_inventory_intent(command) {
             require_station_warper_inventory_intent(command)?;
             result.topology_dirty = false;
@@ -8943,9 +8951,11 @@ impl CoreState {
         let expanded_black_hole_pause_intent;
         let expanded_time_warp_intent;
         let expanded_blueprint_intent;
+        let expanded_construction_queue_cancel_intent;
         let expanded_entity_recipe_intent;
         let mut compact_entity_recipe_receipt_id = None;
         let mut blueprint_delete_index = None;
+        let mut construction_queue_cancel_intent = None;
         let applied_command = if command_contains_active_planet_intent(command) {
             expanded_active_planet_intent = expand_active_planet_intent(self, command)?;
             &expanded_active_planet_intent
@@ -8987,6 +8997,11 @@ impl CoreState {
             expanded_blueprint_intent = crate::blueprint_command::expand_intent(self, command)?;
             blueprint_delete_index = expanded_blueprint_intent.delete_index();
             expanded_blueprint_intent.command()
+        } else if crate::construction_queue_command::command_contains_intent(command) {
+            expanded_construction_queue_cancel_intent =
+                crate::construction_queue_command::expand_intent(self, command)?;
+            construction_queue_cancel_intent = Some(&expanded_construction_queue_cancel_intent);
+            expanded_construction_queue_cancel_intent.command()
         } else if crate::manual_mining::command_contains_intent(command) {
             expanded_manual_mining_intent = crate::manual_mining::expand_intent(self, command)?;
             &expanded_manual_mining_intent
@@ -9022,10 +9037,13 @@ impl CoreState {
             }
             blueprints.remove(index);
         }
-        let base = match base {
+        let mut base = match base {
             Value::Object(base) => base,
             _ => bail!("native command replaced the GameState root"),
         };
+        if let Some(expansion) = construction_queue_cancel_intent {
+            expansion.apply_to_base(&mut base)?;
+        }
         next.install_base_from_command(base, rebuild_production_history);
 
         for record in &applied_command.changed_entities {
@@ -9141,6 +9159,7 @@ impl CoreState {
         }
         next.revision += 1;
         let only_pause_changed = blueprint_delete_index.is_none()
+            && construction_queue_cancel_intent.is_none()
             && applied_command.changed_entities.is_empty()
             && applied_command.added_entities.is_empty()
             && applied_command.removed_entity_ids.is_empty()
@@ -9190,6 +9209,9 @@ impl CoreState {
             // renderer-derived dirty set. Blueprint workspace consumers must
             // therefore re-read their bounded projection after live apply just
             // as they do after cold WAL recovery.
+            result.topology_dirty = true;
+        }
+        if construction_queue_cancel_intent.is_some() {
             result.topology_dirty = true;
         }
         *self = next;
@@ -19586,5 +19608,265 @@ mod tests {
         assert!(state.apply_command(&raw_array_delete).is_err());
         assert_eq!(state.revision, 9);
         assert_eq!(state.canonical_sha256().unwrap(), before);
+    }
+
+    fn construction_queue_cancel_state() -> CoreState {
+        let mut state = blueprint_rename_state();
+        state.base_value_mut().insert(
+            "construction".to_owned(),
+            serde_json::json!({
+                "conveyor_belt_mk1": 11,
+                "assembling_machine_mk1": 3
+            }),
+        );
+        state.base_value_mut().insert(
+            "portableFleet".to_owned(),
+            serde_json::json!({
+                "logistics_drone": 5,
+                "logistics_vessel": 2
+            }),
+        );
+        state.base_value_mut().insert(
+            "blueprintVersions".to_owned(),
+            serde_json::json!([
+                {
+                    "id": "version-cancel",
+                    "blueprintId": "mod:opaque/rocket",
+                    "revision": 1,
+                    "definition": { "opaque": "prune-only-after-cancel" }
+                },
+                {
+                    "id": "version-retained",
+                    "blueprintId": "builtin-second",
+                    "revision": 7,
+                    "definition": { "opaque": "remaining-queue-reference" }
+                },
+                {
+                    "id": "version-orphan",
+                    "blueprintId": "orphan",
+                    "revision": 1,
+                    "definition": { "opaque": "legacy-prune-behaviour" }
+                }
+            ]),
+        );
+        state.base_value_mut().insert(
+            "constructionQueue".to_owned(),
+            serde_json::json!([
+                {
+                    "id": "queue-cancel",
+                    "blueprintId": "mod:opaque/rocket",
+                    "blueprintVersionId": "version-cancel",
+                    "status": "pending-materials",
+                    "reservedConstruction": {
+                        "conveyor_belt_mk1": 4,
+                        "storage_mk1": 7
+                    },
+                    "reservedFleet": {
+                        "logistics_drone": 6,
+                        "logistics_vessel": 0
+                    },
+                    "opaqueQueuePayload": { "neverEnterMarker": true }
+                },
+                {
+                    "id": "queue-retained",
+                    "blueprintId": "builtin-second",
+                    "blueprintVersionId": "version-retained",
+                    "status": "pending-materials",
+                    "reservedConstruction": { "assembling_machine_mk1": 2 },
+                    "reservedFleet": {},
+                    "opaqueQueuePayload": { "keep": [1, 2, 3] }
+                }
+            ]),
+        );
+        state
+    }
+
+    fn construction_queue_cancel_intent_command(revision: u64, id: &str) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("constructionQueue".to_owned()),
+                PathSegment::Key("intent".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(serde_json::json!({
+                "kind": "cancel",
+                "id": id,
+                "revision": revision
+            })),
+        }];
+        command
+    }
+
+    #[test]
+    fn player_authority_construction_queue_cancel_refunds_atomically_and_prunes_versions() {
+        let command = construction_queue_cancel_intent_command(9, "queue-cancel");
+        let encoded = serde_json::to_string(&command).unwrap();
+        assert!(encoded.contains("\"kind\":\"cancel\""));
+        assert!(encoded.contains("\"id\":\"queue-cancel\""));
+        assert!(encoded.contains("\"revision\":9"));
+        for forbidden in [
+            "reservedConstruction",
+            "reservedFleet",
+            "portableFleet",
+            "blueprintVersions",
+            "opaqueQueuePayload",
+            "entities",
+            "belts",
+        ] {
+            assert!(!encoded.contains(forbidden));
+        }
+
+        let mut state = construction_queue_cancel_state();
+        let before = state.base_value().clone();
+        let entity_before = state.parse_entity(0).unwrap();
+        let belt_before = state.parse_belt(0).unwrap();
+        let receipt = state.apply_player_authority_command(&command).unwrap();
+
+        assert_eq!(receipt.previous_revision, 9);
+        assert_eq!(receipt.revision, 10);
+        assert!(receipt.changed_entity_ids.is_empty());
+        assert!(receipt.changed_belt_ids.is_empty());
+        assert!(receipt.topology_dirty);
+        assert_eq!(state.base_value()["construction"]["conveyor_belt_mk1"], 15);
+        assert_eq!(state.base_value()["construction"]["storage_mk1"], 7);
+        assert_eq!(
+            state.base_value()["construction"]["assembling_machine_mk1"],
+            3
+        );
+        assert_eq!(state.base_value()["portableFleet"]["logistics_drone"], 11);
+        assert_eq!(state.base_value()["portableFleet"]["logistics_vessel"], 2);
+        assert_eq!(
+            state.base_value()["constructionQueue"],
+            Value::Array(vec![before["constructionQueue"][1].clone()])
+        );
+        assert_eq!(
+            state.base_value()["blueprintVersions"],
+            Value::Array(vec![before["blueprintVersions"][1].clone()])
+        );
+        assert_eq!(state.base_value()["blueprints"], before["blueprints"]);
+        assert_eq!(state.base_value()["nextId"], before["nextId"]);
+        assert_eq!(state.parse_entity(0).unwrap(), entity_before);
+        assert_eq!(state.parse_belt(0).unwrap(), belt_before);
+    }
+
+    #[test]
+    fn player_authority_construction_queue_cancel_replays_identically_and_recovers_receipt() {
+        let command = construction_queue_cancel_intent_command(9, "queue-cancel");
+        let durable = serde_json::to_string(&command).unwrap();
+        let replayed: SimulationCommandPatch = serde_json::from_str(&durable).unwrap();
+        let mut live = construction_queue_cancel_state();
+        let mut replay = live.clone();
+        let live_receipt = live.apply_player_authority_command(&command).unwrap();
+        let replay_receipt = replay.apply_command(&replayed).unwrap();
+        assert_eq!(live_receipt, replay_receipt);
+        assert_eq!(
+            live.canonical_sha256().unwrap(),
+            replay.canonical_sha256().unwrap()
+        );
+        let recovered = replay
+            .deterministic_player_authority_resume_result(&replayed, 9, 10)
+            .unwrap();
+        assert_eq!(recovered, replay_receipt);
+    }
+
+    #[test]
+    fn player_authority_construction_queue_cancel_matches_legacy_floor_and_clamp_refunds() {
+        let mut state = construction_queue_cancel_state();
+        state.base_value_mut()["construction"]["conveyor_belt_mk1"] = serde_json::json!(11.9);
+        state.base_value_mut()["portableFleet"]["logistics_drone"] = serde_json::json!(5.9);
+        state.base_value_mut()["constructionQueue"][0]["reservedConstruction"]["conveyor_belt_mk1"] =
+            serde_json::json!(4.8);
+        state.base_value_mut()["constructionQueue"][0]["reservedFleet"]["logistics_drone"] =
+            serde_json::json!(6.9);
+        state.base_value_mut()["constructionQueue"][0]["reservedFleet"]["logistics_vessel"] =
+            Value::from(-9);
+
+        state
+            .apply_player_authority_command(&construction_queue_cancel_intent_command(
+                9,
+                "queue-cancel",
+            ))
+            .unwrap();
+        assert_eq!(state.base_value()["construction"]["conveyor_belt_mk1"], 15);
+        assert_eq!(state.base_value()["portableFleet"]["logistics_drone"], 11);
+        assert_eq!(state.base_value()["portableFleet"]["logistics_vessel"], 2);
+    }
+
+    #[test]
+    fn player_authority_construction_queue_cancel_fails_closed_at_every_boundary() {
+        let mut cases = vec![
+            construction_queue_cancel_intent_command(9, "missing"),
+            construction_queue_cancel_intent_command(8, "queue-cancel"),
+        ];
+        let mut missing_revision = construction_queue_cancel_intent_command(9, "queue-cancel");
+        missing_revision.top_level_changes[0]
+            .value
+            .as_mut()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("revision");
+        cases.push(missing_revision);
+        let mut stale_marker = construction_queue_cancel_intent_command(9, "queue-cancel");
+        stale_marker.top_level_changes[0].value.as_mut().unwrap()["revision"] = Value::from(8);
+        cases.push(stale_marker);
+        let mut forged_refund = construction_queue_cancel_intent_command(9, "queue-cancel");
+        forged_refund.top_level_changes[0].value.as_mut().unwrap()["reservedConstruction"] =
+            serde_json::json!({ "belt_mk1": 999 });
+        cases.push(forged_refund);
+        let mut cross_domain = construction_queue_cancel_intent_command(9, "queue-cancel");
+        cross_domain.changed_entities.push(RecordPatch {
+            id: "smelter-a".to_owned(),
+            changes: vec![],
+        });
+        cases.push(cross_domain);
+
+        for command in cases {
+            let mut state = construction_queue_cancel_state();
+            let before_hash = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before_hash);
+        }
+
+        for mutate in [
+            "duplicate-queue",
+            "duplicate-version",
+            "refund-overflow",
+            "invalid-target-reservation",
+        ] {
+            let mut state = construction_queue_cancel_state();
+            match mutate {
+                "duplicate-queue" => {
+                    state.base_value_mut()["constructionQueue"][1]["id"] =
+                        Value::from("queue-cancel");
+                }
+                "duplicate-version" => {
+                    state.base_value_mut()["blueprintVersions"][1]["id"] =
+                        Value::from("version-cancel");
+                }
+                "refund-overflow" => {
+                    state.base_value_mut()["construction"]["conveyor_belt_mk1"] =
+                        Value::from(MAX_JAVASCRIPT_SAFE_INTEGER);
+                }
+                "invalid-target-reservation" => {
+                    state.base_value_mut()["constructionQueue"][0]["reservedConstruction"] =
+                        Value::from("not-an-object");
+                }
+                _ => unreachable!(),
+            }
+            let before_hash = state.canonical_sha256().unwrap();
+            assert!(
+                state
+                    .apply_player_authority_command(&construction_queue_cancel_intent_command(
+                        9,
+                        "queue-cancel",
+                    ))
+                    .is_err()
+            );
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before_hash);
+        }
     }
 }

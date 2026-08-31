@@ -18,9 +18,11 @@ import type {
   NativeBlueprintTransformBinding,
   NativeBlueprintWorkspaceFrame,
   NativeBlueprintWorkspaceIdentity,
+  NativeConstructionQueueCancelBinding,
 } from "../game/nativeBlueprintWorkspaceStore";
 import type { NativeBlueprintTransformPendingCommand } from "../game/nativeBlueprintTransformCommandReconciliation";
 import type { NativeBlueprintDeletePendingCommand } from "../game/nativeBlueprintDeleteCommandReconciliation";
+import type { NativeConstructionQueueCancelPendingCommand } from "../game/nativeConstructionQueueCancelCommandReconciliation";
 import type {
   NativeBlueprintRenamePendingIdentity,
   NativeBlueprintRenameResolution,
@@ -170,9 +172,11 @@ describe("NativeBlueprintWorkspace", () => {
         mirror: NativeBlueprintMirror,
       ) => boolean;
       onSubmitDeleteIntent?: (binding: NativeBlueprintDeleteBinding) => boolean;
+      onSubmitQueueCancelIntent?: (binding: NativeConstructionQueueCancelBinding) => boolean;
       pendingIdentity?: NativeBlueprintRenamePendingIdentity | null;
       transformPending?: NativeBlueprintTransformPendingCommand | null;
       deletePending?: NativeBlueprintDeletePendingCommand | null;
+      queueCancelPending?: NativeConstructionQueueCancelPendingCommand | null;
       latestIdentity?: NativeBlueprintWorkspaceIdentity | null;
       resolution?: NativeBlueprintRenameResolution | null;
       onConsumeRenameResolution?: (submissionId: number) => void;
@@ -195,6 +199,8 @@ describe("NativeBlueprintWorkspace", () => {
         mirror: NativeBlueprintMirror) => boolean>().mockReturnValue(true);
     const onSubmitDeleteIntent = callbacks.onSubmitDeleteIntent ??
       vi.fn<(binding: NativeBlueprintDeleteBinding) => boolean>().mockReturnValue(true);
+    const onSubmitQueueCancelIntent = callbacks.onSubmitQueueCancelIntent ??
+      vi.fn<(binding: NativeConstructionQueueCancelBinding) => boolean>().mockReturnValue(true);
     const onConsumeRenameResolution = callbacks.onConsumeRenameResolution ?? vi.fn<(submissionId: number) => void>();
     const latestIdentity = callbacks.latestIdentity === undefined && value
       ? {
@@ -216,9 +222,11 @@ describe("NativeBlueprintWorkspace", () => {
       onSubmitRenameIntent={onSubmitRenameIntent}
       onSubmitTransformIntent={onSubmitTransformIntent}
       onSubmitDeleteIntent={onSubmitDeleteIntent}
+      onSubmitQueueCancelIntent={onSubmitQueueCancelIntent}
       pendingIdentity={callbacks.pendingIdentity ?? null}
       transformPending={callbacks.transformPending ?? null}
       deletePending={callbacks.deletePending ?? null}
+      queueCancelPending={callbacks.queueCancelPending ?? null}
       resolution={callbacks.resolution ?? null}
       onConsumeRenameResolution={onConsumeRenameResolution}
       commandPending={callbacks.commandPending ?? false}
@@ -230,6 +238,7 @@ describe("NativeBlueprintWorkspace", () => {
       onSubmitRenameIntent,
       onSubmitTransformIntent,
       onSubmitDeleteIntent,
+      onSubmitQueueCancelIntent,
       onConsumeRenameResolution,
     };
   }
@@ -262,6 +271,15 @@ describe("NativeBlueprintWorkspace", () => {
     expect(host.textContent).toContain("Z \u661f");
     expect(host.textContent).toContain("\u8bed\u4e49\u672a\u8bc1\u660e");
     expect(host.textContent).toContain("\u4e0d\u4ee3\u8868\u53ef\u90e8\u7f72");
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-blueprint-queue-cancel='queue-z']")!.click());
+    expect(callbacks.onSubmitQueueCancelIntent).toHaveBeenCalledWith({
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 47,
+      registryFingerprint: "registry-a",
+      queueEntryId: "queue-z",
+      queueTotalCount: 34,
+    });
   });
 
   it("shows the selected supported detail with opaque ids and child order intact", () => {
@@ -695,7 +713,7 @@ describe("NativeBlueprintWorkspace", () => {
     expect(host.textContent).toContain("\u4e0d\u4f1a\u8bfb\u53d6\u6216\u663e\u793a JavaScript \u4e2d\u7684\u65e7\u84dd\u56fe\u6570\u636e");
   });
 
-  it("keeps the implementation detached from legacy state and every mutation except metadata intents", () => {
+  it("keeps the implementation detached from legacy state and exposes only bounded semantic intents", () => {
     const source = readFileSync(resolve("src/components/NativeBlueprintWorkspace.tsx"), "utf8");
     expect(source).not.toMatch(/from\s+["'](?:\.\/BlueprintWorkspace|\.\.\/game\/(?:engine|types|content))["']/);
     expect(source).not.toMatch(/\bGameState\b|\bgame\./);
@@ -703,6 +721,7 @@ describe("NativeBlueprintWorkspace", () => {
     expect(source).toMatch(/onSubmitRenameIntent/);
     expect(source).toMatch(/onSubmitTransformIntent/);
     expect(source).toMatch(/onSubmitDeleteIntent/);
+    expect(source).toMatch(/onSubmitQueueCancelIntent/);
     expect(source).not.toMatch(/onBlur=|onKeyDown=/);
 
     renderWorkspace(frame());
@@ -716,7 +735,7 @@ describe("NativeBlueprintWorkspace", () => {
       "close", "tab-library", "tab-queue", "select",
       "begin-rename", "cancel-rename", "submit-rename",
       "rotate-transform", "mirror-transform", "delete-blueprint",
-      "page-library-prev", "page-library-next", "page-queue-prev", "page-queue-next",
+      "cancel-queue", "page-library-prev", "page-library-next", "page-queue-prev", "page-queue-next",
     ]));
   });
 });

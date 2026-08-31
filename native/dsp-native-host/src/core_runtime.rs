@@ -3023,6 +3023,7 @@ impl CoreRegistry {
         expected_registry_fingerprint: &str,
         section: &str,
         blueprint_id: Option<&str>,
+        queue_entry_id: Option<&str>,
         cursor: usize,
         limit: usize,
     ) -> anyhow::Result<Value> {
@@ -3031,6 +3032,7 @@ impl CoreRegistry {
             expected_registry_fingerprint,
             section,
             blueprint_id,
+            queue_entry_id,
             cursor,
             limit,
         )
@@ -5510,6 +5512,106 @@ mod tests {
         serde_json::to_vec(&envelope).unwrap()
     }
 
+    fn player_authority_construction_queue_cancel_envelope() -> Vec<u8> {
+        let mut envelope: Value =
+            serde_json::from_slice(&player_authority_blueprint_rename_envelope()).unwrap();
+        envelope["state"]["construction"] = json!({
+            "conveyor_belt_mk1": 11,
+            "assembling_machine_mk1": 3
+        });
+        envelope["state"]["portableFleet"] = json!({
+            "logistics_drone": 5,
+            "logistics_vessel": 2
+        });
+        envelope["state"]["blueprintVersions"] = json!([
+            {
+                "id": "version-mod-1",
+                "blueprintId": "mod:opaque/rocket",
+                "revision": 1,
+                "createdAt": 123,
+                "definition": {
+                    "id": "mod:opaque/rocket",
+                    "name": "历史快照名",
+                    "entities": [],
+                    "belts": [],
+                    "opaqueVersionPayload": { "prune": true }
+                }
+            },
+            {
+                "id": "version-retained",
+                "blueprintId": "builtin-second",
+                "revision": 7,
+                "createdAt": 124,
+                "definition": {
+                    "id": "builtin-second",
+                    "name": "保留快照",
+                    "entities": [],
+                    "belts": [],
+                    "opaqueVersionPayload": { "keep": true }
+                }
+            },
+            {
+                "id": "version-orphan",
+                "blueprintId": "orphan",
+                "revision": 1,
+                "createdAt": 125,
+                "definition": {
+                    "id": "orphan",
+                    "name": "旧孤儿快照",
+                    "entities": [],
+                    "belts": []
+                }
+            }
+        ]);
+        envelope["state"]["constructionQueue"] = json!([
+            {
+                "id": "queue-cancel",
+                "blueprintId": "mod:opaque/rocket",
+                "blueprintVersionId": "version-mod-1",
+                "blueprintRevision": 1,
+                "blueprintName": "待取消订单",
+                "planetId": "home",
+                "position": { "x": 1, "y": 2 },
+                "rotation": 0,
+                "mirror": "none",
+                "queuedAt": 10,
+                "status": "pending-materials",
+                "reservedConstruction": {
+                    "conveyor_belt_mk1": 4,
+                    "storage_mk1": 7
+                },
+                "reservedFleet": {
+                    "logistics_drone": 6,
+                    "logistics_vessel": 0
+                },
+                "placedEntityIdsByKey": {},
+                "opaqueQueuePayload": { "neverEnterMarker": true }
+            },
+            {
+                "id": "queue-retained",
+                "blueprintId": "builtin-second",
+                "blueprintVersionId": "version-retained",
+                "blueprintRevision": 7,
+                "blueprintName": "保留订单",
+                "planetId": "home",
+                "position": { "x": 3, "y": 4 },
+                "rotation": 0,
+                "mirror": "none",
+                "queuedAt": 11,
+                "status": "pending-materials",
+                "reservedConstruction": { "assembling_machine_mk1": 2 },
+                "reservedFleet": {},
+                "placedEntityIdsByKey": {},
+                "opaqueQueuePayload": { "keep": true }
+            }
+        ]);
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        serde_json::to_vec(&envelope).unwrap()
+    }
+
     fn player_authority_fixture() -> (
         tempfile::TempDir,
         SaveStore,
@@ -5594,6 +5696,19 @@ mod tests {
     ) {
         player_authority_fixture_from_parts(
             player_authority_blueprint_rename_envelope(),
+            player_authority_catalog(),
+        )
+    }
+
+    fn player_authority_construction_queue_cancel_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        player_authority_fixture_from_parts(
+            player_authority_construction_queue_cancel_envelope(),
             player_authority_catalog(),
         )
     }
@@ -6399,6 +6514,38 @@ mod tests {
                         "kind": "delete",
                         "id": blueprint_id,
                         "revision": blueprint_revision
+                    }
+                }],
+                "changedEntities": [],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn player_authority_construction_queue_cancel_intent_command(
+        base_revision: u64,
+        command_id: &str,
+        queue_entry_id: &str,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [{
+                    "path": ["constructionQueue", "intent"],
+                    "operation": "set",
+                    "value": {
+                        "kind": "cancel",
+                        "id": queue_entry_id,
+                        "revision": base_revision
                     }
                 }],
                 "changedEntities": [],
@@ -11181,6 +11328,243 @@ mod tests {
                     .contains("\"kind\":\"delete\""),
                 "{fault:?}"
             );
+        }
+    }
+
+    #[test]
+    fn construction_queue_cancel_semantic_intent_survives_generic_cold_wal_reopen() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = player_authority_construction_queue_cancel_envelope();
+        let source: Value = serde_json::from_slice(&bytes).unwrap();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        let checkpoint = imported.checkpoint.clone();
+        let request = player_authority_construction_queue_cancel_intent_command(
+            checkpoint.revision,
+            "construction-queue-cancel-generic-wal",
+            "queue-cancel",
+        );
+        let committed = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: request.command_id,
+                    base_revision: checkpoint.revision,
+                    command: Some(request.command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(committed.revision, checkpoint.revision + 1);
+
+        let wal = store
+            .read_wal(&checkpoint.slot, checkpoint.revision)
+            .unwrap();
+        assert_eq!(wal.len(), 1);
+        let wal_payload = serde_json::to_string(&wal).unwrap();
+        assert!(wal_payload.contains("constructionQueue"));
+        assert!(wal_payload.contains("queue-cancel"));
+        assert!(wal_payload.contains("\"kind\":\"cancel\""));
+        for forbidden in [
+            "reservedConstruction",
+            "reservedFleet",
+            "portableFleet",
+            "blueprintVersions",
+            "opaqueQueuePayload",
+        ] {
+            assert!(!wal_payload.contains(forbidden), "{forbidden}");
+        }
+
+        registry
+            .export_v47(
+                &store,
+                &imported.session_id,
+                "construction-queue-cancel-live",
+                100,
+            )
+            .unwrap();
+        let live_bytes = std::fs::read(
+            root.path()
+                .join("exports/construction-queue-cancel-live.json"),
+        )
+        .unwrap();
+        let live: Value = serde_json::from_slice(&live_bytes).unwrap();
+        assert_eq!(live["state"]["construction"]["conveyor_belt_mk1"], 15);
+        assert_eq!(live["state"]["construction"]["storage_mk1"], 7);
+        assert_eq!(live["state"]["construction"]["assembling_machine_mk1"], 3);
+        assert_eq!(live["state"]["portableFleet"]["logistics_drone"], 11);
+        assert_eq!(live["state"]["portableFleet"]["logistics_vessel"], 2);
+        assert_eq!(
+            live["state"]["constructionQueue"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            live["state"]["constructionQueue"][0]["id"],
+            "queue-retained"
+        );
+        assert_eq!(
+            live["state"]["blueprintVersions"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            live["state"]["blueprintVersions"][0]["id"],
+            "version-retained"
+        );
+        assert_eq!(live["state"]["entities"], source["state"]["entities"]);
+        assert_eq!(live["state"]["belts"], source["state"]["belts"]);
+        assert_eq!(live["state"]["blueprints"], source["state"]["blueprints"]);
+        assert_eq!(live["state"]["nextId"], source["state"]["nextId"]);
+        assert!(
+            !String::from_utf8(live_bytes)
+                .unwrap()
+                .contains("\"kind\":\"cancel\"")
+        );
+        let live_state = live["state"].clone();
+        let live_hash = committed.summary.as_ref().unwrap().canonical_sha256.clone();
+
+        drop(registry);
+        drop(store);
+        let reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = CoreRegistry::default();
+        let reopened = reopened_registry
+            .open(
+                &reopened_store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        assert_eq!(reopened.replayed_wal_entries, 1);
+        assert_eq!(reopened.replayed_revision, committed.revision);
+        assert_eq!(reopened.summary.canonical_sha256, live_hash);
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &reopened.session_id,
+                "construction-queue-cancel-replayed",
+                100,
+            )
+            .unwrap();
+        let replayed: Value = serde_json::from_slice(
+            &std::fs::read(
+                root.path()
+                    .join("exports/construction-queue-cancel-replayed.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replayed["state"], live_state);
+    }
+
+    #[test]
+    fn construction_queue_cancel_is_idempotent_across_all_host_fault_boundaries() {
+        let command_id = "construction-queue-cancel-durable-boundary";
+        let (_clean_root, mut clean_store, mut clean_registry, clean_session, checkpoint) =
+            player_authority_construction_queue_cancel_fixture();
+        let request = || {
+            player_authority_construction_queue_cancel_intent_command(
+                checkpoint.revision,
+                command_id,
+                "queue-cancel",
+            )
+        };
+        let clean = clean_registry
+            .commit_player_authority_command(&mut clean_store, &clean_session, request())
+            .unwrap();
+        assert!(clean.changed_entity_ids.is_empty());
+        assert!(clean.changed_belt_ids.is_empty());
+        assert!(clean.topology_dirty);
+        let duplicate = clean_registry
+            .commit_player_authority_command(&mut clean_store, &clean_session, request())
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.revision, clean.revision);
+        assert_eq!(
+            duplicate.summary.canonical_sha256,
+            clean.summary.canonical_sha256
+        );
+
+        for fault in [
+            PlayerAuthorityCommandFault::AfterStage,
+            PlayerAuthorityCommandFault::AfterWal,
+            PlayerAuthorityCommandFault::AfterCheckpoint,
+            PlayerAuthorityCommandFault::AfterReceipt,
+            PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
+        ] {
+            let (_root, mut store, mut registry, session_id, checkpoint) =
+                player_authority_construction_queue_cancel_fixture();
+            let before = registry.status(&session_id).unwrap();
+            let request = || {
+                player_authority_construction_queue_cancel_intent_command(
+                    checkpoint.revision,
+                    command_id,
+                    "queue-cancel",
+                )
+            };
+            let error = registry
+                .commit_player_authority_command_internal(
+                    &mut store,
+                    &session_id,
+                    request(),
+                    PlayerAuthorityCommandKind::Gameplay,
+                    fault,
+                )
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("lost response"),
+                "{fault:?}: {error:#}"
+            );
+            if fault == PlayerAuthorityCommandFault::AfterStage {
+                let after = registry.status(&session_id).unwrap();
+                assert_eq!(after.revision, before.revision);
+                assert_eq!(after.canonical_sha256, before.canonical_sha256);
+            }
+
+            drop(registry);
+            let published = store.recover("normal-main").unwrap().unwrap();
+            let mut reopened = CoreRegistry::default();
+            let opened = reopened
+                .open(
+                    &store,
+                    "normal-main",
+                    published.generation,
+                    &published.root_hash,
+                    published.revision,
+                    &published.registry_fingerprint,
+                    player_authority_catalog(),
+                )
+                .unwrap();
+            let recovered = reopened
+                .commit_player_authority_command(&mut store, &opened.session_id, request())
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
+            assert!(recovered.duplicate, "{fault:?}");
+            assert_eq!(recovered.revision, clean.revision, "{fault:?}");
+            assert_eq!(
+                recovered.summary.canonical_sha256, clean.summary.canonical_sha256,
+                "{fault:?}"
+            );
+            assert!(recovered.changed_entity_ids.is_empty(), "{fault:?}");
+            assert!(recovered.changed_belt_ids.is_empty(), "{fault:?}");
+            assert!(recovered.topology_dirty, "{fault:?}");
+            let lease = store.require_exact_realtime_lease().unwrap();
+            assert_eq!(lease.acknowledged.revision, recovered.revision, "{fault:?}");
+            assert!(lease.pending_command.is_none(), "{fault:?}");
         }
     }
 

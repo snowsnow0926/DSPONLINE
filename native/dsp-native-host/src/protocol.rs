@@ -228,6 +228,8 @@ pub enum ControlRequest {
         section: String,
         blueprint_id: Option<String>,
         #[serde(default)]
+        queue_entry_id: Option<String>,
+        #[serde(default)]
         cursor: usize,
         limit: usize,
     },
@@ -1010,6 +1012,7 @@ mod tests {
             "expectedRegistryFingerprint": "builtin:test",
             "section": "detail",
             "blueprintId": "蓝图-β",
+            "queueEntryId": null,
             "cursor": 0,
             "limit": 32
         }))
@@ -1021,6 +1024,7 @@ mod tests {
                 expected_registry_fingerprint,
                 section,
                 blueprint_id,
+                queue_entry_id,
                 cursor,
                 limit,
             } => {
@@ -1029,6 +1033,7 @@ mod tests {
                 assert_eq!(expected_registry_fingerprint, "builtin:test");
                 assert_eq!(section, "detail");
                 assert_eq!(blueprint_id.as_deref(), Some("蓝图-β"));
+                assert_eq!(queue_entry_id, None);
                 assert_eq!(cursor, 0);
                 assert_eq!(limit, 32);
             }

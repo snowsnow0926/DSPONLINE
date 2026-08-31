@@ -28,6 +28,14 @@ describe("native blueprint workspace App integration", () => {
     fileURLToPath(new URL("./nativeBlueprintDeleteCommandReconciliation.ts", import.meta.url)),
     "utf8",
   );
+  const queueCancelHook = readFileSync(
+    fileURLToPath(new URL("./useNativeConstructionQueueCancelCommandTransaction.ts", import.meta.url)),
+    "utf8",
+  );
+  const queueCancelReconciliation = readFileSync(
+    fileURLToPath(new URL("./nativeConstructionQueueCancelCommandReconciliation.ts", import.meta.url)),
+    "utf8",
+  );
 
   it("binds every page to the active authority session, run, revision, and registry", () => {
     expect(app).toMatch(/new NativeBlueprintWorkspaceStore\(\)/);
@@ -42,8 +50,14 @@ describe("native blueprint workspace App integration", () => {
     expect(app).toMatch(/onSelectBlueprint=\{setNativeBlueprintSelectedId\}/);
   });
 
+  it("keeps an explicit header entry reachable while native authority owns the factory", () => {
+    expect(app).toMatch(/<HeaderControls[\s\S]*?onOpenBlueprints=\{\(\) => \{[\s\S]*?openCommandWorkspace\("blueprints"\)/);
+    expect(app).not.toContain('workspace === "blueprints" && rejectLegacyFactoryInteractionWhileNative("蓝图管理")');
+    expect(app).toMatch(/headerActiveWorkspace[\s\S]*?blueprintsOpen \? "blueprints"/);
+  });
+
   it("keeps the native editor owner mounted through authority handoff and admits legacy only after reconciliation", () => {
-    expect(app).toMatch(/<NativeBlueprintWorkspace[\s\S]*?open=\{blueprintsOpen && \(nativePlayerAuthorityOwnsRuntime \|\|[\s\S]*?nativeBlueprintRenamePendingIdentity !== null \|\| nativeBlueprintRenameResolution !== null \|\|[\s\S]*?nativeBlueprintTransformPending !== null \|\| nativeBlueprintDeletePending !== null\)\}/);
+    expect(app).toMatch(/<NativeBlueprintWorkspace[\s\S]*?open=\{blueprintsOpen && \(nativePlayerAuthorityOwnsRuntime \|\|[\s\S]*?nativeBlueprintRenamePendingIdentity !== null \|\| nativeBlueprintRenameResolution !== null \|\|[\s\S]*?nativeBlueprintTransformPending !== null \|\| nativeBlueprintDeletePending !== null \|\|[\s\S]*?nativeConstructionQueueCancelPending !== null\)\}/);
     const nativeTag = app.match(/(\n\s*<NativeBlueprintWorkspace[\s\S]*?\/>)/)?.[1] ?? "";
     expect(nativeTag).toContain("status={nativeBlueprintWorkspaceSnapshot.status}");
     expect(nativeTag).toContain("frame={nativeBlueprintWorkspaceFrame}");
@@ -51,26 +65,29 @@ describe("native blueprint workspace App integration", () => {
     expect(nativeTag).toContain("onSelectBlueprint={setNativeBlueprintSelectedId}");
     expect(nativeTag).toContain("onLibraryCursorChange=");
     expect(nativeTag).toContain("onQueueCursorChange=");
-    expect(nativeTag).toMatch(/nativeBlueprintRenamePendingIdentity \|\| nativeBlueprintTransformPending \|\|[\s\S]*?nativeBlueprintDeletePending \|\| nativePlayerAuthorityCommandPending[\s\S]*?setNativeBlueprintQueueCursor/);
+    expect(nativeTag).toMatch(/nativeBlueprintRenamePendingIdentity \|\| nativeBlueprintTransformPending \|\|[\s\S]*?nativeBlueprintDeletePending \|\| nativeConstructionQueueCancelPending \|\|[\s\S]*?nativePlayerAuthorityCommandPending[\s\S]*?setNativeBlueprintQueueCursor/);
     expect(nativeTag).toContain("onSubmitRenameIntent={submitNativeBlueprintRenameIntent}");
     expect(nativeTag).toContain("onSubmitTransformIntent={submitNativeBlueprintTransformIntent}");
     expect(nativeTag).toContain("onSubmitDeleteIntent={submitNativeBlueprintDeleteIntent}");
+    expect(nativeTag).toContain("onSubmitQueueCancelIntent={submitNativeConstructionQueueCancelIntent}");
     expect(nativeTag).toContain("pendingIdentity={nativeBlueprintRenamePendingIdentity}");
     expect(nativeTag).toContain("transformPending={nativeBlueprintTransformPending}");
     expect(nativeTag).toContain("deletePending={nativeBlueprintDeletePending}");
+    expect(nativeTag).toContain("queueCancelPending={nativeConstructionQueueCancelPending}");
     expect(nativeTag).toContain("resolution={nativeBlueprintRenameResolution}");
     expect(nativeTag).toContain("onConsumeRenameResolution={consumeNativeBlueprintRenameResolution}");
     expect(nativeTag).toContain("commandPending={nativePlayerAuthorityCommandPending}");
     expect(nativeTag).not.toMatch(/\bgame=|onDeploy=|onRemove=|onRename=|onTransform=|onFund|onCancel=|onExport=|onImport=/);
-    expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintTransformPending &&[\s\S]*?!nativeBlueprintDeletePending &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace[\s\S]*?game=\{game\}[\s\S]*?onDeploy=\{deployBlueprint\}/);
+    expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintTransformPending &&[\s\S]*?!nativeBlueprintDeletePending &&[\s\S]*?!nativeConstructionQueueCancelPending &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace[\s\S]*?game=\{game\}[\s\S]*?onDeploy=\{deployBlueprint\}/);
   });
 
-  it("keeps the native component detached from GameState and every blueprint mutation except metadata intents", () => {
+  it("keeps the native component detached from GameState and exposes only bounded semantic intents", () => {
     expect(component).not.toMatch(/\bGameState\b|\bgame\.|from\s+["']\.\.\/game\/(?:engine|types|content)["']/);
     expect(component).not.toMatch(/on(?:Capture|Import|Transform|Remove|Deploy|Place|Undo|Ghost|Fund|Cancel|Export)\b/);
     expect(component).toMatch(/onSubmitRenameIntent/);
     expect(component).toMatch(/onSubmitTransformIntent/);
     expect(component).toMatch(/onSubmitDeleteIntent/);
+    expect(component).toMatch(/onSubmitQueueCancelIntent/);
     expect(component).toMatch(/readOnly !== true/);
   });
 
@@ -109,6 +126,25 @@ describe("native blueprint workspace App integration", () => {
     expect(deleteReconciliation).toMatch(/frame\.selectedBlueprintId !== null/);
     expect(deleteReconciliation).toMatch(/frame\.libraryById\.has\(pending\.blueprintId\)/);
     expect(component).toMatch(/data-native-blueprint-action="delete-blueprint"/);
+  });
+
+  it("routes queue cancel through one stable-ID marker and exact absence reconciliation", () => {
+    expect(app).toMatch(/useNativeConstructionQueueCancelCommandTransaction\(\{[\s\S]*?authority: nativeEntityRecipeAuthorityObservation,[\s\S]*?frame: nativeBlueprintWorkspaceFrame,[\s\S]*?membershipSource: nativeBlueprintWorkspaceSource,[\s\S]*?commandInFlightRef: nativePlayerAuthorityCommandInFlightRef/);
+    expect(app).toMatch(/const submitNativeConstructionQueueCancelIntent = useCallback[\s\S]*?nativeConstructionQueueCancelBindingMatchesFrame[\s\S]*?commitNativeConstructionQueueCancelCommand\(binding\)/);
+    expect(queueCancelHook.match(/\.applyCommand\(/g)).toHaveLength(1);
+    expect(queueCancelHook).toMatch(/reconcileNativeConstructionQueueCancelPendingCommand/);
+    const reconcileBlock = queueCancelHook.slice(
+      queueCancelHook.indexOf("const reconcileTransport"),
+      queueCancelHook.indexOf("const handleDispatchFailure"),
+    );
+    expect(reconcileBlock).not.toMatch(/applyCommand\(/);
+    expect(queueCancelReconciliation).toMatch(/\[\s*0,\s*100,\s*250,\s*500,\s*1_000,\s*2_000,/);
+    expect(queueCancelHook).toMatch(/readVerifiedQueueMembership\(currentPending\.queueEntryId\)/);
+    expect(queueCancelReconciliation).toMatch(/pending\.membershipProof\.queueEntryId !== pending\.queueEntryId/);
+    expect(queueCancelReconciliation).toMatch(/pending\.membershipProof\.revision !== authority\.revision/);
+    expect(queueCancelReconciliation).not.toMatch(/queuePage\.totalCount !== pending\.queueTotalCount/);
+    expect(queueCancelReconciliation).not.toMatch(/frame\.queue\.some/);
+    expect(component).toMatch(/data-native-blueprint-action="cancel-queue"/);
   });
 
   it("routes exactly one semantic rename marker through durable ACK and same-lineage projection confirmation", () => {

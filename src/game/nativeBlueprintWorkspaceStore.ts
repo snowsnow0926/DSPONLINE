@@ -1,6 +1,7 @@
 import type {
   DesktopBridge,
   DesktopNativeCoreBlueprintDetail,
+  DesktopNativeCoreBlueprintQueueMembershipRow,
   DesktopNativeCoreBlueprintQueueRow,
   DesktopNativeCoreBlueprintSummary,
   DesktopNativeCoreBlueprintWorkspaceResult,
@@ -58,6 +59,22 @@ export interface NativeBlueprintDeleteBinding {
   readonly libraryTotalCount: number;
 }
 
+/** Exact visible-row binding for one Rust-owned construction queue cancel. */
+export interface NativeConstructionQueueCancelBinding {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly registryFingerprint: string;
+  readonly queueEntryId: string;
+  readonly queueTotalCount: number;
+}
+
+/** Rust-derived whole-queue membership proof pinned to one authority revision. */
+export interface NativeConstructionQueueMembershipProof extends NativeBlueprintWorkspaceIdentity {
+  readonly queueEntryId: string;
+  readonly present: boolean;
+}
+
 export interface NativeBlueprintWorkspaceSource {
   readonly boundIdentity: NativeBlueprintWorkspaceIdentity;
   readVerifiedBlueprintPage(
@@ -65,6 +82,9 @@ export interface NativeBlueprintWorkspaceSource {
     blueprintId: string | null,
     cursor: number,
   ): Promise<DesktopNativeCoreBlueprintWorkspaceResult | null>;
+  readVerifiedQueueMembership(
+    queueEntryId: string,
+  ): Promise<NativeConstructionQueueMembershipProof | null>;
 }
 
 export interface NativeBlueprintWorkspaceFrame extends NativeBlueprintWorkspaceIdentity {
@@ -224,6 +244,7 @@ function validProjection(
   section: DesktopNativeCoreBlueprintWorkspaceSection,
   blueprintId: string | null,
   cursor: number,
+  queueEntryId: string | null = null,
 ): boolean {
   if (value.schemaVersion !== 1 || value.projectionType !== "blueprint-workspace-v1" ||
       value.source !== "native-core" || value.stateVersion !== 47 || value.readOnly !== true ||
@@ -231,6 +252,7 @@ function validProjection(
       value.request.expectedRevision !== identity.revision ||
       value.request.expectedRegistryFingerprint !== identity.registryFingerprint ||
       value.request.section !== section || value.request.blueprintId !== blueprintId ||
+      value.request.queueEntryId !== queueEntryId ||
       value.request.cursor !== cursor || value.request.limit !== NATIVE_BLUEPRINT_PAGE_ROWS ||
       value.limits.pageRows !== NATIVE_BLUEPRINT_PAGE_ROWS ||
       value.limits.sourceRows !== NATIVE_BLUEPRINT_MAX_SOURCE_ROWS ||
@@ -248,7 +270,7 @@ function validProjection(
     : cursor < expectedTotal ? cursor
       : Math.floor((expectedTotal - 1) / NATIVE_BLUEPRINT_PAGE_ROWS) * NATIVE_BLUEPRINT_PAGE_ROWS;
   if (value.page.totalCount !== expectedTotal || value.page.cursor !== expectedPageCursor ||
-      section === "detail" && expectedTotal > 1 ||
+      (section === "detail" || section === "queue-membership") && expectedTotal > 1 ||
       value.page.rows.length !== Math.min(NATIVE_BLUEPRINT_PAGE_ROWS, expectedTotal - expectedPageCursor)) return false;
   const consumed = expectedPageCursor + value.page.rows.length;
   const expectedNext = consumed < expectedTotal ? consumed : null;
@@ -257,7 +279,13 @@ function validProjection(
     ? validSummary(row as DesktopNativeCoreBlueprintSummary)
     : section === "detail"
       ? blueprintId !== null && validDetail(row as DesktopNativeCoreBlueprintDetail, blueprintId)
-      : validQueueRow(row as DesktopNativeCoreBlueprintQueueRow));
+      : section === "queue-membership"
+        ? queueEntryId !== null && validOpaqueText(
+          (row as DesktopNativeCoreBlueprintQueueMembershipRow).id,
+          512,
+        ) && (row as DesktopNativeCoreBlueprintQueueMembershipRow).id === queueEntryId &&
+          Object.keys(row as object).length === 1
+        : validQueueRow(row as DesktopNativeCoreBlueprintQueueRow));
 }
 
 function sameHeader(
@@ -283,7 +311,7 @@ export function createNativePlayerAuthorityBlueprintWorkspaceSource(
       blueprintId: string | null,
       cursor: number,
     ) {
-      if ((section === "detail") !== (blueprintId !== null) ||
+      if (section === "queue-membership" || (section === "detail") !== (blueprintId !== null) ||
           blueprintId !== null && !validOpaqueText(blueprintId, 512) ||
           !Number.isSafeInteger(cursor) || cursor < 0 || cursor > NATIVE_BLUEPRINT_MAX_SOURCE_ROWS ||
           section === "detail" && cursor !== 0) return null;
@@ -294,10 +322,41 @@ export function createNativePlayerAuthorityBlueprintWorkspaceSource(
           expectedRegistryFingerprint: boundIdentity.registryFingerprint,
           section,
           blueprintId,
+          queueEntryId: null,
           cursor,
           limit: NATIVE_BLUEPRINT_PAGE_ROWS,
         });
         return validProjection(page, boundIdentity, section, blueprintId, cursor) ? page : null;
+      } catch {
+        return null;
+      }
+    },
+    async readVerifiedQueueMembership(queueEntryId: string) {
+      if (!validOpaqueText(queueEntryId, 512)) return null;
+      try {
+        const page = await reader({
+          sessionId: boundIdentity.sessionId,
+          expectedRevision: boundIdentity.revision,
+          expectedRegistryFingerprint: boundIdentity.registryFingerprint,
+          section: "queue-membership",
+          blueprintId: null,
+          queueEntryId,
+          cursor: 0,
+          limit: NATIVE_BLUEPRINT_PAGE_ROWS,
+        });
+        if (!validProjection(
+          page,
+          boundIdentity,
+          "queue-membership",
+          null,
+          0,
+          queueEntryId,
+        )) return null;
+        return Object.freeze({
+          ...boundIdentity,
+          queueEntryId,
+          present: page.page.totalCount === 1,
+        });
       } catch {
         return null;
       }
@@ -405,6 +464,35 @@ export function selectNativeBlueprintDeleteBinding(
     libraryTotalCount: frame.libraryPage.totalCount,
   });
   return nativeBlueprintDeleteBindingMatchesFrame(binding, frame) ? binding : null;
+}
+
+export function nativeConstructionQueueCancelBindingMatchesFrame(
+  binding: NativeConstructionQueueCancelBinding,
+  frame: NativeBlueprintWorkspaceFrame | null,
+): boolean {
+  return Boolean(frame && frame.sessionId === binding.sessionId && frame.runId === binding.runId &&
+    frame.revision === binding.revision &&
+    frame.registryFingerprint === binding.registryFingerprint &&
+    validOpaqueText(binding.queueEntryId, 512) &&
+    Number.isSafeInteger(binding.queueTotalCount) && binding.queueTotalCount >= 1 &&
+    frame.queuePage.totalCount === binding.queueTotalCount &&
+    frame.queue.some((row) => row.id === binding.queueEntryId));
+}
+
+export function selectNativeConstructionQueueCancelBinding(
+  frame: NativeBlueprintWorkspaceFrame | null,
+  queueEntryId: string,
+): NativeConstructionQueueCancelBinding | null {
+  if (!frame) return null;
+  const binding: NativeConstructionQueueCancelBinding = Object.freeze({
+    sessionId: frame.sessionId,
+    runId: frame.runId,
+    revision: frame.revision,
+    registryFingerprint: frame.registryFingerprint,
+    queueEntryId,
+    queueTotalCount: frame.queuePage.totalCount,
+  });
+  return nativeConstructionQueueCancelBindingMatchesFrame(binding, frame) ? binding : null;
 }
 
 export class NativeBlueprintWorkspaceStore {

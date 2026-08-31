@@ -12,6 +12,7 @@ const CONTEXT = Object.freeze({
   expectedRegistryFingerprint: "builtin:blueprint-test",
   section: "library",
   blueprintId: null,
+  queueEntryId: null,
   cursor: 0,
   limit: 32,
 });
@@ -65,6 +66,7 @@ function result(context, rows, counts = { library: rows.length, queue: 0 }, tota
       expectedRegistryFingerprint: context.expectedRegistryFingerprint,
       section: context.section,
       blueprintId: context.blueprintId,
+      queueEntryId: context.queueEntryId,
       cursor: context.cursor,
       limit: 32,
     },
@@ -188,6 +190,35 @@ test("blueprint pagination deterministically clamps a stale offset to the last l
   assert.equal(normalized.request.cursor, 4_096);
   assert.equal(normalized.page.cursor, 32);
   assert.deepEqual(normalized.page.rows.map((row) => row.id), ["bp-32", "bp-33", "bp-34"]);
+});
+
+test("blueprint queue membership is a target-bound global presence or absence proof", () => {
+  const context = {
+    ...CONTEXT,
+    section: "queue-membership",
+    queueEntryId: "queue-across-page",
+  };
+  const present = normalizeRendererNativeResult(
+    "coreBlueprintWorkspaceProjection",
+    result(context, [{ id: "queue-across-page" }], { library: 1, queue: 40 }, 1),
+    context,
+  );
+  assert.deepEqual(present.page.rows, [{ id: "queue-across-page" }]);
+  assert.equal(present.page.totalCount, 1);
+  const absent = normalizeRendererNativeResult(
+    "coreBlueprintWorkspaceProjection",
+    result(context, [], { library: 1, queue: 39 }, 0),
+    context,
+  );
+  assert.equal(absent.page.totalCount, 0);
+  assert.throws(
+    () => normalizeRendererNativeResult(
+      "coreBlueprintWorkspaceProjection",
+      result(context, [{ id: "queue-other" }], { library: 1, queue: 40 }, 1),
+      context,
+    ),
+    /membership selection/i,
+  );
 });
 
 test("blueprint normalizer rejects forged detail and queue semantic combinations", () => {

@@ -26,6 +26,7 @@ function props(overrides: Partial<Props> = {}): Props {
     onPauseToggle: noOp,
     onOpenResources: noOp,
     onOpenInspector: noOp,
+    onOpenBlueprints: noOp,
     onOpenRecipes: noOp,
     onOpenTechnology: noOp,
     onOpenStatistics: noOp,
@@ -78,5 +79,15 @@ describe("HeaderControls native pause control", () => {
     expect(button?.getAttribute("aria-label")).toBe("Windows 原生暂停控制暂不可用");
     act(() => button?.click());
     expect(onPauseToggle).not.toHaveBeenCalled();
+  });
+
+  it("keeps the blueprint workspace explicitly reachable under native authority", () => {
+    const onOpenBlueprints = vi.fn();
+    act(() => root.render(<HeaderControls {...props({ onOpenBlueprints })} />));
+
+    const button = host.querySelector<HTMLButtonElement>('button[aria-label="打开蓝图工作区"]');
+    expect(button).not.toBeNull();
+    act(() => button?.click());
+    expect(onOpenBlueprints).toHaveBeenCalledTimes(1);
   });
 });

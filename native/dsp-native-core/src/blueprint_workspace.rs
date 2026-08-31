@@ -32,6 +32,7 @@ enum Section {
     Library,
     Detail,
     Queue,
+    QueueMembership,
 }
 
 impl Section {
@@ -40,6 +41,7 @@ impl Section {
             "library" => Ok(Self::Library),
             "detail" => Ok(Self::Detail),
             "queue" => Ok(Self::Queue),
+            "queue-membership" => Ok(Self::QueueMembership),
             _ => bail!("native blueprint workspace section is invalid"),
         }
     }
@@ -49,6 +51,7 @@ impl Section {
             Self::Library => "library",
             Self::Detail => "detail",
             Self::Queue => "queue",
+            Self::QueueMembership => "queue-membership",
         }
     }
 }
@@ -760,6 +763,7 @@ impl CoreState {
         expected_registry_fingerprint: &str,
         section: &str,
         blueprint_id: Option<&str>,
+        queue_entry_id: Option<&str>,
         cursor: usize,
         limit: usize,
     ) -> anyhow::Result<Value> {
@@ -771,14 +775,30 @@ impl CoreState {
             bail!("native blueprint workspace projection request is invalid")
         }
         let section = Section::parse(section)?;
-        if section == Section::Detail {
-            if cursor != 0
-                || !blueprint_id.is_some_and(|value| valid_opaque_text(value, MAX_OPAQUE_ID_BYTES))
-            {
-                bail!("native blueprint workspace detail selector is invalid")
+        match section {
+            Section::Detail => {
+                if cursor != 0
+                    || queue_entry_id.is_some()
+                    || !blueprint_id
+                        .is_some_and(|value| valid_opaque_text(value, MAX_OPAQUE_ID_BYTES))
+                {
+                    bail!("native blueprint workspace detail selector is invalid")
+                }
             }
-        } else if blueprint_id.is_some() {
-            bail!("native blueprint workspace selector is invalid")
+            Section::QueueMembership => {
+                if cursor != 0
+                    || blueprint_id.is_some()
+                    || !queue_entry_id
+                        .is_some_and(|value| valid_opaque_text(value, MAX_OPAQUE_ID_BYTES))
+                {
+                    bail!("native blueprint workspace queue membership selector is invalid")
+                }
+            }
+            Section::Library | Section::Queue => {
+                if blueprint_id.is_some() || queue_entry_id.is_some() {
+                    bail!("native blueprint workspace selector is invalid")
+                }
+            }
         }
 
         let base = self.base_value();
@@ -831,6 +851,15 @@ impl CoreState {
                     .collect::<anyhow::Result<Vec<_>>>()?;
                 (queue.len(), page_cursor, rows)
             }
+            Section::QueueMembership => {
+                let selected_id = queue_entry_id.expect("queue membership selector checked above");
+                let rows = queue
+                    .iter()
+                    .filter(|entry| entry.get("id").and_then(Value::as_str) == Some(selected_id))
+                    .map(|_| json!({ "id": selected_id }))
+                    .collect::<Vec<_>>();
+                (rows.len(), 0, rows)
+            }
         };
         let consumed = page_cursor
             .checked_add(rows.len())
@@ -849,6 +878,7 @@ impl CoreState {
                 "expectedRegistryFingerprint": expected_registry_fingerprint,
                 "section": section.as_str(),
                 "blueprintId": blueprint_id,
+                "queueEntryId": queue_entry_id,
                 "cursor": cursor,
                 "limit": limit,
             },
@@ -1029,7 +1059,15 @@ mod tests {
         cursor: usize,
     ) -> Value {
         state
-            .blueprint_workspace_projection(7, REGISTRY, section, blueprint_id, cursor, PAGE_ROWS)
+            .blueprint_workspace_projection(
+                7,
+                REGISTRY,
+                section,
+                blueprint_id,
+                None,
+                cursor,
+                PAGE_ROWS,
+            )
             .unwrap()
     }
 
@@ -1150,7 +1188,7 @@ mod tests {
         let duplicate = state(cross_page_duplicate, Vec::new(), Vec::new());
         assert!(
             duplicate
-                .blueprint_workspace_projection(7, REGISTRY, "library", None, 0, PAGE_ROWS)
+                .blueprint_workspace_projection(7, REGISTRY, "library", None, None, 0, PAGE_ROWS)
                 .is_err()
         );
 
@@ -1161,7 +1199,7 @@ mod tests {
         );
         assert!(
             malformed
-                .blueprint_workspace_projection(7, REGISTRY, "library", None, 0, PAGE_ROWS)
+                .blueprint_workspace_projection(7, REGISTRY, "library", None, None, 0, PAGE_ROWS)
                 .is_err()
         );
 
@@ -1188,7 +1226,7 @@ mod tests {
         );
         assert!(
             malformed_queue
-                .blueprint_workspace_projection(7, REGISTRY, "queue", None, 0, PAGE_ROWS)
+                .blueprint_workspace_projection(7, REGISTRY, "queue", None, None, 0, PAGE_ROWS)
                 .is_err()
         );
     }
@@ -1331,22 +1369,38 @@ mod tests {
         let before = state.summary().unwrap().canonical_sha256;
         assert!(
             state
-                .blueprint_workspace_projection(6, REGISTRY, "library", None, 0, PAGE_ROWS)
+                .blueprint_workspace_projection(6, REGISTRY, "library", None, None, 0, PAGE_ROWS)
                 .is_err()
         );
         assert!(
             state
-                .blueprint_workspace_projection(7, "other", "library", None, 0, PAGE_ROWS)
+                .blueprint_workspace_projection(7, "other", "library", None, None, 0, PAGE_ROWS)
                 .is_err()
         );
         assert!(
             state
-                .blueprint_workspace_projection(7, REGISTRY, "library", Some("bp"), 0, PAGE_ROWS)
+                .blueprint_workspace_projection(
+                    7,
+                    REGISTRY,
+                    "library",
+                    Some("bp"),
+                    None,
+                    0,
+                    PAGE_ROWS,
+                )
                 .is_err()
         );
         assert!(
             state
-                .blueprint_workspace_projection(7, REGISTRY, "detail", Some("bp"), 1, PAGE_ROWS)
+                .blueprint_workspace_projection(
+                    7,
+                    REGISTRY,
+                    "detail",
+                    Some("bp"),
+                    None,
+                    1,
+                    PAGE_ROWS,
+                )
                 .is_err()
         );
         assert!(
@@ -1356,11 +1410,63 @@ mod tests {
                     REGISTRY,
                     "library",
                     None,
+                    None,
                     MAX_SOURCE_ROWS + 1,
                     PAGE_ROWS,
                 )
                 .is_err()
         );
         assert_eq!(state.summary().unwrap().canonical_sha256, before);
+    }
+
+    #[test]
+    fn queue_membership_scans_the_complete_validated_queue_at_one_revision() {
+        let queue = (0..40)
+            .map(|index| {
+                json!({
+                    "id": format!("queue-{index:02}"),
+                    "blueprintId": "bp",
+                    "blueprintName": "跨页订单",
+                    "planetId": "home",
+                    "position": { "x": index, "y": 0 },
+                    "rotation": 0,
+                    "mirror": "none",
+                    "queuedAt": index,
+                    "status": "pending-materials"
+                })
+            })
+            .collect::<Vec<_>>();
+        let state = state(vec![blueprint("bp", "arc_smelter")], Vec::new(), queue);
+
+        let present = state
+            .blueprint_workspace_projection(
+                7,
+                REGISTRY,
+                "queue-membership",
+                None,
+                Some("queue-39"),
+                0,
+                PAGE_ROWS,
+            )
+            .unwrap();
+        assert_eq!(present["revision"], 7);
+        assert_eq!(present["request"]["queueEntryId"], "queue-39");
+        assert_eq!(present["page"]["totalCount"], 1);
+        assert_eq!(present["page"]["rows"], json!([{ "id": "queue-39" }]));
+
+        let absent = state
+            .blueprint_workspace_projection(
+                7,
+                REGISTRY,
+                "queue-membership",
+                None,
+                Some("queue-missing"),
+                0,
+                PAGE_ROWS,
+            )
+            .unwrap();
+        assert_eq!(absent["request"]["queueEntryId"], "queue-missing");
+        assert_eq!(absent["page"]["totalCount"], 0);
+        assert_eq!(absent["page"]["rows"], json!([]));
     }
 }

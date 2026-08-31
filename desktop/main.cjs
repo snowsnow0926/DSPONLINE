@@ -1080,6 +1080,7 @@ function nativeBlueprintWorkspaceResultContext(request) {
     expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
     section: request?.section,
     blueprintId: request?.blueprintId,
+    queueEntryId: request?.queueEntryId,
     cursor: request?.cursor,
     limit: request?.limit,
   };

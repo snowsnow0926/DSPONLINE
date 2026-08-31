@@ -27,6 +27,7 @@ import type {
   NativeBlueprintWorkspaceFrame,
   NativeBlueprintWorkspaceIdentity,
   NativeBlueprintWorkspaceSnapshot,
+  NativeConstructionQueueCancelBinding,
 } from "../game/nativeBlueprintWorkspaceStore";
 import type {
   NativeBlueprintTransformPendingCommand,
@@ -34,6 +35,9 @@ import type {
 import type {
   NativeBlueprintDeletePendingCommand,
 } from "../game/nativeBlueprintDeleteCommandReconciliation";
+import type {
+  NativeConstructionQueueCancelPendingCommand,
+} from "../game/nativeConstructionQueueCancelCommandReconciliation";
 import {
   nativeBlueprintRenameEditorTargetState,
   type NativeBlueprintRenamePendingIdentity,
@@ -63,9 +67,11 @@ export interface NativeBlueprintWorkspaceProps {
     mirror: NativeBlueprintMirror,
   ) => boolean;
   onSubmitDeleteIntent: (binding: NativeBlueprintDeleteBinding) => boolean;
+  onSubmitQueueCancelIntent: (binding: NativeConstructionQueueCancelBinding) => boolean;
   pendingIdentity: NativeBlueprintRenamePendingIdentity | null;
   transformPending: NativeBlueprintTransformPendingCommand | null;
   deletePending: NativeBlueprintDeletePendingCommand | null;
+  queueCancelPending: NativeConstructionQueueCancelPendingCommand | null;
   resolution: NativeBlueprintRenameResolution | null;
   onConsumeRenameResolution: (submissionId: number) => void;
   commandPending: boolean;
@@ -193,8 +199,8 @@ function NativeBlueprintDetail({ frame }: { frame: NativeBlueprintWorkspaceFrame
 /**
  * Player-authority blueprint surface. It accepts only the same-revision native
  * read projection. Its mutations are minimal rename and target-state transform
- * intents; renderer never receives or constructs a blueprint body, version
- * snapshot, or queue edit.
+ * intents plus one stable-ID queue cancellation marker; renderer never
+ * receives or constructs a blueprint body, refund ledger, or queue edit.
  */
 function sameRenameIdentity(
   left: NativeBlueprintRenameIdentity,
@@ -218,9 +224,11 @@ export function NativeBlueprintWorkspace({
   onSubmitRenameIntent,
   onSubmitTransformIntent,
   onSubmitDeleteIntent,
+  onSubmitQueueCancelIntent,
   pendingIdentity,
   transformPending,
   deletePending,
+  queueCancelPending,
   resolution,
   onConsumeRenameResolution,
   commandPending,
@@ -289,14 +297,16 @@ export function NativeBlueprintWorkspace({
 
   if (!open) return null;
   const interactionLocked = commandPending || pendingIdentity !== null ||
-    transformPending !== null || deletePending !== null || renameEditor !== null;
+    transformPending !== null || deletePending !== null || queueCancelPending !== null ||
+    renameEditor !== null;
   const editorTargetState = renameEditor?.conflict === "lineage"
     ? "lineage-conflict"
     : renameEditor?.conflict === "row" ? "row-conflict" : observedEditorTargetState;
   const editorAccepted = Boolean(renameEditor && renameEditor.acceptedSubmissionId !== null);
   const editorConflict = editorTargetState === "lineage-conflict" || editorTargetState === "row-conflict";
   const editorLocked = Boolean(
-    editorAccepted || pendingIdentity || transformPending || deletePending || editorConflict,
+    editorAccepted || pendingIdentity || transformPending || deletePending ||
+    queueCancelPending || editorConflict,
   );
   const canonicalDraft = renameEditor ? canonicalizeNativeBlueprintName(renameEditor.draft) : null;
   const editorCanSubmit = Boolean(renameEditor && editorTargetState === "ready" &&
@@ -320,6 +330,15 @@ export function NativeBlueprintWorkspace({
           ? `蓝图删除已耐久提交；等待同 lineage revision ${deletePending.receipt?.revision} 缺席投影`
           : "蓝图删除回执或投影无法证明；当前 lineage 保持锁定"
     : null;
+  const queueCancelPendingCopy = queueCancelPending
+    ? queueCancelPending.phase === "dispatching"
+      ? "施工取消正在等待 main-owned durable ACK"
+      : queueCancelPending.phase === "reconciling"
+        ? "施工取消结果不确定；仅进行六次有界只读对账，绝不自动重发"
+        : queueCancelPending.phase === "awaiting-projection"
+          ? `施工取消已耐久提交；等待同 lineage revision ${queueCancelPending.receipt?.revision} 缺席投影`
+          : "施工取消回执或投影无法证明；当前 lineage 保持锁定"
+    : null;
   const pendingCopy = pendingIdentity
     ? pendingIdentity.phase === "awaiting-ack"
       ? "重命名正在等待 main-owned durable ACK"
@@ -328,7 +347,7 @@ export function NativeBlueprintWorkspace({
         : pendingIdentity.phase === "uncertain"
           ? "重命名结果无法确认；保持锁定并仅等待权威对账，绝不自动重发"
           : "重命名身份或投影发生冲突；保持锁定并停止猜测"
-    : transformPendingCopy ?? deletePendingCopy ?? (commandPending
+    : transformPendingCopy ?? deletePendingCopy ?? queueCancelPendingCopy ?? (commandPending
       ? "另一条原生命令正在等待 durable ACK"
       : "页面按存储顺序显示；名称、方向与删除由 Rust 权威提交。");
   const editorCopy = renameEditor
@@ -556,7 +575,7 @@ export function NativeBlueprintWorkspace({
         </article>;
       })}
     </div> : <section className="pending-construction-workspace" aria-label="原生待建施工" data-native-blueprint-section="queue">
-      <header><div><ListChecks size={17} /><span><strong>施工队列 · 只读</strong><small>按持久化数组顺序显示，不在 renderer 重排</small></span></div></header>
+      <header><div><ListChecks size={17} /><span><strong>施工队列 · Rust 权威取消</strong><small>明细只读；取消与完整退款由当前权威状态原子计算</small></span></div></header>
       <NativeBlueprintPagination
         section="queue"
         cursor={readyFrame.queuePage.cursor}
@@ -583,6 +602,25 @@ export function NativeBlueprintWorkspace({
             {entry.semanticStatus === "catalog-backed" ? <span>只读明细引用已验证 · 不代表可部署</span> : null}
             <span>已放置 {entry.placedEntityCount}</span><span>保留施工 {entry.reservedConstructionTotal.toLocaleString("zh-CN")}</span><span>保留载具 {entry.reservedFleetTotal.toLocaleString("zh-CN")}</span>
           </div>
+          <footer>
+            <button
+              className="danger"
+              type="button"
+              disabled={interactionLocked}
+              onClick={() => onSubmitQueueCancelIntent(Object.freeze({
+                  sessionId: readyFrame.sessionId,
+                  runId: readyFrame.runId,
+                  revision: readyFrame.revision,
+                  registryFingerprint: readyFrame.registryFingerprint,
+                  queueEntryId: entry.id,
+                  queueTotalCount: readyFrame.queuePage.totalCount,
+                }))}
+              title={`取消${entry.blueprintName}并完整返还尚未使用的建筑、线路和载具`}
+              aria-label={`取消并返还${entry.blueprintName}`}
+              data-native-blueprint-action="cancel-queue"
+              data-native-blueprint-queue-cancel={entry.id}
+            ><Trash2 size={14} />取消并返还</button>
+          </footer>
         </article>)}
       </div>}
     </section> : <div className="blueprint-library">

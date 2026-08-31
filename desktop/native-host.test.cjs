@@ -821,6 +821,7 @@ test("core registry forwards an exact blueprint selector and rejects ambiguous I
     expectedRegistryFingerprint: "builtin:test",
     section: "detail",
     blueprintId: "mod:蓝图/Ω🚀",
+    queueEntryId: null,
     cursor: 0,
     limit: 32,
   };
@@ -832,15 +833,25 @@ test("core registry forwards an exact blueprint selector and rejects ambiguous I
     cursor: 4_096,
   };
   await registry.blueprintWorkspaceProjection(7, stalePageRequest);
+  const membershipRequest = {
+    ...request,
+    section: "queue-membership",
+    blueprintId: null,
+    queueEntryId: "queue-across-page",
+  };
+  await registry.blueprintWorkspaceProjection(7, membershipRequest);
   assert.deepEqual(calls, [
     { operation: "coreBlueprintWorkspaceProjection", ...request },
     { operation: "coreBlueprintWorkspaceProjection", ...stalePageRequest },
+    { operation: "coreBlueprintWorkspaceProjection", ...membershipRequest },
   ]);
   for (const invalid of [
     { ...request, blueprintId: "bad\nidentifier" },
     { ...request, blueprintId: "\ud800" },
     { ...request, cursor: 1 },
     { ...request, section: "library" },
+    { ...membershipRequest, queueEntryId: null },
+    { ...membershipRequest, blueprintId: "ambiguous" },
     { ...request, section: "library", blueprintId: null, cursor: 4_097 },
     { ...request, unexpected: true },
   ]) {

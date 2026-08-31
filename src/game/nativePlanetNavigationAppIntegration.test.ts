@@ -101,7 +101,7 @@ describe("native planet navigation App integration", () => {
       app.indexOf("useEffect(() => {", app.indexOf("const rejectLegacyFactoryInteractionWhileNative")),
     );
     expect(rejection).toMatch(/nativePlayerAuthorityOwnsRuntimeRef\.current[\s\S]*?本次操作未应用，也不会读取旧星球数据/);
-    for (const label of ["建筑放置与扩建", "建筑拖放", "建筑位置编辑", "生产区域编辑", "蓝图部署", "蓝图复制", "蓝图管理", "基础制造", "建筑回收"]) {
+    for (const label of ["建筑放置与扩建", "建筑拖放", "建筑位置编辑", "生产区域编辑", "蓝图部署", "蓝图复制", "基础制造", "建筑回收"]) {
       expect(app, label).toContain(`rejectLegacyFactoryInteractionWhileNative("${label}")`);
     }
     expect(app).toMatch(/const draggable = !nativePlayerAuthorityOwnsRuntime && !placement/);
@@ -116,7 +116,7 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <PendingBlueprintLayer/);
     expect(app).not.toMatch(/!nativePlayerAuthorityOwnsRuntime \? <SelectionToolbar/);
     expect(app).toMatch(/<SelectionToolbar[\s\S]*?unsafeActionsEnabled=\{!nativePlayerAuthorityOwnsRuntime\}/);
-    expect(app).toMatch(/<NativeBlueprintWorkspace[\s\S]*?!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintTransformPending &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace/);
+    expect(app).toMatch(/<NativeBlueprintWorkspace[\s\S]*?!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintTransformPending &&[\s\S]*?!nativeBlueprintDeletePending &&[\s\S]*?!nativeConstructionQueueCancelPending &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <RuntimeRenderProfile id="onboarding">/);
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeFactoryInspectorPanel[\s\S]*?: <StableInspectorPanel/);
     expect(app).toMatch(/<HeaderControls[\s\S]*?constructionCenterVisible=\{nativePlayerAuthorityOwnsRuntime \|\| game\.entities\.some/);

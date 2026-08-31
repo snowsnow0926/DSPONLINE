@@ -2821,6 +2821,7 @@ export function HeaderControls({
   pauseControlAvailable = true,
   onOpenResources,
   onOpenInspector,
+  onOpenBlueprints,
   onOpenRecipes,
   onOpenTechnology,
   onOpenStatistics,
@@ -2844,6 +2845,7 @@ export function HeaderControls({
   pauseControlAvailable?: boolean;
   onOpenResources: () => void;
   onOpenInspector: () => void;
+  onOpenBlueprints: () => void;
   onOpenRecipes: () => void;
   onOpenTechnology: () => void;
   onOpenStatistics: () => void;
@@ -2856,7 +2858,7 @@ export function HeaderControls({
   constructionCenterUnavailable?: boolean;
   onOpenDysonPlanner: () => void;
   onOpenCommandPalette: () => void;
-  activeWorkspace?: "settings" | "galaxy" | "campaign" | "construction-center" | "star-map" | "statistics" | "recipes" | "technology" | "dyson" | null;
+  activeWorkspace?: "settings" | "galaxy" | "campaign" | "construction-center" | "star-map" | "statistics" | "recipes" | "technology" | "blueprints" | "dyson" | null;
   showMobileUiSwitch?: boolean;
   onMobileUiSwitch?: () => void;
 }) {
@@ -2901,6 +2903,7 @@ export function HeaderControls({
         {showConstructionCenter ? <button className={`header-action--overflowable${activeWorkspace === "construction-center" ? " active" : ""}`} type="button" onClick={onOpenConstructionCenter} disabled={constructionCenterUnavailable} title={constructionCenterUnavailable ? "建筑制造中心当前不可用" : activeWorkspace === "construction-center" ? "建筑制造中心已打开，再次点击返回工厂" : "打开建筑制造中心"} aria-label={constructionCenterUnavailable ? "建筑制造中心当前不可用" : activeWorkspace === "construction-center" ? "建筑制造中心已打开，再次点击返回工厂" : "打开建筑制造中心"} aria-pressed={activeWorkspace === "construction-center"}><Factory size={17} /></button> : null}
         <button className={`header-action--overflowable${activeWorkspace === "star-map" ? " active" : ""}`} type="button" onClick={onOpenStarMap} title={activeWorkspace === "star-map" ? "星图已打开，再次点击返回工厂" : "打开星图"} aria-label={activeWorkspace === "star-map" ? "星图已打开，再次点击返回工厂" : "打开星图"} aria-pressed={activeWorkspace === "star-map"}><Telescope size={17} /></button>
         <button className={`header-action--overflowable${activeWorkspace === "statistics" ? " active" : ""}`} type="button" onClick={onOpenStatistics} title={activeWorkspace === "statistics" ? "生产统计已打开，再次点击返回工厂" : "打开生产统计"} aria-label={activeWorkspace === "statistics" ? "生产统计已打开，再次点击返回工厂" : "打开生产统计"} aria-pressed={activeWorkspace === "statistics"}><BarChart3 size={17} /></button>
+        <button className={`header-action--overflowable${activeWorkspace === "blueprints" ? " active" : ""}`} type="button" onClick={onOpenBlueprints} title={activeWorkspace === "blueprints" ? "蓝图工作区已打开，再次点击返回工厂" : "打开蓝图工作区"} aria-label={activeWorkspace === "blueprints" ? "蓝图工作区已打开，再次点击返回工厂" : "打开蓝图工作区"} aria-pressed={activeWorkspace === "blueprints"}><Layers3 size={17} /></button>
         <button className={`header-action--overflowable${activeWorkspace === "recipes" ? " active" : ""}`} type="button" onClick={onOpenRecipes} title={activeWorkspace === "recipes" ? "生产资料库已打开，再次点击返回工厂" : "打开生产资料库"} aria-label={activeWorkspace === "recipes" ? "生产资料库已打开，再次点击返回工厂" : "打开生产资料库"} aria-pressed={activeWorkspace === "recipes"}><BookOpen size={17} /></button>
         <button className={`header-action--overflowable${activeWorkspace === "technology" ? " active" : ""}`} type="button" onClick={onOpenTechnology} title={activeWorkspace === "technology" ? "科技树已打开，再次点击返回工厂" : "打开科技树"} aria-label={activeWorkspace === "technology" ? "科技树已打开，再次点击返回工厂" : "打开科技树"} aria-pressed={activeWorkspace === "technology"}><FlaskConical size={17} /></button>
         <button className="header-action--overflowable header-command-action" type="button" onClick={(event) => { event.currentTarget.focus({ preventScroll: true }); onOpenCommandPalette(); }} title="打开命令面板（Ctrl/⌘+K）" aria-label="打开命令面板" aria-keyshortcuts="Control+K Meta+K"><Command size={17} /></button>
@@ -2914,6 +2917,7 @@ export function HeaderControls({
           {showConstructionCenter ? <button type="button" role="menuitem" disabled={constructionCenterUnavailable} onClick={() => runOverflowAction(onOpenConstructionCenter)}><Factory size={15} />建筑制造中心{constructionCenterUnavailable ? "（当前不可用）" : ""}</button> : null}
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenStarMap)}><Telescope size={15} />星图</button>
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenStatistics)}><BarChart3 size={15} />生产统计</button>
+          <button type="button" role="menuitem" aria-pressed={activeWorkspace === "blueprints"} onClick={() => runOverflowAction(onOpenBlueprints)}><Layers3 size={15} />蓝图工作区</button>
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenRecipes)}><BookOpen size={15} />生产资料库</button>
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenTechnology)}><FlaskConical size={15} />科技树</button>
           <button type="button" role="menuitem" aria-pressed={activeWorkspace === "dyson"} onClick={() => runOverflowAction(onOpenDysonPlanner)}><Orbit size={15} />戴森球规划</button>

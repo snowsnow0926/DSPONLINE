@@ -19,6 +19,7 @@ mod construction_belt_removal_context;
 mod construction_inventory;
 mod construction_placement_context;
 mod construction_planner;
+mod construction_queue_command;
 mod construction_removal_context;
 mod construction_stack_context;
 mod deterministic_runtime;

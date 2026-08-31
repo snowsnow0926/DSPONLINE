@@ -340,6 +340,7 @@ fn handle_request(
             expected_registry_fingerprint,
             section,
             blueprint_id,
+            queue_entry_id,
             cursor,
             limit,
         } => cores.blueprint_workspace_projection(
@@ -348,6 +349,7 @@ fn handle_request(
             &expected_registry_fingerprint,
             &section,
             blueprint_id.as_deref(),
+            queue_entry_id.as_deref(),
             cursor,
             limit,
         )?,

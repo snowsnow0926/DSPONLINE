@@ -1193,15 +1193,17 @@ class NativeCoreSessionRegistry {
     this.assertOwner(ownerId, request?.sessionId);
     exactObjectKeys(request, [
       "sessionId", "expectedRevision", "expectedRegistryFingerprint", "section",
-      "blueprintId", "cursor", "limit",
+      "blueprintId", "queueEntryId", "cursor", "limit",
     ], "native blueprint workspace projection request");
     if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
       !validLogicalId(request.expectedRegistryFingerprint, 256) ||
-      !["library", "detail", "queue"].includes(request.section) ||
+      !["library", "detail", "queue", "queue-membership"].includes(request.section) ||
       request.blueprintId !== null && !validBlueprintWorkspaceId(request.blueprintId) ||
+      request.queueEntryId !== null && !validBlueprintWorkspaceId(request.queueEntryId) ||
       (request.section === "detail") !== (request.blueprintId !== null) ||
+      (request.section === "queue-membership") !== (request.queueEntryId !== null) ||
       !Number.isSafeInteger(request.cursor) || request.cursor < 0 || request.cursor > 4_096 ||
-      request.section === "detail" && request.cursor !== 0 ||
+      ["detail", "queue-membership"].includes(request.section) && request.cursor !== 0 ||
       request.limit !== 32) {
       throw new TypeError("native blueprint workspace projection request is invalid");
     }
@@ -1212,6 +1214,7 @@ class NativeCoreSessionRegistry {
       expectedRegistryFingerprint: request.expectedRegistryFingerprint,
       section: request.section,
       blueprintId: request.blueprintId,
+      queueEntryId: request.queueEntryId,
       cursor: request.cursor,
       limit: request.limit,
     });

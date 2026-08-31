@@ -459,6 +459,7 @@ import {
 import {
   NativeBlueprintWorkspaceStore,
   createNativePlayerAuthorityBlueprintWorkspaceSource,
+  nativeConstructionQueueCancelBindingMatchesFrame,
   selectNativeBlueprintDeleteBinding,
   selectNativeBlueprintTransformBinding,
   selectNativeBlueprintWorkspaceFrame,
@@ -467,6 +468,7 @@ import {
   type NativeBlueprintRenameIdentity,
   type NativeBlueprintRotation,
   type NativeBlueprintTransformBinding,
+  type NativeConstructionQueueCancelBinding,
 } from "./game/nativeBlueprintWorkspaceStore";
 import {
   prepareNativeBlueprintRenameIntentCommand,
@@ -482,6 +484,7 @@ import {
 } from "./game/nativeBlueprintRenameWorkflow";
 import { useNativeBlueprintDeleteCommandTransaction } from "./game/useNativeBlueprintDeleteCommandTransaction";
 import { useNativeBlueprintTransformCommandTransaction } from "./game/useNativeBlueprintTransformCommandTransaction";
+import { useNativeConstructionQueueCancelCommandTransaction } from "./game/useNativeConstructionQueueCancelCommandTransaction";
 import {
   createNativeProjectedOrdinaryBuildingPlacementCommand,
   readVerifiedNativeConstructionPlacementContext,
@@ -12575,7 +12578,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, []);
 
   const openCommandWorkspace = useCallback(async (workspace: CommandWorkspace) => {
-    if (workspace === "blueprints" && rejectLegacyFactoryInteractionWhileNative("蓝图管理")) return;
     if (workspace === "resources" && rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
     if (workspace === "operations" && rejectLegacyFactoryInteractionWhileNative("旧版运营中心")) return;
     if (workspace === "campaign" && rejectLegacyFactoryInteractionWhileNative("旧版主线任务")) return;
@@ -17271,6 +17273,31 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     }
     return commitNativeBlueprintDeleteCommand(binding);
   }, [commitNativeBlueprintDeleteCommand, nativeBlueprintDeleteBinding]);
+  const {
+    pending: nativeConstructionQueueCancelPending,
+    commit: commitNativeConstructionQueueCancelCommand,
+  } = useNativeConstructionQueueCancelCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    frame: nativeBlueprintWorkspaceFrame,
+    membershipSource: nativeBlueprintWorkspaceSource,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+  });
+  const submitNativeConstructionQueueCancelIntent = useCallback((
+    binding: NativeConstructionQueueCancelBinding,
+  ): boolean => {
+    if (!blueprintsOpenRef.current || nativeBlueprintRenamePendingIdentityRef.current ||
+        !nativeConstructionQueueCancelBindingMatchesFrame(binding, nativeBlueprintWorkspaceFrame)) {
+      setNotice("蓝图工作区、施工队列行或 revision 已漂移；本次取消未提交");
+      return false;
+    }
+    return commitNativeConstructionQueueCancelCommand(binding);
+  }, [commitNativeConstructionQueueCancelCommand, nativeBlueprintWorkspaceFrame]);
   const nativeStationConfigurationProjectionBinding = useMemo<
     NativeProjectedStationConfigurationBinding | null
   >(() => {
@@ -18598,8 +18625,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             : statisticsOpen ? "statistics"
               : recipesOpen ? "recipes"
                 : technologyOpen ? "technology"
-                  : dysonPlannerOpen ? "dyson"
-                  : null;
+                  : blueprintsOpen ? "blueprints"
+                    : dysonPlannerOpen ? "dyson"
+                    : null;
 
   useEffect(() => {
     // The terminal pure-idle projection disables time warp before its
@@ -19037,6 +19065,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           setNotice(null);
         }}
         onOpenInspector={() => { setMobilePanel((current) => current === "inspector" ? null : "inspector"); setNotice(null); }}
+        onOpenBlueprints={() => { if (blueprintsOpen) closeAllWorkspaces(); else openCommandWorkspace("blueprints"); setNotice(null); }}
         onOpenRecipes={() => { if (recipesOpen) closeAllWorkspaces(); else openCommandWorkspace("recipes"); setCampaignFocusItemId(null); setNotice(null); }}
         onOpenTechnology={() => { if (technologyOpen) closeAllWorkspaces(); else openCommandWorkspace("technology"); setCampaignFocusTechId(null); setNotice(null); }}
         onOpenStatistics={() => { if (statisticsOpen) closeAllWorkspaces(); else openCommandWorkspace("statistics"); setStatisticsFocusTab(null); setNotice(null); }}
@@ -20186,7 +20215,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       <NativeBlueprintWorkspace
         open={blueprintsOpen && (nativePlayerAuthorityOwnsRuntime ||
           nativeBlueprintRenamePendingIdentity !== null || nativeBlueprintRenameResolution !== null ||
-          nativeBlueprintTransformPending !== null || nativeBlueprintDeletePending !== null)}
+          nativeBlueprintTransformPending !== null || nativeBlueprintDeletePending !== null ||
+          nativeConstructionQueueCancelPending !== null)}
         status={nativeBlueprintWorkspaceSnapshot.status}
         frame={nativeBlueprintWorkspaceFrame}
         latestIdentity={nativeFactoryInventoryIdentity}
@@ -20194,21 +20224,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         onSelectBlueprint={setNativeBlueprintSelectedId}
         onLibraryCursorChange={(cursor) => {
           if (nativeBlueprintRenamePendingIdentity || nativeBlueprintTransformPending ||
-              nativeBlueprintDeletePending || nativePlayerAuthorityCommandPending) return;
+              nativeBlueprintDeletePending || nativeConstructionQueueCancelPending ||
+              nativePlayerAuthorityCommandPending) return;
           setNativeBlueprintSelectedId(null);
           setNativeBlueprintLibraryCursor(cursor);
         }}
         onQueueCursorChange={(cursor) => {
           if (nativeBlueprintRenamePendingIdentity || nativeBlueprintTransformPending ||
-              nativeBlueprintDeletePending || nativePlayerAuthorityCommandPending) return;
+              nativeBlueprintDeletePending || nativeConstructionQueueCancelPending ||
+              nativePlayerAuthorityCommandPending) return;
           setNativeBlueprintQueueCursor(cursor);
         }}
         onSubmitRenameIntent={submitNativeBlueprintRenameIntent}
         onSubmitTransformIntent={submitNativeBlueprintTransformIntent}
         onSubmitDeleteIntent={submitNativeBlueprintDeleteIntent}
+        onSubmitQueueCancelIntent={submitNativeConstructionQueueCancelIntent}
         pendingIdentity={nativeBlueprintRenamePendingIdentity}
         transformPending={nativeBlueprintTransformPending}
         deletePending={nativeBlueprintDeletePending}
+        queueCancelPending={nativeConstructionQueueCancelPending}
         resolution={nativeBlueprintRenameResolution}
         onConsumeRenameResolution={consumeNativeBlueprintRenameResolution}
         commandPending={nativePlayerAuthorityCommandPending}
@@ -20216,6 +20250,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       {!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&
         !nativeBlueprintTransformPending &&
         !nativeBlueprintDeletePending &&
+        !nativeConstructionQueueCancelPending &&
         !nativeBlueprintRenameResolution ? <BlueprintWorkspace
         open={blueprintsOpen}
         game={game}

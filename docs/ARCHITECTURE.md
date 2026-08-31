@@ -2,7 +2,9 @@
 
 > **Windows Rust material-delivery hub 双阶段活动队列（2026-09-01，开发候选，未发布）**：内置默认目录且身份可证明的物资配送枢纽不再在每个模拟步的两次 drain 中都遍历全部行。session-only `BTreeSet<entity-row>` 按持久行号保存 wake；冷启动仍在前、后两个历史阶段各完整执行一次，第一阶段的全部已选行必须携带到第二阶段，因而不会丢失旧路径在同拍末尾对 `utilization`、`productionRate` 与 `progress` 的零值归一。只有三个持久 delivery slot 均为合法内置形状、全部输入都是有限数值零，且所有配置物料的目标行星托盘仍有余量时才允许休眠；托盘已满、残留输入、legacy/opaque slot、MOD、身份或拓扑不确定都保持常醒或稳定回到 full-scan oracle。
 >
-> 两次真实 belt `transfer_with_bandwidth` 各自产生精确 source/target changed-entity 集合，并分别在前、后 drain 选择前唤醒目标枢纽；后段事件不是前段集合的追加副本。活动集合达到精确 `75%` 时按原持久行序全扫。候选 runtime 只随完整 simulation revision 成功安装，不进入 GameState、WAL、checkpoint、v47 导出、canonical/domain hash；失败候选保留源 wake 与源字节。1,024 hub 合成回归在 `1/5/60` 秒共观察 `2/10/120` 次 drain：冷拍两次均选 `1024`，随后每阶段最多选择 `1`；独立 force-full oracle 每次均选 `1024`，两者完整序列化字节、canonical、domain 与物料守恒 SHA-256 一致。真实 relay→hub 与 producer→hub belt 覆盖前后两段同拍唤醒，1/2/4/8 workers 的 60 秒结果一致；这些是选择形状与等价性证据，不是墙钟收益声明。
+> 两次真实 belt `transfer_with_bandwidth` 各自产生精确 source/target changed-entity 集合，并分别在前、后 drain 选择前唤醒目标枢纽；后段事件不是前段集合的追加副本，hub 作为 belt source 的真实输出移动也会反向唤醒该 hub。活动集合达到精确 `75%` 时按原持久行序全扫。候选 runtime 只随完整 simulation revision 成功安装，不进入 GameState、WAL、checkpoint、v47 导出、canonical/domain hash；失败候选保留源 wake 与源字节。runtime 保留 topology `Arc` clone，所以后续 `Arc::make_mut` 的同长度/同容量内容修改也必须 COW，pointer identity 必然改变并失败关闭；峰值内存估算保守纳入首个 `BTreeSet` 节点、全行 key payload 与源/候选 runtime Arc COW 双份。
+>
+> 1,024 hub 合成回归在 `1/5/60` 秒共观察 `2/10/120` 次 drain：冷拍两次均选 `1024`，随后每阶段最多选择 `1`；flat-full 选择对照每次均选 `1024`。该对照绕过 `MaterialDeliveryRuntime::select`，把完整 topology 行直接传入双方共享的旧 drain body；它独立于 indexed selection，但不是第二套独立结算实现。两路完整序列化字节、canonical、domain 与物料守恒 SHA-256 一致。真实 relay→hub、producer→hub 与 hub→sink belt 覆盖前后两段和 source 输出唤醒；60 秒一次 advance 与 `1/10/30` 秒内部步长及对应 `60/6/2` 次提交在先单独断言 revision 差异后，全部其余持久状态字段与摘要一致；1/2/4/8 workers 的 60 秒结果一致。这些是选择形状与等价性证据，不是墙钟收益声明。旧 Core `899/899` 只属于隔离源码 `ab109bc`，不作为 `df47619` 或当前组合树全量证据；组合全量待 root 最终冻结后重跑。
 >
 > GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host/renderer 协议和 `authorityEligible=false` 均未改变。本切片不证明 opaque/MOD hub writer、连续生产、电力、量子高扇出或全部物流已经 `O(active)`，未连接生产、未部署，也未读取或修改真实玩家存档。
 

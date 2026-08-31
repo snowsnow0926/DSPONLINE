@@ -8,20 +8,26 @@ use crate::state::CoreState;
 
 const ACTIVE_DENSE_NUMERATOR: usize = 3;
 const ACTIVE_DENSE_DENOMINATOR: usize = 4;
+// `BTreeSet` node layout is private to the standard library. Reserve enough
+// fixed space for the first leaf/internal allocation in addition to the
+// deliberately rounded-up per-key cost below.
+const BTREE_FIRST_NODE_BYTES: u64 = 256;
+const BTREE_BYTES_PER_KEY: u64 = (std::mem::size_of::<usize>() * 4) as u64;
 
 /// Session-only deterministic wake queue for built-in material-delivery hubs.
 /// Persisted entity rows remain authoritative. The queue is rebuilt after a
 /// command/topology change and is published only with a committed candidate.
 #[derive(Debug, Clone)]
 pub(crate) struct MaterialDeliveryRuntime {
-    topology_identity: usize,
+    // Retaining the Arc is stronger than remembering its address: any later
+    // `Arc::make_mut` must perform COW, even when a same-length/same-capacity
+    // topology edit would otherwise keep the allocation address unchanged.
+    topology: Arc<crate::state::FactoryTopology>,
     entity_count: usize,
     total_rows: usize,
     pending_entity_indices: BTreeSet<usize>,
     wake_all: bool,
     directory_fallback: bool,
-    #[cfg(test)]
-    force_full_scan: bool,
     #[cfg(test)]
     scan_history: Vec<MaterialDeliveryScan>,
 }
@@ -55,7 +61,7 @@ impl MaterialDeliveryRuntime {
                 .iter()
                 .any(|&index| !validate_hub_identity(state, entities, index));
         Self {
-            topology_identity: Arc::as_ptr(&state.factory_topology) as usize,
+            topology: state.factory_topology.clone(),
             entity_count: entities.len(),
             total_rows: indices.len(),
             pending_entity_indices: BTreeSet::new(),
@@ -64,15 +70,22 @@ impl MaterialDeliveryRuntime {
             wake_all: true,
             directory_fallback,
             #[cfg(test)]
-            force_full_scan: false,
-            #[cfg(test)]
             scan_history: Vec::new(),
         }
     }
 
     pub(crate) fn estimated_bytes(&self) -> u64 {
-        (std::mem::size_of::<Self>()
-            + self.pending_entity_indices.len() * std::mem::size_of::<usize>() * 4) as u64
+        // The memory budget is a peak estimate, not a steady resident count.
+        // A disposable candidate can COW this runtime while the source Arc is
+        // still retained, and a cold/dense first phase can temporarily select
+        // every hub even when the committed pending set is empty.
+        let peak_tree_bytes = if self.total_rows == 0 {
+            0
+        } else {
+            BTREE_FIRST_NODE_BYTES
+                .saturating_add((self.total_rows as u64).saturating_mul(BTREE_BYTES_PER_KEY))
+        };
+        ((std::mem::size_of::<Self>() as u64).saturating_add(peak_tree_bytes)).saturating_mul(2)
     }
 
     pub(crate) fn wake_from_changed_entities(&mut self, state: &CoreState, changed: &[usize]) {
@@ -80,7 +93,7 @@ impl MaterialDeliveryRuntime {
             return;
         }
         let indices = &state.factory_topology.material_delivery_hub_indices;
-        if self.topology_identity != Arc::as_ptr(&state.factory_topology) as usize
+        if !Arc::ptr_eq(&self.topology, &state.factory_topology)
             || self.entity_count != state.entities.ids.len()
             || self.total_rows != indices.len()
         {
@@ -108,15 +121,10 @@ impl MaterialDeliveryRuntime {
         entities: &[Value],
     ) -> MaterialDeliverySelection {
         let indices = &state.factory_topology.material_delivery_hub_indices;
-        let topology_changed = self.topology_identity
-            != Arc::as_ptr(&state.factory_topology) as usize
+        let topology_changed = !Arc::ptr_eq(&self.topology, &state.factory_topology)
             || self.entity_count != entities.len()
             || self.total_rows != indices.len();
-        #[cfg(test)]
-        let forced = self.force_full_scan;
-        #[cfg(not(test))]
-        let forced = false;
-        let identity_probe_all = self.directory_fallback || self.wake_all || forced;
+        let identity_probe_all = self.directory_fallback || self.wake_all;
         let selected_identity_changed = !topology_changed
             && if identity_probe_all {
                 indices
@@ -135,11 +143,8 @@ impl MaterialDeliveryRuntime {
             && active > 0
             && active.saturating_mul(ACTIVE_DENSE_DENOMINATOR)
                 >= self.total_rows.saturating_mul(ACTIVE_DENSE_NUMERATOR);
-        let full_scan = forced
-            || self.directory_fallback
-            || fallback_detected
-            || self.wake_all
-            || dense_fallback;
+        let full_scan =
+            self.directory_fallback || fallback_detected || self.wake_all || dense_fallback;
         let entity_indices = if full_scan {
             indices.clone()
         } else {
@@ -210,11 +215,6 @@ impl MaterialDeliveryRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) fn force_full_scan_for_test(&mut self, force: bool) {
-        self.force_full_scan = force;
-    }
-
-    #[cfg(test)]
     pub(crate) fn pending_rows_for_test(&self) -> Vec<usize> {
         self.pending_entity_indices.iter().copied().collect()
     }
@@ -222,6 +222,11 @@ impl MaterialDeliveryRuntime {
     #[cfg(test)]
     pub(crate) fn scan_history_for_test(&self) -> &[MaterialDeliveryScan] {
         &self.scan_history
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_flat_full_scan_for_test(&mut self, scan: MaterialDeliveryScan) {
+        self.scan_history.push(scan);
     }
 }
 

@@ -69,8 +69,8 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/nativeFactoryUnpinnedBootstrap = nativePlanetRouteRequiresBootstrap\([\s\S]*?nativePlayerAuthorityOwnsRuntime/);
     expect(app).toMatch(/nativeFactoryProjectionPlanetId = nativePlayerAuthorityOwnsRuntime[\s\S]*?nativeFactoryDiscoveredProjectionRoute\?\.planetId/);
     expect(app).toMatch(/factoryGestureRouteKey = nativePlayerAuthorityOwnsRuntime[\s\S]*?nativePlayerAuthorityBoundFrame\?\.sessionId/);
-    expect(app).toMatch(/factoryThinViewAllSelectedEntityIds = useMemo\([\s\S]*?nativeFactoryUnpinnedBootstrap \? \[\]/);
-    expect(app).toMatch(/factoryThinViewAllSelectedBeltIds = useMemo\([\s\S]*?nativeFactoryUnpinnedBootstrap[\s\S]*?\? \[\]/);
+    expect(app).toMatch(/factoryThinViewAllSelectedEntityIds = useMemo\([\s\S]*?nativeFactoryUnpinnedBootstrap\s*\?\s*\[\]/);
+    expect(app).toMatch(/factoryThinViewAllSelectedBeltIds = useMemo\([\s\S]*?nativeFactoryUnpinnedBootstrap[\s\S]*?\?\s*\[\]/);
     expect(app).toMatch(/factoryInteractionConnectionEntityIds = useMemo\([\s\S]*?nativeFactoryUnpinnedBootstrap[\s\S]*?\? \[\]/);
     expect(app).toMatch(/const abortCanvasGestureLifecycle = useCallback[\s\S]*?factoryGestureEpochRef\.current \+= 1[\s\S]*?canvasPointerMotionRef\.current = stopCanvasPointerMotionSession[\s\S]*?capturedPointerIds[\s\S]*?activeCanvasTouchesRef\.current\.clear\(\)[\s\S]*?canvasMultiTouchRef\.current = null[\s\S]*?nodeDragActiveRef\.current = false[\s\S]*?nodeDragGestureEpochRef\.current = null[\s\S]*?multiDragStartRef\.current = null[\s\S]*?connectionHandleSpatialIndexRef\.current = null[\s\S]*?suppressConnectionClickRef\.current = false[\s\S]*?selectionModeRef\.current = false/);
     expect(app).toMatch(/const resetPlanetScopedFactoryUi = useCallback[\s\S]*?abortCanvasGestureLifecycle\(\)[\s\S]*?onMiningStop\(\)[\s\S]*?flowStore\.getState\(\)\.cancelConnection\(\)[\s\S]*?clickConnectionPreviewRef\.current = null[\s\S]*?setPlacement\(null\)[\s\S]*?setRegionMode\(false\)/);
@@ -116,7 +116,7 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <PendingBlueprintLayer/);
     expect(app).not.toMatch(/!nativePlayerAuthorityOwnsRuntime \? <SelectionToolbar/);
     expect(app).toMatch(/<SelectionToolbar[\s\S]*?unsafeActionsEnabled=\{!nativePlayerAuthorityOwnsRuntime\}/);
-    expect(app).toMatch(/<NativeBlueprintWorkspace[\s\S]*?!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace/);
+    expect(app).toMatch(/<NativeBlueprintWorkspace[\s\S]*?!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintTransformPending &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <RuntimeRenderProfile id="onboarding">/);
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeFactoryInspectorPanel[\s\S]*?: <StableInspectorPanel/);
     expect(app).toMatch(/<HeaderControls[\s\S]*?constructionCenterVisible=\{nativePlayerAuthorityOwnsRuntime \|\| game\.entities\.some/);

@@ -18950,6 +18950,29 @@ mod tests {
         command
     }
 
+    fn blueprint_transform_intent_command(
+        revision: u64,
+        id: &str,
+        rotation: u64,
+        mirror: &str,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("blueprints".to_owned()),
+                PathSegment::Key("intent".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(serde_json::json!({
+                "kind": "transform",
+                "id": id,
+                "rotation": rotation,
+                "mirror": mirror
+            })),
+        }];
+        command
+    }
+
     #[test]
     fn player_authority_blueprint_rename_is_minimal_atomic_and_preserves_opaque_state() {
         let mut state = blueprint_rename_state();
@@ -19122,6 +19145,182 @@ mod tests {
                 ))
                 .unwrap();
             assert_eq!(state.base_value()["blueprints"][1]["name"], name);
+        }
+    }
+
+    #[test]
+    fn player_authority_blueprint_transform_is_target_state_atomic_and_preserves_opaque_state() {
+        let mut state = blueprint_rename_state();
+        let command = blueprint_transform_intent_command(9, "mod:opaque/rocket", 270, "horizontal");
+        let encoded = serde_json::to_string(&command).unwrap();
+        assert!(encoded.contains("\"kind\":\"transform\""));
+        assert!(!encoded.contains("entities"));
+        assert!(!encoded.contains("belts"));
+        assert!(!encoded.contains("blueprintVersions"));
+        assert!(!encoded.contains("constructionQueue"));
+
+        let before = state.base_value().clone();
+        let entity_before = state.parse_entity(0).unwrap();
+        let belt_before = state.parse_belt(0).unwrap();
+        let receipt = state.apply_player_authority_command(&command).unwrap();
+        assert_eq!(receipt.previous_revision, 9);
+        assert_eq!(receipt.revision, 10);
+        assert!(receipt.changed_entity_ids.is_empty());
+        assert!(receipt.changed_belt_ids.is_empty());
+        assert!(receipt.topology_dirty);
+        let target = &state.base_value()["blueprints"][0];
+        assert_eq!(target["rotation"], 270);
+        assert_eq!(target["mirror"], "horizontal");
+        // A legacy missing/null row revision is interpreted as one.
+        assert_eq!(target["revision"], 2);
+        assert_eq!(target["name"], before["blueprints"][0]["name"]);
+        assert_eq!(target["entities"], before["blueprints"][0]["entities"]);
+        assert_eq!(target["belts"], before["blueprints"][0]["belts"]);
+        assert_eq!(
+            target["opaqueDefinitionPayload"],
+            before["blueprints"][0]["opaqueDefinitionPayload"]
+        );
+        assert_eq!(state.base_value()["blueprints"][1], before["blueprints"][1]);
+        assert_eq!(
+            state.base_value()["blueprintVersions"],
+            before["blueprintVersions"]
+        );
+        assert_eq!(
+            state.base_value()["constructionQueue"],
+            before["constructionQueue"]
+        );
+        assert_eq!(state.parse_entity(0).unwrap(), entity_before);
+        assert_eq!(state.parse_belt(0).unwrap(), belt_before);
+        assert_eq!(state.base_value()["nextId"], before["nextId"]);
+        let mut expected_base = before.clone();
+        expected_base["blueprints"][0]["rotation"] = Value::from(270);
+        expected_base["blueprints"][0]["mirror"] = Value::from("horizontal");
+        expected_base["blueprints"][0]["revision"] = Value::from(2);
+        assert_eq!(state.base_value(), &expected_base);
+
+        let mut null_legacy = blueprint_rename_state();
+        null_legacy.base_value_mut()["blueprints"][0]["rotation"] = Value::Null;
+        null_legacy.base_value_mut()["blueprints"][0]["mirror"] = Value::Null;
+        null_legacy.base_value_mut()["blueprints"][0]["revision"] = Value::Null;
+        null_legacy
+            .apply_player_authority_command(&blueprint_transform_intent_command(
+                9,
+                "mod:opaque/rocket",
+                90,
+                "none",
+            ))
+            .unwrap();
+        assert_eq!(null_legacy.base_value()["blueprints"][0]["rotation"], 90);
+        assert_eq!(null_legacy.base_value()["blueprints"][0]["mirror"], "none");
+        assert_eq!(null_legacy.base_value()["blueprints"][0]["revision"], 2);
+    }
+
+    #[test]
+    fn player_authority_blueprint_transform_replays_identically_from_semantic_wal_marker() {
+        let command = blueprint_transform_intent_command(9, "builtin-second", 180, "none");
+        let durable = serde_json::to_string(&command).unwrap();
+        let replayed: SimulationCommandPatch = serde_json::from_str(&durable).unwrap();
+        let mut live = blueprint_rename_state();
+        let mut replay = live.clone();
+        let live_receipt = live.apply_player_authority_command(&command).unwrap();
+        let replay_receipt = replay.apply_command(&replayed).unwrap();
+        assert_eq!(live_receipt, replay_receipt);
+        assert!(live_receipt.topology_dirty);
+        assert_eq!(
+            live.canonical_sha256().unwrap(),
+            replay.canonical_sha256().unwrap()
+        );
+        assert_eq!(replay.base_value()["blueprints"][1]["rotation"], 180);
+        assert_eq!(replay.base_value()["blueprints"][1]["mirror"], "none");
+        assert_eq!(replay.base_value()["blueprints"][1]["revision"], 8);
+    }
+
+    #[test]
+    fn player_authority_blueprint_transform_fails_closed_at_exact_marker_and_directory_boundaries()
+    {
+        let mut cases = vec![
+            blueprint_transform_intent_command(9, "missing", 180, "none"),
+            // Effective legacy defaults are 0 / none, so this is a no-op.
+            blueprint_transform_intent_command(9, "mod:opaque/rocket", 0, "none"),
+            blueprint_transform_intent_command(9, "builtin-second", 45, "none"),
+            blueprint_transform_intent_command(9, "builtin-second", 180, "vertical"),
+        ];
+        let mut missing_rotation =
+            blueprint_transform_intent_command(9, "builtin-second", 180, "horizontal");
+        missing_rotation.top_level_changes[0]
+            .value
+            .as_mut()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("rotation");
+        cases.push(missing_rotation);
+        let mut missing_mirror =
+            blueprint_transform_intent_command(9, "builtin-second", 180, "horizontal");
+        missing_mirror.top_level_changes[0]
+            .value
+            .as_mut()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("mirror");
+        cases.push(missing_mirror);
+        let mut extra = blueprint_transform_intent_command(9, "builtin-second", 180, "horizontal");
+        extra.top_level_changes[0].value.as_mut().unwrap()["name"] = Value::from("forged");
+        cases.push(extra);
+        let mut rename_with_transform_key =
+            blueprint_rename_intent_command(9, "builtin-second", "严格改名");
+        rename_with_transform_key.top_level_changes[0]
+            .value
+            .as_mut()
+            .unwrap()["rotation"] = Value::from(90);
+        cases.push(rename_with_transform_key);
+
+        for command in cases {
+            let mut state = blueprint_rename_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        for mutate in ["duplicate-id", "hidden-bad-row", "overflow"] {
+            let mut state = blueprint_rename_state();
+            match mutate {
+                "duplicate-id" => {
+                    state.base_value_mut()["blueprints"][1]["id"] =
+                        Value::from("mod:opaque/rocket");
+                }
+                "hidden-bad-row" => {
+                    state.base_value_mut()["blueprints"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::json!({
+                            "id": "hidden",
+                            "name": "坏行",
+                            "entities": "not-an-array",
+                            "belts": []
+                        }));
+                }
+                "overflow" => {
+                    state.base_value_mut()["blueprints"][1]["revision"] =
+                        Value::from(MAX_JAVASCRIPT_SAFE_INTEGER);
+                }
+                _ => unreachable!(),
+            }
+            let before = state.canonical_sha256().unwrap();
+            assert!(
+                state
+                    .apply_player_authority_command(&blueprint_transform_intent_command(
+                        9,
+                        "builtin-second",
+                        180,
+                        "none",
+                    ))
+                    .is_err()
+            );
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
         }
     }
 }

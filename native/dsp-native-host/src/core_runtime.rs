@@ -6344,6 +6344,41 @@ mod tests {
         }
     }
 
+    fn player_authority_blueprint_transform_intent_command(
+        base_revision: u64,
+        command_id: &str,
+        blueprint_id: &str,
+        rotation: u64,
+        mirror: &str,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [{
+                    "path": ["blueprints", "intent"],
+                    "operation": "set",
+                    "value": {
+                        "kind": "transform",
+                        "id": blueprint_id,
+                        "rotation": rotation,
+                        "mirror": mirror
+                    }
+                }],
+                "changedEntities": [],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
     fn player_authority_raw_top_level_command(
         base_revision: u64,
         command_id: &str,
@@ -10432,6 +10467,143 @@ mod tests {
     }
 
     #[test]
+    fn blueprint_transform_semantic_intent_survives_generic_cold_wal_reopen() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = player_authority_blueprint_rename_envelope();
+        let source: Value = serde_json::from_slice(&bytes).unwrap();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        let checkpoint = imported.checkpoint.clone();
+        let command = player_authority_blueprint_transform_intent_command(
+            checkpoint.revision,
+            "blueprint-transform-generic-wal",
+            "mod:opaque/rocket",
+            270,
+            "horizontal",
+        )
+        .command;
+        let committed = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "blueprint-transform-generic-wal".to_owned(),
+                    base_revision: checkpoint.revision,
+                    command: Some(command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(committed.revision, checkpoint.revision + 1);
+
+        let wal = store
+            .read_wal(&checkpoint.slot, checkpoint.revision)
+            .unwrap();
+        assert_eq!(wal.len(), 1);
+        let wal_payload = serde_json::to_string(&wal).unwrap();
+        assert!(wal_payload.contains("blueprints"));
+        assert!(wal_payload.contains("transform"));
+        assert!(wal_payload.contains("mod:opaque/rocket"));
+        assert!(wal_payload.contains("horizontal"));
+        assert!(!wal_payload.contains("opaqueDefinitionPayload"));
+        assert!(!wal_payload.contains("opaqueVersionPayload"));
+        assert!(!wal_payload.contains("opaqueQueuePayload"));
+
+        registry
+            .export_v47(
+                &store,
+                &imported.session_id,
+                "blueprint-transform-live",
+                100,
+            )
+            .unwrap();
+        let live: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/blueprint-transform-live.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(live["state"].get("intent").is_none());
+        assert_eq!(live["state"]["blueprints"][0]["rotation"], 270);
+        assert_eq!(live["state"]["blueprints"][0]["mirror"], "horizontal");
+        assert_eq!(live["state"]["blueprints"][0]["revision"], 2);
+        assert_eq!(
+            live["state"]["blueprints"][0]["name"],
+            source["state"]["blueprints"][0]["name"]
+        );
+        assert_eq!(
+            live["state"]["blueprints"][0]["entities"],
+            source["state"]["blueprints"][0]["entities"]
+        );
+        assert_eq!(
+            live["state"]["blueprints"][0]["belts"],
+            source["state"]["blueprints"][0]["belts"]
+        );
+        assert_eq!(
+            live["state"]["blueprints"][0]["opaqueDefinitionPayload"],
+            source["state"]["blueprints"][0]["opaqueDefinitionPayload"]
+        );
+        assert_eq!(
+            live["state"]["blueprintVersions"],
+            source["state"]["blueprintVersions"]
+        );
+        assert_eq!(
+            live["state"]["constructionQueue"],
+            source["state"]["constructionQueue"]
+        );
+        assert_eq!(live["state"]["entities"], source["state"]["entities"]);
+        assert_eq!(live["state"]["belts"], source["state"]["belts"]);
+        assert_eq!(live["state"]["nextId"], source["state"]["nextId"]);
+        let live_state = live["state"].clone();
+
+        drop(registry);
+        drop(store);
+        let reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = CoreRegistry::default();
+        let reopened = reopened_registry
+            .open(
+                &reopened_store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        assert_eq!(reopened.replayed_wal_entries, 1);
+        assert_eq!(reopened.replayed_revision, committed.revision);
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &reopened.session_id,
+                "blueprint-transform-replayed",
+                100,
+            )
+            .unwrap();
+        let replayed: Value = serde_json::from_slice(
+            &std::fs::read(
+                root.path()
+                    .join("exports/blueprint-transform-replayed.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(replayed["state"].get("intent").is_none());
+        assert_eq!(replayed["state"], live_state);
+    }
+
+    #[test]
     fn blueprint_rename_is_idempotent_and_atomic_across_host_durable_boundaries() {
         let command_id = "blueprint-rename-durable-boundary";
         let (_clean_root, mut clean_store, mut clean_registry, clean_session, checkpoint) =
@@ -10552,6 +10724,148 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn blueprint_transform_is_idempotent_and_atomic_across_host_durable_boundaries() {
+        let command_id = "blueprint-transform-durable-boundary";
+        let (clean_root, mut clean_store, mut clean_registry, clean_session, checkpoint) =
+            player_authority_blueprint_rename_fixture();
+        let request = || {
+            player_authority_blueprint_transform_intent_command(
+                checkpoint.revision,
+                command_id,
+                "mod:opaque/rocket",
+                270,
+                "horizontal",
+            )
+        };
+        let clean = clean_registry
+            .commit_player_authority_command(&mut clean_store, &clean_session, request())
+            .unwrap();
+        assert!(clean.changed_entity_ids.is_empty());
+        assert!(clean.changed_belt_ids.is_empty());
+        assert!(clean.topology_dirty);
+        let duplicate = clean_registry
+            .commit_player_authority_command(&mut clean_store, &clean_session, request())
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.revision, clean.revision);
+        assert_eq!(
+            duplicate.summary.canonical_sha256,
+            clean.summary.canonical_sha256
+        );
+        clean_registry
+            .export_v47(
+                &clean_store,
+                &clean_session,
+                "blueprint-transform-duplicate-export",
+                100,
+            )
+            .unwrap();
+        let exported_bytes = std::fs::read(
+            clean_root
+                .path()
+                .join("exports/blueprint-transform-duplicate-export.json"),
+        )
+        .unwrap();
+        let exported: Value = serde_json::from_slice(&exported_bytes).unwrap();
+        assert!(exported["state"]["blueprints"].is_array());
+        assert_eq!(exported["state"]["blueprints"][0]["rotation"], 270);
+        assert_eq!(exported["state"]["blueprints"][0]["mirror"], "horizontal");
+        assert_eq!(exported["state"]["blueprints"][0]["revision"], 2);
+        assert!(
+            !String::from_utf8(exported_bytes)
+                .unwrap()
+                .contains("\"kind\":\"transform\"")
+        );
+
+        for fault in [
+            PlayerAuthorityCommandFault::AfterStage,
+            PlayerAuthorityCommandFault::AfterWal,
+            PlayerAuthorityCommandFault::AfterCheckpoint,
+            PlayerAuthorityCommandFault::AfterReceipt,
+            PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
+        ] {
+            let (root, mut store, mut registry, session_id, checkpoint) =
+                player_authority_blueprint_rename_fixture();
+            let before = registry.status(&session_id).unwrap();
+            let request = || {
+                player_authority_blueprint_transform_intent_command(
+                    checkpoint.revision,
+                    command_id,
+                    "mod:opaque/rocket",
+                    270,
+                    "horizontal",
+                )
+            };
+            let error = registry
+                .commit_player_authority_command_internal(
+                    &mut store,
+                    &session_id,
+                    request(),
+                    PlayerAuthorityCommandKind::Gameplay,
+                    fault,
+                )
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("lost response"),
+                "{fault:?}: {error:#}"
+            );
+            if fault == PlayerAuthorityCommandFault::AfterStage {
+                let after = registry.status(&session_id).unwrap();
+                assert_eq!(after.revision, before.revision);
+                assert_eq!(after.canonical_sha256, before.canonical_sha256);
+            }
+
+            drop(registry);
+            let published = store.recover("normal-main").unwrap().unwrap();
+            let mut reopened = CoreRegistry::default();
+            let opened = reopened
+                .open(
+                    &store,
+                    "normal-main",
+                    published.generation,
+                    &published.root_hash,
+                    published.revision,
+                    &published.registry_fingerprint,
+                    player_authority_catalog(),
+                )
+                .unwrap();
+            let recovered = reopened
+                .commit_player_authority_command(&mut store, &opened.session_id, request())
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
+            assert!(recovered.duplicate, "{fault:?}");
+            assert_eq!(recovered.revision, clean.revision, "{fault:?}");
+            assert_eq!(
+                recovered.summary.canonical_sha256, clean.summary.canonical_sha256,
+                "{fault:?}"
+            );
+            assert!(recovered.changed_entity_ids.is_empty(), "{fault:?}");
+            assert!(recovered.changed_belt_ids.is_empty(), "{fault:?}");
+            assert!(recovered.topology_dirty, "{fault:?}");
+            let lease = store.require_exact_realtime_lease().unwrap();
+            assert_eq!(lease.acknowledged.revision, recovered.revision, "{fault:?}");
+            assert!(lease.pending_command.is_none(), "{fault:?}");
+            reopened
+                .export_v47(
+                    &store,
+                    &opened.session_id,
+                    "blueprint-transform-recovered",
+                    100,
+                )
+                .unwrap();
+            let recovered_export = std::fs::read(
+                root.path()
+                    .join("exports/blueprint-transform-recovered.json"),
+            )
+            .unwrap();
+            assert!(
+                !String::from_utf8(recovered_export)
+                    .unwrap()
+                    .contains("\"kind\":\"transform\"")
+            );
+        }
     }
 
     #[test]

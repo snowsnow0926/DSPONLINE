@@ -26,6 +26,7 @@ import {
 } from "./simulationRuntimeProtocol";
 import { createNativeProjectedManualMineCommand } from "./nativeProjectedManualMiningCommands";
 import { createNativeBlueprintRenameIntentCommand } from "./nativeBlueprintRenameIntentCommands";
+import { createNativeBlueprintTransformIntentCommand } from "./nativeBlueprintTransformIntentCommands";
 
 function activeFrame(
   revision = 10,
@@ -365,6 +366,33 @@ describe("native player-authority command source", () => {
 
   it("requires topologyDirty for the minimal blueprint rename marker", async () => {
     const patch = createNativeBlueprintRenameIntentCommand(10, "mod:opaque/rocket", "新蓝图名🚀");
+    const accepted = sourceHarness(patch, {
+      topologyDirty: true,
+      receipt: receiptForPatch(patch, true),
+    });
+    await expect(accepted.source.applyCommand(patch)).resolves.toMatchObject({
+      previousRevision: 10,
+      revision: 11,
+      changedEntityIds: [],
+      changedBeltIds: [],
+      topologyDirty: true,
+    });
+    const rejected = sourceHarness(patch, {
+      topologyDirty: true,
+      receipt: receiptForPatch(patch, false),
+    });
+    await expect(rejected.source.applyCommand(patch)).rejects.toMatchObject({
+      code: "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+    });
+  });
+
+  it("requires the same compact empty-ID topology receipt for blueprint transform", async () => {
+    const patch = createNativeBlueprintTransformIntentCommand(
+      10,
+      "mod:opaque/rocket",
+      270,
+      "horizontal",
+    );
     const accepted = sourceHarness(patch, {
       topologyDirty: true,
       receipt: receiptForPatch(patch, true),

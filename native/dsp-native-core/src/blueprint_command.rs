@@ -1,9 +1,11 @@
-//! Minimal, durable blueprint rename intent.
+//! Minimal, durable blueprint metadata intents.
 //!
-//! The renderer sends only `{ kind, id, name }`. Rust validates the complete
-//! public-v47 blueprint directory and expands the marker to the target row's
-//! `name` and `revision` leaves. No blueprint body, version snapshot, queue,
-//! inventory, entity, belt, or allocator field is renderer-derived.
+//! The renderer sends either the exact rename marker `{ kind, id, name }` or
+//! the exact target-state transform marker `{ kind, id, rotation, mirror }`.
+//! Rust validates the complete public-v47 blueprint directory and expands the
+//! marker to the target row's metadata leaves. No blueprint body, version
+//! snapshot, queue, inventory, entity, belt, or allocator field is
+//! renderer-derived.
 
 use std::collections::HashSet;
 
@@ -28,10 +30,37 @@ struct BlueprintRenameIntent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct BlueprintTransformIntent {
+    id: String,
+    rotation: u64,
+    mirror: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BlueprintIntent {
+    Rename(BlueprintRenameIntent),
+    Transform(BlueprintTransformIntent),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ValidatedBlueprintRename {
     index: usize,
     name: String,
     revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ValidatedBlueprintTransform {
+    index: usize,
+    rotation: u64,
+    mirror: String,
+    revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ValidatedBlueprintIntent {
+    Rename(ValidatedBlueprintRename),
+    Transform(ValidatedBlueprintTransform),
 }
 
 fn path_matches(path: &[PathSegment], expected: &[&str]) -> bool {
@@ -77,7 +106,7 @@ pub(crate) fn command_contains_intent(command: &SimulationCommandPatch) -> bool 
         .any(|change| path_matches(&change.path, &["blueprints", "intent"]))
 }
 
-fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<BlueprintRenameIntent> {
+fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<BlueprintIntent> {
     if command.top_level_changes.len() != 1
         || !command.changed_entities.is_empty()
         || !command.added_entities.is_empty()
@@ -86,42 +115,73 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<BlueprintR
         || !command.added_belts.is_empty()
         || !command.removed_belt_ids.is_empty()
     {
-        bail!("native player-authority blueprint rename intent shape is invalid")
+        bail!("native player-authority blueprint intent shape is invalid")
     }
     let change = &command.top_level_changes[0];
     if !path_matches(&change.path, &["blueprints", "intent"]) || change.operation != "set" {
-        bail!("native player-authority blueprint rename intent path is invalid")
+        bail!("native player-authority blueprint intent path is invalid")
     }
     let intent = change
         .value
         .as_ref()
         .and_then(Value::as_object)
-        .filter(|intent| {
-            intent.len() == 3
-                && intent.contains_key("kind")
-                && intent.contains_key("id")
-                && intent.contains_key("name")
-        })
-        .ok_or_else(|| anyhow!("native player-authority blueprint rename intent is invalid"))?;
-    if intent.get("kind").and_then(Value::as_str) != Some("rename") {
-        bail!("native player-authority blueprint rename kind is invalid")
-    }
+        .ok_or_else(|| anyhow!("native player-authority blueprint intent is invalid"))?;
+    let kind = intent
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority blueprint intent kind is invalid"))?;
     let id = intent
         .get("id")
         .and_then(Value::as_str)
         .filter(|id| valid_opaque_text(id, MAX_OPAQUE_ID_BYTES))
-        .ok_or_else(|| anyhow!("native player-authority blueprint rename ID is invalid"))?;
-    let name = intent
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("native player-authority blueprint rename name is invalid"))?;
-    let canonical = canonical_blueprint_name(name)
-        .filter(|canonical| canonical == name)
-        .ok_or_else(|| anyhow!("native player-authority blueprint rename name is not canonical"))?;
-    Ok(BlueprintRenameIntent {
-        id: id.to_owned(),
-        name: canonical,
-    })
+        .ok_or_else(|| anyhow!("native player-authority blueprint intent ID is invalid"))?;
+    match kind {
+        "rename" => {
+            if intent.len() != 3 || !intent.contains_key("name") {
+                bail!("native player-authority blueprint rename intent is invalid")
+            }
+            let name = intent.get("name").and_then(Value::as_str).ok_or_else(|| {
+                anyhow!("native player-authority blueprint rename name is invalid")
+            })?;
+            let canonical = canonical_blueprint_name(name)
+                .filter(|canonical| canonical == name)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority blueprint rename name is not canonical")
+                })?;
+            Ok(BlueprintIntent::Rename(BlueprintRenameIntent {
+                id: id.to_owned(),
+                name: canonical,
+            }))
+        }
+        "transform" => {
+            if intent.len() != 4
+                || !intent.contains_key("rotation")
+                || !intent.contains_key("mirror")
+            {
+                bail!("native player-authority blueprint transform intent is invalid")
+            }
+            let rotation = intent
+                .get("rotation")
+                .and_then(Value::as_u64)
+                .filter(|rotation| matches!(rotation, 0 | 90 | 180 | 270))
+                .ok_or_else(|| {
+                    anyhow!("native player-authority blueprint transform rotation is invalid")
+                })?;
+            let mirror = intent
+                .get("mirror")
+                .and_then(Value::as_str)
+                .filter(|mirror| matches!(*mirror, "none" | "horizontal"))
+                .ok_or_else(|| {
+                    anyhow!("native player-authority blueprint transform mirror is invalid")
+                })?;
+            Ok(BlueprintIntent::Transform(BlueprintTransformIntent {
+                id: id.to_owned(),
+                rotation,
+                mirror: mirror.to_owned(),
+            }))
+        }
+        _ => bail!("native player-authority blueprint intent kind is invalid"),
+    }
 }
 
 fn optional_array_shape(row: &Map<String, Value>, key: &str, label: &str) -> anyhow::Result<()> {
@@ -141,7 +201,9 @@ fn blueprint_revision(row: &Map<String, Value>) -> anyhow::Result<u64> {
     }
 }
 
-fn validate_blueprint_row(row: &Map<String, Value>) -> anyhow::Result<(&str, &str, u64)> {
+fn validate_blueprint_row(
+    row: &Map<String, Value>,
+) -> anyhow::Result<(&str, &str, u64, u64, &str)> {
     let id = row
         .get("id")
         .and_then(Value::as_str)
@@ -160,26 +222,31 @@ fn validate_blueprint_row(row: &Map<String, Value>) -> anyhow::Result<(&str, &st
         .ok_or_else(|| anyhow!("native player-authority blueprint belts are invalid"))?;
     optional_array_shape(row, "resourceAnchors", "resource anchors")?;
     optional_array_shape(row, "externalPorts", "external ports")?;
-    match row.get("rotation") {
-        None | Some(Value::Null) => {}
+    let rotation = match row.get("rotation") {
+        None | Some(Value::Null) => 0,
         Some(value)
             if value
                 .as_u64()
-                .is_some_and(|rotation| matches!(rotation, 0 | 90 | 180 | 270)) => {}
+                .is_some_and(|rotation| matches!(rotation, 0 | 90 | 180 | 270)) =>
+        {
+            value.as_u64().expect("validated u64 rotation")
+        }
         _ => bail!("native player-authority blueprint rotation is invalid"),
-    }
-    match row.get("mirror") {
-        None | Some(Value::Null) => {}
-        Some(Value::String(value)) if matches!(value.as_str(), "none" | "horizontal") => {}
+    };
+    let mirror = match row.get("mirror") {
+        None | Some(Value::Null) => "none",
+        Some(Value::String(value)) if matches!(value.as_str(), "none" | "horizontal") => {
+            value.as_str()
+        }
         _ => bail!("native player-authority blueprint mirror is invalid"),
-    }
-    Ok((id, name, blueprint_revision(row)?))
+    };
+    Ok((id, name, blueprint_revision(row)?, rotation, mirror))
 }
 
-fn validated_rename(
+fn validated_intent(
     state: &CoreState,
     command: &SimulationCommandPatch,
-) -> anyhow::Result<ValidatedBlueprintRename> {
+) -> anyhow::Result<ValidatedBlueprintIntent> {
     let intent = require_intent(command)?;
     let blueprints = state
         .base_value()
@@ -195,37 +262,56 @@ fn validated_rename(
         let row = value
             .as_object()
             .ok_or_else(|| anyhow!("native player-authority blueprint row is invalid"))?;
-        let (id, current_name, revision) = validate_blueprint_row(row)?;
+        let (id, current_name, revision, current_rotation, current_mirror) =
+            validate_blueprint_row(row)?;
         if !ids.insert(id) {
             bail!("native player-authority blueprint IDs are not unique")
         }
-        if id == intent.id {
+        let target_id = match &intent {
+            BlueprintIntent::Rename(intent) => intent.id.as_str(),
+            BlueprintIntent::Transform(intent) => intent.id.as_str(),
+        };
+        if id == target_id {
             if target.is_some() {
-                bail!("native player-authority blueprint rename target is not unique")
+                bail!("native player-authority blueprint target is not unique")
             }
-            if current_name == intent.name {
-                bail!("native player-authority blueprint rename target is unchanged")
-            }
-            target = Some(ValidatedBlueprintRename {
-                index,
-                name: intent.name.clone(),
-                revision: revision
-                    .checked_add(1)
-                    .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
-                    .ok_or_else(|| {
-                        anyhow!("native player-authority blueprint revision overflows")
-                    })?,
+            let next_revision = revision
+                .checked_add(1)
+                .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                .ok_or_else(|| anyhow!("native player-authority blueprint revision overflows"))?;
+            target = Some(match &intent {
+                BlueprintIntent::Rename(intent) => {
+                    if current_name == intent.name {
+                        bail!("native player-authority blueprint rename target is unchanged")
+                    }
+                    ValidatedBlueprintIntent::Rename(ValidatedBlueprintRename {
+                        index,
+                        name: intent.name.clone(),
+                        revision: next_revision,
+                    })
+                }
+                BlueprintIntent::Transform(intent) => {
+                    if current_rotation == intent.rotation && current_mirror == intent.mirror {
+                        bail!("native player-authority blueprint transform target is unchanged")
+                    }
+                    ValidatedBlueprintIntent::Transform(ValidatedBlueprintTransform {
+                        index,
+                        rotation: intent.rotation,
+                        mirror: intent.mirror.clone(),
+                        revision: next_revision,
+                    })
+                }
             });
         }
     }
-    target.ok_or_else(|| anyhow!("native player-authority blueprint rename target is missing"))
+    target.ok_or_else(|| anyhow!("native player-authority blueprint target is missing"))
 }
 
 pub(crate) fn validate_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
 ) -> anyhow::Result<()> {
-    validated_rename(state, command).map(|_| ())
+    validated_intent(state, command).map(|_| ())
 }
 
 pub(crate) fn validate_resume_marker(command: &SimulationCommandPatch) -> anyhow::Result<()> {
@@ -236,11 +322,9 @@ pub(crate) fn expand_intent(
     state: &CoreState,
     command: &SimulationCommandPatch,
 ) -> anyhow::Result<SimulationCommandPatch> {
-    let rename = validated_rename(state, command)?;
-    Ok(SimulationCommandPatch {
-        protocol_version: command.protocol_version,
-        base_revision: command.base_revision,
-        top_level_changes: vec![
+    let intent = validated_intent(state, command)?;
+    let top_level_changes = match intent {
+        ValidatedBlueprintIntent::Rename(rename) => vec![
             ValuePatch {
                 path: vec![
                     PathSegment::Key("blueprints".to_owned()),
@@ -260,6 +344,40 @@ pub(crate) fn expand_intent(
                 value: Some(Value::from(rename.revision)),
             },
         ],
+        ValidatedBlueprintIntent::Transform(transform) => vec![
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("blueprints".to_owned()),
+                    PathSegment::Index(transform.index),
+                    PathSegment::Key("rotation".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::from(transform.rotation)),
+            },
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("blueprints".to_owned()),
+                    PathSegment::Index(transform.index),
+                    PathSegment::Key("mirror".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::from(transform.mirror)),
+            },
+            ValuePatch {
+                path: vec![
+                    PathSegment::Key("blueprints".to_owned()),
+                    PathSegment::Index(transform.index),
+                    PathSegment::Key("revision".to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(Value::from(transform.revision)),
+            },
+        ],
+    };
+    Ok(SimulationCommandPatch {
+        protocol_version: command.protocol_version,
+        base_revision: command.base_revision,
+        top_level_changes,
         changed_entities: Vec::new(),
         added_entities: Vec::new(),
         removed_entity_ids: Vec::new(),

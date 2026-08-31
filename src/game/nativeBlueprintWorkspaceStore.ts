@@ -28,6 +28,25 @@ export interface NativeBlueprintRenameIdentity {
   readonly currentRevision: number;
 }
 
+export type NativeBlueprintRotation = 0 | 90 | 180 | 270;
+export type NativeBlueprintMirror = "none" | "horizontal";
+
+/**
+ * Exact selected-row binding for one target-state metadata transform. This is
+ * intentionally separate from the rename editor identity so neither parser
+ * can accidentally accept the other intent's fields.
+ */
+export interface NativeBlueprintTransformBinding {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly registryFingerprint: string;
+  readonly blueprintId: string;
+  readonly currentRowRevision: number;
+  readonly currentRotation: NativeBlueprintRotation;
+  readonly currentMirror: NativeBlueprintMirror;
+}
+
 export interface NativeBlueprintWorkspaceSource {
   readonly boundIdentity: NativeBlueprintWorkspaceIdentity;
   readVerifiedBlueprintPage(
@@ -304,6 +323,43 @@ export function nativeBlueprintRenameLineageMatchesIdentity(
     validLogicalId(identity.registryFingerprint, 256) &&
     identity.sessionId === candidate.sessionId && identity.runId === candidate.runId &&
     identity.registryFingerprint === candidate.registryFingerprint;
+}
+
+export function nativeBlueprintTransformBindingMatchesFrame(
+  binding: NativeBlueprintTransformBinding,
+  frame: NativeBlueprintWorkspaceFrame | null,
+): boolean {
+  if (!frame || frame.sessionId !== binding.sessionId || frame.runId !== binding.runId ||
+      frame.revision !== binding.revision ||
+      frame.registryFingerprint !== binding.registryFingerprint ||
+      !validOpaqueText(binding.blueprintId, 512) ||
+      !Number.isSafeInteger(binding.currentRowRevision) || binding.currentRowRevision < 1 ||
+      binding.currentRowRevision >= Number.MAX_SAFE_INTEGER ||
+      ![0, 90, 180, 270].includes(binding.currentRotation) ||
+      !["none", "horizontal"].includes(binding.currentMirror) ||
+      frame.selectedBlueprintId !== binding.blueprintId) return false;
+  const row = frame.libraryById.get(binding.blueprintId);
+  return row?.revision === binding.currentRowRevision &&
+    row.rotation === binding.currentRotation && row.mirror === binding.currentMirror;
+}
+
+export function selectNativeBlueprintTransformBinding(
+  frame: NativeBlueprintWorkspaceFrame | null,
+): NativeBlueprintTransformBinding | null {
+  if (!frame || frame.selectedBlueprintId === null) return null;
+  const row = frame.libraryById.get(frame.selectedBlueprintId);
+  if (!row) return null;
+  const binding: NativeBlueprintTransformBinding = Object.freeze({
+    sessionId: frame.sessionId,
+    runId: frame.runId,
+    revision: frame.revision,
+    registryFingerprint: frame.registryFingerprint,
+    blueprintId: row.id,
+    currentRowRevision: row.revision,
+    currentRotation: row.rotation as NativeBlueprintRotation,
+    currentMirror: row.mirror as NativeBlueprintMirror,
+  });
+  return nativeBlueprintTransformBindingMatchesFrame(binding, frame) ? binding : null;
 }
 
 export class NativeBlueprintWorkspaceStore {

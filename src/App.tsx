@@ -459,8 +459,12 @@ import {
 import {
   NativeBlueprintWorkspaceStore,
   createNativePlayerAuthorityBlueprintWorkspaceSource,
+  selectNativeBlueprintTransformBinding,
   selectNativeBlueprintWorkspaceFrame,
+  type NativeBlueprintMirror,
   type NativeBlueprintRenameIdentity,
+  type NativeBlueprintRotation,
+  type NativeBlueprintTransformBinding,
 } from "./game/nativeBlueprintWorkspaceStore";
 import {
   prepareNativeBlueprintRenameIntentCommand,
@@ -474,6 +478,7 @@ import {
   type NativeBlueprintRenameResolution,
   type NativeBlueprintRenameSubmitOutcome,
 } from "./game/nativeBlueprintRenameWorkflow";
+import { useNativeBlueprintTransformCommandTransaction } from "./game/useNativeBlueprintTransformCommandTransaction";
 import {
   createNativeProjectedOrdinaryBuildingPlacementCommand,
   readVerifiedNativeConstructionPlacementContext,
@@ -2802,6 +2807,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const nativeBlueprintWorkspaceFrame = useMemo(() => nativeFactoryInventoryIdentity
     ? selectNativeBlueprintWorkspaceFrame(nativeBlueprintWorkspaceSnapshot, nativeFactoryInventoryIdentity)
     : null, [nativeBlueprintWorkspaceSnapshot, nativeFactoryInventoryIdentity]);
+  const nativeBlueprintTransformBinding = useMemo(
+    () => selectNativeBlueprintTransformBinding(nativeBlueprintWorkspaceFrame),
+    [nativeBlueprintWorkspaceFrame],
+  );
   const nativeBlueprintWorkspaceFrameRef = useRef(nativeBlueprintWorkspaceFrame);
   const nativeBlueprintWorkspaceIdentityRef = useRef(nativeFactoryInventoryIdentity);
   const nativeBlueprintRenamePendingIdentityRef = useRef(nativeBlueprintRenamePendingIdentity);
@@ -17199,6 +17208,32 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
     setNotice,
   });
+  const {
+    pending: nativeBlueprintTransformPending,
+    commit: commitNativeBlueprintTransformCommand,
+  } = useNativeBlueprintTransformCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    projection: nativeBlueprintTransformBinding,
+    frame: nativeBlueprintWorkspaceFrame,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+  });
+  const submitNativeBlueprintTransformIntent = useCallback((
+    binding: NativeBlueprintTransformBinding,
+    rotation: NativeBlueprintRotation,
+    mirror: NativeBlueprintMirror,
+  ): boolean => {
+    if (!blueprintsOpenRef.current || nativeBlueprintRenamePendingIdentityRef.current) {
+      setNotice("蓝图工作区已关闭或名称修改仍在对账；本次方向变换未提交");
+      return false;
+    }
+    return commitNativeBlueprintTransformCommand(binding, rotation, mirror);
+  }, [commitNativeBlueprintTransformCommand]);
   const nativeStationConfigurationProjectionBinding = useMemo<
     NativeProjectedStationConfigurationBinding | null
   >(() => {
@@ -20113,28 +20148,34 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       </RuntimeRenderProfile> : null}
       <NativeBlueprintWorkspace
         open={blueprintsOpen && (nativePlayerAuthorityOwnsRuntime ||
-          nativeBlueprintRenamePendingIdentity !== null || nativeBlueprintRenameResolution !== null)}
+          nativeBlueprintRenamePendingIdentity !== null || nativeBlueprintRenameResolution !== null ||
+          nativeBlueprintTransformPending !== null)}
         status={nativeBlueprintWorkspaceSnapshot.status}
         frame={nativeBlueprintWorkspaceFrame}
         latestIdentity={nativeFactoryInventoryIdentity}
         onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setBlueprintsOpen(false)}
         onSelectBlueprint={setNativeBlueprintSelectedId}
         onLibraryCursorChange={(cursor) => {
-          if (nativeBlueprintRenamePendingIdentity || nativePlayerAuthorityCommandPending) return;
+          if (nativeBlueprintRenamePendingIdentity || nativeBlueprintTransformPending ||
+              nativePlayerAuthorityCommandPending) return;
           setNativeBlueprintSelectedId(null);
           setNativeBlueprintLibraryCursor(cursor);
         }}
         onQueueCursorChange={(cursor) => {
-          if (nativeBlueprintRenamePendingIdentity || nativePlayerAuthorityCommandPending) return;
+          if (nativeBlueprintRenamePendingIdentity || nativeBlueprintTransformPending ||
+              nativePlayerAuthorityCommandPending) return;
           setNativeBlueprintQueueCursor(cursor);
         }}
         onSubmitRenameIntent={submitNativeBlueprintRenameIntent}
+        onSubmitTransformIntent={submitNativeBlueprintTransformIntent}
         pendingIdentity={nativeBlueprintRenamePendingIdentity}
+        transformPending={nativeBlueprintTransformPending}
         resolution={nativeBlueprintRenameResolution}
         onConsumeRenameResolution={consumeNativeBlueprintRenameResolution}
         commandPending={nativePlayerAuthorityCommandPending}
       />
       {!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&
+        !nativeBlueprintTransformPending &&
         !nativeBlueprintRenameResolution ? <BlueprintWorkspace
         open={blueprintsOpen}
         game={game}

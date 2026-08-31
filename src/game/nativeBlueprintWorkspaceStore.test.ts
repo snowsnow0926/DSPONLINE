@@ -11,6 +11,8 @@ import {
   NativeBlueprintWorkspaceStore,
   createNativePlayerAuthorityBlueprintWorkspaceSource,
   nativeBlueprintRenameIdentityMatchesFrame,
+  nativeBlueprintTransformBindingMatchesFrame,
+  selectNativeBlueprintTransformBinding,
   selectNativeBlueprintWorkspaceFrame,
   type NativeBlueprintWorkspaceIdentity,
   type NativeBlueprintWorkspaceSource,
@@ -406,5 +408,55 @@ describe("NativeBlueprintWorkspaceStore", () => {
     ]) {
       expect(nativeBlueprintRenameIdentityMatchesFrame({ ...identity, ...drift }, frame)).toBe(false);
     }
+  });
+
+  it("binds transform to the exact selected global and row revision", async () => {
+    const row = {
+      ...summary("mod:opaque/selected", "不透明蓝图"),
+      revision: 4,
+      rotation: 270 as const,
+      mirror: "horizontal" as const,
+      detailStatus: "truncated" as const,
+      counts: { entities: 513, belts: 0, resourceAnchors: 0, externalPorts: 0 },
+    };
+    const store = new NativeBlueprintWorkspaceStore();
+    const details = new Map([[row.id, {
+      summary: row,
+      status: "truncated" as const,
+      unsupportedReason: "detail-limits-exceeded" as const,
+      entities: [],
+      belts: [],
+      resourceAnchors: [],
+      externalPorts: [],
+    }]]);
+    await expect(store.refresh(fixtureSource(IDENTITY, [row], [], details), IDENTITY, row.id))
+      .resolves.toBe("committed");
+    const frame = store.getSnapshot().frame;
+    const binding = selectNativeBlueprintTransformBinding(frame);
+    expect(binding).toEqual({
+      sessionId: IDENTITY.sessionId,
+      runId: IDENTITY.runId,
+      revision: IDENTITY.revision,
+      registryFingerprint: IDENTITY.registryFingerprint,
+      blueprintId: row.id,
+      currentRowRevision: 4,
+      currentRotation: 270,
+      currentMirror: "horizontal",
+    });
+    expect(nativeBlueprintTransformBindingMatchesFrame(binding!, frame)).toBe(true);
+    for (const drift of [
+      { revision: 18 },
+      { registryFingerprint: "other-registry" },
+      { blueprintId: "other-blueprint" },
+      { currentRowRevision: 5 },
+      { currentRotation: 0 as const },
+      { currentMirror: "none" as const },
+    ]) {
+      expect(nativeBlueprintTransformBindingMatchesFrame({ ...binding!, ...drift }, frame)).toBe(false);
+    }
+    expect(selectNativeBlueprintTransformBinding(frame && {
+      ...frame,
+      selectedBlueprintId: null,
+    })).toBeNull();
   });
 });

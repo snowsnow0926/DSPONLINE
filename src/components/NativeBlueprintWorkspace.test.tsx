@@ -11,10 +11,14 @@ import type {
   DesktopNativeCoreBlueprintSummary,
 } from "../desktop";
 import type {
+  NativeBlueprintMirror,
   NativeBlueprintRenameIdentity,
+  NativeBlueprintRotation,
+  NativeBlueprintTransformBinding,
   NativeBlueprintWorkspaceFrame,
   NativeBlueprintWorkspaceIdentity,
 } from "../game/nativeBlueprintWorkspaceStore";
+import type { NativeBlueprintTransformPendingCommand } from "../game/nativeBlueprintTransformCommandReconciliation";
 import type {
   NativeBlueprintRenamePendingIdentity,
   NativeBlueprintRenameResolution,
@@ -158,7 +162,13 @@ describe("NativeBlueprintWorkspace", () => {
         identity: NativeBlueprintRenameIdentity,
         name: string,
       ) => NativeBlueprintRenameSubmitOutcome;
+      onSubmitTransformIntent?: (
+        binding: NativeBlueprintTransformBinding,
+        rotation: NativeBlueprintRotation,
+        mirror: NativeBlueprintMirror,
+      ) => boolean;
       pendingIdentity?: NativeBlueprintRenamePendingIdentity | null;
+      transformPending?: NativeBlueprintTransformPendingCommand | null;
       latestIdentity?: NativeBlueprintWorkspaceIdentity | null;
       resolution?: NativeBlueprintRenameResolution | null;
       onConsumeRenameResolution?: (submissionId: number) => void;
@@ -176,6 +186,9 @@ describe("NativeBlueprintWorkspace", () => {
           submissionId: 1,
           commandRevision: value?.revision ?? 47,
         }));
+    const onSubmitTransformIntent = callbacks.onSubmitTransformIntent ??
+      vi.fn<(binding: NativeBlueprintTransformBinding, rotation: NativeBlueprintRotation,
+        mirror: NativeBlueprintMirror) => boolean>().mockReturnValue(true);
     const onConsumeRenameResolution = callbacks.onConsumeRenameResolution ?? vi.fn<(submissionId: number) => void>();
     const latestIdentity = callbacks.latestIdentity === undefined && value
       ? {
@@ -195,7 +208,9 @@ describe("NativeBlueprintWorkspace", () => {
       onLibraryCursorChange={onLibraryCursorChange}
       onQueueCursorChange={onQueueCursorChange}
       onSubmitRenameIntent={onSubmitRenameIntent}
+      onSubmitTransformIntent={onSubmitTransformIntent}
       pendingIdentity={callbacks.pendingIdentity ?? null}
+      transformPending={callbacks.transformPending ?? null}
       resolution={callbacks.resolution ?? null}
       onConsumeRenameResolution={onConsumeRenameResolution}
       commandPending={callbacks.commandPending ?? false}
@@ -205,6 +220,7 @@ describe("NativeBlueprintWorkspace", () => {
       onLibraryCursorChange,
       onQueueCursorChange,
       onSubmitRenameIntent,
+      onSubmitTransformIntent,
       onConsumeRenameResolution,
     };
   }
@@ -557,6 +573,60 @@ describe("NativeBlueprintWorkspace", () => {
     expect(callbacks.onSelectBlueprint).not.toHaveBeenCalled();
   });
 
+  it("submits explicit target-state transforms from the exact selected MOD row without optimistic UI", () => {
+    const onSubmitTransformIntent = vi.fn<(
+      binding: NativeBlueprintTransformBinding,
+      rotation: NativeBlueprintRotation,
+      mirror: NativeBlueprintMirror,
+    ) => boolean>().mockReturnValue(true);
+    const selected = frame({ detailStatus: "unsupported", revision: 47 });
+    renderWorkspace(selected, "ready", { onSubmitTransformIntent });
+
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='rotate-transform']")!.click());
+    expect(onSubmitTransformIntent).toHaveBeenNthCalledWith(1, {
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 47,
+      registryFingerprint: "registry-a",
+      blueprintId: "mod:Ω/🚀",
+      currentRowRevision: 4,
+      currentRotation: 90,
+      currentMirror: "horizontal",
+    }, 180, "horizontal");
+    // The renderer does not update the visible target until Rust projects a
+    // new row revision.
+    expect(host.querySelector("[data-native-blueprint-library-id]")?.textContent)
+      .toContain("r4 · 90° · 水平镜像");
+
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='mirror-transform']")!.click());
+    expect(onSubmitTransformIntent).toHaveBeenNthCalledWith(2, expect.any(Object), 90, "none");
+
+    const transformPending = Object.freeze({
+      token: 1,
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 47,
+      registryFingerprint: "registry-a",
+      blueprintId: "mod:Ω/🚀",
+      currentRowRevision: 4,
+      currentRotation: 90,
+      currentMirror: "horizontal",
+      targetRotation: 180,
+      targetMirror: "horizontal",
+      phase: "reconciling",
+      receipt: null,
+      blockedReason: null,
+      source: {},
+      command: {},
+    }) as unknown as NativeBlueprintTransformPendingCommand;
+    renderWorkspace(selected, "ready", { onSubmitTransformIntent, transformPending });
+    expect(host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='rotate-transform']")?.disabled)
+      .toBe(true);
+    expect(host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='mirror-transform']")?.disabled)
+      .toBe(true);
+    expect(host.textContent).toContain("六次有界只读对账");
+  });
+
   it("fails closed while loading or when a ready frame has stale selection identity", () => {
     const retained = frame();
     renderWorkspace(retained, "loading");
@@ -570,12 +640,13 @@ describe("NativeBlueprintWorkspace", () => {
     expect(host.textContent).toContain("\u4e0d\u4f1a\u8bfb\u53d6\u6216\u663e\u793a JavaScript \u4e2d\u7684\u65e7\u84dd\u56fe\u6570\u636e");
   });
 
-  it("keeps the implementation detached from legacy state and every mutation except rename", () => {
+  it("keeps the implementation detached from legacy state and every mutation except metadata intents", () => {
     const source = readFileSync(resolve("src/components/NativeBlueprintWorkspace.tsx"), "utf8");
     expect(source).not.toMatch(/from\s+["'](?:\.\/BlueprintWorkspace|\.\.\/game\/(?:engine|types|content))["']/);
     expect(source).not.toMatch(/\bGameState\b|\bgame\./);
     expect(source).not.toMatch(/on(?:Capture|Import|Transform|Delete|Remove|Deploy|Place|Undo|Ghost|Fund|Cancel|Export)\b/);
     expect(source).toMatch(/onSubmitRenameIntent/);
+    expect(source).toMatch(/onSubmitTransformIntent/);
     expect(source).not.toMatch(/onBlur=|onKeyDown=/);
 
     renderWorkspace(frame());
@@ -588,6 +659,7 @@ describe("NativeBlueprintWorkspace", () => {
     expect(actions).toEqual(new Set([
       "close", "tab-library", "tab-queue", "select",
       "begin-rename", "cancel-rename", "submit-rename",
+      "rotate-transform", "mirror-transform",
       "page-library-prev", "page-library-next", "page-queue-prev", "page-queue-next",
     ]));
   });

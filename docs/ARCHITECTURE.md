@@ -1,5 +1,7 @@
 # 系统架构
 
+> **Windows ordinary storage/splitter 活动桥接边界（2026-09-01，开发候选，未启用）**：Rust 普通物流 buffer 的 `inputs → outputs` 桥接不再在每个模拟步遍历全部 storage/splitter 行。冷启动/拓扑重建执行一次全扫描，随后 session-only `BTreeSet<entity-row>` 仅接收传送带真实物料移动的 source/target wake；桥接按持久实体行顺序提交，处理后休眠，直到下一次库存事件。活动达到 75%、目录/实体数量漂移或无法证明 built-in 形状时回到同一全扫描语义。runtime queue 只在完整候选提交后安装，不序列化、不参与规范哈希，失败候选保留源 revision 与 wake 证据。该边界只关闭 ordinary storage/splitter 桥接外层全扫，不能代表普通生产、电力、material-delivery、量子高扇出或全部物流已经严格 `O(active)`。
+
 > **Windows Rust ordinary 蓝图完整生命周期边界（2026-09-01，开发候选，未发布）**：原生权威模式下，普通内置蓝图现已把捕获、严格导入、确定性导出、直接部署、仅入队、领料、队列部署和取消闭合到同一条 Rust/Host/薄 UI 事务链。renderer 只提交与当前 session/run/revision/registry 绑定的最小语义 marker；Rust 独占目录解析、canonicalization、材料与拓扑推导，并在 prepare 和私有 apply 两层重验实体、线路、蓝图、版本和施工队列八个持久 ID 域。live、generic cold-WAL、重复 command ID 与五个 durable fault boundary 复用同一展开器；候选失败只丢弃副本，不允许部分扣料、部分建造、假成功或 renderer 自动重发。
 >
 > native import 的原始 UTF-8 exchange 在进入 Rust 前受 1 MiB、well-formed Unicode 和 fatal decode 限制，Rust 再限制 512 entities、1,024 belts、64 library rows 与 ordinary 内置域；raw exchange 不进入 WAL。native export 是只读有界投影，Rust 生成无时间戳 v2 exchange、精确字节数、SHA-256 与 Windows 安全文件名，desktop 不解析或重序列化正文。export 的 owner-ID 冲突检查允许合法的 `version.blueprintId` / `queue.blueprintId` 外键，但拒绝独立 owner ID 复用及异常 version 引用。accepted import draft 只有在连续 ACK、同 lineage/registry、frame revision 不早于 ACK 且目标行精确存在时清除；任何漂移都失败关闭。Web/PWA 仍保留独立 JavaScript fallback，但使用相同数量/字节/库容量硬门限，不进入 Host WAL。GameState v47、envelope v2、cloud schema v8、SQLite layout v3 与 `authorityEligible=false` 均不变；MOD、resource anchor、external port、空间站/舰队和其他特殊域继续拒绝。

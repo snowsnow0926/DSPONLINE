@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 1,
+  "evidenceKind": "windows-native-pure-idle-certificate-prepare-ab",
+  "recordedAt": "2026-09-01",
+  "candidate": {
+    "branch": "codex/native-pure-idle-parallel-cert",
+    "baseCommit": "1db58583b723c5846bc2cc3526d6c9be7bce573b",
+    "packageVersion": "1.2.3",
+    "gameStateVersion": 47,
+    "authorityEligible": false
+  },
+  "environment": {
+    "os": "windows-msvc",
+    "cpu": "Intel(R) Core(TM) i7-14700KF",
+    "physicalCores": 20,
+    "logicalProcessors": 28,
+    "rustc": "1.96.1 (31fca3adb 2026-06-26)",
+    "cargo": "1.96.1 (356927216 2026-06-26)",
+    "profile": "release"
+  },
+  "scope": {
+    "measurement": "prepare-only",
+    "includes": [
+      "ordinary certificate wave 1",
+      "ordinary certificate wave 2",
+      "construction certificate prepare"
+    ],
+    "excludes": [
+      "three-window exact calibration",
+      "macro tail application",
+      "authoritative commit",
+      "production history",
+      "campaign and speedrun finalizers",
+      "serialization and disk IO"
+    ],
+    "endToEndClaim": false
+  },
+  "fixture": {
+    "kind": "synthetic-no-player-data",
+    "description": "productive ordinary closed recipe plus construction quantum, padded with zero-stack inert wind rows that introduce no material writer",
+    "timeWarpMultiplier": 15,
+    "constructionTargetStock": 10000,
+    "inertWindRows": 4160,
+    "entities": 4166,
+    "belts": 1,
+    "workItems": 4167,
+    "parallelThresholdWorkItems": 4096,
+    "ordinarySnapshots": "four immutable snapshots from three exact 10-second windows with construction isolated",
+    "constructionSnapshots": "four immutable snapshots from three exact 10-second windows with construction enabled"
+  },
+  "immutableInputHashes": {
+    "materializedStateBytesSha256": "96a4c9ea596b30d5b8ec858271abec3554c2adaa3586271a20cb848f7f7741fb",
+    "canonicalSha256": "37a85b68913610517faf320dfff6064424a0a0328c49ee8cb2a870ca85019b92",
+    "domainSha256": "4c9cdc9cf8fecc1addf4d5080f6b0eb3cfee17fbec16d29ff45f4b3236446669",
+    "conservationProjectionSha256": "394296cb02c38e3b2ea51215953a1a48f3370e328784038bd3b3e97ee7e547eb",
+    "ordinarySnapshotsSha256": "cc23e0abaca606e40572f89321952f8a0c68666e590573706576e0c559726031",
+    "constructionSnapshotsSha256": "e38fee2fb07393226c0e9530a80ca190ab9b9806e35b7b8611bae0033d44cf66",
+    "sourceBytesUnchangedAfterMeasurement": true
+  },
+  "scheduler": {
+    "pool": "existing process-lifetime DeterministicRuntime/Rayon pool",
+    "temporaryPoolCreated": false,
+    "maximumWorkers": 8,
+    "requestedWorkerCounts": [1, 8],
+    "largeFixtureEightWorkerDiagnostics": {
+      "ordinaryWave1": {
+        "activePartitions": 4,
+        "selectedWorkers": 4,
+        "observedWorkers": 4,
+        "parallel": true
+      },
+      "ordinaryWave2": {
+        "activePartitions": 2,
+        "selectedWorkers": 2,
+        "observedWorkers": 2,
+        "parallel": true,
+        "note": "the renewable partition is inactive because this fixture has no sail certificate"
+      },
+      "construction": {
+        "activePartitions": 3,
+        "selectedWorkers": 3,
+        "observedWorkers": 3,
+        "parallel": true
+      }
+    }
+  },
+  "method": {
+    "warmupPairs": 3,
+    "measuredPairs": 15,
+    "order": [
+      "1", "8", "8", "1", "1", "8", "8", "1", "1", "8",
+      "8", "1", "1", "8", "8", "1", "1", "8", "8", "1",
+      "1", "8", "8", "1", "1", "8", "8", "1", "1", "8"
+    ],
+    "command": "cargo test --release -p dsp-native-core profile_macro_v10_parallel_certificate_prepare_only -- --ignored --nocapture --test-threads=1",
+    "gateFormula": "improvement = 1 - median(eightWorkerNs) / median(oneWorkerNs)",
+    "minimumImprovement": 0.035
+  },
+  "rawNanoseconds": {
+    "oneWorkerInMeasurementOrder": [
+      32357200, 32041700, 31661800, 31648900, 31369700,
+      31397500, 31812600, 31000600, 31044000, 30902900,
+      31237900, 31156900, 29924400, 31318700, 30764100
+    ],
+    "eightWorkerInMeasurementOrder": [
+      20746000, 21071000, 21377000, 20711400, 21582900,
+      21592300, 21623300, 21112900, 21704200, 21602100,
+      21848100, 22807100, 20387900, 20632300, 20963500
+    ],
+    "oneWorkerSorted": [
+      29924400, 30764100, 30902900, 31000600, 31044000,
+      31156900, 31237900, 31318700, 31369700, 31397500,
+      31648900, 31661800, 31812600, 32041700, 32357200
+    ],
+    "eightWorkerSorted": [
+      20387900, 20632300, 20711400, 20746000, 20963500,
+      21071000, 21112900, 21377000, 21582900, 21592300,
+      21602100, 21623300, 21704200, 21848100, 22807100
+    ]
+  },
+  "result": {
+    "oneWorkerMedianNs": 31318700,
+    "eightWorkerMedianNs": 21377000,
+    "oneWorkerRangeNs": [29924400, 32357200],
+    "eightWorkerRangeNs": [20387900, 22807100],
+    "medianImprovement": 0.3174365474939892,
+    "medianImprovementPercentRounded": 31.744,
+    "gate": "GO",
+    "claim": "The synthetic prepare-only slice clears its 3.5% merge gate. This is not an end-to-end simulation or player-save speedup claim."
+  },
+  "determinismCoverage": {
+    "workerMatrix": [1, 2, 4, 8, "auto", "repeat-8"],
+    "equalOutputs": [
+      "complete materialized state bytes",
+      "canonical hash",
+      "domain hash",
+      "conservation projection hash",
+      "serialized report",
+      "exact rejection reason"
+    ],
+    "domains": [
+      "finite source",
+      "infinite source",
+      "research sink",
+      "solar sail sink",
+      "rocket sink",
+      "renewable grid",
+      "construction quantum"
+    ],
+    "atomicity": "early and late prepare failures retain source revision and source bytes and install no candidate certificate or cache"
+  }
+}

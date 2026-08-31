@@ -41,7 +41,10 @@ export interface NativeGalaxyWorkspaceProps {
   fetchProjection: ((request: DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest) => Promise<DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult>) | null;
   onClose: () => void;
   onUpdateProfile: (changes: AccountProfileChanges) => void;
-  onUpdateCloudBinding: (cloud: { id: string; email: string } | null) => void;
+  onUpdateCloudBinding: (
+    expectedAccountId: string,
+    cloud: { id: string; email: string } | null,
+  ) => boolean;
   onCreateAccount: (displayName: string) => void;
   onSwitchAccount: (accountId: string) => void;
 }
@@ -161,14 +164,19 @@ export function NativeGalaxyWorkspace({
 
   const submitLogin = async () => {
     if (cloudBusy || !cloudIdentifier.trim() || !cloudPassword) return;
+    const expectedAccountId = account.profile.id;
     setCloudBusy(true);
     setCloudMessage(null);
     try {
       const session = await loginCloudAccount(cloudIdentifier.trim(), cloudPassword);
       setCloudSession(session);
-      if (session.user) onUpdateCloudBinding({ id: session.user.id, email: session.user.email });
+      const bindingUpdated = session.user
+        ? onUpdateCloudBinding(expectedAccountId, { id: session.user.id, email: session.user.email })
+        : false;
       setCloudPassword("");
-      setCloudMessage("云身份已绑定；主存档恢复、导入和覆盖仍保持禁用。");
+      setCloudMessage(session.user && !bindingUpdated
+        ? "云账号已登录，但本地身份在请求期间切换；未修改任何本地身份绑定。"
+        : "云身份已绑定；主存档恢复、导入和覆盖仍保持禁用。");
     } catch (error) {
       setCloudMessage(error instanceof Error ? error.message : "云账号登录失败");
     } finally {
@@ -177,18 +185,24 @@ export function NativeGalaxyWorkspace({
   };
   const submitLogout = async () => {
     if (cloudBusy) return;
+    const expectedAccountId = account.profile.id;
     setCloudBusy(true);
     try {
       await logoutCloudAccount();
-      onUpdateCloudBinding(null);
+      const bindingUpdated = onUpdateCloudBinding(expectedAccountId, null);
       setCloudSession({ status: "anonymous", user: null, cloudSave: null, mode: projection.game.mode, mailAvailable: cloudSession.mailAvailable, message: null });
-      setCloudMessage("已退出并解除当前本地身份的云绑定。");
+      setCloudMessage(bindingUpdated
+        ? "已退出并解除当前本地身份的云绑定。"
+        : "云账号已退出，但本地身份在请求期间切换；未修改任何本地身份绑定。");
     } catch (error) {
       setCloudMessage(error instanceof Error ? error.message : "退出云账号失败");
     } finally {
       setCloudBusy(false);
     }
   };
+
+  const cloudBoundToActiveAccount = cloudSession.status === "authenticated" &&
+    cloudSession.user !== null && account.profile.cloudUserId === cloudSession.user.id;
 
   return <WorkspaceFrame className="galaxy-workspace native-galaxy-workspace" ariaLabel="原生银河账户" onRequestClose={onClose}>
     <header className="galaxy-header">
@@ -217,7 +231,7 @@ export function NativeGalaxyWorkspace({
       </form></main>
     </div> : null}
     {tab === "cloud" ? <div className="galaxy-cloud-view"><section className="galaxy-cloud-status"><header><i>{cloudSession.status === "offline" ? <CloudOff size={20} /> : <Cloud size={20} />}</i><span><small>账户域会话</small><strong>{cloudSession.user?.displayName ?? (cloudSession.status === "checking" ? "正在检查云身份" : "未登录云账号")}</strong></span><em className={`cloud-state cloud-state--${cloudSession.status}`}>{cloudSession.status}</em></header>
-      {cloudSession.status === "authenticated" && cloudSession.user ? <div className="galaxy-cloud-identity"><span className="galaxy-avatar">{account.profile.avatar}</span><span><strong>{cloudSession.user.email}</strong><small>已绑定到当前本地身份；这里只维护登录与绑定关系。</small></span><button type="button" disabled={cloudBusy} onClick={() => void submitLogout()}><LogOut size={14} />退出并解绑</button></div> : <form className="galaxy-cloud-auth" onSubmit={(event) => { event.preventDefault(); void submitLogin(); }}><label><span>用户名或邮箱</span><input value={cloudIdentifier} autoComplete="username" onChange={(event) => setCloudIdentifier(event.currentTarget.value)} /></label><label><span>密码</span><input type="password" value={cloudPassword} autoComplete="current-password" onChange={(event) => setCloudPassword(event.currentTarget.value)} /></label><button type="submit" disabled={cloudBusy || cloudSession.status === "checking"}><LogIn size={14} />登录并绑定</button></form>}
+      {cloudSession.status === "authenticated" && cloudSession.user ? <div className="galaxy-cloud-identity"><span className="galaxy-avatar">{account.profile.avatar}</span><span><strong>{cloudSession.user.email}</strong><small>{cloudBoundToActiveAccount ? "已绑定到当前本地身份；这里只维护登录与绑定关系。" : "云会话已登录，但未绑定当前本地身份。"}</small></span><button type="button" disabled={cloudBusy} onClick={() => void submitLogout()}><LogOut size={14} />{cloudBoundToActiveAccount ? "退出并解绑" : "退出云账号"}</button></div> : <form className="galaxy-cloud-auth" onSubmit={(event) => { event.preventDefault(); void submitLogin(); }}><label><span>用户名或邮箱</span><input value={cloudIdentifier} autoComplete="username" onChange={(event) => setCloudIdentifier(event.currentTarget.value)} /></label><label><span>密码</span><input type="password" value={cloudPassword} autoComplete="current-password" onChange={(event) => setCloudPassword(event.currentTarget.value)} /></label><button type="submit" disabled={cloudBusy || cloudSession.status === "checking"}><LogIn size={14} />登录并绑定</button></form>}
       {cloudMessage || cloudSession.message ? <p className="galaxy-cloud-message">{cloudMessage ?? cloudSession.message}</p> : null}</section>
       <div className="galaxy-cloud-policy"><LockKeyhole size={20} /><span><strong>主档写入边界保持关闭</strong><small>Rust 玩家权威运行时，恢复云存档、导入存档和覆盖当前主档均明确禁用。请先通过受控持久化切换流程退出当前权威会话；本页面不会绕过该边界。</small></span></div>
     </div> : null}

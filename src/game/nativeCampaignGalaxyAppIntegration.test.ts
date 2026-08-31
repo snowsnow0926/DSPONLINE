@@ -32,4 +32,11 @@ describe("native Campaign and Galaxy App integration", () => {
     expect(app).toMatch(/const createGalaxyAccount[\s\S]*?nativePlayerAuthorityOwnsRuntimeRef\.current[\s\S]*?createLocalAccount\(accountStateRef\.current, displayName\)/);
     expect(app).toMatch(/const switchGalaxyAccount[\s\S]*?nativePlayerAuthorityOwnsRuntimeRef\.current[\s\S]*?switchLocalAccount\(current, accountId\)/);
   });
+
+  it("fences native cloud binding writes to the local account that started the request", () => {
+    expect(app).toMatch(/const updateNativeGalaxyCloudBinding[\s\S]*?current\.activeAccountId !== expectedAccountId\) return false;[\s\S]*?setActiveCloudBinding\(current, cloud\)[\s\S]*?return true;/);
+    expect(app).toMatch(/<NativeGalaxyWorkspace[\s\S]*?onUpdateCloudBinding=\{updateNativeGalaxyCloudBinding\}/);
+    expect(nativeGalaxy).toMatch(/const submitLogin[\s\S]*?const expectedAccountId = account\.profile\.id;[\s\S]*?await loginCloudAccount[\s\S]*?onUpdateCloudBinding\(expectedAccountId,/);
+    expect(nativeGalaxy).toMatch(/const submitLogout[\s\S]*?const expectedAccountId = account\.profile\.id;[\s\S]*?await logoutCloudAccount\(\);[\s\S]*?onUpdateCloudBinding\(expectedAccountId, null\)/);
+  });
 });

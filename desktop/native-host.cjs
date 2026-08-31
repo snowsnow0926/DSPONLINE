@@ -2,6 +2,10 @@ const { spawn } = require("node:child_process");
 const { createHash } = require("node:crypto");
 const path = require("node:path");
 const { requireNativeSaveDiskBudget } = require("./native-save-disk-budget.cjs");
+const {
+  deriveSystemSpaceStationCommandIdentity,
+  normalizeSystemSpaceStationIntent,
+} = require("./native-system-space-station-intent.cjs");
 
 const FRAME_MAGIC = Buffer.from("DSPNATV1", "ascii");
 const FRAME_HEADER_BYTES = 36;
@@ -25,6 +29,8 @@ const NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY =
 const NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY = "native-core-player-authority-gate-v1";
 const NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY = "native-core-player-authority-tick-v1";
 const NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY = "native-core-player-authority-command-v1";
+const NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY =
+  "native-core-player-authority-system-space-station-command-v1";
 const NATIVE_PLAYER_AUTHORITY_PAUSE_CAPABILITY =
   "native-core-player-authority-pause-lifecycle-v1";
 const NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY =
@@ -2108,6 +2114,51 @@ class NativeCoreSessionRegistry {
     }, 300_000);
   }
 
+  commitPlayerAuthoritySystemSpaceStationCommand(ownerId, request) {
+    const session = this.assertOwner(ownerId, request?.sessionId);
+    if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID || session.slot !== "normal-main") {
+      throw new NativeHostError(
+        "system-space-station commands require the main normal-main authority owner",
+        "NATIVE_CORE_PLAYER_AUTHORITY_OWNER_REQUIRED",
+      );
+    }
+    if (!this.client.hello?.capabilities?.includes(
+      NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY,
+    )) {
+      throw new NativeHostError(
+        "native host does not provide durable system-space-station commands",
+        "NATIVE_CORE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_UNAVAILABLE",
+      );
+    }
+    exactObjectKeys(request, [
+      "sessionId", "runId", "commandId", "baseRevision",
+      "expectedRegistryFingerprint", "intent",
+    ], "native player-authority system-space-station command request");
+    const identity = deriveSystemSpaceStationCommandIdentity({
+      sessionId: request.sessionId,
+      runId: request.runId,
+      expectedRevision: request.baseRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      intent: normalizeSystemSpaceStationIntent(request.intent),
+    });
+    if (request.commandId !== identity.commandId) {
+      throw new TypeError(
+        "native player-authority system-space-station command ID conflicts with its intent",
+      );
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreCommitPlayerAuthoritySystemSpaceStationCommand",
+      sessionId: request.sessionId,
+      request: {
+        runId: request.runId,
+        commandId: request.commandId,
+        baseRevision: request.baseRevision,
+        expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+        intent: identity.semantic.intent,
+      },
+    }, 300_000);
+  }
+
   commitPlayerAuthorityPause(ownerId, request) {
     const session = this.assertOwner(ownerId, request?.sessionId);
     if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID || session.slot !== "normal-main") {
@@ -2502,6 +2553,7 @@ module.exports = {
   NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY,
+  NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_PAUSE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,

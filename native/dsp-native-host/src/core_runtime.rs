@@ -4,6 +4,10 @@ use std::io::Read;
 use anyhow::{Context, anyhow, bail};
 use dsp_native_core::canonical::canonical_sha256;
 use dsp_native_core::catalog::RuntimeCatalog;
+use dsp_native_core::system_space_station_command::{
+    SystemSpaceStationAuthority, SystemSpaceStationCommandRequest, SystemSpaceStationIntent,
+    derive_system_space_station_command_id, prepare_system_space_station_command,
+};
 use dsp_native_core::{
     CommandApplyResult, CoreAdvanceMode, CoreAdvanceRequest, CoreAdvanceResult,
     CoreCheckpointIdentity, CoreState, CoreStateSummary, SimulationCommandPatch,
@@ -27,6 +31,7 @@ use crate::save_store::{
 const MAX_CORE_SESSIONS: usize = 4;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_COMMAND_PALETTE_SEARCH_REQUEST_BYTES: usize = 32_768;
+const MAX_SYSTEM_SPACE_STATION_INTENT_REQUEST_BYTES: usize = 32_768;
 
 pub const NATIVE_CORE_VIEWPORT_ENTITY_PRESENTATION_V1_CAPABILITY: &str =
     "native-core-viewport-entity-presentation-v1";
@@ -61,6 +66,8 @@ fn command_palette_search_request_bytes(
 pub const PLAYER_AUTHORITY_GATE_CAPABILITY: &str = "native-core-player-authority-gate-v1";
 pub const PLAYER_AUTHORITY_TICK_CAPABILITY: &str = "native-core-player-authority-tick-v1";
 pub const PLAYER_AUTHORITY_COMMAND_CAPABILITY: &str = "native-core-player-authority-command-v1";
+pub const PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY: &str =
+    "native-core-player-authority-system-space-station-command-v1";
 pub const PLAYER_AUTHORITY_PAUSE_CAPABILITY: &str =
     "native-core-player-authority-pause-lifecycle-v1";
 pub const PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY: &str =
@@ -75,6 +82,7 @@ enum CoreLeaseAuthorization {
         lease: ExactRealtimeLease,
         authority_session_id: String,
         pause_lifecycle: bool,
+        rust_prevalidated_command: bool,
     },
 }
 
@@ -554,6 +562,19 @@ pub struct CoreCommitPlayerAuthorityCommandRequest {
     pub command: SimulationCommandPatch,
 }
 
+/// Main/renderer submit only one bounded semantic intent. The Rust CORE
+/// derives and re-proves the durable SimulationCommandPatch; that patch never
+/// crosses the renderer IPC boundary.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreCommitPlayerAuthoritySystemSpaceStationCommandRequest {
+    pub run_id: String,
+    pub command_id: String,
+    pub base_revision: u64,
+    pub expected_registry_fingerprint: String,
+    pub intent: SystemSpaceStationIntent,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CoreCommitPlayerAuthorityPauseRequest {
@@ -746,6 +767,7 @@ enum PlayerAuthorityCommandFault {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PlayerAuthorityCommandKind {
     Gameplay,
+    SystemSpaceStation,
     PauseLifecycle {
         target_paused: bool,
         settled_deadline_ms: u64,
@@ -755,6 +777,10 @@ enum PlayerAuthorityCommandKind {
 impl PlayerAuthorityCommandKind {
     fn is_pause_lifecycle(self) -> bool {
         matches!(self, Self::PauseLifecycle { .. })
+    }
+
+    fn is_rust_prevalidated(self) -> bool {
+        matches!(self, Self::SystemSpaceStation)
     }
 }
 
@@ -1357,6 +1383,7 @@ impl CoreRegistry {
                     lease: staged.clone(),
                     authority_session_id: authority_session_id.clone(),
                     pause_lifecycle: false,
+                    rust_prevalidated_command: false,
                 }),
             )?;
             if committed.revision != pending.expected_revision
@@ -1408,6 +1435,7 @@ impl CoreRegistry {
                 lease: staged.clone(),
                 authority_session_id: authority_session_id.clone(),
                 pause_lifecycle: false,
+                rust_prevalidated_command: false,
             };
             let published = self.checkpoint_internal(
                 store,
@@ -1726,6 +1754,7 @@ impl CoreRegistry {
                     lease: staged.clone(),
                     authority_session_id: authority_session_id.clone(),
                     pause_lifecycle: false,
+                    rust_prevalidated_command: false,
                 }),
                 prepared_candidate,
             )?;
@@ -1780,6 +1809,7 @@ impl CoreRegistry {
                 lease: staged.clone(),
                 authority_session_id: authority_session_id.clone(),
                 pause_lifecycle: false,
+                rust_prevalidated_command: false,
             };
             let published = self.checkpoint_internal(
                 store,
@@ -1891,6 +1921,199 @@ impl CoreRegistry {
     /// event. Tick and command events share one sequence/revision chain and
     /// the lease permits only one pending event, so neither can overtake the
     /// other's WAL, checkpoint, or ACK boundary.
+    pub fn commit_player_authority_system_space_station_command(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitPlayerAuthoritySystemSpaceStationCommandRequest,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityCommandResult> {
+        self.commit_player_authority_system_space_station_command_impl(
+            store,
+            session_id,
+            request,
+            #[cfg(test)]
+            PlayerAuthorityCommandFault::None,
+        )
+    }
+
+    fn commit_player_authority_system_space_station_command_impl(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitPlayerAuthoritySystemSpaceStationCommandRequest,
+        #[cfg(test)] fault: PlayerAuthorityCommandFault,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityCommandResult> {
+        validate_session_id(session_id)?;
+        if request.base_revision > MAX_SAFE_INTEGER {
+            bail!("native system-space-station command base revision is invalid")
+        }
+        let semantic_request = SystemSpaceStationCommandRequest {
+            command_id: request.command_id.clone(),
+            session_id: session_id.to_owned(),
+            run_id: request.run_id.clone(),
+            expected_revision: request.base_revision,
+            expected_registry_fingerprint: request.expected_registry_fingerprint.clone(),
+            intent: request.intent.clone(),
+        };
+        if serde_json::to_vec(&semantic_request)?.len()
+            > MAX_SYSTEM_SPACE_STATION_INTENT_REQUEST_BYTES
+        {
+            bail!("native system-space-station intent request exceeds its bounded limit")
+        }
+        let expected_command_id = derive_system_space_station_command_id(&semantic_request)?;
+        if expected_command_id != request.command_id {
+            bail!("native system-space-station command ID conflicts with its semantic intent")
+        }
+
+        self.reconcile_uncertain_checkpoint_publication(store, session_id)?;
+        let lease = store.require_exact_realtime_lease()?;
+        if lease.pending_command.is_none()
+            && lease.acknowledged.last_player_command_id.as_deref()
+                == Some(request.command_id.as_str())
+        {
+            return self.replay_acknowledged_system_space_station_command(
+                store,
+                session_id,
+                &request.run_id,
+                &request.command_id,
+                request.base_revision,
+            );
+        }
+
+        let command = if let Some(pending) = lease.pending_command.as_ref() {
+            // Crash recovery must replay the exact durable patch that was
+            // staged before the process died. Re-expanding against a possibly
+            // already-advanced in-memory state would be both unnecessary and
+            // unsafe.
+            if pending.command_id != request.command_id
+                || pending.base_revision != request.base_revision
+            {
+                bail!("native system-space-station intent conflicts with the pending command")
+            }
+            decode_player_authority_command_payload(&pending.command)?
+        } else {
+            let authority = SystemSpaceStationAuthority {
+                session_id: session_id.to_owned(),
+                run_id: request.run_id.clone(),
+            };
+            let prepared = prepare_system_space_station_command(
+                self.session(session_id)?,
+                &authority,
+                semantic_request,
+            )?;
+            if prepared.command_id() != request.command_id
+                || prepared.expected_revision() != request.base_revision
+            {
+                bail!("native system-space-station prepared command identity changed")
+            }
+            // Re-run the semantic expansion and apply it on an isolated clone
+            // immediately before entering the durable FIFO. This is the
+            // prepare/apply TOCTOU proof; the generic transaction performs its
+            // own second patch preflight before stage/WAL/checkpoint/ACK.
+            let mut proof = self.session(session_id)?.clone();
+            let applied = prepared.apply(&mut proof, &authority)?;
+            if applied.previous_revision != request.base_revision
+                || applied.revision != request.base_revision + 1
+            {
+                bail!("native system-space-station prepared command revision changed")
+            }
+            prepared.patch().clone()
+        };
+
+        self.commit_player_authority_command_internal(
+            store,
+            session_id,
+            CoreCommitPlayerAuthorityCommandRequest {
+                run_id: request.run_id,
+                command_id: request.command_id,
+                base_revision: request.base_revision,
+                command,
+            },
+            PlayerAuthorityCommandKind::SystemSpaceStation,
+            #[cfg(test)]
+            fault,
+        )
+    }
+
+    fn replay_acknowledged_system_space_station_command(
+        &self,
+        store: &SaveStore,
+        session_id: &str,
+        run_id: &str,
+        command_id: &str,
+        base_revision: u64,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityCommandResult> {
+        let authority_session_id = store.player_authority_session_binding(session_id)?;
+        let lease = store.require_exact_realtime_lease()?;
+        let expected_revision = base_revision
+            .checked_add(1)
+            .filter(|value| *value <= MAX_SAFE_INTEGER)
+            .ok_or_else(|| anyhow!("native system-space-station command revision is exhausted"))?;
+        if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+            || lease.authority_session_id.as_deref() != Some(authority_session_id.as_str())
+            || lease.run_id != run_id
+            || lease.phase != crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
+            || lease.pending_tick.is_some()
+            || lease.pending_command.is_some()
+            || lease.pending_advance.is_some()
+            || lease.macro_session.is_some()
+            || lease.acknowledged.last_player_command_id.as_deref() != Some(command_id)
+            || lease.acknowledged.command_id.as_deref() != Some(command_id)
+            || lease.acknowledged.command_base_revision != Some(base_revision)
+            || lease.acknowledged.revision != expected_revision
+        {
+            bail!("native system-space-station duplicate command durable ACK conflicts")
+        }
+        let summary = self.status(session_id)?;
+        let state = self.session(session_id)?;
+        let checkpoint = lease.acknowledged.checkpoint.clone();
+        let latest = store
+            .latest_published_checkpoint_identity("normal-main")?
+            .ok_or_else(|| anyhow!("normal-main published checkpoint is missing"))?;
+        if summary.revision != expected_revision
+            || summary.paused
+            || summary.state_version != 47
+            || summary.mode != "normal"
+            || summary.registry_fingerprint != lease.registry_fingerprint
+            || summary.canonical_sha256 != lease.acknowledged.proof.canonical_sha256
+            || summary.domain_sha256 != lease.acknowledged.proof.domain_sha256
+            || state.identity.slot != "normal-main"
+            || state.identity.generation != checkpoint.generation
+            || state.identity.root_hash != checkpoint.root_hash
+            || state.identity.revision != checkpoint.revision
+            || latest.generation != checkpoint.generation
+            || latest.root_hash != checkpoint.root_hash
+            || latest.revision != checkpoint.revision
+            || latest.state_version != 47
+            || latest.mode != "normal"
+            || latest.registry_fingerprint != lease.registry_fingerprint
+        {
+            bail!("native system-space-station duplicate command checkpoint conflicts")
+        }
+        let changes = store.read_player_authority_command_change_receipt(&lease)?;
+        if changes.command_id != command_id
+            || changes.base_revision != base_revision
+            || changes.revision != expected_revision
+            || changes.sequence != lease.acknowledged.sequence
+            || changes.checkpoint != checkpoint
+        {
+            bail!("native system-space-station duplicate command receipt conflicts")
+        }
+        Ok(CoreCommitPlayerAuthorityCommandResult {
+            sequence: lease.acknowledged.sequence,
+            command_id: command_id.to_owned(),
+            base_revision,
+            revision: expected_revision,
+            settled_deadline_ms: lease.acknowledged.settled_deadline_ms,
+            checkpoint,
+            changed_entity_ids: changes.changed_entity_ids,
+            changed_belt_ids: changes.changed_belt_ids,
+            topology_dirty: changes.topology_dirty,
+            summary,
+            duplicate: true,
+        })
+    }
+
     pub fn commit_player_authority_command(
         &mut self,
         store: &mut SaveStore,
@@ -2352,6 +2575,9 @@ impl CoreRegistry {
                 target_paused,
                 settled_deadline_ms: pending.settled_deadline_ms,
             },
+            None if pending.command_id.starts_with("system-space-station-v1-") => {
+                PlayerAuthorityCommandKind::SystemSpaceStation
+            }
             None => PlayerAuthorityCommandKind::Gameplay,
         };
         let committed = self.commit_player_authority_command_internal(
@@ -2432,7 +2658,8 @@ impl CoreRegistry {
         }
         let command_value = serde_json::to_value(&request.command)?;
         match kind {
-            PlayerAuthorityCommandKind::Gameplay => {
+            PlayerAuthorityCommandKind::Gameplay
+            | PlayerAuthorityCommandKind::SystemSpaceStation => {
                 if player_authority_pause_target(&command_value).is_some() {
                     bail!("native player-authority pause transition requires the lifecycle path")
                 }
@@ -2454,6 +2681,7 @@ impl CoreRegistry {
         let initial = store.require_exact_realtime_lease()?;
         let expected_source_phase = match kind {
             PlayerAuthorityCommandKind::Gameplay
+            | PlayerAuthorityCommandKind::SystemSpaceStation
             | PlayerAuthorityCommandKind::PauseLifecycle {
                 target_paused: true,
                 ..
@@ -2464,11 +2692,13 @@ impl CoreRegistry {
             } => crate::exact_realtime_lease::ExactRealtimeLeasePhase::Paused,
         };
         let expected_target_paused = match kind {
-            PlayerAuthorityCommandKind::Gameplay => false,
+            PlayerAuthorityCommandKind::Gameplay
+            | PlayerAuthorityCommandKind::SystemSpaceStation => false,
             PlayerAuthorityCommandKind::PauseLifecycle { target_paused, .. } => target_paused,
         };
         let expected_source_paused = match kind {
-            PlayerAuthorityCommandKind::Gameplay => false,
+            PlayerAuthorityCommandKind::Gameplay
+            | PlayerAuthorityCommandKind::SystemSpaceStation => false,
             PlayerAuthorityCommandKind::PauseLifecycle { target_paused, .. } => !target_paused,
         };
         let duplicate_lifecycle_ack = kind.is_pause_lifecycle()
@@ -2593,6 +2823,9 @@ impl CoreRegistry {
                 PlayerAuthorityCommandKind::Gameplay => {
                     preflight.apply_player_authority_command(&request.command)?
                 }
+                PlayerAuthorityCommandKind::SystemSpaceStation => {
+                    preflight.apply_command(&request.command)?
+                }
                 PlayerAuthorityCommandKind::PauseLifecycle { .. } => {
                     preflight.apply_player_authority_pause_transition(&request.command)?
                 }
@@ -2615,13 +2848,15 @@ impl CoreRegistry {
         };
 
         let staged = match kind {
-            PlayerAuthorityCommandKind::Gameplay => store.stage_player_authority_command(
-                &authority_session_id,
-                &request.run_id,
-                &request.command_id,
-                request.base_revision,
-                command_value,
-            )?,
+            PlayerAuthorityCommandKind::Gameplay
+            | PlayerAuthorityCommandKind::SystemSpaceStation => store
+                .stage_player_authority_command(
+                    &authority_session_id,
+                    &request.run_id,
+                    &request.command_id,
+                    request.base_revision,
+                    command_value,
+                )?,
             PlayerAuthorityCommandKind::PauseLifecycle {
                 target_paused,
                 settled_deadline_ms,
@@ -2669,6 +2904,7 @@ impl CoreRegistry {
                     lease: staged.clone(),
                     authority_session_id: authority_session_id.clone(),
                     pause_lifecycle: kind.is_pause_lifecycle(),
+                    rust_prevalidated_command: kind.is_rust_prevalidated(),
                 }),
             )?;
             if committed.revision != pending.expected_revision
@@ -2722,6 +2958,7 @@ impl CoreRegistry {
                 lease: staged.clone(),
                 authority_session_id: authority_session_id.clone(),
                 pause_lifecycle: kind.is_pause_lifecycle(),
+                rust_prevalidated_command: kind.is_rust_prevalidated(),
             };
             let published = self.checkpoint_internal(
                 store,
@@ -2768,12 +3005,14 @@ impl CoreRegistry {
             domain_sha256: summary.domain_sha256.clone(),
         };
         let lease = match kind {
-            PlayerAuthorityCommandKind::Gameplay => store.acknowledge_player_authority_command(
-                &authority_session_id,
-                &request.run_id,
-                proof,
-                checkpoint.clone(),
-            )?,
+            PlayerAuthorityCommandKind::Gameplay
+            | PlayerAuthorityCommandKind::SystemSpaceStation => store
+                .acknowledge_player_authority_command(
+                    &authority_session_id,
+                    &request.run_id,
+                    proof,
+                    checkpoint.clone(),
+                )?,
             PlayerAuthorityCommandKind::PauseLifecycle { .. } => store
                 .acknowledge_player_authority_pause_transition(
                     &authority_session_id,
@@ -3655,13 +3894,18 @@ impl CoreRegistry {
                 }
                 let state = self.session_mut(session_id)?;
                 if let Some(CoreLeaseAuthorization::PlayerAuthority {
-                    pause_lifecycle, ..
+                    pause_lifecycle,
+                    rust_prevalidated_command,
+                    ..
                 }) = lease_authorization.as_ref()
                     && let Some(command) = operation.command.as_ref()
                 {
                     if *pause_lifecycle {
                         let mut probe = state.clone();
                         probe.apply_player_authority_pause_transition(command)?;
+                    } else if *rust_prevalidated_command {
+                        let mut probe = state.clone();
+                        probe.apply_command(command)?;
                     } else {
                         state.validate_player_authority_command(command)?;
                     }
@@ -3748,6 +3992,12 @@ impl CoreRegistry {
                             ..
                         }) => {
                             prepared.apply_player_authority_pause_transition(command)?;
+                        }
+                        Some(CoreLeaseAuthorization::PlayerAuthority {
+                            rust_prevalidated_command: true,
+                            ..
+                        }) => {
+                            prepared.apply_command(command)?;
                         }
                         Some(CoreLeaseAuthorization::PlayerAuthority { .. }) => {
                             prepared.apply_player_authority_command(command)?;
@@ -4639,6 +4889,120 @@ mod tests {
         let mut catalog = import_catalog();
         catalog["registryFingerprint"] = Value::from(EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT);
         catalog
+    }
+
+    fn player_authority_system_space_station_catalog() -> Value {
+        let mut catalog = player_authority_catalog();
+        let item_ids = [
+            "titanium_alloy",
+            "frame_material",
+            "small_carrier_rocket",
+            "universe_matrix",
+            "dyson_sphere_component",
+            "titanium_glass",
+            "quantum_chip",
+            "antimatter_fuel_rod",
+            "annihilation_constraint_sphere",
+            "strange_matter",
+            "plane_filter",
+            "processor",
+            "particle_broadband",
+            "particle_container",
+            "space_warper",
+        ];
+        catalog["items"].as_array_mut().unwrap().extend(
+            item_ids
+                .into_iter()
+                .map(|id| json!({ "id": id, "name": id, "kind": "solid" })),
+        );
+        catalog["buildings"].as_array_mut().unwrap().push(json!({
+            "id": "space_station_construction_launcher",
+            "kind": "station",
+            "speed": 1,
+            "inputCapacity": 64,
+            "outputCapacity": 64,
+            "powerDemandKw": 1,
+            "powerGenerationKw": 0
+        }));
+        catalog["technologies"].as_array_mut().unwrap().extend([
+            json!({ "id": "system_space_station_engineering", "costs": [{"itemId":"iron_ore","amount":1}], "prerequisites": [] }),
+            json!({ "id": "orbital_modular_assembly", "costs": [{"itemId":"iron_ore","amount":1}], "prerequisites": [] }),
+            json!({ "id": "autonomous_station_construction", "costs": [{"itemId":"iron_ore","amount":1}], "prerequisites": [] }),
+            json!({ "id": "quantum_logistics_network", "costs": [{"itemId":"iron_ore","amount":1}], "prerequisites": [] }),
+            json!({ "id": "orbital_multi_cargo_bus", "costs": [{"itemId":"iron_ore","amount":1}], "prerequisites": [] }),
+        ]);
+        catalog
+    }
+
+    fn system_space_station_record(status: &str) -> Value {
+        json!({
+            "systemId": "helios",
+            "status": status,
+            "costRevision": 0,
+            "costMultiplierBasisPoints": 10000,
+            "phaseIndex": if status == "operational" { 16 } else { 0 },
+            "delivered": {},
+            "constructionBuffer": {},
+            "inventory": if status == "operational" {
+                json!({
+                    "frame_material":"1000000000",
+                    "quantum_chip":"1000000000",
+                    "processor":"1000000000",
+                    "universe_matrix":"1000000000",
+                    "antimatter_fuel_rod":"1000000000",
+                    "annihilation_constraint_sphere":"1000000000",
+                    "strange_matter":"1000000000",
+                    "titanium_alloy":"1000000000",
+                    "particle_container":"1000000000",
+                    "space_warper":"1000000000"
+                })
+            } else { json!({}) },
+            "itemPolicies": {},
+            "modules": {"backbone":0,"energy":0,"interstellar":0},
+            "routingCursors": {},
+            "viewport": {"x":0,"y":0,"zoom":0.85},
+            "decorations": []
+        })
+    }
+
+    fn player_authority_system_space_station_envelope(status: &str) -> Vec<u8> {
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["research"]["completedTechIds"] = json!([
+            "system_space_station_engineering",
+            "orbital_modular_assembly",
+            "autonomous_station_construction",
+            "quantum_logistics_network",
+            "orbital_multi_cargo_bus"
+        ]);
+        envelope["state"]["systemSpaceStations"] = json!({
+            "helios": system_space_station_record(status)
+        });
+        envelope["state"]["planetTrays"]["home"]["titanium_alloy"] = Value::from(2_000_000);
+        envelope["state"]["tray"]["titanium_alloy"] = Value::from(2_000_000);
+        envelope["state"]["entities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id":"station-launcher",
+                "kind":"station",
+                "planetId":"home",
+                "buildingId":"space_station_construction_launcher",
+                "machineCount":1,
+                "position":{"x":7,"y":2},
+                "interactionLocked":false,
+                "inputs":{},
+                "outputs":{},
+                "powerFactor":0,
+                "progress":0,
+                "utilization":0,
+                "productionRate":0,
+                "routingCursor":0
+            }));
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        serde_json::to_vec(&envelope).unwrap()
     }
 
     fn player_authority_recipe_catalog() -> Value {
@@ -5976,6 +6340,43 @@ mod tests {
             player_authority_station_slot_envelope(),
             player_authority_station_inventory_catalog(),
         )
+    }
+
+    fn player_authority_system_space_station_fixture(
+        status: &str,
+    ) -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        player_authority_fixture_from_parts(
+            player_authority_system_space_station_envelope(status),
+            player_authority_system_space_station_catalog(),
+        )
+    }
+
+    fn player_authority_system_space_station_request(
+        session_id: &str,
+        base_revision: u64,
+        intent: SystemSpaceStationIntent,
+    ) -> CoreCommitPlayerAuthoritySystemSpaceStationCommandRequest {
+        let semantic = SystemSpaceStationCommandRequest {
+            command_id: "placeholder".to_owned(),
+            session_id: session_id.to_owned(),
+            run_id: "player-authority-run".to_owned(),
+            expected_revision: base_revision,
+            expected_registry_fingerprint: EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned(),
+            intent: intent.clone(),
+        };
+        CoreCommitPlayerAuthoritySystemSpaceStationCommandRequest {
+            run_id: semantic.run_id.clone(),
+            command_id: derive_system_space_station_command_id(&semantic).unwrap(),
+            base_revision,
+            expected_registry_fingerprint: semantic.expected_registry_fingerprint,
+            intent,
+        }
     }
 
     fn player_authority_construction_automation_fixture() -> (
@@ -16536,6 +16937,288 @@ mod tests {
             .unwrap();
         assert!(recovered.duplicate);
         assert!(recovered.revision > entry_checkpoint.revision);
+    }
+
+    #[test]
+    fn system_space_station_intents_commit_start_delivery_and_module_with_ack_replay() {
+        let cases = [
+            (
+                "not-started",
+                SystemSpaceStationIntent::Start {
+                    system_id: "helios".to_owned(),
+                },
+                "start",
+            ),
+            (
+                "building",
+                SystemSpaceStationIntent::DeliverFromTray {
+                    system_id: "helios".to_owned(),
+                    planet_id: "home".to_owned(),
+                    item_id: "titanium_alloy".to_owned(),
+                    requested_amount: 1_200_000,
+                },
+                "deliver",
+            ),
+            (
+                "operational",
+                SystemSpaceStationIntent::ModuleTarget {
+                    system_id: "helios".to_owned(),
+                    module: dsp_native_core::system_space_station_command::SystemSpaceStationModule::Backbone,
+                    target: 1,
+                },
+                "module",
+            ),
+        ];
+        for (status, intent, label) in cases {
+            let (root, mut store, mut registry, session_id, _) =
+                player_authority_system_space_station_fixture(status);
+            let base = registry.status(&session_id).unwrap().revision;
+            let request =
+                player_authority_system_space_station_request(&session_id, base, intent.clone());
+            let committed = registry
+                .commit_player_authority_system_space_station_command(
+                    &mut store,
+                    &session_id,
+                    request.clone(),
+                )
+                .unwrap();
+            assert_eq!(committed.base_revision, base, "{label}");
+            assert_eq!(committed.revision, base + 1, "{label}");
+            assert!(!committed.duplicate, "{label}");
+            let duplicate = registry
+                .commit_player_authority_system_space_station_command(
+                    &mut store,
+                    &session_id,
+                    request.clone(),
+                )
+                .unwrap();
+            assert_duplicate_receipt_matches(&duplicate, &committed, label);
+
+            let mut collision = request;
+            collision.intent = SystemSpaceStationIntent::UpgradeAll {
+                system_id: Some("helios".to_owned()),
+            };
+            let before = registry.status(&session_id).unwrap();
+            let error = registry
+                .commit_player_authority_system_space_station_command(
+                    &mut store,
+                    &session_id,
+                    collision,
+                )
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("command ID conflicts"),
+                "{label}"
+            );
+            let after = registry.status(&session_id).unwrap();
+            assert_eq!(after.revision, before.revision, "{label}");
+            assert_eq!(after.canonical_sha256, before.canonical_sha256, "{label}");
+
+            let state = export_test_state(root.path(), &registry, &store, &session_id, label);
+            match label {
+                "start" => assert_eq!(state["systemSpaceStations"]["helios"]["status"], "building"),
+                "deliver" => {
+                    assert_eq!(state["planetTrays"]["home"]["titanium_alloy"], 1_000_000);
+                    assert_eq!(state["systemSpaceStations"]["helios"]["phaseIndex"], 0);
+                }
+                "module" => assert_eq!(
+                    state["systemSpaceStations"]["helios"]["modules"]["backbone"],
+                    1
+                ),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn system_space_station_pending_patch_recovers_cold_and_same_intent_replays_without_old_base() {
+        let (_root, mut store, registry, session_id, _) =
+            player_authority_system_space_station_fixture("not-started");
+        let base = registry.status(&session_id).unwrap().revision;
+        let request = player_authority_system_space_station_request(
+            &session_id,
+            base,
+            SystemSpaceStationIntent::Start {
+                system_id: "helios".to_owned(),
+            },
+        );
+        let semantic = SystemSpaceStationCommandRequest {
+            command_id: request.command_id.clone(),
+            session_id: session_id.clone(),
+            run_id: request.run_id.clone(),
+            expected_revision: base,
+            expected_registry_fingerprint: request.expected_registry_fingerprint.clone(),
+            intent: request.intent.clone(),
+        };
+        let prepared = prepare_system_space_station_command(
+            registry.session(&session_id).unwrap(),
+            &SystemSpaceStationAuthority {
+                session_id: session_id.clone(),
+                run_id: request.run_id.clone(),
+            },
+            semantic,
+        )
+        .unwrap();
+        let authority_session_id = store.player_authority_session_binding(&session_id).unwrap();
+        store
+            .stage_player_authority_command(
+                &authority_session_id,
+                &request.run_id,
+                &request.command_id,
+                base,
+                serde_json::to_value(prepared.patch()).unwrap(),
+            )
+            .unwrap();
+        drop(registry);
+
+        let mut restarted = resumable_player_authority_registry_for_test();
+        let startup = restarted
+            .recover_player_authority_pending_command_on_startup(&mut store)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            startup.command_id.as_deref(),
+            Some(request.command_id.as_str())
+        );
+        assert_eq!(startup.revision, base + 1);
+        let replay = restarted
+            .commit_player_authority_system_space_station_command(
+                &mut store,
+                &startup.session_id,
+                request,
+            )
+            .unwrap();
+        assert!(replay.duplicate);
+        assert_eq!(replay.revision, base + 1);
+    }
+
+    #[test]
+    fn system_space_station_intent_recovers_exactly_once_after_every_durable_boundary() {
+        let (clean_root, mut clean_store, mut clean_registry, clean_session, _) =
+            player_authority_system_space_station_fixture("not-started");
+        let clean_base = clean_registry.status(&clean_session).unwrap().revision;
+        let clean_request = player_authority_system_space_station_request(
+            &clean_session,
+            clean_base,
+            SystemSpaceStationIntent::Start {
+                system_id: "helios".to_owned(),
+            },
+        );
+        let clean = clean_registry
+            .commit_player_authority_system_space_station_command(
+                &mut clean_store,
+                &clean_session,
+                clean_request.clone(),
+            )
+            .unwrap();
+        let clean_state = export_test_state(
+            clean_root.path(),
+            &clean_registry,
+            &clean_store,
+            &clean_session,
+            "station-clean",
+        );
+        assert_eq!(
+            clean_state["systemSpaceStations"]["helios"]["status"],
+            "building"
+        );
+
+        for fault in [
+            PlayerAuthorityCommandFault::AfterStage,
+            PlayerAuthorityCommandFault::AfterWal,
+            PlayerAuthorityCommandFault::AfterCheckpoint,
+            PlayerAuthorityCommandFault::AfterReceipt,
+            PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
+        ] {
+            let (root, mut store, mut registry, session_id, _) =
+                player_authority_system_space_station_fixture("not-started");
+            let before = registry.status(&session_id).unwrap();
+            let request = player_authority_system_space_station_request(
+                &session_id,
+                before.revision,
+                SystemSpaceStationIntent::Start {
+                    system_id: "helios".to_owned(),
+                },
+            );
+            assert_eq!(request.command_id, clean_request.command_id, "{fault:?}");
+            let error = registry
+                .commit_player_authority_system_space_station_command_impl(
+                    &mut store,
+                    &session_id,
+                    request.clone(),
+                    fault,
+                )
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("lost response"),
+                "{fault:?}: {error:#}"
+            );
+            if fault == PlayerAuthorityCommandFault::AfterStage {
+                let after = registry.status(&session_id).unwrap();
+                assert_eq!(after.revision, before.revision, "{fault:?}");
+                assert_eq!(after.canonical_sha256, before.canonical_sha256, "{fault:?}");
+            }
+
+            drop(registry);
+            drop(store);
+            let mut reopened_store = SaveStore::open(root.path()).unwrap();
+            let mut reopened = resumable_player_authority_registry_for_test();
+            let startup = reopened
+                .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"))
+                .unwrap_or_else(|| panic!("{fault:?}: startup receipt missing"));
+            assert_eq!(
+                startup.command_id.as_deref(),
+                Some(request.command_id.as_str()),
+                "{fault:?}"
+            );
+            assert_eq!(startup.revision, clean.revision, "{fault:?}");
+            assert_eq!(
+                startup.summary.canonical_sha256, clean.summary.canonical_sha256,
+                "{fault:?}"
+            );
+            let lease = reopened_store.require_exact_realtime_lease().unwrap();
+            assert_eq!(lease.acknowledged.sequence, clean.sequence, "{fault:?}");
+            assert_eq!(lease.acknowledged.revision, clean.revision, "{fault:?}");
+            assert_eq!(
+                lease.acknowledged.command_id.as_deref(),
+                Some(request.command_id.as_str()),
+                "{fault:?}"
+            );
+            assert!(lease.pending_command.is_none(), "{fault:?}");
+
+            let replay = reopened
+                .commit_player_authority_system_space_station_command(
+                    &mut reopened_store,
+                    &startup.session_id,
+                    request.clone(),
+                )
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
+            assert_duplicate_receipt_matches(&replay, &clean, &format!("{fault:?}"));
+            let replayed_state = export_test_state(
+                root.path(),
+                &reopened,
+                &reopened_store,
+                &startup.session_id,
+                &format!("station-{fault:?}"),
+            );
+            assert_eq!(replayed_state, clean_state, "{fault:?}");
+
+            let mut collision = request;
+            collision.intent = SystemSpaceStationIntent::UpgradeAll {
+                system_id: Some("helios".to_owned()),
+            };
+            assert!(
+                reopened
+                    .commit_player_authority_system_space_station_command(
+                        &mut reopened_store,
+                        &startup.session_id,
+                        collision,
+                    )
+                    .is_err(),
+                "{fault:?}"
+            );
+        }
     }
 
     #[test]

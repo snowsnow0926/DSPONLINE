@@ -8,6 +8,7 @@ use crate::core_runtime::{
     CoreCheckpointExactRealtimeFinalizationRequest, CoreCommitOperationExactRealtimeRequest,
     CoreCommitOperationRequest, CoreCommitPlayerAuthorityCommandRequest,
     CoreCommitPlayerAuthorityMacroAdvanceRequest, CoreCommitPlayerAuthorityPauseRequest,
+    CoreCommitPlayerAuthoritySystemSpaceStationCommandRequest,
     CoreCommitPlayerAuthorityTickRequest, CoreFinishPlayerAuthorityMacroSessionRequest,
     CorePlayerAuthorityStartupRecoveryReceipt, CorePreparePlayerAuthorityRequest,
 };
@@ -46,6 +47,13 @@ pub struct CoreCommitPlayerAuthorityTickControlRequest {
 pub struct CoreCommitPlayerAuthorityCommandControlRequest {
     pub session_id: String,
     pub request: CoreCommitPlayerAuthorityCommandRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreCommitPlayerAuthoritySystemSpaceStationCommandControlRequest {
+    pub session_id: String,
+    pub request: CoreCommitPlayerAuthoritySystemSpaceStationCommandRequest,
 }
 
 #[derive(Debug, Deserialize)]
@@ -498,6 +506,9 @@ pub enum ControlRequest {
     CoreActivatePlayerAuthority(CoreActivatePlayerAuthorityControlRequest),
     CoreCommitPlayerAuthorityTick(CoreCommitPlayerAuthorityTickControlRequest),
     CoreCommitPlayerAuthorityCommand(CoreCommitPlayerAuthorityCommandControlRequest),
+    CoreCommitPlayerAuthoritySystemSpaceStationCommand(
+        CoreCommitPlayerAuthoritySystemSpaceStationCommandControlRequest,
+    ),
     CoreCommitPlayerAuthorityPause(CoreCommitPlayerAuthorityPauseControlRequest),
     CoreRecoverPlayerAuthorityCommand(CoreRecoverPlayerAuthorityCommandControlRequest),
     CoreCommitPlayerAuthorityMacroAdvance(CoreCommitPlayerAuthorityMacroAdvanceControlRequest),
@@ -1899,6 +1910,57 @@ mod tests {
             }
             _ => panic!("system-space-station workspace decoded as the wrong variant"),
         }
+    }
+
+    #[test]
+    fn system_space_station_intent_protocol_rejects_patch_fields_and_preserves_exact_intent() {
+        let request: ControlRequest = serde_json::from_value(serde_json::json!({
+            "operation": "coreCommitPlayerAuthoritySystemSpaceStationCommand",
+            "sessionId": "core-1",
+            "request": {
+                "runId": "run-1",
+                "commandId": format!("system-space-station-v1-{}", "a".repeat(64)),
+                "baseRevision": 7,
+                "expectedRegistryFingerprint": "7df8cf3a",
+                "intent": {
+                    "type": "deliver-from-tray",
+                    "systemId": "helios",
+                    "planetId": "home",
+                    "itemId": "titanium_alloy",
+                    "requestedAmount": 123
+                }
+            }
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreCommitPlayerAuthoritySystemSpaceStationCommand(control) => {
+                assert_eq!(control.session_id, "core-1");
+                assert_eq!(control.request.base_revision, 7);
+                assert!(matches!(
+                    control.request.intent,
+                    dsp_native_core::system_space_station_command::SystemSpaceStationIntent::DeliverFromTray {
+                        requested_amount: 123,
+                        ..
+                    }
+                ));
+            }
+            _ => panic!("system-space-station intent decoded as another operation"),
+        }
+        assert!(
+            serde_json::from_value::<ControlRequest>(serde_json::json!({
+                "operation": "coreCommitPlayerAuthoritySystemSpaceStationCommand",
+                "sessionId": "core-1",
+                "request": {
+                    "runId": "run-1",
+                    "commandId": format!("system-space-station-v1-{}", "a".repeat(64)),
+                    "baseRevision": 7,
+                    "expectedRegistryFingerprint": "7df8cf3a",
+                    "intent": { "type": "start", "systemId": "helios" },
+                    "command": { "protocolVersion": 1 }
+                }
+            }))
+            .is_err()
+        );
     }
 }
 

@@ -60,6 +60,9 @@ const {
   NativePlayerAuthorityCommandBroker,
 } = require("./native-player-authority-command-broker.cjs");
 const {
+  NativePlayerAuthoritySystemSpaceStationBroker,
+} = require("./native-player-authority-system-space-station-broker.cjs");
+const {
   NativePlayerAuthorityMacroBroker,
 } = require("./native-player-authority-macro-broker.cjs");
 const {
@@ -171,6 +174,7 @@ let nativeSaveSessions = null;
 let nativeCoreSessions = null;
 let nativePlayerAuthorityRuntime = null;
 let nativePlayerAuthorityCommandBroker = null;
+let nativePlayerAuthoritySystemSpaceStationBroker = null;
 let nativePlayerAuthorityMacroBroker = null;
 let nativePlayerAuthorityProjectionBroker = null;
 let nativePlayerAuthorityPersistenceBroker = null;
@@ -788,6 +792,13 @@ async function initializeNativeHost() {
         mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
       ),
     });
+    nativePlayerAuthoritySystemSpaceStationBroker =
+      new NativePlayerAuthoritySystemSpaceStationBroker({
+        runtime: nativePlayerAuthorityRuntime,
+        isTrustedRendererOwner: (ownerId) => Boolean(
+          mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
+        ),
+      });
     // Main-process-owned. The renderer IPC/preload surface supplies only
     // bounded integer millisecond budgets plus the start revision it observed;
     // session/operation IDs, the current authoritative revision, durable retry
@@ -899,6 +910,7 @@ async function initializeNativeHost() {
     nativePlayerAuthorityRuntime?.shutdownForProcessExit();
     nativePlayerAuthorityRuntime = null;
     nativePlayerAuthorityCommandBroker = null;
+    nativePlayerAuthoritySystemSpaceStationBroker = null;
     nativePlayerAuthorityMacroBroker = null;
     nativePlayerAuthorityProjectionBroker = null;
     nativePlayerAuthorityPersistenceBroker = null;
@@ -2576,6 +2588,19 @@ ipcMain.handle("desktop:native-core-reconcile-command", async (event, request) =
       throw new Error("原生玩家权威命令对账会话不可用");
     }
     return nativePlayerAuthorityCommandBroker.reconcile(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-player-authority-system-space-station-intent", async (event, request) => {
+  return runRendererNativeOperation("coreCommand", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_FAILED",
+    message: "原生恒星系空间站命令提交失败，请重试",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthoritySystemSpaceStationBroker) {
+      throw new Error("原生恒星系空间站权威命令不可用");
+    }
+    return nativePlayerAuthoritySystemSpaceStationBroker.commit(ownerId, request);
   });
 });
 

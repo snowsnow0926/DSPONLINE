@@ -378,6 +378,8 @@ export interface DesktopBridge {
   getNativeCoreDysonWorkspaceProjection?: (request: DesktopNativeCoreDysonWorkspaceProjectionRequest) => Promise<DesktopNativeCoreDysonWorkspaceProjectionResult>;
   /** Bounded, independently paged system-space-station workspace; never a full GameState. */
   getNativeCoreSystemSpaceStationWorkspaceProjection?: (request: DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest) => Promise<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult>;
+  /** Intent-only durable player-authority mutation; session/run/owner/patch stay main/Rust-owned. */
+  commitNativeSystemSpaceStationIntent?: (request: DesktopNativeSystemSpaceStationIntentRequest) => Promise<DesktopNativeCoreCommandResult>;
   /** Current Windows thin-UI host only; native authority never falls back to a renderer entity scan. */
   getNativeCoreCommandPaletteEntitySearch?: (request: DesktopNativeCoreCommandPaletteEntitySearchRequest) => Promise<DesktopNativeCoreCommandPaletteEntitySearchResult>;
   requestNativeCoreProjectionTransfer?: (request: DesktopNativeCoreProjectionTransferRequest) => Promise<DesktopNativeCoreProjectionTransferResult>;
@@ -2642,6 +2644,21 @@ export interface DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest e
   trayLimit: number;
   stationCursor: number;
   stationLimit: number;
+}
+
+export type DesktopNativeSystemSpaceStationIntent =
+  | { type: "start"; systemId: string }
+  | { type: "deliver-from-tray"; systemId: string; planetId: string; itemId: string; requestedAmount: number }
+  | { type: "module-target"; systemId: string; module: "backbone" | "energy" | "interstellar"; target: number }
+  | { type: "upgrade-one"; entityId: string }
+  | { type: "upgrade-all"; systemId: string | null }
+  | { type: "mode-target"; entityId: string; mode: "legacy" | "elevator" }
+  | { type: "output-target"; entityId: string; portIndex: number; itemId: string | null; confirmations: number };
+
+export interface DesktopNativeSystemSpaceStationIntentRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  intent: DesktopNativeSystemSpaceStationIntent;
 }
 
 export interface DesktopNativeCoreSystemSpaceStationRequirementRow {

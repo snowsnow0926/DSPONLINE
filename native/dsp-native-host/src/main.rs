@@ -11,7 +11,7 @@ use dsp_native_host::core_runtime::{
     NATIVE_CORE_VIEWPORT_ENTITY_PRESENTATION_V1_CAPABILITY, PLAYER_AUTHORITY_COMMAND_CAPABILITY,
     PLAYER_AUTHORITY_GATE_CAPABILITY, PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
     PLAYER_AUTHORITY_PAUSE_CAPABILITY, PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
-    PLAYER_AUTHORITY_TICK_CAPABILITY,
+    PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY, PLAYER_AUTHORITY_TICK_CAPABILITY,
 };
 use dsp_native_host::exact_realtime_lease::{
     EXACT_REALTIME_LEASE_CAPABILITY, EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
@@ -141,6 +141,7 @@ fn handle_request(
                     PLAYER_AUTHORITY_GATE_CAPABILITY,
                     PLAYER_AUTHORITY_TICK_CAPABILITY,
                     PLAYER_AUTHORITY_COMMAND_CAPABILITY,
+                    PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY,
                     PLAYER_AUTHORITY_PAUSE_CAPABILITY,
                     PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
                     PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
@@ -785,6 +786,13 @@ fn handle_request(
         ControlRequest::CoreCommitPlayerAuthorityCommand(control) => to_value(
             cores.commit_player_authority_command(store, &control.session_id, control.request)?,
         )?,
+        ControlRequest::CoreCommitPlayerAuthoritySystemSpaceStationCommand(control) => {
+            to_value(cores.commit_player_authority_system_space_station_command(
+                store,
+                &control.session_id,
+                control.request,
+            )?)?
+        }
         ControlRequest::CoreCommitPlayerAuthorityPause(control) => {
             to_value(cores.commit_player_authority_pause_transition(
                 store,

@@ -124,7 +124,11 @@ impl InterstellarStationMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "kebab-case")]
+#[serde(
+    tag = "type",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
 pub enum SystemSpaceStationIntent {
     Start {
         system_id: String,
@@ -230,6 +234,14 @@ impl PreparedSystemSpaceStationCommand {
         }
     }
 
+    pub fn command_id(&self) -> &str {
+        &self.request.command_id
+    }
+
+    pub fn expected_revision(&self) -> u64 {
+        self.request.expected_revision
+    }
+
     /// Re-proves the complete request against the current authoritative state
     /// and commits only the already-proved generic patch. A Host receipt store
     /// should return the prior result for an identical idempotency binding and
@@ -258,6 +270,45 @@ struct SemanticRequest<'a> {
     expected_revision: u64,
     expected_registry_fingerprint: &'a str,
     intent: &'a SystemSpaceStationIntent,
+}
+
+/// Computes the stable semantic digest without consulting mutable gameplay
+/// state. The Host uses this before looking at a current checkpoint so an
+/// already-ACKed retry can still prove the exact original intent after the
+/// base revision itself is no longer resident.
+pub fn system_space_station_semantic_sha256(
+    request: &SystemSpaceStationCommandRequest,
+) -> anyhow::Result<String> {
+    valid_command_text("command ID", &request.command_id)?;
+    valid_command_text("session ID", &request.session_id)?;
+    valid_command_text("run ID", &request.run_id)?;
+    if request.expected_revision > MAX_SAFE_INTEGER {
+        bail!("native system-space-station command revision is invalid")
+    }
+    valid_domain_id(
+        "registry fingerprint",
+        &request.expected_registry_fingerprint,
+    )?;
+    sha256_json(&SemanticRequest {
+        session_id: &request.session_id,
+        run_id: &request.run_id,
+        expected_revision: request.expected_revision,
+        expected_registry_fingerprint: &request.expected_registry_fingerprint,
+        intent: &request.intent,
+    })
+}
+
+/// The durable command ID embeds the complete semantic request digest. This
+/// makes an ACKed receipt self-authenticating for an intent-only retry: the
+/// Host can reject a reused ID with another intent without reconstructing the
+/// old pre-command state or persisting a second gameplay schema.
+pub fn derive_system_space_station_command_id(
+    request: &SystemSpaceStationCommandRequest,
+) -> anyhow::Result<String> {
+    Ok(format!(
+        "system-space-station-v1-{}",
+        system_space_station_semantic_sha256(request)?
+    ))
 }
 
 pub fn prepare_system_space_station_command(
@@ -292,13 +343,7 @@ pub fn prepare_system_space_station_command(
     }
 
     let patch = build_patch(state, &request.intent)?;
-    let semantic_sha256 = sha256_json(&SemanticRequest {
-        session_id: &request.session_id,
-        run_id: &request.run_id,
-        expected_revision: request.expected_revision,
-        expected_registry_fingerprint: &request.expected_registry_fingerprint,
-        intent: &request.intent,
-    })?;
+    let semantic_sha256 = system_space_station_semantic_sha256(&request)?;
     let patch_sha256 = sha256_json(&patch)?;
     Ok(PreparedSystemSpaceStationCommand {
         request,
@@ -416,7 +461,9 @@ fn start_patch(state: &CoreState, system_id: &str) -> anyhow::Result<SimulationC
             let entity = entity
                 .as_object()
                 .ok_or_else(|| anyhow!("native system-space-station entity is invalid"))?;
-            if string_field(entity, "buildingId")? != "space_station_construction_launcher" {
+            if entity.get("buildingId").and_then(Value::as_str)
+                != Some("space_station_construction_launcher")
+            {
                 return Ok(false);
             }
             let planet_id = string_field(entity, "planetId")?;
@@ -454,9 +501,24 @@ fn start_patch(state: &CoreState, system_id: &str) -> anyhow::Result<SimulationC
         Value::from(multiplier),
     );
     object.insert("phaseIndex".to_owned(), Value::from(0));
-    object.insert("delivered".to_owned(), Value::Object(Map::new()));
-    object.insert("constructionBuffer".to_owned(), Value::Object(Map::new()));
-    object.insert("inventory".to_owned(), Value::Object(Map::new()));
+    // Old v47 saves can legitimately carry material while the station is
+    // still marked not-started.  Starting must never erase that material.
+    // Re-parse all three ledgers so malformed legacy state fails closed, then
+    // replay the preserved construction buffer from phase zero under the new
+    // cost multiplier.  Extra item IDs remain in their original ledger.
+    let delivered = decimal_map(object.get("delivered"), "station delivered")?;
+    let construction_buffer = decimal_map(
+        object.get("constructionBuffer"),
+        "station construction buffer",
+    )?;
+    let inventory = decimal_map(object.get("inventory"), "station inventory")?;
+    object.insert("delivered".to_owned(), decimal_map_value(&delivered));
+    object.insert(
+        "constructionBuffer".to_owned(),
+        decimal_map_value(&construction_buffer),
+    );
+    object.insert("inventory".to_owned(), decimal_map_value(&inventory));
+    apply_construction_buffer(object)?;
 
     let mut patch = empty_patch(state);
     patch
@@ -624,7 +686,7 @@ fn module_patch(
         }
     } else {
         for (item_id, cost) in costs {
-            add_decimal_saturated(&mut inventory, item_id, &(cost / 2u8));
+            add_decimal_exact(&mut inventory, item_id, &(cost / 2u8))?;
         }
     }
     station_object
@@ -670,7 +732,9 @@ fn upgrade_patch(
             let object = value
                 .as_object()
                 .ok_or_else(|| anyhow!("native interstellar-station entity is invalid"))?;
-            if string_field(object, "buildingId")? != "interstellar_logistics_station" {
+            if object.get("buildingId").and_then(Value::as_str)
+                != Some("interstellar_logistics_station")
+            {
                 continue;
             }
             if let Some(system_id) = system_filter
@@ -1019,9 +1083,12 @@ fn elevator_output_items(
             .collect();
     }
     let mut result = Vec::with_capacity(OUTPUT_PORTS);
-    let slots = object
-        .get("stationSlots")
-        .and_then(Value::as_array)
+    let Some(slots_value) = object.get("stationSlots") else {
+        result.resize(OUTPUT_PORTS, None);
+        return Ok(result);
+    };
+    let slots = slots_value
+        .as_array()
         .ok_or_else(|| anyhow!("native interstellar-station slots are invalid"))?;
     for slot in slots.iter().take(OUTPUT_PORTS) {
         let slot = slot
@@ -1308,11 +1375,6 @@ fn add_decimal_exact(
     Ok(())
 }
 
-fn add_decimal_saturated(map: &mut BTreeMap<String, BigUint>, item_id: &str, amount: &BigUint) {
-    let next = map.get(item_id).cloned().unwrap_or_else(BigUint::zero) + amount;
-    map.insert(item_id.to_owned(), next.min(max_decimal()));
-}
-
 fn subtract_decimal_exact(
     map: &mut BTreeMap<String, BigUint>,
     item_id: &str,
@@ -1489,6 +1551,14 @@ mod tests {
         })
     }
 
+    fn vein(id: &str) -> Value {
+        json!({
+            "id":id,"kind":"vein","planetId":"home","resourceId":"iron_ore",
+            "machineCount":1,"inputs":{},"outputs":{},"powerFactor":1,
+            "progress":0,"utilization":0,"productionRate":0,"routingCursor":0
+        })
+    }
+
     fn belt(id: &str, source: &str, item_id: &str, tier: u64, lanes: u64) -> Value {
         json!({
             "id":id,"planetId":"home","source":source,"target":"sink",
@@ -1578,7 +1648,7 @@ mod tests {
     fn start_is_two_phase_and_zero_power_does_not_block_manual_command() {
         let mut state = state_with(
             &[STATION_ENGINEERING, AUTONOMOUS_CONSTRUCTION],
-            vec![launcher("launcher", "home", 0.0)],
+            vec![vein("vein"), launcher("launcher", "home", 0.0)],
             vec![],
         );
         let prepared = prepare_system_space_station_command(
@@ -1598,6 +1668,43 @@ mod tests {
         assert_eq!(station["costRevision"], 1);
         assert_eq!(station["costMultiplierBasisPoints"], 8000);
         assert_eq!(state.revision, 8);
+    }
+
+    #[test]
+    fn start_preserves_legacy_material_and_replays_buffer_from_phase_zero() {
+        let mut state = state_with(
+            &[STATION_ENGINEERING],
+            vec![vein("vein"), launcher("launcher", "home", 1.0)],
+            vec![],
+        );
+        let legacy = state
+            .base_value_mut()
+            .get_mut("systemSpaceStations")
+            .unwrap()
+            .get_mut("helios")
+            .unwrap();
+        legacy["delivered"] = json!({"titanium_alloy":"500000","legacy_extra":"11"});
+        legacy["constructionBuffer"] = json!({"titanium_alloy":"600000","legacy_extra":"13"});
+        legacy["inventory"] = json!({"iron_ore":"42","legacy_extra":"17"});
+
+        let prepared = prepare_system_space_station_command(
+            &state,
+            &authority(),
+            request(SystemSpaceStationIntent::Start {
+                system_id: "helios".to_owned(),
+            }),
+        )
+        .unwrap();
+        prepared.apply(&mut state, &authority()).unwrap();
+        let station = station_after(&state, "helios");
+        assert_eq!(station["status"], "building");
+        assert_eq!(station["phaseIndex"], 0);
+        assert_eq!(station["delivered"]["titanium_alloy"], "1000000");
+        assert_eq!(station["constructionBuffer"]["titanium_alloy"], "100000");
+        assert_eq!(station["delivered"]["legacy_extra"], "11");
+        assert_eq!(station["constructionBuffer"]["legacy_extra"], "13");
+        assert_eq!(station["inventory"]["iron_ore"], "42");
+        assert_eq!(station["inventory"]["legacy_extra"], "17");
     }
 
     #[test]
@@ -1747,10 +1854,36 @@ mod tests {
     }
 
     #[test]
+    fn module_refund_decimal_overflow_is_rejected_without_mutation() {
+        let mut state = state_with(&[], vec![], vec![]);
+        let alpha = state
+            .base_value_mut()
+            .get_mut("systemSpaceStations")
+            .unwrap()
+            .get_mut("alpha")
+            .unwrap();
+        alpha["modules"]["backbone"] = json!(1);
+        alpha["inventory"]["frame_material"] = Value::String("9".repeat(MAX_HUB_DIGITS));
+        let before = state.canonical_sha256().unwrap();
+        let result = prepare_system_space_station_command(
+            &state,
+            &authority(),
+            request(SystemSpaceStationIntent::ModuleTarget {
+                system_id: "alpha".to_owned(),
+                module: SystemSpaceStationModule::Backbone,
+                target: 0,
+            }),
+        );
+        assert!(result.is_err());
+        assert_eq!(state.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
     fn upgrade_one_and_all_are_stable_free_access_changes_and_ignore_power() {
         let mut state = state_with(
             &[QUANTUM_LOGISTICS],
             vec![
+                vein("vein"),
                 elevator("z-station", "home", 1, "legacy", 0.0),
                 elevator("a-station", "far", 1, "legacy", 1.0),
             ],
@@ -1792,6 +1925,31 @@ mod tests {
                 })
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn sparse_legacy_station_without_output_fields_defaults_to_five_empty_ports() {
+        let mut sparse = elevator("sparse", "home", 1, "legacy", 1.0);
+        let sparse_object = sparse.as_object_mut().unwrap();
+        sparse_object.remove("elevatorOutputItems");
+        sparse_object.remove("stationSlots");
+        let mut state = state_with(&[QUANTUM_LOGISTICS], vec![sparse], vec![]);
+        let upgrade = prepare_system_space_station_command(
+            &state,
+            &authority(),
+            request(SystemSpaceStationIntent::UpgradeOne {
+                entity_id: "sparse".to_owned(),
+            }),
+        )
+        .unwrap();
+        upgrade.apply(&mut state, &authority()).unwrap();
+        let entity = state
+            .parse_entity(*state.entity_index.get("sparse").unwrap())
+            .unwrap();
+        assert_eq!(
+            entity["elevatorOutputItems"],
+            json!([null, null, null, null, null])
         );
     }
 
@@ -1860,6 +2018,77 @@ mod tests {
     }
 
     #[test]
+    fn destructive_output_refund_handles_mixed_belts_and_overflow_atomically() {
+        let mut assigned_mk1 = belt("assigned-mk1", "station", "copper_ore", 1, 2);
+        assigned_mk1["elevatorOutputIndex"] = json!(0);
+        let mut assigned_mk2 = belt("assigned-mk2", "station", "copper_ore", 2, 3);
+        assigned_mk2["elevatorOutputIndex"] = json!(0);
+        let legacy_mk3 = belt("legacy-mk3", "station", "iron_ore", 3, 4);
+        let unrelated_item = belt("unrelated-item", "station", "copper_ore", 1, 5);
+        let unrelated_source = belt("unrelated-source", "other", "iron_ore", 2, 6);
+        let mut state = state_with(
+            &[],
+            vec![
+                elevator("station", "home", 2, "elevator", 1.0),
+                storage("other"),
+            ],
+            vec![
+                assigned_mk1,
+                assigned_mk2,
+                legacy_mk3,
+                unrelated_item,
+                unrelated_source,
+            ],
+        );
+        let command = prepare_system_space_station_command(
+            &state,
+            &authority(),
+            request(SystemSpaceStationIntent::OutputTarget {
+                entity_id: "station".to_owned(),
+                port_index: 0,
+                item_id: None,
+                confirmations: 2,
+            }),
+        )
+        .unwrap();
+        command.apply(&mut state, &authority()).unwrap();
+        assert!(!state.belt_index.contains_key("assigned-mk1"));
+        assert!(!state.belt_index.contains_key("assigned-mk2"));
+        assert!(!state.belt_index.contains_key("legacy-mk3"));
+        assert!(state.belt_index.contains_key("unrelated-item"));
+        assert!(state.belt_index.contains_key("unrelated-source"));
+        assert_eq!(state.base_value()["construction"]["conveyor_belt_mk1"], 12);
+        assert_eq!(state.base_value()["construction"]["conveyor_belt_mk2"], 23);
+        assert_eq!(state.base_value()["construction"]["conveyor_belt_mk3"], 34);
+
+        let mut overflow_belt = belt("overflow", "station", "iron_ore", 1, 1);
+        overflow_belt["elevatorOutputIndex"] = json!(0);
+        let mut overflow = state_with(
+            &[],
+            vec![elevator("station", "home", 2, "elevator", 1.0)],
+            vec![overflow_belt],
+        );
+        overflow.base_value_mut()["construction"]["conveyor_belt_mk1"] =
+            Value::from(MAX_SAFE_INTEGER);
+        let before = overflow.canonical_sha256().unwrap();
+        assert!(
+            prepare_system_space_station_command(
+                &overflow,
+                &authority(),
+                request(SystemSpaceStationIntent::OutputTarget {
+                    entity_id: "station".to_owned(),
+                    port_index: 0,
+                    item_id: None,
+                    confirmations: 2,
+                }),
+            )
+            .is_err()
+        );
+        assert_eq!(overflow.canonical_sha256().unwrap(), before);
+        assert!(overflow.belt_index.contains_key("overflow"));
+    }
+
+    #[test]
     fn command_id_binding_is_replay_stable_and_detects_payload_collision() {
         let state = state_with(&[], vec![], vec![]);
         let first_request = request(SystemSpaceStationIntent::ModuleTarget {
@@ -1905,6 +2134,28 @@ mod tests {
                 &collision.idempotency_binding(),
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn deterministic_host_command_id_matches_the_bounded_javascript_builder() {
+        let request = SystemSpaceStationCommandRequest {
+            command_id: "placeholder".to_owned(),
+            session_id: "core-1".to_owned(),
+            run_id: "run-1".to_owned(),
+            expected_revision: 7,
+            expected_registry_fingerprint: EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned(),
+            intent: SystemSpaceStationIntent::Start {
+                system_id: "helios".to_owned(),
+            },
+        };
+        assert_eq!(
+            system_space_station_semantic_sha256(&request).unwrap(),
+            "db1ba7d5347e4962e47eedcbfa7fffe8b9ab13f951547c85178f7b816cb2a338"
+        );
+        assert_eq!(
+            derive_system_space_station_command_id(&request).unwrap(),
+            "system-space-station-v1-db1ba7d5347e4962e47eedcbfa7fffe8b9ab13f951547c85178f7b816cb2a338"
         );
     }
 

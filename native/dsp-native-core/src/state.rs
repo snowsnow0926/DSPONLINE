@@ -17,7 +17,9 @@ use sha2::{Digest, Sha256};
 
 use crate::canonical::{fnv1a_utf8, update_canonical, update_canonical_object};
 use crate::catalog::RuntimeCatalog;
-use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
+use crate::deterministic_runtime::{
+    DeterministicRuntime, IndexedPrepareDiagnostics, runtime as deterministic_runtime,
+};
 use crate::entity_raw::encode_entity_records_full;
 #[cfg(test)]
 use crate::entity_raw::json_bitwise_eq;
@@ -2682,6 +2684,16 @@ fn parse_records_with_runtime(
     })
 }
 
+fn parse_records_with_runtime_diagnostics(
+    runtime: &DeterministicRuntime,
+    records: &[RawRecord],
+    label: &'static str,
+) -> (anyhow::Result<Vec<Value>>, IndexedPrepareDiagnostics) {
+    runtime.indexed_try_map_with_diagnostics(records, |index, raw| {
+        serde_json::from_str(raw).with_context(|| format!("decode {label} at index {index}"))
+    })
+}
+
 fn parse_records_parallel(
     records: &[RawRecord],
     label: &'static str,
@@ -4344,6 +4356,13 @@ impl CoreState {
 
     pub(crate) fn parse_entities_parallel(&self) -> anyhow::Result<Vec<Value>> {
         parse_records_parallel(&self.entity_raw, "native core entity")
+    }
+
+    pub(crate) fn parse_entities_with_runtime_diagnostics(
+        &self,
+        runtime: &DeterministicRuntime,
+    ) -> (anyhow::Result<Vec<Value>>, IndexedPrepareDiagnostics) {
+        parse_records_with_runtime_diagnostics(runtime, &self.entity_raw, "native core entity")
     }
 
     pub(crate) fn take_entities_for_simulation(&self) -> anyhow::Result<Vec<Value>> {

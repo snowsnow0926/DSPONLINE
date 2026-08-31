@@ -7,7 +7,8 @@ use serde_json::{Map, Number, Value};
 
 use crate::construction::ConstructionRunReceipt;
 use crate::deterministic_runtime::{
-    DeterministicRuntime, PartitionedPrepareDiagnostics, runtime as deterministic_runtime,
+    DeterministicRuntime, IndexedPrepareDiagnostics, PartitionedPrepareDiagnostics,
+    runtime as deterministic_runtime,
 };
 use crate::simulation::{CoreAdvanceMode, CoreAdvanceRequest, CoreAdvanceResult};
 use crate::state::{
@@ -374,6 +375,7 @@ struct OrdinaryTerminalCertificates {
 #[cfg_attr(not(test), allow(dead_code))]
 struct OrdinaryCertificatePrepareOutcome {
     result: Result<OrdinaryFlowCertificate, String>,
+    entity_parse: Option<IndexedPrepareDiagnostics>,
     wave_one: Option<PartitionedPrepareDiagnostics>,
     wave_two: Option<PartitionedPrepareDiagnostics>,
 }
@@ -382,6 +384,7 @@ struct OrdinaryCertificatePrepareOutcome {
 #[cfg_attr(not(test), allow(dead_code))]
 struct ConstructionCertificatePrepareOutcome {
     result: Result<Option<ConstructionTailCertificate>, String>,
+    entity_parse: Option<IndexedPrepareDiagnostics>,
     wave: Option<PartitionedPrepareDiagnostics>,
 }
 
@@ -406,6 +409,24 @@ fn profile_certificate_prepare(
         elapsed.as_secs_f64() * 1_000.0,
         diagnostics.active_partitions,
         diagnostics.work_items,
+        diagnostics.selected_worker_count,
+        diagnostics.observed_worker_count,
+        u8::from(diagnostics.parallel),
+    );
+}
+
+fn profile_certificate_entity_parse(
+    label: &str,
+    diagnostics: IndexedPrepareDiagnostics,
+    elapsed: std::time::Duration,
+) {
+    if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_none() {
+        return;
+    }
+    eprintln!(
+        "DSP_NATIVE_CORE_PROFILE\t{label}\twallMs={:.3},items={},selectedWorkers={},observedWorkers={},parallel={}",
+        elapsed.as_secs_f64() * 1_000.0,
+        diagnostics.item_count,
         diagnostics.selected_worker_count,
         diagnostics.observed_worker_count,
         u8::from(diagnostics.parallel),
@@ -1952,7 +1973,15 @@ fn capture_exact_settlement_snapshot(
     state: &CoreState,
     base_revision: u64,
 ) -> anyhow::Result<SettlementProofSnapshot> {
-    let mut snapshot = capture_settlement_snapshot(state)?;
+    capture_exact_settlement_snapshot_with_runtime(state, base_revision, deterministic_runtime())
+}
+
+fn capture_exact_settlement_snapshot_with_runtime(
+    state: &CoreState,
+    base_revision: u64,
+    runtime: &DeterministicRuntime,
+) -> anyhow::Result<SettlementProofSnapshot> {
+    let mut snapshot = capture_settlement_snapshot_with_runtime(state, runtime)?;
     snapshot.construction_receipt = state
         .prepared_construction_runtime()
         .and_then(|runtime| runtime.receipt_between(base_revision, state.revision));
@@ -2910,10 +2939,8 @@ fn controller_power_grid(
 /// so every returned per-grid allocation is sustainable for any window size.
 fn conservative_ray_generation_by_grid(
     state: &CoreState,
+    entities: &[Value],
 ) -> Result<BTreeMap<PowerGridKey, f64>, String> {
-    let entities = state
-        .parse_entities_parallel()
-        .map_err(|error| format!("ray-power entity snapshot failed: {error:#}"))?;
     let mut lower_base = state.base_value().clone();
     let systems = lower_base
         .get_mut("dysonEngineering")
@@ -2940,7 +2967,7 @@ fn conservative_ray_generation_by_grid(
         swarm.insert("sailsInOrbit".to_owned(), Value::from(0));
         swarm.insert("generationKw".to_owned(), Value::from(0));
     }
-    let reception = crate::dyson::calculate_reception(state, &mut lower_base, &entities)
+    let reception = crate::dyson::calculate_reception(state, &mut lower_base, entities)
         .map_err(|error| format!("Dyson ray-power lower-bound allocation failed: {error:#}"))?;
     let mut by_grid = BTreeMap::<PowerGridKey, f64>::new();
     for &entity_index in &state.factory_topology.power_source_indices {
@@ -2999,6 +3026,7 @@ fn conservative_ray_generation_by_grid(
 fn build_renewable_power_tail_certificate(
     state: &CoreState,
     snapshots: &[SettlementProofSnapshot],
+    entity_snapshot: Result<&[Value], String>,
 ) -> Result<RenewablePowerTailCertificate, String> {
     if snapshots.len() != 4 {
         return Err("renewable power proof requires three exact windows".to_owned());
@@ -3047,7 +3075,8 @@ fn build_renewable_power_tail_certificate(
         return Err("current time-warp power identity diverged from calibration".to_owned());
     }
     let controller_grid = controller_power_grid(state, &reference.controller_entity_id)?;
-    let lower_ray_by_grid = conservative_ray_generation_by_grid(state)?;
+    let entities = entity_snapshot?;
+    let lower_ray_by_grid = conservative_ray_generation_by_grid(state, entities)?;
     let mut grants = BTreeMap::new();
     for (key, grid) in &reference.grids {
         if !grid.complete {
@@ -3137,6 +3166,21 @@ fn build_renewable_power_tail_certificate(
         structure_floor_by_system: dyson.structure_by_system,
         shell_floor_by_system: dyson.shell_by_system,
     })
+}
+
+#[cfg(test)]
+fn build_renewable_power_tail_certificate_for_test(
+    state: &CoreState,
+    snapshots: &[SettlementProofSnapshot],
+) -> Result<RenewablePowerTailCertificate, String> {
+    let (entities, _) = state.parse_entities_with_runtime_diagnostics(deterministic_runtime());
+    build_renewable_power_tail_certificate(
+        state,
+        snapshots,
+        entities
+            .as_deref()
+            .map_err(|error| format!("ray-power entity snapshot failed: {error:#}")),
+    )
 }
 
 fn validate_renewable_power_tail_certificate(
@@ -3511,28 +3555,21 @@ fn construction_quantum_macro_fingerprint_from_entities(
     .map_err(|error| format!("construction quantum fingerprint encode failed: {error}"))
 }
 
-fn build_construction_quantum_tail_grant_with_runtime(
+fn build_construction_quantum_tail_grant_from_entities(
     state: &CoreState,
-    runtime: &DeterministicRuntime,
+    entities: &[Value],
 ) -> Result<Option<ConstructionQuantumTailGrant>, String> {
     if !construction_quantum_macro_fingerprint_requested(state) {
         return Ok(None);
     }
-    let entities = runtime
-        .indexed_try_map_range(
-            0..state.entities.ids.len(),
-            |entity_index| state.parse_entity(entity_index),
-            |_| Value::Null,
-        )
-        .map_err(|error| format!("construction quantum grant entity snapshot failed: {error:#}"))?;
-    let Some(fingerprint) = construction_quantum_macro_fingerprint_from_entities(state, &entities)?
+    let Some(fingerprint) = construction_quantum_macro_fingerprint_from_entities(state, entities)?
     else {
         return Ok(None);
     };
     let Some(download_per_boundary) =
         crate::quantum_logistics::construction_macro_download_per_boundary(
             state.base_value(),
-            &entities,
+            entities,
         )
         .map_err(|error| format!("construction quantum grant calculation failed: {error:#}"))?
     else {
@@ -3552,6 +3589,7 @@ fn prepare_construction_tail_certificate_with_runtime(
     if !construction_tail_requested(state) {
         return ConstructionCertificatePrepareOutcome {
             result: Ok(None),
+            entity_parse: None,
             wave: None,
         };
     }
@@ -3563,14 +3601,35 @@ fn prepare_construction_tail_certificate_with_runtime(
                 "construction automation cannot share a macro tail with handcraft or placement work"
                     .to_owned(),
             ),
+            entity_parse: None,
             wave: None,
         };
     }
+    // Parse the immutable entity directory exactly once on the injected
+    // runtime before any heterogeneous certificate partition starts. The
+    // resulting private Vec is shared read-only by renewable and quantum
+    // preparation, so neither partition can recursively enter Rayon or fall
+    // back to the process-global runtime.
+    let entity_parse_started = std::time::Instant::now();
+    let (entity_snapshot, entity_parse) = state.parse_entities_with_runtime_diagnostics(runtime);
+    profile_certificate_entity_parse(
+        "pure-idle-construction-certificate-entities",
+        entity_parse,
+        entity_parse_started.elapsed(),
+    );
     let started = std::time::Instant::now();
     let ((renewable_power, center_identities, quantum, ()), wave) = runtime.partitioned_prepare4(
         0b0000_0111,
         pure_idle_certificate_prepare_work_items(state),
-        || build_renewable_power_tail_certificate(state, snapshots),
+        || {
+            build_renewable_power_tail_certificate(
+                state,
+                snapshots,
+                entity_snapshot
+                    .as_deref()
+                    .map_err(|error| format!("ray-power entity snapshot failed: {error:#}")),
+            )
+        },
         || {
             state
                 .factory_topology
@@ -3580,7 +3639,12 @@ fn prepare_construction_tail_certificate_with_runtime(
                 .map(|entity_index| construction_center_identity(state, entity_index))
                 .collect::<Vec<_>>()
         },
-        || build_construction_quantum_tail_grant_with_runtime(state, runtime),
+        || {
+            let entities = entity_snapshot.as_deref().map_err(|error| {
+                format!("construction quantum grant entity snapshot failed: {error:#}")
+            })?;
+            build_construction_quantum_tail_grant_from_entities(state, entities)
+        },
         || (),
     );
     profile_certificate_prepare(
@@ -3612,6 +3676,7 @@ fn prepare_construction_tail_certificate_with_runtime(
     })();
     ConstructionCertificatePrepareOutcome {
         result,
+        entity_parse: Some(entity_parse),
         wave: Some(wave),
     }
 }
@@ -3800,6 +3865,7 @@ fn apply_construction_tail_certificate(
     state: &mut CoreState,
     certificate: &ConstructionTailCertificate,
     request: ConstructionTailApplicationRequest<'_>,
+    runtime: &DeterministicRuntime,
 ) -> Result<ConstructionTailApplication, String> {
     let ConstructionTailApplicationRequest {
         elapsed_before,
@@ -3872,9 +3938,15 @@ fn apply_construction_tail_certificate(
     }
 
     let mut base = state.base_value().clone();
-    let mut entities = state
-        .parse_entities_parallel()
-        .map_err(|error| format!("construction-tail entity snapshot failed: {error:#}"))?;
+    let entity_parse_started = std::time::Instant::now();
+    let (entities, entity_parse) = state.parse_entities_with_runtime_diagnostics(runtime);
+    profile_certificate_entity_parse(
+        "pure-idle-construction-tail-entities",
+        entity_parse,
+        entity_parse_started.elapsed(),
+    );
+    let mut entities =
+        entities.map_err(|error| format!("construction-tail entity snapshot failed: {error:#}"))?;
     let active_quantum_grant = allow_quantum_replay
         .then_some(certificate.quantum.as_ref())
         .flatten();
@@ -5748,6 +5820,7 @@ fn prepare_ordinary_flow_certificate_with_runtime(
                 "three-window calibration requires four snapshots, observed {}",
                 snapshots.len()
             )),
+            entity_parse: None,
             wave_one: None,
             wave_two: None,
         };
@@ -5760,6 +5833,7 @@ fn prepare_ordinary_flow_certificate_with_runtime(
                 result: Err(format!(
                     "calibration window settlement proof rejected: {reason}"
                 )),
+                entity_parse: None,
                 wave_one: None,
                 wave_two: None,
             };
@@ -5772,6 +5846,7 @@ fn prepare_ordinary_flow_certificate_with_runtime(
     else {
         return OrdinaryCertificatePrepareOutcome {
             result: Err("quantum logistics network is missing".to_owned()),
+            entity_parse: None,
             wave_one: None,
             wave_two: None,
         };
@@ -5779,6 +5854,7 @@ fn prepare_ordinary_flow_certificate_with_runtime(
     if quantum.get("enabled").and_then(Value::as_bool) != Some(true) {
         return OrdinaryCertificatePrepareOutcome {
             result: Err("quantum logistics network is disabled".to_owned()),
+            entity_parse: None,
             wave_one: None,
             wave_two: None,
         };
@@ -5794,6 +5870,7 @@ fn prepare_ordinary_flow_certificate_with_runtime(
     {
         return OrdinaryCertificatePrepareOutcome {
             result: Err("quantum inventory or capacity ledger is malformed".to_owned()),
+            entity_parse: None,
             wave_one: None,
             wave_two: None,
         };
@@ -5817,6 +5894,23 @@ fn prepare_ordinary_flow_certificate_with_runtime(
 
     let terminal_consumption = matches!(&dyson_sail, Ok(Some(_)))
         || matches!((&dyson_sail, &dyson_rocket), (Ok(None), Ok(Some(_))));
+    let dynamic_ray_power = match &dyson_sail {
+        Ok(Some(_)) => has_dynamic_ray_power_source(state),
+        Ok(None) => Ok(false),
+        Err(reason) => Err(reason.clone()),
+    };
+    let (renewable_entity_snapshot, entity_parse) = if matches!(&dynamic_ray_power, Ok(true)) {
+        let started = std::time::Instant::now();
+        let (snapshot, diagnostics) = state.parse_entities_with_runtime_diagnostics(runtime);
+        profile_certificate_entity_parse(
+            "pure-idle-ordinary-renewable-entities",
+            diagnostics,
+            started.elapsed(),
+        );
+        (Some(snapshot), Some(diagnostics))
+    } else {
+        (None, None)
+    };
     let wave_two_active_mask = 0b0000_0101
         | if matches!(&dyson_sail, Ok(Some(_))) {
             0b0000_0010
@@ -5831,15 +5925,18 @@ fn prepare_ordinary_flow_certificate_with_runtime(
             Ok(sources) => build_finite_vein_certificates(state, snapshots, sources),
             Err(reason) => Err(reason.clone()),
         },
-        || match &dyson_sail {
-            Ok(Some(_)) => {
-                if has_dynamic_ray_power_source(state)? {
-                    build_renewable_power_tail_certificate(state, snapshots).map(Some)
-                } else {
-                    Ok(None)
-                }
-            }
-            Ok(None) => Ok(None),
+        || match &dynamic_ray_power {
+            Ok(true) => build_renewable_power_tail_certificate(
+                state,
+                snapshots,
+                renewable_entity_snapshot
+                    .as_ref()
+                    .expect("dynamic ray preparation owns an entity snapshot")
+                    .as_deref()
+                    .map_err(|error| format!("ray-power entity snapshot failed: {error:#}")),
+            )
+            .map(Some),
+            Ok(false) => Ok(None),
             Err(reason) => Err(reason.clone()),
         },
         || capture_stable_ordinary_window_flow(snapshots, terminal_consumption),
@@ -5987,6 +6084,7 @@ fn prepare_ordinary_flow_certificate_with_runtime(
     })();
     OrdinaryCertificatePrepareOutcome {
         result,
+        entity_parse,
         wave_one: Some(wave_one),
         wave_two: Some(wave_two),
     }
@@ -7535,12 +7633,26 @@ fn prove_settlement_candidate(
     Ok(candidate)
 }
 
+#[cfg(test)]
 fn prove_internal_exact_settlement_candidate(
     before: &SettlementProofSnapshot,
     candidate: CoreState,
 ) -> Result<CoreState, String> {
-    let after = capture_exact_settlement_snapshot(&candidate, before.revision)
-        .map_err(|error| format!("candidate snapshot invalid: {error:#}"))?;
+    prove_internal_exact_settlement_candidate_with_runtime(
+        before,
+        candidate,
+        deterministic_runtime(),
+    )
+}
+
+fn prove_internal_exact_settlement_candidate_with_runtime(
+    before: &SettlementProofSnapshot,
+    candidate: CoreState,
+    runtime: &DeterministicRuntime,
+) -> Result<CoreState, String> {
+    let after =
+        capture_exact_settlement_snapshot_with_runtime(&candidate, before.revision, runtime)
+            .map_err(|error| format!("candidate snapshot invalid: {error:#}"))?;
     validate_internal_exact_snapshots(before, &after, &candidate.catalog)?;
     Ok(candidate)
 }
@@ -7630,16 +7742,17 @@ fn advance_bounded_with_runtime(
     if let Some(reason) = budget_attestation_reason(state, request) {
         return unsupported(state, request, reason);
     }
-    let settlement_before = match capture_settlement_snapshot(state) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            return unsupported(
-                state,
-                request,
-                format!("pure-idle-settlement-proof-baseline-invalid: {error:#}"),
-            );
-        }
-    };
+    let settlement_before =
+        match capture_settlement_snapshot_with_runtime(state, deterministic_runtime) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return unsupported(
+                    state,
+                    request,
+                    format!("pure-idle-settlement-proof-baseline-invalid: {error:#}"),
+                );
+            }
+        };
 
     let exact_seconds_used_before = if macro_v10 {
         state.pure_idle_macro_exact_seconds_used()
@@ -7745,9 +7858,10 @@ fn advance_bounded_with_runtime(
                         .and_then(|runtime| runtime.calibration_snapshots.last())
                         .map(|snapshot| snapshot.revision)
                         .unwrap_or(exact_base_revision);
-                    let snapshot = match capture_exact_settlement_snapshot(
+                    let snapshot = match capture_exact_settlement_snapshot_with_runtime(
                         &candidate,
                         receipt_base_revision,
+                        deterministic_runtime,
                     ) {
                         Ok(snapshot) => snapshot,
                         Err(error) => {
@@ -8068,6 +8182,7 @@ fn advance_bounded_with_runtime(
                         quantum_credit_rates: &construction_quantum_credit_rates,
                         allow_quantum_replay: allow_construction_quantum_replay,
                     },
+                    deterministic_runtime,
                 ) {
                     Ok(application) => application,
                     Err(reason) => {
@@ -8134,17 +8249,20 @@ fn advance_bounded_with_runtime(
             .checked_add(1)
             .ok_or_else(|| anyhow!("native core revision exhausted"))?;
     }
-    let mut candidate =
-        match prove_internal_exact_settlement_candidate(&settlement_before, candidate) {
-            Ok(candidate) => candidate,
-            Err(reason) => {
-                return unsupported(
-                    state,
-                    request,
-                    format!("pure-idle-settlement-proof-rejected: {reason}"),
-                );
-            }
-        };
+    let mut candidate = match prove_internal_exact_settlement_candidate_with_runtime(
+        &settlement_before,
+        candidate,
+        deterministic_runtime,
+    ) {
+        Ok(candidate) => candidate,
+        Err(reason) => {
+            return unsupported(
+                state,
+                request,
+                format!("pure-idle-settlement-proof-rejected: {reason}"),
+            );
+        }
+    };
     if changed {
         // The exact debit and its new revision live only on this disposable
         // candidate. Every possible failure below leaves the source session
@@ -10876,6 +10994,7 @@ mod tests {
                 quantum_credit_rates: &MaterialTotals::new(),
                 allow_quantum_replay: true,
             },
+            deterministic_runtime(),
         )
         .unwrap_err();
         assert!(
@@ -13330,7 +13449,7 @@ mod tests {
         let initial = sustainable_dynamic_ray_power_fixture(14.0);
         let request = pure_idle_macro_request(initial.revision, 600.0, 600.0 / 14.0);
         let snapshots = exact_three_window_probe(&initial, &request).unwrap();
-        build_renewable_power_tail_certificate(&initial, &snapshots).unwrap();
+        build_renewable_power_tail_certificate_for_test(&initial, &snapshots).unwrap();
 
         for finite_field in ["thermal", "storage-discharge", "storage-charge"] {
             let mut finite = snapshots.clone();
@@ -13351,7 +13470,8 @@ mod tests {
                     _ => unreachable!(),
                 }
             }
-            let rejection = build_renewable_power_tail_certificate(&initial, &finite).unwrap_err();
+            let rejection =
+                build_renewable_power_tail_certificate_for_test(&initial, &finite).unwrap_err();
             assert!(
                 rejection.contains("finite generation or storage"),
                 "field={finite_field} rejection={rejection}"
@@ -13371,7 +13491,7 @@ mod tests {
             grid.demand_kw = PowerProofScalar::from_f64(1.0, "isolated demand").unwrap();
         }
         let rejection =
-            build_renewable_power_tail_certificate(&initial, &isolated_grid).unwrap_err();
+            build_renewable_power_tail_certificate_for_test(&initial, &isolated_grid).unwrap_err();
         assert!(
             rejection.contains("renewable lower-bound supply"),
             "{rejection}"
@@ -13390,7 +13510,8 @@ mod tests {
                 .connected_entities = 1;
         }
         let rejection =
-            build_renewable_power_tail_certificate(&initial, &rounded_tiny_demand).unwrap_err();
+            build_renewable_power_tail_certificate_for_test(&initial, &rounded_tiny_demand)
+                .unwrap_err();
         assert!(
             rejection.contains("renewable lower-bound supply"),
             "{rejection}"
@@ -13406,7 +13527,8 @@ mod tests {
             })
             .unwrap()
             .demand_kw = PowerProofScalar::from_f64(2.0, "unstable demand").unwrap();
-        let rejection = build_renewable_power_tail_certificate(&initial, &unstable).unwrap_err();
+        let rejection =
+            build_renewable_power_tail_certificate_for_test(&initial, &unstable).unwrap_err();
         assert!(
             rejection.contains("changed across calibration"),
             "{rejection}"
@@ -13429,7 +13551,7 @@ mod tests {
 
         let request = pure_idle_macro_request(initial.revision, 600.0, 600.0 / 14.0);
         let snapshots = exact_three_window_probe(&initial, &request).unwrap();
-        let power = build_renewable_power_tail_certificate(&initial, &snapshots).unwrap();
+        let power = build_renewable_power_tail_certificate_for_test(&initial, &snapshots).unwrap();
         let controller = &power.grids[&PowerGridKey {
             planet_id: "home".to_owned(),
             grid_id: "grid-a".to_owned(),
@@ -15669,6 +15791,54 @@ mod tests {
     }
 
     #[test]
+    fn macro_v10_adjacent_research_and_sail_failures_keep_historical_priority() {
+        let state = pad_parallel_certificate_fixture(sustainable_dynamic_ray_power_fixture(14.0));
+        let request = pure_idle_macro_request(state.revision, 60.0, 60.0 / 14.0);
+        let snapshots = exact_three_window_probe(&state, &request).unwrap();
+
+        let mut research_only = state.clone();
+        research_only.base_value_mut()["research"]["selectedTechId"] =
+            json!("unknown-parallel-tech");
+        let expected = prepare_ordinary_flow_certificate_with_runtime(
+            &research_only,
+            &snapshots,
+            &DeterministicRuntime::for_test(1),
+        )
+        .result
+        .unwrap_err();
+        assert!(
+            expected.contains("current research state is not a calibration endpoint"),
+            "unexpected research rejection: {expected}",
+        );
+
+        let mut double_failure = research_only;
+        let launched = proof_counter(
+            double_failure.base_value()["dysonSwarm"].get("totalLaunched"),
+            "double failure totalLaunched",
+        )
+        .unwrap();
+        double_failure.base_value_mut()["dysonSwarm"]["totalLaunched"] = json!(launched + 1);
+        let source_revision = double_failure.revision;
+        let source_bytes = serde_json::to_vec(&double_failure.materialize().unwrap()).unwrap();
+        let source_hash = double_failure.canonical_sha256().unwrap();
+        for worker_count in [1, 2, 4, 8] {
+            let prepared = prepare_ordinary_flow_certificate_with_runtime(
+                &double_failure,
+                &snapshots,
+                &DeterministicRuntime::for_test(worker_count),
+            );
+            assert_eq!(prepared.result.unwrap_err(), expected);
+        }
+        assert_eq!(double_failure.revision, source_revision);
+        assert_eq!(double_failure.canonical_sha256().unwrap(), source_hash);
+        assert_eq!(
+            serde_json::to_vec(&double_failure.materialize().unwrap()).unwrap(),
+            source_bytes,
+        );
+        assert!(double_failure.pure_idle_macro_runtime.is_none());
+    }
+
+    #[test]
     fn construction_parallel_prepare_preserves_interleaved_center_error_order() {
         let mut state = pad_parallel_certificate_fixture(
             productive_multi_center_construction_macro_fixture(15.0, 2, 0),
@@ -15699,7 +15869,8 @@ mod tests {
             .construction_center_indices
             .push(wind_index);
 
-        let renewable = build_renewable_power_tail_certificate(&state, &snapshots).unwrap();
+        let renewable =
+            build_renewable_power_tail_certificate_for_test(&state, &snapshots).unwrap();
         let expected = state
             .factory_topology
             .construction_center_indices
@@ -15734,6 +15905,106 @@ mod tests {
             serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
             source_bytes
         );
+    }
+
+    #[test]
+    fn construction_adjacent_center_and_quantum_failures_keep_center_priority() {
+        let mut center_failure = parallel_certificate_fixture();
+        let request = pure_idle_macro_request(center_failure.revision, 60.0, 4.0);
+        let snapshots = exact_three_window_probe(&center_failure, &request).unwrap();
+        let wind_index = center_failure.entity_index.get("wind").copied().unwrap();
+        Arc::make_mut(&mut center_failure.factory_topology)
+            .construction_center_indices
+            .push(wind_index);
+        let expected = prepare_construction_tail_certificate_with_runtime(
+            &center_failure,
+            &snapshots,
+            &DeterministicRuntime::for_test(1),
+        )
+        .result
+        .unwrap_err();
+        assert!(
+            expected.contains("construction center") || expected.contains("construction_center"),
+            "unexpected center rejection: {expected}",
+        );
+
+        let mut double_failure = center_failure;
+        let tower_index = (0..double_failure.entities.ids.len())
+            .find(|&entity_index| {
+                let entity = double_failure.parse_entity(entity_index).unwrap();
+                entity.get("kind").and_then(Value::as_str) == Some("station")
+                    && entity.get("quantumMode").and_then(Value::as_str) == Some("quantum")
+            })
+            .expect("parallel fixture quantum tower");
+        let mut tower = double_failure.parse_entity(tower_index).unwrap();
+        tower["stationSlots"] = Value::Null;
+        double_failure
+            .replace_entity_raw(tower_index, serde_json::to_string(&tower).unwrap().into());
+        let source_revision = double_failure.revision;
+        let source_bytes = serde_json::to_vec(&double_failure.materialize().unwrap()).unwrap();
+        let source_hash = double_failure.canonical_sha256().unwrap();
+        for worker_count in [1, 2, 4, 8] {
+            let prepared = prepare_construction_tail_certificate_with_runtime(
+                &double_failure,
+                &snapshots,
+                &DeterministicRuntime::for_test(worker_count),
+            );
+            assert_eq!(prepared.result.unwrap_err(), expected);
+        }
+        assert_eq!(double_failure.revision, source_revision);
+        assert_eq!(double_failure.canonical_sha256().unwrap(), source_hash);
+        assert_eq!(
+            serde_json::to_vec(&double_failure.materialize().unwrap()).unwrap(),
+            source_bytes,
+        );
+        assert!(double_failure.pure_idle_macro_runtime.is_none());
+    }
+
+    #[test]
+    fn macro_v10_public_advance_late_malformed_entity_is_atomic_and_installs_no_cache() {
+        let mut malformed = parallel_certificate_fixture();
+        let malformed_index = malformed.entities.ids.len() - 1;
+        malformed.replace_entity_raw(malformed_index, "null".into());
+        let source_revision = malformed.revision;
+        let source_bytes = serde_json::to_vec(&malformed.materialize().unwrap()).unwrap();
+        let source_hash = malformed.canonical_sha256().unwrap();
+        let source_credit = malformed.pure_idle_macro_exact_seconds_used();
+        assert!(malformed.pure_idle_macro_runtime.is_none());
+        let mut expected_reason = None;
+
+        for worker_count in [1, 2, 4, 8] {
+            let mut candidate = malformed.clone();
+            let request = pure_idle_macro_request(candidate.revision, 60.0, 4.0);
+            let result = advance_bounded_with_runtime(
+                &mut candidate,
+                &request,
+                true,
+                &DeterministicRuntime::for_test(worker_count),
+            )
+            .unwrap();
+            assert!(!result.supported);
+            let reason = result.reason.expect("late malformed rejection");
+            assert!(
+                reason.contains("pure-idle-settlement-proof-baseline-invalid")
+                    && reason.contains("entity is not an object"),
+                "workers={worker_count} reason={reason}",
+            );
+            match &expected_reason {
+                None => expected_reason = Some(reason),
+                Some(expected) => assert_eq!(&reason, expected),
+            }
+            assert_eq!(candidate.revision, source_revision);
+            assert_eq!(candidate.canonical_sha256().unwrap(), source_hash);
+            assert_eq!(
+                serde_json::to_vec(&candidate.materialize().unwrap()).unwrap(),
+                source_bytes,
+            );
+            assert_eq!(
+                candidate.pure_idle_macro_exact_seconds_used(),
+                source_credit
+            );
+            assert!(candidate.pure_idle_macro_runtime.is_none());
+        }
     }
 
     #[test]
@@ -15843,6 +16114,53 @@ mod tests {
         );
     }
 
+    fn assert_certificate_entity_parse(
+        diagnostics: IndexedPrepareDiagnostics,
+        entity_count: usize,
+        worker_count: usize,
+    ) {
+        assert_eq!(diagnostics.item_count, entity_count);
+        let expected_workers = if entity_count < crate::deterministic_runtime::PARALLEL_MIN_ITEMS {
+            1
+        } else {
+            worker_count
+        };
+        assert_eq!(diagnostics.selected_worker_count, expected_workers);
+        assert_eq!(diagnostics.parallel, expected_workers > 1);
+        if expected_workers == 1 {
+            assert_eq!(diagnostics.observed_worker_count, 1);
+        } else {
+            assert!(
+                (2..=expected_workers).contains(&diagnostics.observed_worker_count),
+                "actual entity parser did not demonstrate bounded parallel execution: {diagnostics:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn construction_entity_parse_is_owned_by_injected_one_two_four_eight_worker_runtime() {
+        let state = parallel_certificate_fixture();
+        let request = pure_idle_macro_request(state.revision, 60.0, 4.0);
+        let snapshots = exact_three_window_probe(&state, &request).unwrap();
+        for worker_count in [1, 2, 4, 8] {
+            let prepared = prepare_construction_tail_certificate_with_runtime(
+                &state,
+                &snapshots,
+                &DeterministicRuntime::for_test(worker_count),
+            );
+            assert!(
+                prepared.result.is_ok(),
+                "workers={worker_count} reason={:?}",
+                prepared.result,
+            );
+            assert_certificate_entity_parse(
+                prepared.entity_parse.expect("construction entity parse"),
+                state.entities.ids.len(),
+                worker_count,
+            );
+        }
+    }
+
     #[test]
     fn macro_v10_large_certificate_directory_records_real_bounded_pool_diagnostics() {
         let state = parallel_certificate_fixture();
@@ -15855,6 +16173,7 @@ mod tests {
         let ordinary =
             prepare_ordinary_flow_certificate_with_runtime(&state, &ordinary_snapshots, &runtime);
         assert!(ordinary.result.is_ok(), "reason={:?}", ordinary.result);
+        assert!(ordinary.entity_parse.is_none());
         assert_parallel_certificate_wave(ordinary.wave_one.unwrap(), 4);
         assert_parallel_certificate_wave(ordinary.wave_two.unwrap(), 2);
 
@@ -15869,6 +16188,13 @@ mod tests {
             construction.result
         );
         assert_parallel_certificate_wave(construction.wave.unwrap(), 3);
+        assert_certificate_entity_parse(
+            construction
+                .entity_parse
+                .expect("construction entity parse diagnostics"),
+            state.entities.ids.len(),
+            8,
+        );
 
         let serial_runtime = DeterministicRuntime::for_test(1);
         for diagnostics in [
@@ -15918,6 +16244,14 @@ mod tests {
         );
         assert!(small_ordinary.result.is_ok());
         assert!(small_construction.result.is_ok());
+        assert!(small_ordinary.entity_parse.is_none());
+        assert_certificate_entity_parse(
+            small_construction
+                .entity_parse
+                .expect("small construction entity parse diagnostics"),
+            small.entities.ids.len(),
+            8,
+        );
         for diagnostics in [
             small_ordinary.wave_one.unwrap(),
             small_ordinary.wave_two.unwrap(),

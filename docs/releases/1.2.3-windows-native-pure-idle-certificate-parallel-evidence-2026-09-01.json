@@ -1,10 +1,10 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "evidenceKind": "windows-native-pure-idle-certificate-prepare-ab",
   "recordedAt": "2026-09-01",
   "candidate": {
-    "branch": "codex/native-pure-idle-parallel-cert",
-    "baseCommit": "1db58583b723c5846bc2cc3526d6c9be7bce573b",
+    "branch": "codex/native-pure-idle-parallel-cert-p1",
+    "baseCommit": "a8eb5848cdb06e7abe7da166166a36cdaaa8bd0c",
     "packageVersion": "1.2.3",
     "gameStateVersion": 47,
     "authorityEligible": false
@@ -21,6 +21,7 @@
   "scope": {
     "measurement": "prepare-only",
     "includes": [
+      "one injected-runtime entity directory parse before construction partitions",
       "ordinary certificate wave 1",
       "ordinary certificate wave 2",
       "construction certificate prepare"
@@ -60,6 +61,8 @@
   "scheduler": {
     "pool": "existing process-lifetime DeterministicRuntime/Rayon pool",
     "temporaryPoolCreated": false,
+    "nestedRayonCreated": false,
+    "globalRuntimeUsedInsideInjectedPrepare": false,
     "maximumWorkers": 8,
     "requestedWorkerCounts": [1, 8],
     "largeFixtureEightWorkerDiagnostics": {
@@ -82,6 +85,31 @@
         "observedWorkers": 3,
         "parallel": true
       }
+    },
+    "injectedEntityParseDiagnostics": {
+      "items": 4166,
+      "parallelThresholdItems": 4096,
+      "executionBoundary": "fully joined before construction partitioned prepare; immutable result shared by renewable and quantum domains",
+      "oneWorker": {
+        "selectedWorkers": 1,
+        "observedWorkersInParserClosure": 1,
+        "parallel": false
+      },
+      "twoWorkers": {
+        "selectedWorkers": 2,
+        "observedWorkersInParserClosure": 2,
+        "parallel": true
+      },
+      "fourWorkers": {
+        "selectedWorkers": 4,
+        "observedWorkersInParserClosure": 4,
+        "parallel": true
+      },
+      "eightWorkers": {
+        "selectedWorkers": 8,
+        "observedWorkersInParserClosure": 8,
+        "parallel": true
+      }
     }
   },
   "method": {
@@ -94,37 +122,43 @@
     ],
     "command": "cargo test --release -p dsp-native-core profile_macro_v10_parallel_certificate_prepare_only -- --ignored --nocapture --test-threads=1",
     "gateFormula": "improvement = 1 - median(eightWorkerNs) / median(oneWorkerNs)",
-    "minimumImprovement": 0.035
+    "minimumImprovement": 0.035,
+    "tailGate": "nearest-rank P95 for eight workers must not exceed nearest-rank P95 for one worker"
   },
   "rawNanoseconds": {
     "oneWorkerInMeasurementOrder": [
-      32357200, 32041700, 31661800, 31648900, 31369700,
-      31397500, 31812600, 31000600, 31044000, 30902900,
-      31237900, 31156900, 29924400, 31318700, 30764100
+      26457400, 27834100, 27362800, 26475300, 26510600,
+      27166900, 26850200, 26261300, 26576600, 27327500,
+      26646300, 27747700, 27158100, 26208600, 26395600
     ],
     "eightWorkerInMeasurementOrder": [
-      20746000, 21071000, 21377000, 20711400, 21582900,
-      21592300, 21623300, 21112900, 21704200, 21602100,
-      21848100, 22807100, 20387900, 20632300, 20963500
+      18288900, 18473700, 19213300, 18595000, 18403000,
+      18260700, 18159100, 18286000, 18212100, 19883800,
+      18162900, 18704900, 18248400, 18261900, 19803300
     ],
     "oneWorkerSorted": [
-      29924400, 30764100, 30902900, 31000600, 31044000,
-      31156900, 31237900, 31318700, 31369700, 31397500,
-      31648900, 31661800, 31812600, 32041700, 32357200
+      26208600, 26261300, 26395600, 26457400, 26475300,
+      26510600, 26576600, 26646300, 26850200, 27158100,
+      27166900, 27327500, 27362800, 27747700, 27834100
     ],
     "eightWorkerSorted": [
-      20387900, 20632300, 20711400, 20746000, 20963500,
-      21071000, 21112900, 21377000, 21582900, 21592300,
-      21602100, 21623300, 21704200, 21848100, 22807100
+      18159100, 18162900, 18212100, 18248400, 18260700,
+      18261900, 18286000, 18288900, 18403000, 18473700,
+      18595000, 18704900, 19213300, 19803300, 19883800
     ]
   },
   "result": {
-    "oneWorkerMedianNs": 31318700,
-    "eightWorkerMedianNs": 21377000,
-    "oneWorkerRangeNs": [29924400, 32357200],
-    "eightWorkerRangeNs": [20387900, 22807100],
-    "medianImprovement": 0.3174365474939892,
-    "medianImprovementPercentRounded": 31.744,
+    "oneWorkerMedianNs": 26646300,
+    "eightWorkerMedianNs": 18288900,
+    "oneWorkerRangeNs": [26208600, 27834100],
+    "eightWorkerRangeNs": [18159100, 19883800],
+    "oneWorkerNearestRankP95Ns": 27834100,
+    "eightWorkerNearestRankP95Ns": 19883800,
+    "medianImprovement": 0.3136420441111899,
+    "medianImprovementPercentRounded": 31.364,
+    "p95Improvement": 0.2856316532598503,
+    "p95ImprovementPercentRounded": 28.563,
+    "p95Regressed": false,
     "gate": "GO",
     "claim": "The synthetic prepare-only slice clears its 3.5% merge gate. This is not an end-to-end simulation or player-save speedup claim."
   },
@@ -147,6 +181,48 @@
       "renewable grid",
       "construction quantum"
     ],
-    "atomicity": "early and late prepare failures retain source revision and source bytes and install no candidate certificate or cache"
+    "atomicity": "adjacent research/sail and center/quantum double failures retain historical error priority; a late malformed public advance retains source revision, bytes, canonical hash and credit and installs no runtime cache"
+  },
+  "auditRemediation": {
+    "supersededFinding": "the first evidence run was invalid for injected-runtime comparison because renewable and quantum entity parsing could enter the process-global runtime from inside a partitioned prepare closure",
+    "fix": "entity parsing now runs once on the explicitly injected DeterministicRuntime before heterogeneous partitions; renewable and quantum consume the same immutable Vec and neither creates a nested or second pool",
+    "focusedFailureHistory": "first focused run: 109 passed / 1 ignored / 1 failed because the new late-malformed test over-specified that an established rejection string contained an entity ID; the assertion was corrected to require byte-identical rejection reasons across 1/2/4/8 without changing product behavior",
+    "olderFailureHistoryRetained": "the earlier baseline full run found one detailed-quantum-fingerprint disappearance panic and was repaired to fail closed with Ok(None); this P1 does not erase that history"
+  },
+  "validation": {
+    "pureIdleFocused": {
+      "passed": 110,
+      "ignored": 1,
+      "failed": 0
+    },
+    "coreSerialFull": {
+      "passed": 904,
+      "ignored": 1,
+      "failed": 0,
+      "total": 905,
+      "wallSeconds": 307.11
+    },
+    "hostLibrarySerialFull": {
+      "passed": 215,
+      "ignored": 0,
+      "failed": 0,
+      "wallSeconds": 34.04
+    },
+    "hostBinarySerialFull": {
+      "passed": 3,
+      "ignored": 0,
+      "failed": 0
+    },
+    "releasePrepareOnlyGate": {
+      "passed": 1,
+      "ignored": 0,
+      "failed": 0
+    },
+    "staticChecks": {
+      "cargoFmtAllCheck": "passed",
+      "workspaceAllTargetsAllFeaturesClippyDenyWarnings": "passed",
+      "evidenceJsonParse": "passed",
+      "gitDiffCheck": "passed"
+    }
   }
 }

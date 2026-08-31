@@ -59,6 +59,28 @@ function validLogicalPreloadId(value, maximumLength) {
     /^[A-Za-z0-9_.:-]+$/.test(value);
 }
 
+function normalizeAuthorityWorkspacePreloadRequest(request) {
+  if (!hasExactKeys(request, [
+    "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint",
+  ]) || !validLogicalPreloadId(request.sessionId, 128) ||
+      !validLogicalPreloadId(request.runId, 128) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      request.expectedRevision >= Number.MAX_SAFE_INTEGER ||
+      !validLogicalPreloadId(request.expectedRegistryFingerprint, 256)) {
+    throw new TypeError("原生权威工作区投影请求无效");
+  }
+  const normalized = {
+    sessionId: request.sessionId,
+    runId: request.runId,
+    expectedRevision: request.expectedRevision,
+    expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+  };
+  if (Buffer.byteLength(JSON.stringify(normalized), "utf8") > MAX_STELLAR_PROJECTION_REQUEST_BYTES) {
+    throw new TypeError("原生权威工作区投影请求超过安全上限");
+  }
+  return normalized;
+}
+
 function normalizeBlueprintCapturePreloadRequest(request) {
   if (!hasExactKeys(request, [
     "sessionId",
@@ -406,6 +428,8 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   getNativeCoreDysonWorkspaceProjection: (request) => invokeNative("desktop:native-core-dyson-workspace-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生戴森球工作区投影请求失败，请重试" }, request),
   getNativeCoreSystemSpaceStationWorkspaceProjection: (request) => invokeNative("desktop:native-core-system-space-station-workspace-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生恒星系空间站工作区投影请求失败，请重试" }, request),
   getNativeCoreOrbitalContractWorkspaceProjection: (request) => invokeNative("desktop:native-core-orbital-contract-workspace-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生轨道合同工作区投影请求失败，请重试" }, request),
+  getNativeCoreCampaignWorkspaceProjection: (request) => invokeNative("desktop:native-core-campaign-workspace-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生主线任务工作区投影请求失败，请重试" }, normalizeAuthorityWorkspacePreloadRequest(request)),
+  getNativeCoreGalaxyAccountWorkspaceProjection: (request) => invokeNative("desktop:native-core-galaxy-account-workspace-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生银河账户工作区投影请求失败，请重试" }, normalizeAuthorityWorkspacePreloadRequest(request)),
   getNativeCoreCommandPaletteEntitySearch: (request) => invokeNative("desktop:native-core-command-palette-entity-search", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生命令面板设备搜索失败，请重试" }, request),
   requestNativeCoreProjectionTransfer,
   applyNativeCoreCommand: (request) => invokeNative("desktop:native-core-apply-command", { fallbackCode: "NATIVE_CORE_COMMAND_FAILED", message: "原生影子命令执行失败，请重试" }, request),

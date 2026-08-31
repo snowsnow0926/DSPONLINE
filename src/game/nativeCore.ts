@@ -62,6 +62,10 @@ import {
   type DesktopNativeCoreDysonWorkspaceProjectionResult,
   type DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest,
   type DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult,
+  type DesktopNativeCoreCampaignWorkspaceProjectionRequest,
+  type DesktopNativeCoreCampaignWorkspaceProjectionResult,
+  type DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest,
+  type DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult,
   type DesktopNativeSaveCommitResult,
 } from "../desktop";
 import type { ContentPackRuntimeSnapshot } from "./contentPacks";
@@ -169,6 +173,8 @@ export interface WindowsNativeCoreShadow {
   stellarQuantumProjection?(request: Omit<DesktopNativeCoreStellarQuantumProjectionRequest, "sessionId">): Promise<DesktopNativeCoreStellarQuantumProjectionResult>;
   dysonWorkspaceProjection?(request: Omit<DesktopNativeCoreDysonWorkspaceProjectionRequest, "sessionId">): Promise<DesktopNativeCoreDysonWorkspaceProjectionResult>;
   systemSpaceStationWorkspaceProjection?(request: Omit<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest, "sessionId">): Promise<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult>;
+  campaignWorkspaceProjection?(request: Omit<DesktopNativeCoreCampaignWorkspaceProjectionRequest, "sessionId">): Promise<DesktopNativeCoreCampaignWorkspaceProjectionResult>;
+  galaxyAccountWorkspaceProjection?(request: Omit<DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest, "sessionId">): Promise<DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult>;
   applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }>;
   advance(request: {
     baseRevision: number;
@@ -952,6 +958,30 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
       throw new Error("Windows 原生恒星系空间站工作区投影不可用");
     }
     return desktop.getNativeCoreSystemSpaceStationWorkspaceProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async campaignWorkspaceProjection(
+    request: Omit<DesktopNativeCoreCampaignWorkspaceProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreCampaignWorkspaceProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (typeof desktop.getNativeCoreCampaignWorkspaceProjection !== "function") {
+      throw new Error("Windows 原生战役工作区投影不可用");
+    }
+    return desktop.getNativeCoreCampaignWorkspaceProjection({ sessionId: this.sessionId, ...request });
+  }
+
+  async galaxyAccountWorkspaceProjection(
+    request: Omit<DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (typeof desktop.getNativeCoreGalaxyAccountWorkspaceProjection !== "function") {
+      throw new Error("Windows 原生银河账户工作区投影不可用");
+    }
+    return desktop.getNativeCoreGalaxyAccountWorkspaceProjection({ sessionId: this.sessionId, ...request });
   }
 
   async applyCommand(command: SimulationCommandPatch): Promise<{ revision: number; topologyDirty: boolean }> {

@@ -2023,3 +2023,15 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版�
 5. 当前 focused 结果为 Core `15/15`、Host `4/4`、Node `58/58`、renderer boundary `23/23`、Vitest `16/16`，typecheck 与 diff check 通过。测试覆盖库存不足、stale revision/run/registry、无源 mutation reject、上海午夜前后、旧 offer→fresh projection、到期同事务归档、direct claim/abandon 满 48 条历史、duplicate/lost response、五个 durable fault boundaries、cold replay、投影边界和跨语言饱和向量。完整仓库门禁仍须在冻结提交上执行，不能用本节 focused 数字替代发布验证。
 
 本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；未连接生产、部署、签名、打包或处理真实玩家存档。
+
+### 24.28 Campaign / Galaxy 完整薄 UI 玩家壳纵切（2026-09-01，开发候选）
+
+本纵切恢复 Rust 玩家权威下此前完全消失的 Campaign 与 Galaxy 两个入口，不调整 24.1 的固定百分比，不把入口恢复写成完整 Windows 计划完成。
+
+1. `campaign-workspace-v1` 由 Rust 固定任务目录导出最多 16 章、64 任务和 256 KiB；只含任务 ID/主支线/状态/完成与进度，以及最小 item/technology/entity/planet/workspace locator。renderer 复用静态目录仅显示标题与说明，不接收实体、线路、库存、奖励账本或 GameState；locator 只路由 UI，不选择任务或写游戏。
+2. Campaign 的任务总数与 Galaxy `campaignTotal` 都从同一 Rust `TASKS` 目录导出，完成 ID 只计算已知、去重条目。当前 projection 打开时仍调用实体解析并归集 factory metrics，复杂度为 `O(entities + belts)`；这是只读数据边界收敛，不是低成本缓存或 `O(active)` 查询。后续优化必须先建立同 revision 指标缓存或闭合事件账本。
+3. `galaxy-account-workspace-v1` 限 64 KiB 和 256 位十进制，只暴露模式/时间、累计生产、发电/吞吐、Campaign/科研/探索、银河评分与戴森摘要。所有浮点聚合先饱和到有限上限，再转十进制；研究/恒星系/行星计数只接纳当前目录中去重 ID，且全部不超过 JavaScript safe integer。
+4. Galaxy 的 Rust 游戏摘要与 renderer `accountState` 严格分层。账户创建、切换、资料、登录与绑定可以继续；native authority 下的账户操作不调用旧 GameState 记账。恢复、导入和覆盖活动主档没有组件 callback 或按钮，只显示必须先退出权威并经过受控持久化切换的说明。
+5. 两个请求精确绑定 `sessionId/runId/revision/registryFingerprint`。preload、main broker、Host exact-realtime lease、Rust 与 renderer boundary 逐层重验；异步 read 前后 authority snapshot 都必须一致。旧 run 同 revision ABA、stale registry/revision、额外字段、payload 超限、重复任务、计数不一致或 `truncated=true` 均整页失败关闭，不能拼接 Web GameState。Web fallback 行为保持原样。
+6. 门禁覆盖 Core、Host、Node boundary、组件与 App：有界/只读/源 hash 不变；四重 lineage/ABA；truncated、重复 ID、counts、difficulty、decimal、unsafe count、主档兼容 flag；native route 只挂 Native workspace；失败页不暴露任务/账户操作；组件无 GameState 与主档 writer。冻结前 fresh focused 为 Core `3/3`、Host exact lease `1/1`、Host bin `3/3`、Node `62 passed / 6 skipped / 0 failed`（6 个 release Host 集成测试因本工作树未建该二进制而明确跳过）、Vitest `12/12`；typecheck、strict clippy、fmt、production build/startup budget 与 diff check 通过。它们不替代 root 的组合全量、E2E、长跑、多硬件、签名或灰度门禁。
+7. 本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、固定能力百分比或 `authorityEligible=false`；不使用真实玩家存档，不连接生产，不部署、不签名。

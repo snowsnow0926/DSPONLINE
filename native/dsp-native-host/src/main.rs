@@ -138,6 +138,8 @@ fn handle_request(
                     "native-core-dyson-workspace-projection-v1",
                     "native-core-system-space-station-workspace-projection-v1",
                     "native-core-orbital-contract-workspace-projection-v1",
+                    "native-core-campaign-workspace-projection-v1",
+                    "native-core-galaxy-account-workspace-projection-v1",
                     "native-core-authority-wal-v1",
                     "native-core-checkpoint-v1",
                     "native-core-v47-stream-export-v1",
@@ -738,6 +740,30 @@ fn handle_request(
             &expected_registry_fingerprint,
             confirmed_wall_clock_ms,
         )?,
+        ControlRequest::CoreCampaignWorkspaceProjection {
+            session_id,
+            run_id,
+            expected_revision,
+            expected_registry_fingerprint,
+        } => cores.campaign_workspace_projection(
+            store,
+            &session_id,
+            &run_id,
+            expected_revision,
+            &expected_registry_fingerprint,
+        )?,
+        ControlRequest::CoreGalaxyAccountWorkspaceProjection {
+            session_id,
+            run_id,
+            expected_revision,
+            expected_registry_fingerprint,
+        } => cores.galaxy_account_workspace_projection(
+            store,
+            &session_id,
+            &run_id,
+            expected_revision,
+            &expected_registry_fingerprint,
+        )?,
         ControlRequest::CoreApplyCommand {
             session_id,
             command,
@@ -1036,6 +1062,12 @@ mod tests {
         }));
         assert!(capabilities.iter().any(|capability| {
             capability.as_str() == Some(NATIVE_CORE_BLUEPRINT_EXPORT_CONTEXT_V1_CAPABILITY)
+        }));
+        assert!(capabilities.iter().any(|capability| {
+            capability.as_str() == Some("native-core-campaign-workspace-projection-v1")
+        }));
+        assert!(capabilities.iter().any(|capability| {
+            capability.as_str() == Some("native-core-galaxy-account-workspace-projection-v1")
         }));
     }
 

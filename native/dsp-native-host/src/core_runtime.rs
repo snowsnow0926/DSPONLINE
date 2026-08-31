@@ -3950,6 +3950,29 @@ impl CoreRegistry {
         expected_registry_fingerprint: &str,
         confirmed_wall_clock_ms: u64,
     ) -> anyhow::Result<Value> {
+        self.require_player_authority_projection_lease(
+            store,
+            session_id,
+            run_id,
+            expected_registry_fingerprint,
+        )?;
+        self.session(session_id)?
+            .orbital_contract_workspace_projection(
+                session_id,
+                run_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                confirmed_wall_clock_ms,
+            )
+    }
+
+    fn require_player_authority_projection_lease(
+        &self,
+        store: &SaveStore,
+        session_id: &str,
+        run_id: &str,
+        expected_registry_fingerprint: &str,
+    ) -> anyhow::Result<()> {
         let authority_session_id = store.player_authority_session_binding(session_id)?;
         let lease = store.require_exact_realtime_lease()?;
         if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
@@ -3962,15 +3985,53 @@ impl CoreRegistry {
             || lease.pending_advance.is_some()
             || lease.macro_session.is_some()
         {
-            bail!("native orbital-contract projection authority lineage is stale")
+            bail!("native player-authority workspace projection lineage is stale")
         }
+        Ok(())
+    }
+
+    pub fn campaign_workspace_projection(
+        &self,
+        store: &SaveStore,
+        session_id: &str,
+        run_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+    ) -> anyhow::Result<Value> {
+        self.require_player_authority_projection_lease(
+            store,
+            session_id,
+            run_id,
+            expected_registry_fingerprint,
+        )?;
+        self.session(session_id)?.campaign_workspace_projection(
+            session_id,
+            run_id,
+            expected_revision,
+            expected_registry_fingerprint,
+        )
+    }
+
+    pub fn galaxy_account_workspace_projection(
+        &self,
+        store: &SaveStore,
+        session_id: &str,
+        run_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+    ) -> anyhow::Result<Value> {
+        self.require_player_authority_projection_lease(
+            store,
+            session_id,
+            run_id,
+            expected_registry_fingerprint,
+        )?;
         self.session(session_id)?
-            .orbital_contract_workspace_projection(
+            .galaxy_account_workspace_projection(
                 session_id,
                 run_id,
                 expected_revision,
                 expected_registry_fingerprint,
-                confirmed_wall_clock_ms,
             )
     }
 
@@ -6698,6 +6759,30 @@ mod tests {
         player_authority_fixture_from_parts(
             player_authority_orbital_contract_envelope(delivered, inventory),
             player_authority_system_space_station_catalog(),
+        )
+    }
+
+    fn player_authority_campaign_galaxy_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["campaign"] = json!({
+            "activeChapterId": "foundation",
+            "activeTaskId": "smelt_iron",
+            "completedTaskIds": ["mine_first_ore"],
+            "rewardedTaskIds": ["mine_first_ore"]
+        });
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        player_authority_fixture_from_parts(
+            serde_json::to_vec(&envelope).unwrap(),
+            player_authority_catalog(),
         )
     }
 
@@ -17763,6 +17848,96 @@ mod tests {
                 .pending_command
                 .is_none()
         );
+    }
+
+    #[test]
+    fn campaign_and_galaxy_projections_require_the_exact_authority_lease() {
+        let (_root, store, registry, session_id, _) = player_authority_campaign_galaxy_fixture();
+        let before = registry.status(&session_id).unwrap();
+        let campaign = registry
+            .campaign_workspace_projection(
+                &store,
+                &session_id,
+                "player-authority-run",
+                before.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+            )
+            .unwrap();
+        let galaxy = registry
+            .galaxy_account_workspace_projection(
+                &store,
+                &session_id,
+                "player-authority-run",
+                before.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+            )
+            .unwrap();
+        assert_eq!(campaign["projectionType"], "campaign-workspace-v1");
+        assert_eq!(galaxy["projectionType"], "galaxy-account-workspace-v1");
+        assert_eq!(campaign["runId"], "player-authority-run");
+        assert_eq!(galaxy["revision"], before.revision);
+        assert!(serde_json::to_vec(&campaign).unwrap().len() <= 256 * 1024);
+        assert!(serde_json::to_vec(&galaxy).unwrap().len() <= 64 * 1024);
+        for projection in [&campaign, &galaxy] {
+            let encoded = serde_json::to_string(projection).unwrap();
+            for forbidden in ["entities", "belts", "tray", "inputs", "outputs"] {
+                assert!(!encoded.contains(forbidden), "leaked {forbidden}");
+            }
+        }
+        for stale_run in ["stale-run", "player-authority-run"] {
+            let stale_revision = if stale_run == "stale-run" {
+                before.revision
+            } else {
+                before.revision + 1
+            };
+            assert!(
+                registry
+                    .campaign_workspace_projection(
+                        &store,
+                        &session_id,
+                        stale_run,
+                        stale_revision,
+                        EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    )
+                    .is_err()
+            );
+            assert!(
+                registry
+                    .galaxy_account_workspace_projection(
+                        &store,
+                        &session_id,
+                        stale_run,
+                        stale_revision,
+                        EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    )
+                    .is_err()
+            );
+        }
+        assert!(
+            registry
+                .campaign_workspace_projection(
+                    &store,
+                    &session_id,
+                    "player-authority-run",
+                    before.revision,
+                    "stale-registry",
+                )
+                .is_err()
+        );
+        assert!(
+            registry
+                .galaxy_account_workspace_projection(
+                    &store,
+                    &session_id,
+                    "player-authority-run",
+                    before.revision,
+                    "stale-registry",
+                )
+                .is_err()
+        );
+        let after = registry.status(&session_id).unwrap();
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.canonical_sha256, before.canonical_sha256);
     }
 
     #[test]

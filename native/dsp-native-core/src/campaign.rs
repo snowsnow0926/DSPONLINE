@@ -328,6 +328,11 @@ const RARE_ITEMS: &[&str] = &[
     "unipolar_magnet",
 ];
 
+const CAMPAIGN_WORKSPACE_PROJECTION: &str = "campaign-workspace-v1";
+const MAX_CAMPAIGN_WORKSPACE_CHAPTERS: usize = 16;
+const MAX_CAMPAIGN_WORKSPACE_TASKS: usize = 64;
+const MAX_CAMPAIGN_WORKSPACE_BYTES: usize = 256 * 1024;
+
 /// Cumulative material grants represented by the campaign reward ledger.
 ///
 /// This is intentionally read-only and is used by the native settlement proof
@@ -398,6 +403,17 @@ fn normalized_ids(campaign: &Map<String, Value>, key: &str) -> Vec<String> {
         .filter(|id| seen.insert((*id).to_owned()))
         .map(str::to_owned)
         .collect()
+}
+
+pub(crate) fn workspace_task_count() -> usize {
+    TASKS.len()
+}
+
+pub(crate) fn workspace_completed_task_count(base: &Map<String, Value>) -> usize {
+    base.get("campaign")
+        .and_then(Value::as_object)
+        .map(|campaign| normalized_ids(campaign, "completedTaskIds").len())
+        .unwrap_or(0)
 }
 
 fn number_in_record(base: &Map<String, Value>, record: &str, key: &str) -> f64 {
@@ -711,6 +727,179 @@ fn metric_target(metric: Metric) -> f64 {
         | Metric::RareResource
         | Metric::SprayCoater
         | Metric::EndgameMastery => 1.0,
+    }
+}
+
+fn campaign_locator(task_id: &str) -> Value {
+    let pair = match task_id {
+        "mine_first_ore" => Some(("item", "iron_ore")),
+        "smelt_iron" => Some(("item", "iron_ingot")),
+        "deploy_miner" => Some(("entity", "mining_machine")),
+        "lay_first_belt" => Some(("entity", "conveyor_belt_mk1")),
+        "deploy_matrix_lab" => Some(("entity", "matrix_lab")),
+        "produce_blue_matrix" => Some(("item", "electromagnetic_matrix")),
+        "refine_oil" => Some(("item", "refined_oil")),
+        "produce_plastic" => Some(("item", "plastic")),
+        "produce_red_matrix" => Some(("item", "energy_matrix")),
+        "deploy_planetary_station" | "complete_planetary_trip" => {
+            Some(("entity", "planetary_logistics_station"))
+        }
+        "produce_structure_matrix" => Some(("item", "structure_matrix")),
+        "unlock_borealis" => Some(("workspace", "star-map:borealis")),
+        "deploy_interstellar_station" | "complete_interstellar_trip" => {
+            Some(("entity", "interstellar_logistics_station"))
+        }
+        "produce_information_matrix" => Some(("item", "information_matrix")),
+        "produce_gravity_matrix" => Some(("item", "gravity_matrix")),
+        "produce_universe_matrix" => Some(("item", "universe_matrix")),
+        "launch_solar_sail" => Some(("item", "solar_sail")),
+        "launch_carrier_rocket" => Some(("item", "small_carrier_rocket")),
+        "build_dyson_structure" | "absorb_shell_sail" => Some(("workspace", "dyson:helios")),
+        "side_storage" => Some(("entity", "storage_mk1")),
+        "side_stable_power" => Some(("entity", "thermal_power_plant")),
+        "side_belt_upgrade" => Some(("entity", "conveyor_belt_mk2")),
+        "side_rare_resource" => Some(("planet", "frost")),
+        "side_spray_coater" => Some(("entity", "spray_coater")),
+        "endgame_infinite_research" | "endgame_export" | "endgame_score" | "endgame_mastery" => {
+            Some(("workspace", "galaxy"))
+        }
+        _ => None,
+    };
+    pair.map_or(
+        Value::Null,
+        |(kind, target_id)| serde_json::json!({ "kind": kind, "targetId": target_id }),
+    )
+}
+
+impl CoreState {
+    /// Read-only, fixed-catalog campaign view for the native thin renderer.
+    ///
+    /// The projection deliberately exposes neither the factory graph nor any
+    /// inventory container. Renderer navigation receives only a catalog
+    /// locator and therefore cannot turn this read into a gameplay mutation.
+    pub fn campaign_workspace_projection(
+        &self,
+        session_id: &str,
+        run_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+    ) -> anyhow::Result<Value> {
+        if expected_revision != self.revision {
+            bail!("native campaign workspace revision is stale");
+        }
+        if expected_registry_fingerprint != self.identity.registry_fingerprint {
+            bail!("native campaign workspace registry is stale");
+        }
+        if session_id.is_empty()
+            || session_id.len() > 128
+            || run_id.is_empty()
+            || run_id.len() > 128
+        {
+            bail!("native campaign workspace lineage is invalid");
+        }
+        let campaign = self
+            .base_value()
+            .get("campaign")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native campaign workspace state is missing"))?;
+        let completed = normalized_ids(campaign, "completedTaskIds")
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let active_task_id = campaign
+            .get("activeTaskId")
+            .and_then(Value::as_str)
+            .and_then(task_by_id)
+            .map(|task| task.id);
+        let active_chapter_id = campaign
+            .get("activeChapterId")
+            .and_then(Value::as_str)
+            .filter(|id| CHAPTERS.contains(id))
+            .or_else(|| active_task_id.and_then(task_by_id).map(|task| task.chapter));
+
+        let entities = self.parse_entities_parallel()?;
+        let factory = CampaignFactoryMetrics::collect(self, &entities);
+        let mut projected_task_count = 0usize;
+        let mut completed_task_count = 0usize;
+        let mut chapters = Vec::with_capacity(CHAPTERS.len().min(MAX_CAMPAIGN_WORKSPACE_CHAPTERS));
+        for chapter_id in CHAPTERS.iter().take(MAX_CAMPAIGN_WORKSPACE_CHAPTERS) {
+            let mut tasks = Vec::new();
+            let mut chapter_completed = 0usize;
+            let chapter_total = TASKS
+                .iter()
+                .filter(|task| task.chapter == *chapter_id)
+                .count();
+            for task in TASKS
+                .iter()
+                .filter(|task| task.chapter == *chapter_id)
+                .take(MAX_CAMPAIGN_WORKSPACE_TASKS.saturating_sub(projected_task_count))
+            {
+                let prerequisites_ready = prerequisites_met(&completed, task);
+                let target = metric_target(task.metric).max(1.0);
+                let current = metric_value(self.base_value(), &factory, task.metric)
+                    .floor()
+                    .clamp(0.0, target);
+                let complete =
+                    completed.contains(task.id) || prerequisites_ready && current >= target;
+                let status = if complete {
+                    "complete"
+                } else if !prerequisites_ready {
+                    "locked"
+                } else if active_task_id == Some(task.id) {
+                    "active"
+                } else {
+                    "available"
+                };
+                if complete {
+                    chapter_completed += 1;
+                    completed_task_count += 1;
+                }
+                tasks.push(serde_json::json!({
+                    "id": task.id,
+                    "track": if task.main { "main" } else { "side" },
+                    "status": status,
+                    "progress": { "current": current, "target": target },
+                    "locator": campaign_locator(task.id),
+                }));
+                projected_task_count += 1;
+            }
+            chapters.push(serde_json::json!({
+                "id": chapter_id,
+                "completedCount": chapter_completed,
+                "totalCount": chapter_total,
+                "complete": chapter_total > 0 && chapter_completed == chapter_total,
+                "tasks": tasks,
+            }));
+        }
+        let truncated = CHAPTERS.len() > MAX_CAMPAIGN_WORKSPACE_CHAPTERS
+            || TASKS.len() > MAX_CAMPAIGN_WORKSPACE_TASKS;
+        let value = serde_json::json!({
+            "schemaVersion": 1,
+            "projectionType": CAMPAIGN_WORKSPACE_PROJECTION,
+            "source": "native-core",
+            "stateVersion": 47,
+            "sessionId": session_id,
+            "runId": run_id,
+            "revision": self.revision,
+            "registryFingerprint": expected_registry_fingerprint,
+            "truncated": truncated,
+            "limits": {
+                "chapters": MAX_CAMPAIGN_WORKSPACE_CHAPTERS,
+                "tasks": MAX_CAMPAIGN_WORKSPACE_TASKS,
+                "payloadBytes": MAX_CAMPAIGN_WORKSPACE_BYTES,
+            },
+            "counts": {
+                "chapters": CHAPTERS.len(),
+                "tasks": TASKS.len(),
+                "completedTasks": completed_task_count,
+            },
+            "activeChapterId": active_chapter_id,
+            "activeTaskId": active_task_id,
+            "chapters": chapters,
+        });
+        if serde_json::to_vec(&value)?.len() > MAX_CAMPAIGN_WORKSPACE_BYTES {
+            bail!("native campaign workspace projection exceeds the byte limit");
+        }
+        Ok(value)
     }
 }
 
@@ -1064,5 +1253,60 @@ mod tests {
         assert!(!factory_metrics_needed(
             json!({ "campaign": null }).as_object().unwrap()
         ));
+    }
+
+    #[test]
+    fn campaign_workspace_projection_is_bound_bounded_and_read_only() {
+        let mut state = crate::simple_factory::tests::fixture_state(&[]);
+        state.base_value_mut().insert(
+            "campaign".to_owned(),
+            json!({
+                "activeChapterId": "foundation",
+                "activeTaskId": "mine_first_ore",
+                "completedTaskIds": [],
+                "rewardedTaskIds": []
+            }),
+        );
+        let before = state.canonical_sha256().unwrap();
+        let projection = state
+            .campaign_workspace_projection("authority-1", "run-1", state.revision, "machine-e3")
+            .unwrap();
+        assert_eq!(projection["projectionType"], "campaign-workspace-v1");
+        assert_eq!(projection["sessionId"], "authority-1");
+        assert_eq!(projection["runId"], "run-1");
+        assert_eq!(projection["revision"], state.revision);
+        assert_eq!(projection["registryFingerprint"], "machine-e3");
+        assert_eq!(projection["truncated"], false);
+        assert_eq!(projection["counts"]["chapters"], CHAPTERS.len());
+        assert_eq!(projection["counts"]["tasks"], TASKS.len());
+        assert!(serde_json::to_vec(&projection).unwrap().len() <= MAX_CAMPAIGN_WORKSPACE_BYTES);
+        let encoded = serde_json::to_string(&projection).unwrap();
+        for forbidden in [
+            "entities",
+            "belts",
+            "tray",
+            "construction",
+            "quantumLogisticsNetwork",
+            "inputs",
+            "outputs",
+        ] {
+            assert!(!encoded.contains(forbidden), "leaked {forbidden}");
+        }
+        assert_eq!(state.canonical_sha256().unwrap(), before);
+        assert!(
+            state
+                .campaign_workspace_projection(
+                    "authority-1",
+                    "run-1",
+                    state.revision + 1,
+                    "machine-e3"
+                )
+                .is_err()
+        );
+        assert!(
+            state
+                .campaign_workspace_projection("authority-1", "run-1", state.revision, "stale")
+                .is_err()
+        );
     }
 }

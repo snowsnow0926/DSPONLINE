@@ -7950,6 +7950,249 @@ function normalizeCoreOrbitalContractWorkspaceProjection(value, context) {
   };
 }
 
+function normalizeBoundWorkspaceIdentity(source, context, label, projectionType) {
+  if (source.schemaVersion !== 1 || source.projectionType !== projectionType ||
+      source.source !== "native-core" || source.stateVersion !== 47) {
+    throw protocolError(`${label} identity`);
+  }
+  const request = exactObject(context, [
+    "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint",
+  ], `${label} context`);
+  const sessionId = logicalId(source.sessionId, `${label} session`, 128);
+  const runId = logicalId(source.runId, `${label} run`, 128);
+  const revision = safeInteger(source.revision, `${label} revision`);
+  const registryFingerprint = logicalId(source.registryFingerprint, `${label} registry`, 256);
+  if (sessionId !== logicalId(request.sessionId, `${label} requested session`, 128) ||
+      runId !== logicalId(request.runId, `${label} requested run`, 128) ||
+      revision !== safeInteger(request.expectedRevision, `${label} requested revision`) ||
+      registryFingerprint !== logicalId(
+        request.expectedRegistryFingerprint,
+        `${label} requested registry`,
+        256,
+      )) {
+    throw protocolError(`${label} identity binding`);
+  }
+  return { sessionId, runId, revision, registryFingerprint };
+}
+
+function normalizeCoreCampaignWorkspaceProjection(value, context) {
+  const label = "native campaign workspace projection";
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "stateVersion", "sessionId", "runId",
+    "revision", "registryFingerprint", "truncated", "limits", "counts",
+    "activeChapterId", "activeTaskId", "chapters",
+  ], label);
+  requireProjectionByteBudget(source, label);
+  const identity = normalizeBoundWorkspaceIdentity(source, context, label, "campaign-workspace-v1");
+  const limitsSource = exactObject(source.limits, [
+    "chapters", "tasks", "payloadBytes",
+  ], `${label}.limits`);
+  const limits = {
+    chapters: safeInteger(limitsSource.chapters, `${label}.limits.chapters`, 1),
+    tasks: safeInteger(limitsSource.tasks, `${label}.limits.tasks`, 1),
+    payloadBytes: safeInteger(limitsSource.payloadBytes, `${label}.limits.payloadBytes`, 1),
+  };
+  if (limits.chapters !== 16 || limits.tasks !== 64 || limits.payloadBytes !== 256 * 1024 ||
+      boolean(source.truncated, `${label}.truncated`)) {
+    throw protocolError(`${label} complete atom`);
+  }
+  if (Buffer.byteLength(JSON.stringify(source), "utf8") > limits.payloadBytes) {
+    throw protocolError(`${label} payload byte budget`);
+  }
+  const countsSource = exactObject(source.counts, [
+    "chapters", "tasks", "completedTasks",
+  ], `${label}.counts`);
+  const counts = {
+    chapters: safeInteger(countsSource.chapters, `${label}.counts.chapters`),
+    tasks: safeInteger(countsSource.tasks, `${label}.counts.tasks`),
+    completedTasks: safeInteger(countsSource.completedTasks, `${label}.counts.completedTasks`),
+  };
+  if (!Array.isArray(source.chapters) || source.chapters.length > limits.chapters ||
+      source.chapters.length !== counts.chapters) {
+    throw protocolError(`${label}.chapters`);
+  }
+  let totalTasks = 0;
+  let completedTasks = 0;
+  const chapterIds = new Set();
+  const taskIds = new Set();
+  const chapters = source.chapters.map((value, chapterIndex) => {
+    const rowLabel = `${label}.chapters[${chapterIndex}]`;
+    const chapter = exactObject(value, [
+      "id", "completedCount", "totalCount", "complete", "tasks",
+    ], rowLabel);
+    const id = logicalId(chapter.id, `${rowLabel}.id`, 128);
+    if (chapterIds.has(id) || !Array.isArray(chapter.tasks)) throw protocolError(rowLabel);
+    chapterIds.add(id);
+    const completedCount = safeInteger(chapter.completedCount, `${rowLabel}.completedCount`);
+    const totalCount = safeInteger(chapter.totalCount, `${rowLabel}.totalCount`);
+    if (chapter.tasks.length !== totalCount || totalTasks + totalCount > limits.tasks) {
+      throw protocolError(`${rowLabel}.task count`);
+    }
+    let chapterCompleted = 0;
+    const tasks = chapter.tasks.map((value, taskIndex) => {
+      const taskLabel = `${rowLabel}.tasks[${taskIndex}]`;
+      const task = exactObject(value, [
+        "id", "track", "status", "progress", "locator",
+      ], taskLabel);
+      const taskId = logicalId(task.id, `${taskLabel}.id`, 128);
+      if (taskIds.has(taskId)) throw protocolError(`${taskLabel}.id`);
+      taskIds.add(taskId);
+      const progressSource = exactObject(task.progress, ["current", "target"], `${taskLabel}.progress`);
+      const current = safeInteger(progressSource.current, `${taskLabel}.progress.current`);
+      const target = safeInteger(progressSource.target, `${taskLabel}.progress.target`, 1);
+      if (current > target) throw protocolError(`${taskLabel}.progress`);
+      const status = oneOf(task.status, ["locked", "available", "active", "complete"], `${taskLabel}.status`);
+      if (status === "complete") chapterCompleted += 1;
+      let locator = null;
+      if (task.locator !== null) {
+        const locatorSource = exactObject(task.locator, ["kind", "targetId"], `${taskLabel}.locator`);
+        locator = {
+          kind: oneOf(locatorSource.kind, [
+            "item", "technology", "entity", "planet", "workspace",
+          ], `${taskLabel}.locator.kind`),
+          targetId: logicalId(locatorSource.targetId, `${taskLabel}.locator.targetId`, 160),
+        };
+      }
+      return {
+        id: taskId,
+        track: oneOf(task.track, ["main", "side"], `${taskLabel}.track`),
+        status,
+        progress: { current, target },
+        locator,
+      };
+    });
+    if (chapterCompleted !== completedCount ||
+        boolean(chapter.complete, `${rowLabel}.complete`) !== (totalCount > 0 && completedCount === totalCount)) {
+      throw protocolError(`${rowLabel}.completion`);
+    }
+    totalTasks += totalCount;
+    completedTasks += completedCount;
+    return { id, completedCount, totalCount, complete: chapter.complete, tasks };
+  });
+  if (totalTasks !== counts.tasks || completedTasks !== counts.completedTasks) {
+    throw protocolError(`${label}.counts binding`);
+  }
+  const activeChapterId = source.activeChapterId === null
+    ? null
+    : logicalId(source.activeChapterId, `${label}.activeChapterId`, 128);
+  const activeTaskId = source.activeTaskId === null
+    ? null
+    : logicalId(source.activeTaskId, `${label}.activeTaskId`, 128);
+  if (activeChapterId !== null && !chapterIds.has(activeChapterId) ||
+      activeTaskId !== null && !taskIds.has(activeTaskId)) {
+    throw protocolError(`${label}.active binding`);
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "campaign-workspace-v1",
+    source: "native-core",
+    stateVersion: 47,
+    ...identity,
+    truncated: false,
+    limits,
+    counts,
+    activeChapterId,
+    activeTaskId,
+    chapters,
+  };
+}
+
+function normalizeCoreGalaxyAccountWorkspaceProjection(value, context) {
+  const label = "native galaxy account workspace projection";
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "stateVersion", "sessionId", "runId",
+    "revision", "registryFingerprint", "truncated", "limits", "game", "production",
+    "progress", "dyson", "cloudCompatibility",
+  ], label);
+  requireProjectionByteBudget(source, label);
+  const identity = normalizeBoundWorkspaceIdentity(
+    source,
+    context,
+    label,
+    "galaxy-account-workspace-v1",
+  );
+  const limitsSource = exactObject(source.limits, [
+    "payloadBytes", "decimalDigits",
+  ], `${label}.limits`);
+  const limits = {
+    payloadBytes: safeInteger(limitsSource.payloadBytes, `${label}.limits.payloadBytes`, 1),
+    decimalDigits: safeInteger(limitsSource.decimalDigits, `${label}.limits.decimalDigits`, 1),
+  };
+  if (limits.payloadBytes !== 64 * 1024 || limits.decimalDigits !== 256 ||
+      boolean(source.truncated, `${label}.truncated`) ||
+      Buffer.byteLength(JSON.stringify(source), "utf8") > limits.payloadBytes) {
+    throw protocolError(`${label} complete atom`);
+  }
+  const gameSource = exactObject(source.game, ["mode", "elapsedSeconds", "difficulty"], `${label}.game`);
+  const productionSource = exactObject(source.production, [
+    "totalProduced", "universeMatrixProduced", "generationKw", "throughputPerMinute",
+  ], `${label}.production`);
+  const progressSource = exactObject(source.progress, [
+    "campaignCompleted", "campaignTotal", "researchCompleted", "exploredSystems",
+    "colonizedPlanets", "galacticScore",
+  ], `${label}.progress`);
+  const dysonSource = exactObject(source.dyson, [
+    "powerKw", "structurePoints", "rocketsLaunched", "sailsLaunched",
+  ], `${label}.dyson`);
+  const cloudSource = exactObject(source.cloudCompatibility, [
+    "gameStateVersion", "envelopeVersion", "cloudSchemaVersion", "exportSupported",
+    "restoreIntoActiveAuthority", "importIntoActiveAuthority", "overwriteActiveAuthority",
+  ], `${label}.cloudCompatibility`);
+  const campaignCompleted = safeInteger(progressSource.campaignCompleted, `${label}.progress.campaignCompleted`);
+  const campaignTotal = safeInteger(progressSource.campaignTotal, `${label}.progress.campaignTotal`, 1);
+  if (campaignCompleted > campaignTotal || cloudSource.gameStateVersion !== 47 ||
+      cloudSource.envelopeVersion !== 2 || cloudSource.cloudSchemaVersion !== 8 ||
+      boolean(cloudSource.exportSupported, `${label}.cloudCompatibility.exportSupported`) !== true ||
+      boolean(cloudSource.restoreIntoActiveAuthority, `${label}.cloudCompatibility.restore`) !== false ||
+      boolean(cloudSource.importIntoActiveAuthority, `${label}.cloudCompatibility.import`) !== false ||
+      boolean(cloudSource.overwriteActiveAuthority, `${label}.cloudCompatibility.overwrite`) !== false) {
+    throw protocolError(`${label}.compatibility binding`);
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "galaxy-account-workspace-v1",
+    source: "native-core",
+    stateVersion: 47,
+    ...identity,
+    truncated: false,
+    limits,
+    game: {
+      mode: oneOf(gameSource.mode, ["normal", "speedrun"], `${label}.game.mode`),
+      elapsedSeconds: stellarDecimal(gameSource.elapsedSeconds, `${label}.game.elapsedSeconds`),
+      difficulty: logicalId(gameSource.difficulty, `${label}.game.difficulty`, 64),
+    },
+    production: {
+      totalProduced: stellarDecimal(productionSource.totalProduced, `${label}.production.totalProduced`),
+      universeMatrixProduced: stellarDecimal(productionSource.universeMatrixProduced, `${label}.production.universeMatrixProduced`),
+      generationKw: stellarDecimal(productionSource.generationKw, `${label}.production.generationKw`),
+      throughputPerMinute: stellarDecimal(productionSource.throughputPerMinute, `${label}.production.throughputPerMinute`),
+    },
+    progress: {
+      campaignCompleted,
+      campaignTotal,
+      researchCompleted: safeInteger(progressSource.researchCompleted, `${label}.progress.researchCompleted`),
+      exploredSystems: safeInteger(progressSource.exploredSystems, `${label}.progress.exploredSystems`),
+      colonizedPlanets: safeInteger(progressSource.colonizedPlanets, `${label}.progress.colonizedPlanets`),
+      galacticScore: stellarDecimal(progressSource.galacticScore, `${label}.progress.galacticScore`),
+    },
+    dyson: {
+      powerKw: stellarDecimal(dysonSource.powerKw, `${label}.dyson.powerKw`),
+      structurePoints: stellarDecimal(dysonSource.structurePoints, `${label}.dyson.structurePoints`),
+      rocketsLaunched: stellarDecimal(dysonSource.rocketsLaunched, `${label}.dyson.rocketsLaunched`),
+      sailsLaunched: stellarDecimal(dysonSource.sailsLaunched, `${label}.dyson.sailsLaunched`),
+    },
+    cloudCompatibility: {
+      gameStateVersion: 47,
+      envelopeVersion: 2,
+      cloudSchemaVersion: 8,
+      exportSupported: true,
+      restoreIntoActiveAuthority: false,
+      importIntoActiveAuthority: false,
+      overwriteActiveAuthority: false,
+    },
+  };
+}
+
 function normalizeCoreCommandPaletteEntitySearchProjection(value, context) {
   const source = exactObject(value, [
     "schemaVersion", "projectionType", "revision", "registryFingerprint", "limits",
@@ -8617,6 +8860,8 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreDysonWorkspaceProjection: normalizeCoreDysonWorkspaceProjection,
   coreSystemSpaceStationWorkspaceProjection: normalizeCoreSystemSpaceStationWorkspaceProjection,
   coreOrbitalContractWorkspaceProjection: normalizeCoreOrbitalContractWorkspaceProjection,
+  coreCampaignWorkspaceProjection: normalizeCoreCampaignWorkspaceProjection,
+  coreGalaxyAccountWorkspaceProjection: normalizeCoreGalaxyAccountWorkspaceProjection,
   coreCommandPaletteEntitySearchProjection: normalizeCoreCommandPaletteEntitySearchProjection,
   coreCommand: normalizeCoreCommand,
   coreCommandReconcile: normalizeCoreCommandReconcile,

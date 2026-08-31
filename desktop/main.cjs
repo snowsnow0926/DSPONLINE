@@ -1358,6 +1358,24 @@ function nativeOrbitalContractWorkspaceProjectionResultContext(request) {
   };
 }
 
+function nativeCampaignWorkspaceProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    runId: request?.runId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+  };
+}
+
+function nativeGalaxyAccountWorkspaceProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    runId: request?.runId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+  };
+}
+
 function nativeCommandPaletteEntitySearchResultContext(request) {
   return {
     sessionId: request?.sessionId,
@@ -2367,6 +2385,42 @@ ipcMain.handle("desktop:native-core-orbital-contract-workspace-projection", asyn
     return await nativePlayerAuthorityProjectionBroker.read(
       ownerId,
       "orbital-contract-workspace-v1",
+      request,
+    );
+  });
+});
+
+ipcMain.handle("desktop:native-core-campaign-workspace-projection", async (event, request) => {
+  return runRendererNativeOperation("coreCampaignWorkspaceProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生主线任务工作区投影请求失败，请重试",
+    resultContext: nativeCampaignWorkspaceProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      throw new Error("原生主线任务投影仅对当前玩家权威会话开放");
+    }
+    return await nativePlayerAuthorityProjectionBroker.read(
+      ownerId,
+      "campaign-workspace-v1",
+      request,
+    );
+  });
+});
+
+ipcMain.handle("desktop:native-core-galaxy-account-workspace-projection", async (event, request) => {
+  return runRendererNativeOperation("coreGalaxyAccountWorkspaceProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生银河账户工作区投影请求失败，请重试",
+    resultContext: nativeGalaxyAccountWorkspaceProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      throw new Error("原生银河账户投影仅对当前玩家权威会话开放");
+    }
+    return await nativePlayerAuthorityProjectionBroker.read(
+      ownerId,
+      "galaxy-account-workspace-v1",
       request,
     );
   });

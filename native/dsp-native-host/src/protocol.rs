@@ -1922,6 +1922,7 @@ mod tests {
                 "commandId": format!("system-space-station-v1-{}", "a".repeat(64)),
                 "baseRevision": 7,
                 "expectedRegistryFingerprint": "7df8cf3a",
+                "expectedSystemId": "helios",
                 "intent": {
                     "type": "deliver-from-tray",
                     "systemId": "helios",
@@ -1955,6 +1956,7 @@ mod tests {
                     "commandId": format!("system-space-station-v1-{}", "a".repeat(64)),
                     "baseRevision": 7,
                     "expectedRegistryFingerprint": "7df8cf3a",
+                    "expectedSystemId": "helios",
                     "intent": { "type": "start", "systemId": "helios" },
                     "command": { "protocolVersion": 1 }
                 }

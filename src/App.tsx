@@ -9086,8 +9086,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativePlayerAuthorityCommandInFlightRef.current = true;
     setNativePlayerAuthorityCommandPending(true);
     void commitIntent({
+      expectedSessionId: identity.sessionId,
+      expectedRunId: identity.runId,
       expectedRevision: identity.revision,
       expectedRegistryFingerprint: identity.registryFingerprint,
+      expectedSystemId: identity.systemId,
       intent,
     }).then((receipt) => {
       if (receipt.previousRevision !== identity.revision || receipt.revision !== identity.revision + 1) {
@@ -21712,6 +21715,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onNativeStationLimitsChange={(projectedRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
               createNativeProjectedStationLimitsCommand({ baseRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock }))}
             onFocusStation={focusStellarStation}
+            onOpenSystemSpaceStation={openSystemSpaceStation}
           />
         ) : (
           <StarMapWorkspace
@@ -21741,6 +21745,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onStationMinimumLoadChange={(entityId: string, slotIndex: number, minimumLoad: StationMinimumLoad) => commitGame((current) => setStationSlotMinimumLoad(current, entityId, slotIndex, minimumLoad))}
             onStationLimitsChange={(entityId: string, slotIndex: number, minStock: number, maxStock: number) => commitGame((current) => setStationSlotLimits(current, entityId, slotIndex, minStock, maxStock))}
             onFocusStation={focusStellarStation}
+            onOpenSystemSpaceStation={openSystemSpaceStation}
           />
         ) : null}
         {systemSpaceStationOpen && systemSpaceStationId ? nativePlayerAuthorityOwnsRuntime ? <NativeSystemSpaceStationWorkspace

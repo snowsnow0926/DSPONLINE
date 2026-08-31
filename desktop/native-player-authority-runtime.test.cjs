@@ -948,12 +948,14 @@ test("system-space-station intents share the exact command FIFO without exposing
       runId: "player-run-1",
       expectedRevision: baseRevision,
       expectedRegistryFingerprint: "7df8cf3a",
+      expectedSystemId: "helios",
       intent,
     });
     return {
       commandId: identity.commandId,
       baseRevision,
       expectedRegistryFingerprint: "7df8cf3a",
+      expectedSystemId: "helios",
       intent,
     };
   };
@@ -976,7 +978,7 @@ test("system-space-station intents share the exact command FIFO without exposing
   for (const [, , request] of value.calls.filter(([operation]) => operation === "station-command")) {
     assert.equal(Object.hasOwn(request, "command"), false);
     assert.deepEqual(Object.keys(request).sort(), [
-      "baseRevision", "commandId", "expectedRegistryFingerprint", "intent", "runId", "sessionId",
+      "baseRevision", "commandId", "expectedRegistryFingerprint", "expectedSystemId", "intent", "runId", "sessionId",
     ]);
   }
 });
@@ -1013,12 +1015,14 @@ test("lost system-space-station response retries the byte-identical intent comma
     runId: "player-run-1",
     expectedRevision: 7,
     expectedRegistryFingerprint: "7df8cf3a",
+    expectedSystemId: "helios",
     intent,
   });
   const request = {
     commandId: identity.commandId,
     baseRevision: 7,
     expectedRegistryFingerprint: "7df8cf3a",
+    expectedSystemId: "helios",
     intent,
   };
   await assert.rejects(

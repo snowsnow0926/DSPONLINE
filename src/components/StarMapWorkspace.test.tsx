@@ -587,11 +587,13 @@ describe("NativeQuantumInventoryConsole", () => {
 describe("NativeStarMapCatalogConsole", () => {
   it("renders searchable systems, planets, metadata, resources, and traits from the native frame", () => {
     const onQueryChange = vi.fn();
+    const onOpenSystemSpaceStation = vi.fn();
     act(() => root.render(<AppLocaleProvider><NativeStarMapCatalogConsole
       frame={STAR_MAP_CATALOG_FRAME}
       status="ready"
       query=""
       onQueryChange={onQueryChange}
+      onOpenSystemSpaceStation={onOpenSystemSpaceStation}
     /></AppLocaleProvider>));
 
     expect(host.textContent).toContain("原生太阳系");
@@ -602,6 +604,10 @@ describe("NativeStarMapCatalogConsole", () => {
     expect(host.textContent).toContain("星图资料只读");
     expect(host.querySelector("[data-native-star-map-catalog-status='ready']")).not.toBeNull();
     expect(host.querySelector<HTMLButtonElement>(".star-planet-list > button")?.disabled).toBe(true);
+    const stationEntry = host.querySelector<HTMLButtonElement>("[data-native-system-space-station-entry='helios']")!;
+    expect(stationEntry.disabled).toBe(false);
+    act(() => stationEntry.click());
+    expect(onOpenSystemSpaceStation).toHaveBeenCalledWith("helios");
   });
 
   it("fails closed without a complete same-revision catalog frame", () => {

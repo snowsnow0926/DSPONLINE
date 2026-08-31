@@ -2132,13 +2132,14 @@ class NativeCoreSessionRegistry {
     }
     exactObjectKeys(request, [
       "sessionId", "runId", "commandId", "baseRevision",
-      "expectedRegistryFingerprint", "intent",
+      "expectedRegistryFingerprint", "expectedSystemId", "intent",
     ], "native player-authority system-space-station command request");
     const identity = deriveSystemSpaceStationCommandIdentity({
       sessionId: request.sessionId,
       runId: request.runId,
       expectedRevision: request.baseRevision,
       expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      expectedSystemId: request.expectedSystemId,
       intent: normalizeSystemSpaceStationIntent(request.intent),
     });
     if (request.commandId !== identity.commandId) {
@@ -2154,6 +2155,7 @@ class NativeCoreSessionRegistry {
         commandId: request.commandId,
         baseRevision: request.baseRevision,
         expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+        expectedSystemId: request.expectedSystemId,
         intent: identity.semantic.intent,
       },
     }, 300_000);

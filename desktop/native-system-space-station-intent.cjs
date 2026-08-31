@@ -97,7 +97,7 @@ function normalizeSystemSpaceStationIntent(value) {
 
 function systemSpaceStationSemanticRequest(value) {
   if (!exactKeys(value, [
-    "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint", "intent",
+    "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint", "expectedSystemId", "intent",
   ])) {
     throw new TypeError("native system-space-station semantic request is invalid");
   }
@@ -106,6 +106,7 @@ function systemSpaceStationSemanticRequest(value) {
     runId: domainId(value.runId, "run ID"),
     expectedRevision: safeInteger(value.expectedRevision, 0, Number.MAX_SAFE_INTEGER, "revision"),
     expectedRegistryFingerprint: domainId(value.expectedRegistryFingerprint, "registry fingerprint"),
+    expectedSystemId: domainId(value.expectedSystemId, "system ID"),
     intent: normalizeSystemSpaceStationIntent(value.intent),
   };
   const encoded = JSON.stringify(normalized);

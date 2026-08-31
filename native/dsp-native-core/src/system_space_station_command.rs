@@ -170,6 +170,7 @@ pub struct SystemSpaceStationCommandRequest {
     pub run_id: String,
     pub expected_revision: u64,
     pub expected_registry_fingerprint: String,
+    pub expected_system_id: String,
     pub intent: SystemSpaceStationIntent,
 }
 
@@ -269,6 +270,7 @@ struct SemanticRequest<'a> {
     run_id: &'a str,
     expected_revision: u64,
     expected_registry_fingerprint: &'a str,
+    expected_system_id: &'a str,
     intent: &'a SystemSpaceStationIntent,
 }
 
@@ -289,11 +291,13 @@ pub fn system_space_station_semantic_sha256(
         "registry fingerprint",
         &request.expected_registry_fingerprint,
     )?;
+    valid_domain_id("system ID", &request.expected_system_id)?;
     sha256_json(&SemanticRequest {
         session_id: &request.session_id,
         run_id: &request.run_id,
         expected_revision: request.expected_revision,
         expected_registry_fingerprint: &request.expected_registry_fingerprint,
+        expected_system_id: &request.expected_system_id,
         intent: &request.intent,
     })
 }
@@ -341,6 +345,8 @@ pub fn prepare_system_space_station_command(
     if state.identity.state_version != 47 {
         bail!("native system-space-station command requires GameState v47")
     }
+    ensure_system(state, &request.expected_system_id)?;
+    validate_intent_system_scope(state, &request.expected_system_id, &request.intent)?;
 
     let patch = build_patch(state, &request.intent)?;
     let semantic_sha256 = system_space_station_semantic_sha256(&request)?;
@@ -352,6 +358,43 @@ pub fn prepare_system_space_station_command(
         patch_sha256,
         patch,
     })
+}
+
+fn validate_intent_system_scope(
+    state: &CoreState,
+    expected_system_id: &str,
+    intent: &SystemSpaceStationIntent,
+) -> anyhow::Result<()> {
+    match intent {
+        SystemSpaceStationIntent::Start { system_id }
+        | SystemSpaceStationIntent::DeliverFromTray { system_id, .. }
+        | SystemSpaceStationIntent::ModuleTarget { system_id, .. } => {
+            if system_id != expected_system_id {
+                bail!("native system-space-station intent is outside its projected system")
+            }
+        }
+        SystemSpaceStationIntent::UpgradeAll { system_id } => {
+            if system_id.as_deref() != Some(expected_system_id) {
+                bail!("native system-space-station batch intent is outside its projected system")
+            }
+        }
+        SystemSpaceStationIntent::UpgradeOne { entity_id }
+        | SystemSpaceStationIntent::ModeTarget { entity_id, .. }
+        | SystemSpaceStationIntent::OutputTarget { entity_id, .. } => {
+            let index = *state
+                .entity_index
+                .get(entity_id)
+                .ok_or_else(|| anyhow!("native system-space-station scoped entity is missing"))?;
+            let entity = state.parse_entity(index)?;
+            let object = entity
+                .as_object()
+                .ok_or_else(|| anyhow!("native system-space-station scoped entity is invalid"))?;
+            if planet_system(state, string_field(object, "planetId")?)? != expected_system_id {
+                bail!("native system-space-station entity intent is outside its projected system")
+            }
+        }
+    }
+    Ok(())
 }
 
 fn build_patch(
@@ -1623,12 +1666,20 @@ mod tests {
     }
 
     fn request(intent: SystemSpaceStationIntent) -> SystemSpaceStationCommandRequest {
+        request_in_system("helios", intent)
+    }
+
+    fn request_in_system(
+        expected_system_id: &str,
+        intent: SystemSpaceStationIntent,
+    ) -> SystemSpaceStationCommandRequest {
         SystemSpaceStationCommandRequest {
             command_id: "command-1".to_owned(),
             session_id: "session-1".to_owned(),
             run_id: "run-1".to_owned(),
             expected_revision: 7,
             expected_registry_fingerprint: EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned(),
+            expected_system_id: expected_system_id.to_owned(),
             intent,
         }
     }
@@ -1714,7 +1765,7 @@ mod tests {
             vec![launcher("launcher", "home", 1.0)],
             vec![],
         );
-        for mutate in 0..4 {
+        for mutate in 0..5 {
             let mut candidate = request(SystemSpaceStationIntent::Start {
                 system_id: "helios".to_owned(),
             });
@@ -1722,7 +1773,8 @@ mod tests {
                 0 => candidate.session_id = "other".to_owned(),
                 1 => candidate.run_id = "other".to_owned(),
                 2 => candidate.expected_revision = 6,
-                _ => candidate.expected_registry_fingerprint = "modded".to_owned(),
+                3 => candidate.expected_registry_fingerprint = "modded".to_owned(),
+                _ => candidate.expected_system_id = "alpha".to_owned(),
             }
             assert!(prepare_system_space_station_command(&state, &authority(), candidate).is_err());
         }
@@ -1738,7 +1790,7 @@ mod tests {
         let other = prepare_system_space_station_command(
             &changed,
             &authority(),
-            request(SystemSpaceStationIntent::ModuleTarget {
+            request_in_system("alpha", SystemSpaceStationIntent::ModuleTarget {
                 system_id: "alpha".to_owned(),
                 module: SystemSpaceStationModule::Backbone,
                 target: 1,
@@ -1796,7 +1848,7 @@ mod tests {
         let prepared = prepare_system_space_station_command(
             &state,
             &authority(),
-            request(SystemSpaceStationIntent::ModuleTarget {
+            request_in_system("alpha", SystemSpaceStationIntent::ModuleTarget {
                 system_id: "alpha".to_owned(),
                 module: SystemSpaceStationModule::Backbone,
                 target: 2,
@@ -1808,7 +1860,7 @@ mod tests {
         assert_eq!(station["modules"]["backbone"], 2);
         assert_eq!(station["inventory"]["frame_material"], "999800000");
 
-        let mut down = request(SystemSpaceStationIntent::ModuleTarget {
+        let mut down = request_in_system("alpha", SystemSpaceStationIntent::ModuleTarget {
             system_id: "alpha".to_owned(),
             module: SystemSpaceStationModule::Backbone,
             target: 0,
@@ -1831,7 +1883,7 @@ mod tests {
             prepare_system_space_station_command(
                 &poor,
                 &authority(),
-                request(SystemSpaceStationIntent::ModuleTarget {
+                request_in_system("alpha", SystemSpaceStationIntent::ModuleTarget {
                     system_id: "alpha".to_owned(),
                     module: SystemSpaceStationModule::Backbone,
                     target: 1
@@ -1843,7 +1895,7 @@ mod tests {
             prepare_system_space_station_command(
                 &poor,
                 &authority(),
-                request(SystemSpaceStationIntent::ModuleTarget {
+                request_in_system("alpha", SystemSpaceStationIntent::ModuleTarget {
                     system_id: "alpha".to_owned(),
                     module: SystemSpaceStationModule::Backbone,
                     target: MAX_MODULE_COUNT + 1
@@ -1868,7 +1920,7 @@ mod tests {
         let result = prepare_system_space_station_command(
             &state,
             &authority(),
-            request(SystemSpaceStationIntent::ModuleTarget {
+            request_in_system("alpha", SystemSpaceStationIntent::ModuleTarget {
                 system_id: "alpha".to_owned(),
                 module: SystemSpaceStationModule::Backbone,
                 target: 0,
@@ -1892,7 +1944,9 @@ mod tests {
         let prepared = prepare_system_space_station_command(
             &state,
             &authority(),
-            request(SystemSpaceStationIntent::UpgradeAll { system_id: None }),
+            request(SystemSpaceStationIntent::UpgradeAll {
+                system_id: Some("helios".to_owned()),
+            }),
         )
         .unwrap();
         assert_eq!(
@@ -1902,13 +1956,34 @@ mod tests {
                 .iter()
                 .map(|row| row.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["a-station", "z-station"]
+            vec!["z-station"]
         );
         prepared.apply(&mut state, &authority()).unwrap();
-        for id in ["a-station", "z-station"] {
-            let index = *state.entity_index.get(id).unwrap();
-            assert_eq!(state.parse_entity(index).unwrap()["stationTier"], 2);
-        }
+        let z_index = *state.entity_index.get("z-station").unwrap();
+        assert_eq!(state.parse_entity(z_index).unwrap()["stationTier"], 2);
+        let a_index = *state.entity_index.get("a-station").unwrap();
+        assert_eq!(state.parse_entity(a_index).unwrap()["stationTier"], 1);
+
+        let mut alpha_request = request_in_system(
+            "alpha",
+            SystemSpaceStationIntent::UpgradeAll {
+                system_id: Some("alpha".to_owned()),
+            },
+        );
+        alpha_request.expected_revision = 8;
+        let alpha_prepared =
+            prepare_system_space_station_command(&state, &authority(), alpha_request).unwrap();
+        assert_eq!(
+            alpha_prepared
+                .patch()
+                .changed_entities
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a-station"]
+        );
+        alpha_prepared.apply(&mut state, &authority()).unwrap();
+        assert_eq!(state.parse_entity(a_index).unwrap()["stationTier"], 2);
         let belt_index = *state.belt_index.get("belt-z").unwrap();
         assert_eq!(
             state.parse_belt(belt_index).unwrap()["elevatorOutputIndex"],
@@ -2091,7 +2166,7 @@ mod tests {
     #[test]
     fn command_id_binding_is_replay_stable_and_detects_payload_collision() {
         let state = state_with(&[], vec![], vec![]);
-        let first_request = request(SystemSpaceStationIntent::ModuleTarget {
+        let first_request = request_in_system("alpha", SystemSpaceStationIntent::ModuleTarget {
             system_id: "alpha".to_owned(),
             module: SystemSpaceStationModule::Backbone,
             target: 1,
@@ -2113,7 +2188,7 @@ mod tests {
         let collision = prepare_system_space_station_command(
             &state,
             &authority(),
-            request(SystemSpaceStationIntent::ModuleTarget {
+            request_in_system("alpha", SystemSpaceStationIntent::ModuleTarget {
                 system_id: "alpha".to_owned(),
                 module: SystemSpaceStationModule::Backbone,
                 target: 2,
@@ -2145,17 +2220,18 @@ mod tests {
             run_id: "run-1".to_owned(),
             expected_revision: 7,
             expected_registry_fingerprint: EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned(),
+            expected_system_id: "helios".to_owned(),
             intent: SystemSpaceStationIntent::Start {
                 system_id: "helios".to_owned(),
             },
         };
         assert_eq!(
             system_space_station_semantic_sha256(&request).unwrap(),
-            "db1ba7d5347e4962e47eedcbfa7fffe8b9ab13f951547c85178f7b816cb2a338"
+            "9eeffa5a13ff025ee8b0e2a2531ccc3aae761e9ecb3c83c36ad5a233c10b2601"
         );
         assert_eq!(
             derive_system_space_station_command_id(&request).unwrap(),
-            "system-space-station-v1-db1ba7d5347e4962e47eedcbfa7fffe8b9ab13f951547c85178f7b816cb2a338"
+            "system-space-station-v1-9eeffa5a13ff025ee8b0e2a2531ccc3aae761e9ecb3c83c36ad5a233c10b2601"
         );
     }
 

@@ -572,6 +572,7 @@ pub struct CoreCommitPlayerAuthoritySystemSpaceStationCommandRequest {
     pub command_id: String,
     pub base_revision: u64,
     pub expected_registry_fingerprint: String,
+    pub expected_system_id: String,
     pub intent: SystemSpaceStationIntent,
 }
 
@@ -1953,6 +1954,7 @@ impl CoreRegistry {
             run_id: request.run_id.clone(),
             expected_revision: request.base_revision,
             expected_registry_fingerprint: request.expected_registry_fingerprint.clone(),
+            expected_system_id: request.expected_system_id.clone(),
             intent: request.intent.clone(),
         };
         if serde_json::to_vec(&semantic_request)?.len()
@@ -6368,6 +6370,7 @@ mod tests {
             run_id: "player-authority-run".to_owned(),
             expected_revision: base_revision,
             expected_registry_fingerprint: EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned(),
+            expected_system_id: "helios".to_owned(),
             intent: intent.clone(),
         };
         CoreCommitPlayerAuthoritySystemSpaceStationCommandRequest {
@@ -6375,6 +6378,7 @@ mod tests {
             command_id: derive_system_space_station_command_id(&semantic).unwrap(),
             base_revision,
             expected_registry_fingerprint: semantic.expected_registry_fingerprint,
+            expected_system_id: semantic.expected_system_id,
             intent,
         }
     }
@@ -17048,6 +17052,7 @@ mod tests {
             run_id: request.run_id.clone(),
             expected_revision: base,
             expected_registry_fingerprint: request.expected_registry_fingerprint.clone(),
+            expected_system_id: request.expected_system_id.clone(),
             intent: request.intent.clone(),
         };
         let prepared = prepare_system_space_station_command(

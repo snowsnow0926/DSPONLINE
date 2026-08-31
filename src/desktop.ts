@@ -2656,8 +2656,11 @@ export type DesktopNativeSystemSpaceStationIntent =
   | { type: "output-target"; entityId: string; portIndex: number; itemId: string | null; confirmations: number };
 
 export interface DesktopNativeSystemSpaceStationIntentRequest {
+  expectedSessionId: string;
+  expectedRunId: string;
   expectedRevision: number;
   expectedRegistryFingerprint: string;
+  expectedSystemId: string;
   intent: DesktopNativeSystemSpaceStationIntent;
 }
 

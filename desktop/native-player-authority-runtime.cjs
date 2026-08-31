@@ -250,9 +250,10 @@ function normalizeCommandRequest(value) {
 
 function normalizeSystemSpaceStationCommandRequest(value) {
   if (!isRecord(value) || Reflect.ownKeys(value).some((key) => typeof key !== "string" ||
-      !["commandId", "baseRevision", "expectedRegistryFingerprint", "intent"].includes(key)) ||
+      !["commandId", "baseRevision", "expectedRegistryFingerprint", "expectedSystemId", "intent"].includes(key)) ||
       !Object.hasOwn(value, "commandId") || !Object.hasOwn(value, "baseRevision") ||
-      !Object.hasOwn(value, "expectedRegistryFingerprint") || !Object.hasOwn(value, "intent")) {
+      !Object.hasOwn(value, "expectedRegistryFingerprint") ||
+      !Object.hasOwn(value, "expectedSystemId") || !Object.hasOwn(value, "intent")) {
     throw runtimeError("native player-authority system-space-station request is invalid");
   }
   const commandId = requireLogicalId(value.commandId, "commandId");
@@ -261,6 +262,7 @@ function normalizeSystemSpaceStationCommandRequest(value) {
     value.expectedRegistryFingerprint,
     "expectedRegistryFingerprint",
   );
+  const expectedSystemId = requireLogicalId(value.expectedSystemId, "expectedSystemId");
   let intent;
   try {
     intent = normalizeSystemSpaceStationIntent(value.intent);
@@ -276,6 +278,7 @@ function normalizeSystemSpaceStationCommandRequest(value) {
     commandId,
     baseRevision,
     expectedRegistryFingerprint,
+    expectedSystemId,
     intent,
   });
 }
@@ -1521,6 +1524,7 @@ class NativePlayerAuthorityRuntime {
           commandId: entry.request.commandId,
           baseRevision: entry.request.baseRevision,
           expectedRegistryFingerprint: entry.request.expectedRegistryFingerprint,
+          expectedSystemId: entry.request.expectedSystemId,
           intent: entry.request.intent,
         });
       }

@@ -2,9 +2,10 @@
 
 /*
  * Renderer-safe intent broker for the Rust-authoritative system space station.
- * The renderer supplies only the revision/catalog it rendered plus one exact
- * intent. Session/run/owner/command identity and every material patch remain
- * main/Rust-owned.
+ * The renderer echoes the exact projection lineage and system scope it
+ * rendered plus one bounded intent. Main treats those values only as equality
+ * fences against its current runtime; owner/command identity and every
+ * material patch remain main/Rust-owned.
  */
 
 const {
@@ -58,9 +59,15 @@ class NativePlayerAuthoritySystemSpaceStationBroker {
         code: "NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_RENDERER_UNTRUSTED",
       });
     }
-    if (!exactKeys(rawRequest, ["expectedRevision", "expectedRegistryFingerprint", "intent"]) ||
+    if (!exactKeys(rawRequest, [
+      "expectedSessionId", "expectedRunId", "expectedRevision",
+      "expectedRegistryFingerprint", "expectedSystemId", "intent",
+    ]) ||
+        !validIdentity(rawRequest.expectedSessionId) ||
+        !validIdentity(rawRequest.expectedRunId) ||
         !Number.isSafeInteger(rawRequest.expectedRevision) || rawRequest.expectedRevision < 0 ||
-        !validIdentity(rawRequest.expectedRegistryFingerprint)) {
+        !validIdentity(rawRequest.expectedRegistryFingerprint) ||
+        !validIdentity(rawRequest.expectedSystemId)) {
       throw new TypeError("native system-space-station renderer request is invalid");
     }
     const before = this.runtime.snapshot();
@@ -70,17 +77,26 @@ class NativePlayerAuthoritySystemSpaceStationBroker {
         code: "NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_UNAVAILABLE",
       });
     }
+    if (before.sessionId !== rawRequest.expectedSessionId ||
+        before.runId !== rawRequest.expectedRunId ||
+        before.revision !== rawRequest.expectedRevision) {
+      throw Object.assign(new Error("native system-space-station projection lineage is stale"), {
+        code: "NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_STALE",
+      });
+    }
     const identity = deriveSystemSpaceStationCommandIdentity({
-      sessionId: before.sessionId,
-      runId: before.runId,
+      sessionId: rawRequest.expectedSessionId,
+      runId: rawRequest.expectedRunId,
       expectedRevision: rawRequest.expectedRevision,
       expectedRegistryFingerprint: rawRequest.expectedRegistryFingerprint,
+      expectedSystemId: rawRequest.expectedSystemId,
       intent: normalizeSystemSpaceStationIntent(rawRequest.intent),
     });
     const receipt = await this.runtime.commitSystemSpaceStationIntent({
       commandId: identity.commandId,
       baseRevision: rawRequest.expectedRevision,
       expectedRegistryFingerprint: rawRequest.expectedRegistryFingerprint,
+      expectedSystemId: rawRequest.expectedSystemId,
       intent: identity.semantic.intent,
     });
     if (!isRecord(receipt) || receipt.phase !== "active" ||

@@ -33,9 +33,10 @@ test("all seven system-space-station intents are exact, bounded and deterministi
     runId: "run-1",
     expectedRevision: 7,
     expectedRegistryFingerprint: "7df8cf3a",
+    expectedSystemId: "helios",
     intent: intents[0],
   });
-  assert.equal(identity.semanticSha256, "db1ba7d5347e4962e47eedcbfa7fffe8b9ab13f951547c85178f7b816cb2a338");
+  assert.equal(identity.semanticSha256, "9eeffa5a13ff025ee8b0e2a2531ccc3aae761e9ecb3c83c36ad5a233c10b2601");
   assert.equal(identity.commandId, `system-space-station-v1-${identity.semanticSha256}`);
   const collision = deriveSystemSpaceStationCommandIdentity({
     ...identity.semantic,
@@ -68,8 +69,11 @@ test("renderer broker submits only bounded intent and returns one contiguous dur
     isTrustedRendererOwner: (ownerId) => ownerId === 17,
   });
   const receipt = await broker.commit(17, {
+    expectedSessionId: "core-1",
+    expectedRunId: "run-1",
     expectedRevision: 7,
     expectedRegistryFingerprint: "7df8cf3a",
+    expectedSystemId: "helios",
     intent: intents[0],
   });
   assert.deepEqual(receipt, {
@@ -81,15 +85,34 @@ test("renderer broker submits only bounded intent and returns one contiguous dur
   });
   assert.equal(calls.length, 1);
   assert.deepEqual(Object.keys(calls[0]).sort(), [
-    "baseRevision", "commandId", "expectedRegistryFingerprint", "intent",
+    "baseRevision", "commandId", "expectedRegistryFingerprint", "expectedSystemId", "intent",
   ]);
   assert.equal(Object.hasOwn(calls[0], "command"), false);
   assert.equal(Object.hasOwn(calls[0], "sessionId"), false);
   assert.equal(Object.hasOwn(calls[0], "runId"), false);
   await assert.rejects(
-    broker.commit(18, { expectedRevision: 7, expectedRegistryFingerprint: "7df8cf3a", intent: intents[0] }),
+    broker.commit(18, {
+      expectedSessionId: "core-1", expectedRunId: "run-1", expectedRevision: 7,
+      expectedRegistryFingerprint: "7df8cf3a", expectedSystemId: "helios", intent: intents[0],
+    }),
     /not trusted/,
   );
+  for (const stale of [
+    { expectedSessionId: "core-other", expectedRunId: "run-1", expectedRevision: 7 },
+    { expectedSessionId: "core-1", expectedRunId: "run-other", expectedRevision: 7 },
+    { expectedSessionId: "core-1", expectedRunId: "run-1", expectedRevision: 6 },
+  ]) {
+    await assert.rejects(
+      broker.commit(17, {
+        ...stale,
+        expectedRegistryFingerprint: "7df8cf3a",
+        expectedSystemId: "helios",
+        intent: intents[0],
+      }),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_STALE",
+    );
+  }
+  assert.equal(calls.length, 1);
 });
 
 test("main and preload expose one intent-only channel and no renderer patch surface", () => {

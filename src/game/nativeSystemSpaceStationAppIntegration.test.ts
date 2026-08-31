@@ -20,6 +20,9 @@ describe("native system-space-station App integration", () => {
     expect(block).toContain("rejectPlayerStateEditDuringPrimarySave()");
     expect(block).toContain("nativePlayerAuthorityCommandInFlightRef.current");
     expect(block).toContain("nativePlayerAuthorityClockRef.current?.refresh()");
+    expect(block).toContain("expectedSessionId: identity.sessionId");
+    expect(block).toContain("expectedRunId: identity.runId");
+    expect(block).toContain("expectedSystemId: identity.systemId");
     expect(block).not.toMatch(/commitGame|gameRef\.current|SimulationCommandPatch|applySimulationCommandPatch/);
 
     for (const type of [
@@ -36,6 +39,7 @@ describe("native system-space-station App integration", () => {
     expect(app).toMatch(/type: "output-target",[\s\S]*?confirmations: 2/);
     expect(app).toMatch(/<NativeSystemSpaceStationWorkspace[\s\S]*?pending=\{nativePlayerAuthorityCommandPending\}/);
     expect(app).toMatch(/commandsAvailable=\{typeof desktopBridge\?\.commitNativeSystemSpaceStationIntent === "function"\}/);
+    expect(app.match(/onOpenSystemSpaceStation=\{openSystemSpaceStation\}/g)).toHaveLength(2);
   });
 
   it("keeps the renderer surface bounded and free of full-state mutation inputs", () => {
@@ -59,11 +63,12 @@ describe("native system-space-station App integration", () => {
     const desktop = source("src/desktop.ts");
     const preload = source("desktop/preload.cjs");
     const broker = source("desktop/native-player-authority-system-space-station-broker.cjs");
-    expect(desktop).toMatch(/interface DesktopNativeSystemSpaceStationIntentRequest \{[\s\S]*?expectedRevision:[\s\S]*?expectedRegistryFingerprint:[\s\S]*?intent:/);
+    expect(desktop).toMatch(/interface DesktopNativeSystemSpaceStationIntentRequest \{[\s\S]*?expectedSessionId:[\s\S]*?expectedRunId:[\s\S]*?expectedRevision:[\s\S]*?expectedRegistryFingerprint:[\s\S]*?expectedSystemId:[\s\S]*?intent:/);
     expect(preload).toMatch(/commitNativeSystemSpaceStationIntent:[\s\S]*?desktop:native-player-authority-system-space-station-intent/);
     expect(preload).not.toMatch(/commitPlayerAuthoritySystemSpaceStationCommand/);
-    expect(broker).toMatch(/renderer supplies only the revision\/catalog it rendered plus one exact/);
-    expect(broker).toMatch(/exactKeys\(rawRequest, \["expectedRevision", "expectedRegistryFingerprint", "intent"\]\)/);
-    expect(broker).not.toMatch(/rawRequest\.(?:sessionId|runId|command|patch)/);
+    expect(broker).toMatch(/renderer echoes the exact projection lineage and system scope/);
+    expect(broker).toMatch(/before\.sessionId !== rawRequest\.expectedSessionId/);
+    expect(broker).toMatch(/before\.runId !== rawRequest\.expectedRunId/);
+    expect(broker).not.toMatch(/rawRequest\.(?:command|patch)/);
   });
 });

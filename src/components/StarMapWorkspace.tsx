@@ -628,11 +628,13 @@ export function NativeStarMapCatalogConsole({
   status,
   query,
   onQueryChange,
+  onOpenSystemSpaceStation,
 }: {
   frame: NativeStarMapCatalogFrame | null;
   status: StarMapNativeReadStatus;
   query: string;
   onQueryChange: (query: string) => void;
+  onOpenSystemSpaceStation?: (systemId: StarSystemId) => void;
 }) {
   const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
   if (!frame) {
@@ -674,6 +676,15 @@ export function NativeStarMapCatalogConsole({
           {index > 0 ? <div className={`star-route-link${system.discovered ? " star-route-link--open" : ""}`}><i /><ArrowRight size={16} /><span>{formatDistance(system.distanceFromOriginLy)}</span></div> : null}
           <article className={`star-system-card${system.discovered ? " star-system-card--unlocked" : " star-system-card--locked"}${system.active ? " star-system-card--active" : ""}`} style={style}>
             <header><i className="star-system-orb"><Sparkles size={20} /></i><div><span>{staticSystem?.code ?? system.systemId}</span><strong>{system.displayName}</strong><small>{system.starTypeName} · {system.luminosity.toFixed(2)} L☉ · {formatDistance(system.distanceFromOriginLy)}</small></div><em>{system.active ? <><Navigation size={12} /> 当前</> : system.discovered ? <><Check size={12} /> 已发现{system.missionActive ? " · 勘探中" : ""}</> : <><LockKeyhole size={12} /> 未勘探</>}</em></header>
+            <div className="star-system-space-station-actions">
+              <button
+                className="star-system-space-station-upgrade"
+                type="button"
+                disabled={!system.discovered || !staticSystem || !onOpenSystemSpaceStation}
+                onClick={() => staticSystem && onOpenSystemSpaceStation?.(staticSystem.id)}
+                data-native-system-space-station-entry={system.systemId}
+              ><Factory size={14} />管理本系空间站</button>
+            </div>
             <p>{staticSystem?.description ?? `恒星质量 ${system.massMultiplier.toFixed(2)} · 半径 ${system.radiusMultiplier.toFixed(2)}`}</p>
             <div className="star-planet-list">
               {planets.map((planet) => {
@@ -720,6 +731,7 @@ export function NativeStarMapWorkspace({
   onNativeStationLimitsChange,
   onFocusStation,
   onNativeQuantumItemCapacityChange,
+  onOpenSystemSpaceStation,
 }: {
   open: boolean;
   mapCatalogFrame: NativeStarMapCatalogFrame | null;
@@ -739,6 +751,7 @@ export function NativeStarMapWorkspace({
   onNativeStationLimitsChange?: NativeStationLimitsAction;
   onFocusStation: (entityId: string, planetId: PlanetId) => void;
   onNativeQuantumItemCapacityChange?: NativeQuantumItemCapacityAction;
+  onOpenSystemSpaceStation?: (systemId: StarSystemId) => void;
 }) {
   const [view, setView] = useState<"map" | "industry" | "quantum">("map");
   const [mapQuery, setMapQuery] = useState("");
@@ -780,7 +793,7 @@ export function NativeStarMapWorkspace({
       <button type="button" role="tab" aria-selected={view === "quantum"} className={view === "quantum" ? "active" : ""} onClick={() => setView("quantum")}><Atom size={14} />量子库存</button>
     </nav>
 
-    {view === "map" ? <NativeStarMapCatalogConsole frame={mapCatalogFrame} status={mapCatalogStatus} query={mapQuery} onQueryChange={setMapQuery} />
+    {view === "map" ? <NativeStarMapCatalogConsole frame={mapCatalogFrame} status={mapCatalogStatus} query={mapQuery} onQueryChange={setMapQuery} onOpenSystemSpaceStation={onOpenSystemSpaceStation} />
       : view === "industry" ? <NativeIndustryConsole readModel={readModel} status={readStatus} selector={industryReadRequest} onSelectorChange={onIndustryReadRequest} onNativeRoleChange={onNativeRoleChange} onNativeStationPriorityChange={onNativeStationPriorityChange} onNativeStationMinimumLoadChange={onNativeStationMinimumLoadChange} onNativeStationRoutePolicyChange={onNativeStationRoutePolicyChange} onNativeStationWarperBudgetChange={onNativeStationWarperBudgetChange} onNativeStationLimitsChange={onNativeStationLimitsChange} onFocusStation={onFocusStation} />
         : <NativeQuantumInventoryConsole readModel={quantumReadModel} status={quantumReadStatus} onNativeItemCapacityChange={onNativeQuantumItemCapacityChange} />}
   </WorkspaceFrame>;
@@ -820,6 +833,7 @@ export function StarMapWorkspace({
   onCollectorQuantumModeChange,
   onQuantumItemCapacityChange,
   onNativeQuantumItemCapacityChange,
+  onOpenSystemSpaceStation,
   mobile = false,
   mobileSubview,
   onMobileOpenDetail,
@@ -857,6 +871,7 @@ export function StarMapWorkspace({
   onCollectorQuantumModeChange: StarMapCollectorBatchAction;
   onQuantumItemCapacityChange: (itemId: ItemId, value: string) => void;
   onNativeQuantumItemCapacityChange?: NativeQuantumItemCapacityAction;
+  onOpenSystemSpaceStation?: (systemId: StarSystemId) => void;
   mobile?: boolean;
   mobileSubview?: string | null;
   onMobileOpenDetail?: (subview: string) => void;
@@ -943,7 +958,7 @@ export function StarMapWorkspace({
     <button className="star-map-batch-actions__collectors" type="button" disabled={batchBusy !== null || pendingCollectorCount === 0} onClick={() => void runBatchAction("collectors", () => onCollectorQuantumModeChange(true))}><ArrowUpFromLine size={14} /><span>量子网络一键接入所有轨道收集器{pendingCollectorCount > 0 ? `（${pendingCollectorCount}）` : ""}</span></button>
     {batchReport ? <div className="star-map-batch-report" role="status" aria-live="polite"><strong>{batchReport.scopeLabel} · {batchReport.actionLabel}</strong><span>成功 {batchReport.successCount} · 跳过 {batchReport.skippedCount}</span>{batchReport.skipReasons.length > 0 ? <small>跳过原因：{batchReport.skipReasons.join("；")}</small> : <small>全部符合条件的目标均已提交</small>}<button type="button" onClick={() => setBatchReport(null)} aria-label="关闭批量操作结果"><X size={12} /></button></div> : null}
   </div>;
-  const nativeMapCatalogConsole = <NativeStarMapCatalogConsole frame={nativeMapCatalogFrame ?? null} status={nativeMapCatalogStatus} query={mapQuery} onQueryChange={setMapQuery} />;
+  const nativeMapCatalogConsole = <NativeStarMapCatalogConsole frame={nativeMapCatalogFrame ?? null} status={nativeMapCatalogStatus} query={mapQuery} onQueryChange={setMapQuery} onOpenSystemSpaceStation={onOpenSystemSpaceStation} />;
   const nativeQuantumConsole = <NativeQuantumInventoryConsole readModel={nativeQuantumReadModel ?? null} status={nativeQuantumReadStatus} onNativeItemCapacityChange={onNativeQuantumItemCapacityChange} />;
   const industryConsole = nativeAuthorityRequired
     ? <NativeIndustryConsole readModel={nativeReadModel ?? null} status={nativeReadStatus} selector={industryReadRequest} onSelectorChange={onIndustryReadRequest} onNativeRoleChange={onNativeRoleChange} onNativeStationPriorityChange={onNativeStationPriorityChange} onNativeStationMinimumLoadChange={onNativeStationMinimumLoadChange} onNativeStationRoutePolicyChange={onNativeStationRoutePolicyChange} onNativeStationWarperBudgetChange={onNativeStationWarperBudgetChange} onNativeStationLimitsChange={onNativeStationLimitsChange} onFocusStation={onFocusStation} />
@@ -981,7 +996,7 @@ export function StarMapWorkspace({
         const missionActive = nativeSystem?.missionActive ?? Boolean(mission);
         const stationCount = pendingSystemUpgradeCount(system.id);
         const quantumCount = pendingSystemQuantumCount(system.id);
-        return <div className="mobile-star-system-list__row" key={system.id}><button type="button" onClick={() => onMobileOpenDetail?.(`system:${system.id}`)}><i style={{ color: system.color }}><Sparkles size={21} /></i><span><small>{system.code} · {nativeSystem?.starTypeName ?? profile.starTypeName}</small><strong>{nativeSystem?.displayName ?? getStarSystemDisplayName(game, system.id)}</strong><em>{nativeSystem?.planetCount ?? system.planetIds.length} 颗行星 · {(nativeSystem?.luminosity ?? profile.luminosity).toFixed(2)} L☉ · {formatDistance(nativeSystem?.distanceFromOriginLy ?? profile.distanceFromOriginLy)}</em></span><b>{unlocked ? missionActive ? "勘探中" : "已发现" : "未勘探"}</b><ArrowRight size={18} /></button>{stationCount > 0 ? <button className="mobile-star-system-list__upgrade" type="button" onClick={() => onUpgradeAllStations(system.id)}><Sparkles size={15} />升级本系物流站（{stationCount}）</button> : null}{quantumCount > 0 ? <button className="mobile-star-system-list__upgrade mobile-star-system-list__upgrade--quantum" type="button" onClick={() => onAttachAllQuantumStations(system.id)}><Sparkles size={15} />切换本系量子物流站（{quantumCount}）</button> : null}</div>;
+        return <div className="mobile-star-system-list__row" key={system.id}><button type="button" onClick={() => onMobileOpenDetail?.(`system:${system.id}`)}><i style={{ color: system.color }}><Sparkles size={21} /></i><span><small>{system.code} · {nativeSystem?.starTypeName ?? profile.starTypeName}</small><strong>{nativeSystem?.displayName ?? getStarSystemDisplayName(game, system.id)}</strong><em>{nativeSystem?.planetCount ?? system.planetIds.length} 颗行星 · {(nativeSystem?.luminosity ?? profile.luminosity).toFixed(2)} L☉ · {formatDistance(nativeSystem?.distanceFromOriginLy ?? profile.distanceFromOriginLy)}</em></span><b>{unlocked ? missionActive ? "勘探中" : "已发现" : "未勘探"}</b><ArrowRight size={18} /></button>{unlocked ? <button className="mobile-star-system-list__upgrade" type="button" onClick={() => onOpenSystemSpaceStation?.(system.id)}><Factory size={15} />管理本系空间站</button> : null}{stationCount > 0 ? <button className="mobile-star-system-list__upgrade" type="button" onClick={() => onUpgradeAllStations(system.id)}><Sparkles size={15} />升级本系物流站（{stationCount}）</button> : null}{quantumCount > 0 ? <button className="mobile-star-system-list__upgrade mobile-star-system-list__upgrade--quantum" type="button" onClick={() => onAttachAllQuantumStations(system.id)}><Sparkles size={15} />切换本系量子物流站（{quantumCount}）</button> : null}</div>;
       })}</div>}</> : detailPlanet && planetProfile && colonyRequirements ? <div className="mobile-workspace-scroll mobile-planet-detail">
         <header className="mobile-detail-heading"><i style={{ color: detailPlanet.color }}><Orbit size={22} /></i><span><small>{systemForPlanet ? getStarSystemDisplayName(game, systemForPlanet.id) : ""} · {detailPlanet.code}</small><strong>{getPlanetDisplayName(game, detailPlanet.id)}</strong></span><b>{colonized ? "已殖民" : "殖民候选"}</b></header>
         <StellarMetadataManager game={game} compact onPlanetMetadataChange={onPlanetMetadataChange} onSystemNameChange={onSystemNameChange} />
@@ -990,7 +1005,7 @@ export function StarMapWorkspace({
         {!colonized ? <section className={`mobile-colony-requirements mobile-colony-requirements--${colonyRequirements.status}`}><header><strong>殖民前哨需求</strong><small>材料取自{getPlanetDisplayName(game, colonyRequirements.sourcePlanetId)}，运输载具取自随身载具栏</small></header><p>{colonyRequirements.reason}</p><div>{colonyRequirements.costs.map((cost) => <span className={cost.missing === 0 ? "ready" : "missing"} key={cost.itemId}><ItemGlyph itemId={cost.itemId} /><em>{getItem(cost.itemId).name}<small>{cost.source === "portable-fleet" ? "随身载具" : "当前行星托盘"}</small></em><strong>{cost.current.toLocaleString("zh-CN")}/{cost.required.toLocaleString("zh-CN")}</strong></span>)}</div></section> : null}
         <div className="mobile-detail-spacer" /><footer className="mobile-detail-actionbar"><button className="primary" type="button" disabled={!colonized && !canColonizePlanet(game, detailPlanet.id)} onClick={() => colonized ? onTravel(detailPlanet.id) : onColonize(detailPlanet.id)}>{colonized ? <Navigation size={18} /> : <Factory size={18} />}{colonized ? "进入行星工厂" : "建立殖民前哨"}</button></footer>
       </div> : detailSystem && systemProfile ? <div className="mobile-workspace-scroll mobile-star-system-detail">
-        <header className="mobile-detail-heading"><i style={{ color: detailSystem.color }}><Sparkles size={22} /></i><span><small>{detailSystem.code} · {systemProfile.starTypeName}</small><strong>{getStarSystemDisplayName(game, detailSystem.id)}</strong></span><b>{systemProfile.luminosity.toFixed(2)} L☉</b></header><p className="mobile-detail-summary">{detailSystem.description}</p><div className="mobile-detail-system-actions">{pendingSystemUpgradeCount(detailSystem.id) > 0 ? <button className="mobile-detail-system-upgrade" type="button" onClick={() => onUpgradeAllStations(detailSystem.id)}><Sparkles size={16} />一键升级本系物流站</button> : null}{pendingSystemQuantumCount(detailSystem.id) > 0 ? <button className="mobile-detail-system-upgrade mobile-detail-system-upgrade--quantum" type="button" onClick={() => onAttachAllQuantumStations(detailSystem.id)}><Sparkles size={16} />一键切换本系量子物流站</button> : null}</div>
+        <header className="mobile-detail-heading"><i style={{ color: detailSystem.color }}><Sparkles size={22} /></i><span><small>{detailSystem.code} · {systemProfile.starTypeName}</small><strong>{getStarSystemDisplayName(game, detailSystem.id)}</strong></span><b>{systemProfile.luminosity.toFixed(2)} L☉</b></header><p className="mobile-detail-summary">{detailSystem.description}</p><div className="mobile-detail-system-actions"><button className="mobile-detail-system-upgrade" type="button" onClick={() => onOpenSystemSpaceStation?.(detailSystem.id)}><Factory size={16} />管理本系空间站</button>{pendingSystemUpgradeCount(detailSystem.id) > 0 ? <button className="mobile-detail-system-upgrade" type="button" onClick={() => onUpgradeAllStations(detailSystem.id)}><Sparkles size={16} />一键升级本系物流站</button> : null}{pendingSystemQuantumCount(detailSystem.id) > 0 ? <button className="mobile-detail-system-upgrade mobile-detail-system-upgrade--quantum" type="button" onClick={() => onAttachAllQuantumStations(detailSystem.id)}><Sparkles size={16} />一键切换本系量子物流站</button> : null}</div>
         <StellarMetadataManager game={game} compact onPlanetMetadataChange={onPlanetMetadataChange} onSystemNameChange={onSystemNameChange} />
         <section className="mobile-detail-section"><header>行星</header><div className="mobile-system-planets">{detailSystem.planetIds.map((planetId) => { const planet = getPlanet(planetId); const profile = getPlanetIndustrialProfile(game, planetId); const ready = isPlanetColonized(game, planetId); return <button type="button" key={planetId} onClick={() => onMobileOpenDetail?.(`planet:${planetId}`)}><i style={{ color: planet.color }}><Orbit size={20} /></i><span><strong>{getPlanetDisplayName(game, planetId)}</strong><small>{profile.climateName} · {OCEAN_LABELS[profile.oceanType]}</small></span><b>{ready ? "已殖民" : "查看需求"}</b><ArrowRight size={18} /></button>; })}</div></section>
         {!isStarSystemUnlocked(game, detailSystem.id) ? <section className="mobile-colony-requirements"><header><strong>恒星系勘探</strong><small>{formatDistance(systemProfile.distanceFromOriginLy)}</small></header><div>{detailSystem.explorationCost.map((cost) => <span className={(game.tray[cost.itemId] ?? 0) >= cost.amount ? "ready" : "missing"} key={cost.itemId}><ItemGlyph itemId={cost.itemId} /><em>{getItem(cost.itemId).name}</em><strong>{Math.floor(game.tray[cost.itemId] ?? 0)}/{cost.amount}</strong></span>)}</div><button type="button" disabled={!canExploreStarSystem(game, detailSystem.id)} onClick={() => onExplore(detailSystem.id)}><Telescope size={18} />开始勘探</button></section> : null}
@@ -1063,7 +1078,7 @@ export function StarMapWorkspace({
                   <div><span>{system.code}</span><strong>{nativeSystem?.displayName ?? getStarSystemDisplayName(game, system.id)}</strong><small>{nativeSystem?.starTypeName ?? systemProfile.starTypeName} · {(nativeSystem?.luminosity ?? systemProfile.luminosity).toFixed(2)} L☉ · {formatDistance(nativeSystem?.distanceFromOriginLy ?? systemProfile.distanceFromOriginLy)}</small></div>
                   <em>{active ? <><Navigation size={12} /> 当前</> : unlocked ? <><Check size={12} /> 已发现{missionActive ? " · 勘探中" : ""}</> : <><LockKeyhole size={12} /> 未勘探</>}</em>
                 </header>
-                <div className="star-system-space-station-actions">{pendingSystemUpgradeCount(system.id) > 0 ? <button className="star-system-space-station-upgrade" type="button" onClick={() => onUpgradeAllStations(system.id)}><Sparkles size={14} />一键升级本系物流站</button> : null}{pendingSystemQuantumCount(system.id) > 0 ? <button className="star-system-space-station-upgrade star-system-space-station-upgrade--quantum" type="button" onClick={() => onAttachAllQuantumStations(system.id)}><Sparkles size={14} />一键切换本系量子物流站</button> : null}</div>
+                <div className="star-system-space-station-actions">{unlocked ? <button className="star-system-space-station-upgrade" type="button" onClick={() => onOpenSystemSpaceStation?.(system.id)}><Factory size={14} />管理本系空间站</button> : null}{pendingSystemUpgradeCount(system.id) > 0 ? <button className="star-system-space-station-upgrade" type="button" onClick={() => onUpgradeAllStations(system.id)}><Sparkles size={14} />一键升级本系物流站</button> : null}{pendingSystemQuantumCount(system.id) > 0 ? <button className="star-system-space-station-upgrade star-system-space-station-upgrade--quantum" type="button" onClick={() => onAttachAllQuantumStations(system.id)}><Sparkles size={14} />一键切换本系量子物流站</button> : null}</div>
                 <p>{system.description}</p>
                 <div className="star-planet-list">
                   {system.planetIds.map((planetId) => {

@@ -1315,6 +1315,7 @@ test("system-space-station authority command derives exact intent identity befor
     runId: "player-run-1",
     expectedRevision: 7,
     expectedRegistryFingerprint: "7df8cf3a",
+    expectedSystemId: "helios",
     intent,
   });
   await registry.commitPlayerAuthoritySystemSpaceStationCommand("main-player-authority", {
@@ -1323,6 +1324,7 @@ test("system-space-station authority command derives exact intent identity befor
     commandId: identity.commandId,
     baseRevision: 7,
     expectedRegistryFingerprint: "7df8cf3a",
+    expectedSystemId: "helios",
     intent,
   });
   assert.deepEqual(calls, [{
@@ -1333,6 +1335,7 @@ test("system-space-station authority command derives exact intent identity befor
       commandId: identity.commandId,
       baseRevision: 7,
       expectedRegistryFingerprint: "7df8cf3a",
+      expectedSystemId: "helios",
       intent,
     },
   }]);
@@ -1344,6 +1347,7 @@ test("system-space-station authority command derives exact intent identity befor
       commandId: identity.commandId,
       baseRevision: 7,
       expectedRegistryFingerprint: "7df8cf3a",
+      expectedSystemId: "helios",
       intent: { ...intent, target: 4 },
     },
   ), /command ID conflicts/);
@@ -1355,6 +1359,7 @@ test("system-space-station authority command derives exact intent identity befor
       commandId: identity.commandId,
       baseRevision: 7,
       expectedRegistryFingerprint: "7df8cf3a",
+      expectedSystemId: "helios",
       intent,
       command: {},
     },

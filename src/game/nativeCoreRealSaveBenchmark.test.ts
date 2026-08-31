@@ -27,6 +27,30 @@ const { NativeHostClient, NativeSaveSessionRegistry } = require("../../desktop/n
   NativeHostClient: new (options: { binaryPath: string; rootPath: string; requestTimeoutMs: number }) => {
     child?: { pid?: number };
     stderrTail?: string;
+    requestWithStructuredProfileEvidence(
+      request: Record<string, unknown>,
+      options?: { requestTimeoutMs?: number },
+    ): Promise<{
+      value: any;
+      operationDurationNs: number | null;
+      profileChannel: {
+        responseBound: boolean;
+        dropped: boolean;
+        malformedCount: number;
+        incomplete: boolean;
+        quiescent: boolean;
+        timedOut: boolean;
+        records: Array<{ sequence: number; record: unknown }>;
+      };
+      operationBinding: {
+        protocol: string;
+        requestId: number;
+        sessionIdSha256: string;
+        baseRevision: number;
+        measuredRevision: number | null;
+        profilePurpose: string;
+      };
+    }>;
     start(version: string): Promise<{ capabilities: string[] }>;
     request(request: Record<string, unknown>): Promise<any>;
     stop(): Promise<void>;
@@ -812,17 +836,18 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     const openStartedAt = performance.now();
     let openFinishedAt = openStartedAt;
     let opened: any;
+    const coreOpenRequest = {
+      operation: "coreOpen",
+      slot: envelope.mode === "speedrun" ? "speedrun-main" : "normal-main",
+      generation: commit.generation,
+      rootHash: commit.rootHash,
+      revision: commit.revision,
+      registryFingerprint: runtime.fingerprint,
+      catalog: createNativeCoreCatalog(runtime),
+    };
     let openPeakSample: PrivatePeakSample;
     try {
-      opened = await client.request({
-        operation: "coreOpen",
-        slot: envelope.mode === "speedrun" ? "speedrun-main" : "normal-main",
-        generation: commit.generation,
-        rootHash: commit.rootHash,
-        revision: commit.revision,
-        registryFingerprint: runtime.fingerprint,
-        catalog: createNativeCoreCatalog(runtime),
-      });
+      opened = await client.request(coreOpenRequest);
       openFinishedAt = performance.now();
     } finally {
       openPeakSample = await openPeakSampler.stop();
@@ -876,16 +901,17 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     }
     const commandPrivateBytesBefore = privateBytes(client.child?.pid);
     const commandStartedAt = performance.now();
+    const unpauseCommand = {
+      protocolVersion: 1,
+      baseRevision: commit.revision,
+      topLevelChanges: [{ path: ["paused"], operation: "set", value: false }],
+      changedEntities: [], addedEntities: [], removedEntityIds: [],
+      changedBelts: [], addedBelts: [], removedBeltIds: [],
+    };
     const resumed = await client.request({
       operation: "coreApplyCommand",
       sessionId: opened.sessionId,
-      command: {
-        protocolVersion: 1,
-        baseRevision: commit.revision,
-        topLevelChanges: [{ path: ["paused"], operation: "set", value: false }],
-        changedEntities: [], addedEntities: [], removedEntityIds: [],
-        changedBelts: [], addedBelts: [], removedBeltIds: [],
-      },
+      command: unpauseCommand,
     });
     const commandDurationMs = performance.now() - commandStartedAt;
     const commandPrivateBytesAfter = privateBytes(client.child?.pid);
@@ -911,13 +937,15 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
       nativeHost: fixedAffinityProcessSnapshot(client.child?.pid),
     };
     let fixedAffinityProcessesAfter = fixedAffinityProcessesBefore;
+    const fixedProfileEvidenceEnabled = fixedAffinityProcessPolicy !== null &&
+      process.env.DSP_NATIVE_CORE_PROFILE === "1";
     const exactPeakSampler = await startPrivatePeakSampler(client.child?.pid, "exact-advance");
-    const coreAdvanceStartedAt = performance.now();
-    let coreAdvanceFinishedAt = coreAdvanceStartedAt;
+    let coreAdvanceDurationNs: number | null = null;
+    let timingProfileOperation: Awaited<ReturnType<InstanceType<typeof NativeHostClient>["requestWithStructuredProfileEvidence"]>> | null = null;
     let admission: any;
     let exactPeakSample: PrivatePeakSample;
     try {
-      admission = await client.request({
+      const advanceRequest = {
         operation: "coreAdvance",
         sessionId: opened.sessionId,
         request: {
@@ -926,8 +954,22 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
           wallSeconds: 1,
           includeDiagnostics: false,
         },
-      });
-      coreAdvanceFinishedAt = performance.now();
+      };
+      if (fixedProfileEvidenceEnabled) {
+        timingProfileOperation = await client.requestWithStructuredProfileEvidence({
+          ...advanceRequest,
+          profilePurpose: "local-dispatch-timing-v1",
+        });
+        admission = timingProfileOperation.value;
+        coreAdvanceDurationNs = timingProfileOperation.operationDurationNs;
+      } else {
+        const startedAtNs = process.hrtime.bigint();
+        admission = await client.request(advanceRequest);
+        const duration = process.hrtime.bigint() - startedAtNs;
+        coreAdvanceDurationNs = duration > 0n && duration <= BigInt(Number.MAX_SAFE_INTEGER)
+          ? Number(duration)
+          : null;
+      }
     } finally {
       try {
         fixedAffinityProcessesAfter = fixedAffinityProcessPolicy ? {
@@ -951,7 +993,7 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
         exactPeakSample = await exactPeakSampler.stop();
       }
     }
-    const coreAdvanceDurationMs = coreAdvanceFinishedAt - coreAdvanceStartedAt;
+    const coreAdvanceDurationMs = coreAdvanceDurationNs === null ? Number.NaN : coreAdvanceDurationNs / 1_000_000;
     const diagnosticsStartedAt = performance.now();
     const advancedSummary = await client.request({
       operation: "coreStatus",
@@ -965,6 +1007,40 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
     });
     const cachedDiagnosticsDurationMs = performance.now() - cachedDiagnosticsStartedAt;
     expect(cachedAdvancedSummary).toEqual(advancedSummary);
+    let shapeProfileOperation: Awaited<ReturnType<InstanceType<typeof NativeHostClient>["requestWithStructuredProfileEvidence"]>> | null = null;
+    let shapeAdvancedSummary: any = null;
+    if (admission.supported && fixedProfileEvidenceEnabled) {
+      const shapeOpened = await client.request(coreOpenRequest);
+      try {
+        const shapeResumed = await client.request({
+          operation: "coreApplyCommand",
+          sessionId: shapeOpened.sessionId,
+          command: unpauseCommand,
+        });
+        expect(shapeResumed.revision).toBe(resumed.revision);
+        shapeProfileOperation = await client.requestWithStructuredProfileEvidence({
+          operation: "coreAdvance",
+          profilePurpose: "local-dispatch-shape-v1",
+          sessionId: shapeOpened.sessionId,
+          request: {
+            baseRevision: shapeResumed.revision,
+            simulationSeconds: 1,
+            wallSeconds: 1,
+            includeDiagnostics: false,
+          },
+        });
+        expect(shapeProfileOperation.value.supported).toBe(true);
+        shapeAdvancedSummary = await client.request({
+          operation: "coreStatus",
+          sessionId: shapeOpened.sessionId,
+        });
+      } finally {
+        await client.request({ operation: "coreClose", sessionId: shapeOpened.sessionId });
+      }
+      expect(shapeAdvancedSummary.canonicalSha256).toBe(advancedSummary.canonicalSha256);
+      expect(shapeAdvancedSummary.domainSha256).toBe(advancedSummary.domainSha256);
+      expect(shapeAdvancedSummary.revision).toBe(advancedSummary.revision);
+    }
     logBenchmarkRecord("admission", {
       nativeCoreAdmission: {
         supported: admission.supported,
@@ -1043,6 +1119,7 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
           mismatchDetails,
           blockedMachineGroups,
           nativeAdvanceDurationMs: Number(coreAdvanceDurationMs.toFixed(2)),
+          nativeAdvanceDurationNs: coreAdvanceDurationNs,
           jsAdvanceDurationMs: Number(jsAdvanceDurationMs.toFixed(2)),
           jsAdvanceAndConservationDurationMs: Number(jsAdvanceAndConservationDurationMs.toFixed(2)),
           nativeToJsRatio: Number((coreAdvanceDurationMs / jsAdvanceDurationMs).toFixed(3)),
@@ -1075,6 +1152,19 @@ describe.skipIf(!runBenchmark)("real-save Windows native core benchmark", () => 
             effectiveWorkerLimit: lastNativeProfileValue(client.stderrTail, "runtime-worker-limit"),
             observedWorkerCount: lastNativeProfileValue(client.stderrTail, "runtime-observed-workers"),
             writeBackWorkers: admission.beltScheduler?.writeBackWorkers ?? null,
+            fullAdvanceDurationNs: coreAdvanceDurationNs,
+            shapeMeasuredCanonicalSha256: shapeAdvancedSummary?.canonicalSha256 ?? null,
+            shapeMeasuredDomainSha256: shapeAdvancedSummary?.domainSha256 ?? null,
+            localDispatchProfileOperations: {
+              timing: timingProfileOperation ? {
+                profileChannel: timingProfileOperation.profileChannel,
+                operationBinding: timingProfileOperation.operationBinding,
+              } : null,
+              shape: shapeProfileOperation ? {
+                profileChannel: shapeProfileOperation.profileChannel,
+                operationBinding: shapeProfileOperation.operationBinding,
+              } : null,
+            },
           },
           javascriptBeltScheduler: {
             routeChecks: jsProfiler.beltRouteChecks,

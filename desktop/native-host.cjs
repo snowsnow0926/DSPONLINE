@@ -203,6 +203,7 @@ class NativeHostClient {
     this.pending = new Map();
     this.stdoutBuffer = Buffer.alloc(0);
     this.stderrTail = "";
+    this.structuredProfileRequestActive = false;
     this.exited = false;
   }
 
@@ -237,16 +238,19 @@ class NativeHostClient {
     return this.startPromise;
   }
 
-  request(request, timeoutMs = this.requestTimeoutMs) {
+  beginRequest(request, timeoutMs = this.requestTimeoutMs) {
     if (!this.child || this.exited || !this.child.stdin.writable) {
-      return Promise.reject(new NativeHostError("native host is not running", "NATIVE_HOST_UNAVAILABLE"));
+      return {
+        requestId: null,
+        promise: Promise.reject(new NativeHostError("native host is not running", "NATIVE_HOST_UNAVAILABLE")),
+      };
     }
     const requestId = this.nextRequestId;
     this.nextRequestId += 1;
     if (!Number.isSafeInteger(this.nextRequestId)) this.nextRequestId = 1;
     const payload = Buffer.from(JSON.stringify(request), "utf8");
     const frame = encodeFrame({ requestId, payload });
-    return new Promise((resolve, reject) => {
+    const promise = new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         reject(new NativeHostError("native host request timed out", "NATIVE_HOST_TIMEOUT"));
@@ -261,6 +265,77 @@ class NativeHostClient {
         pending.reject(new NativeHostError(`native host write failed: ${error.message}`, "NATIVE_HOST_WRITE_FAILED"));
       });
     });
+    return { requestId, promise };
+  }
+
+  request(request, timeoutMs = this.requestTimeoutMs) {
+    return this.beginRequest(request, timeoutMs).promise;
+  }
+
+  async requestWithStructuredProfileEvidence(request, {
+    requestTimeoutMs = this.requestTimeoutMs,
+  } = {}) {
+    if (this.structuredProfileRequestActive || request?.operation !== "coreAdvance" ||
+        !["local-dispatch-timing-v1", "local-dispatch-shape-v1"].includes(request?.profilePurpose) ||
+        typeof request?.sessionId !== "string" || request.sessionId.length === 0 ||
+        !Number.isSafeInteger(request?.request?.baseRevision) || request.request.baseRevision < 0) {
+      throw new TypeError("native structured profile request binding is invalid");
+    }
+    this.structuredProfileRequestActive = true;
+    const startedAtNs = process.hrtime.bigint();
+    try {
+      const pending = this.beginRequest(request, requestTimeoutMs);
+      if (!Number.isSafeInteger(pending.requestId) || pending.requestId <= 0) {
+        return await pending.promise;
+      }
+      const framedValue = await pending.promise;
+      const completedAtNs = process.hrtime.bigint();
+      const duration = completedAtNs - startedAtNs;
+      const operationDurationNs = duration > 0n && duration <= BigInt(Number.MAX_SAFE_INTEGER)
+        ? Number(duration)
+        : null;
+      const framedEvidence = framedValue?.profileEvidence;
+      const responseBound = Boolean(
+        framedEvidence && typeof framedEvidence === "object" && !Array.isArray(framedEvidence) &&
+        framedEvidence.protocol === "native-core-advance-profile-response-v1" &&
+        framedEvidence.requestId === pending.requestId &&
+        typeof framedEvidence.overflowed === "boolean" &&
+        Array.isArray(framedEvidence.records) && framedEvidence.records.length <= 2 &&
+        framedEvidence.records.every((record) => record && typeof record === "object" && !Array.isArray(record)),
+      );
+      const responseRecords = responseBound ? framedEvidence.records : [];
+      const profileChannel = {
+        responseBound,
+        dropped: responseBound ? framedEvidence.overflowed : false,
+        malformedCount: responseBound ? 0 : 1,
+        incomplete: false,
+        quiescent: true,
+        timedOut: false,
+        records: responseRecords.map((record, index) => ({
+          sequence: index + 1,
+          record: JSON.parse(JSON.stringify(record)),
+        })),
+      };
+      const value = framedValue && typeof framedValue === "object" && !Array.isArray(framedValue)
+        ? { ...framedValue }
+        : framedValue;
+      if (value && typeof value === "object" && !Array.isArray(value)) delete value.profileEvidence;
+      return {
+        value,
+        operationDurationNs,
+        profileChannel,
+        operationBinding: {
+          protocol: "native-core-advance-profile-v1",
+          requestId: pending.requestId,
+          sessionIdSha256: createHash("sha256").update(request.sessionId, "utf8").digest("hex"),
+          baseRevision: request.request.baseRevision,
+          measuredRevision: Number.isSafeInteger(value?.revision) ? value.revision : null,
+          profilePurpose: request.profilePurpose,
+        },
+      };
+    } finally {
+      this.structuredProfileRequestActive = false;
+    }
   }
 
   async stop() {

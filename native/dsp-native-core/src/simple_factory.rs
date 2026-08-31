@@ -3912,17 +3912,17 @@ fn simulate_step(
     seconds: f64,
     isolate_construction_automation: bool,
 ) -> anyhow::Result<bool> {
-    let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
-    let mut profile_checkpoint = std::time::Instant::now();
+    let profile_enabled = crate::profile_evidence::profile_environment_enabled();
+    let mut profile_checkpoint = profile_enabled.then(std::time::Instant::now);
     macro_rules! profile_mark {
         ($label:literal) => {
-            if profile_enabled {
+            if let Some(checkpoint) = profile_checkpoint.as_mut() {
                 eprintln!(
                     "DSP_NATIVE_CORE_PROFILE\t{}\t{:.3}",
                     $label,
-                    profile_checkpoint.elapsed().as_secs_f64() * 1_000.0
+                    checkpoint.elapsed().as_secs_f64() * 1_000.0
                 );
-                profile_checkpoint = std::time::Instant::now();
+                *checkpoint = std::time::Instant::now();
             }
         };
     }
@@ -5287,14 +5287,40 @@ fn simulate_step(
             scan.selected_demands, scan.total_candidate_rows, scan.dense_fallback
         );
     }
-    let local_dispatch_scan = crate::local_logistics::dispatch(
-        state,
-        base,
-        entities,
-        &station_powers,
-        local_step_runtime,
-        &mut step_route_ledger,
-    )?;
+    profile_mark!("local-dispatch-preparation");
+    let profile_operation = profile_enabled
+        .then(crate::profile_evidence::current_profile_operation_binding)
+        .flatten();
+    let timing_profile = profile_operation.as_ref().is_some_and(|binding| {
+        binding.purpose() == crate::profile_evidence::ProfileOperationPurpose::LocalDispatchTimingV1
+    });
+    let shape_profile = profile_operation.as_ref().is_some_and(|binding| {
+        binding.purpose() == crate::profile_evidence::ProfileOperationPurpose::LocalDispatchShapeV1
+    });
+    let local_dispatch_started = timing_profile.then(std::time::Instant::now);
+    let local_dispatch_scan = if shape_profile {
+        crate::local_logistics::dispatch_profiled(
+            state,
+            base,
+            entities,
+            &station_powers,
+            local_step_runtime,
+            &mut step_route_ledger,
+        )?
+    } else {
+        crate::local_logistics::dispatch(
+            state,
+            base,
+            entities,
+            &station_powers,
+            local_step_runtime,
+            &mut step_route_ledger,
+        )?
+    };
+    let local_dispatch_duration_ns = local_dispatch_started
+        .map(|started| u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    profile_mark!("local-dispatch");
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tlocal-dispatch-active\t{}/{}\tdemands={}/{}\tdense={}\tdirectory-fallback={}",
@@ -5305,8 +5331,62 @@ fn simulate_step(
             local_dispatch_scan.dense_fallback,
             local_dispatch_scan.directory_fallback,
         );
+        if let Some(binding) = profile_operation.as_ref() {
+            let operation_binding = json!({
+                "protocol": "native-core-advance-profile-v1",
+                "requestId": binding.request_id(),
+                "sessionIdSha256": hex::encode(binding.session_id_sha256()),
+                "baseRevision": binding.base_revision(),
+                "expectedMeasuredRevision": binding.expected_measured_revision(),
+                "profilePurpose": binding.purpose().as_str(),
+            });
+            let structured_profile = if timing_profile {
+                json!({
+                    "schemaVersion": 2,
+                    "recordType": "local-dispatch-timing",
+                    "instrumentationVersion": "local-dispatch-profile-v3",
+                    "measurementScope": "production-dispatch-only-observer-excluded",
+                    "stageDurationNs": local_dispatch_duration_ns,
+                    "operationBinding": operation_binding,
+                })
+            } else {
+                let profile = local_dispatch_scan
+                    .profile
+                    .expect("shape-only local dispatch profile");
+                json!({
+                    "schemaVersion": 2,
+                    "recordType": "local-dispatch-planet-shards",
+                    "instrumentationVersion": "local-dispatch-profile-v3",
+                    "workScope": "shape-proxy-only-not-time-or-speedup",
+                    "productGate": "full-advance-stage-share-times-parallelizable-share-at-least-3.5-percent",
+                    "selectedDemands": profile.selected_demands,
+                    "totalDemands": profile.total_demands,
+                    "planetShards": profile.planet_shards,
+                    "demandSlots": profile.demand_slots,
+                    "peerEdges": profile.peer_edges,
+                    "sortWorkUnits": profile.sort_work_units,
+                    "totalWorkUnits": profile.total_work_units,
+                    "largestShardWorkUnits": profile.largest_shard_work_units,
+                    "largestShardRatioPpm": profile.largest_shard_ratio_ppm,
+                    "parallelizableWorkUnits": profile.parallelizable_work_units,
+                    "parallelizableRatioPpm": profile.parallelizable_ratio_ppm,
+                    "routeEvents": profile.route_events,
+                    "shardWorkSha256": hex::encode(profile.shard_work_sha256),
+                    "planetIdentityProven": profile.planet_identity_proven,
+                    "scanFallback": profile.scan_fallback.as_str(),
+                    "parallelFallback": profile.parallel_fallback.as_str(),
+                    "operationBinding": operation_binding,
+                })
+            };
+            let captured = crate::profile_evidence::record_profile_operation_evidence(
+                structured_profile.clone(),
+            );
+            eprintln!(
+                "DSP_NATIVE_CORE_PROFILE_RECORD_DIAGNOSTIC\t{}\tcaptured={captured}",
+                structured_profile,
+            );
+        }
     }
-    profile_mark!("local-dispatch");
     let interstellar_step_runtime = std::sync::Arc::make_mut(interstellar_route_activity);
     let interstellar_dispatch_scan = crate::interstellar_logistics::dispatch(
         state,
@@ -5708,7 +5788,6 @@ fn simulate_step(
         }
     }
     profile_mark!("metrics-and-global-finalize");
-    let _ = profile_checkpoint.elapsed();
     Ok(station_mode_topology_changed)
 }
 
@@ -5740,8 +5819,8 @@ pub(crate) fn prepare_advance(
     wall_seconds: f64,
     isolate_construction_automation: bool,
 ) -> anyhow::Result<PreparedFactoryAdvance> {
-    let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
-    let mut profile_checkpoint = std::time::Instant::now();
+    let profile_enabled = crate::profile_evidence::profile_environment_enabled();
+    let mut profile_checkpoint = profile_enabled.then(std::time::Instant::now);
     if profile_enabled {
         let runtime = crate::deterministic_runtime::runtime();
         eprintln!(
@@ -5755,13 +5834,13 @@ pub(crate) fn prepare_advance(
     }
     macro_rules! profile_mark {
         ($label:literal) => {
-            if profile_enabled {
+            if let Some(checkpoint) = profile_checkpoint.as_mut() {
                 eprintln!(
                     "DSP_NATIVE_CORE_PROFILE\tstate-{}\t{:.3}",
                     $label,
-                    profile_checkpoint.elapsed().as_secs_f64() * 1_000.0
+                    checkpoint.elapsed().as_secs_f64() * 1_000.0
                 );
-                profile_checkpoint = std::time::Instant::now();
+                *checkpoint = std::time::Instant::now();
             }
         };
     }
@@ -6046,7 +6125,6 @@ pub(crate) fn prepare_advance(
     {
         station.insert("status".to_owned(), Value::from("eligible"));
     }
-    let _ = profile_checkpoint.elapsed();
     Ok(PreparedFactoryAdvance {
         base,
         entities,

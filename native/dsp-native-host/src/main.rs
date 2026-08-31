@@ -57,6 +57,7 @@ fn handle_request(
     store: &mut SaveStore,
     cores: &mut CoreRegistry,
     player_authority_startup_recovery: &mut Option<CorePlayerAuthorityStartupRecoveryReceipt>,
+    request_id: u64,
     request: ControlRequest,
 ) -> anyhow::Result<HostAction> {
     let value = match request {
@@ -609,7 +610,47 @@ fn handle_request(
         ControlRequest::CoreAdvance {
             session_id,
             request,
-        } => to_value(cores.advance(&session_id, &request)?)?,
+            profile_purpose,
+        } => {
+            if let Some(purpose) = profile_purpose {
+                if std::env::var("DSP_NATIVE_CORE_PROFILE").as_deref() != Ok("1") {
+                    bail!("native core profile purpose requires the fixed profile environment");
+                }
+                if request.simulation_seconds != 1.0
+                    || request.wall_seconds != 1.0
+                    || request.advance_mode != dsp_native_core::CoreAdvanceMode::Exact
+                    || request.include_diagnostics
+                {
+                    bail!("native core profile purpose requires one exact diagnostic-free second");
+                }
+                let binding = dsp_native_core::ProfileOperationBinding::new(
+                    request_id,
+                    &session_id,
+                    request.base_revision,
+                    purpose,
+                )
+                .ok_or_else(|| anyhow!("native core profile operation binding is invalid"))?;
+                let capture = dsp_native_core::with_profile_operation_binding(binding, || {
+                    cores.advance(&session_id, &request)
+                });
+                let mut value = to_value(capture.result?)?;
+                value
+                    .as_object_mut()
+                    .ok_or_else(|| anyhow!("native core profile response must be an object"))?
+                    .insert(
+                        "profileEvidence".to_owned(),
+                        serde_json::json!({
+                            "protocol": "native-core-advance-profile-response-v1",
+                            "requestId": request_id,
+                            "overflowed": capture.overflowed,
+                            "records": capture.records,
+                        }),
+                    );
+                value
+            } else {
+                to_value(cores.advance(&session_id, &request)?)?
+            }
+        }
         ControlRequest::CoreCommitOperation {
             session_id,
             request,
@@ -741,6 +782,7 @@ fn serve(root: PathBuf) -> anyhow::Result<()> {
                 &mut store,
                 &mut cores,
                 &mut player_authority_startup_recovery,
+                frame.request_id,
                 request,
             ))?,
             Err(error) => response_bytes(Err(error))?,

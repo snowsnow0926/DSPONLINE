@@ -36,6 +36,7 @@ mod local_logistics;
 mod manual_mining;
 mod orbital_station;
 pub mod production_history;
+mod profile_evidence;
 mod pure_idle;
 mod quantum_logistics;
 mod recipe_command;
@@ -58,6 +59,10 @@ pub use catalog::{
     TechnologyDefinition,
 };
 pub use command::{CommandApplyResult, SimulationCommandPatch};
+pub use profile_evidence::{
+    ProfileOperationBinding, ProfileOperationCapture, ProfileOperationPurpose,
+    with_profile_operation_binding,
+};
 pub use simulation::{CoreAdvanceMode, CoreAdvanceRequest, CoreAdvanceResult};
 pub use state::{
     CoreCheckpointIdentity, CoreState, CoreStateSummary, DomainCoverage,

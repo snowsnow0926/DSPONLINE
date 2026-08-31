@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value, json};
+use sha2::{Digest, Sha256};
 
 use crate::deterministic_runtime::{DeterministicRuntime, runtime as deterministic_runtime};
 use crate::state::CoreState;
@@ -445,7 +446,7 @@ pub(crate) struct LocalReadyStationScan {
     pub signature_fallback: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct LocalDispatchScan {
     pub selected_station_rows: usize,
     pub total_station_rows: usize,
@@ -453,6 +454,205 @@ pub(crate) struct LocalDispatchScan {
     pub total_demand_rows: usize,
     pub dense_fallback: bool,
     pub directory_fallback: bool,
+    // Keep the ordinary hot-path receipt compact. Profiling pays for its own
+    // allocation; a disabled profiler adds only one nullable pointer instead
+    // of embedding the full observer payload in every dispatch return value.
+    pub profile: Option<Box<LocalDispatchProfile>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum LocalDispatchScanFallback {
+    #[default]
+    None,
+    ForcedFullScan,
+    Directory,
+    Dense,
+}
+
+impl LocalDispatchScanFallback {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::ForcedFullScan => "forced-full-scan",
+            Self::Directory => "directory",
+            Self::Dense => "dense",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum LocalDispatchParallelFallback {
+    #[default]
+    NoSelectedDemand,
+    UnprovenPlanet,
+    SinglePlanet,
+    ShapeOnly,
+}
+
+impl LocalDispatchParallelFallback {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoSelectedDemand => "no-selected-demand",
+            Self::UnprovenPlanet => "unproven-planet",
+            Self::SinglePlanet => "single-planet",
+            Self::ShapeOnly => "shape-only-requires-full-advance-gate",
+        }
+    }
+}
+
+/// Opt-in feasibility evidence for a future deterministic planet-sharded
+/// local-dispatch planner. These counters never select work or mutate state.
+/// `work_units` is a deliberately simple, stable proxy: demand rows + demand
+/// slots + peer edges + `n * ceil(log2(n))` sort units + emitted route events.
+/// Its ratios describe this local-dispatch proxy only. They never decide a
+/// performance gate: the fixed-input harness must separately divide the exact
+/// outer dispatch duration by the full native advance duration.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LocalDispatchProfile {
+    pub selected_demands: usize,
+    pub total_demands: usize,
+    pub planet_shards: usize,
+    pub demand_slots: u64,
+    pub peer_edges: u64,
+    pub sort_work_units: u64,
+    pub total_work_units: u64,
+    pub largest_shard_work_units: u64,
+    pub largest_shard_ratio_ppm: u32,
+    pub parallelizable_work_units: u64,
+    pub parallelizable_ratio_ppm: u32,
+    pub route_events: u64,
+    pub shard_work_sha256: [u8; 32],
+    pub planet_identity_proven: bool,
+    pub scan_fallback: LocalDispatchScanFallback,
+    pub parallel_fallback: LocalDispatchParallelFallback,
+}
+
+#[derive(Debug, Default)]
+struct LocalDispatchProfileAccumulator {
+    selected_demands: usize,
+    demand_slots: u64,
+    peer_edges: u64,
+    sort_work_units: u64,
+    route_events: u64,
+    shard_work_units: Vec<u64>,
+    unproven_planet: bool,
+}
+
+impl LocalDispatchProfileAccumulator {
+    fn enabled(planet_capacity: usize) -> Self {
+        Self {
+            shard_work_units: vec![0; planet_capacity],
+            ..Self::default()
+        }
+    }
+
+    fn record_demand(
+        &mut self,
+        planet_key: Option<usize>,
+        demand_slots: u64,
+        peer_edges: u64,
+        sort_work_units: u64,
+        route_events: u64,
+    ) {
+        self.selected_demands = self.selected_demands.saturating_add(1);
+        self.demand_slots = self.demand_slots.saturating_add(demand_slots);
+        self.peer_edges = self.peer_edges.saturating_add(peer_edges);
+        self.sort_work_units = self.sort_work_units.saturating_add(sort_work_units);
+        self.route_events = self.route_events.saturating_add(route_events);
+        let work_units = 1_u64
+            .saturating_add(demand_slots)
+            .saturating_add(peer_edges)
+            .saturating_add(sort_work_units)
+            .saturating_add(route_events);
+        if let Some(shard) = planet_key.and_then(|key| self.shard_work_units.get_mut(key)) {
+            *shard = shard.saturating_add(work_units);
+        } else {
+            self.unproven_planet = true;
+        }
+    }
+
+    fn finish(
+        self,
+        total_demands: usize,
+        scan_fallback: LocalDispatchScanFallback,
+    ) -> LocalDispatchProfile {
+        let total_work_units = 1_u64
+            .saturating_mul(self.selected_demands as u64)
+            .saturating_add(self.demand_slots)
+            .saturating_add(self.peer_edges)
+            .saturating_add(self.sort_work_units)
+            .saturating_add(self.route_events);
+        let planet_shards = self
+            .shard_work_units
+            .iter()
+            .filter(|work| **work > 0)
+            .count();
+        let mut largest_shard_work_units = self.shard_work_units.iter().copied().max().unwrap_or(0);
+        let parallelizable_work_units = if self.unproven_planet {
+            largest_shard_work_units = total_work_units;
+            0
+        } else {
+            total_work_units.saturating_sub(largest_shard_work_units)
+        };
+        let largest_shard_ratio_ppm = work_ratio_ppm(largest_shard_work_units, total_work_units);
+        let parallelizable_ratio_ppm = work_ratio_ppm(parallelizable_work_units, total_work_units);
+        let mut shard_hasher = Sha256::new();
+        shard_hasher.update(
+            u64::try_from(self.shard_work_units.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        for work_units in &self.shard_work_units {
+            shard_hasher.update(work_units.to_be_bytes());
+        }
+        let shard_work_sha256 = shard_hasher.finalize().into();
+        let parallel_fallback = if self.selected_demands == 0 {
+            LocalDispatchParallelFallback::NoSelectedDemand
+        } else if self.unproven_planet {
+            LocalDispatchParallelFallback::UnprovenPlanet
+        } else if planet_shards < 2 {
+            LocalDispatchParallelFallback::SinglePlanet
+        } else {
+            // This proxy only proves that more than one planet owns work. It
+            // deliberately never decides the full-advance 3.5% timing gate.
+            LocalDispatchParallelFallback::ShapeOnly
+        };
+        LocalDispatchProfile {
+            selected_demands: self.selected_demands,
+            total_demands,
+            planet_shards,
+            demand_slots: self.demand_slots,
+            peer_edges: self.peer_edges,
+            sort_work_units: self.sort_work_units,
+            total_work_units,
+            largest_shard_work_units,
+            largest_shard_ratio_ppm,
+            parallelizable_work_units,
+            parallelizable_ratio_ppm,
+            route_events: self.route_events,
+            shard_work_sha256,
+            planet_identity_proven: !self.unproven_planet,
+            scan_fallback,
+            parallel_fallback,
+        }
+    }
+}
+
+fn work_ratio_ppm(numerator: u64, denominator: u64) -> u32 {
+    if denominator == 0 {
+        return 0;
+    }
+    ((u128::from(numerator) * 1_000_000) / u128::from(denominator)).min(u128::from(u32::MAX)) as u32
+}
+
+fn sort_work_units(rows: usize) -> u64 {
+    if rows <= 1 {
+        return 0;
+    }
+    let passes = usize::BITS - (rows - 1).leading_zeros();
+    u64::try_from(rows)
+        .unwrap_or(u64::MAX)
+        .saturating_mul(u64::from(passes))
 }
 
 impl LocalPeerDirectory {
@@ -511,6 +711,21 @@ impl LocalPeerDirectory {
 
     fn has_local_pair(&self) -> bool {
         self.has_local_pair
+    }
+
+    fn profile_planet_capacity(&self) -> usize {
+        let capacity = self
+            .station_planets
+            .values()
+            .copied()
+            .max()
+            .and_then(|key| key.checked_add(1))
+            .unwrap_or(0);
+        if capacity <= self.station_planets.len() {
+            capacity
+        } else {
+            0
+        }
     }
 
     pub(crate) fn active_local_route_demand_indices(&self) -> &[usize] {
@@ -874,6 +1089,7 @@ impl LocalPeerDirectory {
             total_demand_rows,
             dense_fallback,
             directory_fallback,
+            profile: None,
         };
         (selected, scan)
     }
@@ -2110,7 +2326,10 @@ fn set_peer(entities: &mut [Value], index: usize, peer_id: &str) {
     }
 }
 
-fn dispatch_for_indices<L: LocalDispatchLedger + ?Sized>(
+// Keep the optional recorder separate from simulation inputs so the const
+// generic compiles the ordinary path without allocating profile state.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_for_indices<L: LocalDispatchLedger + ?Sized, const PROFILE: bool>(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
@@ -2118,6 +2337,7 @@ fn dispatch_for_indices<L: LocalDispatchLedger + ?Sized>(
     directory: &LocalPeerDirectory,
     demand_indices: &[usize],
     ledger: &mut L,
+    mut profile: Option<&mut LocalDispatchProfileAccumulator>,
 ) -> anyhow::Result<Vec<usize>> {
     if !directory.has_local_pair() && !directory.has_local_routes() {
         return Ok(Vec::new());
@@ -2163,6 +2383,14 @@ fn dispatch_for_indices<L: LocalDispatchLedger + ?Sized>(
         if ordered_slots.is_empty() {
             continue;
         }
+        let mut demand_slot_rows = 0_u64;
+        let mut demand_peer_edges = 0_u64;
+        let mut demand_sort_work_units = 0_u64;
+        let mut demand_route_events = 0_u64;
+        if PROFILE {
+            demand_slot_rows = u64::try_from(ordered_slots.len()).unwrap_or(u64::MAX);
+            demand_sort_work_units = sort_work_units(ordered_slots.len());
+        }
         for offset in 0..ordered_slots.len() {
             let (slot_index, slot) = ordered_slots[(cursor + offset) % ordered_slots.len()];
             let item_id = slot.item_id.as_deref().expect("demand item").to_owned();
@@ -2175,6 +2403,12 @@ fn dispatch_for_indices<L: LocalDispatchLedger + ?Sized>(
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             let mut matches = peer_matches(directory, demand_index, slot_index)?;
+            if PROFILE {
+                demand_peer_edges = demand_peer_edges
+                    .saturating_add(u64::try_from(matches.len()).unwrap_or(u64::MAX));
+                demand_sort_work_units =
+                    demand_sort_work_units.saturating_add(sort_work_units(matches.len()));
+            }
             matches.sort_by(|(left_index, left_slot), (right_index, right_slot)| {
                 let left = entities[*left_index].as_object().expect("station object");
                 let right = entities[*right_index].as_object().expect("station object");
@@ -2315,6 +2549,9 @@ fn dispatch_for_indices<L: LocalDispatchLedger + ?Sized>(
                         .expect("initialized local demand routes")
                         .push(route);
                     activated_local_demands.push(demand_index);
+                    if PROFILE {
+                        demand_route_events = demand_route_events.saturating_add(1);
+                    }
                     ledger.record_dispatch(
                         demand_index,
                         supply_index,
@@ -2361,12 +2598,27 @@ fn dispatch_for_indices<L: LocalDispatchLedger + ?Sized>(
                 }
             }
         }
+        if PROFILE {
+            profile
+                .as_deref_mut()
+                .expect("profile accumulator must be present")
+                .record_demand(
+                    directory.station_planets.get(&demand_index).copied(),
+                    demand_slot_rows,
+                    demand_peer_edges,
+                    demand_sort_work_units,
+                    demand_route_events,
+                );
+        }
     }
     activated_local_demands.sort_unstable();
     activated_local_demands.dedup();
     Ok(activated_local_demands)
 }
 
+// Full-scan oracle selection and opt-in profiling are execution controls, not
+// authority state, and remain explicit at this narrow candidate boundary.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_with_ledger_mode<L: LocalDispatchLedger + ?Sized>(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -2375,20 +2627,37 @@ fn dispatch_with_ledger_mode<L: LocalDispatchLedger + ?Sized>(
     directory: &mut LocalPeerDirectory,
     ledger: &mut L,
     force_full_scan: bool,
+    profile_enabled: bool,
 ) -> anyhow::Result<LocalDispatchScan> {
     let (next_powered, power_wakes, power_directory_fallback) =
         directory.plan_dispatch_power_wakes(powers);
-    let (dispatch_indices, scan) =
+    let (dispatch_indices, mut scan) =
         directory.dispatch_scan_indices(&power_wakes, power_directory_fallback, force_full_scan);
-    let activated_local_demands = dispatch_for_indices(
-        state,
-        base,
-        entities,
-        powers,
-        directory,
-        &dispatch_indices,
-        ledger,
-    )?;
+    let mut profile = profile_enabled
+        .then(|| LocalDispatchProfileAccumulator::enabled(directory.profile_planet_capacity()));
+    let activated_local_demands = if profile_enabled {
+        dispatch_for_indices::<L, true>(
+            state,
+            base,
+            entities,
+            powers,
+            directory,
+            &dispatch_indices,
+            ledger,
+            profile.as_mut(),
+        )?
+    } else {
+        dispatch_for_indices::<L, false>(
+            state,
+            base,
+            entities,
+            powers,
+            directory,
+            &dispatch_indices,
+            ledger,
+            None,
+        )?
+    };
     // The pending and power caches are candidate-local runtime state. Install
     // their next values only after every JSON/ledger mutation above succeeds.
     directory.commit_dispatch(
@@ -2396,6 +2665,20 @@ fn dispatch_with_ledger_mode<L: LocalDispatchLedger + ?Sized>(
         &activated_local_demands,
         scan.directory_fallback,
     );
+    if let Some(profile) = profile {
+        let scan_fallback = if force_full_scan {
+            LocalDispatchScanFallback::ForcedFullScan
+        } else if scan.directory_fallback {
+            LocalDispatchScanFallback::Directory
+        } else if scan.dense_fallback {
+            LocalDispatchScanFallback::Dense
+        } else {
+            LocalDispatchScanFallback::None
+        };
+        scan.profile = Some(Box::new(
+            profile.finish(scan.total_demand_rows, scan_fallback),
+        ));
+    }
     Ok(scan)
 }
 
@@ -2407,7 +2690,29 @@ fn dispatch_with_ledger<L: LocalDispatchLedger + ?Sized>(
     directory: &mut LocalPeerDirectory,
     ledger: &mut L,
 ) -> anyhow::Result<LocalDispatchScan> {
-    dispatch_with_ledger_mode(state, base, entities, powers, directory, ledger, false)
+    dispatch_with_ledger_mode(
+        state, base, entities, powers, directory, ledger, false, false,
+    )
+}
+
+pub(crate) fn dispatch_profiled(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    powers: &HashMap<usize, f64>,
+    directory: &mut LocalPeerDirectory,
+    route_ledger: &mut StationRouteLedger,
+) -> anyhow::Result<LocalDispatchScan> {
+    dispatch_with_ledger_mode(
+        state,
+        base,
+        entities,
+        powers,
+        directory,
+        route_ledger,
+        false,
+        true,
+    )
 }
 
 #[cfg(test)]
@@ -2419,7 +2724,9 @@ fn dispatch_full_scan_oracle<L: LocalDispatchLedger + ?Sized>(
     directory: &mut LocalPeerDirectory,
     ledger: &mut L,
 ) -> anyhow::Result<LocalDispatchScan> {
-    dispatch_with_ledger_mode(state, base, entities, powers, directory, ledger, true)
+    dispatch_with_ledger_mode(
+        state, base, entities, powers, directory, ledger, true, false,
+    )
 }
 
 pub(crate) fn dispatch(
@@ -4390,6 +4697,285 @@ mod tests {
             serde_json::to_vec(&json!({ "base": base, "entities": entities })).unwrap(),
             scans,
         )
+    }
+
+    fn run_profiled_dispatch_once(
+        source: &[Value],
+        profile_enabled: bool,
+    ) -> (Vec<u8>, LocalDispatchScan) {
+        let state = route_fixture_state(source);
+        let mut base = route_fixture_base();
+        let mut entities = source.to_vec();
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        let powers = route_powers(entities.len(), 1.0);
+        let scan = if profile_enabled {
+            dispatch_profiled(
+                &state,
+                base.as_object_mut().unwrap(),
+                &mut entities,
+                &powers,
+                &mut directory,
+                &mut ledger,
+            )
+        } else {
+            dispatch(
+                &state,
+                base.as_object_mut().unwrap(),
+                &mut entities,
+                &powers,
+                &mut directory,
+                &mut ledger,
+            )
+        }
+        .unwrap();
+        (
+            serde_json::to_vec(&json!({ "base": base, "entities": entities })).unwrap(),
+            scan,
+        )
+    }
+
+    #[test]
+    fn local_dispatch_profiler_is_opt_in_and_preserves_serial_state() {
+        assert!(std::mem::size_of::<LocalDispatchScan>() <= 64);
+        let mut source = sparse_readiness_matrix(32, 1);
+        source[0]["outputs"]["iron_ore"] = Value::from(5_000.0);
+
+        let (ordinary_bytes, ordinary_scan) = run_profiled_dispatch_once(&source, false);
+        let (profiled_bytes, profiled_scan) = run_profiled_dispatch_once(&source, true);
+
+        assert_eq!(profiled_bytes, ordinary_bytes);
+        assert_eq!(
+            profiled_scan.selected_station_rows,
+            ordinary_scan.selected_station_rows
+        );
+        assert_eq!(
+            profiled_scan.total_station_rows,
+            ordinary_scan.total_station_rows
+        );
+        assert_eq!(
+            profiled_scan.selected_demand_rows,
+            ordinary_scan.selected_demand_rows
+        );
+        assert_eq!(
+            profiled_scan.total_demand_rows,
+            ordinary_scan.total_demand_rows
+        );
+        assert_eq!(profiled_scan.dense_fallback, ordinary_scan.dense_fallback);
+        assert_eq!(
+            profiled_scan.directory_fallback,
+            ordinary_scan.directory_fallback
+        );
+        assert!(ordinary_scan.profile.is_none());
+
+        let profile = profiled_scan.profile.expect("opt-in dispatch profile");
+        assert_eq!(profile.selected_demands, 1);
+        assert_eq!(profile.total_demands, 1);
+        assert_eq!(profile.planet_shards, 1);
+        assert_eq!(profile.demand_slots, 1);
+        assert_eq!(profile.peer_edges, 1);
+        assert_eq!(profile.sort_work_units, 0);
+        assert_eq!(profile.total_work_units, 4);
+        assert_eq!(profile.largest_shard_work_units, 4);
+        assert_eq!(profile.largest_shard_ratio_ppm, 1_000_000);
+        assert_eq!(profile.parallelizable_work_units, 0);
+        assert_eq!(profile.parallelizable_ratio_ppm, 0);
+        assert_eq!(profile.route_events, 1);
+        assert!(profile.planet_identity_proven);
+        assert_eq!(hex::encode(profile.shard_work_sha256).len(), 64);
+        assert_eq!(profile.scan_fallback, LocalDispatchScanFallback::None);
+        assert_eq!(
+            profile.parallel_fallback,
+            LocalDispatchParallelFallback::SinglePlanet
+        );
+    }
+
+    #[test]
+    fn local_dispatch_profiler_reports_sparse_empty_and_dense_scan_fallbacks() {
+        let source = sparse_readiness_matrix(32, 1);
+        let state = route_fixture_state(&source);
+        let mut base = route_fixture_base();
+        let mut entities = source;
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let powers = route_powers(entities.len(), 1.0);
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        dispatch_profiled(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            &powers,
+            &mut directory,
+            &mut ledger,
+        )
+        .unwrap();
+        let empty_scan = dispatch_profiled(
+            &state,
+            base.as_object_mut().unwrap(),
+            &mut entities,
+            &powers,
+            &mut directory,
+            &mut ledger,
+        )
+        .unwrap();
+        let empty = empty_scan.profile.expect("empty dispatch profile");
+        assert_eq!(empty.selected_demands, 0);
+        assert_eq!(empty.total_demands, 1);
+        assert_eq!(empty.planet_shards, 0);
+        assert_eq!(empty.total_work_units, 0);
+        assert_eq!(empty.largest_shard_ratio_ppm, 0);
+        assert_eq!(empty.parallelizable_ratio_ppm, 0);
+        assert_eq!(
+            empty.parallel_fallback,
+            LocalDispatchParallelFallback::NoSelectedDemand
+        );
+
+        let dense_source = sparse_readiness_matrix(16, 12);
+        let dense_state = route_fixture_state(&dense_source);
+        let mut dense_base = route_fixture_base();
+        let mut dense_entities = dense_source;
+        let mut dense_directory = prepare_step_directory(
+            &dense_entities,
+            &dense_state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let dense_activity = crate::interstellar_logistics::prepare_route_activity(&dense_entities);
+        let mut dense_ledger = StationRouteLedger::build(
+            &dense_state,
+            &dense_entities,
+            &dense_directory,
+            &dense_activity,
+        );
+        let dense_powers = route_powers(dense_entities.len(), 1.0);
+        let dense_scan = dispatch_profiled(
+            &dense_state,
+            dense_base.as_object_mut().unwrap(),
+            &mut dense_entities,
+            &dense_powers,
+            &mut dense_directory,
+            &mut dense_ledger,
+        )
+        .unwrap();
+        let dense = dense_scan.profile.expect("dense dispatch profile");
+        assert_eq!(dense.selected_demands, 12);
+        assert_eq!(dense.total_demands, 12);
+        assert_eq!(dense.scan_fallback, LocalDispatchScanFallback::Dense);
+        assert_eq!(
+            dense.parallel_fallback,
+            LocalDispatchParallelFallback::SinglePlanet
+        );
+    }
+
+    #[test]
+    fn local_dispatch_profiler_counts_peer_sort_after_storage_only_planet_gap() {
+        let mut entities = vec![
+            route_station(0, "storage"),
+            route_station(1, "supply"),
+            route_station(2, "supply"),
+            route_station(3, "demand"),
+        ];
+        entities[0]["planetId"] = Value::from("planet/storage-only");
+        for entity in entities.iter_mut().skip(1) {
+            entity["planetId"] = Value::from("planet/working");
+        }
+        for index in [1_usize, 2] {
+            entities[index]["outputs"]["iron_ore"] = Value::from(100_000_000.0);
+        }
+
+        let (_, scan) = run_profiled_dispatch_once(&entities, true);
+        let profile = scan.profile.expect("gapped planet profile");
+        assert_eq!(profile.selected_demands, 1);
+        assert_eq!(profile.total_demands, 1);
+        assert_eq!(profile.planet_shards, 1);
+        assert_eq!(profile.demand_slots, 1);
+        assert_eq!(profile.peer_edges, 2);
+        assert_eq!(profile.sort_work_units, 2);
+        assert_eq!(profile.scan_fallback, LocalDispatchScanFallback::None);
+        assert_eq!(
+            profile.parallel_fallback,
+            LocalDispatchParallelFallback::SinglePlanet
+        );
+    }
+
+    #[test]
+    fn local_dispatch_profiler_never_applies_the_full_advance_timing_gate_to_proxy_work() {
+        let mut accumulator = LocalDispatchProfileAccumulator::enabled(2);
+        accumulator.record_demand(Some(0), 1, 1, 100, 0);
+        accumulator.record_demand(Some(1), 1, 0, 0, 0);
+        let profile = accumulator.finish(2, LocalDispatchScanFallback::None);
+
+        assert_eq!(profile.planet_shards, 2);
+        assert_eq!(profile.total_work_units, 105);
+        assert_eq!(profile.largest_shard_work_units, 103);
+        assert_eq!(profile.parallelizable_work_units, 2);
+        assert_eq!(profile.parallelizable_ratio_ppm, 19_047);
+        assert_eq!(
+            profile.parallel_fallback,
+            LocalDispatchParallelFallback::ShapeOnly
+        );
+        assert_eq!(
+            profile.parallel_fallback.as_str(),
+            "shape-only-requires-full-advance-gate"
+        );
+    }
+
+    fn two_planet_dispatch_fixture() -> Vec<Value> {
+        let mut entities = vec![
+            route_station(0, "supply"),
+            route_station(1, "demand"),
+            route_station(2, "supply"),
+            route_station(3, "demand"),
+        ];
+        for index in [0_usize, 1] {
+            entities[index]["planetId"] = Value::from("planet/a");
+        }
+        for index in [2_usize, 3] {
+            entities[index]["planetId"] = Value::from("planet/b");
+        }
+        entities[2]["outputs"]["iron_ore"] = Value::from(100_000_000.0);
+        entities
+    }
+
+    #[test]
+    fn local_dispatch_profiler_reports_stable_multi_planet_parallel_work() {
+        let source = two_planet_dispatch_fixture();
+        let (expected_bytes, expected_scan) = run_profiled_dispatch_once(&source, true);
+        let expected = expected_scan.profile.expect("multi-planet profile");
+        assert_eq!(expected.selected_demands, 2);
+        assert_eq!(expected.total_demands, 2);
+        assert_eq!(expected.planet_shards, 2);
+        assert_eq!(expected.demand_slots, 2);
+        assert_eq!(expected.peer_edges, 2);
+        assert_eq!(expected.sort_work_units, 0);
+        assert_eq!(expected.total_work_units, 8);
+        assert_eq!(expected.largest_shard_work_units, 4);
+        assert_eq!(expected.largest_shard_ratio_ppm, 500_000);
+        assert_eq!(expected.parallelizable_work_units, 4);
+        assert_eq!(expected.parallelizable_ratio_ppm, 500_000);
+        assert_eq!(expected.route_events, 2);
+        assert_eq!(expected.scan_fallback, LocalDispatchScanFallback::None);
+        assert_eq!(
+            expected.parallel_fallback,
+            LocalDispatchParallelFallback::ShapeOnly
+        );
+        assert_eq!(
+            expected.parallel_fallback.as_str(),
+            "shape-only-requires-full-advance-gate"
+        );
+        assert_eq!(sort_work_units(2), 2);
+        assert_eq!(sort_work_units(5), 15);
+
+        for _ in 0..4 {
+            let (actual_bytes, actual_scan) = run_profiled_dispatch_once(&source, true);
+            assert_eq!(actual_bytes, expected_bytes);
+            assert_eq!(
+                actual_scan.profile.expect("stable dispatch profile"),
+                expected
+            );
+        }
     }
 
     #[test]

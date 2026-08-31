@@ -33,6 +33,7 @@ const DEFAULT_HARNESS_SNAPSHOT_PATHS = Object.freeze([
   "tsconfig.node.json",
 ]);
 const SAMPLE_MARKER = /DSP_NATIVE_FIXED_AFFINITY_SAMPLE\t(\{[^\r\n]+\})/g;
+const LOCAL_DISPATCH_STAGE_SHARE_MIN_PPM = 35_000;
 const PRIORITY_FLAGS = new Map([
   ["Idle", "/low"],
   ["BelowNormal", "/belownormal"],
@@ -857,6 +858,36 @@ function publicProcessPolicy(policy) {
   };
 }
 
+function publicLocalDispatchProfile(profile) {
+  if (!profile || typeof profile !== "object" || Array.isArray(profile)) return null;
+  const result = {};
+  for (const key of [
+    "schemaVersion", "stageDurationNs", "stageDurationMicros", "fullAdvanceDurationNs", "stageSharePpm",
+    "parallelBenefitUpperBoundPpm",
+    "selectedDemands", "totalDemands", "planetShards", "demandSlots", "peerEdges",
+    "sortWorkUnits", "totalWorkUnits", "largestShardWorkUnits", "largestShardRatioPpm",
+    "parallelizableWorkUnits", "parallelizableRatioPpm", "routeEvents",
+  ]) {
+    result[key] = Number.isSafeInteger(profile[key]) && profile[key] >= 0 ? profile[key] : null;
+  }
+  for (const key of ["shardWorkSha256", "shapeSha256"]) {
+    result[key] = typeof profile[key] === "string" && /^[a-f0-9]{64}$/.test(profile[key])
+      ? profile[key]
+      : null;
+  }
+  for (const key of [
+    "instrumentationVersion", "workScope", "productGate", "scanFallback", "parallelFallback",
+    "gateStatus", "parallelBenefitUpperBoundScope",
+  ]) {
+    result[key] = typeof profile[key] === "string" && profile[key].length <= 128 ? profile[key] : null;
+  }
+  result.planetIdentityProven = profile.planetIdentityProven === true;
+  result.gateReasonCodes = Array.isArray(profile.gateReasonCodes)
+    ? profile.gateReasonCodes.filter((reason) => typeof reason === "string" && reason.length <= 128).slice(0, 16)
+    : [];
+  return result;
+}
+
 function publicFixedAffinityRecord(record) {
   if (!record || typeof record !== "object") return null;
   const publicRecord = {};
@@ -888,7 +919,88 @@ function publicFixedAffinityRecord(record) {
   }
   publicRecord.profileEnabled = record.profileEnabled === true;
   publicRecord.processPolicy = publicProcessPolicy(record.processPolicy);
+  publicRecord.evidenceStatus = record.evidenceStatus === "RESULT" ? "RESULT" : "NO_RESULT";
+  publicRecord.profileGate = record.profileGate && typeof record.profileGate === "object" ? {
+    status: ["ELIGIBLE_FOR_FIXED_AB", "NO_GO"].includes(record.profileGate.status)
+      ? record.profileGate.status
+      : "NO_RESULT",
+    thresholdPpm: safeIntegerOrNull(record.profileGate.thresholdPpm),
+    theoreticalUpperBoundPpm: safeIntegerOrNull(record.profileGate.theoreticalUpperBoundPpm),
+    reasonCodes: Array.isArray(record.profileGate.reasonCodes)
+      ? record.profileGate.reasonCodes.filter((reason) => typeof reason === "string" && reason.length <= 128).slice(0, 16)
+      : [],
+  } : { status: "NO_RESULT", thresholdPpm: null, reasonCodes: ["profile-gate-missing"] };
+  publicRecord.performanceDecision = record.performanceDecision?.status === "NOT_EVALUATED" ? {
+    status: "NOT_EVALUATED",
+    reasonCode: typeof record.performanceDecision.reasonCode === "string"
+      ? record.performanceDecision.reasonCode.slice(0, 128)
+      : null,
+  } : { status: "NOT_EVALUATED", reasonCode: "performance-decision-evidence-invalid" };
+  publicRecord.localDispatchProfile = publicLocalDispatchProfile(record.localDispatchProfile);
   return publicRecord;
+}
+
+function aggregateLocalDispatchProfileGate(status, samples, evidenceReasonCodes = []) {
+  if (status !== "RESULT") {
+    const profileReasons = evidenceReasonCodes.filter((reason) =>
+      typeof reason === "string" && reason.startsWith("local-dispatch-profile-"));
+    return {
+      status: "NO_RESULT",
+      thresholdPpm: LOCAL_DISPATCH_STAGE_SHARE_MIN_PPM,
+      reasonCodes: profileReasons.length > 0 ? uniqueReasons(profileReasons) : ["fixed-affinity-evidence-invalid"],
+      baselineStageSharePpm: null,
+      candidateStageSharePpm: null,
+      baselineParallelBenefitUpperBoundPpm: null,
+      candidateParallelBenefitUpperBoundPpm: null,
+    };
+  }
+  const completed = samples.filter((sample) => sample.ok === true);
+  const profiles = completed.map((sample) => sample.record.localDispatchProfile);
+  const reasonCodes = uniqueReasons(completed.flatMap((sample) => sample.record.profileGate.reasonCodes));
+  const baselineShares = completed.filter((sample) => sample.label === "baseline")
+    .map((sample) => sample.record.localDispatchProfile.stageSharePpm);
+  const candidateShares = completed.filter((sample) => sample.label === "candidate")
+    .map((sample) => sample.record.localDispatchProfile.stageSharePpm);
+  const baselineUpperBounds = completed.filter((sample) => sample.label === "baseline")
+    .map((sample) => sample.record.localDispatchProfile.parallelBenefitUpperBoundPpm);
+  const candidateUpperBounds = completed.filter((sample) => sample.label === "candidate")
+    .map((sample) => sample.record.localDispatchProfile.parallelBenefitUpperBoundPpm);
+  if (profiles.length === 0 || baselineShares.length === 0 || candidateShares.length === 0) {
+    return {
+      status: "NO_RESULT",
+      thresholdPpm: LOCAL_DISPATCH_STAGE_SHARE_MIN_PPM,
+      reasonCodes: ["local-dispatch-profile-evidence-missing"],
+      baselineStageSharePpm: null,
+      candidateStageSharePpm: null,
+      baselineParallelBenefitUpperBoundPpm: null,
+      candidateParallelBenefitUpperBoundPpm: null,
+    };
+  }
+  return {
+    status: reasonCodes.length === 0 ? "ELIGIBLE_FOR_FIXED_AB" : "NO_GO",
+    thresholdPpm: LOCAL_DISPATCH_STAGE_SHARE_MIN_PPM,
+    reasonCodes,
+    baselineStageSharePpm: {
+      minimum: Math.min(...baselineShares),
+      median: median(baselineShares),
+      maximum: Math.max(...baselineShares),
+    },
+    candidateStageSharePpm: {
+      minimum: Math.min(...candidateShares),
+      median: median(candidateShares),
+      maximum: Math.max(...candidateShares),
+    },
+    baselineParallelBenefitUpperBoundPpm: {
+      minimum: Math.min(...baselineUpperBounds),
+      median: median(baselineUpperBounds),
+      maximum: Math.max(...baselineUpperBounds),
+    },
+    candidateParallelBenefitUpperBoundPpm: {
+      minimum: Math.min(...candidateUpperBounds),
+      median: median(candidateUpperBounds),
+      maximum: Math.max(...candidateUpperBounds),
+    },
+  };
 }
 
 function publicSampleEvidence(sample) {
@@ -1077,12 +1189,18 @@ export function runFixedAffinityAb(options, dependencies = {}) {
     }
   }
   const finalReasons = uniqueReasons(reasonCodes);
-  const status = finalReasons.length === 0 ? "RESULT" : "NO_RESULT";
+  const evidenceStatus = finalReasons.length === 0 ? "RESULT" : "NO_RESULT";
   const completedSamples = samples.filter((sample) => sample.ok);
   const baselineDurations = completedSamples.filter((sample) => sample.label === "baseline")
     .map((sample) => sample.record.durationMs);
   const candidateDurations = completedSamples.filter((sample) => sample.label === "candidate")
     .map((sample) => sample.record.durationMs);
+  const profileGate = aggregateLocalDispatchProfileGate(evidenceStatus, samples, finalReasons);
+  const status = evidenceStatus === "NO_RESULT"
+    ? "NO_RESULT"
+    : profileGate.status === "NO_GO"
+      ? "NO_GO"
+      : "RESULT";
   const baselineMedianMs = status === "RESULT" ? median(baselineDurations) : null;
   const candidateMedianMs = status === "RESULT" ? median(candidateDurations) : null;
   return {
@@ -1090,7 +1208,13 @@ export function runFixedAffinityAb(options, dependencies = {}) {
     benchmark: "native-core-fixed-affinity-ab",
     claimBoundary: "fixed-affinity with private staged snapshots against non-malicious concurrent replacement; processor class is not attested as P-core; active same-user tampering is outside this evidence boundary",
     status,
-    reasonCodes: finalReasons,
+    evidenceStatus,
+    profileGate,
+    performanceDecision: {
+      status: "NOT_EVALUATED",
+      reasonCode: "profile-eligibility-and-observed-timings-do-not-accept-a-product-candidate",
+    },
+    reasonCodes: status === "NO_GO" ? profileGate.reasonCodes : finalReasons,
     generatedAt: new Date(now()).toISOString(),
     durationMs: Math.max(0, now() - startedAt),
     host: {
@@ -1109,6 +1233,12 @@ export function runFixedAffinityAb(options, dependencies = {}) {
       nodePriority: options.nodePriority,
       nativePriority: options.nativePriority,
       profileEnabled: true,
+      localDispatchProfileGate: {
+        stageShareMinimumPpm: LOCAL_DISPATCH_STAGE_SHARE_MIN_PPM,
+        requiredPlanetShards: 2,
+        proxyCountsAsPerformanceBenefit: false,
+        allMeasuredSamplesMustPass: true,
+      },
       timeoutMs: options.timeoutMs,
       order: schedule.map((entry) => entry.label),
       stagingExcludedFromMeasuredDurations: true,
@@ -1160,6 +1290,8 @@ export function runFixedAffinityAb(options, dependencies = {}) {
       candidateReductionPercent: baselineMedianMs && candidateMedianMs
         ? (1 - candidateMedianMs / baselineMedianMs) * 100
         : null,
+      observedOnly: true,
+      performanceDecisionApplied: false,
     } : null,
   };
 }
@@ -1214,6 +1346,16 @@ export function main(argv = process.argv.slice(2), dependencies = {}) {
           benchmark: "native-core-fixed-affinity-ab",
           claimBoundary: "fixed-affinity; processor class is not attested as P-core; no claim against active same-user tampering",
           status: "NO_RESULT",
+          evidenceStatus: "NO_RESULT",
+          profileGate: {
+            status: "NO_RESULT",
+            thresholdPpm: LOCAL_DISPATCH_STAGE_SHARE_MIN_PPM,
+            reasonCodes: ["runner-error"],
+          },
+          performanceDecision: {
+            status: "NOT_EVALUATED",
+            reasonCode: "runner-did-not-produce-valid-performance-evidence",
+          },
           reasonCodes: ["runner-error"],
           generatedAt: new Date().toISOString(),
           failure,

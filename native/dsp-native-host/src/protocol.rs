@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use dsp_native_core::{CoreAdvanceRequest, SimulationCommandPatch};
+use dsp_native_core::{CoreAdvanceRequest, ProfileOperationPurpose, SimulationCommandPatch};
 
 use crate::core_runtime::{
     CoreActivatePlayerAuthorityRequest, CoreCheckpointAcknowledgeExactRealtimeRequest,
@@ -413,6 +413,8 @@ pub enum ControlRequest {
     CoreAdvance {
         session_id: String,
         request: CoreAdvanceRequest,
+        #[serde(default)]
+        profile_purpose: Option<ProfileOperationPurpose>,
     },
     CoreCommitOperation {
         session_id: String,

@@ -1,4 +1,5 @@
 const assert = require("node:assert/strict");
+const { createHash } = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const { PassThrough } = require("node:stream");
 const test = require("node:test");
@@ -1594,6 +1595,100 @@ test("native host spawn inherits the parent environment and accepts only bounded
   for (const expectedKey of ["systemroot", "comspec", "path"]) {
     const key = Object.keys(process.env).find((candidate) => candidate.toLowerCase() === expectedKey);
     if (key) assert.equal(spawnOptions.env[key], process.env[key]);
+  }
+  await client.stop();
+});
+
+test("structured profile request is bound to its response frame and ignores late stderr records", async () => {
+  const child = new EventEmitter();
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => child.emit("exit", 0, null);
+  child.stdin.on("data", (chunk) => {
+    const requestFrame = parseFrames(Buffer.from(chunk)).frames[0];
+    const request = JSON.parse(requestFrame.payload.toString("utf8"));
+    let value = request.operation === "hello"
+      ? { protocolVersion: 1, nativeFormatVersion: 1, hostVersion: "test", capabilities: [] }
+      : { stopped: true };
+    if (request.operation === "coreAdvance") {
+      const operationBinding = {
+        protocol: "native-core-advance-profile-v1",
+        requestId: requestFrame.requestId,
+        sessionIdSha256: createHash("sha256").update(request.sessionId, "utf8").digest("hex"),
+        baseRevision: request.request.baseRevision,
+        expectedMeasuredRevision: 12,
+        profilePurpose: request.profilePurpose,
+      };
+      const record = {
+        schemaVersion: 2,
+        recordType: "local-dispatch-timing",
+        instrumentationVersion: "local-dispatch-profile-v3",
+        measurementScope: "production-dispatch-only-observer-excluded",
+        stageDurationNs: 100,
+        operationBinding,
+      };
+      const records = request.sessionId === "session-response-duplicate"
+        ? [record, record]
+        : [record];
+      value = {
+        supported: true,
+        revision: 12,
+        ...(request.sessionId === "session-response-missing" ? {} : { profileEvidence: {
+          protocol: "native-core-advance-profile-response-v1",
+          requestId: requestFrame.requestId,
+          overflowed: request.sessionId === "session-response-overflow",
+          records,
+        } }),
+      };
+      setTimeout(() => child.stderr.write(`DSP_NATIVE_CORE_PROFILE_RECORD\t${JSON.stringify(record)}\n`), 20);
+    }
+    child.stdout.write(encodeFrame({
+      requestId: requestFrame.requestId,
+      kind: CONTROL_RESPONSE_KIND,
+      payload: Buffer.from(JSON.stringify({ ok: true, value }), "utf8"),
+    }));
+  });
+  const client = new NativeHostClient({
+    binaryPath: process.platform === "win32" ? "C:\\test\\dsp-native-host.exe" : "/test/dsp-native-host",
+    rootPath: process.platform === "win32" ? "C:\\test\\native-data" : "/test/native-data",
+    spawnProcess: () => child,
+  });
+  await client.start("test");
+  const result = await client.requestWithStructuredProfileEvidence({
+    operation: "coreAdvance",
+    profilePurpose: "local-dispatch-timing-v1",
+    sessionId: "session-delayed-duplicate",
+    request: { baseRevision: 11, simulationSeconds: 1, wallSeconds: 1, includeDiagnostics: false },
+  });
+  assert.equal(result.value.revision, 12);
+  assert.equal(Object.hasOwn(result.value, "profileEvidence"), false);
+  assert.equal(result.operationBinding.requestId, 2);
+  assert.equal(result.operationBinding.baseRevision, 11);
+  assert.equal(result.operationBinding.measuredRevision, 12);
+  assert.equal(result.profileChannel.responseBound, true);
+  assert.equal(result.profileChannel.quiescent, true);
+  assert.equal(result.profileChannel.timedOut, false);
+  assert.equal(result.profileChannel.records.length, 1);
+  assert.ok(result.operationDurationNs > 0);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  assert.equal(result.profileChannel.records.length, 1);
+
+  for (const [sessionId, expected] of [
+    ["session-response-missing", { responseBound: false, malformedCount: 1, dropped: false, records: 0 }],
+    ["session-response-overflow", { responseBound: true, malformedCount: 0, dropped: true, records: 1 }],
+    ["session-response-duplicate", { responseBound: true, malformedCount: 0, dropped: false, records: 2 }],
+  ]) {
+    const invalid = await client.requestWithStructuredProfileEvidence({
+      operation: "coreAdvance",
+      profilePurpose: "local-dispatch-timing-v1",
+      sessionId,
+      request: { baseRevision: 11, simulationSeconds: 1, wallSeconds: 1, includeDiagnostics: false },
+    });
+    assert.equal(invalid.profileChannel.responseBound, expected.responseBound);
+    assert.equal(invalid.profileChannel.malformedCount, expected.malformedCount);
+    assert.equal(invalid.profileChannel.dropped, expected.dropped);
+    assert.equal(invalid.profileChannel.records.length, expected.records);
   }
   await client.stop();
 });

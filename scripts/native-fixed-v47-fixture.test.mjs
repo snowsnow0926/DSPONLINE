@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -39,6 +40,49 @@ function processPolicy(overrides = {}) {
   };
 }
 
+function localDispatchProfile(overrides = {}) {
+  const profile = {
+    schemaVersion: 2,
+    instrumentationVersion: "local-dispatch-profile-v3",
+    workScope: "shape-proxy-only-not-time-or-speedup",
+    productGate: "full-advance-stage-share-times-parallelizable-share-at-least-3.5-percent",
+    stageDurationNs: 1_000_000,
+    stageDurationMicros: 1_000,
+    fullAdvanceDurationNs: 12_500_000,
+    stageSharePpm: 80_000,
+    parallelBenefitUpperBoundPpm: 40_000,
+    parallelBenefitUpperBoundScope: "theoretical-before-coordination-and-merge-overhead",
+    selectedDemands: 2,
+    totalDemands: 2,
+    planetShards: 2,
+    demandSlots: 2,
+    peerEdges: 2,
+    sortWorkUnits: 0,
+    totalWorkUnits: 8,
+    largestShardWorkUnits: 4,
+    largestShardRatioPpm: 500_000,
+    parallelizableWorkUnits: 4,
+    parallelizableRatioPpm: 500_000,
+    routeEvents: 2,
+    shardWorkSha256: "1".repeat(64),
+    planetIdentityProven: true,
+    scanFallback: "none",
+    parallelFallback: "shape-only-requires-full-advance-gate",
+    gateStatus: "ELIGIBLE_FOR_FIXED_AB",
+    gateReasonCodes: [],
+    ...overrides,
+  };
+  profile.shapeSha256 = createHash("sha256").update(JSON.stringify([
+    profile.instrumentationVersion, profile.workScope, profile.selectedDemands,
+    profile.totalDemands, profile.planetShards, profile.demandSlots, profile.peerEdges,
+    profile.sortWorkUnits, profile.totalWorkUnits, profile.largestShardWorkUnits,
+    profile.largestShardRatioPpm, profile.parallelizableWorkUnits,
+    profile.parallelizableRatioPpm, profile.routeEvents, profile.shardWorkSha256,
+    profile.planetIdentityProven, profile.scanFallback, profile.parallelFallback,
+  ])).digest("hex");
+  return profile;
+}
+
 function preflight(overrides = {}) {
   return {
     fixtureSha256: "a".repeat(64),
@@ -58,6 +102,18 @@ function preflight(overrides = {}) {
     writeBackWorkers: 4,
     processPolicy: processPolicy(),
     durationMs: 10,
+    evidenceStatus: "RESULT",
+    profileGate: {
+      status: "ELIGIBLE_FOR_FIXED_AB",
+      thresholdPpm: 35_000,
+      theoreticalUpperBoundPpm: 40_000,
+      reasonCodes: [],
+    },
+    performanceDecision: {
+      status: "NOT_EVALUATED",
+      reasonCode: "profile-shape-and-stage-share-are-not-performance-benefit",
+    },
+    localDispatchProfile: localDispatchProfile(),
     ...overrides,
   };
 }
@@ -181,6 +237,35 @@ test("preflight requires strict digests, explicit priorities, affinity, and iden
     assert.equal(rejected.status, "NO_RESULT", reason);
     assert.ok(rejected.reasonCodes.includes(reason), JSON.stringify(rejected));
     assert.equal(rejected.expected, null);
+  }
+
+  for (const [reason, drift] of [
+    ["local-dispatch-profile-evidence-mismatch", { evidenceStatus: "OLD" }],
+    ["local-dispatch-profile-evidence-mismatch", { localDispatchProfile: null }],
+    ["local-dispatch-profile-evidence-mismatch", {
+      localDispatchProfile: localDispatchProfile({ stageSharePpm: 79_999 }),
+    }],
+    ["local-dispatch-profile-shape-mismatch", {
+      profileGate: {
+        status: "ELIGIBLE_FOR_FIXED_AB",
+        thresholdPpm: 35_000,
+        theoreticalUpperBoundPpm: 44_444,
+        reasonCodes: [],
+      },
+      localDispatchProfile: localDispatchProfile({
+        selectedDemands: 3,
+        totalDemands: 3,
+        totalWorkUnits: 9,
+        largestShardRatioPpm: 444_444,
+        parallelizableWorkUnits: 5,
+        parallelizableRatioPpm: 555_555,
+        parallelBenefitUpperBoundPpm: 44_444,
+      }),
+    }],
+  ]) {
+    const rejected = evaluateFixedPreflight({ records: [preflight(), preflight(drift)], ...evaluationOptions });
+    assert.equal(rejected.status, "NO_RESULT", reason);
+    assert.ok(rejected.reasonCodes.includes(reason), JSON.stringify(rejected));
   }
 });
 

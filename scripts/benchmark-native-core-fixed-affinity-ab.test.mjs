@@ -41,6 +41,49 @@ function fixtureBytes() {
   }), "utf8");
 }
 
+function localDispatchProfile(overrides = {}) {
+  const profile = {
+    schemaVersion: 2,
+    instrumentationVersion: "local-dispatch-profile-v3",
+    workScope: "shape-proxy-only-not-time-or-speedup",
+    productGate: "full-advance-stage-share-times-parallelizable-share-at-least-3.5-percent",
+    stageDurationNs: 1_000_000,
+    stageDurationMicros: 1_000,
+    fullAdvanceDurationNs: 12_500_000,
+    stageSharePpm: 80_000,
+    parallelBenefitUpperBoundPpm: 40_000,
+    parallelBenefitUpperBoundScope: "theoretical-before-coordination-and-merge-overhead",
+    selectedDemands: 2,
+    totalDemands: 2,
+    planetShards: 2,
+    demandSlots: 2,
+    peerEdges: 2,
+    sortWorkUnits: 0,
+    totalWorkUnits: 8,
+    largestShardWorkUnits: 4,
+    largestShardRatioPpm: 500_000,
+    parallelizableWorkUnits: 4,
+    parallelizableRatioPpm: 500_000,
+    routeEvents: 2,
+    shardWorkSha256: "1".repeat(64),
+    planetIdentityProven: true,
+    scanFallback: "none",
+    parallelFallback: "shape-only-requires-full-advance-gate",
+    gateStatus: "ELIGIBLE_FOR_FIXED_AB",
+    gateReasonCodes: [],
+    ...overrides,
+  };
+  profile.shapeSha256 = createHash("sha256").update(JSON.stringify([
+    profile.instrumentationVersion, profile.workScope, profile.selectedDemands,
+    profile.totalDemands, profile.planetShards, profile.demandSlots, profile.peerEdges,
+    profile.sortWorkUnits, profile.totalWorkUnits, profile.largestShardWorkUnits,
+    profile.largestShardRatioPpm, profile.parallelizableWorkUnits,
+    profile.parallelizableRatioPpm, profile.routeEvents, profile.shardWorkSha256,
+    profile.planetIdentityProven, profile.scanFallback, profile.parallelFallback,
+  ])).digest("hex");
+  return profile;
+}
+
 function record(fixtureSha256, overrides = {}) {
   const node = { Id: 1001, PriorityClass: "High", ProcessorAffinity: "0xFFFF" };
   const nativeHost = { Id: 2002, PriorityClass: "Normal", ProcessorAffinity: "0xFFFF" };
@@ -66,6 +109,18 @@ function record(fixtureSha256, overrides = {}) {
       after: { node: { ...node }, nativeHost: { ...nativeHost } },
     },
     durationMs: 10,
+    evidenceStatus: "RESULT",
+    profileGate: {
+      status: "ELIGIBLE_FOR_FIXED_AB",
+      thresholdPpm: 35_000,
+      theoreticalUpperBoundPpm: 40_000,
+      reasonCodes: [],
+    },
+    performanceDecision: {
+      status: "NOT_EVALUATED",
+      reasonCode: "profile-shape-and-stage-share-are-not-performance-benefit",
+    },
+    localDispatchProfile: localDispatchProfile(),
     ...overrides,
   };
 }
@@ -246,6 +301,13 @@ test("runner accepts six interleaved samples only when fixture and all process e
     assert.equal(report.samples.length, 6);
     assert.deepEqual(report.configuration.order, ["baseline", "candidate", "candidate", "baseline", "baseline", "candidate"]);
     assert.ok(Math.abs(report.summary.candidateReductionPercent - 20) < 1e-9);
+    assert.equal(report.evidenceStatus, "RESULT");
+    assert.equal(report.profileGate.status, "ELIGIBLE_FOR_FIXED_AB");
+    assert.equal(report.profileGate.thresholdPpm, 35_000);
+    assert.equal(report.profileGate.baselineStageSharePpm.minimum, 80_000);
+    assert.equal(report.performanceDecision.status, "NOT_EVALUATED");
+    assert.equal(report.summary.observedOnly, true);
+    assert.equal(report.summary.performanceDecisionApplied, false);
     assert.match(report.claimBoundary, /not attested as P-core/);
     assert.match(report.claimBoundary, /non-malicious concurrent replacement/);
     assert.equal(observed.length, 1);
@@ -309,6 +371,82 @@ test("runner emits NO_RESULT for child evidence drift and final fixture revalida
     assert.ok(finalMismatch.reasonCodes.includes("fixture-final-sha-mismatch"));
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("profile gate fails closed for low share and shape drift without turning eligibility into a benefit claim", () => {
+  const lowShare = prepare();
+  try {
+    const fixture = readFixedV47Fixture(lowShare.configured.fixture);
+    const profile = localDispatchProfile({
+      stageDurationNs: 100_000,
+      stageDurationMicros: 100,
+      stageSharePpm: 8_000,
+      parallelBenefitUpperBoundPpm: 4_000,
+      gateStatus: "NO_GO",
+      gateReasonCodes: [
+        "local-dispatch-stage-share-below-3.5-percent",
+        "local-dispatch-parallel-benefit-upper-bound-below-3.5-percent",
+      ],
+    });
+    const report = runFixedAffinityAb(lowShare.configured, dependencies(lowShare, {
+      runSample: ({ binary }) => record(fixture.sha256, {
+        ...binaryEvidence(binary),
+        profileGate: {
+          status: "NO_GO",
+          thresholdPpm: 35_000,
+          theoreticalUpperBoundPpm: 4_000,
+          reasonCodes: profile.gateReasonCodes,
+        },
+        localDispatchProfile: profile,
+      }),
+    }));
+    assert.equal(report.status, "NO_GO");
+    assert.equal(report.evidenceStatus, "RESULT");
+    assert.equal(report.profileGate.status, "NO_GO");
+    assert.ok(report.profileGate.reasonCodes.includes("local-dispatch-stage-share-below-3.5-percent"));
+    assert.equal(report.performanceDecision.status, "NOT_EVALUATED");
+    assert.equal(report.summary, null);
+  } finally {
+    rmSync(lowShare.root, { recursive: true, force: true });
+  }
+
+  const shapeDrift = prepare();
+  try {
+    const fixture = readFixedV47Fixture(shapeDrift.configured.fixture);
+    let calls = 0;
+    const report = runFixedAffinityAb(shapeDrift.configured, dependencies(shapeDrift, {
+      runSample: ({ binary }) => {
+        calls += 1;
+        return record(fixture.sha256, {
+          ...binaryEvidence(binary),
+          ...(calls === 2 ? {
+            profileGate: {
+              status: "ELIGIBLE_FOR_FIXED_AB",
+              thresholdPpm: 35_000,
+              theoreticalUpperBoundPpm: 44_444,
+              reasonCodes: [],
+            },
+            localDispatchProfile: localDispatchProfile({
+              selectedDemands: 3,
+              totalDemands: 3,
+              totalWorkUnits: 9,
+              largestShardRatioPpm: 444_444,
+              parallelizableWorkUnits: 5,
+              parallelizableRatioPpm: 555_555,
+              parallelBenefitUpperBoundPpm: 44_444,
+            }),
+          } : {}),
+        });
+      },
+    }));
+    assert.equal(report.status, "NO_RESULT");
+    assert.equal(report.evidenceStatus, "NO_RESULT");
+    assert.equal(report.profileGate.status, "NO_RESULT");
+    assert.ok(report.reasonCodes.includes("local-dispatch-profile-shape-mismatch"));
+    assert.ok(report.profileGate.reasonCodes.includes("local-dispatch-profile-shape-mismatch"));
+  } finally {
+    rmSync(shapeDrift.root, { recursive: true, force: true });
   }
 });
 

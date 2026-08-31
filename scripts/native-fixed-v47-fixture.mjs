@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const LOCAL_DISPATCH_STAGE_SHARE_MIN_PPM = 35_000;
 const FIXED_AFFINITY_PRIORITY_CLASSES = new Set([
   "Idle", "BelowNormal", "Normal", "AboveNormal", "High", "RealTime",
 ]);
@@ -190,7 +191,128 @@ function digestMismatch(records, field) {
     new Set(records.map((record) => record[field])).size !== 1;
 }
 
-function identityReasons(records, expected, requiredWriteBackWorkers = null) {
+function localDispatchShapeSha256(profile) {
+  return createHash("sha256").update(JSON.stringify([
+    profile.instrumentationVersion,
+    profile.workScope,
+    profile.selectedDemands,
+    profile.totalDemands,
+    profile.planetShards,
+    profile.demandSlots,
+    profile.peerEdges,
+    profile.sortWorkUnits,
+    profile.totalWorkUnits,
+    profile.largestShardWorkUnits,
+    profile.largestShardRatioPpm,
+    profile.parallelizableWorkUnits,
+    profile.parallelizableRatioPpm,
+    profile.routeEvents,
+    profile.shardWorkSha256,
+    profile.planetIdentityProven,
+    profile.scanFallback,
+    profile.parallelFallback,
+  ])).digest("hex");
+}
+
+function validLocalDispatchEvidence(record) {
+  const profile = record?.localDispatchProfile;
+  const gate = record?.profileGate;
+  const decision = record?.performanceDecision;
+  if (record?.evidenceStatus !== "RESULT" || !profile || typeof profile !== "object" || Array.isArray(profile) ||
+      !gate || typeof gate !== "object" || Array.isArray(gate) ||
+      !decision || typeof decision !== "object" || Array.isArray(decision) ||
+      decision.status !== "NOT_EVALUATED" ||
+      decision.reasonCode !== "profile-shape-and-stage-share-are-not-performance-benefit" ||
+      profile.schemaVersion !== 2 || profile.instrumentationVersion !== "local-dispatch-profile-v3" ||
+      profile.workScope !== "shape-proxy-only-not-time-or-speedup" ||
+      profile.productGate !== "full-advance-stage-share-times-parallelizable-share-at-least-3.5-percent" ||
+      !SHA256_PATTERN.test(profile.shardWorkSha256 ?? "") ||
+      !SHA256_PATTERN.test(profile.shapeSha256 ?? "") ||
+      profile.shapeSha256 !== localDispatchShapeSha256(profile) ||
+      !Number.isSafeInteger(profile.stageDurationNs) || profile.stageDurationNs < 0 ||
+      profile.stageDurationMicros !== Math.floor(profile.stageDurationNs / 1_000) ||
+      !Number.isSafeInteger(profile.fullAdvanceDurationNs) || profile.fullAdvanceDurationNs <= 0 ||
+      !Number.isSafeInteger(profile.stageSharePpm) || profile.stageSharePpm < 0 || profile.stageSharePpm > 1_000_000 ||
+      !Number.isSafeInteger(profile.parallelBenefitUpperBoundPpm) || profile.parallelBenefitUpperBoundPpm < 0 ||
+      !Number.isSafeInteger(profile.parallelizableRatioPpm) || profile.parallelizableRatioPpm < 0 ||
+      profile.parallelBenefitUpperBoundScope !== "theoretical-before-coordination-and-merge-overhead" ||
+      BigInt(profile.stageDurationNs) > BigInt(profile.fullAdvanceDurationNs) ||
+      profile.stageSharePpm !== Number((BigInt(profile.stageDurationNs) * 1_000_000n) /
+        BigInt(profile.fullAdvanceDurationNs)) ||
+      profile.parallelBenefitUpperBoundPpm !== Number(
+        (BigInt(profile.stageSharePpm) * BigInt(profile.parallelizableRatioPpm)) / 1_000_000n,
+      ) ||
+      !Array.isArray(profile.gateReasonCodes) ||
+      gate.thresholdPpm !== LOCAL_DISPATCH_STAGE_SHARE_MIN_PPM ||
+      gate.theoreticalUpperBoundPpm !== profile.parallelBenefitUpperBoundPpm ||
+      !["ELIGIBLE_FOR_FIXED_AB", "NO_GO"].includes(gate.status) ||
+      gate.status !== profile.gateStatus || !Array.isArray(gate.reasonCodes) ||
+      JSON.stringify(gate.reasonCodes) !== JSON.stringify(profile.gateReasonCodes)) {
+    return false;
+  }
+  const numericShapeFields = [
+    "selectedDemands", "totalDemands", "planetShards", "demandSlots", "peerEdges",
+    "sortWorkUnits", "totalWorkUnits", "largestShardWorkUnits", "largestShardRatioPpm",
+    "parallelizableWorkUnits", "parallelizableRatioPpm", "routeEvents",
+  ];
+  if (numericShapeFields.some((key) => !Number.isSafeInteger(profile[key]) || profile[key] < 0) ||
+      typeof profile.planetIdentityProven !== "boolean" || typeof profile.scanFallback !== "string" ||
+      typeof profile.parallelFallback !== "string" ||
+      profile.gateReasonCodes.some((reason) => typeof reason !== "string") ||
+      new Set(profile.gateReasonCodes).size !== profile.gateReasonCodes.length ||
+      (profile.gateStatus === "ELIGIBLE_FOR_FIXED_AB") !== (profile.gateReasonCodes.length === 0) ||
+      profile.gateReasonCodes.includes("local-dispatch-stage-share-below-3.5-percent") !==
+        (profile.stageSharePpm < LOCAL_DISPATCH_STAGE_SHARE_MIN_PPM)) {
+    return false;
+  }
+  const ratioPpm = (numerator, denominator) => denominator === 0
+    ? 0
+    : Number((BigInt(numerator) * 1_000_000n) / BigInt(denominator));
+  if (profile.selectedDemands > profile.totalDemands || profile.planetShards > profile.selectedDemands ||
+      BigInt(profile.totalWorkUnits) !== BigInt(profile.selectedDemands) + BigInt(profile.demandSlots) +
+        BigInt(profile.peerEdges) + BigInt(profile.sortWorkUnits) + BigInt(profile.routeEvents) ||
+      profile.largestShardWorkUnits > profile.totalWorkUnits ||
+      profile.largestShardRatioPpm !== ratioPpm(profile.largestShardWorkUnits, profile.totalWorkUnits) ||
+      profile.parallelizableRatioPpm !== ratioPpm(profile.parallelizableWorkUnits, profile.totalWorkUnits) ||
+      profile.parallelizableWorkUnits !== (profile.planetIdentityProven
+        ? profile.totalWorkUnits - profile.largestShardWorkUnits
+        : 0)) {
+    return false;
+  }
+  const expectedGateReasons = [];
+  if (profile.scanFallback !== "none") expectedGateReasons.push("local-dispatch-scan-fallback");
+  if (!profile.planetIdentityProven) expectedGateReasons.push("local-dispatch-planet-identity-unproven");
+  if (profile.planetShards < 2) expectedGateReasons.push("local-dispatch-planet-shards-insufficient");
+  if (profile.parallelFallback !== "shape-only-requires-full-advance-gate") {
+    expectedGateReasons.push("local-dispatch-parallel-fallback");
+  }
+  if (profile.stageSharePpm < LOCAL_DISPATCH_STAGE_SHARE_MIN_PPM) {
+    expectedGateReasons.push("local-dispatch-stage-share-below-3.5-percent");
+  }
+  if (profile.parallelBenefitUpperBoundPpm < LOCAL_DISPATCH_STAGE_SHARE_MIN_PPM) {
+    expectedGateReasons.push("local-dispatch-parallel-benefit-upper-bound-below-3.5-percent");
+  }
+  if (JSON.stringify(profile.gateReasonCodes) !== JSON.stringify(expectedGateReasons)) return false;
+  return true;
+}
+
+function localDispatchEvidenceReasons(records, requiredShapeSha256 = null) {
+  if (records.some((record) => !validLocalDispatchEvidence(record))) {
+    return ["local-dispatch-profile-evidence-mismatch"];
+  }
+  const shapes = new Set(records.map((record) => record.localDispatchProfile.shapeSha256));
+  if (shapes.size !== 1 || (requiredShapeSha256 !== null && !shapes.has(requiredShapeSha256))) {
+    return ["local-dispatch-profile-shape-mismatch"];
+  }
+  return [];
+}
+
+function identityReasons(
+  records,
+  expected,
+  requiredWriteBackWorkers = null,
+  requiredLocalDispatchShapeSha256 = null,
+) {
   const reasons = [];
   if (records.some((record) => record.fixtureSha256 !== expected.fixtureSha256)) {
     reasons.push("fixture-sha-mismatch");
@@ -267,6 +389,7 @@ function identityReasons(records, expected, requiredWriteBackWorkers = null) {
     (requiredWriteBackWorkers !== null && records.some((record) => record.writeBackWorkers !== requiredWriteBackWorkers))) {
     reasons.push("worker-metadata-mismatch");
   }
+  reasons.push(...localDispatchEvidenceReasons(records, requiredLocalDispatchShapeSha256));
   return reasons;
 }
 
@@ -333,7 +456,12 @@ export function evaluateFixedMeasured({
   } catch {
     return invalidEvaluation("measured-configuration-invalid");
   }
-  const reasonCodes = identityReasons(records, expected, preflightExpected.writeBackWorkers);
+  const reasonCodes = identityReasons(
+    records,
+    expected,
+    preflightExpected.writeBackWorkers,
+    preflightExpected.localDispatchProfile?.shapeSha256 ?? null,
+  );
   for (const [field, reason] of [
     ["openCanonicalSha256", "open-canonical-hash-mismatch"],
     ["preStepCanonicalSha256", "pre-step-canonical-hash-mismatch"],

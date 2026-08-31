@@ -25,15 +25,21 @@ interface ReadRef<T> {
   readonly current: T;
 }
 
-interface MutableBooleanRef {
-  current: boolean;
+interface MutableRef<T> {
+  current: T;
 }
 
 export interface NativeEntityRecipeCommandTransactionOptions {
   readonly authority: NativeEntityRecipeAuthorityObservation | null;
   readonly projection: NativeProjectedEntityRecipeBinding | null;
   readonly authorityOwnedRef: ReadRef<boolean>;
-  readonly commandInFlightRef: MutableBooleanRef;
+  readonly commandInFlightRef: MutableRef<boolean>;
+  /**
+   * Pins the destructive command's entity into the bounded factory read request.
+   * The player may continue browsing while the receipt is converging, but that
+   * must not replace the only projection capable of retiring the global lock.
+   */
+  readonly projectionTargetEntityIdRef: MutableRef<string | null>;
   readonly commandSourceRef: ReadRef<Readonly<{
     source: NativePlayerAuthorityCommandSource;
   }> | null>;
@@ -97,8 +103,9 @@ export function useNativeEntityRecipeCommandTransaction(
 
   const finishPending = useCallback((token: number, notice: string): boolean => {
     if (pendingRef.current?.token !== token) return false;
-    publishPending(null);
     const current = optionsRef.current;
+    current.projectionTargetEntityIdRef.current = null;
+    publishPending(null);
     current.commandInFlightRef.current = false;
     current.setCommandPending(false);
     current.setNotice(notice);
@@ -243,6 +250,7 @@ export function useNativeEntityRecipeCommandTransaction(
       current.setNotice("原生建筑配方命令未通过精确事务边界校验；本次配方未提交");
       return false;
     }
+    current.projectionTargetEntityIdRef.current = initialPending.entityId;
     publishPending(initialPending);
     current.commandInFlightRef.current = true;
     current.setCommandPending(true);

@@ -39,6 +39,7 @@ describe("native entity recipe App integration", () => {
     expect(hookBinding).toMatch(/projection: nativeEntityRecipeProjectionBinding/);
     expect(hookBinding).toMatch(/authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef/);
     expect(hookBinding).toMatch(/commandInFlightRef: nativePlayerAuthorityCommandInFlightRef/);
+    expect(hookBinding).toMatch(/projectionTargetEntityIdRef: nativeEntityRecipeProjectionTargetEntityIdRef/);
     expect(hookBinding).toMatch(/commandSourceRef: nativePlayerAuthorityCommandBindingRef/);
     expect(hookBinding).toMatch(/pending: nativeEntityRecipePending/);
     expect(hookBinding).toMatch(/commit: commitNativeEntityRecipeCommand/);
@@ -51,6 +52,16 @@ describe("native entity recipe App integration", () => {
     expect(handler).toMatch(/selectedEntityIdsRef\.current\.length !== 1[\s\S]*?selectedBeltIdsRef\.current\.length !== 0/);
     expect(handler).toMatch(/commitNativeEntityRecipeCommand\(binding, targetRecipeId\)/);
     expect(handler).not.toMatch(/commitGame|gameRef\.current|setRecipe|changedEntities/);
+  });
+
+  it("keeps the dispatched recipe entity in the bounded read request while the player browses", () => {
+    const selectionStart = app.indexOf("const nativeEntityRecipeProjectionTargetEntityId =");
+    const selectionEnd = app.indexOf("const factoryThinViewRelatedEntityIds", selectionStart);
+    const selectionRequest = app.slice(selectionStart, selectionEnd);
+    expect(selectionStart).toBeGreaterThan(0);
+    expect(selectionRequest).toMatch(/nativePlayerAuthorityCommandPending[\s\S]*?nativeEntityRecipeProjectionTargetEntityIdRef\.current/);
+    expect(selectionRequest).toMatch(/factoryThinViewAllSelectedEntityIds[\s\S]*?nativeEntityRecipeProjectionTargetEntityId[\s\S]*?\[nativeEntityRecipeProjectionTargetEntityId\]/);
+    expect(selectionRequest).toMatch(/factoryThinViewAllSelectedBeltIds[\s\S]*?nativeEntityRecipeProjectionTargetEntityId[\s\S]*?\? \[\]/);
   });
 
   it("keeps the extracted transaction free of renderer-side gameplay mutation", () => {

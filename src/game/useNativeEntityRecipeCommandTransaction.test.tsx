@@ -198,6 +198,7 @@ interface HarnessProps {
   readonly source: NativePlayerAuthorityCommandSource;
   readonly authority: NativeEntityRecipeAuthorityObservation | null;
   readonly projection: NativeProjectedEntityRecipeBinding;
+  readonly transactionProjection?: NativeProjectedEntityRecipeBinding | null;
   readonly refresh: () => Promise<void>;
   readonly invalidate: () => void;
   readonly wait?: (milliseconds: number) => Promise<void>;
@@ -206,6 +207,7 @@ interface HarnessProps {
 function Harness(props: HarnessProps) {
   const authorityOwnedRef = useRef(true);
   const commandInFlightRef = useRef(false);
+  const projectionTargetEntityIdRef = useRef<string | null>(null);
   const commandSourceRef = useRef<Readonly<{ source: NativePlayerAuthorityCommandSource }> | null>({
     source: props.source,
   });
@@ -214,9 +216,12 @@ function Harness(props: HarnessProps) {
   const [notice, setNotice] = useState("");
   const transaction = useNativeEntityRecipeCommandTransaction({
     authority: props.authority,
-    projection: props.projection,
+    projection: props.transactionProjection === undefined
+      ? props.projection
+      : props.transactionProjection,
     authorityOwnedRef,
     commandInFlightRef,
+    projectionTargetEntityIdRef,
     commandSourceRef,
     setCommandPending,
     rejectPlayerStateEdit: () => false,
@@ -230,6 +235,7 @@ function Harness(props: HarnessProps) {
       data-testid="transaction"
       data-phase={transaction.pending?.phase ?? "none"}
       data-command-pending={String(commandPending)}
+      data-projection-target={projectionTargetEntityIdRef.current ?? "none"}
     >{notice}</output>
     <NativeFactoryInspectorPanel
       inspector={inspector(props.projection)}
@@ -335,6 +341,59 @@ describe("useNativeEntityRecipeCommandTransaction", () => {
     expect(host.querySelector<HTMLSelectElement>('[aria-label="Windows 原生生产配方"]')?.value)
       .toBe("copper_ingot");
     expect(bridge.applyNativeCoreCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains the dispatched entity as the projection target while the visible selection is absent", async () => {
+    const initial = frame();
+    const bridge = {
+      getNativePlayerAuthorityState: vi.fn()
+        .mockResolvedValueOnce(initial)
+        .mockResolvedValueOnce(frame(11)),
+      applyNativeCoreCommand: vi.fn(async () => committedReceipt()),
+      reconcileNativeCoreCommand: vi.fn(),
+    } satisfies Pick<
+      DesktopBridge,
+      "getNativePlayerAuthorityState" | "applyNativeCoreCommand" | "reconcileNativeCoreCommand"
+    >;
+    const source = createNativePlayerAuthorityCommandSource(bridge, initial)!;
+    const render = (
+      currentAuthority: NativeEntityRecipeAuthorityObservation,
+      transactionProjection: NativeProjectedEntityRecipeBinding | null,
+    ) => act(() => root.render(<Harness
+      source={source}
+      authority={currentAuthority}
+      projection={recipeBinding()}
+      transactionProjection={transactionProjection}
+      refresh={vi.fn(async () => undefined)}
+      invalidate={vi.fn()}
+    />));
+
+    render(authority(), recipeBinding());
+    chooseCopperRecipe(host);
+    await flushAsyncWork();
+    expect(bridge.applyNativeCoreCommand).toHaveBeenCalledTimes(1);
+    expect(host.querySelector('[data-testid="transaction"]')?.getAttribute("data-phase"))
+      .toBe("awaiting-projection");
+    expect(host.querySelector('[data-testid="transaction"]')?.getAttribute("data-projection-target"))
+      .toBe("smelter-a");
+
+    // Clearing or changing the visible selection cannot discard the target
+    // read while its exact same-lineage receipt is still converging.
+    render(authority(11), null);
+    await flushAsyncWork();
+    expect(host.querySelector('[data-testid="transaction"]')?.getAttribute("data-phase"))
+      .toBe("awaiting-projection");
+    expect(host.querySelector('[data-testid="transaction"]')?.getAttribute("data-projection-target"))
+      .toBe("smelter-a");
+
+    render(authority(11), recipeBinding(11, "copper_ingot"));
+    await flushAsyncWork();
+    expect(host.querySelector('[data-testid="transaction"]')?.getAttribute("data-phase"))
+      .toBe("none");
+    expect(host.querySelector('[data-testid="transaction"]')?.getAttribute("data-command-pending"))
+      .toBe("false");
+    expect(host.querySelector('[data-testid="transaction"]')?.getAttribute("data-projection-target"))
+      .toBe("none");
   });
 
   it("unlocks a proven non-commit but keeps a conflict locked without resending", async () => {

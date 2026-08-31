@@ -2612,6 +2612,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     source: NativePlayerAuthorityCommandSource;
   } | null>(null);
   const nativePlayerAuthorityCommandInFlightRef = useRef(false);
+  const nativeEntityRecipeProjectionTargetEntityIdRef = useRef<string | null>(null);
   const nativeManualMiningLastAttemptedFrameKeyRef = useRef<string | null>(null);
   const nativePlayerAuthorityPauseInFlightRef = useRef(false);
   const [nativePlayerAuthorityCommandPending, setNativePlayerAuthorityCommandPending] = useState(false);
@@ -3236,9 +3237,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const factoryGestureRouteKey = nativePlayerAuthorityOwnsRuntime
     ? `${nativePlayerAuthorityBoundFrame?.sessionId ?? "unbound"}:${nativeFactoryProjectionPlanetId}`
     : `web:${game.activePlanetId}`;
+  const nativeEntityRecipeProjectionTargetEntityId = nativePlayerAuthorityCommandPending
+    ? nativeEntityRecipeProjectionTargetEntityIdRef.current
+    : null;
   const factoryThinViewAllSelectedEntityIds = useMemo(
-    () => nativeFactoryUnpinnedBootstrap ? [] : [...new Set(selectedEntityIds)],
-    [nativeFactoryUnpinnedBootstrap, selectedEntityIds],
+    () => nativeFactoryUnpinnedBootstrap
+      ? []
+      : nativeEntityRecipeProjectionTargetEntityId
+        ? [nativeEntityRecipeProjectionTargetEntityId]
+        : [...new Set(selectedEntityIds)],
+    [nativeEntityRecipeProjectionTargetEntityId, nativeFactoryUnpinnedBootstrap, selectedEntityIds],
   );
   const factoryThinViewSelectedEntityIds = useMemo(
     () => factoryThinViewAllSelectedEntityIds.slice(0, FACTORY_READ_MODEL_LIMITS.selectedEntityRows),
@@ -3247,8 +3255,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const factoryThinViewAllSelectedBeltIds = useMemo(
     () => nativeFactoryUnpinnedBootstrap
       ? []
-      : [...new Set(selectedBeltId ? [selectedBeltId, ...selectedBeltIds] : selectedBeltIds)],
-    [nativeFactoryUnpinnedBootstrap, selectedBeltId, selectedBeltIds],
+      : nativeEntityRecipeProjectionTargetEntityId
+        ? []
+        : [...new Set(selectedBeltId ? [selectedBeltId, ...selectedBeltIds] : selectedBeltIds)],
+    [
+      nativeEntityRecipeProjectionTargetEntityId,
+      nativeFactoryUnpinnedBootstrap,
+      selectedBeltId,
+      selectedBeltIds,
+    ],
   );
   const factoryThinViewSelectedBeltIds = useMemo(
     () => factoryThinViewAllSelectedBeltIds.slice(0, FACTORY_READ_MODEL_LIMITS.selectedBeltRows),
@@ -17176,6 +17191,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     projection: nativeEntityRecipeProjectionBinding,
     authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
     commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    projectionTargetEntityIdRef: nativeEntityRecipeProjectionTargetEntityIdRef,
     commandSourceRef: nativePlayerAuthorityCommandBindingRef,
     setCommandPending: setNativePlayerAuthorityCommandPending,
     rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,

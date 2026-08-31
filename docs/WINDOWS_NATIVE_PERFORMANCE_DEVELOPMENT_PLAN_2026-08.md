@@ -1975,3 +1975,15 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版�
 7. 首轮 Core 全量在较大的 4,096 行合成稀疏测试已经通过后，Windows 测试进程随后以 `STATUS_ACCESS_VIOLATION` 结束；当时同一模块 focused `5/5` 通过。为降低单进程组合测试压力，计数夹具收敛为仍能证明同一复杂度的 1,024 行。随后又加强失败候选重试断言并增加 MOD writer 失败关闭回归；最终 focused 为 `6/6`，workspace 串行全量为 Core `839/839`（211.68 秒）、Host library `203/203`（30.55 秒）、Host main `2/2`（0.00 秒），合计 `1044/1044`、0 失败、0 跳过；workspace strict clippy、Rust fmt 与 diff check 通过。该失败史保留，不能写成首轮全绿。
 
 仍未关闭的全扫域包括：连续生产/矿机/供电探针的合法活动集合，material-delivery hubs，量子高扇出与部分 inventory key parse/write，拓扑重建、75% 稠密和所有 fail-closed 退化。它们必须分别建立 writer-closed wake 证书和独立 flat oracle 后才能继续收敛；本节不能把整个物流系统或四大目标标成 100%。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 和 `authorityEligible=false` 均不变；本切片未连接生产、部署、签名或处理真实玩家存档。
+
+### 24.26 Rust 权威轨道空间站合同板（2026-09-01，开发候选）
+
+本纵切在恒星系空间站工作区之后迁移玩家可见轨道合同操作，不调整 24.1 的固定能力百分比。范围只包括 contract board；cargo-terminal binding、decorations、profile/public showcase、construction、其他银河操作与 MOD 继续失败关闭。
+
+1. renderer 只提交 accept、deliver-quantum、claim、abandon、feature 五类 deny-unknown-fields intent，并绑定 session/run/revision/内置 registry。Rust 从当前 v47 权威状态重新生成 offer、限制 accepted 数量、核验任务日/状态/ID/库存，按请求量、可用量和剩余需求三者最小值守恒交付，重算加权结算与确定奖励。renderer 不提交 GameState、patch、余额、进度或奖励。
+2. durable request 额外绑定 main-owned `confirmedWallClockMs`。mutation broker 首次排队只采样一次并把它纳入 command ID；transport loss 复用同一 FIFO entry、clock、command ID 和 Host bytes。Rust 在 disposable clone 中先把 board clock 单调设为 max，再调用既有 `(lastConfirmedWallClockMs + TIME_ZONE_OFFSET_MS) / TASK_DAY_MS` 上海 UTC+8 synchronize，完成 expiry、offer rollover 后才执行 intent；成功进入既有 WAL/checkpoint/receipt/cold-replay 事务，reject 不修改源状态。
+3. 同 revision projection 不缓存昨日结果。main projection broker 每次读取内部采样 clock，renderer exact request 没有时间字段；Host 以 exact-realtime lease 二次证明 authority session/run/registry，Rust 在只读 clone 上 synchronize 后输出最多 4 offer、3 accepted、8 completed history、每合同 6 requirements、256 KiB。旧 offer 点击 definite reject 后 UI 在 FIFO settle 时强制重读，取得当前日 projection，不提交 rollover-only 伪成功。
+4. completed history 保持 8 行时采用 newest 7 + 较旧 featured；featured 已在 newest 8 时保留正常 newest 8。持久 history 满 48 条且 expiry 或 direct claim/abandon 插入淘汰最老 featured 时清 null，避免 strict projection 永久失败。orbitalMarks、stationReputation 和 exportedByItem 与 Web 一样在 256 位饱和，completedContracts 在 MAX_SAFE 饱和；command base revision 达 MAX_SAFE 前置拒绝。
+5. 当前 focused 结果为 Core `15/15`、Host `4/4`、Node `58/58`、renderer boundary `23/23`、Vitest `16/16`，typecheck 与 diff check 通过。测试覆盖库存不足、stale revision/run/registry、无源 mutation reject、上海午夜前后、旧 offer→fresh projection、到期同事务归档、direct claim/abandon 满 48 条历史、duplicate/lost response、五个 durable fault boundaries、cold replay、投影边界和跨语言饱和向量。完整仓库门禁仍须在冻结提交上执行，不能用本节 focused 数字替代发布验证。
+
+本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；未连接生产、部署、签名、打包或处理真实玩家存档。

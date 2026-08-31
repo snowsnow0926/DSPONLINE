@@ -538,7 +538,9 @@ function archiveSettledContract(station: OrbitalStationState, contractId: string
   const [contract] = station.contractBoard.accepted.splice(index, 1);
   station.contractBoard.history.unshift(contract);
   station.contractBoard.history = station.contractBoard.history.slice(0, STATION_CONTRACT_HISTORY_LIMIT);
-  if (station.contractBoard.featuredContractId === contractId && contract.settlementReason !== "completed") {
+  const featuredContractId = station.contractBoard.featuredContractId;
+  if (featuredContractId !== null && !station.contractBoard.history.some((candidate) =>
+    candidate.id === featuredContractId && candidate.settlementReason === "completed")) {
     station.contractBoard.featuredContractId = null;
   }
 }

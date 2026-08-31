@@ -7,7 +7,8 @@ use crate::core_runtime::{
     CoreActivatePlayerAuthorityRequest, CoreCheckpointAcknowledgeExactRealtimeRequest,
     CoreCheckpointExactRealtimeFinalizationRequest, CoreCommitOperationExactRealtimeRequest,
     CoreCommitOperationRequest, CoreCommitPlayerAuthorityCommandRequest,
-    CoreCommitPlayerAuthorityMacroAdvanceRequest, CoreCommitPlayerAuthorityPauseRequest,
+    CoreCommitPlayerAuthorityMacroAdvanceRequest,
+    CoreCommitPlayerAuthorityOrbitalContractCommandRequest, CoreCommitPlayerAuthorityPauseRequest,
     CoreCommitPlayerAuthoritySystemSpaceStationCommandRequest,
     CoreCommitPlayerAuthorityTickRequest, CoreFinishPlayerAuthorityMacroSessionRequest,
     CorePlayerAuthorityStartupRecoveryReceipt, CorePreparePlayerAuthorityRequest,
@@ -54,6 +55,13 @@ pub struct CoreCommitPlayerAuthorityCommandControlRequest {
 pub struct CoreCommitPlayerAuthoritySystemSpaceStationCommandControlRequest {
     pub session_id: String,
     pub request: CoreCommitPlayerAuthoritySystemSpaceStationCommandRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreCommitPlayerAuthorityOrbitalContractCommandControlRequest {
+    pub session_id: String,
+    pub request: CoreCommitPlayerAuthorityOrbitalContractCommandRequest,
 }
 
 #[derive(Debug, Deserialize)]
@@ -484,6 +492,13 @@ pub enum ControlRequest {
         station_cursor: usize,
         station_limit: usize,
     },
+    CoreOrbitalContractWorkspaceProjection {
+        session_id: String,
+        run_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        confirmed_wall_clock_ms: u64,
+    },
     CoreApplyCommand {
         session_id: String,
         command: SimulationCommandPatch,
@@ -508,6 +523,9 @@ pub enum ControlRequest {
     CoreCommitPlayerAuthorityCommand(CoreCommitPlayerAuthorityCommandControlRequest),
     CoreCommitPlayerAuthoritySystemSpaceStationCommand(
         CoreCommitPlayerAuthoritySystemSpaceStationCommandControlRequest,
+    ),
+    CoreCommitPlayerAuthorityOrbitalContractCommand(
+        CoreCommitPlayerAuthorityOrbitalContractCommandControlRequest,
     ),
     CoreCommitPlayerAuthorityPause(CoreCommitPlayerAuthorityPauseControlRequest),
     CoreRecoverPlayerAuthorityCommand(CoreRecoverPlayerAuthorityCommandControlRequest),

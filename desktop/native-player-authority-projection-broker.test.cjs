@@ -10,9 +10,11 @@ const {
 
 function fixture(initialSnapshot = {}) {
   let rendererTrusted = true;
+  let now = 8_697_599_999;
   let snapshot = {
     phase: "active",
     sessionId: "core-main-1",
+    runId: "run-1",
     revision: 17,
     inFlight: false,
     ...initialSnapshot,
@@ -131,12 +133,24 @@ function fixture(initialSnapshot = {}) {
         revision: request.expectedRevision,
       };
     },
+    async orbitalContractWorkspaceProjection(ownerId, request) {
+      calls.push(["orbital-contract-workspace-v1", ownerId, request]);
+      return {
+        projectionType: "orbital-contract-workspace-v1",
+        schemaVersion: 1,
+        sessionId: request.sessionId,
+        runId: request.runId,
+        revision: request.expectedRevision,
+        registryFingerprint: request.expectedRegistryFingerprint,
+      };
+    },
   };
   const broker = new NativePlayerAuthorityProjectionBroker({
     runtime: { snapshot: () => ({ ...snapshot }) },
     registry,
     ownerId: "main-player-authority",
     isTrustedRendererOwner: (ownerId) => rendererTrusted && ownerId === 23,
+    now: () => now,
   });
   return {
     broker,
@@ -144,13 +158,21 @@ function fixture(initialSnapshot = {}) {
     registry,
     setRendererTrusted(value) { rendererTrusted = value; },
     setSnapshot(value) { snapshot = { ...snapshot, ...value }; },
+    setNow(value) { now = value; },
   };
 }
 
 test("active same-session same-revision reads use only the main owner identity", async () => {
   const value = fixture();
-  for (const projectionType of ["viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "blueprint-workspace-v1", "blueprint-capture-context-v1", "blueprint-import-context-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "command-palette-entity-search-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1", "system-space-station-workspace-v1"]) {
-    const request = { sessionId: "core-main-1", expectedRevision: 17 };
+  for (const projectionType of ["viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "blueprint-workspace-v1", "blueprint-capture-context-v1", "blueprint-import-context-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "command-palette-entity-search-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1", "system-space-station-workspace-v1", "orbital-contract-workspace-v1"]) {
+    const request = projectionType === "orbital-contract-workspace-v1"
+      ? {
+          sessionId: "core-main-1",
+          runId: "run-1",
+          expectedRevision: 17,
+          expectedRegistryFingerprint: "7df8cf3a",
+        }
+      : { sessionId: "core-main-1", expectedRevision: 17 };
     const result = await value.broker.read(23, projectionType, request);
     assert.equal(result.revision, 17);
   }
@@ -182,7 +204,81 @@ test("active same-session same-revision reads use only the main owner identity",
     ["stellar-quantum-v1", "main-player-authority"],
     ["dyson-workspace-v1", "main-player-authority"],
     ["system-space-station-workspace-v1", "main-player-authority"],
+    ["orbital-contract-workspace-v1", "main-player-authority"],
   ]);
+});
+
+test("orbital projections bind a fresh main clock on same-revision reads across Shanghai midnight", async () => {
+  const value = fixture();
+  const rendererRequest = Object.freeze({
+    sessionId: "core-main-1",
+    runId: "run-1",
+    expectedRevision: 17,
+    expectedRegistryFingerprint: "7df8cf3a",
+  });
+  await value.broker.read(23, "orbital-contract-workspace-v1", rendererRequest);
+  value.setNow(8_697_600_000);
+  await value.broker.read(23, "orbital-contract-workspace-v1", rendererRequest);
+  const requests = value.calls
+    .filter(([type]) => type === "orbital-contract-workspace-v1")
+    .map(([, , request]) => request);
+  assert.deepEqual(requests.map((request) => request.confirmedWallClockMs), [
+    8_697_599_999,
+    8_697_600_000,
+  ]);
+  assert.equal(Object.hasOwn(rendererRequest, "confirmedWallClockMs"), false);
+  assert.notStrictEqual(requests[0], rendererRequest);
+  await assert.rejects(value.broker.read(23, "orbital-contract-workspace-v1", {
+    ...rendererRequest,
+    confirmedWallClockMs: 1,
+  }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_REQUEST_INVALID");
+});
+
+test("orbital projection rejects stale active runs before and after an asynchronous read", async () => {
+  const request = {
+    sessionId: "core-main-1",
+    runId: "run-1",
+    expectedRevision: 17,
+    expectedRegistryFingerprint: "7df8cf3a",
+  };
+  const stale = fixture({ runId: "run-2" });
+  await assert.rejects(
+    stale.broker.read(23, "orbital-contract-workspace-v1", request),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RUN_MISMATCH",
+  );
+  assert.equal(stale.calls.length, 0);
+
+  const raced = fixture();
+  raced.registry.orbitalContractWorkspaceProjection = async (ownerId, hostRequest) => {
+    raced.calls.push(["orbital-contract-workspace-v1", ownerId, hostRequest]);
+    raced.setSnapshot({ runId: "run-2" });
+    return {
+      projectionType: "orbital-contract-workspace-v1",
+      schemaVersion: 1,
+      sessionId: hostRequest.sessionId,
+      runId: hostRequest.runId,
+      revision: 17,
+      registryFingerprint: hostRequest.expectedRegistryFingerprint,
+    };
+  };
+  await assert.rejects(
+    raced.broker.read(23, "orbital-contract-workspace-v1", request),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RUN_MISMATCH",
+  );
+
+  const mismatchedResult = fixture();
+  mismatchedResult.registry.orbitalContractWorkspaceProjection = async () => ({
+    projectionType: "orbital-contract-workspace-v1",
+    schemaVersion: 1,
+    sessionId: "core-main-1",
+    runId: "run-1",
+    revision: 17,
+    registryFingerprint: "ffffffff",
+  });
+  await assert.rejects(
+    mismatchedResult.broker.read(23, "orbital-contract-workspace-v1", request),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RESULT_MISMATCH",
+  );
 });
 
 test("untrusted renderer, unsupported projections, wrong sessions, and old revisions fail closed", async () => {

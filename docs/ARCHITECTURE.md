@@ -1,5 +1,11 @@
 # 系统架构
 
+> **Windows native orbital-contract authority（2026-09-01，开发候选）**：durable semantic request 为 `{sessionId,runId,expectedRevision,expectedRegistryFingerprint,confirmedWallClockMs,intent}`；`intent` 是 deny-unknown-fields 的五分支 union，renderer 永远不提供 patch、GameState、余额、进度或奖励。Rust prepare 在任何 WAL staging 前拒绝 stale lineage、非空 content-pack registry、终端 safe revision、畸形板/ID/库存，并在 clone 上先调用既有 UTC+8 `station_contracts::synchronize`，再执行玩家动作。成功 patch 只覆盖 `orbitalStation`，量子交付另覆盖唯一 item inventory；Host 使用普通 player-authority WAL/checkpoint/receipt/cold-replay 事务。
+>
+> mutation 的 main clock 只在首次 enqueue 采样一次并参与 command hash；未知响应由同一个 runtime queue entry 原字节重试。read route 不缓存同 revision 的昨日合同板：projection broker 每次读取重新采样 main clock，Host 以 exact-realtime lease 二次证明 authority session/run/registry，Rust 只在 clone 上 synchronize 后投影。旧 offer 拒绝不会提交 rollover 副作用，UI 在 FIFO settle 后重新读取。history 投影最多 8 行，若合法 featured 不在 newest 8，则输出 newest 7 + featured；48 行持久 history 因 expiry 插入而截断 featured 时清 null，保持 strict invariant。
+>
+> 本纵切不扩展格式或 authority eligibility。cargo terminal binding、decorations、profile/public showcase、construction、MOD 和其他银河操作仍由原生 route 显式失败关闭；Web fallback 保持独立 JavaScript 实现。
+
 > **Windows ordinary storage/splitter 活动桥接边界（2026-09-01，开发候选，未启用）**：Rust 普通物流 buffer 的 `inputs → outputs` 桥接不再在每个模拟步遍历全部 storage/splitter 行。冷启动/拓扑重建执行一次全扫描，随后 session-only `BTreeSet<entity-row>` 仅接收传送带真实物料移动的 source/target wake；桥接按持久实体行顺序提交，处理后休眠，直到下一次库存事件。活动达到 75%、目录/实体数量漂移或无法证明 built-in 形状时回到同一全扫描语义。runtime queue 只在完整候选提交后安装，不序列化、不参与规范哈希，失败候选保留源 revision 与 wake 证据。该边界只关闭 ordinary storage/splitter 桥接外层全扫，不能代表普通生产、电力、material-delivery、量子高扇出或全部物流已经严格 `O(active)`。
 
 > **Windows Rust ordinary 蓝图完整生命周期边界（2026-09-01，开发候选，未发布）**：原生权威模式下，普通内置蓝图现已把捕获、严格导入、确定性导出、直接部署、仅入队、领料、队列部署和取消闭合到同一条 Rust/Host/薄 UI 事务链。renderer 只提交与当前 session/run/revision/registry 绑定的最小语义 marker；Rust 独占目录解析、canonicalization、材料与拓扑推导，并在 prepare 和私有 apply 两层重验实体、线路、蓝图、版本和施工队列八个持久 ID 域。live、generic cold-WAL、重复 command ID 与五个 durable fault boundary 复用同一展开器；候选失败只丢弃副本，不允许部分扣料、部分建造、假成功或 renderer 自动重发。

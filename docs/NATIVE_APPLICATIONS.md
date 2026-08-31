@@ -1,5 +1,11 @@
 # 原生应用构建与更新
 
+> **轨道合同原生权威边界（2026-09-01，开发候选）**：Windows authority route 现在以 `orbital-contract-workspace-v1` 提供最多 4 个 offer、3 个 accepted、8 个 completed history、每合同 6 条 requirement 和 256 KiB 的有界投影。main projection broker 对 renderer 的 exact-key 请求内部附加 confirmed wall clock，Host 再用当前 exact-realtime lease 证明 session/run/registry；renderer bridge 与 TypeScript 请求类型均没有时间字段，也拿不到量子网络正文、奖励公式或完整 GameState。
+>
+> mutation broker 只接受 accept、deliver-quantum、claim、abandon 和 feature 五类语义。时钟在首次排队时采样并进入 SHA-256 command identity；FIFO 的 unknown-response retry 保留完全相同的请求、clock 和 command ID。跨上海午夜的旧 offer 会在 Rust 同步 clone 后 definite reject，源状态不变；pending 结束后 UI 强制重读同 revision 的新 main-clock projection，不会用一次“rollover-only 成功”掩盖拒绝。原生合同页不调用 legacy station writers，Web/PWA fallback 不变。
+>
+> 此能力不是完整空间站迁移：cargo-terminal binding、decorations、profile/public showcase 和 construction 按钮保持禁用，MOD/非内置 registry 失败关闭。GameState v47、公开 envelope/cloud/SQLite/package 均不升级，`authorityEligible=false`；本候选没有打包、签名、安装、部署或生产操作。
+
 > 2026-08-28 的全面性能开发候选继续保持 `1.2.3` 包版本，仅用作可并存的未签名诊断包，不代表覆盖稳定版。E18 + e503 整合运行时已冻结为 clean 提交 `f6923747c69b0be590a2b2e4c0681f1c41ecee75`，标准目录包 Build ID 为 `1.2.3+f6923747c69b`；75 个文件、413,286,323 B，可测 ZIP 为 157,799,939 B、SHA-256 `f3c3729b93a290cab861fc9caf8e0816080bd32f695a5d66dda26bc2d873b593`。此前 `460742f86483` 的 E18 clean 包只是历史性能基础，不能冒充整合态制品。若今后标准目录再次被安全软件锁住，`desktop/pack.cjs` 只会复用刚解压且经过身份检查的 Electron 分发，在 `release-performance-edition-fallback/win-unpacked` 重试；标准目录与 fallback 仍只能有一个被清单选中。
 
 > 冻结 E18 包及后续整合态沿用同一套可与稳定版并存的 1.2.3 **性能开发版**身份：appId/AppUserModelID 为 `com.dspidle.network.performance`，产品名为 `DSP极简网络 Windows 性能开发版`，默认输出为 `release-performance-edition/`，EXE 为 `dsp-idle-performance-edition.exe`。它在 AppData 使用固定独立的 `DSPidle2-Performance-Edition` userData 与 `Chromium` sessionData，不读取稳定版默认目录；本机存档、云会话、设置、窗口状态和原生私有存档因此初始为空。程序不会自动搬运旧数据，玩家若要测试旧档，必须先在稳定版导出 JSON/JSON.gz，再在性能版通过导入界面明确选择该文件。不要把稳定版数据目录直接覆盖到性能版目录，也不要反向覆盖。

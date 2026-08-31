@@ -1,5 +1,11 @@
 # 测试与发布基线
 
+> **Windows native 轨道合同门禁（2026-09-01，开发候选）**：Core 必须覆盖五类 intent、库存不足/旧 revision/旧 offer 原子拒绝、上海午夜前后 task day、同事务 expiry/offer rollover、256 位账本与 MAX_SAFE completion 饱和、48 history featured 淘汰和 newest 7 + featured 的 8 行投影。Host 必须覆盖 exact lease session/run/registry 二次证明、duplicate receipt、无源 mutation 的 typed pre-stage reject，以及 stage/WAL/checkpoint/receipt/lease-ACK 五个故障边界和 cold replay exactly-once。
+>
+> Desktop/Node 必须证明 renderer 请求不能携带时间、同 revision 跨午夜投影每次使用新的 main clock fence、stale run 在异步 read 前后均拒绝、projection result 绑定 session/run/revision/registry、FIFO lost response 重试完全复用 confirmedWallClockMs/commandId/request bytes。Vitest 必须证明 native page 只消费有界投影/发语义 intent、definite reject 后 pending settle 会强制重读同 revision，以及 Web/Rust 共用 256 位饱和向量。当前 focused 结果为 Core `15/15`、Host `4/4`、Node `58/58`、renderer boundary `23/23`、Vitest `16/16`，typecheck 和 diff check 通过；完整 native/Vitest/build/E2E/pack/签名/部署仍不能由这些专项数字代替。
+>
+> 所有写测试只使用合成 v47 状态和临时 SaveStore，不读取或修改真实玩家存档；没有生产、发布、下载页或云数据操作。cargo-terminal binding、decorations、profile、construction、MOD 与其他银河动作仍是显式未覆盖且失败关闭的后续范围。
+
 > **Windows Rust ordinary 蓝图捕获/import/export 生命周期门禁（2026-09-01，开发候选）**：本块只给当前开发候选定义门禁并记录 focused evidence，不等于集成全量或发布完成。必须逐项满足：
 >
 > - [x] capture 保持 24.20 的 exact context、`{kind:"capture",entityIds,revision}` marker、一次 dispatch、六次只读 receipt、exact library-membership 与 fresh direct-deploy 交接边界；既有失败史和结果不得被 import/export 数字覆盖。

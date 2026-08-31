@@ -7767,6 +7767,189 @@ function normalizeCoreSystemSpaceStationWorkspaceProjection(value, context) {
   };
 }
 
+function normalizeCoreOrbitalContractWorkspaceProjection(value, context) {
+  const label = "native orbital-contract workspace projection";
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "sessionId", "runId", "revision",
+    "registryFingerprint", "stateVersion", "stationStatus", "taskDay", "rulesVersion",
+    "quantumEnabled", "orbitalMarks", "stationReputation", "completedContracts",
+    "featuredContractId", "offers", "accepted", "completedHistory", "limits", "unsupported",
+  ], label);
+  if (source.schemaVersion !== 1 || source.projectionType !== "orbital-contract-workspace-v1" ||
+      source.source !== "native-core" || source.stateVersion !== 47 || source.rulesVersion !== 1) {
+    throw protocolError(`${label} identity`);
+  }
+  requireProjectionByteBudget(source, label);
+  const request = exactObject(context, [
+    "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint",
+  ], `${label} context`);
+  const sessionId = logicalId(source.sessionId, `${label} session`, 128);
+  const runId = logicalId(source.runId, `${label} run`, 128);
+  const revision = safeInteger(source.revision, `${label} revision`);
+  const registryFingerprint = logicalId(source.registryFingerprint, `${label} registry`, 256);
+  if (sessionId !== logicalId(request.sessionId, `${label} requested session`, 128) ||
+      runId !== logicalId(request.runId, `${label} requested run`, 128) ||
+      revision !== safeInteger(request.expectedRevision, `${label} requested revision`) ||
+      registryFingerprint !== logicalId(
+        request.expectedRegistryFingerprint,
+        `${label} requested registry`,
+        256,
+      )) {
+    throw protocolError(`${label} identity binding`);
+  }
+  const limitsSource = exactObject(source.limits, [
+    "offerCount", "acceptedCount", "historyCount", "requirementsPerContract", "projectionBytes",
+  ], `${label} limits`);
+  const limits = {
+    offerCount: safeInteger(limitsSource.offerCount, `${label} offer limit`, 1),
+    acceptedCount: safeInteger(limitsSource.acceptedCount, `${label} accepted limit`, 1),
+    historyCount: safeInteger(limitsSource.historyCount, `${label} history limit`, 1),
+    requirementsPerContract: safeInteger(
+      limitsSource.requirementsPerContract,
+      `${label} requirement limit`,
+      1,
+    ),
+    projectionBytes: safeInteger(limitsSource.projectionBytes, `${label} byte limit`, 1),
+  };
+  if (limits.offerCount !== 4 || limits.acceptedCount !== 3 || limits.historyCount !== 8 ||
+      limits.requirementsPerContract !== 6 || limits.projectionBytes !== 256 * 1024) {
+    throw protocolError(`${label} limit binding`);
+  }
+  const normalizeContract = (value, rowLabel, expectedStatuses) => {
+    const contract = exactObject(value, [
+      "id", "templateId", "slot", "title", "summary", "taskDay", "expiresAtTaskDay",
+      "special", "difficulty", "status", "requirements", "rewardMarks", "rewardReputation",
+      "completionBasisPoints",
+    ], rowLabel);
+    if (!Array.isArray(contract.requirements) ||
+        contract.requirements.length < 1 ||
+        contract.requirements.length > limits.requirementsPerContract) {
+      throw protocolError(`${rowLabel} requirements`);
+    }
+    const requirements = contract.requirements.map((value, index) => {
+      const requirementLabel = `${rowLabel}.requirements[${index}]`;
+      const requirement = exactObject(value, [
+        "itemId", "amount", "delivered", "channel", "sourcePlanetIds", "availableQuantum",
+      ], requirementLabel);
+      if (!Array.isArray(requirement.sourcePlanetIds) || requirement.sourcePlanetIds.length > 4) {
+        throw protocolError(`${requirementLabel}.sourcePlanetIds`);
+      }
+      const sourcePlanetIds = requirement.sourcePlanetIds.map((planetId, planetIndex) =>
+        systemSpaceStationId(planetId, `${requirementLabel}.sourcePlanetIds[${planetIndex}]`));
+      if (new Set(sourcePlanetIds).size !== sourcePlanetIds.length) {
+        throw protocolError(`${requirementLabel}.sourcePlanetIds`);
+      }
+      const amount = stellarDecimal(requirement.amount, `${requirementLabel}.amount`);
+      const delivered = stellarDecimal(requirement.delivered, `${requirementLabel}.delivered`);
+      if (BigInt(delivered) > BigInt(amount) || amount === "0") {
+        throw protocolError(`${requirementLabel} progress`);
+      }
+      return {
+        itemId: systemSpaceStationId(requirement.itemId, `${requirementLabel}.itemId`),
+        amount,
+        delivered,
+        channel: oneOf(requirement.channel, ["any", "terminal", "quantum"], `${requirementLabel}.channel`),
+        sourcePlanetIds,
+        availableQuantum: stellarDecimal(
+          requirement.availableQuantum,
+          `${requirementLabel}.availableQuantum`,
+        ),
+      };
+    });
+    const slot = safeInteger(contract.slot, `${rowLabel}.slot`);
+    const taskDay = safeInteger(contract.taskDay, `${rowLabel}.taskDay`);
+    const expiresAtTaskDay = safeInteger(contract.expiresAtTaskDay, `${rowLabel}.expiresAtTaskDay`);
+    const completionBasisPoints = safeInteger(
+      contract.completionBasisPoints,
+      `${rowLabel}.completionBasisPoints`,
+    );
+    if (slot > 3 || expiresAtTaskDay !== taskDay + 3 || completionBasisPoints > 10_000) {
+      throw protocolError(`${rowLabel} bounds`);
+    }
+    return {
+      id: systemSpaceStationId(contract.id, `${rowLabel}.id`),
+      templateId: oneOf(contract.templateId, [
+        "single", "combination", "dyson", "origin", "multi-origin", "quantum", "advanced",
+      ], `${rowLabel}.templateId`),
+      slot,
+      title: stellarLabel(contract.title, `${rowLabel}.title`, 1),
+      summary: stellarLabel(contract.summary, `${rowLabel}.summary`, 1),
+      taskDay,
+      expiresAtTaskDay,
+      special: boolean(contract.special, `${rowLabel}.special`),
+      difficulty: oneOf(contract.difficulty, ["P1", "P2", "P3"], `${rowLabel}.difficulty`),
+      status: oneOf(contract.status, expectedStatuses, `${rowLabel}.status`),
+      requirements,
+      rewardMarks: stellarDecimal(contract.rewardMarks, `${rowLabel}.rewardMarks`),
+      rewardReputation: stellarDecimal(contract.rewardReputation, `${rowLabel}.rewardReputation`),
+      completionBasisPoints,
+    };
+  };
+  const normalizeContracts = (value, maximum, rowLabel, statuses) => {
+    if (!Array.isArray(value) || value.length > maximum) throw protocolError(rowLabel);
+    const rows = value.map((entry, index) => normalizeContract(entry, `${rowLabel}[${index}]`, statuses));
+    if (new Set(rows.map((entry) => entry.id)).size !== rows.length) throw protocolError(`${rowLabel} IDs`);
+    return rows;
+  };
+  const offers = normalizeContracts(source.offers, limits.offerCount, `${label} offers`, ["offered"]);
+  const accepted = normalizeContracts(
+    source.accepted,
+    limits.acceptedCount,
+    `${label} accepted`,
+    ["accepted", "claimable"],
+  );
+  if (!Array.isArray(source.completedHistory) || source.completedHistory.length > limits.historyCount) {
+    throw protocolError(`${label} history`);
+  }
+  const completedHistory = source.completedHistory.map((value, index) => {
+    const rowLabel = `${label} history[${index}]`;
+    const entry = exactObject(value, [
+      "id", "title", "difficulty", "settledAtTaskDay",
+    ], rowLabel);
+    return {
+      id: systemSpaceStationId(entry.id, `${rowLabel}.id`),
+      title: stellarLabel(entry.title, `${rowLabel}.title`, 1),
+      difficulty: oneOf(entry.difficulty, ["P1", "P2", "P3"], `${rowLabel}.difficulty`),
+      settledAtTaskDay: safeInteger(entry.settledAtTaskDay, `${rowLabel}.settledAtTaskDay`),
+    };
+  });
+  const allIds = [...offers, ...accepted, ...completedHistory].map((entry) => entry.id);
+  if (new Set(allIds).size !== allIds.length) throw protocolError(`${label} contract IDs`);
+  const featuredContractId = source.featuredContractId === null
+    ? null
+    : systemSpaceStationId(source.featuredContractId, `${label} featured contract`);
+  if (featuredContractId !== null && !completedHistory.some((entry) => entry.id === featuredContractId)) {
+    throw protocolError(`${label} featured contract binding`);
+  }
+  if (!Array.isArray(source.unsupported) || source.unsupported.length !== 4 ||
+      source.unsupported.join("|") !== "cargo-terminal-binding|decorations|profile|construction") {
+    throw protocolError(`${label} unsupported scope`);
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "orbital-contract-workspace-v1",
+    source: "native-core",
+    sessionId,
+    runId,
+    revision,
+    registryFingerprint,
+    stateVersion: 47,
+    stationStatus: oneOf(source.stationStatus, ["showcase-building", "operational"], `${label} station status`),
+    taskDay: safeInteger(source.taskDay, `${label} task day`),
+    rulesVersion: 1,
+    quantumEnabled: boolean(source.quantumEnabled, `${label} quantum enabled`),
+    orbitalMarks: stellarDecimal(source.orbitalMarks, `${label} orbital marks`),
+    stationReputation: stellarDecimal(source.stationReputation, `${label} station reputation`),
+    completedContracts: safeInteger(source.completedContracts, `${label} completed contracts`),
+    featuredContractId,
+    offers,
+    accepted,
+    completedHistory,
+    limits,
+    unsupported: [...source.unsupported],
+  };
+}
+
 function normalizeCoreCommandPaletteEntitySearchProjection(value, context) {
   const source = exactObject(value, [
     "schemaVersion", "projectionType", "revision", "registryFingerprint", "limits",
@@ -8433,6 +8616,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreStellarQuantumProjection: normalizeCoreStellarQuantumProjection,
   coreDysonWorkspaceProjection: normalizeCoreDysonWorkspaceProjection,
   coreSystemSpaceStationWorkspaceProjection: normalizeCoreSystemSpaceStationWorkspaceProjection,
+  coreOrbitalContractWorkspaceProjection: normalizeCoreOrbitalContractWorkspaceProjection,
   coreCommandPaletteEntitySearchProjection: normalizeCoreCommandPaletteEntitySearchProjection,
   coreCommand: normalizeCoreCommand,
   coreCommandReconcile: normalizeCoreCommandReconcile,

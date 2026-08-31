@@ -38,6 +38,7 @@ const PROJECTION_METHODS = Object.freeze({
   "stellar-quantum-v1": "stellarQuantumProjection",
   "dyson-workspace-v1": "dysonWorkspaceProjection",
   "system-space-station-workspace-v1": "systemSpaceStationWorkspaceProjection",
+  "orbital-contract-workspace-v1": "orbitalContractWorkspaceProjection",
 });
 
 class NativePlayerAuthorityProjectionBrokerError extends Error {
@@ -54,6 +55,11 @@ function brokerError(message, code) {
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasExactKeys(value, keys) {
+  return isRecord(value) && Reflect.ownKeys(value).every((key) =>
+    typeof key === "string" && keys.includes(key)) && keys.every((key) => Object.hasOwn(value, key));
 }
 
 function validLogicalId(value, maximumLength = 128) {
@@ -74,6 +80,12 @@ function assertAuthoritySnapshot(snapshot, request) {
       "NATIVE_PLAYER_AUTHORITY_PROJECTION_SESSION_MISMATCH",
     );
   }
+  if (Object.hasOwn(request, "runId") && snapshot.runId !== request.runId) {
+    throw brokerError(
+      "native player-authority projection run does not match the active authority run",
+      "NATIVE_PLAYER_AUTHORITY_PROJECTION_RUN_MISMATCH",
+    );
+  }
   if (snapshot.revision !== request.expectedRevision) {
     throw brokerError(
       "native player-authority projection revision is no longer current",
@@ -85,7 +97,8 @@ function assertAuthoritySnapshot(snapshot, request) {
 class NativePlayerAuthorityProjectionBroker {
   constructor(options) {
     if (!isRecord(options) || !options.runtime || typeof options.runtime.snapshot !== "function" ||
-        !options.registry || typeof options.isTrustedRendererOwner !== "function") {
+        !options.registry || typeof options.isTrustedRendererOwner !== "function" ||
+        options.now !== undefined && typeof options.now !== "function") {
       throw new TypeError("native player-authority projection broker options are invalid");
     }
     for (const method of Object.values(PROJECTION_METHODS)) {
@@ -100,6 +113,7 @@ class NativePlayerAuthorityProjectionBroker {
     this.registry = options.registry;
     this.ownerId = options.ownerId ?? "main-player-authority";
     this.isTrustedRendererOwner = options.isTrustedRendererOwner;
+    this.now = options.now ?? Date.now;
   }
 
   /**
@@ -125,7 +139,12 @@ class NativePlayerAuthorityProjectionBroker {
     }
     const method = PROJECTION_METHODS[projectionType];
     if (!method || !isRecord(request) || !validLogicalId(request.sessionId) ||
-        !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0) {
+        !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+        projectionType === "orbital-contract-workspace-v1" && !hasExactKeys(request, [
+          "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint",
+        ]) || projectionType === "orbital-contract-workspace-v1" &&
+          (!validLogicalId(request.runId) ||
+           !validLogicalId(request.expectedRegistryFingerprint, 256))) {
       throw brokerError(
         "native player-authority projection request is invalid",
         "NATIVE_PLAYER_AUTHORITY_PROJECTION_REQUEST_INVALID",
@@ -134,7 +153,21 @@ class NativePlayerAuthorityProjectionBroker {
 
     const before = this.runtime.snapshot();
     assertAuthoritySnapshot(before, request);
-    const result = await this.registry[method](this.ownerId, request);
+    let registryRequest = request;
+    if (projectionType === "orbital-contract-workspace-v1") {
+      const confirmedWallClockMs = this.now();
+      if (!Number.isSafeInteger(confirmedWallClockMs) || confirmedWallClockMs < 0) {
+        throw brokerError(
+          "native orbital-contract projection wall clock is invalid",
+          "NATIVE_PLAYER_AUTHORITY_PROJECTION_CLOCK_INVALID",
+        );
+      }
+      // Never mutate or expose the renderer request. Each read gets a fresh
+      // main-process fence, so a same-revision read cannot cache yesterday's
+      // board across the UTC+8 task-day boundary.
+      registryRequest = Object.freeze({ ...request, confirmedWallClockMs });
+    }
+    const result = await this.registry[method](this.ownerId, registryRequest);
     if (!this.isTrustedRendererOwner(rendererOwnerId)) {
       throw brokerError(
         "native player-authority projection renderer disappeared before delivery",
@@ -146,6 +179,14 @@ class NativePlayerAuthorityProjectionBroker {
     if (!isRecord(result) || result.revision !== request.expectedRevision) {
       throw brokerError(
         "native player-authority projection result is not bound to the requested revision",
+        "NATIVE_PLAYER_AUTHORITY_PROJECTION_RESULT_MISMATCH",
+      );
+    }
+    if (projectionType === "orbital-contract-workspace-v1" &&
+        (result.sessionId !== request.sessionId || result.runId !== request.runId ||
+         result.registryFingerprint !== request.expectedRegistryFingerprint)) {
+      throw brokerError(
+        "native orbital-contract projection result lineage is not current",
         "NATIVE_PLAYER_AUTHORITY_PROJECTION_RESULT_MISMATCH",
       );
     }

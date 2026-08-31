@@ -3,6 +3,9 @@
 const {
   normalizeSystemSpaceStationIntent,
 } = require("./native-system-space-station-intent.cjs");
+const {
+  normalizeOrbitalContractIntent,
+} = require("./native-orbital-contract-intent.cjs");
 
 /*
  * Main-process-only player-authority clock.
@@ -23,6 +26,8 @@ const MAX_DURABLE_COMMAND_BYTES = 1_750_000;
 const MAX_MACRO_BUDGET_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 const SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE =
   "NATIVE_CORE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED";
+const ORBITAL_CONTRACT_PRE_STAGE_REJECTED_CODE =
+  "NATIVE_CORE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_PRE_STAGE_REJECTED";
 const COMMAND_KEYS = Object.freeze([
   "protocolVersion", "baseRevision", "topLevelChanges", "changedEntities", "addedEntities",
   "removedEntityIds", "changedBelts", "addedBelts", "removedBeltIds",
@@ -48,6 +53,11 @@ function isRecord(value) {
 function isDefiniteSystemSpaceStationPreStageRejection(entry, cause) {
   return entry?.request?.kind === "system-space-station" && isRecord(cause) &&
     cause.code === SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE;
+}
+
+function isDefiniteOrbitalContractPreStageRejection(entry, cause) {
+  return entry?.request?.kind === "orbital-contract" && isRecord(cause) &&
+    cause.code === ORBITAL_CONTRACT_PRE_STAGE_REJECTED_CODE;
 }
 
 function requireLogicalId(value, label) {
@@ -286,6 +296,51 @@ function normalizeSystemSpaceStationCommandRequest(value) {
     baseRevision,
     expectedRegistryFingerprint,
     expectedSystemId,
+    intent,
+  });
+}
+
+function normalizeOrbitalContractCommandRequest(value) {
+  if (!isRecord(value) || Reflect.ownKeys(value).some((key) => typeof key !== "string" ||
+      !["commandId", "baseRevision", "expectedRegistryFingerprint", "confirmedWallClockMs", "intent"].includes(key)) ||
+      !Object.hasOwn(value, "commandId") || !Object.hasOwn(value, "baseRevision") ||
+      !Object.hasOwn(value, "expectedRegistryFingerprint") ||
+      !Object.hasOwn(value, "confirmedWallClockMs") || !Object.hasOwn(value, "intent")) {
+    throw runtimeError("native player-authority orbital-contract request is invalid");
+  }
+  const commandId = requireLogicalId(value.commandId, "commandId");
+  const baseRevision = requireSafeInteger(value.baseRevision, 0, "baseRevision");
+  if (baseRevision >= Number.MAX_SAFE_INTEGER) {
+    throw runtimeError(
+      "native player-authority orbital-contract revision is exhausted",
+      "NATIVE_PLAYER_AUTHORITY_COMMAND_REVISION_EXHAUSTED",
+    );
+  }
+  const expectedRegistryFingerprint = requireLogicalId(
+    value.expectedRegistryFingerprint,
+    "expectedRegistryFingerprint",
+  );
+  const confirmedWallClockMs = requireSafeInteger(
+    value.confirmedWallClockMs,
+    0,
+    "confirmedWallClockMs",
+  );
+  let intent;
+  try {
+    intent = normalizeOrbitalContractIntent(value.intent);
+  } catch (cause) {
+    throw runtimeError(
+      "native player-authority orbital-contract intent is invalid",
+      "NATIVE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_INTENT_INVALID",
+      cause,
+    );
+  }
+  return Object.freeze({
+    kind: "orbital-contract",
+    commandId,
+    baseRevision,
+    expectedRegistryFingerprint,
+    confirmedWallClockMs,
     intent,
   });
 }
@@ -1036,6 +1091,52 @@ class NativePlayerAuthorityRuntime {
     return promise;
   }
 
+  commitOrbitalContractIntent(rawRequest) {
+    if (this.phase !== "active" || !this.context) {
+      return Promise.reject(runtimeError(
+        "native player-authority runtime is not accepting orbital-contract intents",
+      ));
+    }
+    let request;
+    let replay = false;
+    try {
+      request = normalizeOrbitalContractCommandRequest(rawRequest);
+      if (this.commandQueue.length >= 64) {
+        throw runtimeError(
+          "native player-authority command queue is full",
+          "NATIVE_PLAYER_AUTHORITY_COMMAND_QUEUE_FULL",
+        );
+      }
+      replay = !this.inFlight && !this.activeCommand && this.commandQueue.length === 0 &&
+        this.context.lastCommand?.commandId === request.commandId &&
+        this.context.lastCommand?.baseRevision === request.baseRevision &&
+        this.context.lastCommand?.revision === this.context.revision;
+      let projectedRevision = this.context.revision;
+      if (!replay && (this.currentOperation === "tick" || this.currentOperation === "command")) {
+        projectedRevision += 1;
+      }
+      if (!replay) projectedRevision += this.commandQueue.length;
+      if (!Number.isSafeInteger(projectedRevision) ||
+          !replay && request.baseRevision !== projectedRevision) {
+        throw runtimeError(
+          "native player-authority orbital-contract revision is not the queued revision",
+          "NATIVE_PLAYER_AUTHORITY_COMMAND_REVISION_MISMATCH",
+        );
+      }
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    let resolveCommand;
+    let rejectCommand;
+    const promise = new Promise((resolve, reject) => {
+      resolveCommand = resolve;
+      rejectCommand = reject;
+    });
+    this.commandQueue.push({ request, replay, promise, resolve: resolveCommand, reject: rejectCommand });
+    this.pump();
+    return promise;
+  }
+
   /**
    * Commits the player-visible pause flag and the exact-realtime lease phase as
    * one durable Host transaction. The caller supplies only the desired state:
@@ -1518,6 +1619,23 @@ class NativePlayerAuthorityRuntime {
     });
     this.inFlight = completion;
     const commit = () => {
+      if (entry.request.kind === "orbital-contract") {
+        if (typeof this.registry.commitPlayerAuthorityOrbitalContractCommand !== "function") {
+          throw runtimeError(
+            "native player-authority orbital-contract capability is unavailable",
+            "NATIVE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_UNAVAILABLE",
+          );
+        }
+        return this.registry.commitPlayerAuthorityOrbitalContractCommand(this.ownerId, {
+          sessionId: context.sessionId,
+          runId: context.runId,
+          commandId: entry.request.commandId,
+          baseRevision: entry.request.baseRevision,
+          expectedRegistryFingerprint: entry.request.expectedRegistryFingerprint,
+          confirmedWallClockMs: entry.request.confirmedWallClockMs,
+          intent: entry.request.intent,
+        });
+      }
       if (entry.request.kind === "system-space-station") {
         if (typeof this.registry.commitPlayerAuthoritySystemSpaceStationCommand !== "function") {
           throw runtimeError(
@@ -1571,14 +1689,22 @@ class NativePlayerAuthorityRuntime {
       this.transition("active");
       return { ok: true, command: context.lastCommand };
     }).catch((cause) => {
-      const definitePreStageRejection =
+      const definiteSystemSpaceStationRejection =
         isDefiniteSystemSpaceStationPreStageRejection(entry, cause);
+      const definiteOrbitalContractRejection =
+        isDefiniteOrbitalContractPreStageRejection(entry, cause);
+      const definitePreStageRejection =
+        definiteSystemSpaceStationRejection || definiteOrbitalContractRejection;
       const error = definitePreStageRejection
         ? runtimeError(
           typeof cause.message === "string" && cause.message.length > 0
             ? cause.message
-            : "native system-space-station command was rejected before durable staging",
-          SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
+            : definiteOrbitalContractRejection
+              ? "native orbital-contract command was rejected before durable staging"
+              : "native system-space-station command was rejected before durable staging",
+          definiteOrbitalContractRejection
+            ? ORBITAL_CONTRACT_PRE_STAGE_REJECTED_CODE
+            : SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
           cause,
         )
         : cause instanceof NativePlayerAuthorityRuntimeError
@@ -1760,6 +1886,7 @@ class NativePlayerAuthorityRuntime {
 module.exports = {
   NativePlayerAuthorityRuntime,
   NativePlayerAuthorityRuntimeError,
+  ORBITAL_CONTRACT_PRE_STAGE_REJECTED_CODE,
   SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
   TICK_MILLISECONDS,
 };

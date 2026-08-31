@@ -6,6 +6,10 @@ const {
   deriveSystemSpaceStationCommandIdentity,
   normalizeSystemSpaceStationIntent,
 } = require("./native-system-space-station-intent.cjs");
+const {
+  deriveOrbitalContractCommandIdentity,
+  normalizeOrbitalContractIntent,
+} = require("./native-orbital-contract-intent.cjs");
 
 const FRAME_MAGIC = Buffer.from("DSPNATV1", "ascii");
 const FRAME_HEADER_BYTES = 36;
@@ -31,6 +35,8 @@ const NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY = "native-core-player-authority-ti
 const NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY = "native-core-player-authority-command-v1";
 const NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY =
   "native-core-player-authority-system-space-station-command-v1";
+const NATIVE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_COMMAND_CAPABILITY =
+  "native-core-player-authority-orbital-contract-command-v1";
 const NATIVE_PLAYER_AUTHORITY_PAUSE_CAPABILITY =
   "native-core-player-authority-pause-lifecycle-v1";
 const NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY =
@@ -42,6 +48,8 @@ const NATIVE_CONSTRUCTION_INVENTORY_CAPABILITY = "native-core-construction-inven
 const NATIVE_BLUEPRINT_WORKSPACE_CAPABILITY = "native-core-blueprint-workspace-v1";
 const NATIVE_SYSTEM_SPACE_STATION_WORKSPACE_CAPABILITY =
   "native-core-system-space-station-workspace-projection-v1";
+const NATIVE_ORBITAL_CONTRACT_WORKSPACE_CAPABILITY =
+  "native-core-orbital-contract-workspace-projection-v1";
 const NATIVE_BLUEPRINT_CAPTURE_CONTEXT_CAPABILITY =
   "native-core-blueprint-capture-context-v1";
 const NATIVE_BLUEPRINT_IMPORT_CONTEXT_CAPABILITY =
@@ -103,7 +111,7 @@ function normalizeNativeHostSpawnEnvironment(value = {}) {
 
 function encodeNativeProjectionTransfer({ sessionId, sequence, projectionType, result }) {
   if (!validLogicalId(sessionId, 128) || !Number.isSafeInteger(sequence) || sequence < 1 ||
-    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "blueprint-workspace-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1", "system-space-station-workspace-v1"].includes(projectionType) || !result || typeof result !== "object" ||
+    !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "blueprint-workspace-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1", "system-space-station-workspace-v1", "orbital-contract-workspace-v1"].includes(projectionType) || !result || typeof result !== "object" ||
     result.schemaVersion !== (["viewport-v2", "stellar-industry-v2"].includes(projectionType) ? 2 : 1) || result.projectionType !== projectionType ||
     !Number.isSafeInteger(result.revision) || result.revision < 0) {
     throw new TypeError("native core projection transfer is invalid");
@@ -1886,6 +1894,39 @@ class NativeCoreSessionRegistry {
     return this.requestOwned(ownerId, request.sessionId, hostRequest);
   }
 
+  orbitalContractWorkspaceProjection(ownerId, request) {
+    const session = this.assertOwner(ownerId, request?.sessionId);
+    exactObjectKeys(request, [
+      "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint",
+      "confirmedWallClockMs",
+    ], "native orbital-contract workspace projection request");
+    if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID || session.slot !== "normal-main" ||
+      !validLogicalId(request.runId, 128) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !Number.isSafeInteger(request.confirmedWallClockMs) || request.confirmedWallClockMs < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256)) {
+      throw new TypeError("native orbital-contract workspace projection request is invalid");
+    }
+    if (!this.client.hello?.capabilities?.includes(NATIVE_ORBITAL_CONTRACT_WORKSPACE_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide the orbital-contract workspace projection",
+        "NATIVE_CORE_CAPABILITY_MISSING",
+      );
+    }
+    const hostRequest = {
+      operation: "coreOrbitalContractWorkspaceProjection",
+      sessionId: request.sessionId,
+      runId: request.runId,
+      expectedRevision: request.expectedRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      confirmedWallClockMs: request.confirmedWallClockMs,
+    };
+    if (Buffer.byteLength(JSON.stringify(hostRequest), "utf8") > MAX_STELLAR_PROJECTION_REQUEST_BYTES) {
+      throw new RangeError("native orbital-contract workspace request exceeds the bounded IPC limit");
+    }
+    return this.requestOwned(ownerId, request.sessionId, hostRequest);
+  }
+
   commandPaletteEntitySearchProjection(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     const allowedKeys = new Set([
@@ -2156,6 +2197,53 @@ class NativeCoreSessionRegistry {
         baseRevision: request.baseRevision,
         expectedRegistryFingerprint: request.expectedRegistryFingerprint,
         expectedSystemId: request.expectedSystemId,
+        intent: identity.semantic.intent,
+      },
+    }, 300_000);
+  }
+
+  commitPlayerAuthorityOrbitalContractCommand(ownerId, request) {
+    const session = this.assertOwner(ownerId, request?.sessionId);
+    if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID || session.slot !== "normal-main") {
+      throw new NativeHostError(
+        "orbital-contract commands require the main normal-main authority owner",
+        "NATIVE_CORE_PLAYER_AUTHORITY_OWNER_REQUIRED",
+      );
+    }
+    if (!this.client.hello?.capabilities?.includes(
+      NATIVE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_COMMAND_CAPABILITY,
+    )) {
+      throw new NativeHostError(
+        "native host does not provide durable orbital-contract commands",
+        "NATIVE_CORE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_COMMAND_UNAVAILABLE",
+      );
+    }
+    exactObjectKeys(request, [
+      "sessionId", "runId", "commandId", "baseRevision",
+      "expectedRegistryFingerprint", "confirmedWallClockMs", "intent",
+    ], "native player-authority orbital-contract command request");
+    const identity = deriveOrbitalContractCommandIdentity({
+      sessionId: request.sessionId,
+      runId: request.runId,
+      expectedRevision: request.baseRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      confirmedWallClockMs: request.confirmedWallClockMs,
+      intent: normalizeOrbitalContractIntent(request.intent),
+    });
+    if (request.commandId !== identity.commandId) {
+      throw new TypeError(
+        "native player-authority orbital-contract command ID conflicts with its intent",
+      );
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreCommitPlayerAuthorityOrbitalContractCommand",
+      sessionId: request.sessionId,
+      request: {
+        runId: request.runId,
+        commandId: request.commandId,
+        baseRevision: request.baseRevision,
+        expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+        confirmedWallClockMs: request.confirmedWallClockMs,
         intent: identity.semantic.intent,
       },
     }, 300_000);
@@ -2539,6 +2627,7 @@ module.exports = {
   NATIVE_FACTORY_INVENTORY_CAPABILITY,
   NATIVE_CONSTRUCTION_INVENTORY_CAPABILITY,
   NATIVE_BLUEPRINT_WORKSPACE_CAPABILITY,
+  NATIVE_ORBITAL_CONTRACT_WORKSPACE_CAPABILITY,
   NATIVE_SYSTEM_SPACE_STATION_WORKSPACE_CAPABILITY,
   NATIVE_BLUEPRINT_CAPTURE_CONTEXT_CAPABILITY,
   NATIVE_BLUEPRINT_IMPORT_CONTEXT_CAPABILITY,
@@ -2555,6 +2644,7 @@ module.exports = {
   NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY,
+  NATIVE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_COMMAND_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_PAUSE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,

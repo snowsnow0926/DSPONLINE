@@ -11,6 +11,7 @@ import type {
   DesktopNativeCoreBlueprintSummary,
 } from "../desktop";
 import type {
+  NativeBlueprintDeleteBinding,
   NativeBlueprintMirror,
   NativeBlueprintRenameIdentity,
   NativeBlueprintRotation,
@@ -19,6 +20,7 @@ import type {
   NativeBlueprintWorkspaceIdentity,
 } from "../game/nativeBlueprintWorkspaceStore";
 import type { NativeBlueprintTransformPendingCommand } from "../game/nativeBlueprintTransformCommandReconciliation";
+import type { NativeBlueprintDeletePendingCommand } from "../game/nativeBlueprintDeleteCommandReconciliation";
 import type {
   NativeBlueprintRenamePendingIdentity,
   NativeBlueprintRenameResolution,
@@ -167,8 +169,10 @@ describe("NativeBlueprintWorkspace", () => {
         rotation: NativeBlueprintRotation,
         mirror: NativeBlueprintMirror,
       ) => boolean;
+      onSubmitDeleteIntent?: (binding: NativeBlueprintDeleteBinding) => boolean;
       pendingIdentity?: NativeBlueprintRenamePendingIdentity | null;
       transformPending?: NativeBlueprintTransformPendingCommand | null;
+      deletePending?: NativeBlueprintDeletePendingCommand | null;
       latestIdentity?: NativeBlueprintWorkspaceIdentity | null;
       resolution?: NativeBlueprintRenameResolution | null;
       onConsumeRenameResolution?: (submissionId: number) => void;
@@ -189,6 +193,8 @@ describe("NativeBlueprintWorkspace", () => {
     const onSubmitTransformIntent = callbacks.onSubmitTransformIntent ??
       vi.fn<(binding: NativeBlueprintTransformBinding, rotation: NativeBlueprintRotation,
         mirror: NativeBlueprintMirror) => boolean>().mockReturnValue(true);
+    const onSubmitDeleteIntent = callbacks.onSubmitDeleteIntent ??
+      vi.fn<(binding: NativeBlueprintDeleteBinding) => boolean>().mockReturnValue(true);
     const onConsumeRenameResolution = callbacks.onConsumeRenameResolution ?? vi.fn<(submissionId: number) => void>();
     const latestIdentity = callbacks.latestIdentity === undefined && value
       ? {
@@ -209,8 +215,10 @@ describe("NativeBlueprintWorkspace", () => {
       onQueueCursorChange={onQueueCursorChange}
       onSubmitRenameIntent={onSubmitRenameIntent}
       onSubmitTransformIntent={onSubmitTransformIntent}
+      onSubmitDeleteIntent={onSubmitDeleteIntent}
       pendingIdentity={callbacks.pendingIdentity ?? null}
       transformPending={callbacks.transformPending ?? null}
+      deletePending={callbacks.deletePending ?? null}
       resolution={callbacks.resolution ?? null}
       onConsumeRenameResolution={onConsumeRenameResolution}
       commandPending={callbacks.commandPending ?? false}
@@ -221,6 +229,7 @@ describe("NativeBlueprintWorkspace", () => {
       onQueueCursorChange,
       onSubmitRenameIntent,
       onSubmitTransformIntent,
+      onSubmitDeleteIntent,
       onConsumeRenameResolution,
     };
   }
@@ -627,6 +636,52 @@ describe("NativeBlueprintWorkspace", () => {
     expect(host.textContent).toContain("六次有界只读对账");
   });
 
+  it("submits one exact selected-row delete without removing the row optimistically", () => {
+    const onSubmitDeleteIntent = vi.fn<(binding: NativeBlueprintDeleteBinding) => boolean>()
+      .mockReturnValue(true);
+    const selected = frame({ detailStatus: "unsupported", revision: 47 });
+    renderWorkspace(selected, "ready", { onSubmitDeleteIntent });
+
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='delete-blueprint']")!
+      .click());
+    expect(onSubmitDeleteIntent).toHaveBeenCalledWith({
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 47,
+      registryFingerprint: "registry-a",
+      blueprintId: "mod:Ω/🚀",
+      currentRowRevision: 4,
+      libraryTotalCount: 2,
+    });
+    expect([...host.querySelectorAll<HTMLElement>("[data-native-blueprint-library-id]")]
+      .some((node) => node.dataset.nativeBlueprintLibraryId === "mod:Ω/🚀")).toBe(true);
+    expect(host.textContent).toContain("名称、方向与删除由 Rust 权威提交");
+
+    const deletePending = Object.freeze({
+      token: 1,
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 47,
+      registryFingerprint: "registry-a",
+      blueprintId: "mod:Ω/🚀",
+      currentRowRevision: 4,
+      libraryTotalCount: 2,
+      phase: "reconciling",
+      receipt: null,
+      blockedReason: null,
+      source: {},
+      command: {},
+    }) as unknown as NativeBlueprintDeletePendingCommand;
+    renderWorkspace(selected, "ready", { onSubmitDeleteIntent, deletePending });
+    expect(host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='delete-blueprint']")?.disabled)
+      .toBe(true);
+    expect(host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='rotate-transform']")?.disabled)
+      .toBe(true);
+    expect(host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='begin-rename']")?.disabled)
+      .toBe(true);
+    expect(host.textContent).toContain("蓝图删除结果不确定");
+  });
+
   it("fails closed while loading or when a ready frame has stale selection identity", () => {
     const retained = frame();
     renderWorkspace(retained, "loading");
@@ -647,6 +702,7 @@ describe("NativeBlueprintWorkspace", () => {
     expect(source).not.toMatch(/on(?:Capture|Import|Transform|Delete|Remove|Deploy|Place|Undo|Ghost|Fund|Cancel|Export)\b/);
     expect(source).toMatch(/onSubmitRenameIntent/);
     expect(source).toMatch(/onSubmitTransformIntent/);
+    expect(source).toMatch(/onSubmitDeleteIntent/);
     expect(source).not.toMatch(/onBlur=|onKeyDown=/);
 
     renderWorkspace(frame());
@@ -659,7 +715,7 @@ describe("NativeBlueprintWorkspace", () => {
     expect(actions).toEqual(new Set([
       "close", "tab-library", "tab-queue", "select",
       "begin-rename", "cancel-rename", "submit-rename",
-      "rotate-transform", "mirror-transform",
+      "rotate-transform", "mirror-transform", "delete-blueprint",
       "page-library-prev", "page-library-next", "page-queue-prev", "page-queue-next",
     ]));
   });

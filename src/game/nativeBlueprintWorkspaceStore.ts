@@ -47,6 +47,17 @@ export interface NativeBlueprintTransformBinding {
   readonly currentMirror: NativeBlueprintMirror;
 }
 
+/** Exact selected-row compare-and-delete binding for one library entry. */
+export interface NativeBlueprintDeleteBinding {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly registryFingerprint: string;
+  readonly blueprintId: string;
+  readonly currentRowRevision: number;
+  readonly libraryTotalCount: number;
+}
+
 export interface NativeBlueprintWorkspaceSource {
   readonly boundIdentity: NativeBlueprintWorkspaceIdentity;
   readVerifiedBlueprintPage(
@@ -360,6 +371,40 @@ export function selectNativeBlueprintTransformBinding(
     currentMirror: row.mirror as NativeBlueprintMirror,
   });
   return nativeBlueprintTransformBindingMatchesFrame(binding, frame) ? binding : null;
+}
+
+export function nativeBlueprintDeleteBindingMatchesFrame(
+  binding: NativeBlueprintDeleteBinding,
+  frame: NativeBlueprintWorkspaceFrame | null,
+): boolean {
+  if (!frame || frame.sessionId !== binding.sessionId || frame.runId !== binding.runId ||
+      frame.revision !== binding.revision ||
+      frame.registryFingerprint !== binding.registryFingerprint ||
+      !validOpaqueText(binding.blueprintId, 512) ||
+      !Number.isSafeInteger(binding.currentRowRevision) || binding.currentRowRevision < 1 ||
+      binding.currentRowRevision > Number.MAX_SAFE_INTEGER ||
+      !Number.isSafeInteger(binding.libraryTotalCount) || binding.libraryTotalCount < 1 ||
+      frame.libraryPage.totalCount !== binding.libraryTotalCount ||
+      frame.selectedBlueprintId !== binding.blueprintId) return false;
+  return frame.libraryById.get(binding.blueprintId)?.revision === binding.currentRowRevision;
+}
+
+export function selectNativeBlueprintDeleteBinding(
+  frame: NativeBlueprintWorkspaceFrame | null,
+): NativeBlueprintDeleteBinding | null {
+  if (!frame || frame.selectedBlueprintId === null) return null;
+  const row = frame.libraryById.get(frame.selectedBlueprintId);
+  if (!row) return null;
+  const binding: NativeBlueprintDeleteBinding = Object.freeze({
+    sessionId: frame.sessionId,
+    runId: frame.runId,
+    revision: frame.revision,
+    registryFingerprint: frame.registryFingerprint,
+    blueprintId: row.id,
+    currentRowRevision: row.revision,
+    libraryTotalCount: frame.libraryPage.totalCount,
+  });
+  return nativeBlueprintDeleteBindingMatchesFrame(binding, frame) ? binding : null;
 }
 
 export class NativeBlueprintWorkspaceStore {

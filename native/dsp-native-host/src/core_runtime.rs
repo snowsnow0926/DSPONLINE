@@ -6379,6 +6379,39 @@ mod tests {
         }
     }
 
+    fn player_authority_blueprint_delete_intent_command(
+        base_revision: u64,
+        command_id: &str,
+        blueprint_id: &str,
+        blueprint_revision: u64,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [{
+                    "path": ["blueprints", "intent"],
+                    "operation": "set",
+                    "value": {
+                        "kind": "delete",
+                        "id": blueprint_id,
+                        "revision": blueprint_revision
+                    }
+                }],
+                "changedEntities": [],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
     fn player_authority_raw_top_level_command(
         base_revision: u64,
         command_id: &str,
@@ -10864,6 +10897,289 @@ mod tests {
                 !String::from_utf8(recovered_export)
                     .unwrap()
                     .contains("\"kind\":\"transform\"")
+            );
+        }
+    }
+
+    #[test]
+    fn blueprint_delete_semantic_intent_survives_generic_cold_wal_reopen() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = player_authority_blueprint_rename_envelope();
+        let source: Value = serde_json::from_slice(&bytes).unwrap();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        let checkpoint = imported.checkpoint.clone();
+        let command = player_authority_blueprint_delete_intent_command(
+            checkpoint.revision,
+            "blueprint-delete-generic-wal",
+            "mod:opaque/rocket",
+            1,
+        )
+        .command;
+        let committed = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: "blueprint-delete-generic-wal".to_owned(),
+                    base_revision: checkpoint.revision,
+                    command: Some(command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(committed.revision, checkpoint.revision + 1);
+
+        let wal = store
+            .read_wal(&checkpoint.slot, checkpoint.revision)
+            .unwrap();
+        assert_eq!(wal.len(), 1);
+        let wal_payload = serde_json::to_string(&wal).unwrap();
+        assert!(wal_payload.contains("blueprints"));
+        assert!(wal_payload.contains("delete"));
+        assert!(wal_payload.contains("mod:opaque/rocket"));
+        assert!(!wal_payload.contains("opaqueDefinitionPayload"));
+        assert!(!wal_payload.contains("opaqueVersionPayload"));
+        assert!(!wal_payload.contains("opaqueQueuePayload"));
+
+        registry
+            .export_v47(&store, &imported.session_id, "blueprint-delete-live", 100)
+            .unwrap();
+        let live_bytes =
+            std::fs::read(root.path().join("exports/blueprint-delete-live.json")).unwrap();
+        let live: Value = serde_json::from_slice(&live_bytes).unwrap();
+        assert_eq!(live["state"]["blueprints"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            live["state"]["blueprints"][0],
+            source["state"]["blueprints"][1]
+        );
+        assert_eq!(
+            live["state"]["blueprintVersions"],
+            source["state"]["blueprintVersions"]
+        );
+        assert_eq!(
+            live["state"]["constructionQueue"],
+            source["state"]["constructionQueue"]
+        );
+        assert_eq!(live["state"]["entities"], source["state"]["entities"]);
+        assert_eq!(live["state"]["belts"], source["state"]["belts"]);
+        assert_eq!(live["state"]["nextId"], source["state"]["nextId"]);
+        assert!(
+            !String::from_utf8(live_bytes)
+                .unwrap()
+                .contains("\"kind\":\"delete\"")
+        );
+        let live_state = live["state"].clone();
+        let live_hash = committed.summary.as_ref().unwrap().canonical_sha256.clone();
+
+        drop(registry);
+        drop(store);
+        let reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = CoreRegistry::default();
+        let reopened = reopened_registry
+            .open(
+                &reopened_store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        assert_eq!(reopened.replayed_wal_entries, 1);
+        assert_eq!(reopened.replayed_revision, committed.revision);
+        assert_eq!(reopened.summary.canonical_sha256, live_hash);
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &reopened.session_id,
+                "blueprint-delete-replayed",
+                100,
+            )
+            .unwrap();
+        let replayed_bytes =
+            std::fs::read(root.path().join("exports/blueprint-delete-replayed.json")).unwrap();
+        let replayed: Value = serde_json::from_slice(&replayed_bytes).unwrap();
+        assert_eq!(replayed["state"], live_state);
+        assert!(
+            !String::from_utf8(replayed_bytes)
+                .unwrap()
+                .contains("\"kind\":\"delete\"")
+        );
+    }
+
+    #[test]
+    fn blueprint_delete_is_idempotent_and_atomic_across_host_durable_boundaries() {
+        let command_id = "blueprint-delete-durable-boundary";
+        let (clean_root, mut clean_store, mut clean_registry, clean_session, checkpoint) =
+            player_authority_blueprint_rename_fixture();
+        let request = || {
+            player_authority_blueprint_delete_intent_command(
+                checkpoint.revision,
+                command_id,
+                "mod:opaque/rocket",
+                1,
+            )
+        };
+        let clean = clean_registry
+            .commit_player_authority_command(&mut clean_store, &clean_session, request())
+            .unwrap();
+        assert!(clean.changed_entity_ids.is_empty());
+        assert!(clean.changed_belt_ids.is_empty());
+        assert!(clean.topology_dirty);
+        let duplicate = clean_registry
+            .commit_player_authority_command(&mut clean_store, &clean_session, request())
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.revision, clean.revision);
+        assert_eq!(
+            duplicate.summary.canonical_sha256,
+            clean.summary.canonical_sha256
+        );
+        clean_registry
+            .export_v47(
+                &clean_store,
+                &clean_session,
+                "blueprint-delete-duplicate-export",
+                100,
+            )
+            .unwrap();
+        let exported_bytes = std::fs::read(
+            clean_root
+                .path()
+                .join("exports/blueprint-delete-duplicate-export.json"),
+        )
+        .unwrap();
+        let exported: Value = serde_json::from_slice(&exported_bytes).unwrap();
+        assert_eq!(exported["state"]["blueprints"].as_array().unwrap().len(), 1);
+        assert_eq!(exported["state"]["blueprints"][0]["id"], "builtin-second");
+        assert_eq!(
+            exported["state"]["blueprintVersions"][0]["blueprintId"],
+            "mod:opaque/rocket"
+        );
+        assert_eq!(
+            exported["state"]["constructionQueue"][0]["blueprintVersionId"],
+            "version-mod-1"
+        );
+        assert!(
+            !String::from_utf8(exported_bytes)
+                .unwrap()
+                .contains("\"kind\":\"delete\"")
+        );
+
+        for fault in [
+            PlayerAuthorityCommandFault::AfterStage,
+            PlayerAuthorityCommandFault::AfterWal,
+            PlayerAuthorityCommandFault::AfterCheckpoint,
+            PlayerAuthorityCommandFault::AfterReceipt,
+            PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
+        ] {
+            let (root, mut store, mut registry, session_id, checkpoint) =
+                player_authority_blueprint_rename_fixture();
+            let before = registry.status(&session_id).unwrap();
+            let request = || {
+                player_authority_blueprint_delete_intent_command(
+                    checkpoint.revision,
+                    command_id,
+                    "mod:opaque/rocket",
+                    1,
+                )
+            };
+            let error = registry
+                .commit_player_authority_command_internal(
+                    &mut store,
+                    &session_id,
+                    request(),
+                    PlayerAuthorityCommandKind::Gameplay,
+                    fault,
+                )
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("lost response"),
+                "{fault:?}: {error:#}"
+            );
+            if fault == PlayerAuthorityCommandFault::AfterStage {
+                let after = registry.status(&session_id).unwrap();
+                assert_eq!(after.revision, before.revision);
+                assert_eq!(after.canonical_sha256, before.canonical_sha256);
+            }
+
+            drop(registry);
+            let published = store.recover("normal-main").unwrap().unwrap();
+            let mut reopened = CoreRegistry::default();
+            let opened = reopened
+                .open(
+                    &store,
+                    "normal-main",
+                    published.generation,
+                    &published.root_hash,
+                    published.revision,
+                    &published.registry_fingerprint,
+                    player_authority_catalog(),
+                )
+                .unwrap();
+            let recovered = reopened
+                .commit_player_authority_command(&mut store, &opened.session_id, request())
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
+            assert!(recovered.duplicate, "{fault:?}");
+            assert_eq!(recovered.revision, clean.revision, "{fault:?}");
+            assert_eq!(
+                recovered.summary.canonical_sha256, clean.summary.canonical_sha256,
+                "{fault:?}"
+            );
+            assert!(recovered.changed_entity_ids.is_empty(), "{fault:?}");
+            assert!(recovered.changed_belt_ids.is_empty(), "{fault:?}");
+            assert!(recovered.topology_dirty, "{fault:?}");
+            let lease = store.require_exact_realtime_lease().unwrap();
+            assert_eq!(lease.acknowledged.revision, recovered.revision, "{fault:?}");
+            assert!(lease.pending_command.is_none(), "{fault:?}");
+            reopened
+                .export_v47(
+                    &store,
+                    &opened.session_id,
+                    "blueprint-delete-recovered",
+                    100,
+                )
+                .unwrap();
+            let recovered_bytes =
+                std::fs::read(root.path().join("exports/blueprint-delete-recovered.json")).unwrap();
+            let recovered_export: Value = serde_json::from_slice(&recovered_bytes).unwrap();
+            assert_eq!(
+                recovered_export["state"]["blueprints"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1,
+                "{fault:?}"
+            );
+            assert_eq!(
+                recovered_export["state"]["blueprintVersions"][0]["blueprintId"],
+                "mod:opaque/rocket",
+                "{fault:?}"
+            );
+            assert_eq!(
+                recovered_export["state"]["constructionQueue"][0]["blueprintVersionId"],
+                "version-mod-1",
+                "{fault:?}"
+            );
+            assert!(
+                !String::from_utf8(recovered_bytes)
+                    .unwrap()
+                    .contains("\"kind\":\"delete\""),
+                "{fault:?}"
             );
         }
     }

@@ -8942,9 +8942,10 @@ impl CoreState {
         let expanded_manual_mining_intent;
         let expanded_black_hole_pause_intent;
         let expanded_time_warp_intent;
-        let expanded_blueprint_rename_intent;
+        let expanded_blueprint_intent;
         let expanded_entity_recipe_intent;
         let mut compact_entity_recipe_receipt_id = None;
+        let mut blueprint_delete_index = None;
         let applied_command = if command_contains_active_planet_intent(command) {
             expanded_active_planet_intent = expand_active_planet_intent(self, command)?;
             &expanded_active_planet_intent
@@ -8983,9 +8984,9 @@ impl CoreState {
             expanded_entity_recipe_intent = crate::recipe_command::expand_intent(self, command)?;
             &expanded_entity_recipe_intent
         } else if crate::blueprint_command::command_contains_intent(command) {
-            expanded_blueprint_rename_intent =
-                crate::blueprint_command::expand_intent(self, command)?;
-            &expanded_blueprint_rename_intent
+            expanded_blueprint_intent = crate::blueprint_command::expand_intent(self, command)?;
+            blueprint_delete_index = expanded_blueprint_intent.delete_index();
+            expanded_blueprint_intent.command()
         } else if crate::manual_mining::command_contains_intent(command) {
             expanded_manual_mining_intent = crate::manual_mining::expand_intent(self, command)?;
             &expanded_manual_mining_intent
@@ -9010,6 +9011,16 @@ impl CoreState {
         let mut base = Value::Object(next.take_base_for_command());
         for change in &applied_command.top_level_changes {
             apply_value_patch(&mut base, change)?;
+        }
+        if let Some(index) = blueprint_delete_index {
+            let blueprints = base
+                .get_mut("blueprints")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| anyhow!("native player-authority blueprint directory is invalid"))?;
+            if index >= blueprints.len() {
+                bail!("native player-authority blueprint delete index is invalid")
+            }
+            blueprints.remove(index);
         }
         let base = match base {
             Value::Object(base) => base,
@@ -9129,7 +9140,8 @@ impl CoreState {
             }
         }
         next.revision += 1;
-        let only_pause_changed = applied_command.changed_entities.is_empty()
+        let only_pause_changed = blueprint_delete_index.is_none()
+            && applied_command.changed_entities.is_empty()
             && applied_command.added_entities.is_empty()
             && applied_command.removed_entity_ids.is_empty()
             && applied_command.changed_belts.is_empty()
@@ -9171,6 +9183,13 @@ impl CoreState {
             result.changed_entity_ids.clear();
             result.changed_entity_ids.push(entity_id);
             result.changed_belt_ids.clear();
+            result.topology_dirty = true;
+        }
+        if blueprint_delete_index.is_some() {
+            // The compact semantic marker and private delete plan carry no
+            // renderer-derived dirty set. Blueprint workspace consumers must
+            // therefore re-read their bounded projection after live apply just
+            // as they do after cold WAL recovery.
             result.topology_dirty = true;
         }
         *self = next;
@@ -18973,6 +18992,27 @@ mod tests {
         command
     }
 
+    fn blueprint_delete_intent_command(
+        revision: u64,
+        id: &str,
+        blueprint_revision: u64,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("blueprints".to_owned()),
+                PathSegment::Key("intent".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(serde_json::json!({
+                "kind": "delete",
+                "id": id,
+                "revision": blueprint_revision
+            })),
+        }];
+        command
+    }
+
     #[test]
     fn player_authority_blueprint_rename_is_minimal_atomic_and_preserves_opaque_state() {
         let mut state = blueprint_rename_state();
@@ -19322,5 +19362,229 @@ mod tests {
             assert_eq!(state.revision, 9);
             assert_eq!(state.canonical_sha256().unwrap(), before);
         }
+    }
+
+    #[test]
+    fn player_authority_blueprint_delete_is_atomic_and_preserves_queued_snapshot_state() {
+        let mut state = blueprint_rename_state();
+        state.base_value_mut()["blueprints"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "tail-blueprint",
+                "name": "尾部蓝图",
+                "revision": 3,
+                "entities": [],
+                "belts": [],
+                "opaqueTailPayload": { "keep": [3, 2, 1] }
+            }));
+        let command = blueprint_delete_intent_command(9, "mod:opaque/rocket", 1);
+        let encoded = serde_json::to_string(&command).unwrap();
+        assert!(encoded.contains("\"kind\":\"delete\""));
+        assert!(encoded.contains("\"revision\":1"));
+        assert!(!encoded.contains("entities"));
+        assert!(!encoded.contains("belts"));
+        assert!(!encoded.contains("blueprintVersions"));
+        assert!(!encoded.contains("constructionQueue"));
+
+        let expansion = crate::blueprint_command::expand_intent(&state, &command).unwrap();
+        assert_eq!(expansion.delete_index(), Some(0));
+        assert!(expansion.command().top_level_changes.is_empty());
+        assert!(expansion.command().changed_entities.is_empty());
+        assert!(expansion.command().changed_belts.is_empty());
+
+        let before = state.base_value().clone();
+        let versions_before = serde_json::to_vec(&before["blueprintVersions"]).unwrap();
+        let queue_before = serde_json::to_vec(&before["constructionQueue"]).unwrap();
+        let entity_before = state.parse_entity(0).unwrap();
+        let belt_before = state.parse_belt(0).unwrap();
+        let receipt = state.apply_player_authority_command(&command).unwrap();
+
+        assert_eq!(receipt.previous_revision, 9);
+        assert_eq!(receipt.revision, 10);
+        assert!(receipt.changed_entity_ids.is_empty());
+        assert!(receipt.changed_belt_ids.is_empty());
+        assert!(receipt.topology_dirty);
+        assert_eq!(
+            state.base_value()["blueprints"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(state.base_value()["blueprints"][0], before["blueprints"][1]);
+        assert_eq!(state.base_value()["blueprints"][1], before["blueprints"][2]);
+        assert_eq!(
+            serde_json::to_vec(&state.base_value()["blueprintVersions"]).unwrap(),
+            versions_before
+        );
+        assert_eq!(
+            serde_json::to_vec(&state.base_value()["constructionQueue"]).unwrap(),
+            queue_before
+        );
+        assert_eq!(state.base_value()["nextId"], before["nextId"]);
+        assert_eq!(state.parse_entity(0).unwrap(), entity_before);
+        assert_eq!(state.parse_belt(0).unwrap(), belt_before);
+        let mut expected_base = before.clone();
+        expected_base["blueprints"] = Value::Array(vec![
+            before["blueprints"][1].clone(),
+            before["blueprints"][2].clone(),
+        ]);
+        assert_eq!(state.base_value(), &expected_base);
+    }
+
+    #[test]
+    fn player_authority_blueprint_delete_accepts_max_safe_target_revision() {
+        let mut state = blueprint_rename_state();
+        state.base_value_mut()["blueprints"][1]["revision"] =
+            Value::from(MAX_JAVASCRIPT_SAFE_INTEGER);
+        let before = state.base_value().clone();
+        let receipt = state
+            .apply_player_authority_command(&blueprint_delete_intent_command(
+                9,
+                "builtin-second",
+                MAX_JAVASCRIPT_SAFE_INTEGER,
+            ))
+            .unwrap();
+        assert_eq!(receipt.revision, 10);
+        assert_eq!(
+            state.base_value()["blueprints"],
+            Value::Array(vec![before["blueprints"][0].clone()])
+        );
+    }
+
+    #[test]
+    fn player_authority_blueprint_delete_replays_identically_from_semantic_wal_marker() {
+        let command = blueprint_delete_intent_command(9, "mod:opaque/rocket", 1);
+        let durable = serde_json::to_string(&command).unwrap();
+        assert!(durable.contains("\"kind\":\"delete\""));
+        assert!(!durable.contains("opaqueDefinitionPayload"));
+        let replayed: SimulationCommandPatch = serde_json::from_str(&durable).unwrap();
+        let mut live = blueprint_rename_state();
+        let mut replay = live.clone();
+        let live_receipt = live.apply_player_authority_command(&command).unwrap();
+        let replay_receipt = replay.apply_command(&replayed).unwrap();
+        assert_eq!(live_receipt, replay_receipt);
+        assert!(live_receipt.changed_entity_ids.is_empty());
+        assert!(live_receipt.changed_belt_ids.is_empty());
+        assert!(live_receipt.topology_dirty);
+        assert_eq!(
+            live.canonical_sha256().unwrap(),
+            replay.canonical_sha256().unwrap()
+        );
+        assert_eq!(
+            replay.base_value()["blueprints"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(
+            replay.base_value()["blueprintVersions"],
+            blueprint_rename_state().base_value()["blueprintVersions"]
+        );
+        assert_eq!(
+            replay.base_value()["constructionQueue"],
+            blueprint_rename_state().base_value()["constructionQueue"]
+        );
+    }
+
+    #[test]
+    fn player_authority_blueprint_delete_fails_closed_at_marker_and_directory_boundaries() {
+        let mut cases = vec![
+            blueprint_delete_intent_command(9, "missing", 1),
+            blueprint_delete_intent_command(9, "builtin-second", 6),
+            blueprint_delete_intent_command(9, "builtin-second", 8),
+            blueprint_delete_intent_command(9, "builtin-second", 0),
+            blueprint_delete_intent_command(9, "builtin-second", MAX_JAVASCRIPT_SAFE_INTEGER + 1),
+        ];
+        let mut missing_revision = blueprint_delete_intent_command(9, "builtin-second", 7);
+        missing_revision.top_level_changes[0]
+            .value
+            .as_mut()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("revision");
+        cases.push(missing_revision);
+        let mut extra = blueprint_delete_intent_command(9, "builtin-second", 7);
+        extra.top_level_changes[0].value.as_mut().unwrap()["name"] = Value::from("forged");
+        cases.push(extra);
+        let mut rename_with_delete_revision =
+            blueprint_rename_intent_command(9, "builtin-second", "严格改名");
+        rename_with_delete_revision.top_level_changes[0]
+            .value
+            .as_mut()
+            .unwrap()["revision"] = Value::from(7);
+        cases.push(rename_with_delete_revision);
+
+        for command in cases {
+            let mut state = blueprint_rename_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        for mutate in ["duplicate-id", "hidden-bad-row", "source-limit"] {
+            let mut state = blueprint_rename_state();
+            match mutate {
+                "duplicate-id" => {
+                    state.base_value_mut()["blueprints"][1]["id"] =
+                        Value::from("mod:opaque/rocket");
+                }
+                "hidden-bad-row" => {
+                    state.base_value_mut()["blueprints"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::json!({
+                            "id": "hidden",
+                            "name": "坏行",
+                            "entities": [],
+                            "belts": "not-an-array"
+                        }));
+                }
+                "source-limit" => {
+                    state.base_value_mut()["blueprints"] = Value::Array(
+                        (0..4_097)
+                            .map(|index| {
+                                serde_json::json!({
+                                    "id": format!("blueprint-{index}"),
+                                    "name": format!("蓝图{index}"),
+                                    "revision": 1,
+                                    "entities": [],
+                                    "belts": []
+                                })
+                            })
+                            .collect(),
+                    );
+                }
+                _ => unreachable!(),
+            }
+            let before = state.canonical_sha256().unwrap();
+            let target_id = if mutate == "source-limit" {
+                "blueprint-0"
+            } else {
+                "mod:opaque/rocket"
+            };
+            assert!(
+                state
+                    .apply_player_authority_command(&blueprint_delete_intent_command(
+                        9, target_id, 1,
+                    ))
+                    .is_err()
+            );
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut raw_array_delete = empty_player_command(9);
+        raw_array_delete.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("blueprints".to_owned()),
+                PathSegment::Index(0),
+            ],
+            operation: "delete".to_owned(),
+            value: None,
+        }];
+        let mut state = blueprint_rename_state();
+        let before = state.canonical_sha256().unwrap();
+        assert!(state.apply_command(&raw_array_delete).is_err());
+        assert_eq!(state.revision, 9);
+        assert_eq!(state.canonical_sha256().unwrap(), before);
     }
 }

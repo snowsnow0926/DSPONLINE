@@ -1,10 +1,14 @@
 //! Minimal, durable blueprint metadata intents.
 //!
-//! The renderer sends either the exact rename marker `{ kind, id, name }` or
-//! the exact target-state transform marker `{ kind, id, rotation, mirror }`.
+//! The renderer sends the exact rename marker `{ kind, id, name }`, the exact
+//! target-state transform marker `{ kind, id, rotation, mirror }`, or the exact
+//! delete marker `{ kind, id, revision }`.
 //! Rust validates the complete public-v47 blueprint directory and expands the
-//! marker to the target row's metadata leaves. No blueprint body, version
-//! snapshot, queue, inventory, entity, belt, or allocator field is
+//! marker to an authoritative mutation. Rename and transform use ordinary leaf
+//! patches. Delete keeps its validated array index in a private Core-only plan,
+//! so the generic patch engine still forbids renderer-accessible array deletion
+//! and no complete blueprint directory is copied into the command. No blueprint
+//! body, version snapshot, queue, inventory, entity, belt, or allocator field is
 //! renderer-derived.
 
 use std::collections::HashSet;
@@ -37,9 +41,16 @@ struct BlueprintTransformIntent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct BlueprintDeleteIntent {
+    id: String,
+    revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum BlueprintIntent {
     Rename(BlueprintRenameIntent),
     Transform(BlueprintTransformIntent),
+    Delete(BlueprintDeleteIntent),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,9 +69,35 @@ struct ValidatedBlueprintTransform {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ValidatedBlueprintDelete {
+    index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ValidatedBlueprintIntent {
     Rename(ValidatedBlueprintRename),
     Transform(ValidatedBlueprintTransform),
+    Delete(ValidatedBlueprintDelete),
+}
+
+/// Core-only expansion of a validated semantic blueprint marker.
+///
+/// `delete_index` is deliberately not serializable and never crosses the Host
+/// or WAL boundary. It can only be produced after `validated_intent()` has
+/// proved the complete blueprint directory and exact target revision.
+pub(crate) struct BlueprintCommandExpansion {
+    command: SimulationCommandPatch,
+    delete_index: Option<usize>,
+}
+
+impl BlueprintCommandExpansion {
+    pub(crate) fn command(&self) -> &SimulationCommandPatch {
+        &self.command
+    }
+
+    pub(crate) fn delete_index(&self) -> Option<usize> {
+        self.delete_index
+    }
 }
 
 fn path_matches(path: &[PathSegment], expected: &[&str]) -> bool {
@@ -180,6 +217,22 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<BlueprintI
                 mirror: mirror.to_owned(),
             }))
         }
+        "delete" => {
+            if intent.len() != 3 || !intent.contains_key("revision") {
+                bail!("native player-authority blueprint delete intent is invalid")
+            }
+            let revision = intent
+                .get("revision")
+                .and_then(Value::as_u64)
+                .filter(|revision| *revision > 0 && *revision <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority blueprint delete revision is invalid")
+                })?;
+            Ok(BlueprintIntent::Delete(BlueprintDeleteIntent {
+                id: id.to_owned(),
+                revision,
+            }))
+        }
         _ => bail!("native player-authority blueprint intent kind is invalid"),
     }
 }
@@ -270,20 +323,23 @@ fn validated_intent(
         let target_id = match &intent {
             BlueprintIntent::Rename(intent) => intent.id.as_str(),
             BlueprintIntent::Transform(intent) => intent.id.as_str(),
+            BlueprintIntent::Delete(intent) => intent.id.as_str(),
         };
         if id == target_id {
             if target.is_some() {
                 bail!("native player-authority blueprint target is not unique")
             }
-            let next_revision = revision
-                .checked_add(1)
-                .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
-                .ok_or_else(|| anyhow!("native player-authority blueprint revision overflows"))?;
             target = Some(match &intent {
                 BlueprintIntent::Rename(intent) => {
                     if current_name == intent.name {
                         bail!("native player-authority blueprint rename target is unchanged")
                     }
+                    let next_revision = revision
+                        .checked_add(1)
+                        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                        .ok_or_else(|| {
+                            anyhow!("native player-authority blueprint revision overflows")
+                        })?;
                     ValidatedBlueprintIntent::Rename(ValidatedBlueprintRename {
                         index,
                         name: intent.name.clone(),
@@ -294,12 +350,24 @@ fn validated_intent(
                     if current_rotation == intent.rotation && current_mirror == intent.mirror {
                         bail!("native player-authority blueprint transform target is unchanged")
                     }
+                    let next_revision = revision
+                        .checked_add(1)
+                        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                        .ok_or_else(|| {
+                            anyhow!("native player-authority blueprint revision overflows")
+                        })?;
                     ValidatedBlueprintIntent::Transform(ValidatedBlueprintTransform {
                         index,
                         rotation: intent.rotation,
                         mirror: intent.mirror.clone(),
                         revision: next_revision,
                     })
+                }
+                BlueprintIntent::Delete(intent) => {
+                    if revision != intent.revision {
+                        bail!("native player-authority blueprint delete revision is not current")
+                    }
+                    ValidatedBlueprintIntent::Delete(ValidatedBlueprintDelete { index })
                 }
             });
         }
@@ -321,68 +389,78 @@ pub(crate) fn validate_resume_marker(command: &SimulationCommandPatch) -> anyhow
 pub(crate) fn expand_intent(
     state: &CoreState,
     command: &SimulationCommandPatch,
-) -> anyhow::Result<SimulationCommandPatch> {
+) -> anyhow::Result<BlueprintCommandExpansion> {
     let intent = validated_intent(state, command)?;
-    let top_level_changes = match intent {
-        ValidatedBlueprintIntent::Rename(rename) => vec![
-            ValuePatch {
-                path: vec![
-                    PathSegment::Key("blueprints".to_owned()),
-                    PathSegment::Index(rename.index),
-                    PathSegment::Key("name".to_owned()),
-                ],
-                operation: "set".to_owned(),
-                value: Some(Value::from(rename.name)),
-            },
-            ValuePatch {
-                path: vec![
-                    PathSegment::Key("blueprints".to_owned()),
-                    PathSegment::Index(rename.index),
-                    PathSegment::Key("revision".to_owned()),
-                ],
-                operation: "set".to_owned(),
-                value: Some(Value::from(rename.revision)),
-            },
-        ],
-        ValidatedBlueprintIntent::Transform(transform) => vec![
-            ValuePatch {
-                path: vec![
-                    PathSegment::Key("blueprints".to_owned()),
-                    PathSegment::Index(transform.index),
-                    PathSegment::Key("rotation".to_owned()),
-                ],
-                operation: "set".to_owned(),
-                value: Some(Value::from(transform.rotation)),
-            },
-            ValuePatch {
-                path: vec![
-                    PathSegment::Key("blueprints".to_owned()),
-                    PathSegment::Index(transform.index),
-                    PathSegment::Key("mirror".to_owned()),
-                ],
-                operation: "set".to_owned(),
-                value: Some(Value::from(transform.mirror)),
-            },
-            ValuePatch {
-                path: vec![
-                    PathSegment::Key("blueprints".to_owned()),
-                    PathSegment::Index(transform.index),
-                    PathSegment::Key("revision".to_owned()),
-                ],
-                operation: "set".to_owned(),
-                value: Some(Value::from(transform.revision)),
-            },
-        ],
+    let (top_level_changes, delete_index) = match intent {
+        ValidatedBlueprintIntent::Rename(rename) => (
+            vec![
+                ValuePatch {
+                    path: vec![
+                        PathSegment::Key("blueprints".to_owned()),
+                        PathSegment::Index(rename.index),
+                        PathSegment::Key("name".to_owned()),
+                    ],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from(rename.name)),
+                },
+                ValuePatch {
+                    path: vec![
+                        PathSegment::Key("blueprints".to_owned()),
+                        PathSegment::Index(rename.index),
+                        PathSegment::Key("revision".to_owned()),
+                    ],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from(rename.revision)),
+                },
+            ],
+            None,
+        ),
+        ValidatedBlueprintIntent::Transform(transform) => (
+            vec![
+                ValuePatch {
+                    path: vec![
+                        PathSegment::Key("blueprints".to_owned()),
+                        PathSegment::Index(transform.index),
+                        PathSegment::Key("rotation".to_owned()),
+                    ],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from(transform.rotation)),
+                },
+                ValuePatch {
+                    path: vec![
+                        PathSegment::Key("blueprints".to_owned()),
+                        PathSegment::Index(transform.index),
+                        PathSegment::Key("mirror".to_owned()),
+                    ],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from(transform.mirror)),
+                },
+                ValuePatch {
+                    path: vec![
+                        PathSegment::Key("blueprints".to_owned()),
+                        PathSegment::Index(transform.index),
+                        PathSegment::Key("revision".to_owned()),
+                    ],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from(transform.revision)),
+                },
+            ],
+            None,
+        ),
+        ValidatedBlueprintIntent::Delete(delete) => (Vec::new(), Some(delete.index)),
     };
-    Ok(SimulationCommandPatch {
-        protocol_version: command.protocol_version,
-        base_revision: command.base_revision,
-        top_level_changes,
-        changed_entities: Vec::new(),
-        added_entities: Vec::new(),
-        removed_entity_ids: Vec::new(),
-        changed_belts: Vec::new(),
-        added_belts: Vec::new(),
-        removed_belt_ids: Vec::new(),
+    Ok(BlueprintCommandExpansion {
+        command: SimulationCommandPatch {
+            protocol_version: command.protocol_version,
+            base_revision: command.base_revision,
+            top_level_changes,
+            changed_entities: Vec::new(),
+            added_entities: Vec::new(),
+            removed_entity_ids: Vec::new(),
+            changed_belts: Vec::new(),
+            added_belts: Vec::new(),
+            removed_belt_ids: Vec::new(),
+        },
+        delete_index,
     })
 }

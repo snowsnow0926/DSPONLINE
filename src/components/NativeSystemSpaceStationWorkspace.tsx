@@ -17,6 +17,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import { useEffect, useState } from "react";
 import type {
   NativeSystemSpaceStationPage,
   NativeSystemSpaceStationPageLane,
@@ -31,7 +32,19 @@ export interface NativeSystemSpaceStationWorkspaceProps {
   readonly identity: NativeSystemSpaceStationWorkspaceIdentity | null;
   readonly fetchProjection: NativeSystemSpaceStationWorkspaceFetchProjection | null;
   readonly mobile?: boolean;
+  readonly pending?: boolean;
   readonly onClose: () => void;
+  readonly onStartConstruction?: (systemId: string) => boolean | void;
+  readonly onDeliverMaterial?: (systemId: string, planetId: string, itemId: string, amount: number) => boolean | void;
+  readonly onSetModuleCount?: (
+    systemId: string,
+    module: "backbone" | "energy" | "interstellar",
+    target: number,
+  ) => boolean | void;
+  readonly onUpgradeStation?: (entityId: string) => boolean | void;
+  readonly onUpgradeAllStations?: (systemId: string) => boolean | void;
+  readonly onRequestMode?: (entityId: string, mode: "legacy" | "elevator") => boolean | void;
+  readonly onSetOutput?: (entityId: string, portIndex: number, itemId: string | null) => boolean | void;
 }
 
 function quantity(value: string | number): string {
@@ -95,6 +108,60 @@ function EmptyPage({ children }: { readonly children: string }) {
   return <p data-native-system-station-empty style={{ color: "var(--muted, #9db2aa)", margin: 0 }}>{children}</p>;
 }
 
+function NativeSystemStationOutputControl({
+  entityId,
+  portIndex,
+  itemId,
+  itemName,
+  disabled,
+  onSetOutput,
+}: {
+  readonly entityId: string;
+  readonly portIndex: number;
+  readonly itemId: string | null;
+  readonly itemName: string;
+  readonly disabled: boolean;
+  readonly onSetOutput?: (entityId: string, portIndex: number, itemId: string | null) => boolean | void;
+}) {
+  const [draft, setDraft] = useState(itemId ?? "");
+  const [armedValue, setArmedValue] = useState<string | null | undefined>(undefined);
+  useEffect(() => {
+    setDraft(itemId ?? "");
+    setArmedValue(undefined);
+  }, [entityId, itemId, portIndex]);
+  const normalized = draft.trim() || null;
+  const unchanged = normalized === itemId;
+  const armed = armedValue !== undefined && armedValue === normalized;
+  const submit = () => {
+    if (disabled || unchanged || !onSetOutput) return;
+    if (!armed) {
+      setArmedValue(normalized);
+      return;
+    }
+    const accepted = onSetOutput(entityId, portIndex, normalized);
+    if (accepted !== false) setArmedValue(undefined);
+  };
+  return <label data-native-system-station-output={portIndex}>
+    <span>输出 {portIndex + 1}</span>
+    <input
+      aria-label={`输出 ${portIndex + 1} 物料 ID`}
+      value={draft}
+      placeholder={itemName || "留空即清除"}
+      disabled={disabled || !onSetOutput}
+      onChange={(event) => {
+        setDraft(event.target.value);
+        setArmedValue(undefined);
+      }}
+    />
+    <button
+      type="button"
+      disabled={disabled || !onSetOutput || unchanged}
+      onClick={submit}
+      data-native-system-station-output-submit={portIndex}
+    >{armed ? "再次确认" : normalized ? "设置" : "清除"}</button>
+  </label>;
+}
+
 /**
  * The Windows authority workspace consumes only the bounded Rust projection.
  * It has no GameState prop, catalog import, simulation command, or legacy
@@ -105,7 +172,15 @@ export function NativeSystemSpaceStationWorkspace({
   identity,
   fetchProjection,
   mobile = false,
+  pending = false,
   onClose,
+  onStartConstruction,
+  onDeliverMaterial,
+  onSetModuleCount,
+  onUpgradeStation,
+  onUpgradeAllStations,
+  onRequestMode,
+  onSetOutput,
 }: NativeSystemSpaceStationWorkspaceProps) {
   const workspace = useNativeSystemSpaceStationWorkspace({ open, identity, fetchProjection });
   const { snapshot, frame } = workspace;
@@ -118,6 +193,9 @@ export function NativeSystemSpaceStationWorkspace({
   const loading = snapshot.status === "loading";
   const unavailable = snapshot.status === "unavailable" || !identity || !fetchProjection ||
     snapshot.status === "empty" && open;
+  const commandsEnabled = Boolean(projection && identity && frame &&
+    frame.sessionId === identity.sessionId && frame.runId === identity.runId &&
+    frame.revision === identity.revision && !loading && !pending);
 
   return <WorkspaceFrame
     open={open}
@@ -130,7 +208,7 @@ export function NativeSystemSpaceStationWorkspace({
     <header className="system-space-station-header">
       <div className="system-space-station-title">
         <i><Sparkles size={20} /></i>
-        <span><small>Rust 权威 · 有界只读投影{identity ? ` · revision ${identity.revision}` : ""}</small><strong>{title}</strong></span>
+        <span><small>Rust 权威 · 有界投影与意图命令{identity ? ` · revision ${identity.revision}` : ""}</small><strong>{title}</strong></span>
         {projection ? <b>{stationStatusLabel(projection.station.status)}</b> : null}
       </div>
       <button type="button" className="system-space-station-close" onClick={handleClose} aria-label="关闭原生空间站"><X size={18} /></button>
@@ -169,12 +247,17 @@ export function NativeSystemSpaceStationWorkspace({
           </div>
         </section>
 
-        {projection.station.status === "not-started" ? <section className="system-space-station-card system-space-station-start" data-native-system-space-station-start-readonly>
+        {projection.station.status === "not-started" ? <section className="system-space-station-card system-space-station-start" data-native-system-space-station-start>
           <Factory size={22} />
           <div><strong>空间站项目尚未开工</strong><span>{projection.station.canStartConstruction
-            ? "Rust 已确认系统、科技和施工发射平台满足开工条件；写命令接入后才会启用操作。"
+            ? "Rust 已确认系统、科技和施工发射平台满足开工条件。"
             : `开工条件：系统${projection.system.unlocked ? "已解锁" : "未解锁"}、科技${projection.technology.constructionReady ? "已完成" : "未完成"}、发射平台${projection.station.launcherPresent ? "已存在" : "缺失"}。`}</span></div>
-          <button type="button" disabled>只读预览</button>
+          <button
+            type="button"
+            disabled={!commandsEnabled || !projection.station.canStartConstruction || !onStartConstruction}
+            onClick={() => onStartConstruction?.(projection.system.systemId)}
+            data-native-system-station-command="start"
+          >{pending ? "提交中…" : "开始施工"}</button>
         </section> : null}
 
         <section className="system-space-station-card" data-native-system-space-station-section="requirements">
@@ -221,16 +304,47 @@ export function NativeSystemSpaceStationWorkspace({
               <span>{entry.planetName}{entry.activePlanet ? " · 当前行星" : ""}</span>
               <strong>{entry.itemName}</strong>
               <em>{quantity(entry.amount)}{entry.constructionMaterial ? " · 施工材料" : ""}</em>
+              {entry.constructionMaterial && projection.station.status === "building" ? <button
+                type="button"
+                disabled={!commandsEnabled || entry.amount <= 0 || !onDeliverMaterial}
+                onClick={() => onDeliverMaterial?.(
+                  projection.system.systemId,
+                  entry.planetId,
+                  entry.itemId,
+                  entry.amount,
+                )}
+                data-native-system-station-command="deliver"
+              >交付可用物料</button> : null}
             </div>)}
           </div>}
         </section>
 
         <section className="system-space-station-card" data-native-system-space-station-section="modules">
-          <header><Power size={17} /><strong>功能模块</strong><span>模块数量来自 Rust 权威状态；修改命令尚未在本只读块开放。</span></header>
+          <header><Power size={17} /><strong>功能模块</strong><span>数量与可用材料由 Rust 在提交 revision 再次校验。</span></header>
           <div className="system-space-station-modules">
-            <label><span>物流主干</span><strong>{projection.station.modules.backbone.toLocaleString("zh-CN")}</strong></label>
-            <label><span>能源核心</span><strong>{projection.station.modules.energy.toLocaleString("zh-CN")}</strong></label>
-            <label><span>星际运输</span><strong>{projection.station.modules.interstellar.toLocaleString("zh-CN")}</strong></label>
+            {([
+              ["backbone", "物流主干", projection.station.modules.backbone],
+              ["energy", "能源核心", projection.station.modules.energy],
+              ["interstellar", "星际运输", projection.station.modules.interstellar],
+            ] as const).map(([module, label, count]) => <label key={module}>
+              <span>{label}</span><strong>{count.toLocaleString("zh-CN")}</strong>
+              <button
+                type="button"
+                aria-label={`${label}减少 1`}
+                disabled={!commandsEnabled || projection.station.status !== "operational" ||
+                  !projection.technology.moduleAssemblyReady || count <= 0 || !onSetModuleCount}
+                onClick={() => onSetModuleCount?.(projection.system.systemId, module, count - 1)}
+                data-native-system-station-command={`module-${module}-decrease`}
+              >−</button>
+              <button
+                type="button"
+                aria-label={`${label}增加 1`}
+                disabled={!commandsEnabled || projection.station.status !== "operational" ||
+                  !projection.technology.moduleAssemblyReady || count >= 1_000_000 || !onSetModuleCount}
+                onClick={() => onSetModuleCount?.(projection.system.systemId, module, count + 1)}
+                data-native-system-station-command={`module-${module}-increase`}
+              >+</button>
+            </label>)}
           </div>
           <small>模块装配科技：{projection.technology.moduleAssemblyReady ? "已解锁" : "未解锁"} · 自律施工：{projection.technology.autonomousConstructionReady ? "已解锁" : "未解锁"} · 多货物总线：{projection.technology.orbitalBusReady ? "已解锁" : "未解锁"}</small>
         </section>
@@ -240,17 +354,49 @@ export function NativeSystemSpaceStationWorkspace({
             <Route size={17} /><strong>星际物流站</strong><span>Mk.I {projection.summary.mk1StationCount} · Mk.II {projection.summary.mk2StationCount} · 电梯 {projection.summary.elevatorStationCount} · 切换中 {projection.summary.transitioningStationCount}</span>
             <NativeSystemStationPageControls lane="station" label="星际物流站" page={projection.interstellarStations} disabled={loading} onCursorChange={workspace.setPageCursor} />
           </header>
+          {projection.summary.mk1StationCount > 0 ? <button
+            type="button"
+            disabled={!commandsEnabled || !onUpgradeAllStations}
+            onClick={() => onUpgradeAllStations?.(projection.system.systemId)}
+            data-native-system-station-command="upgrade-all"
+          >升级本系全部 Mk.I</button> : null}
           {projection.interstellarStations.rows.length === 0 ? <EmptyPage>当前恒星系没有星际物流站。</EmptyPage> : <div className="system-space-station-stations">
             {projection.interstellarStations.rows.map((station) => <article key={station.entityId} data-native-system-station-entity={station.entityId}>
               <div><strong>{station.planetName} · {station.machineCount.toLocaleString("zh-CN")} 座</strong><small>Mk.{station.stationTier} · {modeLabel(station.operationMode)} · {transitionLabel(station.modeTransition)}</small></div>
               <div className="system-space-station-station-actions">
-                <button type="button" className={station.operationMode === "legacy" ? "active" : ""} disabled>传统模式</button>
-                <button type="button" className={station.operationMode === "elevator" ? "active" : ""} disabled>电梯模式</button>
+                {station.stationTier === 1 ? <button
+                  type="button"
+                  disabled={!commandsEnabled || !onUpgradeStation}
+                  onClick={() => onUpgradeStation?.(station.entityId)}
+                  data-native-system-station-command="upgrade-one"
+                >升级 Mk.II</button> : null}
+                <button
+                  type="button"
+                  className={station.effectiveTargetMode === "legacy" ? "active" : ""}
+                  disabled={!commandsEnabled || station.stationTier !== 2 || station.effectiveTargetMode === "legacy" || !onRequestMode}
+                  onClick={() => onRequestMode?.(station.entityId, "legacy")}
+                  data-native-system-station-command="mode-legacy"
+                >传统模式</button>
+                <button
+                  type="button"
+                  className={station.effectiveTargetMode === "elevator" ? "active" : ""}
+                  disabled={!commandsEnabled || station.stationTier !== 2 || station.effectiveTargetMode === "elevator" || !onRequestMode}
+                  onClick={() => onRequestMode?.(station.entityId, "elevator")}
+                  data-native-system-station-command="mode-elevator"
+                >电梯模式</button>
               </div>
               <div className="system-space-station-outputs">
-                {station.outputTargets.map((target) => <label key={target.portIndex}><span>输出 {target.portIndex + 1}</span><strong>{target.itemName || "空"}</strong></label>)}
+                {station.outputTargets.map((target) => <NativeSystemStationOutputControl
+                  key={target.portIndex}
+                  entityId={station.entityId}
+                  portIndex={target.portIndex}
+                  itemId={target.itemId}
+                  itemName={target.itemName}
+                  disabled={!commandsEnabled || !station.outputConfigurationEnabled}
+                  onSetOutput={onSetOutput}
+                />)}
               </div>
-              <small>{station.outputConfigurationEnabled ? "输出配置条件已满足（只读）" : `目标模式：${modeLabel(station.effectiveTargetMode)}`}</small>
+              <small>{station.outputConfigurationEnabled ? "输出配置条件已满足；设置或清除必须连续确认两次" : `目标模式：${modeLabel(station.effectiveTargetMode)}`}</small>
             </article>)}
           </div>}
         </section>
@@ -258,7 +404,7 @@ export function NativeSystemSpaceStationWorkspace({
     </div>
 
     <footer className="system-space-station-footer">
-      <span><ShieldCheck size={14} />仅消费 ≤1 MiB Rust 投影；不读取、复制或回写完整 GameState</span>
+      <span><ShieldCheck size={14} />仅消费 ≤1 MiB Rust 投影并提交有界意图；不读取、复制或回写完整 GameState</span>
       <button type="button" onClick={handleClose}><ArrowLeft size={15} />返回工厂</button>
     </footer>
   </WorkspaceFrame>;

@@ -20961,17 +20961,23 @@ input:focus-visible,
 .system-space-station-outputs label { display: grid; gap: 4px; color: var(--muted, #9db2aa); font-size: 11px; }
 .system-space-station-delivery-tools select,
 .system-space-station-modules input,
-.system-space-station-outputs select { min-height: 34px; min-width: 140px; color: var(--text, #eef7f2); border: 1px solid var(--line, rgba(255,255,255,.16)); border-radius: 5px; background: var(--panel-strong, #13211d); padding: 0 8px; }
+.system-space-station-outputs select,
+.system-space-station-outputs input { min-height: 34px; min-width: 140px; color: var(--text, #eef7f2); border: 1px solid var(--line, rgba(255,255,255,.16)); border-radius: 5px; background: var(--panel-strong, #13211d); padding: 0 8px; }
 .system-space-station-requirements { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 6px; }
 .system-space-station-requirements > div { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 8px; border-radius: 5px; background: rgba(255,255,255,.035); }
 .system-space-station-requirements > div span { color: var(--muted, #9db2aa); font-size: 11px; }
 .system-space-station-requirements > div strong { font-size: 12px; }
 .system-space-station-requirements > div em { grid-column: 1 / -1; color: var(--muted, #9db2aa); font-size: 11px; font-style: normal; }
+.system-space-station-requirements > div > button { grid-column: 1 / -1; }
 .system-space-station-requirements > div.complete { color: #9de8be; background: rgba(91,190,143,.12); }
 .system-space-station-inventory { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 6px; }
 .system-space-station-inventory span { display: flex; justify-content: space-between; gap: 10px; padding: 8px; border-radius: 5px; background: rgba(255,255,255,.04); }
 .system-space-station-inventory strong { color: #9de8be; }
 .system-space-station-modules { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.native-system-space-station-workspace .system-space-station-modules label { grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; }
+.native-system-space-station-workspace .system-space-station-modules label > span { grid-column: 1 / -1; }
+.native-system-space-station-workspace .system-space-station-modules label > strong { min-width: 0; overflow-wrap: anywhere; }
+.native-system-space-station-workspace .system-space-station-modules label > button { min-width: 36px; padding: 0 8px; }
 .system-space-station-stations { display: grid; gap: 8px; }
 .system-space-station-stations article { display: grid; gap: 8px; padding: 10px; border-radius: 6px; background: rgba(255,255,255,.04); }
 .system-space-station-stations article > div:first-child { display: grid; gap: 2px; }
@@ -20986,7 +20992,11 @@ input:focus-visible,
 .system-space-station-upgrade-status--materials,
 .system-space-station-upgrade-status--technology,
 .system-space-station-upgrade-status--invalid { color: #f0bd75; }
-.system-space-station-outputs { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.system-space-station-outputs { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; }
+.native-system-space-station-workspace .system-space-station-outputs label { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+.native-system-space-station-workspace .system-space-station-outputs label > span { grid-column: 1 / -1; }
+.native-system-space-station-workspace .system-space-station-outputs input { min-width: 0; width: 100%; }
+.native-system-space-station-workspace .system-space-station-outputs button { min-width: 76px; padding: 0 8px; }
 .system-space-station-footer span { display: inline-flex; align-items: center; gap: 5px; }
 .system-space-station-footer button { display: inline-flex; align-items: center; gap: 5px; border: 0; color: inherit; background: transparent; cursor: pointer; }
 .elevator-logistics-io { display: grid; gap: 6px; }

@@ -131,6 +131,51 @@ function projection(
   };
 }
 
+function startableProjection(
+  request: NativeSystemSpaceStationWorkspaceProjectionRequest,
+): NativeSystemSpaceStationWorkspaceProjection {
+  const value = projection(request);
+  return {
+    ...value,
+    station: {
+      ...value.station,
+      persisted: false,
+      status: "not-started",
+      phaseIndex: 0,
+      canStartConstruction: true,
+      progress: { basisPoints: 0, deliveredAmount: "0", requiredAmount: "7200000", constructionBufferAmount: "0" },
+    },
+  };
+}
+
+function operationalProjection(
+  request: NativeSystemSpaceStationWorkspaceProjectionRequest,
+): NativeSystemSpaceStationWorkspaceProjection {
+  const value = projection(request);
+  const first = value.interstellarStations.rows[0]!;
+  const rows = [{
+    ...first,
+    stationTier: 2 as const,
+    operationMode: "elevator" as const,
+    effectiveTargetMode: "elevator" as const,
+    outputConfigurationEnabled: true,
+    outputTargets: first.outputTargets.map((target) => target.portIndex === 0
+      ? { ...target, itemId: "iron_ingot", itemName: "铁块" }
+      : target),
+  }, ...value.interstellarStations.rows.slice(1)];
+  return {
+    ...value,
+    station: {
+      ...value.station,
+      status: "operational",
+      phaseIndex: 16,
+      progress: { ...value.station.progress, basisPoints: 10_000, deliveredAmount: "7200000" },
+    },
+    summary: { ...value.summary, mk1StationCount: 64, mk2StationCount: 1, elevatorStationCount: 1 },
+    interstellarStations: { ...value.interstellarStations, rows },
+  };
+}
+
 let host: HTMLDivElement;
 let root: Root;
 
@@ -169,12 +214,12 @@ function renderWorkspace(
 }
 
 describe("NativeSystemSpaceStationWorkspace", () => {
-  it("renders all bounded read-only sections without a GameState dependency", async () => {
+  it("renders all bounded thin-UI sections without a GameState dependency", async () => {
     renderWorkspace();
     await settle();
 
     expect(host.querySelector("[data-native-system-space-station='workspace-v1']")?.getAttribute("data-native-system-space-station-status")).toBe("ready");
-    expect(host.textContent).toContain("Rust 权威 · 有界只读投影");
+    expect(host.textContent).toContain("Rust 权威 · 有界投影与意图命令");
     expect(host.textContent).toContain("太阳联合工程区 r41");
     expect(host.textContent).toContain("施工材料 0");
     expect(host.textContent).toContain("100,000,000,000,000,000,000");
@@ -187,6 +232,73 @@ describe("NativeSystemSpaceStationWorkspace", () => {
 
     const source = readFileSync(resolve(process.cwd(), "src/components/NativeSystemSpaceStationWorkspace.tsx"), "utf8");
     expect(source).not.toMatch(/import[^\n]+GameState|game\s*:\s*GameState|from\s+["']\.\.\/game\/content["']/);
+  });
+
+  it("submits start and tray delivery as bounded domain arguments", async () => {
+    const onStartConstruction = vi.fn(() => true);
+    renderWorkspace({
+      fetchProjection: vi.fn(async (request) => startableProjection(request)),
+      onStartConstruction,
+    });
+    await settle();
+    const start = host.querySelector<HTMLButtonElement>("[data-native-system-station-command='start']")!;
+    expect(start.disabled).toBe(false);
+    act(() => start.click());
+    expect(onStartConstruction).toHaveBeenCalledWith("helios");
+
+    const onDeliverMaterial = vi.fn(() => true);
+    const nextIdentity = { ...IDENTITY, revision: 42 };
+    act(() => root.render(<NativeSystemSpaceStationWorkspace
+      open
+      identity={nextIdentity}
+      fetchProjection={async (request) => projection(request)}
+      onClose={vi.fn()}
+      onDeliverMaterial={onDeliverMaterial}
+    />));
+    await settle();
+    const deliver = host.querySelector<HTMLButtonElement>("[data-native-system-station-command='deliver']")!;
+    expect(deliver.disabled).toBe(false);
+    act(() => deliver.click());
+    expect(onDeliverMaterial).toHaveBeenCalledWith("helios", "home", "tray_item_0", 1);
+  });
+
+  it("submits module, upgrade, mode and twice-confirmed output intents without a GameState patch", async () => {
+    const onSetModuleCount = vi.fn(() => true);
+    const onUpgradeStation = vi.fn(() => true);
+    const onUpgradeAllStations = vi.fn(() => true);
+    const onRequestMode = vi.fn(() => true);
+    const onSetOutput = vi.fn(() => true);
+    renderWorkspace({
+      fetchProjection: vi.fn(async (request) => operationalProjection(request)),
+      onSetModuleCount,
+      onUpgradeStation,
+      onUpgradeAllStations,
+      onRequestMode,
+      onSetOutput,
+    });
+    await settle();
+
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-system-station-command='module-backbone-increase']")!.click());
+    expect(onSetModuleCount).toHaveBeenCalledWith("helios", "backbone", 4);
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-system-station-command='upgrade-all']")!.click());
+    expect(onUpgradeAllStations).toHaveBeenCalledWith("helios");
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-system-station-command='upgrade-one']")!.click());
+    expect(onUpgradeStation).toHaveBeenCalledWith("station_1");
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-system-station-command='mode-legacy']")!.click());
+    expect(onRequestMode).toHaveBeenCalledWith("station_0", "legacy");
+
+    const output = host.querySelector<HTMLInputElement>("[data-native-system-station-output='0'] input")!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(output, "copper_ingot");
+      output.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const submit = host.querySelector<HTMLButtonElement>("[data-native-system-station-output-submit='0']")!;
+    act(() => submit.click());
+    expect(onSetOutput).not.toHaveBeenCalled();
+    expect(submit.textContent).toContain("再次确认");
+    act(() => submit.click());
+    expect(onSetOutput).toHaveBeenCalledWith("station_0", 0, "copper_ingot");
+
   });
 
   it("moves each page lane independently and preserves the other three cursors", async () => {

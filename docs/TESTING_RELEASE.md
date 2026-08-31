@@ -3,6 +3,11 @@
 > **Windows 恒星系空间站 Rust 写面与 definite-rejection 当前组合门禁（2026-09-01，开发候选）**：合并提交链为 `fa484c2`（可达入口及 session/run/revision/registry/system 围栏）、`35ea4e2`（Rust durable-stage 前 typed rejection）、`5bcaed0`（合并夹具身份）和 `b92f1e6`（标准 Rust 格式化）。当前组合 fresh：TypeScript typecheck 通过；Node runtime/Host/intent `74/74`；Rust Core 空间站 `13/13`；Host 空间站 `6/6`；Host typed response `1/1`；UI/store/App 定向 `34/34`；Host all-target clippy 与 `git diff --check` 通过。格式门首轮只报告测试夹具机械排版差异，执行 `cargo fmt` 后已闭合，不能删成一次通过。独立复审未发现 P0/P1；EPIPE、普通命令同 code、pending replay 和五个 durable fault boundary 均保持 uncertain/recoverable。
 >
 > 上述数字只证明当前空间站组合切片，不复用为完整 Rust/Vitest/native/E2E 或发布门禁。混装旧 Host 时 preload 方法存在但 Host capability 缺失会使 UI 先展示再拒绝，这是 P2；匹配构建正常。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 不变；没有生成包、签名、连接生产、部署或处理真实玩家存档。
+> **Windows native 轨道合同门禁（2026-09-01，开发候选）**：Core 必须覆盖五类 intent、库存不足/旧 revision/旧 offer 原子拒绝、上海午夜前后 task day、同事务 expiry/offer rollover、256 位账本与 MAX_SAFE completion 饱和、48 history featured 淘汰和 newest 7 + featured 的 8 行投影。Host 必须覆盖 exact lease session/run/registry 二次证明、duplicate receipt、无源 mutation 的 typed pre-stage reject，以及 stage/WAL/checkpoint/receipt/lease-ACK 五个故障边界和 cold replay exactly-once。
+>
+> Desktop/Node 必须证明 renderer 请求不能携带时间、同 revision 跨午夜投影每次使用新的 main clock fence、stale run 在异步 read 前后均拒绝、projection result 绑定 session/run/revision/registry、FIFO lost response 重试完全复用 confirmedWallClockMs/commandId/request bytes。Vitest 必须证明 native page 只消费有界投影/发语义 intent、definite reject 后 pending settle 会强制重读同 revision，以及 Web/Rust 共用 256 位饱和向量。当前 focused 结果为 Core `15/15`、Host `4/4`、Node `58/58`、renderer boundary `23/23`、Vitest `16/16`，typecheck 和 diff check 通过；完整 native/Vitest/build/E2E/pack/签名/部署仍不能由这些专项数字代替。
+>
+> 所有写测试只使用合成 v47 状态和临时 SaveStore，不读取或修改真实玩家存档；没有生产、发布、下载页或云数据操作。cargo-terminal binding、decorations、profile、construction、MOD 与其他银河动作仍是显式未覆盖且失败关闭的后续范围。
 
 > **Windows Rust ordinary 蓝图捕获/import/export 生命周期门禁（2026-09-01，开发候选）**：本块只给当前开发候选定义门禁并记录 focused evidence，不等于集成全量或发布完成。必须逐项满足：
 >

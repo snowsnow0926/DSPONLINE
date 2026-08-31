@@ -306,6 +306,9 @@ import { compressSaveTextToGzipBlob } from "./game/saveFileCodec";
 import { alignToDevicePixel } from "./game/displayPixels";
 import {
   getDesktopBridge,
+  type DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest,
+  type DesktopNativeCoreOrbitalContractWorkspaceProjectionResult,
+  type DesktopNativeOrbitalContractIntent,
   type DesktopNativeSystemSpaceStationIntent,
   type DesktopNativePlayerAuthorityHandoffRequest,
   type DesktopNativePlayerAuthorityHandoffResult,
@@ -1575,6 +1578,7 @@ const ConstructionCenterWorkspace = lazy(() => importWithRecovery(() => import("
 const SystemSpaceStationWorkspace = lazy(() => importWithRecovery(() => import("./components/SystemSpaceStationWorkspace"), "空间站模块").then((module) => ({ default: module.SystemSpaceStationWorkspace })));
 const NativeSystemSpaceStationWorkspace = lazy(() => importWithRecovery(() => import("./components/NativeSystemSpaceStationWorkspace"), "原生空间站模块").then((module) => ({ default: module.NativeSystemSpaceStationWorkspace })));
 const OrbitalStationWorkspace = lazy(() => importWithRecovery(() => import("./components/OrbitalStationWorkspace"), "全星系空间站模块").then((module) => ({ default: module.OrbitalStationWorkspace })));
+const NativeOrbitalContractWorkspace = lazy(() => importWithRecovery(() => import("./components/NativeOrbitalContractWorkspace"), "原生轨道合同模块").then((module) => ({ default: module.NativeOrbitalContractWorkspace })));
 
 // Content packs must be active before save migration reads any modded IDs.
 const INITIAL_CONTENT_PACK_REGISTRY = loadContentPackRegistry();
@@ -2967,6 +2971,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
       return projection;
     };
+  }, [desktopBridge]);
+  const nativeOrbitalContractIdentity = useMemo<DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest | null>(() => {
+    const frame = nativePlayerAuthorityActiveFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null ? Object.freeze({
+      sessionId: frame.sessionId,
+      runId: frame.runId,
+      expectedRevision: frame.revision,
+      expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
+    }) : null;
+  }, [
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityOwnsRuntime,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeOrbitalContractFetchProjection = useMemo<((
+    request: DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest,
+  ) => Promise<DesktopNativeCoreOrbitalContractWorkspaceProjectionResult>) | null>(() => {
+    const readProjection = desktopBridge?.getNativeCoreOrbitalContractWorkspaceProjection;
+    return typeof readProjection === "function" ? readProjection : null;
   }, [desktopBridge]);
   const nativeFactoryInventoryIdentity = useMemo<NativeFactoryInventoryIdentity | null>(() => {
     const sessionId = nativePlayerAuthorityActiveFrame?.sessionId;
@@ -9120,6 +9143,56 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     rejectPlayerStateEditDuringPrimarySave,
     systemSpaceStationId,
     systemSpaceStationOpen,
+  ]);
+
+  const commitNativeOrbitalContractIntent = useCallback((
+    intent: DesktopNativeOrbitalContractIntent,
+    successNotice: string,
+  ): boolean => {
+    if (rejectPlayerStateEditDuringPrimarySave()) return false;
+    const identity = nativeOrbitalContractIdentity;
+    const commitIntent = desktopBridge?.commitNativeOrbitalContractIntent;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || !orbitalStationOpen ||
+        !identity || typeof commitIntent !== "function") {
+      setNotice("原生轨道合同权威会话或耐久命令通道尚未就绪；本次操作未提交");
+      return false;
+    }
+    if (nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一条命令；本次合同操作未提交");
+      return false;
+    }
+    nativePlayerAuthorityCommandInFlightRef.current = true;
+    setNativePlayerAuthorityCommandPending(true);
+    void commitIntent({
+      expectedSessionId: identity.sessionId,
+      expectedRunId: identity.runId,
+      expectedRevision: identity.expectedRevision,
+      expectedRegistryFingerprint: identity.expectedRegistryFingerprint,
+      intent,
+    }).then((receipt) => {
+      if (receipt.previousRevision !== identity.expectedRevision ||
+          receipt.revision !== identity.expectedRevision + 1) {
+        throw new Error("native orbital-contract receipt revision drifted");
+      }
+      invalidateFactoryAlertProjection();
+      setNotice(successNotice);
+    }).catch(() => {
+      setNotice("轨道合同命令未通过校验或结果暂时无法确认；不会自动重发，正在核对权威 revision");
+    }).finally(async () => {
+      try {
+        await nativePlayerAuthorityClockRef.current?.refresh();
+      } finally {
+        nativePlayerAuthorityCommandInFlightRef.current = false;
+        setNativePlayerAuthorityCommandPending(false);
+      }
+    });
+    return true;
+  }, [
+    desktopBridge,
+    invalidateFactoryAlertProjection,
+    nativeOrbitalContractIdentity,
+    orbitalStationOpen,
+    rejectPlayerStateEditDuringPrimarySave,
   ]);
 
   const submitNativeBlueprintRenameIntent = useCallback((
@@ -21799,6 +21872,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             commitGame((current) => setElevatorOutputItem(current, entityId, portIndex, itemId, 2));
           }}
           onSetModuleCount={(systemId, module, count) => commitGame((current) => setSystemSpaceStationModuleCount(current, systemId, module, count))}
+        /> : null}
+        {orbitalStationOpen && isSpaceStationFeatureEnabled() && nativePlayerAuthorityOwnsRuntime ? <NativeOrbitalContractWorkspace
+          open
+          identity={nativeOrbitalContractIdentity}
+          fetchProjection={nativeOrbitalContractFetchProjection}
+          pending={nativePlayerAuthorityCommandPending}
+          commandsAvailable={typeof desktopBridge?.commitNativeOrbitalContractIntent === "function"}
+          mobile={compactLayout.isMobileShell}
+          onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setOrbitalStationOpen(false)}
+          onIntent={commitNativeOrbitalContractIntent}
         /> : null}
         {orbitalStationOpen && isSpaceStationFeatureEnabled() && !nativePlayerAuthorityOwnsRuntime ? <OrbitalStationWorkspace
           game={game}

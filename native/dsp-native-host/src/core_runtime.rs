@@ -4,6 +4,10 @@ use std::io::Read;
 use anyhow::{Context, anyhow, bail};
 use dsp_native_core::canonical::canonical_sha256;
 use dsp_native_core::catalog::RuntimeCatalog;
+use dsp_native_core::orbital_contract_command::{
+    OrbitalContractAuthority, OrbitalContractCommandRequest, OrbitalContractIntent,
+    derive_orbital_contract_command_id, prepare_orbital_contract_command,
+};
 use dsp_native_core::system_space_station_command::{
     SystemSpaceStationAuthority, SystemSpaceStationCommandRequest, SystemSpaceStationIntent,
     derive_system_space_station_command_id, prepare_system_space_station_command,
@@ -33,6 +37,7 @@ const MAX_CORE_SESSIONS: usize = 4;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_COMMAND_PALETTE_SEARCH_REQUEST_BYTES: usize = 32_768;
 const MAX_SYSTEM_SPACE_STATION_INTENT_REQUEST_BYTES: usize = 32_768;
+const MAX_ORBITAL_CONTRACT_INTENT_REQUEST_BYTES: usize = 32_768;
 
 pub const NATIVE_CORE_VIEWPORT_ENTITY_PRESENTATION_V1_CAPABILITY: &str =
     "native-core-viewport-entity-presentation-v1";
@@ -71,6 +76,10 @@ pub const PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY: &str =
     "native-core-player-authority-system-space-station-command-v1";
 pub const PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE: &str =
     "NATIVE_CORE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED";
+pub const PLAYER_AUTHORITY_ORBITAL_CONTRACT_COMMAND_CAPABILITY: &str =
+    "native-core-player-authority-orbital-contract-command-v1";
+pub const PLAYER_AUTHORITY_ORBITAL_CONTRACT_PRE_STAGE_REJECTED_CODE: &str =
+    "NATIVE_CORE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_PRE_STAGE_REJECTED";
 pub const PLAYER_AUTHORITY_PAUSE_CAPABILITY: &str =
     "native-core-player-authority-pause-lifecycle-v1";
 pub const PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY: &str =
@@ -90,6 +99,24 @@ pub struct PlayerAuthoritySystemSpaceStationPreStageRejected {
 }
 
 impl PlayerAuthoritySystemSpaceStationPreStageRejected {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    fn from_error(error: anyhow::Error) -> Self {
+        Self::new(format!("{error:#}"))
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct PlayerAuthorityOrbitalContractPreStageRejected {
+    message: String,
+}
+
+impl PlayerAuthorityOrbitalContractPreStageRejected {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -604,6 +631,17 @@ pub struct CoreCommitPlayerAuthoritySystemSpaceStationCommandRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreCommitPlayerAuthorityOrbitalContractCommandRequest {
+    pub run_id: String,
+    pub command_id: String,
+    pub base_revision: u64,
+    pub expected_registry_fingerprint: String,
+    pub confirmed_wall_clock_ms: u64,
+    pub intent: OrbitalContractIntent,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CoreCommitPlayerAuthorityPauseRequest {
     pub run_id: String,
     pub base_revision: u64,
@@ -795,6 +833,7 @@ enum PlayerAuthorityCommandFault {
 enum PlayerAuthorityCommandKind {
     Gameplay,
     SystemSpaceStation,
+    OrbitalContract,
     PauseLifecycle {
         target_paused: bool,
         settled_deadline_ms: u64,
@@ -807,7 +846,7 @@ impl PlayerAuthorityCommandKind {
     }
 
     fn is_rust_prevalidated(self) -> bool {
-        matches!(self, Self::SystemSpaceStation)
+        matches!(self, Self::SystemSpaceStation | Self::OrbitalContract)
     }
 }
 
@@ -2066,6 +2105,115 @@ impl CoreRegistry {
         )
     }
 
+    pub fn commit_player_authority_orbital_contract_command(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitPlayerAuthorityOrbitalContractCommandRequest,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityCommandResult> {
+        self.commit_player_authority_orbital_contract_command_impl(
+            store,
+            session_id,
+            request,
+            #[cfg(test)]
+            PlayerAuthorityCommandFault::None,
+        )
+    }
+
+    fn commit_player_authority_orbital_contract_command_impl(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitPlayerAuthorityOrbitalContractCommandRequest,
+        #[cfg(test)] fault: PlayerAuthorityCommandFault,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityCommandResult> {
+        validate_session_id(session_id)?;
+        if request.base_revision >= MAX_SAFE_INTEGER {
+            bail!("native orbital-contract command base revision is exhausted")
+        }
+        let semantic_request = OrbitalContractCommandRequest {
+            command_id: request.command_id.clone(),
+            session_id: session_id.to_owned(),
+            run_id: request.run_id.clone(),
+            expected_revision: request.base_revision,
+            expected_registry_fingerprint: request.expected_registry_fingerprint.clone(),
+            confirmed_wall_clock_ms: request.confirmed_wall_clock_ms,
+            intent: request.intent.clone(),
+        };
+        if serde_json::to_vec(&semantic_request)?.len() > MAX_ORBITAL_CONTRACT_INTENT_REQUEST_BYTES
+        {
+            bail!("native orbital-contract intent request exceeds its bounded limit")
+        }
+        let expected_command_id = derive_orbital_contract_command_id(&semantic_request)?;
+        if expected_command_id != request.command_id {
+            bail!("native orbital-contract command ID conflicts with its semantic intent")
+        }
+
+        self.reconcile_uncertain_checkpoint_publication(store, session_id)?;
+        let lease = store.require_exact_realtime_lease()?;
+        if lease.pending_command.is_none()
+            && lease.acknowledged.last_player_command_id.as_deref()
+                == Some(request.command_id.as_str())
+        {
+            return self.replay_acknowledged_system_space_station_command(
+                store,
+                session_id,
+                &request.run_id,
+                &request.command_id,
+                request.base_revision,
+            );
+        }
+
+        let command = if let Some(pending) = lease.pending_command.as_ref() {
+            if pending.command_id != request.command_id
+                || pending.base_revision != request.base_revision
+            {
+                bail!("native orbital-contract intent conflicts with the pending command")
+            }
+            decode_player_authority_command_payload(&pending.command)?
+        } else {
+            let authority = OrbitalContractAuthority {
+                session_id: session_id.to_owned(),
+                run_id: request.run_id.clone(),
+            };
+            let prepared = prepare_orbital_contract_command(
+                self.session(session_id)?,
+                &authority,
+                semantic_request,
+            )
+            .map_err(PlayerAuthorityOrbitalContractPreStageRejected::from_error)?;
+            if prepared.command_id() != request.command_id
+                || prepared.expected_revision() != request.base_revision
+            {
+                bail!("native orbital-contract prepared command identity changed")
+            }
+            let mut proof = self.session(session_id)?.clone();
+            let applied = prepared
+                .apply(&mut proof, &authority)
+                .map_err(PlayerAuthorityOrbitalContractPreStageRejected::from_error)?;
+            if applied.previous_revision != request.base_revision
+                || applied.revision != request.base_revision + 1
+            {
+                bail!("native orbital-contract prepared command revision changed")
+            }
+            prepared.patch().clone()
+        };
+
+        self.commit_player_authority_command_internal(
+            store,
+            session_id,
+            CoreCommitPlayerAuthorityCommandRequest {
+                run_id: request.run_id,
+                command_id: request.command_id,
+                base_revision: request.base_revision,
+                command,
+            },
+            PlayerAuthorityCommandKind::OrbitalContract,
+            #[cfg(test)]
+            fault,
+        )
+    }
+
     fn replay_acknowledged_system_space_station_command(
         &self,
         store: &SaveStore,
@@ -2609,6 +2757,9 @@ impl CoreRegistry {
             None if pending.command_id.starts_with("system-space-station-v1-") => {
                 PlayerAuthorityCommandKind::SystemSpaceStation
             }
+            None if pending.command_id.starts_with("orbital-contract-v1-") => {
+                PlayerAuthorityCommandKind::OrbitalContract
+            }
             None => PlayerAuthorityCommandKind::Gameplay,
         };
         let committed = self.commit_player_authority_command_internal(
@@ -2690,7 +2841,8 @@ impl CoreRegistry {
         let command_value = serde_json::to_value(&request.command)?;
         match kind {
             PlayerAuthorityCommandKind::Gameplay
-            | PlayerAuthorityCommandKind::SystemSpaceStation => {
+            | PlayerAuthorityCommandKind::SystemSpaceStation
+            | PlayerAuthorityCommandKind::OrbitalContract => {
                 if player_authority_pause_target(&command_value).is_some() {
                     bail!("native player-authority pause transition requires the lifecycle path")
                 }
@@ -2713,6 +2865,7 @@ impl CoreRegistry {
         let expected_source_phase = match kind {
             PlayerAuthorityCommandKind::Gameplay
             | PlayerAuthorityCommandKind::SystemSpaceStation
+            | PlayerAuthorityCommandKind::OrbitalContract
             | PlayerAuthorityCommandKind::PauseLifecycle {
                 target_paused: true,
                 ..
@@ -2724,12 +2877,14 @@ impl CoreRegistry {
         };
         let expected_target_paused = match kind {
             PlayerAuthorityCommandKind::Gameplay
-            | PlayerAuthorityCommandKind::SystemSpaceStation => false,
+            | PlayerAuthorityCommandKind::SystemSpaceStation
+            | PlayerAuthorityCommandKind::OrbitalContract => false,
             PlayerAuthorityCommandKind::PauseLifecycle { target_paused, .. } => target_paused,
         };
         let expected_source_paused = match kind {
             PlayerAuthorityCommandKind::Gameplay
-            | PlayerAuthorityCommandKind::SystemSpaceStation => false,
+            | PlayerAuthorityCommandKind::SystemSpaceStation
+            | PlayerAuthorityCommandKind::OrbitalContract => false,
             PlayerAuthorityCommandKind::PauseLifecycle { target_paused, .. } => !target_paused,
         };
         let duplicate_lifecycle_ack = kind.is_pause_lifecycle()
@@ -2857,6 +3012,9 @@ impl CoreRegistry {
                 PlayerAuthorityCommandKind::SystemSpaceStation => {
                     preflight.apply_command(&request.command)?
                 }
+                PlayerAuthorityCommandKind::OrbitalContract => {
+                    preflight.apply_command(&request.command)?
+                }
                 PlayerAuthorityCommandKind::PauseLifecycle { .. } => {
                     preflight.apply_player_authority_pause_transition(&request.command)?
                 }
@@ -2880,14 +3038,14 @@ impl CoreRegistry {
 
         let staged = match kind {
             PlayerAuthorityCommandKind::Gameplay
-            | PlayerAuthorityCommandKind::SystemSpaceStation => store
-                .stage_player_authority_command(
-                    &authority_session_id,
-                    &request.run_id,
-                    &request.command_id,
-                    request.base_revision,
-                    command_value,
-                )?,
+            | PlayerAuthorityCommandKind::SystemSpaceStation
+            | PlayerAuthorityCommandKind::OrbitalContract => store.stage_player_authority_command(
+                &authority_session_id,
+                &request.run_id,
+                &request.command_id,
+                request.base_revision,
+                command_value,
+            )?,
             PlayerAuthorityCommandKind::PauseLifecycle {
                 target_paused,
                 settled_deadline_ms,
@@ -3037,7 +3195,8 @@ impl CoreRegistry {
         };
         let lease = match kind {
             PlayerAuthorityCommandKind::Gameplay
-            | PlayerAuthorityCommandKind::SystemSpaceStation => store
+            | PlayerAuthorityCommandKind::SystemSpaceStation
+            | PlayerAuthorityCommandKind::OrbitalContract => store
                 .acknowledge_player_authority_command(
                     &authority_session_id,
                     &request.run_id,
@@ -3779,6 +3938,39 @@ impl CoreRegistry {
                 tray_limit,
                 station_cursor,
                 station_limit,
+            )
+    }
+
+    pub fn orbital_contract_workspace_projection(
+        &self,
+        store: &SaveStore,
+        session_id: &str,
+        run_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        confirmed_wall_clock_ms: u64,
+    ) -> anyhow::Result<Value> {
+        let authority_session_id = store.player_authority_session_binding(session_id)?;
+        let lease = store.require_exact_realtime_lease()?;
+        if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+            || lease.authority_session_id.as_deref() != Some(authority_session_id.as_str())
+            || lease.run_id != run_id
+            || lease.registry_fingerprint != expected_registry_fingerprint
+            || lease.phase != crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
+            || lease.pending_tick.is_some()
+            || lease.pending_command.is_some()
+            || lease.pending_advance.is_some()
+            || lease.macro_session.is_some()
+        {
+            bail!("native orbital-contract projection authority lineage is stale")
+        }
+        self.session(session_id)?
+            .orbital_contract_workspace_projection(
+                session_id,
+                run_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                confirmed_wall_clock_ms,
             )
     }
 
@@ -4800,6 +4992,7 @@ mod tests {
     struct MutableDiskSpaceProbe(AtomicU64);
 
     const EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT: &str = "7df8cf3a";
+    const ORBITAL_CONTRACT_DAY_100_CLOCK_MS: u64 = 8_611_200_000;
 
     #[test]
     fn command_palette_host_request_byte_accounting_includes_the_full_envelope() {
@@ -5029,6 +5222,86 @@ mod tests {
                 "productionRate":0,
                 "routingCursor":0
             }));
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        serde_json::to_vec(&envelope).unwrap()
+    }
+
+    fn player_authority_orbital_contract_envelope(delivered: &str, inventory: &str) -> Vec<u8> {
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["contentPacks"] = json!([]);
+        envelope["state"]["galaxy"]["seed"] = Value::from(7);
+        envelope["state"]["quantumLogisticsNetwork"] = json!({
+            "enabled": true,
+            "inventory": { "processor": inventory },
+            "itemCapacities": { "processor": "1000000" },
+            "routingCursors": {},
+            "uploadRoutingCursors": {}
+        });
+        let status = if delivered == "100" {
+            "claimable"
+        } else {
+            "accepted"
+        };
+        envelope["state"]["orbitalStation"] = json!({
+            "stateVersion": 1,
+            "status": "operational",
+            "construction": { "costRevision": 1, "stageRequirements": [] },
+            "viewport": { "x": 0, "y": 0, "zoom": 0.85 },
+            "contractBoard": {
+                "rulesVersion": 1,
+                "taskDay": 100,
+                "lastConfirmedWallClockMs": ORBITAL_CONTRACT_DAY_100_CLOCK_MS,
+                "offers": [],
+                "accepted": [{
+                    "id": "station-contract-v1-7-100-0-single",
+                    "templateId": "single",
+                    "slot": 0,
+                    "title": "processor contract",
+                    "summary": "authoritative orbital contract fixture",
+                    "taskDay": 100,
+                    "expiresAtTaskDay": 103,
+                    "special": false,
+                    "difficulty": "P1",
+                    "status": status,
+                    "requirements": [{
+                        "itemId": "processor",
+                        "amount": "100",
+                        "delivered": delivered,
+                        "channel": "any",
+                        "weight": 3
+                    }],
+                    "rewards": {
+                        "baseMarks": "45",
+                        "baseReputation": "30",
+                        "completionMarks": "20",
+                        "completionReputation": "15"
+                    },
+                    "acceptedAtTaskDay": 100
+                }],
+                "history": [],
+                "settledIds": [],
+                "featuredContractId": null
+            },
+            "economy": {
+                "orbitalMarks": "0",
+                "stationReputation": "0",
+                "unlockedDecorationIds": []
+            },
+            "layout": {
+                "themeId": "orbital_teal",
+                "placements": [],
+                "featuredAchievementIds": []
+            },
+            "profile": {
+                "title": "fixture",
+                "motto": "fixture",
+                "featuredMetricKeys": []
+            },
+            "totals": { "completedContracts": 0, "exportedByItem": {} }
+        });
         let state = serde_json::to_string(&envelope["state"]).unwrap();
         envelope["checksum"] = Value::from(utf16_fnv(&format!(
             "{{\"formatVersion\":2,\"state\":{state}}}"
@@ -6410,6 +6683,46 @@ mod tests {
             serde_json::to_vec(&envelope).unwrap(),
             player_authority_system_space_station_catalog(),
         )
+    }
+
+    fn player_authority_orbital_contract_fixture(
+        delivered: &str,
+        inventory: &str,
+    ) -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        player_authority_fixture_from_parts(
+            player_authority_orbital_contract_envelope(delivered, inventory),
+            player_authority_system_space_station_catalog(),
+        )
+    }
+
+    fn player_authority_orbital_contract_request(
+        session_id: &str,
+        base_revision: u64,
+        intent: OrbitalContractIntent,
+    ) -> CoreCommitPlayerAuthorityOrbitalContractCommandRequest {
+        let semantic = OrbitalContractCommandRequest {
+            command_id: "placeholder".to_owned(),
+            session_id: session_id.to_owned(),
+            run_id: "player-authority-run".to_owned(),
+            expected_revision: base_revision,
+            expected_registry_fingerprint: EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned(),
+            confirmed_wall_clock_ms: ORBITAL_CONTRACT_DAY_100_CLOCK_MS,
+            intent: intent.clone(),
+        };
+        CoreCommitPlayerAuthorityOrbitalContractCommandRequest {
+            run_id: semantic.run_id.clone(),
+            command_id: derive_orbital_contract_command_id(&semantic).unwrap(),
+            base_revision,
+            expected_registry_fingerprint: semantic.expected_registry_fingerprint,
+            confirmed_wall_clock_ms: ORBITAL_CONTRACT_DAY_100_CLOCK_MS,
+            intent,
+        }
     }
 
     fn player_authority_system_space_station_request(
@@ -17365,6 +17678,325 @@ mod tests {
                     .is_err(),
                 "{fault:?}"
             );
+        }
+    }
+
+    #[test]
+    fn orbital_contract_projection_is_bounded_bound_and_read_only() {
+        let (_root, store, registry, session_id, _) =
+            player_authority_orbital_contract_fixture("25", "75");
+        let before = registry.status(&session_id).unwrap();
+        let projection = registry
+            .orbital_contract_workspace_projection(
+                &store,
+                &session_id,
+                "player-authority-run",
+                before.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                ORBITAL_CONTRACT_DAY_100_CLOCK_MS,
+            )
+            .unwrap();
+        assert_eq!(
+            projection["projectionType"],
+            "orbital-contract-workspace-v1"
+        );
+        assert_eq!(projection["runId"], "player-authority-run");
+        assert_eq!(
+            projection["registryFingerprint"],
+            EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        );
+        assert_eq!(
+            projection["accepted"][0]["requirements"][0]["delivered"],
+            "25"
+        );
+        assert_eq!(
+            projection["accepted"][0]["requirements"][0]["availableQuantum"],
+            "75"
+        );
+        assert!(serde_json::to_vec(&projection).unwrap().len() <= 256 * 1024);
+        let encoded = serde_json::to_string(&projection).unwrap();
+        assert!(!encoded.contains("quantumLogisticsNetwork"));
+        assert!(!encoded.contains("itemCapacities"));
+        assert!(
+            registry
+                .orbital_contract_workspace_projection(
+                    &store,
+                    &session_id,
+                    "player-authority-run",
+                    before.revision + 1,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    ORBITAL_CONTRACT_DAY_100_CLOCK_MS,
+                )
+                .is_err()
+        );
+        assert!(
+            registry
+                .orbital_contract_workspace_projection(
+                    &store,
+                    &session_id,
+                    "stale-run",
+                    before.revision,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    ORBITAL_CONTRACT_DAY_100_CLOCK_MS,
+                )
+                .is_err()
+        );
+        assert!(
+            registry
+                .orbital_contract_workspace_projection(
+                    &store,
+                    &session_id,
+                    "player-authority-run",
+                    before.revision,
+                    "ffffffff",
+                    ORBITAL_CONTRACT_DAY_100_CLOCK_MS,
+                )
+                .is_err()
+        );
+        let after = registry.status(&session_id).unwrap();
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.canonical_sha256, before.canonical_sha256);
+        assert!(
+            store
+                .require_exact_realtime_lease()
+                .unwrap()
+                .pending_command
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn orbital_contract_delivery_and_claim_commit_with_duplicate_receipts() {
+        let (root, mut store, mut registry, session_id, _) =
+            player_authority_orbital_contract_fixture("25", "75");
+        let base = registry.status(&session_id).unwrap().revision;
+        let delivery = player_authority_orbital_contract_request(
+            &session_id,
+            base,
+            OrbitalContractIntent::DeliverQuantum {
+                contract_id: "station-contract-v1-7-100-0-single".to_owned(),
+                item_id: "processor".to_owned(),
+                requested_amount: "999".to_owned(),
+            },
+        );
+        let committed = registry
+            .commit_player_authority_orbital_contract_command(
+                &mut store,
+                &session_id,
+                delivery.clone(),
+            )
+            .unwrap();
+        assert_eq!(committed.revision, base + 1);
+        assert!(!committed.duplicate);
+        let duplicate = registry
+            .commit_player_authority_orbital_contract_command(
+                &mut store,
+                &session_id,
+                delivery.clone(),
+            )
+            .unwrap();
+        assert_duplicate_receipt_matches(&duplicate, &committed, "orbital-delivery");
+
+        let mut collision = delivery;
+        collision.intent = OrbitalContractIntent::Abandon {
+            contract_id: "station-contract-v1-7-100-0-single".to_owned(),
+        };
+        assert!(
+            registry
+                .commit_player_authority_orbital_contract_command(
+                    &mut store,
+                    &session_id,
+                    collision,
+                )
+                .is_err()
+        );
+
+        let claim = player_authority_orbital_contract_request(
+            &session_id,
+            committed.revision,
+            OrbitalContractIntent::Claim {
+                contract_id: "station-contract-v1-7-100-0-single".to_owned(),
+            },
+        );
+        let claimed = registry
+            .commit_player_authority_orbital_contract_command(&mut store, &session_id, claim)
+            .unwrap();
+        assert_eq!(claimed.revision, committed.revision + 1);
+        let state = export_test_state(
+            root.path(),
+            &registry,
+            &store,
+            &session_id,
+            "orbital-delivery-claim",
+        );
+        assert_eq!(
+            state["quantumLogisticsNetwork"]["inventory"]["processor"],
+            "0"
+        );
+        assert_eq!(
+            state["orbitalStation"]["totals"]["exportedByItem"]["processor"],
+            "75"
+        );
+        assert_eq!(state["orbitalStation"]["totals"]["completedContracts"], 1);
+        assert_eq!(state["orbitalStation"]["economy"]["orbitalMarks"], "65");
+        assert_eq!(
+            state["orbitalStation"]["economy"]["stationReputation"],
+            "45"
+        );
+        assert_eq!(
+            state["orbitalStation"]["contractBoard"]["history"][0]["settlementReason"],
+            "completed"
+        );
+    }
+
+    #[test]
+    fn orbital_contract_rejections_are_typed_before_stage_and_do_not_mutate_source() {
+        let cases = [("insufficient", 0_u64), ("stale", 1_u64)];
+        for (label, stale_by) in cases {
+            let (_root, mut store, mut registry, session_id, _) =
+                player_authority_orbital_contract_fixture("25", "0");
+            let before = registry.status(&session_id).unwrap();
+            let before_lease = store.require_exact_realtime_lease().unwrap();
+            let request = player_authority_orbital_contract_request(
+                &session_id,
+                before.revision + stale_by,
+                OrbitalContractIntent::DeliverQuantum {
+                    contract_id: "station-contract-v1-7-100-0-single".to_owned(),
+                    item_id: "processor".to_owned(),
+                    requested_amount: "1".to_owned(),
+                },
+            );
+            let error = registry
+                .commit_player_authority_orbital_contract_command(&mut store, &session_id, request)
+                .unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<PlayerAuthorityOrbitalContractPreStageRejected>()
+                    .is_some(),
+                "{label}: {error:#}"
+            );
+            let after = registry.status(&session_id).unwrap();
+            assert_eq!(after.revision, before.revision, "{label}");
+            assert_eq!(after.canonical_sha256, before.canonical_sha256, "{label}");
+            assert_eq!(after.domain_sha256, before.domain_sha256, "{label}");
+            let after_lease = store.require_exact_realtime_lease().unwrap();
+            assert_eq!(
+                after_lease.acknowledged, before_lease.acknowledged,
+                "{label}"
+            );
+            assert!(after_lease.pending_command.is_none(), "{label}");
+        }
+    }
+
+    #[test]
+    fn orbital_contract_intent_recovers_exactly_once_after_every_durable_boundary() {
+        let (clean_root, mut clean_store, mut clean_registry, clean_session, _) =
+            player_authority_orbital_contract_fixture("25", "75");
+        let clean_base = clean_registry.status(&clean_session).unwrap().revision;
+        let clean_request = player_authority_orbital_contract_request(
+            &clean_session,
+            clean_base,
+            OrbitalContractIntent::DeliverQuantum {
+                contract_id: "station-contract-v1-7-100-0-single".to_owned(),
+                item_id: "processor".to_owned(),
+                requested_amount: "999".to_owned(),
+            },
+        );
+        let clean = clean_registry
+            .commit_player_authority_orbital_contract_command(
+                &mut clean_store,
+                &clean_session,
+                clean_request.clone(),
+            )
+            .unwrap();
+        let clean_state = export_test_state(
+            clean_root.path(),
+            &clean_registry,
+            &clean_store,
+            &clean_session,
+            "orbital-clean",
+        );
+
+        for fault in [
+            PlayerAuthorityCommandFault::AfterStage,
+            PlayerAuthorityCommandFault::AfterWal,
+            PlayerAuthorityCommandFault::AfterCheckpoint,
+            PlayerAuthorityCommandFault::AfterReceipt,
+            PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
+        ] {
+            let (root, mut store, mut registry, session_id, _) =
+                player_authority_orbital_contract_fixture("25", "75");
+            let before = registry.status(&session_id).unwrap();
+            let request = player_authority_orbital_contract_request(
+                &session_id,
+                before.revision,
+                OrbitalContractIntent::DeliverQuantum {
+                    contract_id: "station-contract-v1-7-100-0-single".to_owned(),
+                    item_id: "processor".to_owned(),
+                    requested_amount: "999".to_owned(),
+                },
+            );
+            assert_eq!(request.command_id, clean_request.command_id, "{fault:?}");
+            let error = registry
+                .commit_player_authority_orbital_contract_command_impl(
+                    &mut store,
+                    &session_id,
+                    request.clone(),
+                    fault,
+                )
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("lost response"), "{fault:?}");
+            assert!(
+                error
+                    .downcast_ref::<PlayerAuthorityOrbitalContractPreStageRejected>()
+                    .is_none(),
+                "{fault:?}: durable failures are uncertain"
+            );
+            if fault == PlayerAuthorityCommandFault::AfterStage {
+                let after = registry.status(&session_id).unwrap();
+                assert_eq!(after.revision, before.revision, "{fault:?}");
+                assert_eq!(after.canonical_sha256, before.canonical_sha256, "{fault:?}");
+            }
+
+            drop(registry);
+            drop(store);
+            let mut reopened_store = SaveStore::open(root.path()).unwrap();
+            let mut reopened = resumable_player_authority_registry_for_test();
+            let startup = reopened
+                .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"))
+                .unwrap_or_else(|| panic!("{fault:?}: startup receipt missing"));
+            assert_eq!(
+                startup.command_id.as_deref(),
+                Some(request.command_id.as_str()),
+                "{fault:?}"
+            );
+            assert_eq!(startup.revision, clean.revision, "{fault:?}");
+            assert_eq!(
+                startup.summary.canonical_sha256, clean.summary.canonical_sha256,
+                "{fault:?}"
+            );
+            let lease = reopened_store.require_exact_realtime_lease().unwrap();
+            assert_eq!(lease.acknowledged.sequence, clean.sequence, "{fault:?}");
+            assert_eq!(lease.acknowledged.revision, clean.revision, "{fault:?}");
+            assert!(lease.pending_command.is_none(), "{fault:?}");
+
+            let replay = reopened
+                .commit_player_authority_orbital_contract_command(
+                    &mut reopened_store,
+                    &startup.session_id,
+                    request.clone(),
+                )
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
+            assert_duplicate_receipt_matches(&replay, &clean, &format!("{fault:?}"));
+            let replayed_state = export_test_state(
+                root.path(),
+                &reopened,
+                &reopened_store,
+                &startup.session_id,
+                &format!("orbital-{fault:?}"),
+            );
+            assert_eq!(replayed_state, clean_state, "{fault:?}");
         }
     }
 

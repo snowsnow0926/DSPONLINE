@@ -6,6 +6,7 @@ const test = require("node:test");
 
 const {
   NativePlayerAuthorityRuntime,
+  ORBITAL_CONTRACT_PRE_STAGE_REJECTED_CODE,
   SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
 } = require("./native-player-authority-runtime.cjs");
 const {
@@ -14,6 +15,9 @@ const {
 const {
   deriveSystemSpaceStationCommandIdentity,
 } = require("./native-system-space-station-intent.cjs");
+const {
+  deriveOrbitalContractCommandIdentity,
+} = require("./native-orbital-contract-intent.cjs");
 
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
@@ -107,6 +111,24 @@ function systemSpaceStationRequest(baseRevision, intent) {
   };
 }
 
+function orbitalContractRequest(baseRevision, intent) {
+  const identity = deriveOrbitalContractCommandIdentity({
+    sessionId: "core-main-1",
+    runId: "player-run-1",
+    expectedRevision: baseRevision,
+    expectedRegistryFingerprint: "7df8cf3a",
+    confirmedWallClockMs: 8_611_200_000,
+    intent,
+  });
+  return {
+    commandId: identity.commandId,
+    baseRevision,
+    expectedRegistryFingerprint: "7df8cf3a",
+    confirmedWallClockMs: 8_611_200_000,
+    intent,
+  };
+}
+
 function pauseLifecycleReceipt(request, sequence, generation, duplicate = false) {
   const revision = request.baseRevision + 1;
   return {
@@ -174,6 +196,21 @@ function fixture(overrides = {}) {
     },
     async commitPlayerAuthoritySystemSpaceStationCommand(ownerId, request) {
       calls.push(["station-command", ownerId, request]);
+      const revision = request.baseRevision + 1;
+      return {
+        sequence: revision - checkpoint.revision,
+        commandId: request.commandId,
+        baseRevision: request.baseRevision,
+        revision,
+        settledDeadlineMs: 10_000,
+        duplicate: false,
+        ...changeReceipt(),
+        checkpoint: { generation: 3 + revision - checkpoint.revision, rootHash: HASH_A, revision },
+        summary: summary(revision),
+      };
+    },
+    async commitPlayerAuthorityOrbitalContractCommand(ownerId, request) {
+      calls.push(["orbital-command", ownerId, request]);
       const revision = request.baseRevision + 1;
       return {
         sequence: revision - checkpoint.revision,
@@ -1000,6 +1037,80 @@ test("system-space-station intents share the exact command FIFO without exposing
       "baseRevision", "commandId", "expectedRegistryFingerprint", "expectedSystemId", "intent", "runId", "sessionId",
     ]);
   }
+});
+
+test("orbital-contract intents share the main-owned FIFO and never expose a patch", async () => {
+  const value = fixture();
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  const results = await Promise.all([
+    value.runtime.commitOrbitalContractIntent(orbitalContractRequest(7, {
+      type: "deliver-quantum",
+      contractId: "station-contract-v1-7-100-0-single",
+      itemId: "processor",
+      requestedAmount: "75",
+    })),
+    value.runtime.commitCommand(playerCommand(8, "ordinary-after-orbital", 1)),
+    value.runtime.commitOrbitalContractIntent(orbitalContractRequest(9, {
+      type: "claim",
+      contractId: "station-contract-v1-7-100-0-single",
+    })),
+  ]);
+  assert.deepEqual(results.map((result) => result.revision), [8, 9, 10]);
+  assert.deepEqual(
+    value.calls
+      .filter(([operation]) => operation === "orbital-command" || operation === "command")
+      .map(([operation]) => operation),
+    ["orbital-command", "command", "orbital-command"],
+  );
+  for (const [, , request] of value.calls.filter(([operation]) => operation === "orbital-command")) {
+    assert.equal(Object.hasOwn(request, "command"), false);
+    assert.deepEqual(Object.keys(request).sort(), [
+      "baseRevision", "commandId", "confirmedWallClockMs", "expectedRegistryFingerprint", "intent", "runId", "sessionId",
+    ]);
+  }
+});
+
+test("orbital-contract pre-stage rejection is definite but transport loss stays retryable", async () => {
+  let attempts = 0;
+  const value = fixture({
+    registry: {
+      async commitPlayerAuthorityOrbitalContractCommand(ownerId, request) {
+        value.calls.push(["orbital-command", ownerId, request]);
+        attempts += 1;
+        if (attempts === 1) throw Object.assign(new Error("pipe closed"), { code: "EPIPE" });
+        throw Object.assign(new Error("quantum inventory is insufficient"), {
+          code: ORBITAL_CONTRACT_PRE_STAGE_REJECTED_CODE,
+        });
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  const request = orbitalContractRequest(7, {
+    type: "deliver-quantum",
+    contractId: "station-contract-v1-7-100-0-single",
+    itemId: "processor",
+    requestedAmount: "1",
+  });
+  await assert.rejects(
+    value.runtime.commitOrbitalContractIntent(request),
+    { code: "NATIVE_PLAYER_AUTHORITY_COMMAND_UNCERTAIN" },
+  );
+  assert.equal(value.runtime.snapshot().phase, "uncertain");
+  await assert.rejects(value.runtime.retryUncertain(), (error) => {
+    assert.equal(error.code, ORBITAL_CONTRACT_PRE_STAGE_REJECTED_CODE);
+    return true;
+  });
+  assert.equal(value.runtime.snapshot().phase, "active");
+  assert.equal(value.runtime.snapshot().revision, 7);
+  const calls = value.calls.filter(([operation]) => operation === "orbital-command");
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0][2], calls[1][2]);
 });
 
 test("typed station pre-stage rejections stay definite, cancel dependent commands, and resume", async () => {

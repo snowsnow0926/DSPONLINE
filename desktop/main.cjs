@@ -63,6 +63,10 @@ const {
   NativePlayerAuthoritySystemSpaceStationBroker,
 } = require("./native-player-authority-system-space-station-broker.cjs");
 const {
+  createMonotonicOrbitalContractClock,
+  NativePlayerAuthorityOrbitalContractBroker,
+} = require("./native-player-authority-orbital-contract-broker.cjs");
+const {
   NativePlayerAuthorityMacroBroker,
 } = require("./native-player-authority-macro-broker.cjs");
 const {
@@ -175,6 +179,7 @@ let nativeCoreSessions = null;
 let nativePlayerAuthorityRuntime = null;
 let nativePlayerAuthorityCommandBroker = null;
 let nativePlayerAuthoritySystemSpaceStationBroker = null;
+let nativePlayerAuthorityOrbitalContractBroker = null;
 let nativePlayerAuthorityMacroBroker = null;
 let nativePlayerAuthorityProjectionBroker = null;
 let nativePlayerAuthorityPersistenceBroker = null;
@@ -784,6 +789,7 @@ async function initializeNativeHost() {
     if (playerAuthorityStartupRecovery) {
       nativePlayerAuthorityRuntime.resumeFromStartupRecovery(playerAuthorityStartupRecovery);
     }
+    const sampleOrbitalContractWallClock = createMonotonicOrbitalContractClock();
     nativePlayerAuthorityCommandBroker = new NativePlayerAuthorityCommandBroker({
       runtime: nativePlayerAuthorityRuntime,
       onCommittedCommand: (receipt) =>
@@ -795,6 +801,14 @@ async function initializeNativeHost() {
     nativePlayerAuthoritySystemSpaceStationBroker =
       new NativePlayerAuthoritySystemSpaceStationBroker({
         runtime: nativePlayerAuthorityRuntime,
+        isTrustedRendererOwner: (ownerId) => Boolean(
+          mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
+        ),
+      });
+    nativePlayerAuthorityOrbitalContractBroker =
+      new NativePlayerAuthorityOrbitalContractBroker({
+        runtime: nativePlayerAuthorityRuntime,
+        now: sampleOrbitalContractWallClock,
         isTrustedRendererOwner: (ownerId) => Boolean(
           mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
         ),
@@ -821,6 +835,7 @@ async function initializeNativeHost() {
       runtime: nativePlayerAuthorityRuntime,
       registry: nativeCoreSessions,
       ownerId: playerAuthorityOwnerId,
+      now: sampleOrbitalContractWallClock,
       isTrustedRendererOwner: (ownerId) => Boolean(
         mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
       ),
@@ -911,6 +926,7 @@ async function initializeNativeHost() {
     nativePlayerAuthorityRuntime = null;
     nativePlayerAuthorityCommandBroker = null;
     nativePlayerAuthoritySystemSpaceStationBroker = null;
+    nativePlayerAuthorityOrbitalContractBroker = null;
     nativePlayerAuthorityMacroBroker = null;
     nativePlayerAuthorityProjectionBroker = null;
     nativePlayerAuthorityPersistenceBroker = null;
@@ -1330,6 +1346,15 @@ function nativeSystemSpaceStationWorkspaceProjectionResultContext(request) {
     trayLimit: request?.trayLimit,
     stationCursor: request?.stationCursor,
     stationLimit: request?.stationLimit,
+  };
+}
+
+function nativeOrbitalContractWorkspaceProjectionResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    runId: request?.runId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
   };
 }
 
@@ -2329,6 +2354,24 @@ ipcMain.handle("desktop:native-core-system-space-station-workspace-projection", 
   });
 });
 
+ipcMain.handle("desktop:native-core-orbital-contract-workspace-projection", async (event, request) => {
+  return runRendererNativeOperation("coreOrbitalContractWorkspaceProjection", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生轨道合同工作区投影请求失败，请重试",
+    resultContext: nativeOrbitalContractWorkspaceProjectionResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      throw new Error("原生轨道合同投影仅对当前玩家权威会话开放");
+    }
+    return await nativePlayerAuthorityProjectionBroker.read(
+      ownerId,
+      "orbital-contract-workspace-v1",
+      request,
+    );
+  });
+});
+
 ipcMain.handle("desktop:native-core-command-palette-entity-search", async (event, request) => {
   return runRendererNativeOperation("coreCommandPaletteEntitySearchProjection", {
     fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
@@ -2601,6 +2644,19 @@ ipcMain.handle("desktop:native-player-authority-system-space-station-intent", as
       throw new Error("原生恒星系空间站权威命令不可用");
     }
     return nativePlayerAuthoritySystemSpaceStationBroker.commit(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-player-authority-orbital-contract-intent", async (event, request) => {
+  return runRendererNativeOperation("coreCommand", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_COMMAND_FAILED",
+    message: "原生轨道合同命令提交失败，请重试",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityOrbitalContractBroker) {
+      throw new Error("原生轨道合同权威命令不可用");
+    }
+    return nativePlayerAuthorityOrbitalContractBroker.commit(ownerId, request);
   });
 });
 

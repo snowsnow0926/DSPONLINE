@@ -190,6 +190,37 @@ describe("orbital station contracts", () => {
     expect(expired.totals.completedContracts).toBe(0);
   });
 
+  it("clears a featured completed contract only when the 48-row archive truncates it", () => {
+    for (const [historyLength, expectedFeatured] of [[47, true], [48, false]] as const) {
+      const game = contractReadyState(8912, 100);
+      const offer = game.orbitalStation.contractBoard.offers[0];
+      const station = cloneOrbitalStationState(acceptStationContract(game.orbitalStation, offer.id));
+      const template = structuredClone(offer);
+      station.contractBoard.history = Array.from({ length: historyLength }, (_, index): StationContract => ({
+        ...structuredClone(template),
+        id: `completed-history-${index}`,
+        status: "settled",
+        acceptedAtTaskDay: 90 - index,
+        settlementId: `station-settlement:completed-history-${index}:completed`,
+        settlementReason: "completed",
+        settledAtTaskDay: 91 - index,
+        completionBasisPoints: 10_000,
+        requirements: template.requirements.map((requirement) => ({
+          ...structuredClone(requirement),
+          delivered: requirement.amount,
+        })),
+      }));
+      station.contractBoard.settledIds = station.contractBoard.history.map((contract) => contract.id);
+      const featuredId = station.contractBoard.history.at(-1)!.id;
+      station.contractBoard.featuredContractId = featuredId;
+
+      const archived = abandonStationContract(station, offer.id);
+      expect(archived.contractBoard.history).toHaveLength(48);
+      expect(archived.contractBoard.featuredContractId === featuredId).toBe(expectedFeatured);
+      expect(archived.contractBoard.history.some((contract) => contract.id === featuredId)).toBe(expectedFeatured);
+    }
+  });
+
   it("uses a monotonic wall-clock task day and ignores simulation/time-warp seconds", () => {
     const state = contractReadyState(7654, 50);
     expect(stationTaskDayIndex(atTaskDay(50))).toBe(50);

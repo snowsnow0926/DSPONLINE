@@ -7,6 +7,11 @@
 > 可预期的缺科技、库存不足、目标未变化等语义失败只在 Rust 证明 durable stage 尚未开始时返回 typed definite rejection；main 保留原 revision/checkpoint、取消依赖该失败 revision 的排队命令并立即恢复权威时钟。EPIPE、普通命令伪造同 code、pending replay 和五个 durable 故障边界继续 uncertain/recoverable。独立终审对合并态给出 GO、未发现 P0/P1；当前组合定向为 Node `74/74`、Rust Core `13/13`、Host 空间站 `6/6`、Host typed response `1/1`、UI/store/App `34/34`，typecheck、Host clippy 与 diff check 通过。Rust fmt 首次检查发现新增测试夹具只缺机械排版，执行标准格式化后已提交；该失败史保留。
 >
 > 仍有非阻塞 P2：preload 方法恒定暴露，若人为混装旧 Host，UI 会先显示按钮再收到 capability 拒绝；匹配构建没有该问题。固定能力百分比等待 WIN-430 合并后的统一加权复审，不以这个单一写面临时抬高。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 和 `authorityEligible=false` 均不改变；未连接生产、未部署、未签名，也未读取或修改玩家存档。
+> **Windows Rust 轨道空间站合同板纵切（2026-09-01，开发候选，未发布）**：原生玩家权威会话的接受合同、量子交付、领取奖励、放弃/部分结算和展示/取消展示已改为一个有界语义 intent union。renderer 不再提交 GameState、patch、库存、进度或奖励；Rust 绑定 session/run/revision/内置 registry，从当前 v47 状态重算确定合同、物料守恒、加权结算和奖励，并通过既有 Host WAL、checkpoint、receipt、冷重放和 main-owned FIFO 原子提交。相同 command ID 的重复/丢失响应只复用同一 confirmed wall clock 和原字节，不会重新采时或重复领奖。
+>
+> 上海任务日严格复用 `(lastConfirmedWallClockMs + 8h) / 24h` 的既有 `station_contracts::synchronize` 语义。主进程为每次 mutation 采样一次时钟并纳入 command ID；同 revision 的只读投影也由主进程内部采样，在 Rust clone 上先同步到期、换日和 offer，不修改源状态且不允许 renderer 传时间。Host 在投影前再次用 exact-realtime lease 证明 authority session/run/registry。48 条 history 因换日或直接结算截断时会清除已被淘汰的 featured，8 行薄投影稳定保留 newest 7 + 较旧 featured；十进制账本饱和到 256 个 9，完成数饱和到 JavaScript 安全整数。
+>
+> 当前 focused 证据为 Core `15/15`、Host `4/4`、Node `58/58`、renderer boundary `23/23`、Vitest `16/16`，typecheck 与 diff check 通过；完整仓库门禁仍需在冻结提交上重跑。原生薄 UI 只消费 `orbital-contract-workspace-v1`，Web fallback 继续使用原 JavaScript 写链。货运终端绑定、装饰、公开档案/profile 和空间站施工仍显式禁用并失败关闭；银河其他操作与 MOD 也不在本纵切。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 不变；未连接生产、未部署、未签名，也未读取或修改真实玩家存档。
 
 > **Windows ordinary storage/splitter 活动队列（2026-09-01，开发候选，未发布）**：Rust 精确模拟原先每个模拟步都会扫描全部普通 `storage`/`splitter`，把对应物料从 `inputs` 搬到 `outputs`。现在该桥接阶段使用 session-only、按实体持久行号排序的确定性 wake queue：冷启动先完整执行一次旧语义；此后只有传送带真实搬运所触及的 storage/splitter 行会被唤醒。一次旧语义桥接必然已经“搬空当前可搬输入”或“填满输出容量”，因此在下一次库存事件前可以安全休眠。
 >

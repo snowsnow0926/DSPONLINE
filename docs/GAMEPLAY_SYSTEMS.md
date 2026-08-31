@@ -1,5 +1,11 @@
 # 玩法与系统基线
 
+> **Windows Rust 轨道合同玩法边界（2026-09-01，开发候选，未发布）**：原生合同页支持接受每日 offer、从量子库存交付明确正整数数量、领取已完成奖励、放弃并按当前加权进度结算基础奖励，以及展示/取消展示已完成合同。Rust 每次都从当前合同要求、库存和确定奖励表重算；交付量为“请求、真实库存、剩余需求”的最小值，库存减少必须等于进度和 exportedByItem 增量。账本超过 256 位时与 Web 一样饱和到 256 个 9，completedContracts 在最大安全整数饱和。
+>
+> 任务日仍是上海 UTC+8 日。跨午夜读取会显示当日新 offer；旧投影点击不接受昨日 offer，且不会为了刷新板而提交伪成功事务。到期 accepted 合同会在下一条成功语义事务中先按 completed/expired 规则归档，再执行目标动作。薄投影最多保留 8 条 completed history，并确保较旧的 featured 仍可取消展示；若 48 条持久 history 换日截断了 featured，则自动清除悬空展示 ID。
+>
+> 原生页面当前只有合同板。货运终端自动绑定、装饰购买/摆放、公开档案与空间站施工仍禁用；这些操作不能回退到 renderer 直接写 GameState。Web fallback 的既有完整空间站页面不改变。
+
 > **Windows Rust ordinary 蓝图直接部署（2026-08-31，开发候选，未发布）**：玩家在原生蓝图工作区选择已证明的 ordinary 蓝图并点击“直接部署”后，先进入画布定位；落点时才读取绑定当前 revision、registry fingerprint、蓝图 ID/行 revision、有限坐标和活动陆地行星的 `blueprint-direct-deploy-context-v1`。renderer 最终只提交 `{kind:"direct-deploy",blueprintId,blueprintRevision,position:{x,y},revision}`；行星、蓝图正文、施工需求、余额、实体/线路正文、生成 ID 和 allocator 都不能由界面填写。
 >
 > 直接部署是一条独立的全额事务，不是 queue-only 的快捷入口。Rust 从当前 live blueprint 与内置 catalog 重新计算建筑堆叠、喷涂模块和 belt tier/lanes 的全部施工需求；只有权威 `construction` 能一次付清时才原子扣料并建造。缺料、MOD/命名空间内容、非陆地活动行星、resource anchor、external port、特殊建筑、锁定科技、目录漂移、ID 耗尽或任何损坏状态都会保持原状态，绝不会部分扣料、部分建造或隐式创建 `pending-materials` 订单。既有施工队列与 immutable versions 不因直接部署而改变。

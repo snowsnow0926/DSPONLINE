@@ -380,6 +380,10 @@ export interface DesktopBridge {
   getNativeCoreSystemSpaceStationWorkspaceProjection?: (request: DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest) => Promise<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult>;
   /** Intent-only durable player-authority mutation; session/run/owner/patch stay main/Rust-owned. */
   commitNativeSystemSpaceStationIntent?: (request: DesktopNativeSystemSpaceStationIntentRequest) => Promise<DesktopNativeCoreCommandResult>;
+  /** Bounded Rust-owned orbital contract board; never exposes a GameState or inventory map. */
+  getNativeCoreOrbitalContractWorkspaceProjection?: (request: DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest) => Promise<DesktopNativeCoreOrbitalContractWorkspaceProjectionResult>;
+  /** Intent-only durable contract mutation; reward/material totals stay Rust-owned. */
+  commitNativeOrbitalContractIntent?: (request: DesktopNativeOrbitalContractIntentRequest) => Promise<DesktopNativeCoreCommandResult>;
   /** Current Windows thin-UI host only; native authority never falls back to a renderer entity scan. */
   getNativeCoreCommandPaletteEntitySearch?: (request: DesktopNativeCoreCommandPaletteEntitySearchRequest) => Promise<DesktopNativeCoreCommandPaletteEntitySearchResult>;
   requestNativeCoreProjectionTransfer?: (request: DesktopNativeCoreProjectionTransferRequest) => Promise<DesktopNativeCoreProjectionTransferResult>;
@@ -2790,6 +2794,88 @@ export interface DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult {
   sharedInventory: DesktopNativeCoreStellarPage<DesktopNativeCoreSystemSpaceStationInventoryRow>;
   trayMaterials: DesktopNativeCoreStellarPage<DesktopNativeCoreSystemSpaceStationTrayRow>;
   interstellarStations: DesktopNativeCoreStellarPage<DesktopNativeCoreSystemSpaceStationEntityRow>;
+}
+
+export interface DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest extends DesktopNativeCoreSessionRequest {
+  runId: string;
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+}
+
+export type DesktopNativeOrbitalContractIntent =
+  | { type: "accept"; contractId: string }
+  | { type: "deliver-quantum"; contractId: string; itemId: string; requestedAmount: string }
+  | { type: "claim"; contractId: string }
+  | { type: "abandon"; contractId: string }
+  | { type: "feature"; contractId: string | null };
+
+export interface DesktopNativeOrbitalContractIntentRequest {
+  expectedSessionId: string;
+  expectedRunId: string;
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  intent: DesktopNativeOrbitalContractIntent;
+}
+
+export interface DesktopNativeCoreOrbitalContractRequirementRow {
+  itemId: string;
+  amount: string;
+  delivered: string;
+  channel: "any" | "terminal" | "quantum";
+  sourcePlanetIds: string[];
+  availableQuantum: string;
+}
+
+export interface DesktopNativeCoreOrbitalContractRow {
+  id: string;
+  templateId: "single" | "combination" | "dyson" | "origin" | "multi-origin" | "quantum" | "advanced";
+  slot: number;
+  title: string;
+  summary: string;
+  taskDay: number;
+  expiresAtTaskDay: number;
+  special: boolean;
+  difficulty: "P1" | "P2" | "P3";
+  status: "offered" | "accepted" | "claimable";
+  requirements: DesktopNativeCoreOrbitalContractRequirementRow[];
+  rewardMarks: string;
+  rewardReputation: string;
+  completionBasisPoints: number;
+}
+
+export interface DesktopNativeCoreOrbitalContractWorkspaceProjectionResult {
+  schemaVersion: 1;
+  projectionType: "orbital-contract-workspace-v1";
+  source: "native-core";
+  sessionId: string;
+  runId: string;
+  revision: number;
+  registryFingerprint: string;
+  stateVersion: 47;
+  stationStatus: "showcase-building" | "operational";
+  taskDay: number;
+  rulesVersion: 1;
+  quantumEnabled: boolean;
+  orbitalMarks: string;
+  stationReputation: string;
+  completedContracts: number;
+  featuredContractId: string | null;
+  offers: DesktopNativeCoreOrbitalContractRow[];
+  accepted: DesktopNativeCoreOrbitalContractRow[];
+  completedHistory: Array<{
+    id: string;
+    title: string;
+    difficulty: "P1" | "P2" | "P3";
+    settledAtTaskDay: number;
+  }>;
+  limits: {
+    offerCount: 4;
+    acceptedCount: 3;
+    historyCount: 8;
+    requirementsPerContract: 6;
+    projectionBytes: 262144;
+  };
+  unsupported: ["cargo-terminal-binding", "decorations", "profile", "construction"];
 }
 
 export interface DesktopNativeCoreCommandPaletteEntitySearchRequest extends DesktopNativeCoreSessionRequest {

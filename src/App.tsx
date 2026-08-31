@@ -595,6 +595,10 @@ import {
   createNativePlayerAuthorityDysonWorkspaceSource,
   selectNativeDysonWorkspaceFrame,
 } from "./game/nativeDysonWorkspaceStore";
+import type {
+  NativeSystemSpaceStationWorkspaceFetchProjection,
+  NativeSystemSpaceStationWorkspaceIdentity,
+} from "./game/nativeSystemSpaceStationWorkspaceStore";
 import {
   createNativeProjectedInteractionLockCommandFromReadModels,
   createNativeProjectedPlanetRoleCommand,
@@ -1568,6 +1572,7 @@ const CampaignWorkspace = lazy(() => importWithRecovery(() => import("./componen
 const GalaxyWorkspace = lazy(() => importWithRecovery(() => import("./components/GalaxyWorkspace"), "银河工作区模块").then((module) => ({ default: module.GalaxyWorkspace })));
 const ConstructionCenterWorkspace = lazy(() => importWithRecovery(() => import("./components/ConstructionCenterWorkspace"), "建筑制造中心模块").then((module) => ({ default: module.ConstructionCenterWorkspace })));
 const SystemSpaceStationWorkspace = lazy(() => importWithRecovery(() => import("./components/SystemSpaceStationWorkspace"), "空间站模块").then((module) => ({ default: module.SystemSpaceStationWorkspace })));
+const NativeSystemSpaceStationWorkspace = lazy(() => importWithRecovery(() => import("./components/NativeSystemSpaceStationWorkspace"), "原生空间站模块").then((module) => ({ default: module.NativeSystemSpaceStationWorkspace })));
 const OrbitalStationWorkspace = lazy(() => importWithRecovery(() => import("./components/OrbitalStationWorkspace"), "全星系空间站模块").then((module) => ({ default: module.OrbitalStationWorkspace })));
 
 // Content packs must be active before save migration reads any modded IDs.
@@ -2937,6 +2942,31 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativeRecipeWorkspaceStore.getSnapshot,
   );
   const recipeWorkspaceRegistryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
+  const nativeSystemSpaceStationIdentity = useMemo<NativeSystemSpaceStationWorkspaceIdentity | null>(() => {
+    const frame = nativePlayerAuthorityActiveFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null && systemSpaceStationId ? Object.freeze({
+      sessionId: frame.sessionId,
+      runId: frame.runId,
+      revision: frame.revision,
+      registryFingerprint: recipeWorkspaceRegistryFingerprint,
+      systemId: systemSpaceStationId,
+    }) : null;
+  }, [
+    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityOwnsRuntime,
+    recipeWorkspaceRegistryFingerprint,
+    systemSpaceStationId,
+  ]);
+  const nativeSystemSpaceStationFetchProjection = useMemo<NativeSystemSpaceStationWorkspaceFetchProjection | null>(() => {
+    const readProjection = desktopBridge?.getNativeCoreSystemSpaceStationWorkspaceProjection;
+    if (typeof readProjection !== "function") return null;
+    return async (request, signal) => {
+      if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+      const projection = await readProjection(request);
+      if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+      return projection;
+    };
+  }, [desktopBridge]);
   const nativeFactoryInventoryIdentity = useMemo<NativeFactoryInventoryIdentity | null>(() => {
     const sessionId = nativePlayerAuthorityActiveFrame?.sessionId;
     const runId = nativePlayerAuthorityActiveFrame?.runId;
@@ -21660,7 +21690,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onFocusStation={focusStellarStation}
           />
         ) : null}
-        {systemSpaceStationOpen && systemSpaceStationId && !nativePlayerAuthorityOwnsRuntime ? <SystemSpaceStationWorkspace
+        {systemSpaceStationOpen && systemSpaceStationId ? nativePlayerAuthorityOwnsRuntime ? <NativeSystemSpaceStationWorkspace
+          open
+          identity={nativeSystemSpaceStationIdentity}
+          fetchProjection={nativeSystemSpaceStationFetchProjection}
+          mobile={nextMobileShell}
+          onClose={() => { setSystemSpaceStationOpen(false); setSystemSpaceStationId(null); }}
+        /> : <SystemSpaceStationWorkspace
           open
           game={game}
           systemId={systemSpaceStationId}

@@ -137,7 +137,9 @@ describe("native planet navigation App integration", () => {
     for (const label of ["微型黑洞启停", "蓝图施工订单取消", "系统空间站输出口设置", "轨道空间站操作", "旧版游戏规则设置"]) {
       expect(app, label).toContain(`rejectLegacyFactoryInteractionWhileNative("${label}")`);
     }
-    expect(app).toMatch(/systemSpaceStationOpen && systemSpaceStationId && !nativePlayerAuthorityOwnsRuntime/);
+    expect(app).toMatch(/systemSpaceStationOpen && systemSpaceStationId \? nativePlayerAuthorityOwnsRuntime \? <NativeSystemSpaceStationWorkspace/);
+    expect(app).toMatch(/<NativeSystemSpaceStationWorkspace[\s\S]*?identity=\{nativeSystemSpaceStationIdentity\}[\s\S]*?fetchProjection=\{nativeSystemSpaceStationFetchProjection\}[\s\S]*?: <SystemSpaceStationWorkspace/);
+    expect(app).toMatch(/getNativeCoreSystemSpaceStationWorkspaceProjection/);
     expect(app).toMatch(/orbitalStationOpen && isSpaceStationFeatureEnabled\(\) && !nativePlayerAuthorityOwnsRuntime/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime && game\.mode === "normal" && isSpaceStationFeatureEnabled\(\) \? <div className="canvas-global-navigation/);
     for (const workspace of ["galaxyOpen", "campaignOpen", "operationsOpen"]) {

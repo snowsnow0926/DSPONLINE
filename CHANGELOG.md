@@ -4,13 +4,13 @@ All notable player-facing changes are recorded here. Game-state migration versio
 
 ## [Unreleased]
 
-### 1.2.6（发布候选，未部署）
+### 1.2.6（已发布，2026-08-31）
 
 - 产率复制挂机不再复制物品或向量子仓库、行星托盘、机器缓存和施工缓存写入虚构库存；统计窗口只直接推进真实白矩阵科研与逐恒星系戴森结构/壳面进度。
 - 没有当前科研或匹配戴森计划的通道会舍弃本段额度，不生成可延期库存；建筑制造继续只消耗玩家真实物资。
 - 星图为已殖民星球新增“一键重置星球工厂”，依次确认删除范围、不可撤销后果并精确输入当前星球名称。
 - 重置永久删除目标星球的建筑、采集器、传送带、本地物资、队列和相关物流航线，不返料且不可撤销；天然矿脉当前储量、殖民资料、科研、戴森工程、量子仓库、全局施工库存、随身舰队和蓝图保持不变。
-- GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 不变；本候选尚未部署。
+- GameState v47、存档 envelope v2、cloud schema v8 与 SQLite layout v3 不变；香港/上海 Web/API、下载页、Windows stable 和 Android stable 已完成全量发布，完整证据见 [1.2.6 正式发布记录](./docs/releases/1.2.6.md)。
 
 ### 1.2.5（已发布，2026-08-30）
 

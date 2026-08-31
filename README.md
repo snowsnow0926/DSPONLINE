@@ -2,7 +2,7 @@
 
 [English README](./README.en.md) | 简体中文
 
-《戴森球计划》生产流程的 2D 无限画布挂机工厂游戏。线上稳定版本为 `1.2.5`；使用 `GameState` v47、存档 envelope v2、云 schema v8 和 SQLite layout v3，提供 Web/PWA、Electron 桌面壳、Capacitor Android 应用、云账号、四槽云存档和排行榜。1.2.5 让两种纯挂机模式中的建筑制造持续工作，修复 Worker 故障导致挂机退出或自动回退旧状态，并收口密集蓝图详细信息错位。香港与上海 Web/API、下载页、Windows stable 和 Android stable 均已完成全量原子发布，1.2.4 为 previous-stable；Android 使用批准的长期证书，Windows 安装包按既有策略明确标记为 `NotSigned`。线上证据见 [1.2.5 正式发布记录](./docs/releases/1.2.5.md)，下载入口见 [上海下载节点](https://download.dsponline.cn/)。
+《戴森球计划》生产流程的 2D 无限画布挂机工厂游戏。线上稳定版本为 `1.2.6`；使用 `GameState` v47、存档 envelope v2、云 schema v8 和 SQLite layout v3，提供 Web/PWA、Electron 桌面壳、Capacitor Android 应用、云账号、四槽云存档和排行榜。1.2.6 让时间扭曲产率复制只直结白矩阵科研与逐恒星系戴森进度，不再向任何库存虚空造物，并新增三次确认的一键重置星球工厂。香港与上海 Web/API、下载页、Windows stable 和 Android stable 均已完成全量原子发布，1.2.5 为 previous-stable；Android 使用批准的长期证书，Windows 安装包按既有策略明确标记为 `NotSigned`。线上证据见 [1.2.6 正式发布记录](./docs/releases/1.2.6.md)，下载入口见 [上海下载节点](https://download.dsponline.cn/)。
 
 正式入口：[https://dsponline.cn](https://dsponline.cn)
 源码仓库：[https://github.com/snowsnow0926/DSPONLINE](https://github.com/snowsnow0926/DSPONLINE)

@@ -25,6 +25,7 @@ const ITEM_CAPACITY_MAX: u64 = 10_000_000_000;
 thread_local! {
     static REQUEST_ORDER_COMPARISONS: Cell<usize> = const { Cell::new(0) };
     static RUNTIME_FLOW_PARSE_ROWS: Cell<usize> = const { Cell::new(0) };
+    static SPARSE_PROOF_INVENTORY_UPDATE_ROWS: Cell<usize> = const { Cell::new(0) };
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1975,16 +1976,18 @@ fn update_network_sparse_proof_after_write(
     proof.item_capacity_rows = item_capacities.len();
     proof.routing_cursor_rows = routing_cursors.len();
     proof.upload_routing_cursor_rows = upload_routing_cursors.len();
-    for (item_id, amount) in &network.inventory {
-        if amount.is_zero() {
-            proof.zero_inventory.insert(item_id.clone());
-        } else {
-            proof.zero_inventory.remove(item_id);
-        }
-    }
     for item_id in &network.dirty_inventory {
-        if !network.inventory.contains_key(item_id) {
-            proof.zero_inventory.remove(item_id);
+        #[cfg(test)]
+        SPARSE_PROOF_INVENTORY_UPDATE_ROWS.with(|counter| {
+            counter.set(counter.get().saturating_add(1));
+        });
+        match network.inventory.get(item_id) {
+            Some(amount) if amount.is_zero() => {
+                proof.zero_inventory.insert(item_id.clone());
+            }
+            Some(_) | None => {
+                proof.zero_inventory.remove(item_id);
+            }
         }
     }
     proof.runtime_flow = network.runtime_flow.clone();
@@ -6616,6 +6619,83 @@ mod tests {
         assert_eq!(
             serde_json::to_vec(&reloaded).expect("reloaded sparse bytes"),
             serde_json::to_vec(&reload_oracle).expect("reloaded full bytes")
+        );
+    }
+
+    #[test]
+    fn sparse_proof_updates_only_dirty_inventory_keys() {
+        let mut base = active_quantum_base(0);
+        let inventory = base["quantumLogisticsNetwork"]["inventory"]
+            .as_object_mut()
+            .expect("wide inventory");
+        inventory.insert("active".to_owned(), Value::from("7"));
+        for index in 0..4_096 {
+            inventory.insert(
+                format!("dormant-{index:04}"),
+                Value::from((index + 1).to_string()),
+            );
+        }
+
+        let complete = parse_network(&base).expect("canonical wide network");
+        let mut directory = QuantumLogisticsDirectory {
+            network_sparse_proof: NetworkSparseProof::from_complete(&complete),
+            ..QuantumLogisticsDirectory::default()
+        };
+        let selection = NetworkItemSelection {
+            inventory: HashSet::from(["active".to_owned()]),
+            ..NetworkItemSelection::default()
+        };
+        let (mut network, scan) =
+            parse_active_network(&base, &selection, &mut directory, false, false)
+                .expect("sparse active parse");
+        assert!(!scan.full_scan_fallback);
+        assert_eq!(network.inventory.len(), 1);
+
+        network.set_inventory_amount("active", BigUint::zero());
+        SPARSE_PROOF_INVENTORY_UPDATE_ROWS.with(|counter| counter.set(0));
+        let write_scan =
+            write_active_network(&mut base, &network, &mut directory).expect("sparse proof write");
+        let proof_update_rows = SPARSE_PROOF_INVENTORY_UPDATE_ROWS.with(|counter| counter.get());
+
+        assert_eq!(write_scan.dirty_rows, 1);
+        assert!(!write_scan.dense_fallback);
+        assert!(!write_scan.signature_fallback);
+        assert_eq!(proof_update_rows, 1);
+        assert!(
+            directory
+                .network_sparse_proof
+                .as_ref()
+                .expect("updated proof")
+                .zero_inventory
+                .contains("active")
+        );
+        assert_eq!(
+            base["quantumLogisticsNetwork"]["inventory"]
+                .as_object()
+                .expect("inventory")
+                .len(),
+            4_097
+        );
+
+        let (mut network, scan) =
+            parse_active_network(&base, &selection, &mut directory, false, false)
+                .expect("second sparse active parse");
+        assert!(!scan.full_scan_fallback);
+        network.set_inventory_amount("active", BigUint::from(9_u8));
+        SPARSE_PROOF_INVENTORY_UPDATE_ROWS.with(|counter| counter.set(0));
+        write_active_network(&mut base, &network, &mut directory)
+            .expect("second sparse proof write");
+        assert_eq!(
+            SPARSE_PROOF_INVENTORY_UPDATE_ROWS.with(|counter| counter.get()),
+            1
+        );
+        assert!(
+            !directory
+                .network_sparse_proof
+                .as_ref()
+                .expect("second updated proof")
+                .zero_inventory
+                .contains("active")
         );
     }
 

@@ -1204,14 +1204,14 @@ fn prepare_power_demand_probes_with_runtime(
     entities: &[Value],
     profiles: &[PlanetProfile],
     ready_station_indices: &[usize],
+    vein_indices: &[usize],
+    machine_indices: &[usize],
     production_buffer_limit: f64,
     power_demand_multiplier: f64,
     industrial_speed: f64,
     research_speed: f64,
     seconds: f64,
 ) -> PreparedPowerDemandProbes {
-    let vein_indices = &state.factory_topology.vein_indices;
-    let machine_indices = &state.factory_topology.ordinary_machine_indices;
     let active_mask = u8::from(!ready_station_indices.is_empty())
         | (u8::from(!vein_indices.is_empty()) << 1)
         | (u8::from(!machine_indices.is_empty()) << 2);
@@ -2928,22 +2928,29 @@ fn is_local_machine_settlement_recipe(recipe_id: &str) -> bool {
 fn plan_local_machine_settlement(
     state: &CoreState,
     runtime: &DeterministicRuntime,
+    machine_indices: &[usize],
 ) -> MachineLocalSettlementPlan {
-    plan_local_machine_settlement_with_threshold(state, runtime, PARALLEL_MIN_ITEMS)
+    plan_local_machine_settlement_with_threshold(
+        state,
+        runtime,
+        machine_indices,
+        PARALLEL_MIN_ITEMS,
+    )
 }
 
 fn plan_local_machine_settlement_with_threshold(
     state: &CoreState,
     runtime: &DeterministicRuntime,
+    machine_indices: &[usize],
     parallel_min_items: usize,
 ) -> MachineLocalSettlementPlan {
     debug_assert!(parallel_min_items > 0);
     let mut plan = MachineLocalSettlementPlan::default();
-    let parallel_allowed = runtime.worker_limit() > 1
-        && state.factory_topology.ordinary_machine_indices.len() >= parallel_min_items;
+    let parallel_allowed =
+        runtime.worker_limit() > 1 && machine_indices.len() >= parallel_min_items;
     let mut candidate_indices = Vec::new();
 
-    for &entity_index in &state.factory_topology.ordinary_machine_indices {
+    for &entity_index in machine_indices {
         let recipe_id = state
             .symbols
             .resolve(state.entities.recipes[entity_index])
@@ -3911,6 +3918,9 @@ fn simulate_step(
     belt_runtime: &mut crate::belts::BeltRuntime,
     belt_routes: &crate::belts::PreparedRoutes,
     logistics_buffer_runtime: &mut std::sync::Arc<crate::logistics_buffers::LogisticsBufferRuntime>,
+    ordinary_production_runtime: &mut std::sync::Arc<
+        crate::ordinary_production::OrdinaryProductionRuntime,
+    >,
     local_step_directory: &mut std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
     quantum_logistics_directory: &mut std::sync::Arc<
         crate::quantum_logistics::QuantumLogisticsDirectory,
@@ -4123,6 +4133,8 @@ fn simulate_step(
     )?;
     std::sync::Arc::make_mut(logistics_buffer_runtime)
         .wake_from_changed_entities(state, &belt_changed_entity_indices);
+    std::sync::Arc::make_mut(ordinary_production_runtime)
+        .wake_from_changed_entities(&belt_changed_entity_indices);
     local_step_runtime.wake_ready_from_changed_stations(&belt_changed_entity_indices);
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
         &belt_changed_entity_indices,
@@ -4136,6 +4148,16 @@ fn simulate_step(
     quantum_step_runtime.wake_from_stations(&belt_changed_entity_indices);
     profile_mark!("belt-input-transfer");
     let belt_reservation = crate::belts::reserve(state, base, entities, belt_runtime, belt_routes)?;
+    let production_step_runtime = std::sync::Arc::make_mut(ordinary_production_runtime);
+    production_step_runtime
+        .wake_from_output_credits(belt_reservation.output_credits.active_source_items());
+    // A live research target can complete technology or alter infinite
+    // production/mining multipliers inside this exact step. Keep that global
+    // barrier on the legacy producer/miner oracle; once research is quiescent,
+    // commands invalidate this session-only runtime before any new settings,
+    // recipe or technology configuration can commit.
+    let ordinary_production_selection =
+        production_step_runtime.select(state, entities, has_active_research(base));
     profile_mark!("belt-reservation");
     crate::interstellar_logistics::run_orbital_collectors(
         state,
@@ -4196,6 +4218,24 @@ fn simulate_step(
     for probe in power_source_probes {
         if let Some(probe) = probe? {
             apply_power_source_probe(probe, &mut grids);
+        }
+    }
+    // A full-output miner has no demand, but the legacy probe still counts it
+    // as connected/disconnected. Preserve that display metric with a static
+    // per-grid aggregate while the row sleeps; any output-credit or belt
+    // inventory event wakes the exact miner before it can produce again.
+    for (grid_slot, &count) in ordinary_production_selection
+        .dormant_positive_veins_by_grid
+        .iter()
+        .enumerate()
+    {
+        if count == 0 {
+            continue;
+        }
+        if grids[grid_slot].has_power_source {
+            grids[grid_slot].connected_entities += count;
+        } else {
+            grids[grid_slot].disconnected_entities += count;
         }
     }
     profile_mark!("power-source-index");
@@ -4268,6 +4308,8 @@ fn simulate_step(
         entities,
         &profiles,
         &ready_station_indices,
+        &ordinary_production_selection.vein_indices,
+        &ordinary_production_selection.machine_indices,
         production_buffer_limit,
         power_demand_multiplier,
         industrial_speed,
@@ -4305,6 +4347,21 @@ fn simulate_step(
             machine_probes.push(probe);
         }
     }
+    // Sleeping is deliberately one quiescent pass behind production. A row
+    // that was runnable at this pre-settlement probe must be selected once
+    // more even when this pass consumes its last input or fills its output.
+    // That following pass executes the legacy zero-field normalization before
+    // the row can leave the wake set.
+    let pre_step_active_vein_indices = vein_probes
+        .iter()
+        .filter(|probe| probe.demand_active)
+        .map(|probe| probe.entity_index)
+        .collect::<Vec<_>>();
+    let pre_step_active_machine_indices = machine_probes
+        .iter()
+        .filter(|probe| probe.demand_active)
+        .map(|probe| probe.entity_index)
+        .collect::<Vec<_>>();
 
     let use_construction_aggregates = construction_power_plan.aggregate_candidate
         && construction_power_aggregation_is_exact(
@@ -4543,7 +4600,7 @@ fn simulate_step(
     };
     let vein_settlement_outcomes = collect_vein_settlement_outcomes(
         runtime,
-        &state.factory_topology.vein_indices,
+        &ordinary_production_selection.vein_indices,
         &VeinProbeEnvironment {
             state,
             entities,
@@ -4556,7 +4613,11 @@ fn simulate_step(
     );
     let mut vein_settlement_outcomes = vein_settlement_outcomes.into_iter().peekable();
     profile_mark!("vein-settlement-probes");
-    let local_machine_settlement_plan = plan_local_machine_settlement(state, runtime);
+    let local_machine_settlement_plan = plan_local_machine_settlement(
+        state,
+        runtime,
+        &ordinary_production_selection.machine_indices,
+    );
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tfactory-local-machine-settlement\tworkers={}\tparallel={}\tfallback={}\tbarriers={}\tbatches={}",
@@ -4597,7 +4658,11 @@ fn simulate_step(
     let research_entity_indexes = &state.factory_topology.research_entity_indices;
     let mut reset_research_progress_before_next_entity = false;
 
-    for &entity_index in &state.factory_topology.non_station_indices {
+    let ordinary_settlement_indices = crate::ordinary_production::merge_settlement_indices(
+        &state.factory_topology.power_source_indices,
+        &ordinary_production_selection,
+    );
+    for &entity_index in &ordinary_settlement_indices {
         if reset_research_progress_before_next_entity {
             reset_indexed_research_machine_progress(entities, research_entity_indexes)?;
             reset_research_progress_before_next_entity = false;
@@ -5048,6 +5113,70 @@ fn simulate_step(
         }
     }
     crate::dyson::commit_deferred_launches(base, dyson_launch_runtime);
+    let mut next_machine_awake = Vec::with_capacity(
+        ordinary_production_selection
+            .selected_supported_machine_indices
+            .len(),
+    );
+    for &entity_index in &ordinary_production_selection.selected_supported_machine_indices {
+        let object = entities[entity_index]
+            .as_object()
+            .ok_or_else(|| anyhow!("native simple factory entity is not an object"))?;
+        let building = string_at(object, "buildingId")
+            .and_then(|id| state.catalog.buildings.get(id))
+            .ok_or_else(|| anyhow!("native simple factory machine building is missing"))?;
+        let recipe = string_at(object, "recipeId")
+            .and_then(|id| state.catalog.recipes.get(id))
+            .ok_or_else(|| anyhow!("native simple factory machine recipe is missing"))?;
+        next_machine_awake.push((
+            entity_index,
+            pre_step_active_machine_indices
+                .binary_search(&entity_index)
+                .is_ok()
+                || machine_can_run(
+                    state,
+                    base,
+                    object,
+                    building,
+                    recipe,
+                    production_buffer_limit,
+                ),
+        ));
+    }
+    let mut next_vein_awake = Vec::with_capacity(
+        ordinary_production_selection
+            .selected_supported_vein_indices
+            .len(),
+    );
+    for &entity_index in &ordinary_production_selection.selected_supported_vein_indices {
+        let awake = pre_step_active_vein_indices
+            .binary_search(&entity_index)
+            .is_ok()
+            || probe_vein_demand(
+                state,
+                entities,
+                production_buffer_limit,
+                power_demand_multiplier,
+                entity_index,
+            )?
+            .is_some_and(|probe| probe.demand_active);
+        next_vein_awake.push((entity_index, awake));
+    }
+    let ordinary_production_scan = production_step_runtime.commit_selection(
+        ordinary_production_selection,
+        &next_machine_awake,
+        &next_vein_awake,
+    )?;
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tordinary-production-active\t{}/{}\tskipped={}\tdense={}\tdirectory-fallback={}",
+            ordinary_production_scan.selected_rows,
+            ordinary_production_scan.total_rows,
+            ordinary_production_scan.stable_rows_skipped,
+            ordinary_production_scan.dense_fallback,
+            ordinary_production_scan.directory_fallback,
+        );
+    }
     profile_mark!("power-facilities-machines-miners");
 
     if reset_research_progress_before_next_entity {
@@ -5202,6 +5331,7 @@ fn simulate_step(
     )?;
     std::sync::Arc::make_mut(logistics_buffer_runtime)
         .wake_from_changed_entities(state, &belt_changed_entity_indices);
+    production_step_runtime.wake_from_changed_entities(&belt_changed_entity_indices);
     local_step_runtime.wake_ready_from_changed_stations(&late_logistics_changed_entity_indices);
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
         &late_logistics_changed_entity_indices,
@@ -5833,6 +5963,8 @@ pub(crate) struct PreparedFactoryDomains {
     pub(crate) belt_routes: std::sync::Arc<crate::belts::PreparedRoutes>,
     pub(crate) logistics_buffer_runtime:
         std::sync::Arc<crate::logistics_buffers::LogisticsBufferRuntime>,
+    pub(crate) ordinary_production_runtime:
+        std::sync::Arc<crate::ordinary_production::OrdinaryProductionRuntime>,
     pub(crate) local_peer_directory: std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
     pub(crate) quantum_logistics_directory:
         std::sync::Arc<crate::quantum_logistics::QuantumLogisticsDirectory>,
@@ -5859,6 +5991,7 @@ pub(crate) fn prepare_factory_domains_with_runtime(
 ) -> anyhow::Result<PreparedFactoryDomains> {
     let cached_belt_routes = state.prepared_belt_routes();
     let cached_logistics_buffer_runtime = state.prepared_logistics_buffer_runtime();
+    let cached_ordinary_production_runtime = state.prepared_ordinary_production_runtime();
     let cached_local_peer_directory = state.prepared_local_peer_directory();
     let cached_quantum_logistics_directory = state.prepared_quantum_logistics_directory();
     let cached_construction_runtime = state.prepared_construction_runtime();
@@ -5869,7 +6002,10 @@ pub(crate) fn prepare_factory_domains_with_runtime(
     let interstellar_is_cold = cached_interstellar_peer_directory.is_none()
         || cached_interstellar_route_activity.is_none();
     let active_mask = u8::from(cached_belt_routes.is_none())
-        | (u8::from(cached_logistics_buffer_runtime.is_none()) << 1)
+        | (u8::from(
+            cached_logistics_buffer_runtime.is_none()
+                || cached_ordinary_production_runtime.is_none(),
+        ) << 1)
         | (u8::from(cached_local_peer_directory.is_none()) << 2)
         | (u8::from(cached_quantum_logistics_directory.is_none()) << 3)
         | (u8::from(cached_construction_runtime.is_none()) << 4)
@@ -5880,7 +6016,7 @@ pub(crate) fn prepare_factory_domains_with_runtime(
     let (
         (
             belt_routes,
-            logistics_buffer_runtime,
+            (logistics_buffer_runtime, ordinary_production_runtime),
             local_peer_directory,
             quantum_logistics_directory,
             construction_runtime,
@@ -5902,11 +6038,20 @@ pub(crate) fn prepare_factory_domains_with_runtime(
             )
         },
         || {
-            cached_logistics_buffer_runtime.unwrap_or_else(|| {
-                std::sync::Arc::new(crate::logistics_buffers::LogisticsBufferRuntime::build(
-                    state, entities,
-                ))
-            })
+            (
+                cached_logistics_buffer_runtime.unwrap_or_else(|| {
+                    std::sync::Arc::new(crate::logistics_buffers::LogisticsBufferRuntime::build(
+                        state, entities,
+                    ))
+                }),
+                cached_ordinary_production_runtime.unwrap_or_else(|| {
+                    std::sync::Arc::new(
+                        crate::ordinary_production::OrdinaryProductionRuntime::build(
+                            state, entities,
+                        ),
+                    )
+                }),
+            )
         },
         || {
             cached_local_peer_directory.map_or_else(
@@ -5987,6 +6132,7 @@ pub(crate) fn prepare_factory_domains_with_runtime(
     Ok(PreparedFactoryDomains {
         belt_routes,
         logistics_buffer_runtime,
+        ordinary_production_runtime,
         local_peer_directory,
         quantum_logistics_directory,
         construction_runtime,
@@ -6007,6 +6153,8 @@ pub(crate) struct PreparedFactoryAdvance {
     pub belt_routes: std::sync::Arc<crate::belts::PreparedRoutes>,
     pub belt_activity: std::sync::Arc<crate::belts::BeltActivitySnapshot>,
     pub logistics_buffer_runtime: std::sync::Arc<crate::logistics_buffers::LogisticsBufferRuntime>,
+    pub ordinary_production_runtime:
+        std::sync::Arc<crate::ordinary_production::OrdinaryProductionRuntime>,
     pub local_peer_directory: std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
     pub quantum_logistics_directory:
         std::sync::Arc<crate::quantum_logistics::QuantumLogisticsDirectory>,
@@ -6107,6 +6255,7 @@ fn prepare_advance_with_runtime(
     }
     let mut belt_routes = prepared_domains.belt_routes;
     let mut logistics_buffer_runtime = prepared_domains.logistics_buffer_runtime;
+    let mut ordinary_production_runtime = prepared_domains.ordinary_production_runtime;
     let mut local_peer_directory = prepared_domains.local_peer_directory;
     let mut quantum_logistics_directory = prepared_domains.quantum_logistics_directory;
     let mut construction_runtime = prepared_domains.construction_runtime;
@@ -6210,6 +6359,7 @@ fn prepare_advance_with_runtime(
             &mut belt_runtime,
             &belt_routes,
             &mut logistics_buffer_runtime,
+            &mut ordinary_production_runtime,
             &mut local_peer_directory,
             &mut quantum_logistics_directory,
             &mut construction_runtime,
@@ -6343,6 +6493,7 @@ fn prepare_advance_with_runtime(
         belt_routes,
         belt_activity,
         logistics_buffer_runtime,
+        ordinary_production_runtime,
         local_peer_directory,
         quantum_logistics_directory,
         construction_runtime,
@@ -6363,6 +6514,7 @@ pub(crate) mod tests {
     use crate::simulation::{CoreAdvanceMode, CoreAdvanceRequest};
     use crate::state::CoreCheckpointIdentity;
     use serde_json::json;
+    use sha2::Digest;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
@@ -6484,12 +6636,13 @@ pub(crate) mod tests {
 
     fn fixture_building(id: &str) -> BuildingDefinition {
         let renewable = is_independent_renewable_power_facility(id);
+        let fuel_generator = id == "thermal_power_plant";
         BuildingDefinition {
             id: id.to_owned(),
             kind: match id {
                 "storage_mk1" => "storage",
                 "splitter" => "splitter",
-                _ if renewable => "power",
+                _ if renewable || fuel_generator => "power",
                 _ => "machine",
             }
             .to_owned(),
@@ -6501,11 +6654,15 @@ pub(crate) mod tests {
                 "wind_turbine" => 300.0,
                 "solar_panel" => 360.0,
                 "geothermal_power_station" => 4_800.0,
+                "thermal_power_plant" => 2_160.0,
                 _ => 0.0,
             },
             power_charge_kw: 0.0,
             energy_capacity_mj: 0.0,
-            fuel_item_ids: Vec::new(),
+            fuel_item_ids: fuel_generator
+                .then(|| "coal".to_owned())
+                .into_iter()
+                .collect(),
             fuel_efficiency: 1.0,
             family: Some("smelting".to_owned()),
             accepts: None,
@@ -6532,7 +6689,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn fixture_catalog() -> RuntimeCatalog {
+    fn fixture_catalog_with_registry(registry_fingerprint: &str) -> RuntimeCatalog {
         let input = || ItemAmount {
             item_id: "iron_ore".to_owned(),
             amount: 1.0,
@@ -6544,7 +6701,7 @@ pub(crate) mod tests {
         RuntimeCatalog::validate(
             CatalogSnapshot {
                 protocol_version: 1,
-                registry_fingerprint: "machine-e3".to_owned(),
+                registry_fingerprint: registry_fingerprint.to_owned(),
                 planets: vec![PlanetDefinition {
                     id: "home".to_owned(),
                     name: "home".to_owned(),
@@ -6557,6 +6714,7 @@ pub(crate) mod tests {
                 items: [
                     ("iron_ore", "solid"),
                     ("iron_ingot", "solid"),
+                    ("coal", "solid"),
                     ("proliferator_mk1", "solid"),
                     ("universe_matrix", "matrix"),
                     ("solar_sail", "solid"),
@@ -6567,7 +6725,7 @@ pub(crate) mod tests {
                     id: id.to_owned(),
                     name: id.to_owned(),
                     kind: kind.to_owned(),
-                    fuel_energy_mj: 0.0,
+                    fuel_energy_mj: if id == "coal" { 2.7 } else { 0.0 },
                 })
                 .collect(),
                 buildings: [
@@ -6582,6 +6740,7 @@ pub(crate) mod tests {
                     "wind_turbine",
                     "solar_panel",
                     "geothermal_power_station",
+                    "thermal_power_plant",
                     "storage_mk1",
                     "splitter",
                 ]
@@ -6659,7 +6818,7 @@ pub(crate) mod tests {
                 }],
                 technologies: Vec::new(),
             },
-            "machine-e3",
+            registry_fingerprint,
         )
         .unwrap()
     }
@@ -6706,7 +6865,11 @@ pub(crate) mod tests {
         })
     }
 
-    fn fixture_state_from_base(base: Value, entities: &[Value]) -> CoreState {
+    fn fixture_state_from_base_with_registry(
+        base: Value,
+        entities: &[Value],
+        registry_fingerprint: &str,
+    ) -> CoreState {
         let entity_count = entities.len();
         let base = serde_json::to_vec(&base).unwrap();
         let entities = serde_json::to_vec(entities).unwrap();
@@ -6770,13 +6933,17 @@ pub(crate) mod tests {
                 revision: 7,
                 state_version: 47,
                 mode: "normal".to_owned(),
-                registry_fingerprint: "machine-e3".to_owned(),
+                registry_fingerprint: registry_fingerprint.to_owned(),
                 base_primary_checksum: "12345678".to_owned(),
             },
             &records,
-            fixture_catalog(),
+            fixture_catalog_with_registry(registry_fingerprint),
         )
         .unwrap()
+    }
+
+    fn fixture_state_from_base(base: Value, entities: &[Value]) -> CoreState {
+        fixture_state_from_base_with_registry(base, entities, "machine-e3")
     }
 
     pub(crate) fn fixture_state(entities: &[Value]) -> CoreState {
@@ -7358,6 +7525,7 @@ pub(crate) mod tests {
     fn assert_prepared_factory_domains_are_clear(state: &CoreState) {
         assert!(state.prepared_belt_routes().is_none());
         assert!(state.prepared_logistics_buffer_runtime().is_none());
+        assert!(state.prepared_ordinary_production_runtime().is_none());
         assert!(state.prepared_local_peer_directory().is_none());
         assert!(state.prepared_quantum_logistics_directory().is_none());
         assert!(state.prepared_construction_runtime().is_none());
@@ -7390,6 +7558,772 @@ pub(crate) mod tests {
             }
         }
         crate::canonical::canonical_sha256(&Value::Object(projection))
+    }
+
+    fn ordinary_oactive_machine(index: usize, input: f64, output: f64) -> Value {
+        json!({
+            "id": format!("ordinary-oactive-machine-{index:05}"),
+            "kind": "machine",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "arc_smelter",
+            "recipeId": "iron_ingot",
+            "machineCount": 1,
+            "minerCount": 0,
+            "inputs": { "iron_ore": input },
+            "outputs": { "iron_ingot": output },
+            "progress": 0,
+            "utilization": 0,
+            "productionRate": 0,
+            "routingCursor": 0,
+            "proliferatorBonusProgress": { "iron_ingot": 0 }
+        })
+    }
+
+    fn ordinary_oactive_vein(id: &str, miner_count: f64, output: f64, remaining: f64) -> Value {
+        json!({
+            "id": id,
+            "kind": "vein",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "mining_machine",
+            "recipeId": null,
+            "machineCount": 1,
+            "minerCount": miner_count,
+            "resourceId": "iron_ore",
+            "resourceRemaining": remaining,
+            "resourceDepletionRemainder": 0,
+            "outputs": { "iron_ore": output },
+            "progress": 0,
+            "utilization": 0,
+            "productionRate": 0
+        })
+    }
+
+    fn ordinary_oactive_fixture(machine_count: usize) -> CoreState {
+        let mut base = construction_isolation_base();
+        base["settings"]["resourceMode"] = Value::from("finite");
+        let mut entities = vec![json!({
+            "id": "ordinary-oactive-thermal",
+            "kind": "power",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "thermal_power_plant",
+            "machineCount": 1,
+            "minerCount": 0,
+            "fuelItemId": "coal",
+            "fuelRemainingMj": 0,
+            "inputs": { "coal": 1 },
+            "outputs": {},
+            "progress": 0,
+            "utilization": 0,
+            "productionRate": 0,
+            "routingCursor": 0
+        })];
+        entities.extend((0..machine_count).map(|index| {
+            ordinary_oactive_machine(
+                index,
+                if index == 0 { 100.0 } else { 0.0 },
+                if index == 1 { 100.0 } else { 0.0 },
+            )
+        }));
+        entities.extend([
+            ordinary_oactive_vein("ordinary-oactive-zero-miner", 0.0, 0.0, 100.0),
+            ordinary_oactive_vein("ordinary-oactive-full-miner", 1.0, 100.0, 100.0),
+            ordinary_oactive_vein("ordinary-oactive-depleted-miner", 1.0, 0.0, 0.0),
+        ]);
+        fixture_state_from_base_with_registry(
+            base,
+            &entities,
+            crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        )
+    }
+
+    fn ordinary_oactive_quiesce_fixture() -> CoreState {
+        let mut base = construction_isolation_base();
+        base["settings"]["resourceMode"] = Value::from("finite");
+        let mut entities = vec![json!({
+            "id": "ordinary-oactive-wind",
+            "kind": "power",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "wind_turbine",
+            "machineCount": 1,
+            "minerCount": 0,
+            "inputs": {},
+            "outputs": {},
+            "progress": 0,
+            "utilization": 0,
+            "productionRate": 0,
+            "routingCursor": 0
+        })];
+        let mut last_input = ordinary_oactive_machine(20_000, 1.0, 0.0);
+        last_input["id"] = Value::from("ordinary-oactive-last-input");
+        entities.push(last_input);
+        let mut filled_machine = ordinary_oactive_machine(20_001, 10.0, 99.0);
+        filled_machine["id"] = Value::from("ordinary-oactive-filled-machine");
+        entities.push(filled_machine);
+        entities.push(ordinary_oactive_vein(
+            "ordinary-oactive-exhausted-vein",
+            1.0,
+            0.0,
+            1.0,
+        ));
+        entities.push(ordinary_oactive_vein(
+            "ordinary-oactive-filled-vein",
+            1.0,
+            99.0,
+            100.0,
+        ));
+        entities.extend((0..20).map(|index| ordinary_oactive_machine(30_000 + index, 0.0, 0.0)));
+        fixture_state_from_base_with_registry(
+            base,
+            &entities,
+            crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        )
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct OrdinaryOactiveRun {
+        bytes: Vec<u8>,
+        canonical: String,
+        domain: String,
+        conservation: String,
+        scans: Vec<crate::ordinary_production::OrdinaryProductionScan>,
+    }
+
+    fn run_ordinary_oactive_advance(
+        seconds: f64,
+        worker_count: usize,
+        force_full_scan: bool,
+    ) -> OrdinaryOactiveRun {
+        let runtime = DeterministicRuntime::for_test(worker_count);
+        let mut state = ordinary_oactive_fixture(PARALLEL_MIN_ITEMS + 65);
+        if force_full_scan {
+            let mut production = state
+                .prepared_ordinary_production_runtime()
+                .expect("production runtime");
+            std::sync::Arc::make_mut(&mut production).force_full_scan_for_test(true);
+            state.install_prepared_ordinary_production_runtime(production);
+        }
+        let prepared =
+            prepare_advance_with_runtime(&state, seconds, seconds, false, &runtime).unwrap();
+        let scans = prepared
+            .ordinary_production_runtime
+            .scan_history_for_test()
+            .to_vec();
+        let next_revision = state.revision + 1;
+        state
+            .commit_simulated_state(
+                prepared.base,
+                prepared.entities,
+                prepared.belt_commit,
+                next_revision,
+                false,
+            )
+            .unwrap();
+        OrdinaryOactiveRun {
+            bytes: serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+            canonical: state.canonical_sha256().unwrap(),
+            domain: state.domain_sha256().unwrap(),
+            conservation: synthetic_conservation_sha256(&state),
+            scans,
+        }
+    }
+
+    fn install_forced_ordinary_oracle(state: &mut CoreState) {
+        let entities = state.parse_entities_parallel().unwrap();
+        let mut runtime = std::sync::Arc::new(
+            crate::ordinary_production::OrdinaryProductionRuntime::build(state, &entities),
+        );
+        std::sync::Arc::make_mut(&mut runtime).force_full_scan_for_test(true);
+        state.install_prepared_ordinary_production_runtime(runtime);
+    }
+
+    fn advance_and_install_ordinary_test_state(
+        state: &mut CoreState,
+        seconds: f64,
+    ) -> Vec<crate::ordinary_production::OrdinaryProductionScan> {
+        let prepared = prepare_advance_with_runtime(
+            state,
+            seconds,
+            seconds,
+            false,
+            &DeterministicRuntime::for_test(4),
+        )
+        .unwrap();
+        let belt_routes = prepared.belt_routes.clone();
+        let belt_activity = prepared.belt_activity.clone();
+        let logistics_buffer_runtime = prepared.logistics_buffer_runtime.clone();
+        let ordinary_production_runtime = prepared.ordinary_production_runtime.clone();
+        let local_peer_directory = prepared.local_peer_directory.clone();
+        let quantum_logistics_directory = prepared.quantum_logistics_directory.clone();
+        let construction_runtime = prepared.construction_runtime.clone();
+        let station_mode_transition_runtime = prepared.station_mode_transition_runtime.clone();
+        let quantum_transition_runtime = prepared.quantum_transition_runtime.clone();
+        let interstellar_peer_directory = prepared.interstellar_peer_directory.clone();
+        let interstellar_route_activity = prepared.interstellar_route_activity.clone();
+        let scans = ordinary_production_runtime.scan_history_for_test().to_vec();
+        let next_revision = state.revision + 1;
+        state
+            .commit_simulated_state(
+                prepared.base,
+                prepared.entities,
+                prepared.belt_commit,
+                next_revision,
+                false,
+            )
+            .unwrap();
+        state.install_prepared_belt_routes(belt_routes);
+        state.install_prepared_belt_activity(belt_activity);
+        state.install_prepared_logistics_buffer_runtime(logistics_buffer_runtime);
+        state.install_prepared_ordinary_production_runtime(ordinary_production_runtime);
+        state.install_prepared_local_peer_directory(local_peer_directory);
+        state.install_prepared_quantum_logistics_directory(quantum_logistics_directory);
+        state.install_prepared_construction_runtime(construction_runtime);
+        state.install_prepared_station_mode_transition_runtime(station_mode_transition_runtime);
+        state.install_prepared_quantum_transition_runtime(quantum_transition_runtime);
+        state.install_prepared_interstellar_peer_directory(interstellar_peer_directory);
+        state.install_prepared_interstellar_route_activity(interstellar_route_activity);
+        scans
+    }
+
+    fn replace_thermal_fuel(state: &mut CoreState, coal: f64) {
+        let index = state
+            .entity_index
+            .get("ordinary-oactive-thermal")
+            .copied()
+            .unwrap();
+        let mut thermal = state.parse_entity(index).unwrap();
+        thermal["inputs"]["coal"] = Value::from(coal);
+        thermal["fuelRemainingMj"] = Value::from(0.0);
+        state.replace_entity_raw(index, serde_json::to_string(&thermal).unwrap().into());
+        state.rebuild_indexes().unwrap();
+    }
+
+    #[test]
+    fn ordinary_oactive_matches_force_full_bytes_and_all_hashes_at_1_5_60_and_workers() {
+        for seconds in [1.0, 5.0, 60.0] {
+            let indexed = run_ordinary_oactive_advance(seconds, 1, false);
+            let oracle = run_ordinary_oactive_advance(seconds, 1, true);
+            assert_eq!(
+                (
+                    &indexed.bytes,
+                    &indexed.canonical,
+                    &indexed.domain,
+                    &indexed.conservation
+                ),
+                (
+                    &oracle.bytes,
+                    &oracle.canonical,
+                    &oracle.domain,
+                    &oracle.conservation
+                ),
+                "ordinary production diverged from force-full oracle at {seconds}s"
+            );
+            assert_eq!(indexed.scans[0].selected_rows, indexed.scans[0].total_rows);
+            assert!(indexed.scans[0].full_scan);
+            assert!(oracle.scans.iter().all(|scan| scan.full_scan));
+            eprintln!(
+                "ORDINARY_OACTIVE_EVIDENCE seconds={seconds} scans={:?} canonical={} domain={} conservation={}",
+                indexed
+                    .scans
+                    .iter()
+                    .map(|scan| scan.selected_rows)
+                    .collect::<Vec<_>>(),
+                indexed.canonical,
+                indexed.domain,
+                indexed.conservation,
+            );
+            if seconds > 1.0 {
+                assert!(indexed.scans.iter().skip(1).all(|scan| !scan.full_scan));
+                assert!(
+                    indexed
+                        .scans
+                        .iter()
+                        .skip(1)
+                        .all(|scan| scan.selected_rows <= 2)
+                );
+            }
+        }
+
+        let expected = run_ordinary_oactive_advance(60.0, 1, false);
+        for worker_count in [2, 4, 8] {
+            let observed = run_ordinary_oactive_advance(60.0, worker_count, false);
+            assert_eq!(
+                (
+                    &observed.bytes,
+                    &observed.canonical,
+                    &observed.domain,
+                    &observed.conservation
+                ),
+                (
+                    &expected.bytes,
+                    &expected.canonical,
+                    &expected.domain,
+                    &expected.conservation
+                ),
+                "ordinary production diverged at {worker_count} workers"
+            );
+            assert_eq!(observed.scans, expected.scans);
+        }
+        assert_eq!(run_ordinary_oactive_advance(60.0, 8, false), expected);
+    }
+
+    #[test]
+    fn ordinary_oactive_power_loss_fuel_restore_and_input_output_depletion_match_oracle() {
+        let mut indexed = ordinary_oactive_fixture(PARALLEL_MIN_ITEMS + 17);
+        let mut oracle = indexed.clone();
+        replace_thermal_fuel(&mut indexed, 0.0);
+        replace_thermal_fuel(&mut oracle, 0.0);
+        install_forced_ordinary_oracle(&mut oracle);
+
+        let indexed_loss_scans = advance_and_install_ordinary_test_state(&mut indexed, 3.0);
+        let oracle_loss_scans = advance_and_install_ordinary_test_state(&mut oracle, 3.0);
+        assert_eq!(
+            indexed.materialize().unwrap(),
+            oracle.materialize().unwrap()
+        );
+        assert!(
+            indexed_loss_scans
+                .iter()
+                .skip(1)
+                .all(|scan| !scan.full_scan)
+        );
+        assert!(oracle_loss_scans.iter().all(|scan| scan.full_scan));
+
+        replace_thermal_fuel(&mut indexed, 5.0);
+        replace_thermal_fuel(&mut oracle, 5.0);
+        install_forced_ordinary_oracle(&mut oracle);
+        let indexed_restore_scans = advance_and_install_ordinary_test_state(&mut indexed, 5.0);
+        let oracle_restore_scans = advance_and_install_ordinary_test_state(&mut oracle, 5.0);
+        assert_eq!(
+            indexed.materialize().unwrap(),
+            oracle.materialize().unwrap()
+        );
+        assert_eq!(
+            indexed.canonical_sha256().unwrap(),
+            oracle.canonical_sha256().unwrap()
+        );
+        assert_eq!(
+            indexed.domain_sha256().unwrap(),
+            oracle.domain_sha256().unwrap()
+        );
+        assert_eq!(
+            synthetic_conservation_sha256(&indexed),
+            synthetic_conservation_sha256(&oracle)
+        );
+        assert!(
+            indexed_restore_scans
+                .iter()
+                .skip(1)
+                .all(|scan| !scan.full_scan)
+        );
+        assert!(oracle_restore_scans.iter().all(|scan| scan.full_scan));
+
+        let materialized = indexed.materialize().unwrap();
+        let entities = materialized["entities"].as_array().unwrap();
+        let by_id = |id: &str| {
+            entities
+                .iter()
+                .find(|entity| entity["id"].as_str() == Some(id))
+                .unwrap()
+        };
+        assert_eq!(
+            by_id("ordinary-oactive-full-miner")["outputs"]["iron_ore"],
+            json!(100.0)
+        );
+        assert_eq!(
+            by_id("ordinary-oactive-depleted-miner")["resourceRemaining"],
+            json!(0.0)
+        );
+        assert_eq!(
+            by_id("ordinary-oactive-machine-00001")["outputs"]["iron_ingot"],
+            json!(100.0)
+        );
+        assert!(
+            by_id("ordinary-oactive-machine-00000")["outputs"]["iron_ingot"]
+                .as_f64()
+                .unwrap()
+                > 0.0,
+            "fuel restoration must resume the still-active producer"
+        );
+    }
+
+    #[test]
+    fn ordinary_oactive_quiesces_after_last_input_full_output_and_miner_terminal_passes() {
+        for seconds in [1.0, 2.0, 3.0] {
+            let mut indexed = ordinary_oactive_quiesce_fixture();
+            let mut oracle = indexed.clone();
+            install_forced_ordinary_oracle(&mut oracle);
+            let indexed_scans = advance_and_install_ordinary_test_state(&mut indexed, seconds);
+            let oracle_scans = advance_and_install_ordinary_test_state(&mut oracle, seconds);
+            assert_eq!(
+                serde_json::to_vec(&indexed.materialize().unwrap()).unwrap(),
+                serde_json::to_vec(&oracle.materialize().unwrap()).unwrap(),
+                "ordinary quiesce bytes diverged at {seconds}s"
+            );
+            assert_eq!(
+                (
+                    indexed.canonical_sha256().unwrap(),
+                    indexed.domain_sha256().unwrap(),
+                    synthetic_conservation_sha256(&indexed),
+                ),
+                (
+                    oracle.canonical_sha256().unwrap(),
+                    oracle.domain_sha256().unwrap(),
+                    synthetic_conservation_sha256(&oracle),
+                ),
+                "ordinary quiesce hashes diverged at {seconds}s"
+            );
+            assert!(oracle_scans.iter().all(|scan| scan.full_scan));
+            assert_eq!(indexed_scans[0].selected_rows, 24);
+            if seconds >= 2.0 {
+                assert_eq!(
+                    indexed_scans[1].selected_rows, 4,
+                    "the post-production normalization pass must stay awake"
+                );
+                assert!(!indexed_scans[1].full_scan);
+            }
+            if seconds >= 3.0 {
+                assert_eq!(
+                    indexed_scans[2].selected_rows, 1,
+                    "only the legacy power-demand-active depleted vein remains awake"
+                );
+                assert!(!indexed_scans[2].full_scan);
+            }
+
+            let materialized = indexed.materialize().unwrap();
+            let entities = materialized["entities"].as_array().unwrap();
+            let by_id = |id: &str| {
+                entities
+                    .iter()
+                    .find(|entity| entity["id"].as_str() == Some(id))
+                    .unwrap()
+            };
+            assert_eq!(
+                by_id("ordinary-oactive-last-input")["inputs"]["iron_ore"],
+                json!(0.0)
+            );
+            assert_eq!(
+                by_id("ordinary-oactive-filled-machine")["outputs"]["iron_ingot"],
+                json!(100.0)
+            );
+            assert_eq!(
+                by_id("ordinary-oactive-exhausted-vein")["resourceRemaining"],
+                json!(0.0)
+            );
+            assert_eq!(
+                by_id("ordinary-oactive-filled-vein")["outputs"]["iron_ore"],
+                json!(100.0)
+            );
+            for id in [
+                "ordinary-oactive-last-input",
+                "ordinary-oactive-filled-machine",
+                "ordinary-oactive-exhausted-vein",
+                "ordinary-oactive-filled-vein",
+            ] {
+                let row = by_id(id);
+                if seconds == 1.0 {
+                    assert!(finite_number(row.get("productionRate")) > 0.0);
+                } else {
+                    assert_eq!(row["utilization"], json!(0.0), "{id} at {seconds}s");
+                    assert_eq!(row["productionRate"], json!(0.0), "{id} at {seconds}s");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failed_ordinary_oactive_candidate_retains_source_wakes_and_bytes() {
+        let mut state = ordinary_oactive_fixture(PARALLEL_MIN_ITEMS + 9);
+        state.base_value_mut().remove("totalProduced");
+        let source_bytes = serde_json::to_vec(&state.materialize().unwrap()).unwrap();
+        let source_runtime = state
+            .prepared_ordinary_production_runtime()
+            .expect("source production runtime");
+        let pending = source_runtime.pending_rows_for_test();
+        let history = source_runtime.scan_history_for_test().to_vec();
+        let error = prepare_advance_with_runtime(
+            &state,
+            1.0,
+            1.0,
+            false,
+            &DeterministicRuntime::for_test(4),
+        )
+        .err()
+        .expect("malformed totalProduced must fail");
+        assert!(format!("{error:#}").contains("total production record is missing"));
+        assert_eq!(
+            serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+            source_bytes
+        );
+        let retained = state
+            .prepared_ordinary_production_runtime()
+            .expect("retained production runtime");
+        assert!(std::sync::Arc::ptr_eq(&source_runtime, &retained));
+        assert_eq!(retained.pending_rows_for_test(), pending);
+        assert_eq!(retained.scan_history_for_test(), history);
+    }
+
+    #[test]
+    fn ordinary_oactive_quiet_1024_dense_mod_identity_and_failed_candidate_are_fail_closed() {
+        let entities = (0..1_024)
+            .map(|index| ordinary_oactive_machine(index, 0.0, 0.0))
+            .collect::<Vec<_>>();
+        let state = fixture_state_from_base_with_registry(
+            construction_isolation_base(),
+            &entities,
+            crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        );
+        let mut runtime =
+            crate::ordinary_production::OrdinaryProductionRuntime::build(&state, &entities);
+        let cold = runtime.select(&state, &entities, false);
+        assert_eq!(cold.scan.selected_rows, 1_024);
+        let cold_rows = cold.selected_supported_machine_indices.clone();
+        runtime
+            .commit_selection(
+                cold,
+                &cold_rows
+                    .into_iter()
+                    .map(|index| (index, false))
+                    .collect::<Vec<_>>(),
+                &[],
+            )
+            .unwrap();
+        let quiet = runtime.select(&state, &entities, false);
+        assert_eq!(quiet.scan.selected_rows, 0);
+        assert_eq!(quiet.scan.stable_rows_skipped, 1_024);
+        let technology_barrier = runtime.select(&state, &entities, true);
+        assert_eq!(technology_barrier.scan.selected_rows, 1_024);
+        assert!(technology_barrier.scan.full_scan);
+
+        runtime.wake_from_changed_entities(&[511]);
+        let one = runtime.select(&state, &entities, false);
+        assert_eq!(one.scan.selected_rows, 1);
+        assert_eq!(one.scan.stable_rows_skipped, 1_023);
+        runtime.commit_selection(one, &[(511, false)], &[]).unwrap();
+        runtime.wake_from_output_credits(&[(700, 0)]);
+        let credit_wake = runtime.select(&state, &entities, false);
+        assert_eq!(credit_wake.machine_indices, vec![700]);
+        runtime
+            .commit_selection(credit_wake, &[(700, false)], &[])
+            .unwrap();
+
+        runtime.wake_from_changed_entities(&(0..768).collect::<Vec<_>>());
+        let dense = runtime.select(&state, &entities, false);
+        assert_eq!(dense.scan.selected_rows, 1_024);
+        assert!(dense.scan.dense_fallback && dense.scan.full_scan);
+
+        let mut mod_state = state.clone();
+        mod_state.identity.registry_fingerprint = "mod:opaque-writer".to_owned();
+        let mod_runtime =
+            crate::ordinary_production::OrdinaryProductionRuntime::build(&mod_state, &entities);
+        let mod_scan = mod_runtime.select(&mod_state, &entities, false).scan;
+        assert!(mod_scan.directory_fallback && mod_scan.full_scan);
+
+        let mut rebuilt_topology = state.clone();
+        std::sync::Arc::make_mut(&mut rebuilt_topology.factory_topology)
+            .ordinary_machine_indices
+            .shrink_to_fit();
+        let rebuilt_scan = runtime.select(&rebuilt_topology, &entities, false).scan;
+        assert!(rebuilt_scan.directory_fallback && rebuilt_scan.full_scan);
+
+        let mut drifted_entities = entities.clone();
+        let mut drift_runtime =
+            crate::ordinary_production::OrdinaryProductionRuntime::build(&state, &drifted_entities);
+        let first = drift_runtime.select(&state, &drifted_entities, false);
+        let first_rows = first.selected_supported_machine_indices.clone();
+        drift_runtime
+            .commit_selection(
+                first,
+                &first_rows
+                    .into_iter()
+                    .map(|index| (index, false))
+                    .collect::<Vec<_>>(),
+                &[],
+            )
+            .unwrap();
+        drifted_entities[17]["id"] = Value::from("identity-drift");
+        drift_runtime.wake_from_changed_entities(&[17]);
+        let drift = drift_runtime.select(&state, &drifted_entities, false);
+        assert!(drift.scan.directory_fallback && drift.scan.full_scan);
+
+        let mut failed =
+            crate::ordinary_production::OrdinaryProductionRuntime::build(&state, &entities);
+        let initial = failed.select(&state, &entities, false);
+        let initial_rows = initial.selected_supported_machine_indices.clone();
+        failed
+            .commit_selection(
+                initial,
+                &initial_rows
+                    .into_iter()
+                    .map(|index| (index, false))
+                    .collect::<Vec<_>>(),
+                &[],
+            )
+            .unwrap();
+        failed.wake_from_changed_entities(&[23]);
+        let failed_selection = failed.select(&state, &entities, false);
+        let error = failed
+            .commit_selection(failed_selection, &[], &[])
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("machine readiness order diverged")
+        );
+        assert_eq!(failed.pending_rows_for_test().0, vec![23]);
+    }
+
+    fn ordinary_random_ready(entity: &Value) -> bool {
+        finite_number(
+            entity
+                .get("inputs")
+                .and_then(|inputs| inputs.get("iron_ore")),
+        ) >= 1.0
+            && finite_number(
+                entity
+                    .get("outputs")
+                    .and_then(|outputs| outputs.get("iron_ingot")),
+            ) < 100.0
+    }
+
+    fn settle_ordinary_random_rows(entities: &mut [Value], indices: &[usize]) {
+        for &index in indices {
+            if !ordinary_random_ready(&entities[index]) {
+                continue;
+            }
+            let object = entities[index].as_object_mut().unwrap();
+            let input = finite_number(
+                object
+                    .get("inputs")
+                    .and_then(|inputs| inputs.get("iron_ore")),
+            );
+            let output = finite_number(
+                object
+                    .get("outputs")
+                    .and_then(|outputs| outputs.get("iron_ingot")),
+            );
+            object["inputs"]["iron_ore"] = Value::from((input - 1.0).max(0.0));
+            object["outputs"]["iron_ingot"] = Value::from(output + 1.0);
+        }
+    }
+
+    fn replay_ordinary_random_events(
+        seed: u64,
+    ) -> (
+        Vec<u8>,
+        Vec<crate::ordinary_production::OrdinaryProductionScan>,
+    ) {
+        let source = (0..257)
+            .map(|index| ordinary_oactive_machine(index, 0.0, 0.0))
+            .collect::<Vec<_>>();
+        let state = fixture_state_from_base_with_registry(
+            construction_isolation_base(),
+            &source,
+            crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        );
+        let mut indexed_entities = source.clone();
+        let mut oracle_entities = source;
+        let mut indexed =
+            crate::ordinary_production::OrdinaryProductionRuntime::build(&state, &indexed_entities);
+        let mut oracle =
+            crate::ordinary_production::OrdinaryProductionRuntime::build(&state, &oracle_entities);
+        oracle.force_full_scan_for_test(true);
+        let mut random = seed;
+        for step in 0..120 {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            let event_count = (random as usize % 3) + 1;
+            let mut changed = Vec::with_capacity(event_count);
+            for event in 0..event_count {
+                random = random
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1 + event as u64);
+                let index = random as usize % indexed_entities.len();
+                let amount = ((random >> 11) % 113) as f64;
+                let key = if random & 1 == 0 {
+                    ("inputs", "iron_ore")
+                } else {
+                    ("outputs", "iron_ingot")
+                };
+                indexed_entities[index][key.0][key.1] = Value::from(amount);
+                oracle_entities[index][key.0][key.1] = Value::from(amount);
+                changed.push(index);
+            }
+            indexed.wake_from_changed_entities(&changed);
+            oracle.wake_from_changed_entities(&changed);
+            let indexed_selection = indexed.select(&state, &indexed_entities, false);
+            let oracle_selection = oracle.select(&state, &oracle_entities, false);
+            let indexed_pre_readiness = indexed_selection
+                .selected_supported_machine_indices
+                .iter()
+                .map(|&index| (index, ordinary_random_ready(&indexed_entities[index])))
+                .collect::<Vec<_>>();
+            let oracle_pre_readiness = oracle_selection
+                .selected_supported_machine_indices
+                .iter()
+                .map(|&index| (index, ordinary_random_ready(&oracle_entities[index])))
+                .collect::<Vec<_>>();
+            settle_ordinary_random_rows(&mut indexed_entities, &indexed_selection.machine_indices);
+            settle_ordinary_random_rows(&mut oracle_entities, &oracle_selection.machine_indices);
+            let indexed_readiness = indexed_selection
+                .selected_supported_machine_indices
+                .iter()
+                .zip(indexed_pre_readiness.iter())
+                .map(|(&index, &(_, pre_ready))| {
+                    (
+                        index,
+                        pre_ready || ordinary_random_ready(&indexed_entities[index]),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let oracle_readiness = oracle_selection
+                .selected_supported_machine_indices
+                .iter()
+                .zip(oracle_pre_readiness.iter())
+                .map(|(&index, &(_, pre_ready))| {
+                    (
+                        index,
+                        pre_ready || ordinary_random_ready(&oracle_entities[index]),
+                    )
+                })
+                .collect::<Vec<_>>();
+            indexed
+                .commit_selection(indexed_selection, &indexed_readiness, &[])
+                .unwrap();
+            oracle
+                .commit_selection(oracle_selection, &oracle_readiness, &[])
+                .unwrap();
+            assert_eq!(
+                serde_json::to_vec(&indexed_entities).unwrap(),
+                serde_json::to_vec(&oracle_entities).unwrap(),
+                "random ordinary production diverged at step {} seed {seed}",
+                step + 1
+            );
+        }
+        (
+            serde_json::to_vec(&indexed_entities).unwrap(),
+            indexed.scan_history_for_test().to_vec(),
+        )
+    }
+
+    #[test]
+    fn ordinary_oactive_randomized_event_sequences_are_byte_exact_and_repeatable() {
+        for seed in [1, 2, 3, 0xdead_beef, u64::MAX - 1] {
+            let first = replay_ordinary_random_events(seed);
+            let second = replay_ordinary_random_events(seed);
+            assert_eq!(first, second, "random replay changed at seed {seed}");
+            assert!(first.1.iter().skip(1).any(|scan| !scan.full_scan));
+            let digest: [u8; 32] = sha2::Sha256::digest(&first.0).into();
+            let repeated: [u8; 32] = sha2::Sha256::digest(&second.0).into();
+            assert_eq!(
+                digest, repeated,
+                "random replay hash changed at seed {seed}"
+            );
+        }
     }
 
     fn run_partitioned_factory_advance(
@@ -7580,6 +8514,8 @@ pub(crate) mod tests {
                 &entities,
                 &profiles,
                 &ready_indices,
+                &state.factory_topology.vein_indices,
+                &state.factory_topology.ordinary_machine_indices,
                 DEFAULT_BUILDING_BUFFER_LIMIT,
                 1.0,
                 1.0,
@@ -8785,6 +9721,7 @@ pub(crate) mod tests {
         let parallel = plan_local_machine_settlement_with_threshold(
             &state,
             &DeterministicRuntime::for_test(8),
+            &state.factory_topology.ordinary_machine_indices,
             2,
         );
         assert_eq!(parallel.global_barrier_count, 3);
@@ -8799,8 +9736,11 @@ pub(crate) mod tests {
             vec![vec![0, 1, 3, 4, 6, 7, 9, 10]]
         );
 
-        let production_threshold =
-            plan_local_machine_settlement(&state, &DeterministicRuntime::for_test(8));
+        let production_threshold = plan_local_machine_settlement(
+            &state,
+            &DeterministicRuntime::for_test(8),
+            &state.factory_topology.ordinary_machine_indices,
+        );
         assert!(production_threshold.batches.is_empty());
         assert_eq!(production_threshold.serial_fallback_count, 9);
         assert_eq!(production_threshold.global_barrier_count, 3);
@@ -8808,6 +9748,7 @@ pub(crate) mod tests {
         let one_worker = plan_local_machine_settlement_with_threshold(
             &state,
             &DeterministicRuntime::for_test(1),
+            &state.factory_topology.ordinary_machine_indices,
             2,
         );
         assert!(one_worker.batches.is_empty());
@@ -8838,7 +9779,11 @@ pub(crate) mod tests {
             ));
         }
         let state = fixture_state(&entities);
-        let plan = plan_local_machine_settlement(&state, &DeterministicRuntime::for_test(8));
+        let plan = plan_local_machine_settlement(
+            &state,
+            &DeterministicRuntime::for_test(8),
+            &state.factory_topology.ordinary_machine_indices,
+        );
         assert_eq!(plan.batches.len(), 1);
         assert_eq!(plan.parallel_entity_count, local_count);
         assert!(plan.global_barrier_count > 100);

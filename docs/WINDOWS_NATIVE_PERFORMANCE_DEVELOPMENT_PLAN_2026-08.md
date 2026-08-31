@@ -2023,3 +2023,20 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版�
 5. 当前 focused 结果为 Core `15/15`、Host `4/4`、Node `58/58`、renderer boundary `23/23`、Vitest `16/16`，typecheck 与 diff check 通过。测试覆盖库存不足、stale revision/run/registry、无源 mutation reject、上海午夜前后、旧 offer→fresh projection、到期同事务归档、direct claim/abandon 满 48 条历史、duplicate/lost response、五个 durable fault boundaries、cold replay、投影边界和跨语言饱和向量。完整仓库门禁仍须在冻结提交上执行，不能用本节 focused 数字替代发布验证。
 
 本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；未连接生产、部署、签名、打包或处理真实玩家存档。
+
+### 24.27 活跃科研边界下 ordinary producer/miner 的确定性稀疏结算（2026-09-01，开发候选）
+
+本纵切只关闭 24.25 中“只要有活跃科研就无条件扫描全部普通 producer/miner”的已知退化；不修改科研结算公式、持久格式、固定能力百分比，也不把科研本身、全生产系统或全部物流描述为已经 `O(active)`。
+
+1. `matrix_research` 行继续逐拍常醒，并始终按持久实体行的历史顺序参与电力与结算。当前步若有可能完成有限科技或无限科研，ordinary producer/miner 必须在同一步使用原 full-scan oracle，因此研究行之后的机器/矿脉可以精确取得新科技、新无限等级带来的生产、采矿、堆叠或速度倍率；不能把完成事件延迟到下一拍。
+2. belt 输入阶段完成、科研结算尚未开始时，Rust 生成一个仅供本步选择使用的 `ResearchCompletionBoundaryProof`。全部研究所当前矩阵库存是本步可投入矩阵的严格物料上界，因为后续阶段在科研结算前没有 writer 会再增加 lab input。有限科研至少需要各成本剩余整数单位之和的 cycle；无限科研至少需要当前 level 剩余成本的 cycle。
+3. cycle 上界有意宁大勿小：对全部 research 行假设整拍满功率、持续使用可允许的最高 speed spray、忽略输入/输出限制，并纳入 building、machineCount、科研、行星专精倍率、已有 progress、向上取整及正浮点裕量。只有某项矩阵库存严格不足，或该上界仍严格小于剩余 cycle，proof 才允许其余已休眠普通行沿用 wake index；等于边界也 full scan。该证明只排除“本步第一次完成”，所以不需要预测完成后发生的 queue rollover 或 auto infinite 续研。
+4. 未知/MOD/opaque research writer、目录/实体/topology 漂移、非法或非有限数值、越界整数、缺失成本/进度/倍率、无限等级上限、可能完成和其他无法闭合的情况都稳定 fail closed 到 full scan。proof 不保存到 `OrdinaryProductionRuntime`，也不进入 GameState、WAL、checkpoint、增量 chunk、导出或 canonical/domain hash；普通命令、科技/设置/容量/拓扑变更仍沿既有 rebuild/invalidation 丢弃 prepared runtime。
+5. runtime 与实体候选保持同一事务边界：research proof 只影响 disposable selection；选中行失败、candidate 失败或更外层 revision commit 失败，都不得安装候选 runtime、清除源 wake 或部分提交实体。force-full oracle 继续比较正式序列化字节、canonical、domain 和物料守恒 SHA-256。
+6. 合成 4,164 行、活跃长科研的扫描证据为：有限科研在 `1/5/60` 秒得到 `4164`、`4164→2×4`、`4164→2×59`；无限科研得到 `4164`、`4164→2×4`、`4164→2×52→1×7`。两类都逐步等于 force-full 的完整 bytes 与三类 hash，并在 1/2/4/8 workers 下得到相同结果。接近有限/无限完成会回退 full scan；强边界回归让 `matrix_compression` 在研究行完成后，使同拍后置普通机器精确从 100 增至 104，错误关闭 oracle 会直接失败。
+7. 24.25 审计 P2 使用真实两段 persisted belt，而不是测试专用 wake API：满输出 producer 连接满 buffer，再连接下游 sink；下游移动逐拍腾出 bridge 与 producer capacity 后，producer 由真实 source/target 库存事件唤醒。最终扫描为 `33→1→1→1→1`，每拍与 force-full 的完整 bytes、canonical、domain 和物料守恒 hash 相同。首次 RED 为 `33→0→0→0→0`；根因是合成 storage 缺公开 `storedItemId`，按合法 bridge 语义不能搬运。只补齐测试夹具后转绿，没有放宽产品校验或直接注入 wake。
+8. 新增回归覆盖有限/无限科研、auto infinite 开/关、暂停、矩阵不足、库存足但 cycle 不足、接近完成、queued next tech、opaque state、同拍完成顺序、`1/5/60` 分段、1/2/4/8 workers，以及真实 belt 多拍唤醒。既有 ordinary focused `6/6` 继续通过，其原矩阵已覆盖有限资源、电源失去/恢复、低供给、输入/输出堵塞、随机库存事件、失败候选和 command/topology invalidation；本切片没有以新 helper 替代这些既有回归。
+9. 仍未关闭的外扫/常醒域包括科研 recipe 本身、power-source probes、戴森全局 barrier、行星指标全实体归集、production-history 采样、material-delivery hubs、拓扑重建、自然稠密、75% 普通活动集合及全部 fail-closed 路径。扫描计数不等于墙钟收益，真实大档、24 小时、多硬件、签名与发布仍是独立门禁。
+10. 冻结源码的最终 workspace 串行全量为 Core `891/891`（287.97 秒）、Host library `214/214`（34.72 秒）、Host main `3/3`（0.00 秒），合计 `1108/1108`、0 失败、0 跳过。既有 ordinary focused 为 `6/6`（22.02 秒）；新增长科研、fail-closed proof、同拍完成和真实 belt 回归均分别通过。Rust fmt 与 workspace `--all-targets --all-features -D warnings` strict clippy 最终通过。strict clippy 首轮真实报告两处 `manual_range_contains` 与一处 `if_same_then_else`；按等价 RangeInclusive 和合并布尔条件修复后 focused `1/1`、strict clippy 与最终全量转绿，失败史不删除。
+
+GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host/renderer 协议和 `authorityEligible=false` 均未改变；本切片未连接生产、部署、签名、发布，也未读取或修改真实玩家存档。

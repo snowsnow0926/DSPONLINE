@@ -2324,6 +2324,338 @@ pub(crate) fn remaining_research_costs(
     }
 }
 
+/// Disposable, current-step proof for the global research barrier. It never
+/// enters GameState, a prepared runtime, a checkpoint or a canonical hash.
+/// The sparse ordinary-production selector may be used only when the current
+/// research target is inactive, at least one required matrix cannot possibly
+/// be supplied by every research lab combined during this step, or a strict
+/// cycle ceiling remains below the amount needed to cross the boundary.
+///
+/// Belt input movement has already completed before this proof is captured;
+/// no later phase can add to a matrix-lab input before research settlement.
+/// Therefore current lab inventory is a strict material upper bound. We do
+/// not try to infer row ordering: if the material bound cannot exclude a
+/// boundary, the exact legacy full scan remains the oracle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResearchCompletionBoundaryProof {
+    Inactive,
+    CannotCompleteThisStep,
+    RequiresFullScan(&'static str),
+}
+
+impl ResearchCompletionBoundaryProof {
+    fn requires_full_scan(self) -> bool {
+        matches!(self, Self::RequiresFullScan(_))
+    }
+
+    fn profile_label(self) -> &'static str {
+        match self {
+            Self::Inactive => "inactive",
+            Self::CannotCompleteThisStep => "strict-upper-bound",
+            Self::RequiresFullScan(reason) => reason,
+        }
+    }
+}
+
+fn catalog_integer(value: f64) -> Option<u128> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    (value.is_finite() && (0.0..=MAX_SAFE_INTEGER).contains(&value) && value.fract() == 0.0)
+        .then_some(value as u128)
+}
+
+fn legacy_available_integer(value: Option<&Value>) -> Option<u128> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    let value = value.and_then(Value::as_f64).unwrap_or(0.0);
+    if !value.is_finite() || value > MAX_SAFE_INTEGER {
+        return None;
+    }
+    Some((value.max(0.0) + EPSILON).floor() as u128)
+}
+
+fn summed_research_lab_inventory(
+    state: &CoreState,
+    entities: &[Value],
+    item_id: &str,
+) -> Option<u128> {
+    let mut available = 0_u128;
+    for &entity_index in &state.factory_topology.research_entity_indices {
+        if entity_index >= state.entities.ids.len() {
+            return None;
+        }
+        let entity = entities.get(entity_index)?.as_object()?;
+        if entity.get("id").and_then(Value::as_str) != Some(&state.entities.ids[entity_index])
+            || entity.get("kind").and_then(Value::as_str) != Some("machine")
+            || entity.get("recipeId").and_then(Value::as_str) != Some("matrix_research")
+            || state
+                .symbols
+                .resolve(*state.entities.recipes.get(entity_index)?)
+                != Some("matrix_research")
+            || entity.keys().any(|key| key.starts_with("mod:"))
+        {
+            return None;
+        }
+        let amount = legacy_available_integer(
+            entity
+                .get("inputs")
+                .and_then(Value::as_object)
+                .and_then(|inputs| inputs.get(item_id)),
+        )?;
+        available = available.checked_add(amount)?;
+    }
+    Some(available)
+}
+
+/// Conservative integer-cycle ceiling for every research row combined. The
+/// actual settlement multiplies by a power factor in [0, 1], may run at base
+/// speed after spray is exhausted, and is further capped by material. This
+/// proof deliberately assumes full power, the speed-spray multiplier for the
+/// entire step, and no input/output cap. A relative and absolute floating
+/// margin is added before ceil so conversion can only overestimate.
+fn maximum_research_cycles_this_step(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    seconds: f64,
+) -> Option<u128> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return None;
+    }
+    let research_speed = research_speed_multiplier(base);
+    if !research_speed.is_finite() || research_speed < 0.0 {
+        return None;
+    }
+    let mut total = 0_u128;
+    for &entity_index in &state.factory_topology.research_entity_indices {
+        let entity = entities.get(entity_index)?.as_object()?;
+        let building_id = entity.get("buildingId").and_then(Value::as_str)?;
+        let recipe_id = entity.get("recipeId").and_then(Value::as_str)?;
+        if recipe_id != "matrix_research"
+            || entity.keys().any(|key| key.starts_with("mod:"))
+            || state
+                .symbols
+                .resolve(*state.entities.recipes.get(entity_index)?)
+                != Some("matrix_research")
+            || state
+                .symbols
+                .resolve(*state.entities.buildings.get(entity_index)?)
+                != Some(building_id)
+        {
+            return None;
+        }
+        let building = state.catalog.buildings.get(building_id)?;
+        let recipe = state.catalog.recipes.get(recipe_id)?;
+        let machine_count = entity.get("machineCount")?.as_f64()?;
+        let progress = entity
+            .get("progress")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        if !machine_count.is_finite()
+            || !(0.0..=MAX_SAFE_INTEGER).contains(&machine_count)
+            || !progress.is_finite()
+            || progress > MAX_SAFE_INTEGER
+            || !building.speed.is_finite()
+            || building.speed < 0.0
+            || !recipe.duration.is_finite()
+            || recipe.duration <= 0.0
+        {
+            return None;
+        }
+        let planet_index = *state
+            .factory_topology
+            .entity_planet_indices
+            .get(entity_index)?;
+        let planet = state.catalog.planets.get(planet_index)?;
+        let profile = profile_for(base, &planet.id, &planet.system_id).ok()?;
+        let planet_speed = if specialization_applies(profile, building) {
+            profile.production_speed_multiplier
+        } else {
+            1.0
+        };
+        let speed_spray = proliferator_speed_multiplier(state, entity, recipe).max(1.0);
+        if !planet_speed.is_finite()
+            || planet_speed < 0.0
+            || !speed_spray.is_finite()
+            || speed_spray < 1.0
+        {
+            return None;
+        }
+        let per_second = building.speed * machine_count * research_speed * planet_speed
+            / recipe.duration
+            * speed_spray;
+        let raw_upper = progress.max(0.0) + per_second * seconds;
+        let biased_upper = raw_upper * (1.0 + 16.0 * f64::EPSILON) + 4.0;
+        if !biased_upper.is_finite() || biased_upper > MAX_SAFE_INTEGER {
+            return None;
+        }
+        total = total.checked_add(biased_upper.ceil() as u128)?;
+    }
+    Some(total)
+}
+
+fn finite_research_boundary_proof(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    technology_id: &str,
+    seconds: f64,
+) -> ResearchCompletionBoundaryProof {
+    let Some(technology) = state.catalog.technologies.get(technology_id) else {
+        return ResearchCompletionBoundaryProof::RequiresFullScan("finite-catalog-unproved");
+    };
+    if technology.costs.is_empty() || completed_tech(base, technology_id) {
+        return ResearchCompletionBoundaryProof::RequiresFullScan("finite-state-boundary");
+    }
+    let progress = base
+        .get("research")
+        .and_then(Value::as_object)
+        .and_then(|research| research.get("progressByTech"))
+        .and_then(Value::as_object)
+        .and_then(|progress| progress.get(technology_id))
+        .and_then(Value::as_object);
+    let mut total_remaining = 0_u128;
+    for cost in &technology.costs {
+        let Some(required) = catalog_integer(cost.amount) else {
+            return ResearchCompletionBoundaryProof::RequiresFullScan("finite-cost-unproved");
+        };
+        if required == 0 {
+            return ResearchCompletionBoundaryProof::RequiresFullScan("finite-zero-cost");
+        }
+        let completed = progress
+            .and_then(|progress| progress.get(&cost.item_id))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        if !completed.is_finite() || completed > 9_007_199_254_740_991.0 {
+            return ResearchCompletionBoundaryProof::RequiresFullScan("finite-progress-unproved");
+        }
+        // Research invests whole items but legacy progress may contain a
+        // fractional import. Ceil is the exact number of additional integer
+        // items required to make floor(progress) reach the integer cost.
+        let remaining = ((required as f64 - completed.max(0.0)).max(0.0)).ceil() as u128;
+        total_remaining = match total_remaining.checked_add(remaining) {
+            Some(total) => total,
+            None => {
+                return ResearchCompletionBoundaryProof::RequiresFullScan(
+                    "finite-remaining-overflow",
+                );
+            }
+        };
+        if remaining == 0 {
+            continue;
+        }
+        let Some(available) = summed_research_lab_inventory(state, entities, &cost.item_id) else {
+            return ResearchCompletionBoundaryProof::RequiresFullScan("finite-inventory-unproved");
+        };
+        if available < remaining {
+            return ResearchCompletionBoundaryProof::CannotCompleteThisStep;
+        }
+    }
+    if total_remaining == 0 {
+        return ResearchCompletionBoundaryProof::RequiresFullScan("finite-state-boundary");
+    }
+    match maximum_research_cycles_this_step(state, base, entities, seconds) {
+        Some(maximum_cycles) if maximum_cycles < total_remaining => {
+            return ResearchCompletionBoundaryProof::CannotCompleteThisStep;
+        }
+        Some(_) => {}
+        None => {
+            return ResearchCompletionBoundaryProof::RequiresFullScan("finite-cycle-unproved");
+        }
+    }
+    ResearchCompletionBoundaryProof::RequiresFullScan("finite-boundary-possible")
+}
+
+fn infinite_research_boundary_proof(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    research_id: &str,
+    seconds: f64,
+) -> ResearchCompletionBoundaryProof {
+    if !crate::infinite_research::valid_id(research_id) {
+        return ResearchCompletionBoundaryProof::RequiresFullScan("infinite-catalog-unproved");
+    }
+    let Some(progress) = base
+        .get("endgame")
+        .and_then(Value::as_object)
+        .and_then(|endgame| endgame.get("infiniteResearch"))
+        .and_then(Value::as_object)
+        .and_then(|research| research.get(research_id))
+        .and_then(Value::as_object)
+    else {
+        return ResearchCompletionBoundaryProof::RequiresFullScan("infinite-state-unproved");
+    };
+    let Some(level) = progress
+        .get("level")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.0 && value.fract() == 0.0)
+        .filter(|value| *value <= u32::MAX as f64)
+        .map(|value| value as u32)
+    else {
+        return ResearchCompletionBoundaryProof::RequiresFullScan("infinite-level-unproved");
+    };
+    if crate::infinite_research::maximum_level(research_id).is_none_or(|maximum| level >= maximum) {
+        return ResearchCompletionBoundaryProof::RequiresFullScan("infinite-maximum-boundary");
+    }
+    let Some(completed) = progress
+        .get("progress")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|value| value.parse::<u128>().ok())
+    else {
+        return ResearchCompletionBoundaryProof::RequiresFullScan("infinite-progress-unproved");
+    };
+    let Ok(required) = crate::infinite_research::cost(research_id, level) else {
+        return ResearchCompletionBoundaryProof::RequiresFullScan("infinite-cost-unproved");
+    };
+    let remaining = required.saturating_sub(completed.min(required));
+    let Some(available) = summed_research_lab_inventory(state, entities, "universe_matrix") else {
+        return ResearchCompletionBoundaryProof::RequiresFullScan("infinite-inventory-unproved");
+    };
+    let cycle_ceiling_excludes_completion = remaining > 0
+        && maximum_research_cycles_this_step(state, base, entities, seconds)
+            .is_some_and(|maximum_cycles| maximum_cycles < remaining);
+    if remaining > available || cycle_ceiling_excludes_completion {
+        ResearchCompletionBoundaryProof::CannotCompleteThisStep
+    } else {
+        ResearchCompletionBoundaryProof::RequiresFullScan("infinite-boundary-possible")
+    }
+}
+
+fn research_completion_boundary_proof(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &[Value],
+    seconds: f64,
+) -> ResearchCompletionBoundaryProof {
+    let Some(research) = base.get("research").and_then(Value::as_object) else {
+        return ResearchCompletionBoundaryProof::RequiresFullScan("research-state-unproved");
+    };
+    let selected = match research.get("selectedTechId") {
+        Some(Value::String(id)) if !id.is_empty() => Some(id.as_str()),
+        Some(Value::Null) | None => None,
+        _ => {
+            return ResearchCompletionBoundaryProof::RequiresFullScan("finite-selection-unproved");
+        }
+    };
+    if let Some(technology_id) = selected {
+        return finite_research_boundary_proof(state, base, entities, technology_id, seconds);
+    }
+    let active_infinite = base
+        .get("endgame")
+        .and_then(Value::as_object)
+        .and_then(|endgame| endgame.get("activeInfiniteResearchId"));
+    match active_infinite {
+        Some(Value::String(id)) if !id.is_empty() && endgame_unlocked(base) => {
+            infinite_research_boundary_proof(state, base, entities, id, seconds)
+        }
+        Some(Value::String(_)) | Some(Value::Null) | None => {
+            ResearchCompletionBoundaryProof::Inactive
+        }
+        _ => ResearchCompletionBoundaryProof::RequiresFullScan("infinite-selection-unproved"),
+    }
+}
+
 fn reset_research_machine_progress(entities: &mut [Value]) -> anyhow::Result<()> {
     for entity in entities.iter_mut().filter_map(Value::as_object_mut) {
         if string_at(entity, "recipeId") == Some("matrix_research") {
@@ -4151,13 +4483,13 @@ fn simulate_step(
     let production_step_runtime = std::sync::Arc::make_mut(ordinary_production_runtime);
     production_step_runtime
         .wake_from_output_credits(belt_reservation.output_credits.active_source_items());
-    // A live research target can complete technology or alter infinite
-    // production/mining multipliers inside this exact step. Keep that global
-    // barrier on the legacy producer/miner oracle; once research is quiescent,
-    // commands invalidate this session-only runtime before any new settings,
-    // recipe or technology configuration can commit.
+    // A research row remains awake and keeps its persisted settlement order.
+    // Other dormant producer/miner rows may stay sparse only when the current
+    // post-belt-input material snapshot proves that no research boundary can
+    // be crossed in this step. Any uncertainty retains the legacy full scan.
+    let research_boundary = research_completion_boundary_proof(state, base, entities, seconds);
     let ordinary_production_selection =
-        production_step_runtime.select(state, entities, has_active_research(base));
+        production_step_runtime.select(state, entities, research_boundary.requires_full_scan());
     profile_mark!("belt-reservation");
     crate::interstellar_logistics::run_orbital_collectors(
         state,
@@ -5169,12 +5501,13 @@ fn simulate_step(
     )?;
     if profile_enabled {
         eprintln!(
-            "DSP_NATIVE_CORE_PROFILE\tordinary-production-active\t{}/{}\tskipped={}\tdense={}\tdirectory-fallback={}",
+            "DSP_NATIVE_CORE_PROFILE\tordinary-production-active\t{}/{}\tskipped={}\tdense={}\tdirectory-fallback={}\tresearch-boundary={}",
             ordinary_production_scan.selected_rows,
             ordinary_production_scan.total_rows,
             ordinary_production_scan.stable_rows_skipped,
             ordinary_production_scan.dense_fallback,
             ordinary_production_scan.directory_fallback,
+            research_boundary.profile_label(),
         );
     }
     profile_mark!("power-facilities-machines-miners");
@@ -6510,6 +6843,7 @@ pub(crate) mod tests {
     use crate::catalog::{
         BeltDefinition, CatalogSnapshot, ConstructionDefinition, ItemAmount, ItemDefinition,
         PlanetDefinition, ProliferatorDefinition, RecipeDefinition, RuntimeCatalog,
+        TechnologyDefinition,
     };
     use crate::simulation::{CoreAdvanceMode, CoreAdvanceRequest};
     use crate::state::CoreCheckpointIdentity;
@@ -6816,7 +7150,28 @@ pub(crate) mod tests {
                     power_multiplier: 1.5,
                     required_tech_id: "proliferator_1".to_owned(),
                 }],
-                technologies: Vec::new(),
+                technologies: vec![
+                    TechnologyDefinition {
+                        id: "research_speed_1".to_owned(),
+                        name: "research_speed_1".to_owned(),
+                        costs: vec![ItemAmount {
+                            item_id: "universe_matrix".to_owned(),
+                            amount: 100_000.0,
+                        }],
+                        prerequisites: Vec::new(),
+                        construction_rewards: Vec::new(),
+                    },
+                    TechnologyDefinition {
+                        id: "mining_speed_1".to_owned(),
+                        name: "mining_speed_1".to_owned(),
+                        costs: vec![ItemAmount {
+                            item_id: "universe_matrix".to_owned(),
+                            amount: 200_000.0,
+                        }],
+                        prerequisites: vec!["research_speed_1".to_owned()],
+                        construction_rewards: Vec::new(),
+                    },
+                ],
             },
             registry_fingerprint,
         )
@@ -6870,14 +7225,24 @@ pub(crate) mod tests {
         entities: &[Value],
         registry_fingerprint: &str,
     ) -> CoreState {
+        fixture_state_from_base_belts_with_registry(base, entities, &[], registry_fingerprint)
+    }
+
+    fn fixture_state_from_base_belts_with_registry(
+        base: Value,
+        entities: &[Value],
+        belts: &[Value],
+        registry_fingerprint: &str,
+    ) -> CoreState {
         let entity_count = entities.len();
+        let belt_count = belts.len();
         let base = serde_json::to_vec(&base).unwrap();
         let entities = serde_json::to_vec(entities).unwrap();
-        let belts = serde_json::to_vec(&Vec::<Value>::new()).unwrap();
+        let belts = serde_json::to_vec(belts).unwrap();
         let chunks = [
             ("base", "base", &base, 0, 1),
             ("entities:00000000", "entities", &entities, 0, entity_count),
-            ("belts:00000000", "belts", &belts, 0, 0),
+            ("belts:00000000", "belts", &belts, 0, belt_count),
         ]
         .into_iter()
         .map(|(id, kind, bytes, offset, count)| {
@@ -6902,7 +7267,7 @@ pub(crate) mod tests {
             "chunkRootChecksum": "12345678",
             "totalBytes": base.len() + entities.len() + belts.len(),
             "entityCount": entity_count,
-            "beltCount": 0,
+            "beltCount": belt_count,
             "chunks": chunks
         }))
         .unwrap();
@@ -7600,6 +7965,217 @@ pub(crate) mod tests {
         })
     }
 
+    fn research_boundary_lab(id: &str, universe_matrix: f64) -> Value {
+        json!({
+            "id": id,
+            "kind": "machine",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "matrix_lab",
+            "recipeId": "matrix_research",
+            "machineCount": 1,
+            "minerCount": 0,
+            "inputs": { "universe_matrix": universe_matrix },
+            "outputs": {},
+            "progress": 0,
+            "utilization": 0,
+            "productionRate": 0,
+            "routingCursor": 0,
+            "proliferatorBonusProgress": {}
+        })
+    }
+
+    fn research_boundary_fixture(
+        ordinary_count: usize,
+        universe_matrix: f64,
+        finite_progress: f64,
+    ) -> CoreState {
+        let mut base = construction_isolation_base();
+        base["research"]["selectedTechId"] = Value::from("research_speed_1");
+        base["research"]["progressByTech"] = json!({
+            "research_speed_1": { "universe_matrix": finite_progress }
+        });
+        let mut entities = Vec::with_capacity(ordinary_count + 2);
+        entities.push(json!({
+            "id": "research-boundary-wind",
+            "kind": "power",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "wind_turbine",
+            "machineCount": 1,
+            "minerCount": 0,
+            "inputs": {},
+            "outputs": {},
+            "progress": 0,
+            "utilization": 0,
+            "productionRate": 0,
+            "routingCursor": 0
+        }));
+        // Keep the barrier ahead of the ordinary rows so a boundary-capable
+        // test also proves that later rows retain their historical multiplier.
+        entities.push(research_boundary_lab(
+            "research-boundary-lab",
+            universe_matrix,
+        ));
+        entities.extend((0..ordinary_count).map(|index| {
+            ordinary_oactive_machine(
+                50_000 + index,
+                if index == 0 { 100.0 } else { 0.0 },
+                if index == 1 { 100.0 } else { 0.0 },
+            )
+        }));
+        fixture_state_from_base_with_registry(
+            base,
+            &entities,
+            crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        )
+    }
+
+    fn infinite_research_boundary_fixture(
+        ordinary_count: usize,
+        universe_matrix: f64,
+        level: u32,
+        progress: &str,
+        auto_research: bool,
+    ) -> CoreState {
+        let mut state = research_boundary_fixture(ordinary_count, universe_matrix, 0.0);
+        state.base_value_mut()["research"]["selectedTechId"] = Value::Null;
+        state.base_value_mut()["research"]["completedTechIds"] =
+            json!(["proliferator_1", "universe_matrix"]);
+        state.base_value_mut()["endgame"]["activeInfiniteResearchId"] =
+            Value::from("matrix_compression");
+        state.base_value_mut()["endgame"]["autoResearch"] = Value::from(auto_research);
+        state.base_value_mut()["endgame"]["infiniteResearch"]["matrix_compression"] = json!({
+            "level": level,
+            "progress": progress
+        });
+        state
+    }
+
+    fn ordinary_belt_wake_fixture() -> CoreState {
+        let base = construction_isolation_base();
+        let mut producer = ordinary_oactive_machine(90_000, 100.0, 100.0);
+        producer["id"] = Value::from("belt-wake-producer");
+        let storage = |id: &str, input: f64, output: f64| {
+            json!({
+                "id": id,
+                "kind": "storage",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "storage_mk1",
+                "recipeId": null,
+                "storedItemId": "iron_ingot",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": { "iron_ingot": input },
+                "outputs": { "iron_ingot": output },
+                "progress": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "routingCursor": 0
+            })
+        };
+        let mut entities = vec![
+            json!({
+                "id": "belt-wake-wind",
+                "kind": "power",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "wind_turbine",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "routingCursor": 0
+            }),
+            producer,
+            storage("belt-wake-buffer", 100.0, 100.0),
+            storage("belt-wake-sink", 0.0, 0.0),
+        ];
+        entities.extend((0..32).map(|index| ordinary_oactive_machine(91_000 + index, 0.0, 0.0)));
+        let belts = vec![
+            json!({
+                "id": "belt-wake-producer-to-buffer",
+                "planetId": "home",
+                "source": "belt-wake-producer",
+                "target": "belt-wake-buffer",
+                "itemId": "iron_ingot",
+                "lanes": 1,
+                "stackSize": 1,
+                "tier": 1,
+                "priority": 1,
+                "progress": 0,
+                "totalTransferred": 0,
+                "lastFlow": 0,
+                "congestion": 0
+            }),
+            json!({
+                "id": "belt-wake-buffer-to-sink",
+                "planetId": "home",
+                "source": "belt-wake-buffer",
+                "target": "belt-wake-sink",
+                "itemId": "iron_ingot",
+                "lanes": 1,
+                "stackSize": 1,
+                "tier": 1,
+                "priority": 1,
+                "progress": 0,
+                "totalTransferred": 0,
+                "lastFlow": 0,
+                "congestion": 0
+            }),
+        ];
+        fixture_state_from_base_belts_with_registry(
+            base,
+            &entities,
+            &belts,
+            crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        )
+    }
+
+    fn run_research_boundary_advance(
+        seconds: f64,
+        worker_count: usize,
+        force_full_scan: bool,
+        infinite: bool,
+    ) -> OrdinaryOactiveRun {
+        let runtime = DeterministicRuntime::for_test(worker_count);
+        let mut state = if infinite {
+            infinite_research_boundary_fixture(4_163, 120.0, 24, "0", true)
+        } else {
+            research_boundary_fixture(4_163, 120.0, 0.0)
+        };
+        if force_full_scan {
+            install_forced_ordinary_oracle(&mut state);
+        }
+        let prepared =
+            prepare_advance_with_runtime(&state, seconds, seconds, false, &runtime).unwrap();
+        let scans = prepared
+            .ordinary_production_runtime
+            .scan_history_for_test()
+            .to_vec();
+        let next_revision = state.revision + 1;
+        state
+            .commit_simulated_state(
+                prepared.base,
+                prepared.entities,
+                prepared.belt_commit,
+                next_revision,
+                false,
+            )
+            .unwrap();
+        OrdinaryOactiveRun {
+            bytes: serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+            canonical: state.canonical_sha256().unwrap(),
+            domain: state.domain_sha256().unwrap(),
+            conservation: synthetic_conservation_sha256(&state),
+            scans,
+        }
+    }
+
     fn ordinary_oactive_fixture(machine_count: usize) -> CoreState {
         let mut base = construction_isolation_base();
         base["settings"]["resourceMode"] = Value::from("finite");
@@ -7868,6 +8444,250 @@ pub(crate) mod tests {
             assert_eq!(observed.scans, expected.scans);
         }
         assert_eq!(run_ordinary_oactive_advance(60.0, 8, false), expected);
+    }
+
+    #[test]
+    fn active_long_research_keeps_4164_rows_sparse_and_matches_force_full_at_1_5_60() {
+        for infinite in [false, true] {
+            for seconds in [1.0, 5.0, 60.0] {
+                let indexed = run_research_boundary_advance(seconds, 1, false, infinite);
+                let oracle = run_research_boundary_advance(seconds, 1, true, infinite);
+                assert_eq!(
+                    (
+                        &indexed.bytes,
+                        &indexed.canonical,
+                        &indexed.domain,
+                        &indexed.conservation,
+                    ),
+                    (
+                        &oracle.bytes,
+                        &oracle.canonical,
+                        &oracle.domain,
+                        &oracle.conservation,
+                    ),
+                    "research boundary diverged at {seconds}s infinite={infinite}"
+                );
+                assert_eq!(indexed.scans[0].selected_rows, 4_164);
+                assert!(indexed.scans[0].full_scan);
+                assert!(oracle.scans.iter().all(|scan| scan.full_scan));
+                if seconds > 1.0 {
+                    assert!(indexed.scans.iter().skip(1).all(|scan| !scan.full_scan));
+                    assert!(
+                        indexed
+                            .scans
+                            .iter()
+                            .skip(1)
+                            .all(|scan| scan.selected_rows <= 3),
+                        "steady active research should retain only the barrier and live ordinary rows: {:?}",
+                        indexed
+                            .scans
+                            .iter()
+                            .map(|scan| scan.selected_rows)
+                            .collect::<Vec<_>>()
+                    );
+                }
+                eprintln!(
+                    "RESEARCH_BOUNDARY_OACTIVE_EVIDENCE infinite={infinite} seconds={seconds} scans={:?} canonical={} domain={} conservation={}",
+                    indexed
+                        .scans
+                        .iter()
+                        .map(|scan| scan.selected_rows)
+                        .collect::<Vec<_>>(),
+                    indexed.canonical,
+                    indexed.domain,
+                    indexed.conservation,
+                );
+            }
+        }
+
+        for infinite in [false, true] {
+            let expected = run_research_boundary_advance(60.0, 1, false, infinite);
+            for worker_count in [2, 4, 8] {
+                let observed = run_research_boundary_advance(60.0, worker_count, false, infinite);
+                assert_eq!(
+                    observed, expected,
+                    "infinite={infinite} workers={worker_count}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn research_boundary_proof_is_fail_closed_for_completion_queue_and_opaque_state() {
+        let state = research_boundary_fixture(32, 100_000.0, 0.0);
+        let entities = state.parse_entities_parallel().unwrap();
+        assert_eq!(
+            research_completion_boundary_proof(&state, state.base_value(), &entities, 1.0),
+            ResearchCompletionBoundaryProof::CannotCompleteThisStep,
+            "the cycle ceiling alone must prove a heavily stocked long research cannot finish"
+        );
+
+        let near = research_boundary_fixture(32, 1.0, 99_999.0);
+        let near_entities = near.parse_entities_parallel().unwrap();
+        assert!(
+            research_completion_boundary_proof(&near, near.base_value(), &near_entities, 1.0)
+                .requires_full_scan(),
+            "a finite boundary possible in this step must select the full oracle"
+        );
+
+        let mut queued = near.clone();
+        queued.base_value_mut()["research"]["queuedTechIds"] = json!(["mining_speed_1"]);
+        assert!(
+            research_completion_boundary_proof(&queued, queued.base_value(), &near_entities, 1.0,)
+                .requires_full_scan(),
+            "automatic queue rollover must retain the full historical row order"
+        );
+
+        let mut paused = near.clone();
+        paused.base_value_mut()["research"]["selectedTechId"] = Value::Null;
+        paused.base_value_mut()["research"]["pausedTechId"] = Value::from("research_speed_1");
+        assert_eq!(
+            research_completion_boundary_proof(&paused, paused.base_value(), &near_entities, 1.0,),
+            ResearchCompletionBoundaryProof::Inactive
+        );
+
+        for auto_research in [false, true] {
+            let safe = infinite_research_boundary_fixture(32, 249.0, 0, "0", auto_research);
+            let safe_entities = safe.parse_entities_parallel().unwrap();
+            assert_eq!(
+                research_completion_boundary_proof(&safe, safe.base_value(), &safe_entities, 1.0,),
+                ResearchCompletionBoundaryProof::CannotCompleteThisStep,
+                "cycle ceiling must be safe below the infinite boundary"
+            );
+            let near_infinite =
+                infinite_research_boundary_fixture(32, 1.0, 0, "249", auto_research);
+            let near_infinite_entities = near_infinite.parse_entities_parallel().unwrap();
+            assert!(
+                research_completion_boundary_proof(
+                    &near_infinite,
+                    near_infinite.base_value(),
+                    &near_infinite_entities,
+                    1.0,
+                )
+                .requires_full_scan(),
+                "infinite boundary possible auto={auto_research}"
+            );
+        }
+
+        let mut opaque_entities = near_entities.clone();
+        opaque_entities[1]["mod:research-writer"] = json!({ "enabled": true });
+        assert!(
+            research_completion_boundary_proof(&near, near.base_value(), &opaque_entities, 1.0)
+                .requires_full_scan(),
+            "opaque research writers must never enter the sparse proof"
+        );
+    }
+
+    #[test]
+    fn research_completion_before_later_machine_matches_force_full_and_changes_same_step_speed() {
+        let mut indexed = infinite_research_boundary_fixture(32, 1.0, 0, "249", false);
+        let later_index = *indexed
+            .entity_index
+            .get("ordinary-oactive-machine-50000")
+            .unwrap();
+        let mut later = indexed.parse_entity(later_index).unwrap();
+        later["machineCount"] = Value::from(100);
+        later["inputs"]["iron_ore"] = Value::from(1_000);
+        later["outputs"]["iron_ingot"] = Value::from(0);
+        indexed.replace_entity_raw(later_index, serde_json::to_string(&later).unwrap().into());
+        indexed.rebuild_indexes().unwrap();
+        let mut oracle = indexed.clone();
+        install_forced_ordinary_oracle(&mut oracle);
+        let indexed_scans = advance_and_install_ordinary_test_state(&mut indexed, 1.0);
+        let oracle_scans = advance_and_install_ordinary_test_state(&mut oracle, 1.0);
+        assert_eq!(
+            serde_json::to_vec(&indexed.materialize().unwrap()).unwrap(),
+            serde_json::to_vec(&oracle.materialize().unwrap()).unwrap()
+        );
+        assert_eq!(
+            (
+                indexed.canonical_sha256().unwrap(),
+                indexed.domain_sha256().unwrap(),
+                synthetic_conservation_sha256(&indexed),
+            ),
+            (
+                oracle.canonical_sha256().unwrap(),
+                oracle.domain_sha256().unwrap(),
+                synthetic_conservation_sha256(&oracle),
+            )
+        );
+        assert!(indexed_scans[0].full_scan && oracle_scans[0].full_scan);
+        assert_eq!(
+            indexed.base_value()["endgame"]["infiniteResearch"]["matrix_compression"]["level"],
+            json!(1)
+        );
+        let later = indexed
+            .parse_entities_parallel()
+            .unwrap()
+            .into_iter()
+            .find(|entity| entity["id"] == "ordinary-oactive-machine-50000")
+            .unwrap();
+        assert_eq!(
+            later["outputs"]["iron_ingot"],
+            json!(104.0),
+            "the post-boundary row must use matrix-compression level 1 in the same step"
+        );
+    }
+
+    #[test]
+    fn real_belt_frees_sleeping_producer_output_then_wakes_it_across_multiple_steps() {
+        let mut indexed = ordinary_belt_wake_fixture();
+        let mut oracle = indexed.clone();
+        install_forced_ordinary_oracle(&mut oracle);
+        let indexed_scans = advance_and_install_ordinary_test_state(&mut indexed, 5.0);
+        let oracle_scans = advance_and_install_ordinary_test_state(&mut oracle, 5.0);
+        assert_eq!(
+            serde_json::to_vec(&indexed.materialize().unwrap()).unwrap(),
+            serde_json::to_vec(&oracle.materialize().unwrap()).unwrap(),
+            "a real late belt capacity change must wake the sleeping producer before its next settlement"
+        );
+        assert_eq!(
+            (
+                indexed.canonical_sha256().unwrap(),
+                indexed.domain_sha256().unwrap(),
+                synthetic_conservation_sha256(&indexed),
+            ),
+            (
+                oracle.canonical_sha256().unwrap(),
+                oracle.domain_sha256().unwrap(),
+                synthetic_conservation_sha256(&oracle),
+            )
+        );
+        assert_eq!(indexed_scans.len(), 5);
+        assert_eq!(indexed_scans[0].selected_rows, 33);
+        assert!(indexed_scans[0].full_scan);
+        eprintln!("REAL_BELT_WAKE_EVIDENCE scans={indexed_scans:?}");
+        assert!(
+            indexed_scans
+                .iter()
+                .skip(1)
+                .all(|scan| !scan.full_scan && scan.selected_rows == 1),
+            "the producer must be selected by real belt movement without waking 32 dormant siblings: {indexed_scans:?}"
+        );
+        assert!(oracle_scans.iter().all(|scan| scan.full_scan));
+        let producer = indexed
+            .parse_entities_parallel()
+            .unwrap()
+            .into_iter()
+            .find(|entity| entity["id"] == "belt-wake-producer")
+            .unwrap();
+        assert!(
+            finite_number(
+                producer
+                    .get("outputs")
+                    .and_then(|outputs| outputs.get("iron_ingot"))
+            ) < 100.0,
+            "the belt must have moved real producer output"
+        );
+        assert!(
+            finite_number(
+                indexed
+                    .base_value()
+                    .get("totalProduced")
+                    .and_then(|total| total.get("iron_ingot"))
+            ) > 0.0,
+            "the belt-woken producer must resume production"
+        );
     }
 
     #[test]

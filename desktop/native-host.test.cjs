@@ -15,6 +15,7 @@ const {
   NATIVE_CONSTRUCTION_REMOVAL_CONTEXT_CAPABILITY,
   NATIVE_CONSTRUCTION_STACK_CONTEXT_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_COMMAND_CAPABILITY,
+  NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_GATE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_PAUSE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
@@ -34,6 +35,9 @@ const {
   normalizeNativeHostSpawnEnvironment,
   parseFrames,
 } = require("./native-host.cjs");
+const {
+  deriveSystemSpaceStationCommandIdentity,
+} = require("./native-system-space-station-intent.cjs");
 
 test("native factory inventory capability matches the Rust host contract", () => {
   assert.equal(NATIVE_FACTORY_INVENTORY_CAPABILITY, "native-core-factory-inventory-v1");
@@ -1290,6 +1294,71 @@ test("player authority commands are capability-gated, main-owned, and exact-revi
     sessionId: "core-1", runId: "player-run-1", commandId: "player-command-1",
     baseRevision: 7, command,
   }), (error) => error.code === "NATIVE_CORE_PLAYER_AUTHORITY_COMMAND_UNAVAILABLE");
+});
+
+test("system-space-station authority command derives exact intent identity before Host commit", async () => {
+  const calls = [];
+  const client = {
+    hello: { capabilities: [NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY] },
+    async request(request) {
+      calls.push(request);
+      return { commandId: request.request.commandId, revision: request.request.baseRevision + 1 };
+    },
+  };
+  const registry = new NativeCoreSessionRegistry(client);
+  registry.sessions.set("core-1", {
+    ownerId: "main-player-authority", slot: "normal-main", ownerEpoch: 2, state: "owned", inFlight: 0,
+  });
+  const intent = { type: "module-target", systemId: "helios", module: "energy", target: 3 };
+  const identity = deriveSystemSpaceStationCommandIdentity({
+    sessionId: "core-1",
+    runId: "player-run-1",
+    expectedRevision: 7,
+    expectedRegistryFingerprint: "7df8cf3a",
+    intent,
+  });
+  await registry.commitPlayerAuthoritySystemSpaceStationCommand("main-player-authority", {
+    sessionId: "core-1",
+    runId: "player-run-1",
+    commandId: identity.commandId,
+    baseRevision: 7,
+    expectedRegistryFingerprint: "7df8cf3a",
+    intent,
+  });
+  assert.deepEqual(calls, [{
+    operation: "coreCommitPlayerAuthoritySystemSpaceStationCommand",
+    sessionId: "core-1",
+    request: {
+      runId: "player-run-1",
+      commandId: identity.commandId,
+      baseRevision: 7,
+      expectedRegistryFingerprint: "7df8cf3a",
+      intent,
+    },
+  }]);
+  assert.throws(() => registry.commitPlayerAuthoritySystemSpaceStationCommand(
+    "main-player-authority",
+    {
+      sessionId: "core-1",
+      runId: "player-run-1",
+      commandId: identity.commandId,
+      baseRevision: 7,
+      expectedRegistryFingerprint: "7df8cf3a",
+      intent: { ...intent, target: 4 },
+    },
+  ), /command ID conflicts/);
+  assert.throws(() => registry.commitPlayerAuthoritySystemSpaceStationCommand(
+    "main-player-authority",
+    {
+      sessionId: "core-1",
+      runId: "player-run-1",
+      commandId: identity.commandId,
+      baseRevision: 7,
+      expectedRegistryFingerprint: "7df8cf3a",
+      intent,
+      command: {},
+    },
+  ), /request is invalid/);
 });
 
 test("player pause lifecycle is capability-gated, main-owned, and carries an exact clock anchor", async () => {

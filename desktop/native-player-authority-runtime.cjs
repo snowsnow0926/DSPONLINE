@@ -1,5 +1,9 @@
 "use strict";
 
+const {
+  normalizeSystemSpaceStationIntent,
+} = require("./native-system-space-station-intent.cjs");
+
 /*
  * Main-process-only player-authority clock.
  *
@@ -241,7 +245,39 @@ function normalizeCommandRequest(value) {
   if (Buffer.byteLength(encoded, "utf8") > MAX_DURABLE_COMMAND_BYTES) {
     throw runtimeError("native player-authority command exceeds its durable payload limit");
   }
-  return Object.freeze({ commandId, baseRevision, command: JSON.parse(encoded) });
+  return Object.freeze({ kind: "patch", commandId, baseRevision, command: JSON.parse(encoded) });
+}
+
+function normalizeSystemSpaceStationCommandRequest(value) {
+  if (!isRecord(value) || Reflect.ownKeys(value).some((key) => typeof key !== "string" ||
+      !["commandId", "baseRevision", "expectedRegistryFingerprint", "intent"].includes(key)) ||
+      !Object.hasOwn(value, "commandId") || !Object.hasOwn(value, "baseRevision") ||
+      !Object.hasOwn(value, "expectedRegistryFingerprint") || !Object.hasOwn(value, "intent")) {
+    throw runtimeError("native player-authority system-space-station request is invalid");
+  }
+  const commandId = requireLogicalId(value.commandId, "commandId");
+  const baseRevision = requireSafeInteger(value.baseRevision, 0, "baseRevision");
+  const expectedRegistryFingerprint = requireLogicalId(
+    value.expectedRegistryFingerprint,
+    "expectedRegistryFingerprint",
+  );
+  let intent;
+  try {
+    intent = normalizeSystemSpaceStationIntent(value.intent);
+  } catch (cause) {
+    throw runtimeError(
+      "native player-authority system-space-station intent is invalid",
+      "NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_INTENT_INVALID",
+      cause,
+    );
+  }
+  return Object.freeze({
+    kind: "system-space-station",
+    commandId,
+    baseRevision,
+    expectedRegistryFingerprint,
+    intent,
+  });
 }
 
 function validateRecoveryReceipt(value, sessionId) {
@@ -944,6 +980,52 @@ class NativePlayerAuthorityRuntime {
     return promise;
   }
 
+  commitSystemSpaceStationIntent(rawRequest) {
+    if (this.phase !== "active" || !this.context) {
+      return Promise.reject(runtimeError(
+        "native player-authority runtime is not accepting system-space-station intents",
+      ));
+    }
+    let request;
+    let replay = false;
+    try {
+      request = normalizeSystemSpaceStationCommandRequest(rawRequest);
+      if (this.commandQueue.length >= 64) {
+        throw runtimeError(
+          "native player-authority command queue is full",
+          "NATIVE_PLAYER_AUTHORITY_COMMAND_QUEUE_FULL",
+        );
+      }
+      replay = !this.inFlight && !this.activeCommand && this.commandQueue.length === 0 &&
+        this.context.lastCommand?.commandId === request.commandId &&
+        this.context.lastCommand?.baseRevision === request.baseRevision &&
+        this.context.lastCommand?.revision === this.context.revision;
+      let projectedRevision = this.context.revision;
+      if (!replay && (this.currentOperation === "tick" || this.currentOperation === "command")) {
+        projectedRevision += 1;
+      }
+      if (!replay) projectedRevision += this.commandQueue.length;
+      if (!Number.isSafeInteger(projectedRevision) ||
+          !replay && request.baseRevision !== projectedRevision) {
+        throw runtimeError(
+          "native player-authority system-space-station revision is not the queued revision",
+          "NATIVE_PLAYER_AUTHORITY_COMMAND_REVISION_MISMATCH",
+        );
+      }
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    let resolveCommand;
+    let rejectCommand;
+    const promise = new Promise((resolve, reject) => {
+      resolveCommand = resolve;
+      rejectCommand = reject;
+    });
+    this.commandQueue.push({ request, replay, promise, resolve: resolveCommand, reject: rejectCommand });
+    this.pump();
+    return promise;
+  }
+
   /**
    * Commits the player-visible pause flag and the exact-realtime lease phase as
    * one durable Host transaction. The caller supplies only the desired state:
@@ -1425,13 +1507,32 @@ class NativePlayerAuthorityRuntime {
       resolveInFlight = resolve;
     });
     this.inFlight = completion;
-    Promise.resolve().then(() => this.registry.commitPlayerAuthorityCommand(this.ownerId, {
-      sessionId: context.sessionId,
-      runId: context.runId,
-      commandId: entry.request.commandId,
-      baseRevision: entry.request.baseRevision,
-      command: entry.request.command,
-    })).then((receipt) => {
+    const commit = () => {
+      if (entry.request.kind === "system-space-station") {
+        if (typeof this.registry.commitPlayerAuthoritySystemSpaceStationCommand !== "function") {
+          throw runtimeError(
+          "native player-authority system-space-station capability is unavailable",
+          "NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_UNAVAILABLE",
+          );
+        }
+        return this.registry.commitPlayerAuthoritySystemSpaceStationCommand(this.ownerId, {
+          sessionId: context.sessionId,
+          runId: context.runId,
+          commandId: entry.request.commandId,
+          baseRevision: entry.request.baseRevision,
+          expectedRegistryFingerprint: entry.request.expectedRegistryFingerprint,
+          intent: entry.request.intent,
+        });
+      }
+      return this.registry.commitPlayerAuthorityCommand(this.ownerId, {
+        sessionId: context.sessionId,
+        runId: context.runId,
+        commandId: entry.request.commandId,
+        baseRevision: entry.request.baseRevision,
+        command: entry.request.command,
+      });
+    };
+    Promise.resolve().then(commit).then((receipt) => {
       if (this.shutdownRequested) {
         throw runtimeError(
           "native player-authority runtime shut down during a command",

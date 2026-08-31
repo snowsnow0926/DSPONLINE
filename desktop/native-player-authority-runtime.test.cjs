@@ -10,6 +10,9 @@ const {
 const {
   NativePlayerAuthorityMacroBroker,
 } = require("./native-player-authority-macro-broker.cjs");
+const {
+  deriveSystemSpaceStationCommandIdentity,
+} = require("./native-system-space-station-intent.cjs");
 
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
@@ -137,6 +140,21 @@ function fixture(overrides = {}) {
     },
     async commitPlayerAuthorityCommand(ownerId, request) {
       calls.push(["command", ownerId, request]);
+      const revision = request.baseRevision + 1;
+      return {
+        sequence: revision - checkpoint.revision,
+        commandId: request.commandId,
+        baseRevision: request.baseRevision,
+        revision,
+        settledDeadlineMs: 10_000,
+        duplicate: false,
+        ...changeReceipt(),
+        checkpoint: { generation: 3 + revision - checkpoint.revision, rootHash: HASH_A, revision },
+        summary: summary(revision),
+      };
+    },
+    async commitPlayerAuthoritySystemSpaceStationCommand(ownerId, request) {
+      calls.push(["station-command", ownerId, request]);
       const revision = request.baseRevision + 1;
       return {
         sequence: revision - checkpoint.revision,
@@ -916,6 +934,110 @@ test("player commands form one FIFO revision chain and ticks cannot overtake the
   assert.equal(value.runtime.snapshot().revision, 11);
   assert.equal(value.runtime.snapshot().acknowledgedSequence, 4);
   assert.equal(value.runtime.snapshot().nextDeadlineMs, 12_000);
+});
+
+test("system-space-station intents share the exact command FIFO without exposing a patch", async () => {
+  const value = fixture();
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  const stationRequest = (baseRevision, intent) => {
+    const identity = deriveSystemSpaceStationCommandIdentity({
+      sessionId: "core-main-1",
+      runId: "player-run-1",
+      expectedRevision: baseRevision,
+      expectedRegistryFingerprint: "7df8cf3a",
+      intent,
+    });
+    return {
+      commandId: identity.commandId,
+      baseRevision,
+      expectedRegistryFingerprint: "7df8cf3a",
+      intent,
+    };
+  };
+  const results = await Promise.all([
+    value.runtime.commitSystemSpaceStationIntent(stationRequest(7, {
+      type: "start", systemId: "helios",
+    })),
+    value.runtime.commitCommand(playerCommand(8, "ordinary-command", 1)),
+    value.runtime.commitSystemSpaceStationIntent(stationRequest(9, {
+      type: "module-target", systemId: "helios", module: "backbone", target: 1,
+    })),
+  ]);
+  assert.deepEqual(results.map((result) => result.revision), [8, 9, 10]);
+  assert.deepEqual(
+    value.calls
+      .filter(([operation]) => operation === "station-command" || operation === "command")
+      .map(([operation]) => operation),
+    ["station-command", "command", "station-command"],
+  );
+  for (const [, , request] of value.calls.filter(([operation]) => operation === "station-command")) {
+    assert.equal(Object.hasOwn(request, "command"), false);
+    assert.deepEqual(Object.keys(request).sort(), [
+      "baseRevision", "commandId", "expectedRegistryFingerprint", "intent", "runId", "sessionId",
+    ]);
+  }
+});
+
+test("lost system-space-station response retries the byte-identical intent command", async () => {
+  let attempts = 0;
+  const value = fixture({
+    registry: {
+      async commitPlayerAuthoritySystemSpaceStationCommand(ownerId, request) {
+        value.calls.push(["station-command", ownerId, request]);
+        attempts += 1;
+        if (attempts === 1) throw Object.assign(new Error("pipe closed"), { code: "EPIPE" });
+        return {
+          sequence: 1,
+          commandId: request.commandId,
+          baseRevision: request.baseRevision,
+          revision: 8,
+          settledDeadlineMs: 10_000,
+          duplicate: true,
+          ...changeReceipt({ changedEntityIds: ["station-1"], topologyDirty: false }),
+          checkpoint: { generation: 4, rootHash: HASH_A, revision: 8 },
+          summary: summary(8),
+        };
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  const intent = { type: "upgrade-one", entityId: "station-1" };
+  const identity = deriveSystemSpaceStationCommandIdentity({
+    sessionId: "core-main-1",
+    runId: "player-run-1",
+    expectedRevision: 7,
+    expectedRegistryFingerprint: "7df8cf3a",
+    intent,
+  });
+  const request = {
+    commandId: identity.commandId,
+    baseRevision: 7,
+    expectedRegistryFingerprint: "7df8cf3a",
+    intent,
+  };
+  await assert.rejects(
+    value.runtime.commitSystemSpaceStationIntent(request),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_COMMAND_UNCERTAIN",
+  );
+  const recovered = await value.runtime.retryUncertain();
+  assert.equal(recovered.revision, 8);
+  assert.deepEqual(recovered.changedEntityIds, ["station-1"]);
+  const replay = await value.runtime.commitSystemSpaceStationIntent(request);
+  assert.equal(replay.revision, 8);
+  const calls = value.calls.filter(([operation]) => operation === "station-command");
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[0][2], calls[1][2]);
+  assert.deepEqual(calls[1][2], calls[2][2]);
+  assert.equal(
+    value.calls.filter(([operation]) => operation === "command").length,
+    0,
+  );
 });
 
 test("a command queued behind an in-flight tick waits and uses the next exact revision", async () => {

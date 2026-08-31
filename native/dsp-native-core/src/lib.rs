@@ -6,6 +6,7 @@
 
 mod belts;
 mod blueprint_command;
+mod blueprint_import;
 mod blueprint_workspace;
 mod campaign;
 pub mod canonical;

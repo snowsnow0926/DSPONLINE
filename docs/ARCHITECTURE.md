@@ -1,5 +1,9 @@
 # 系统架构
 
+> **Windows Rust ordinary 蓝图完整生命周期边界（2026-09-01，开发候选，未发布）**：原生权威模式下，普通内置蓝图现已把捕获、严格导入、确定性导出、直接部署、仅入队、领料、队列部署和取消闭合到同一条 Rust/Host/薄 UI 事务链。renderer 只提交与当前 session/run/revision/registry 绑定的最小语义 marker；Rust 独占目录解析、canonicalization、材料与拓扑推导，并在 prepare 和私有 apply 两层重验实体、线路、蓝图、版本和施工队列八个持久 ID 域。live、generic cold-WAL、重复 command ID 与五个 durable fault boundary 复用同一展开器；候选失败只丢弃副本，不允许部分扣料、部分建造、假成功或 renderer 自动重发。
+>
+> native import 的原始 UTF-8 exchange 在进入 Rust 前受 1 MiB、well-formed Unicode 和 fatal decode 限制，Rust 再限制 512 entities、1,024 belts、64 library rows 与 ordinary 内置域；raw exchange 不进入 WAL。native export 是只读有界投影，Rust 生成无时间戳 v2 exchange、精确字节数、SHA-256 与 Windows 安全文件名，desktop 不解析或重序列化正文。export 的 owner-ID 冲突检查允许合法的 `version.blueprintId` / `queue.blueprintId` 外键，但拒绝独立 owner ID 复用及异常 version 引用。accepted import draft 只有在连续 ACK、同 lineage/registry、frame revision 不早于 ACK 且目标行精确存在时清除；任何漂移都失败关闭。Web/PWA 仍保留独立 JavaScript fallback，但使用相同数量/字节/库容量硬门限，不进入 Host WAL。GameState v47、envelope v2、cloud schema v8、SQLite layout v3 与 `authorityEligible=false` 均不变；MOD、resource anchor、external port、空间站/舰队和其他特殊域继续拒绝。
+
 > **Windows Rust 普通生产者活动线路与 clone-safe 工作区边界（2026-08-31，开发候选，未发布）**：线路拓扑为内置默认内容目录中的普通生产者建立配方输入与全部已路由输出的反向依赖。普通输出组只有在已有输出/输入、运行时流量、完整输入周期或反向唤醒存在时保持活动；输入货物写入会唤醒同一生产者的所有路由产物，而不是只唤醒输入物料对应的一条线。若唤醒发生在本步活动快照之后，内核只对新唤醒且此前未选中的普通输出组执行一次同秒时钟补齐，再按原稳定线路顺序预留容量和提交。未路由副产物不会伪造线路，MOD、opaque、特殊/全局配方及证明不足的形状继续常醒；活动比例达到 75% 时保留完整扫描 oracle 的稳定退化。
 >
 > `BeltActivitySnapshot` 的活动索引与一个精确拓扑绑定的单槽 `BeltReusablePool` 共享所有权。候选借用后，已提交快照仍保留同一池身份；成功发布把携带本次活动索引来源的工作区归还，下一借用先按该 provenance 清除上次为真的活动位，再播种自己的不可变快照。发布前任意失败则由 `BeltRuntime` 的销毁边界清空活动位、选择/候选/待唤醒集合和逐组临时状态后归还。重叠 clone 在池被占用时分配独立工作区，归还时 first-return-wins；后归还的副本不得覆盖已驻留缓冲。真实 `Barrier` 双线程回归会让两个 OS 线程都完成 checkout 后才允许任一候选发布，证明只有一个候选取得池内驻留工作区、另一个使用独立分配，二者不共享可变缓冲；发布回池后下一借用仍会清除获胜来源的旧活动位。这样 disposable pure-idle candidate、写回失败或取消都不能污染下一 revision，也不能抽干 live snapshot 的复用能力。池、活动索引和工作区均为 revision 私有运行时数据，不持久化、不参与 canonical hash。

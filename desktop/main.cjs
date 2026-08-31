@@ -1086,6 +1086,34 @@ function nativeBlueprintWorkspaceResultContext(request) {
   };
 }
 
+function nativeBlueprintCaptureContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    entityIds: request?.entityIds,
+  };
+}
+
+function nativeBlueprintImportContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    raw: request?.raw,
+  };
+}
+
+function nativeBlueprintExportContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    blueprintId: request?.blueprintId,
+    blueprintRevision: request?.blueprintRevision,
+  };
+}
+
 function nativeBlueprintEnqueueContextResultContext(request) {
   return {
     sessionId: request?.sessionId,
@@ -1929,6 +1957,60 @@ ipcMain.handle("desktop:native-core-blueprint-workspace", async (event, request)
   });
 });
 
+ipcMain.handle("desktop:native-core-blueprint-capture-context", async (event, request) => {
+  return runRendererNativeOperation("coreBlueprintCaptureContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生蓝图捕获上下文请求失败，请重试",
+    resultContext: nativeBlueprintCaptureContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "blueprint-capture-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.blueprintCaptureContext(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-blueprint-import-context", async (event, request) => {
+  return runRendererNativeOperation("coreBlueprintImportContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生蓝图导入上下文请求失败，请重试",
+    resultContext: nativeBlueprintImportContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "blueprint-import-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.blueprintImportContext(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-core-blueprint-export-context", async (event, request) => {
+  return runRendererNativeOperation("coreBlueprintExportContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生蓝图导出上下文请求失败，请重试",
+    resultContext: nativeBlueprintExportContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "blueprint-export-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.blueprintExportContext(ownerId, request);
+  });
+});
+
 ipcMain.handle("desktop:native-core-blueprint-enqueue-context", async (event, request) => {
   return runRendererNativeOperation("coreBlueprintEnqueueContext", {
     fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
@@ -2222,10 +2304,14 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
   if (!port) return;
   const run = async () => {
     const ownerId = requireTrustedNativeSender(event);
-    if (!request || typeof request !== "object" ||
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+      Reflect.ownKeys(request).length !== 4 ||
+      !["sessionId", "projectionType", "sequence", "payload"].every(
+        (key) => Object.prototype.hasOwnProperty.call(request, key),
+      ) ||
       !validNativeLogicalId(request.sessionId, 128) ||
       !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
-      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "blueprint-workspace-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType) ||
+      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "blueprint-workspace-v1", "blueprint-capture-context-v1", "blueprint-import-context-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object" ||
       Object.prototype.hasOwnProperty.call(request.payload, "sessionId")) {
       throw new Error("原生投影二进制请求无效");
@@ -2250,6 +2336,12 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       rawResult = await nativeCoreSessions.constructionInventoryProjection(ownerId, normalizedRequest);
     } else if (request.projectionType === "blueprint-workspace-v1") {
       rawResult = await nativeCoreSessions.blueprintWorkspaceProjection(ownerId, normalizedRequest);
+    } else if (request.projectionType === "blueprint-capture-context-v1") {
+      rawResult = await nativeCoreSessions.blueprintCaptureContext(ownerId, normalizedRequest);
+    } else if (request.projectionType === "blueprint-import-context-v1") {
+      rawResult = await nativeCoreSessions.blueprintImportContext(ownerId, normalizedRequest);
+    } else if (request.projectionType === "blueprint-export-context-v1") {
+      rawResult = await nativeCoreSessions.blueprintExportContext(ownerId, normalizedRequest);
     } else if (request.projectionType === "blueprint-enqueue-context-v1") {
       rawResult = await nativeCoreSessions.blueprintEnqueueContext(ownerId, normalizedRequest);
     } else if (request.projectionType === "blueprint-direct-deploy-context-v1") {
@@ -2298,6 +2390,12 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                 ? "coreConstructionInventoryProjection"
                 : request.projectionType === "blueprint-workspace-v1"
                   ? "coreBlueprintWorkspaceProjection"
+                : request.projectionType === "blueprint-capture-context-v1"
+                  ? "coreBlueprintCaptureContext"
+                : request.projectionType === "blueprint-import-context-v1"
+                  ? "coreBlueprintImportContext"
+                : request.projectionType === "blueprint-export-context-v1"
+                  ? "coreBlueprintExportContext"
                 : request.projectionType === "blueprint-enqueue-context-v1"
                   ? "coreBlueprintEnqueueContext"
                 : request.projectionType === "blueprint-direct-deploy-context-v1"
@@ -2344,6 +2442,12 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                 ? nativeConstructionInventoryResultContext(normalizedRequest)
                 : request.projectionType === "blueprint-workspace-v1"
                   ? nativeBlueprintWorkspaceResultContext(normalizedRequest)
+                : request.projectionType === "blueprint-capture-context-v1"
+                  ? nativeBlueprintCaptureContextResultContext(normalizedRequest)
+                : request.projectionType === "blueprint-import-context-v1"
+                  ? nativeBlueprintImportContextResultContext(normalizedRequest)
+                : request.projectionType === "blueprint-export-context-v1"
+                  ? nativeBlueprintExportContextResultContext(normalizedRequest)
                 : request.projectionType === "blueprint-enqueue-context-v1"
                   ? nativeBlueprintEnqueueContextResultContext(normalizedRequest)
                 : request.projectionType === "blueprint-direct-deploy-context-v1"

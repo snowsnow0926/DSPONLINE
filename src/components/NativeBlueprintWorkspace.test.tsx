@@ -34,12 +34,18 @@ import type { NativeConstructionQueueFundPendingCommand } from "../game/nativeCo
 import type { NativeConstructionQueueDeployPendingCommand } from "../game/nativeConstructionQueueDeployCommandReconciliation";
 import type { NativeBlueprintEnqueuePendingCommand } from "../game/nativeBlueprintEnqueueCommandReconciliation";
 import type { NativeBlueprintDirectDeployPendingCommand } from "../game/nativeBlueprintDirectDeployCommandReconciliation";
+import type { NativeBlueprintImportPendingCommand } from "../game/nativeBlueprintImportCommandReconciliation";
+import type { NativeBlueprintImportConfirmation } from "../game/useNativeBlueprintImportCommandTransaction";
+import type { NativeBlueprintExportBinding } from "../game/nativeBlueprintExportContext";
 import type {
   NativeBlueprintRenamePendingIdentity,
   NativeBlueprintRenameResolution,
   NativeBlueprintRenameSubmitOutcome,
 } from "../game/nativeBlueprintRenameWorkflow";
-import { NativeBlueprintWorkspace } from "./NativeBlueprintWorkspace";
+import {
+  NativeBlueprintWorkspace,
+  type NativeBlueprintImportAcceptedSubmission,
+} from "./NativeBlueprintWorkspace";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -77,6 +83,15 @@ function detail(status: DesktopNativeCoreBlueprintDetail["status"] = "supported"
       ],
     }] : [],
   };
+}
+
+function importedSummary(id = "blueprint_48"): DesktopNativeCoreBlueprintSummary {
+  return Object.freeze({
+    ...summaries[1],
+    id,
+    name: "Host 冷重启蓝图",
+    revision: 1,
+  });
 }
 
 function frame(options: {
@@ -154,6 +169,37 @@ function renameResolution(
   });
 }
 
+function confirmedImport(
+  options: Partial<NativeBlueprintImportConfirmation> = {},
+): NativeBlueprintImportConfirmation {
+  return Object.freeze({
+    sessionId: "session-a",
+    runId: "run-a",
+    registryFingerprint: "registry-a",
+    previousRevision: 47,
+    ackRevision: 48,
+    blueprintId: "blueprint_48",
+    blueprintName: "Host 冷重启蓝图",
+    blueprintRevision: 1,
+    ...options,
+  });
+}
+
+function acceptedImport(
+  options: Partial<NativeBlueprintImportAcceptedSubmission> = {},
+) {
+  return Object.freeze({
+    success: true as const,
+    message: "已提交",
+    sessionId: "session-a",
+    runId: "run-a",
+    registryFingerprint: "registry-a",
+    commandRevision: 47,
+    blueprintId: "blueprint_48",
+    ...options,
+  });
+}
+
 function replaceInputValue(input: HTMLInputElement, value: string): void {
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
   input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -203,6 +249,21 @@ describe("NativeBlueprintWorkspace", () => {
       onSubmitQueueDeployIntent?: (binding: NativeConstructionQueueDeployBinding) => boolean;
       onBeginQueuePlacement?: (binding: NativeBlueprintEnqueueSelectionBinding) => boolean;
       onBeginDirectPlacement?: (binding: NativeBlueprintDirectDeploySelectionBinding) => boolean;
+      onSubmitImportRaw?: (raw: string) => Promise<Readonly<
+        | {
+          success: true;
+          message: string;
+          sessionId: string;
+          runId: string;
+          registryFingerprint: string;
+          commandRevision: number;
+          blueprintId: string;
+        }
+        | { success: false; message: string }
+      >>;
+      onExportBlueprint?: (
+        binding: NativeBlueprintExportBinding,
+      ) => Promise<Readonly<{ success: boolean; message: string }>>;
       pendingIdentity?: NativeBlueprintRenamePendingIdentity | null;
       transformPending?: NativeBlueprintTransformPendingCommand | null;
       recipeOverridePending?: NativeBlueprintRecipeOverridePendingCommand | null;
@@ -212,6 +273,8 @@ describe("NativeBlueprintWorkspace", () => {
       queueDeployPending?: NativeConstructionQueueDeployPendingCommand | null;
       enqueuePending?: NativeBlueprintEnqueuePendingCommand | null;
       directDeployPending?: NativeBlueprintDirectDeployPendingCommand | null;
+      importPending?: NativeBlueprintImportPendingCommand | null;
+      importConfirmation?: NativeBlueprintImportConfirmation | null;
       latestIdentity?: NativeBlueprintWorkspaceIdentity | null;
       resolution?: NativeBlueprintRenameResolution | null;
       onConsumeRenameResolution?: (submissionId: number) => void;
@@ -248,6 +311,32 @@ describe("NativeBlueprintWorkspace", () => {
       vi.fn<(binding: NativeBlueprintEnqueueSelectionBinding) => boolean>().mockReturnValue(true);
     const onBeginDirectPlacement = callbacks.onBeginDirectPlacement ??
       vi.fn<(binding: NativeBlueprintDirectDeploySelectionBinding) => boolean>().mockReturnValue(true);
+    const onSubmitImportRaw = callbacks.onSubmitImportRaw ??
+      vi.fn<(raw: string) => Promise<Readonly<
+        | {
+          success: true;
+          message: string;
+          sessionId: string;
+          runId: string;
+          registryFingerprint: string;
+          commandRevision: number;
+          blueprintId: string;
+        }
+        | { success: false; message: string }
+      >>>().mockResolvedValue(Object.freeze({
+        success: true,
+        message: "已提交",
+        sessionId: "session-a",
+        runId: "run-a",
+        registryFingerprint: "registry-a",
+        commandRevision: 47,
+        blueprintId: "blueprint_48",
+      }));
+    const onExportBlueprint = callbacks.onExportBlueprint ??
+      vi.fn<(binding: NativeBlueprintExportBinding) => Promise<Readonly<{
+        success: boolean;
+        message: string;
+      }>>>().mockResolvedValue(Object.freeze({ success: true, message: "已导出" }));
     const onConsumeRenameResolution = callbacks.onConsumeRenameResolution ?? vi.fn<(submissionId: number) => void>();
     const latestIdentity = callbacks.latestIdentity === undefined && value
       ? {
@@ -275,6 +364,8 @@ describe("NativeBlueprintWorkspace", () => {
       onSubmitQueueDeployIntent={onSubmitQueueDeployIntent}
       onBeginQueuePlacement={onBeginQueuePlacement}
       onBeginDirectPlacement={onBeginDirectPlacement}
+      onSubmitImportRaw={onSubmitImportRaw}
+      onExportBlueprint={onExportBlueprint}
       pendingIdentity={callbacks.pendingIdentity ?? null}
       transformPending={callbacks.transformPending ?? null}
       recipeOverridePending={callbacks.recipeOverridePending ?? null}
@@ -284,6 +375,8 @@ describe("NativeBlueprintWorkspace", () => {
       queueDeployPending={callbacks.queueDeployPending ?? null}
       enqueuePending={callbacks.enqueuePending ?? null}
       directDeployPending={callbacks.directDeployPending ?? null}
+      importPending={callbacks.importPending ?? null}
+      importConfirmation={callbacks.importConfirmation ?? null}
       resolution={callbacks.resolution ?? null}
       onConsumeRenameResolution={onConsumeRenameResolution}
       commandPending={callbacks.commandPending ?? false}
@@ -300,8 +393,30 @@ describe("NativeBlueprintWorkspace", () => {
       onSubmitQueueDeployIntent,
       onBeginQueuePlacement,
       onBeginDirectPlacement,
+      onSubmitImportRaw,
+      onExportBlueprint,
       onConsumeRenameResolution,
     };
+  }
+
+  async function submitVisibleImportDraft(raw = "{\"type\":\"dsp-idle-blueprint\"}"): Promise<void> {
+    act(() => host.querySelector<HTMLButtonElement>(
+      "[data-native-blueprint-action='toggle-import']",
+    )!.click());
+    const textarea = host.querySelector<HTMLTextAreaElement>(
+      "[aria-label='粘贴 Rust 原生普通蓝图交换 JSON']",
+    )!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, raw);
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      host.querySelector<HTMLButtonElement>(
+        "[data-native-blueprint-action='submit-import-raw']",
+      )!.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
   }
 
   it("renders current library and queue pages in persisted order and emits only read cursors or selection", () => {
@@ -952,6 +1067,122 @@ describe("NativeBlueprintWorkspace", () => {
     expect(host.textContent).toContain("\u4e0d\u4f1a\u8bfb\u53d6\u6216\u663e\u793a JavaScript \u4e2d\u7684\u65e7\u84dd\u56fe\u6570\u636e");
   });
 
+  it("passes only bounded raw import text and one exact selected-row export binding", async () => {
+    const onSubmitImportRaw = vi.fn(async (raw: string) => ({
+      success: true as const,
+      message: raw,
+      sessionId: "session-a",
+      runId: "run-a",
+      registryFingerprint: "registry-a",
+      commandRevision: 47,
+      blueprintId: "blueprint_48",
+    }));
+    const onExportBlueprint = vi.fn(async (_binding: NativeBlueprintExportBinding) => ({
+      success: true,
+      message: "已导出",
+    }));
+    renderWorkspace(frame(), "ready", { onSubmitImportRaw, onExportBlueprint });
+    await act(async () => {
+      host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='export-blueprint']")!.click();
+      await Promise.resolve();
+    });
+    expect(onExportBlueprint).toHaveBeenCalledOnce();
+    expect(onExportBlueprint).toHaveBeenCalledWith({
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 47,
+      registryFingerprint: "registry-a",
+      blueprintId: "mod:Ω/🚀",
+      blueprintName: "模组蓝图 Ω",
+      blueprintRevision: 4,
+    });
+
+    await submitVisibleImportDraft();
+    expect(onSubmitImportRaw).toHaveBeenCalledOnce();
+    expect(onSubmitImportRaw).toHaveBeenCalledWith("{\"type\":\"dsp-idle-blueprint\"}");
+    expect(host.querySelector<HTMLTextAreaElement>(
+      "[aria-label='粘贴 Rust 原生普通蓝图交换 JSON']",
+    )?.value).toBe("{\"type\":\"dsp-idle-blueprint\"}");
+    expect(host.querySelector("[data-native-blueprint-import='bounded-raw']")).not.toBeNull();
+
+    const confirmed = importedSummary();
+    renderWorkspace(frame({
+      revision: 48,
+      library: Object.freeze([...summaries, confirmed]),
+    }), "ready", {
+      onSubmitImportRaw,
+      onExportBlueprint,
+      importConfirmation: confirmedImport(),
+    });
+    expect(host.querySelector("[data-native-blueprint-import='bounded-raw']")).toBeNull();
+  });
+
+  it("retains an accepted import draft until pending retires and the same-lineage row reaches the ACK revision", async () => {
+    const onSubmitImportRaw = vi.fn(async () => acceptedImport());
+    renderWorkspace(frame(), "ready", { onSubmitImportRaw });
+    await submitVisibleImportDraft();
+    const library = Object.freeze([...summaries, importedSummary()]);
+
+    renderWorkspace(frame({ revision: 47, library }), "ready", {
+      onSubmitImportRaw,
+      importConfirmation: confirmedImport(),
+    });
+    expect(host.querySelector("[data-native-blueprint-import='bounded-raw']")).not.toBeNull();
+    expect(host.querySelector<HTMLTextAreaElement>(
+      "[aria-label='粘贴 Rust 原生普通蓝图交换 JSON']",
+    )?.value).toBe("{\"type\":\"dsp-idle-blueprint\"}");
+
+    const importPending = {
+      phase: "awaiting-projection",
+      receipt: { revision: 48 },
+    } as unknown as NativeBlueprintImportPendingCommand;
+    renderWorkspace(frame({ revision: 48, library }), "ready", {
+      onSubmitImportRaw,
+      importConfirmation: confirmedImport(),
+      importPending,
+    });
+    expect(host.querySelector("[data-native-blueprint-import='bounded-raw']")).not.toBeNull();
+
+    renderWorkspace(frame({ revision: 48, library }), "ready", {
+      onSubmitImportRaw,
+      importConfirmation: confirmedImport(),
+    });
+    expect(host.querySelector("[data-native-blueprint-import='bounded-raw']")).toBeNull();
+  });
+
+  it.each([
+    ["session", { sessionId: "session-b" }],
+    ["run", { runId: "run-b" }],
+    ["registry", { registryFingerprint: "registry-b" }],
+  ] as const)("does not clear an accepted import draft after %s lineage drift", async (_label, drift) => {
+    const onSubmitImportRaw = vi.fn(async () => acceptedImport());
+    renderWorkspace(frame(), "ready", { onSubmitImportRaw });
+    await submitVisibleImportDraft();
+    renderWorkspace(frame({
+      revision: 48,
+      library: Object.freeze([...summaries, importedSummary()]),
+      ...drift,
+    }), "ready", {
+      onSubmitImportRaw,
+      importConfirmation: confirmedImport(),
+    });
+    expect(host.querySelector("[data-native-blueprint-import='bounded-raw']")).not.toBeNull();
+  });
+
+  it("does not clear from a pre-existing or later-transaction row that reuses the same blueprint ID", async () => {
+    const onSubmitImportRaw = vi.fn(async () => acceptedImport());
+    const reusedLibrary = Object.freeze([...summaries, importedSummary()]);
+    renderWorkspace(frame({ library: reusedLibrary }), "ready", { onSubmitImportRaw });
+    await submitVisibleImportDraft();
+    expect(host.querySelector("[data-native-blueprint-import='bounded-raw']")).not.toBeNull();
+
+    renderWorkspace(frame({ revision: 49, library: reusedLibrary }), "ready", {
+      onSubmitImportRaw,
+      importConfirmation: confirmedImport({ previousRevision: 48, ackRevision: 49 }),
+    });
+    expect(host.querySelector("[data-native-blueprint-import='bounded-raw']")).not.toBeNull();
+  });
+
   it("keeps the implementation detached from legacy state and exposes only bounded semantic intents", () => {
     const source = readFileSync(resolve("src/components/NativeBlueprintWorkspace.tsx"), "utf8");
     expect(source).not.toMatch(/from\s+["'](?:\.\/BlueprintWorkspace|\.\.\/game\/(?:engine|types|content))["']/);
@@ -975,7 +1206,7 @@ describe("NativeBlueprintWorkspace", () => {
     act(() => host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='begin-rename']")!.click());
     for (const node of host.querySelectorAll<HTMLElement>("[data-native-blueprint-action]")) actions.add(node.dataset.nativeBlueprintAction);
     expect(actions).toEqual(new Set([
-      "close", "tab-library", "tab-queue", "select",
+      "close", "tab-library", "tab-queue", "toggle-import", "select", "export-blueprint",
       "begin-rename", "cancel-rename", "submit-rename",
       "rotate-transform", "mirror-transform", "begin-enqueue-placement", "begin-direct-deploy-placement", "delete-blueprint",
       "deploy-queue", "cancel-queue", "page-library-prev", "page-library-next", "page-queue-prev", "page-queue-next",

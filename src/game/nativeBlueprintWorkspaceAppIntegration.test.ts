@@ -76,6 +76,26 @@ describe("native blueprint workspace App integration", () => {
     fileURLToPath(new URL("./nativeBlueprintDirectDeployCommandReconciliation.ts", import.meta.url)),
     "utf8",
   );
+  const captureHook = readFileSync(
+    fileURLToPath(new URL("./useNativeBlueprintCaptureCommandTransaction.ts", import.meta.url)),
+    "utf8",
+  );
+  const captureReconciliation = readFileSync(
+    fileURLToPath(new URL("./nativeBlueprintCaptureCommandReconciliation.ts", import.meta.url)),
+    "utf8",
+  );
+  const importHook = readFileSync(
+    fileURLToPath(new URL("./useNativeBlueprintImportCommandTransaction.ts", import.meta.url)),
+    "utf8",
+  );
+  const importReconciliation = readFileSync(
+    fileURLToPath(new URL("./nativeBlueprintImportCommandReconciliation.ts", import.meta.url)),
+    "utf8",
+  );
+  const exportContext = readFileSync(
+    fileURLToPath(new URL("./nativeBlueprintExportContext.ts", import.meta.url)),
+    "utf8",
+  );
 
   it("binds every page to the active authority session, run, revision, and registry", () => {
     expect(app).toMatch(/new NativeBlueprintWorkspaceStore\(\)/);
@@ -97,7 +117,7 @@ describe("native blueprint workspace App integration", () => {
   });
 
   it("keeps the native editor owner mounted through authority handoff and admits legacy only after reconciliation", () => {
-    expect(app).toMatch(/<NativeBlueprintWorkspace[\s\S]*?open=\{blueprintsOpen && \(nativePlayerAuthorityOwnsRuntime \|\|[\s\S]*?nativeBlueprintRenamePendingIdentity !== null \|\| nativeBlueprintRenameResolution !== null \|\|[\s\S]*?nativeBlueprintTransformPending !== null \|\| nativeBlueprintRecipeOverridePending !== null \|\|[\s\S]*?nativeBlueprintDeletePending !== null \|\|[\s\S]*?nativeConstructionQueueCancelPending !== null \|\| nativeConstructionQueueFundPending !== null \|\|[\s\S]*?nativeBlueprintEnqueuePending !== null \|\| nativeBlueprintDirectDeployPending !== null\)\}/);
+    expect(app).toMatch(/<NativeBlueprintWorkspace[\s\S]*?open=\{blueprintsOpen && \(nativePlayerAuthorityOwnsRuntime \|\|[\s\S]*?nativeBlueprintRenamePendingIdentity !== null \|\| nativeBlueprintRenameResolution !== null \|\|[\s\S]*?nativeBlueprintTransformPending !== null \|\| nativeBlueprintRecipeOverridePending !== null \|\|[\s\S]*?nativeBlueprintDeletePending !== null \|\|[\s\S]*?nativeConstructionQueueCancelPending !== null \|\| nativeConstructionQueueFundPending !== null \|\|[\s\S]*?nativeConstructionQueueDeployPending !== null \|\|[\s\S]*?nativeBlueprintEnqueuePending !== null \|\| nativeBlueprintDirectDeployPending !== null \|\|[\s\S]*?nativeBlueprintImportPending !== null \|\| nativeBlueprintExportContextPending\)\}/);
     const nativeTag = app.match(/(\n\s*<NativeBlueprintWorkspace[\s\S]*?\/>)/)?.[1] ?? "";
     expect(nativeTag).toContain("status={nativeBlueprintWorkspaceSnapshot.status}");
     expect(nativeTag).toContain("frame={nativeBlueprintWorkspaceFrame}");
@@ -105,7 +125,7 @@ describe("native blueprint workspace App integration", () => {
     expect(nativeTag).toContain("onSelectBlueprint={setNativeBlueprintSelectedId}");
     expect(nativeTag).toContain("onLibraryCursorChange=");
     expect(nativeTag).toContain("onQueueCursorChange=");
-    expect(nativeTag).toMatch(/nativeBlueprintRenamePendingIdentity \|\| nativeBlueprintTransformPending \|\|[\s\S]*?nativeBlueprintRecipeOverridePending \|\| nativeBlueprintDeletePending \|\|[\s\S]*?nativeConstructionQueueCancelPending \|\| nativeConstructionQueueFundPending \|\|[\s\S]*?nativeBlueprintEnqueuePending \|\| nativeBlueprintDirectDeployPending \|\|[\s\S]*?nativePlayerAuthorityCommandPending[\s\S]*?setNativeBlueprintQueueCursor/);
+    expect(nativeTag).toMatch(/nativeBlueprintRenamePendingIdentity \|\| nativeBlueprintTransformPending \|\|[\s\S]*?nativeBlueprintRecipeOverridePending \|\| nativeBlueprintDeletePending \|\|[\s\S]*?nativeConstructionQueueCancelPending \|\| nativeConstructionQueueFundPending \|\|[\s\S]*?nativeConstructionQueueDeployPending \|\|[\s\S]*?nativeBlueprintEnqueuePending \|\| nativeBlueprintDirectDeployPending \|\|[\s\S]*?nativeBlueprintImportPending \|\|[\s\S]*?nativePlayerAuthorityCommandPending[\s\S]*?setNativeBlueprintQueueCursor/);
     expect(nativeTag).toContain("onSubmitRenameIntent={submitNativeBlueprintRenameIntent}");
     expect(nativeTag).toContain("onSubmitTransformIntent={submitNativeBlueprintTransformIntent}");
     expect(nativeTag).toContain("onSubmitRecipeOverrideIntent={submitNativeBlueprintRecipeOverrideIntent}");
@@ -124,11 +144,15 @@ describe("native blueprint workspace App integration", () => {
     expect(nativeTag).toContain("queueDeployPending={nativeConstructionQueueDeployPending}");
     expect(nativeTag).toContain("enqueuePending={nativeBlueprintEnqueuePending}");
     expect(nativeTag).toContain("directDeployPending={nativeBlueprintDirectDeployPending}");
+    expect(nativeTag).toContain("importPending={nativeBlueprintImportPending}");
+    expect(nativeTag).toContain("importConfirmation={nativeBlueprintImportConfirmation}");
+    expect(nativeTag).toContain("onSubmitImportRaw={submitNativeBlueprintImportRaw}");
+    expect(nativeTag).toContain("onExportBlueprint={exportNativeBlueprint}");
     expect(nativeTag).toContain("resolution={nativeBlueprintRenameResolution}");
     expect(nativeTag).toContain("onConsumeRenameResolution={consumeNativeBlueprintRenameResolution}");
-    expect(nativeTag).toMatch(/commandPending=\{nativePlayerAuthorityCommandPending \|\| nativeBlueprintEnqueueContextPending \|\|[\s\S]*?nativeBlueprintDirectDeployContextPending\}/);
+    expect(nativeTag).toMatch(/commandPending=\{nativePlayerAuthorityCommandPending \|\| nativeBlueprintEnqueueContextPending \|\|[\s\S]*?nativeBlueprintDirectDeployContextPending \|\| nativeBlueprintImportContextPending \|\|[\s\S]*?nativeBlueprintExportContextPending\}/);
     expect(nativeTag).not.toMatch(/\bgame=|onDeploy=|onRemove=|onRename=|onTransform=|onFund|onCancel=|onExport=|onImport=/);
-    expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintTransformPending &&[\s\S]*?!nativeBlueprintRecipeOverridePending &&[\s\S]*?!nativeBlueprintDeletePending &&[\s\S]*?!nativeConstructionQueueCancelPending &&[\s\S]*?!nativeConstructionQueueFundPending &&[\s\S]*?!nativeBlueprintEnqueuePending &&[\s\S]*?!nativeBlueprintDirectDeployPending &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace[\s\S]*?game=\{game\}[\s\S]*?onDeploy=\{deployBlueprint\}/);
+    expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintTransformPending &&[\s\S]*?!nativeBlueprintRecipeOverridePending &&[\s\S]*?!nativeBlueprintDeletePending &&[\s\S]*?!nativeConstructionQueueCancelPending &&[\s\S]*?!nativeConstructionQueueFundPending &&[\s\S]*?!nativeConstructionQueueDeployPending &&[\s\S]*?!nativeBlueprintEnqueuePending &&[\s\S]*?!nativeBlueprintDirectDeployPending &&[\s\S]*?!nativeBlueprintImportPending &&[\s\S]*?!nativeBlueprintExportContextPending &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace[\s\S]*?game=\{game\}[\s\S]*?onDeploy=\{deployBlueprint\}/);
   });
 
   it("keeps the native component detached from GameState and exposes only bounded semantic intents", () => {
@@ -281,7 +305,7 @@ describe("native blueprint workspace App integration", () => {
 
   it("routes direct placement through one click-time Rust proof and same-lineage topology confirmation", () => {
     expect(app).toMatch(/useNativeBlueprintDirectDeployCommandTransaction\(\{[\s\S]*?authority: nativeEntityRecipeAuthorityObservation,[\s\S]*?topology: nativeBlueprintDirectDeployTopologyObservation,[\s\S]*?commandInFlightRef: nativePlayerAuthorityCommandInFlightRef/);
-    expect(app).toMatch(/const beginNativeBlueprintDirectDeployPlacement = useCallback[\s\S]*?nativeBlueprintDirectDeploySelectionBindingMatchesFrame[\s\S]*?setNativeBlueprintDirectDeployPlacement\(binding\)/);
+    expect(app).toMatch(/const beginNativeBlueprintDirectDeployPlacement = useCallback[\s\S]*?nativeBlueprintDirectDeploySelectionBindingMatchesFrame[\s\S]*?enterNativeBlueprintDirectDeployPlacement\(binding\)/);
     expect(app).toMatch(/const submitNativeBlueprintDirectDeployAt = useCallback[\s\S]*?readVerifiedNativeBlueprintDirectDeployContext\([\s\S]*?identity,[\s\S]*?selection,[\s\S]*?position,[\s\S]*?commitNativeBlueprintDirectDeployCommand\(context\)/);
     expect(app).toMatch(/nativeBlueprintDirectDeployCanvasSubmitRef\.current\([\s\S]*?position,[\s\S]*?event\.clientX/);
     expect(app).toMatch(/cancelNativeBlueprintDirectDeployPlacement\(\)[\s\S]*?nativeFactoryProjectionPlanetId/);
@@ -297,6 +321,117 @@ describe("native blueprint workspace App integration", () => {
     expect(directDeployReconciliation).not.toMatch(/topology\.activePlanetId !== pending\.activePlanetId/);
     expect(directDeployReconciliation).toMatch(/topology\.registryFingerprint !== pending\.registryFingerprint/);
     expect(component).toMatch(/data-native-blueprint-action="begin-direct-deploy-placement"/);
+  });
+
+  it("captures a native selection through Rust without invoking legacy createBlueprint or commitGame", () => {
+    expect(app).toMatch(/useNativeBlueprintCaptureCommandTransaction\(\{[\s\S]*?authority: nativeEntityRecipeAuthorityObservation,[\s\S]*?membershipSource: nativeBlueprintWorkspaceSource,[\s\S]*?onConfirmed: enterNativeBlueprintDirectDeployPlacement/);
+    const nativeCaptureBlock = app.slice(
+      app.indexOf("const captureNativeSelectionAsBlueprint"),
+      app.indexOf("const copySelectionAsBlueprint"),
+    );
+    expect(nativeCaptureBlock).toMatch(/readVerifiedNativeBlueprintCaptureContext\([\s\S]*?desktopBridge,[\s\S]*?identity,[\s\S]*?selection/);
+    expect(nativeCaptureBlock).toMatch(/if \(!context\.support\.supported\)[\s\S]*?return;/);
+    expect(nativeCaptureBlock).toMatch(/commitNativeBlueprintCaptureCommand\(context\)/);
+    expect(nativeCaptureBlock).not.toMatch(/\bcreateBlueprint\b|\bcommitGame\b|\bgameRef\b|\bnextId\b/);
+
+    const copyDispatchBlock = app.slice(
+      app.indexOf("const copySelectionAsBlueprint"),
+      app.indexOf("const deployBlueprint"),
+    );
+    expect(copyDispatchBlock).toMatch(/nativePlayerAuthorityOwnsRuntimeRef\.current[\s\S]*?captureNativeSelectionAsBlueprint\(\);[\s\S]*?return;[\s\S]*?copyEntitiesAsBlueprint\(selectedEntityIds\)/);
+    expect(captureHook.match(/\.applyCommand\(/g)).toHaveLength(1);
+    expect(captureHook).toMatch(/reconcileNativeBlueprintCapturePendingCommand/);
+    const reconcileBlock = captureHook.slice(
+      captureHook.indexOf("const reconcileTransport"),
+      captureHook.indexOf("const handleDispatchFailure"),
+    );
+    expect(reconcileBlock).not.toMatch(/applyCommand\(/);
+    expect(captureReconciliation).toMatch(/\[\s*0,\s*100,\s*250,\s*500,\s*1_000,\s*2_000,/);
+    expect(captureHook).toMatch(/readVerifiedLibraryMembership/);
+    expect(captureReconciliation).toMatch(/pending\.membershipProof\.blueprintId !== pending\.expectedBlueprintId/);
+    expect(captureReconciliation).toMatch(/pending\.membershipProof\.revision !== authority\.revision/);
+
+    const legacyCaptureBlock = app.slice(
+      app.indexOf("const copyEntitiesAsBlueprint"),
+      app.indexOf("const captureNativeSelectionAsBlueprint"),
+    );
+    expect(legacyCaptureBlock).toMatch(/createBlueprint\(before, eligibleIds\)/);
+    expect(legacyCaptureBlock).toMatch(/if \(!commitGame\(\(\) => next\)\) \{[\s\S]*?playTone\("alert"\);[\s\S]*?return;[\s\S]*?setBlueprintPlacementId\(blueprintId\)/);
+  });
+
+  it("opens post-capture direct placement without weakening the public workspace entry guard", () => {
+    const internalEntryStart = app.indexOf("const enterNativeBlueprintDirectDeployPlacement");
+    const internalEntry = app.slice(
+      internalEntryStart,
+      app.indexOf("useNativeBlueprintDirectDeployCommandTransaction", internalEntryStart),
+    );
+    expect(internalEntry).toMatch(/nativePlayerAuthorityOwnsRuntimeRef\.current/);
+    expect(internalEntry).toMatch(/currentIdentity\.sessionId !== binding\.sessionId/);
+    expect(internalEntry).toMatch(/currentIdentity\.registryFingerprint !== binding\.registryFingerprint/);
+    expect(internalEntry).not.toMatch(/blueprintsOpenRef\.current|nativeBlueprintDirectDeploySelectionBindingMatchesFrame/);
+
+    const publicEntryStart = app.indexOf("const beginNativeBlueprintDirectDeployPlacement");
+    const publicEntry = app.slice(
+      publicEntryStart,
+      app.indexOf("useNativeBlueprintCaptureCommandTransaction", publicEntryStart),
+    );
+    expect(publicEntry).toMatch(/!blueprintsOpenRef\.current/);
+    expect(publicEntry).toMatch(/nativeBlueprintDirectDeploySelectionBindingMatchesFrame/);
+    expect(publicEntry).toMatch(/return enterNativeBlueprintDirectDeployPlacement\(binding\)/);
+  });
+
+  it("imports through one opaque Rust marker and exports only the Rust-provided verified exchange", () => {
+    const importStart = app.indexOf("const submitNativeBlueprintImportRaw");
+    const importBlock = app.slice(importStart, app.indexOf("const exportNativeBlueprint", importStart));
+    expect(importBlock).toMatch(/readVerifiedNativeBlueprintImportContext\(desktopBridge, identity, raw\)/);
+    expect(importBlock).toMatch(/commitNativeBlueprintImportCommand\(context\)/);
+    expect(importBlock).toMatch(/const expectedBlueprintId = context\.preparedIntent\?\.blueprint\.id[\s\S]*?setNativeBlueprintImportConfirmation\(null\)[\s\S]*?sessionId: context\.sessionId,[\s\S]*?runId: context\.runId,[\s\S]*?registryFingerprint: context\.registryFingerprint,[\s\S]*?commandRevision: context\.revision,[\s\S]*?blueprintId: expectedBlueprintId/);
+    expect(importBlock).not.toMatch(/parseBlueprintExchange|importBlueprintExchange|commitGame|nextId|gameRef/);
+    expect(app).toMatch(/useState<NativeBlueprintImportConfirmation \| null>\(null\)/);
+    expect(app).toMatch(/const confirmNativeBlueprintImport[\s\S]*?setNativeBlueprintImportConfirmation\(confirmation\)/);
+    expect(importHook).toMatch(/previousRevision: receipt\.previousRevision,[\s\S]*?ackRevision: receipt\.revision/);
+    expect(importHook.match(/\.applyCommand\(/g)).toHaveLength(1);
+    expect(importHook).toMatch(/reconcileNativeBlueprintImportPendingCommand/);
+    const reconcileBlock = importHook.slice(
+      importHook.indexOf("const reconcileTransport"),
+      importHook.indexOf("const handleDispatchFailure"),
+    );
+    expect(reconcileBlock).not.toMatch(/applyCommand\(/);
+    expect(importReconciliation).toMatch(/\[\s*0,\s*100,\s*250,\s*500,\s*1_000,\s*2_000,/);
+    expect(importHook).toMatch(/const readMembership = source\.readVerifiedLibraryMembership/);
+    expect(importHook).toMatch(/readMembership\(currentPending\.expectedBlueprintId\)/);
+    expect(component).toMatch(/importPending !== null \|\| !importConfirmation \|\| !readyFrame/);
+    expect(component).toMatch(/confirmation\.previousRevision !== accepted\.commandRevision/);
+    expect(component).toMatch(/frame\.sessionId !== accepted\.sessionId \|\| frame\.runId !== accepted\.runId/);
+    expect(component).toMatch(/frame\.registryFingerprint !== accepted\.registryFingerprint/);
+    expect(component).toMatch(/frame\.revision < confirmation\.ackRevision/);
+    expect(component).toMatch(/frame\.libraryById\.get\(accepted\.blueprintId\)/);
+
+    const exportStart = app.indexOf("const exportNativeBlueprint");
+    const exportBlock = app.slice(exportStart, app.indexOf("const copySelectionAsBlueprint", exportStart));
+    expect(exportBlock).toMatch(/readVerifiedNativeBlueprintExportContext\(desktopBridge, binding\)/);
+    expect(exportBlock).toMatch(/contents: context\.rawExchange/);
+    expect(exportBlock).toMatch(/await exportTextFile/);
+    expect(exportBlock).not.toMatch(/serializeBlueprintExchange|parseBlueprintExchange|commitGame|applyCommand|gameRef/);
+    expect(exportContext).not.toMatch(/JSON\.parse|parseBlueprintExchange|serializeBlueprintExchange/);
+    expect(component).toMatch(/data-native-blueprint-action="submit-import-raw"/);
+    expect(component).toMatch(/data-native-blueprint-action="export-blueprint"/);
+  });
+
+  it("reports Web fallback import success only after discriminated admission is committed", () => {
+    const importStart = app.indexOf("const importBlueprint = useCallback");
+    const importBlock = app.slice(importStart, app.indexOf("useEffect(() =>", importStart));
+    expect(importBlock).toMatch(/const committed = commitGame\(\(current\) => \{[\s\S]*?const imported = importBlueprintExchange\(current, result\.blueprint!\)/);
+    expect(importBlock).toMatch(/if \(!imported\.ok\) \{[\s\S]*?failureReason = imported\.reason;[\s\S]*?return current;/);
+    expect(importBlock).toMatch(/importedBlueprintId = imported\.blueprintId;[\s\S]*?return imported\.state;/);
+    expect(importBlock).toMatch(/if \(!committed \|\| !importedBlueprintId\) \{[\s\S]*?return \{ success: false, message \};[\s\S]*?const message = `已导入蓝图/);
+  });
+
+  it("never reports legacy blueprint placement success after commitGame rejects the mutation", () => {
+    const placementStart = app.indexOf("if (blueprintPlacementId) {");
+    const placementBlock = app.slice(placementStart, app.indexOf("if (!selectionMode", placementStart));
+    expect(placementBlock).toMatch(/const committed = commitGame\(\(current\) => \{[\s\S]*?return next;[\s\S]*?\}\);/);
+    expect(placementBlock).toMatch(/if \(compatible && !committed\) \{[\s\S]*?存档未改变[\s\S]*?playTone\("alert"\);[\s\S]*?return;[\s\S]*?if \(deployable\) playTone\("place"\)/);
   });
 
   it("routes exactly one semantic rename marker through durable ACK and same-lineage projection confirmation", () => {
@@ -332,6 +467,14 @@ describe("native blueprint workspace App integration", () => {
     expect(app).toMatch(/canUpgrade=\{!nativePlayerAuthorityOwnsRuntime && canUpgradeEntities/);
     expect(app).toMatch(/canUpgradeBelts=\{!nativePlayerAuthorityOwnsRuntime && selectedBelts\.some/);
     expect(app).toMatch(/if \(!nativePlayerAuthorityOwnsRuntime\) return;[\s\S]*?setBlueprintPlacementId\(null\);[\s\S]*?setBlueprintAllowOverlap\(false\);/);
+    expect(app).toMatch(/const nativeBlueprintCaptureSelection = useMemo<NativeBlueprintCaptureSelectionBinding \| null>[\s\S]*?selectedEntityIds\.length < 1 \|\| selectedEntityIds\.length > 512[\s\S]*?entityIds: Object\.freeze\(\[\.\.\.selectedEntityIds\]\)/);
+    const toolbar = app.slice(
+      app.lastIndexOf("<SelectionToolbar"),
+      app.indexOf("</SelectionToolbar>", app.lastIndexOf("<SelectionToolbar")),
+    );
+    expect(toolbar).toMatch(/unsafeActionsEnabled=\{!nativePlayerAuthorityOwnsRuntime\}/);
+    expect(toolbar).toMatch(/copyActionEnabled=\{!nativePlayerAuthorityOwnsRuntime \|\| Boolean\([\s\S]*?nativeBlueprintCaptureSelection/);
+    expect(toolbar).toMatch(/eligibleCount=\{nativePlayerAuthorityOwnsRuntime[\s\S]*?nativeBlueprintCaptureSelection\?\.entityIds\.length/);
   });
 
   it("keeps renderer memory to one library page, one queue page, and optional detail", () => {

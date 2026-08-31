@@ -3070,6 +3070,56 @@ impl CoreRegistry {
             )
     }
 
+    pub fn blueprint_capture_context(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        entity_ids: &[String],
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?
+            .blueprint_capture_context_projection(
+                expected_revision,
+                expected_registry_fingerprint,
+                entity_ids,
+            )
+    }
+
+    pub fn blueprint_import_context(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        raw: &str,
+    ) -> anyhow::Result<Value> {
+        if raw.is_empty() || raw.len() > 1_048_576 {
+            bail!("native blueprint import context raw exchange exceeds the IPC byte limit")
+        }
+        self.session(session_id)?
+            .blueprint_import_context_projection(
+                expected_revision,
+                expected_registry_fingerprint,
+                raw,
+            )
+    }
+
+    pub fn blueprint_export_context(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        blueprint_id: &str,
+        blueprint_revision: u64,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?
+            .blueprint_export_context_projection(
+                expected_revision,
+                expected_registry_fingerprint,
+                blueprint_id,
+                blueprint_revision,
+            )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn blueprint_direct_deploy_context(
         &self,
@@ -4811,6 +4861,43 @@ mod tests {
         format!("{hash:08x}")
     }
 
+    fn assert_duplicate_receipt_matches<T: serde::Serialize>(
+        duplicate: &T,
+        committed: &T,
+        label: &str,
+    ) {
+        let mut duplicate_value = serde_json::to_value(duplicate).unwrap();
+        let mut committed_value = serde_json::to_value(committed).unwrap();
+        assert_eq!(duplicate_value["duplicate"], true, "{label}: duplicate");
+        assert_eq!(committed_value["duplicate"], false, "{label}: committed");
+        duplicate_value["duplicate"] = Value::Bool(false);
+        // Runtime allocation capacities can be rebuilt more compactly after a
+        // cold reopen; they are diagnostic-only and not part of durable state.
+        for value in [&mut duplicate_value, &mut committed_value] {
+            if let Some(summary) = value.get_mut("summary").and_then(Value::as_object_mut) {
+                summary.remove("memory");
+            }
+        }
+        assert_eq!(duplicate_value, committed_value, "{label}: receipt");
+    }
+
+    fn export_test_state(
+        root: &Path,
+        registry: &CoreRegistry,
+        store: &SaveStore,
+        session_id: &str,
+        export_id: &str,
+    ) -> Value {
+        registry
+            .export_v47(store, session_id, export_id, 100)
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(
+            &std::fs::read(root.join("exports").join(format!("{export_id}.json"))).unwrap(),
+        )
+        .unwrap();
+        envelope["state"].clone()
+    }
+
     fn import_envelope() -> Vec<u8> {
         let mut plans = serde_json::Map::new();
         let mut active_orbits = serde_json::Map::new();
@@ -5700,6 +5787,76 @@ mod tests {
         serde_json::to_vec(&envelope).unwrap()
     }
 
+    fn player_authority_blueprint_capture_envelope() -> Vec<u8> {
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["entities"]
+            .as_array_mut()
+            .unwrap()
+            .extend([
+                json!({
+                    "id": "capture-left",
+                    "kind": "machine",
+                    "planetId": "home",
+                    "position": { "x": 10, "y": 20 },
+                    "interactionLocked": false,
+                    "buildingId": "arc_smelter",
+                    "powerGridId": "grid-a",
+                    "powerPriority": 2,
+                    "recipeId": null,
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": { "iron_ore": 3 },
+                    "outputs": { "iron_ingot": 2 },
+                    "progress": 0.5,
+                    "routingCursor": 0,
+                    "utilization": 0.5,
+                    "productionRate": 2
+                }),
+                json!({
+                    "id": "capture-right",
+                    "kind": "machine",
+                    "planetId": "home",
+                    "position": { "x": 12, "y": 20 },
+                    "interactionLocked": false,
+                    "buildingId": "arc_smelter",
+                    "powerGridId": "grid-a",
+                    "powerPriority": 1,
+                    "recipeId": null,
+                    "machineCount": 1,
+                    "minerCount": 0,
+                    "inputs": {},
+                    "outputs": {},
+                    "progress": 0,
+                    "routingCursor": 0,
+                    "utilization": 0,
+                    "productionRate": 0
+                }),
+            ]);
+        envelope["state"]["belts"] = json!([{
+            "id": "capture-belt",
+            "planetId": "home",
+            "source": "capture-left",
+            "target": "capture-right",
+            "itemId": "iron_ingot",
+            "lanes": 1,
+            "tier": 1,
+            "sorterTier": 1,
+            "progress": 0,
+            "priority": 2,
+            "stackSize": 1,
+            "monitorEnabled": true,
+            "routeMode": "auto",
+            "totalTransferred": 7,
+            "congestion": 0,
+            "lastFlow": 1
+        }]);
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        serde_json::to_vec(&envelope).unwrap()
+    }
+
     fn player_authority_construction_queue_deploy_envelope() -> Vec<u8> {
         let mut envelope: Value =
             serde_json::from_slice(&player_authority_blueprint_enqueue_envelope()).unwrap();
@@ -5862,6 +6019,29 @@ mod tests {
             player_authority_blueprint_enqueue_envelope(),
             player_authority_catalog(),
         )
+    }
+
+    fn player_authority_blueprint_capture_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        player_authority_fixture_from_parts(
+            player_authority_blueprint_capture_envelope(),
+            player_authority_catalog(),
+        )
+    }
+
+    fn player_authority_blueprint_import_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        player_authority_fixture_from_parts(import_envelope(), player_authority_catalog())
     }
 
     fn player_authority_construction_queue_deploy_fixture() -> (
@@ -6781,6 +6961,91 @@ mod tests {
                         "position": { "x": x, "y": y },
                         "revision": base_revision
                     }
+                }],
+                "changedEntities": [],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn player_authority_blueprint_capture_intent_command(
+        base_revision: u64,
+        command_id: &str,
+        entity_ids: &[&str],
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [{
+                    "path": ["blueprints", "intent"],
+                    "operation": "set",
+                    "value": {
+                        "kind": "capture",
+                        "entityIds": entity_ids,
+                        "revision": base_revision
+                    }
+                }],
+                "changedEntities": [],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn player_authority_blueprint_import_exchange(name: &str) -> String {
+        json!({
+            "type": "dsp-idle-blueprint",
+            "formatVersion": 2,
+            "blueprint": {
+                "id": "untrusted-source-id",
+                "name": name,
+                "revision": 77,
+                "entities": [{
+                    "key": "node_1",
+                    "buildingId": "arc_smelter",
+                    "offset": { "x": 0, "y": 0 },
+                    "machineCount": 1
+                }],
+                "resourceAnchors": [],
+                "belts": [],
+                "externalPorts": [],
+                "rotation": 0,
+                "mirror": "none",
+                "recipeOverrides": {}
+            }
+        })
+        .to_string()
+    }
+
+    fn player_authority_blueprint_import_intent_command(
+        base_revision: u64,
+        command_id: &str,
+        prepared_intent: Value,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [{
+                    "path": ["blueprints", "intent"],
+                    "operation": "set",
+                    "value": prepared_intent
                 }],
                 "changedEntities": [],
                 "addedEntities": [],
@@ -11649,6 +11914,227 @@ mod tests {
     }
 
     #[test]
+    fn blueprint_capture_context_bridge_is_exact_bounded_and_same_revision() {
+        let (_root, _store, registry, session_id, checkpoint) =
+            player_authority_blueprint_capture_fixture();
+        let entity_ids = vec!["capture-left".to_owned(), "capture-right".to_owned()];
+        let projection = registry
+            .blueprint_capture_context(
+                &session_id,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                &entity_ids,
+            )
+            .unwrap();
+        assert_eq!(projection["schemaVersion"], 1);
+        assert_eq!(projection["projectionType"], "blueprint-capture-context-v1");
+        assert_eq!(projection["source"], "native-core");
+        assert_eq!(projection["revision"], checkpoint.revision);
+        assert_eq!(projection["stateVersion"], 47);
+        assert_eq!(
+            projection["registryFingerprint"],
+            EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        );
+        assert_eq!(
+            projection["request"],
+            json!({
+                "expectedRevision": checkpoint.revision,
+                "expectedRegistryFingerprint": EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "entityIds": ["capture-left", "capture-right"]
+            })
+        );
+        assert_eq!(projection["activePlanetId"], "home");
+        assert_eq!(
+            projection["support"],
+            json!({ "supported": true, "reason": null })
+        );
+        assert_eq!(projection["expectedBlueprintId"], "blueprint_9");
+        assert_eq!(projection["expectedBlueprintName"], "蓝图 01");
+        assert_eq!(projection["expectedBlueprintRevision"], 1);
+        assert_eq!(
+            projection["limits"],
+            json!({
+                "selectionEntityIds": 512,
+                "blueprintEntities": 512,
+                "blueprintBelts": 1024,
+                "opaqueIdBytes": 512,
+                "projectionBytes": 1_048_576
+            })
+        );
+        for private_field in [
+            "sessionId",
+            "runId",
+            "blueprint",
+            "entities",
+            "belts",
+            "nextId",
+        ] {
+            assert!(projection.get(private_field).is_none(), "{private_field}");
+        }
+        assert!(
+            registry
+                .blueprint_capture_context(
+                    &session_id,
+                    checkpoint.revision + 1,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    &entity_ids,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn blueprint_import_context_bridge_is_strict_bounded_and_same_revision() {
+        let (_root, _store, registry, session_id, checkpoint) =
+            player_authority_blueprint_import_fixture();
+        let raw = player_authority_blueprint_import_exchange("Host 导入");
+        let projection = registry
+            .blueprint_import_context(
+                &session_id,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                &raw,
+            )
+            .unwrap();
+        assert_eq!(projection["schemaVersion"], 1);
+        assert_eq!(projection["projectionType"], "blueprint-import-context-v1");
+        assert_eq!(projection["source"], "native-core");
+        assert_eq!(projection["revision"], checkpoint.revision);
+        assert_eq!(projection["stateVersion"], 47);
+        assert_eq!(
+            projection["registryFingerprint"],
+            EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        );
+        assert_eq!(
+            projection["request"]["expectedRevision"],
+            checkpoint.revision
+        );
+        assert_eq!(
+            projection["request"]["expectedRegistryFingerprint"],
+            EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        );
+        assert_eq!(projection["request"]["rawBytes"], raw.len());
+        assert_eq!(
+            projection["request"]["rawSha256"].as_str().unwrap().len(),
+            64
+        );
+        assert_eq!(projection["activePlanetId"], "home");
+        assert_eq!(
+            projection["support"],
+            json!({ "supported": true, "reason": null })
+        );
+        assert_eq!(projection["preparedIntent"]["kind"], "import");
+        assert_eq!(projection["preparedIntent"]["sourceName"], "Host 导入");
+        assert_eq!(
+            projection["preparedIntent"]["blueprint"]["id"],
+            "blueprint_9"
+        );
+        assert_eq!(projection["preparedIntent"]["blueprint"]["revision"], 1);
+        assert_eq!(projection["limits"]["rawBytes"], 1_048_576);
+        assert_eq!(projection["limits"]["commandBytes"], 1_048_576);
+        let encoded = serde_json::to_string(&projection).unwrap();
+        assert!(encoded.len() <= 1_048_576);
+        assert!(!encoded.contains(&raw));
+        assert!(!encoded.contains("untrusted-source-id"));
+        assert!(
+            registry
+                .blueprint_import_context(
+                    &session_id,
+                    checkpoint.revision + 1,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    &raw,
+                )
+                .is_err()
+        );
+        assert!(
+            registry
+                .blueprint_import_context(
+                    &session_id,
+                    checkpoint.revision,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    &"x".repeat(1_048_577),
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn blueprint_export_context_bridge_is_bounded_read_only_and_survives_cold_open() {
+        let (_root, mut store, mut registry, session_id, checkpoint) =
+            player_authority_blueprint_import_fixture();
+        let raw = player_authority_blueprint_import_exchange("CON.txt");
+        let import = registry
+            .blueprint_import_context(
+                &session_id,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                &raw,
+            )
+            .unwrap();
+        let committed = registry
+            .commit_player_authority_command(
+                &mut store,
+                &session_id,
+                player_authority_blueprint_import_intent_command(
+                    checkpoint.revision,
+                    "blueprint-export-fixture-import",
+                    import["preparedIntent"].clone(),
+                ),
+            )
+            .unwrap();
+        let before = registry.status(&session_id).unwrap();
+        let export = registry
+            .blueprint_export_context(
+                &session_id,
+                committed.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "blueprint_9",
+                1,
+            )
+            .unwrap();
+        let after = registry.status(&session_id).unwrap();
+        assert_eq!(before.revision, after.revision);
+        assert_eq!(before.canonical_sha256, after.canonical_sha256);
+        assert_eq!(export["projectionType"], "blueprint-export-context-v1");
+        assert_eq!(
+            export["support"],
+            json!({ "supported": true, "reason": null })
+        );
+        assert_eq!(export["blueprintName"], "CON.txt");
+        assert_eq!(export["fileNameStem"], "_CON.txt");
+        let raw_exchange = export["rawExchange"].as_str().unwrap();
+        assert_eq!(export["rawBytes"], raw_exchange.len());
+        assert_eq!(export["rawSha256"].as_str().unwrap().len(), 64);
+        assert!(!raw_exchange.contains("exportedAt"));
+        assert!(serde_json::to_vec(&export).unwrap().len() <= 1_048_576);
+
+        drop(registry);
+        let published = store.recover("normal-main").unwrap().unwrap();
+        let mut reopened = CoreRegistry::default();
+        let opened = reopened
+            .open(
+                &store,
+                "normal-main",
+                published.generation,
+                &published.root_hash,
+                published.revision,
+                &published.registry_fingerprint,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        let cold_export = reopened
+            .blueprint_export_context(
+                &opened.session_id,
+                committed.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "blueprint_9",
+                1,
+            )
+            .unwrap();
+        assert_eq!(cold_export, export);
+    }
+
+    #[test]
     fn blueprint_direct_deploy_context_bridge_is_exact_finite_and_same_revision() {
         let (_root, _store, registry, session_id, checkpoint) =
             player_authority_blueprint_direct_deploy_fixture();
@@ -11776,6 +12262,14 @@ mod tests {
         for forbidden in [
             "construction_9",
             "ordinary-alpha@2",
+            "\"definition\"",
+            "\"construction\":",
+            "\"portableFleet\":",
+            "\"blueprintVersions\"",
+            "smelter-left",
+            "smelter-right",
+            "belt-link",
+            "machineCount",
             "blueprintName",
             "queuedAt",
             "rotation",
@@ -11841,6 +12335,30 @@ mod tests {
         assert_eq!(reopened.replayed_wal_entries, 1);
         assert_eq!(reopened.replayed_revision, committed.revision);
         assert_eq!(reopened.summary.canonical_sha256, live_hash);
+        let duplicate_request = player_authority_blueprint_enqueue_intent_command(
+            checkpoint.revision,
+            "blueprint-enqueue-generic-wal",
+            "ordinary-alpha",
+            2,
+            20.25,
+            30.5,
+        );
+        let duplicate = reopened_registry
+            .commit_operation(
+                &reopened_store,
+                &reopened.session_id,
+                CoreCommitOperationRequest {
+                    command_id: duplicate_request.command_id,
+                    base_revision: checkpoint.revision,
+                    command: Some(duplicate_request.command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        assert_duplicate_receipt_matches(&duplicate, &committed, "generic cold-WAL reopen");
         reopened_registry
             .export_v47(
                 &reopened_store,
@@ -11854,6 +12372,145 @@ mod tests {
         )
         .unwrap();
         assert_eq!(replayed["state"], live_state);
+        assert_eq!(
+            replayed["state"]["constructionQueue"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn blueprint_enqueue_is_idempotent_across_all_host_fault_boundaries() {
+        let command_id = "blueprint-enqueue-durable-boundary";
+        let (clean_root, mut clean_store, mut clean_registry, clean_session, checkpoint) =
+            player_authority_blueprint_enqueue_fixture();
+        let request = || {
+            player_authority_blueprint_enqueue_intent_command(
+                checkpoint.revision,
+                command_id,
+                "ordinary-alpha",
+                2,
+                20.25,
+                30.5,
+            )
+        };
+        let clean = clean_registry
+            .commit_player_authority_command(&mut clean_store, &clean_session, request())
+            .unwrap();
+        assert!(clean.changed_entity_ids.is_empty());
+        assert!(clean.changed_belt_ids.is_empty());
+        assert!(clean.topology_dirty);
+        let clean_state = export_test_state(
+            clean_root.path(),
+            &clean_registry,
+            &clean_store,
+            &clean_session,
+            "blueprint-enqueue-clean",
+        );
+        assert_eq!(clean_state["nextId"], 10);
+        assert_eq!(
+            clean_state["constructionQueue"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(clean_state["constructionQueue"][0]["id"], "construction_9");
+
+        let duplicate = clean_registry
+            .commit_player_authority_command(&mut clean_store, &clean_session, request())
+            .unwrap();
+        assert_duplicate_receipt_matches(&duplicate, &clean, "same-process duplicate");
+        let duplicate_state = export_test_state(
+            clean_root.path(),
+            &clean_registry,
+            &clean_store,
+            &clean_session,
+            "blueprint-enqueue-duplicate",
+        );
+        assert_eq!(duplicate_state, clean_state);
+
+        for fault in [
+            PlayerAuthorityCommandFault::AfterStage,
+            PlayerAuthorityCommandFault::AfterWal,
+            PlayerAuthorityCommandFault::AfterCheckpoint,
+            PlayerAuthorityCommandFault::AfterReceipt,
+            PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
+        ] {
+            let (root, mut store, mut registry, session_id, checkpoint) =
+                player_authority_blueprint_enqueue_fixture();
+            let before = registry.status(&session_id).unwrap();
+            let request = || {
+                player_authority_blueprint_enqueue_intent_command(
+                    checkpoint.revision,
+                    command_id,
+                    "ordinary-alpha",
+                    2,
+                    20.25,
+                    30.5,
+                )
+            };
+            let error = registry
+                .commit_player_authority_command_internal(
+                    &mut store,
+                    &session_id,
+                    request(),
+                    PlayerAuthorityCommandKind::Gameplay,
+                    fault,
+                )
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("lost response"),
+                "{fault:?}: {error:#}"
+            );
+            if fault == PlayerAuthorityCommandFault::AfterStage {
+                let after = registry.status(&session_id).unwrap();
+                assert_eq!(after.revision, before.revision);
+                assert_eq!(after.canonical_sha256, before.canonical_sha256);
+            }
+
+            drop(registry);
+            let published = store.recover("normal-main").unwrap().unwrap();
+            let mut reopened = CoreRegistry::default();
+            let opened = reopened
+                .open(
+                    &store,
+                    "normal-main",
+                    published.generation,
+                    &published.root_hash,
+                    published.revision,
+                    &published.registry_fingerprint,
+                    player_authority_catalog(),
+                )
+                .unwrap();
+            let recovered = reopened
+                .commit_player_authority_command(&mut store, &opened.session_id, request())
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
+            assert_duplicate_receipt_matches(&recovered, &clean, &format!("{fault:?}"));
+            assert_eq!(recovered.revision, clean.revision, "{fault:?}");
+            assert_eq!(
+                recovered.summary.canonical_sha256, clean.summary.canonical_sha256,
+                "{fault:?}"
+            );
+            let recovered_state = export_test_state(
+                root.path(),
+                &reopened,
+                &store,
+                &opened.session_id,
+                &format!("blueprint-enqueue-recovered-{fault:?}"),
+            );
+            assert_eq!(recovered_state, clean_state, "{fault:?}");
+            assert_eq!(
+                recovered_state["constructionQueue"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1,
+                "{fault:?}"
+            );
+            let lease = store.require_exact_realtime_lease().unwrap();
+            assert_eq!(lease.acknowledged.revision, recovered.revision, "{fault:?}");
+            assert!(lease.pending_command.is_none(), "{fault:?}");
+        }
     }
 
     #[test]
@@ -12030,6 +12687,577 @@ mod tests {
         )
         .unwrap();
         assert_eq!(replayed["state"], live_state);
+    }
+
+    #[test]
+    fn blueprint_import_prepared_intent_survives_generic_cold_wal_without_blob_store() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = import_envelope();
+        let source: Value = serde_json::from_slice(&bytes).unwrap();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        let checkpoint = imported.checkpoint.clone();
+        let raw = player_authority_blueprint_import_exchange("冷重放蓝图");
+        let context = registry
+            .blueprint_import_context(
+                &imported.session_id,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                &raw,
+            )
+            .unwrap();
+        let prepared = context["preparedIntent"].clone();
+        let request = player_authority_blueprint_import_intent_command(
+            checkpoint.revision,
+            "blueprint-import-generic-wal",
+            prepared,
+        );
+        let committed = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: request.command_id,
+                    base_revision: checkpoint.revision,
+                    command: Some(request.command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(committed.revision, checkpoint.revision + 1);
+
+        let wal = store
+            .read_wal(&checkpoint.slot, checkpoint.revision)
+            .unwrap();
+        assert_eq!(wal.len(), 1);
+        let wal_payload = serde_json::to_string(&wal).unwrap();
+        assert!(wal_payload.contains("\"kind\":\"import\""));
+        assert!(wal_payload.contains("冷重放蓝图"));
+        assert!(wal_payload.contains("blueprint_9"));
+        assert!(wal_payload.contains("blueprintSha256"));
+        assert!(!wal_payload.contains("untrusted-source-id"));
+        assert!(!wal_payload.contains(&raw));
+
+        registry
+            .export_v47(&store, &imported.session_id, "blueprint-import-live", 100)
+            .unwrap();
+        let live: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/blueprint-import-live.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(live["state"]["nextId"], 10);
+        assert_eq!(live["state"]["blueprints"].as_array().unwrap().len(), 1);
+        assert_eq!(live["state"]["blueprints"][0]["id"], "blueprint_9");
+        assert_eq!(live["state"]["blueprints"][0]["name"], "冷重放蓝图");
+        assert_eq!(live["state"]["entities"], source["state"]["entities"]);
+        assert_eq!(live["state"]["belts"], source["state"]["belts"]);
+        assert_eq!(
+            live["state"]["constructionQueue"],
+            source["state"]["constructionQueue"]
+        );
+        let live_state = live["state"].clone();
+        let live_hash = committed.summary.as_ref().unwrap().canonical_sha256.clone();
+
+        drop(registry);
+        drop(store);
+        let reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = CoreRegistry::default();
+        let reopened = reopened_registry
+            .open(
+                &reopened_store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        assert_eq!(reopened.replayed_wal_entries, 1);
+        assert_eq!(reopened.replayed_revision, committed.revision);
+        assert_eq!(reopened.summary.canonical_sha256, live_hash);
+        let membership = reopened_registry
+            .blueprint_workspace_projection(
+                &reopened.session_id,
+                committed.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "library-membership",
+                Some("blueprint_9"),
+                None,
+                0,
+                32,
+            )
+            .unwrap();
+        assert_eq!(membership["page"]["rows"], json!([{ "id": "blueprint_9" }]));
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &reopened.session_id,
+                "blueprint-import-replayed",
+                100,
+            )
+            .unwrap();
+        let replayed: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/blueprint-import-replayed.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replayed["state"], live_state);
+    }
+
+    #[test]
+    fn blueprint_capture_semantic_intent_survives_generic_cold_wal_and_membership_reopen() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = player_authority_blueprint_capture_envelope();
+        let source: Value = serde_json::from_slice(&bytes).unwrap();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        let checkpoint = imported.checkpoint.clone();
+        let request = player_authority_blueprint_capture_intent_command(
+            checkpoint.revision,
+            "blueprint-capture-generic-wal",
+            &["capture-left", "capture-right"],
+        );
+        let committed = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: request.command_id,
+                    base_revision: checkpoint.revision,
+                    command: Some(request.command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(committed.revision, checkpoint.revision + 1);
+
+        let wal = store
+            .read_wal(&checkpoint.slot, checkpoint.revision)
+            .unwrap();
+        assert_eq!(wal.len(), 1);
+        let wal_payload = serde_json::to_string(&wal).unwrap();
+        assert!(wal_payload.contains("blueprints"));
+        assert!(wal_payload.contains("\"kind\":\"capture\""));
+        assert!(wal_payload.contains("capture-left"));
+        assert!(wal_payload.contains("capture-right"));
+        for forbidden in [
+            "blueprint_9",
+            "蓝图 01",
+            "arc_smelter",
+            "iron_ingot",
+            "capture-belt",
+            "machineCount",
+            "sourceKey",
+            "recipeOverrides",
+            "nextId",
+        ] {
+            assert!(!wal_payload.contains(forbidden), "{forbidden}");
+        }
+
+        let membership = registry
+            .blueprint_workspace_projection(
+                &imported.session_id,
+                committed.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "library-membership",
+                Some("blueprint_9"),
+                None,
+                0,
+                32,
+            )
+            .unwrap();
+        assert_eq!(membership["page"]["rows"], json!([{ "id": "blueprint_9" }]));
+        assert_eq!(membership["page"]["totalCount"], 1);
+
+        registry
+            .export_v47(&store, &imported.session_id, "blueprint-capture-live", 100)
+            .unwrap();
+        let live_bytes =
+            std::fs::read(root.path().join("exports/blueprint-capture-live.json")).unwrap();
+        let live: Value = serde_json::from_slice(&live_bytes).unwrap();
+        assert_eq!(live["state"]["nextId"], 10);
+        assert_eq!(live["state"]["entities"], source["state"]["entities"]);
+        assert_eq!(live["state"]["belts"], source["state"]["belts"]);
+        assert_eq!(
+            live["state"]["constructionQueue"],
+            source["state"]["constructionQueue"]
+        );
+        let blueprints = live["state"]["blueprints"].as_array().unwrap();
+        assert_eq!(blueprints.len(), 1);
+        assert_eq!(blueprints[0]["id"], "blueprint_9");
+        assert_eq!(blueprints[0]["name"], "蓝图 01");
+        assert_eq!(blueprints[0]["revision"], 1);
+        assert_eq!(blueprints[0]["entities"].as_array().unwrap().len(), 2);
+        assert_eq!(blueprints[0]["belts"].as_array().unwrap().len(), 1);
+        assert!(
+            !String::from_utf8(live_bytes)
+                .unwrap()
+                .contains("\"kind\":\"capture\"")
+        );
+        let live_state = live["state"].clone();
+        let live_hash = committed.summary.as_ref().unwrap().canonical_sha256.clone();
+
+        drop(registry);
+        drop(store);
+        let reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = CoreRegistry::default();
+        let reopened = reopened_registry
+            .open(
+                &reopened_store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        assert_eq!(reopened.replayed_wal_entries, 1);
+        assert_eq!(reopened.replayed_revision, committed.revision);
+        assert_eq!(reopened.summary.canonical_sha256, live_hash);
+        let reopened_membership = reopened_registry
+            .blueprint_workspace_projection(
+                &reopened.session_id,
+                committed.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "library-membership",
+                Some("blueprint_9"),
+                None,
+                0,
+                32,
+            )
+            .unwrap();
+        assert_eq!(
+            reopened_membership["page"]["rows"],
+            json!([{ "id": "blueprint_9" }])
+        );
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &reopened.session_id,
+                "blueprint-capture-replayed",
+                100,
+            )
+            .unwrap();
+        let replayed: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/blueprint-capture-replayed.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replayed["state"], live_state);
+    }
+
+    #[test]
+    fn blueprint_capture_is_idempotent_across_all_host_fault_boundaries() {
+        let command_id = "blueprint-capture-durable-boundary";
+        let (_clean_root, mut clean_store, mut clean_registry, clean_session, checkpoint) =
+            player_authority_blueprint_capture_fixture();
+        let request = || {
+            player_authority_blueprint_capture_intent_command(
+                checkpoint.revision,
+                command_id,
+                &["capture-left", "capture-right"],
+            )
+        };
+        let clean = clean_registry
+            .commit_player_authority_command(&mut clean_store, &clean_session, request())
+            .unwrap();
+        assert!(clean.changed_entity_ids.is_empty());
+        assert!(clean.changed_belt_ids.is_empty());
+        assert!(clean.topology_dirty);
+        let duplicate = clean_registry
+            .commit_player_authority_command(&mut clean_store, &clean_session, request())
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.revision, clean.revision);
+        assert_eq!(
+            duplicate.summary.canonical_sha256,
+            clean.summary.canonical_sha256
+        );
+
+        for fault in [
+            PlayerAuthorityCommandFault::AfterStage,
+            PlayerAuthorityCommandFault::AfterWal,
+            PlayerAuthorityCommandFault::AfterCheckpoint,
+            PlayerAuthorityCommandFault::AfterReceipt,
+            PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
+        ] {
+            let (root, mut store, mut registry, session_id, checkpoint) =
+                player_authority_blueprint_capture_fixture();
+            let before = registry.status(&session_id).unwrap();
+            let request = || {
+                player_authority_blueprint_capture_intent_command(
+                    checkpoint.revision,
+                    command_id,
+                    &["capture-left", "capture-right"],
+                )
+            };
+            let error = registry
+                .commit_player_authority_command_internal(
+                    &mut store,
+                    &session_id,
+                    request(),
+                    PlayerAuthorityCommandKind::Gameplay,
+                    fault,
+                )
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("lost response"),
+                "{fault:?}: {error:#}"
+            );
+            if fault == PlayerAuthorityCommandFault::AfterStage {
+                let after = registry.status(&session_id).unwrap();
+                assert_eq!(after.revision, before.revision);
+                assert_eq!(after.canonical_sha256, before.canonical_sha256);
+            }
+
+            drop(registry);
+            let published = store.recover("normal-main").unwrap().unwrap();
+            let mut reopened = CoreRegistry::default();
+            let opened = reopened
+                .open(
+                    &store,
+                    "normal-main",
+                    published.generation,
+                    &published.root_hash,
+                    published.revision,
+                    &published.registry_fingerprint,
+                    player_authority_catalog(),
+                )
+                .unwrap();
+            let recovered = reopened
+                .commit_player_authority_command(&mut store, &opened.session_id, request())
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
+            assert!(recovered.duplicate, "{fault:?}");
+            assert_eq!(recovered.revision, clean.revision, "{fault:?}");
+            assert_eq!(
+                recovered.summary.canonical_sha256, clean.summary.canonical_sha256,
+                "{fault:?}"
+            );
+            assert!(recovered.changed_entity_ids.is_empty(), "{fault:?}");
+            assert!(recovered.changed_belt_ids.is_empty(), "{fault:?}");
+            assert!(recovered.topology_dirty, "{fault:?}");
+            let membership = reopened
+                .blueprint_workspace_projection(
+                    &opened.session_id,
+                    recovered.revision,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    "library-membership",
+                    Some("blueprint_9"),
+                    None,
+                    0,
+                    32,
+                )
+                .unwrap();
+            assert_eq!(
+                membership["page"]["rows"],
+                json!([{ "id": "blueprint_9" }]),
+                "{fault:?}"
+            );
+            reopened
+                .export_v47(
+                    &store,
+                    &opened.session_id,
+                    "blueprint-capture-recovered",
+                    100,
+                )
+                .unwrap();
+            let recovered_export: Value = serde_json::from_slice(
+                &std::fs::read(root.path().join("exports/blueprint-capture-recovered.json"))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(recovered_export["state"]["nextId"], 10, "{fault:?}");
+            assert_eq!(
+                recovered_export["state"]["blueprints"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1,
+                "{fault:?}"
+            );
+            let lease = store.require_exact_realtime_lease().unwrap();
+            assert_eq!(lease.acknowledged.revision, recovered.revision, "{fault:?}");
+            assert!(lease.pending_command.is_none(), "{fault:?}");
+        }
+    }
+
+    #[test]
+    fn blueprint_import_is_idempotent_across_all_host_fault_boundaries() {
+        let command_id = "blueprint-import-durable-boundary";
+        let (_clean_root, mut clean_store, mut clean_registry, clean_session, checkpoint) =
+            player_authority_blueprint_import_fixture();
+        let raw = player_authority_blueprint_import_exchange("故障恢复蓝图");
+        let clean_context = clean_registry
+            .blueprint_import_context(
+                &clean_session,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                &raw,
+            )
+            .unwrap();
+        let prepared = clean_context["preparedIntent"].clone();
+        let request = || {
+            player_authority_blueprint_import_intent_command(
+                checkpoint.revision,
+                command_id,
+                prepared.clone(),
+            )
+        };
+        let clean = clean_registry
+            .commit_player_authority_command(&mut clean_store, &clean_session, request())
+            .unwrap();
+        assert!(clean.changed_entity_ids.is_empty());
+        assert!(clean.changed_belt_ids.is_empty());
+        assert!(clean.topology_dirty);
+        let duplicate = clean_registry
+            .commit_player_authority_command(&mut clean_store, &clean_session, request())
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.revision, clean.revision);
+        assert_eq!(
+            duplicate.summary.canonical_sha256,
+            clean.summary.canonical_sha256
+        );
+
+        for fault in [
+            PlayerAuthorityCommandFault::AfterStage,
+            PlayerAuthorityCommandFault::AfterWal,
+            PlayerAuthorityCommandFault::AfterCheckpoint,
+            PlayerAuthorityCommandFault::AfterReceipt,
+            PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
+        ] {
+            let (root, mut store, mut registry, session_id, checkpoint) =
+                player_authority_blueprint_import_fixture();
+            let raw = player_authority_blueprint_import_exchange("故障恢复蓝图");
+            let context = registry
+                .blueprint_import_context(
+                    &session_id,
+                    checkpoint.revision,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    &raw,
+                )
+                .unwrap();
+            let prepared = context["preparedIntent"].clone();
+            let request = || {
+                player_authority_blueprint_import_intent_command(
+                    checkpoint.revision,
+                    command_id,
+                    prepared.clone(),
+                )
+            };
+            let before = registry.status(&session_id).unwrap();
+            let error = registry
+                .commit_player_authority_command_internal(
+                    &mut store,
+                    &session_id,
+                    request(),
+                    PlayerAuthorityCommandKind::Gameplay,
+                    fault,
+                )
+                .unwrap_err();
+            assert!(
+                format!("{error:#}").contains("lost response"),
+                "{fault:?}: {error:#}"
+            );
+            if fault == PlayerAuthorityCommandFault::AfterStage {
+                let after = registry.status(&session_id).unwrap();
+                assert_eq!(after.revision, before.revision);
+                assert_eq!(after.canonical_sha256, before.canonical_sha256);
+            }
+
+            drop(registry);
+            let published = store.recover("normal-main").unwrap().unwrap();
+            let mut reopened = CoreRegistry::default();
+            let opened = reopened
+                .open(
+                    &store,
+                    "normal-main",
+                    published.generation,
+                    &published.root_hash,
+                    published.revision,
+                    &published.registry_fingerprint,
+                    player_authority_catalog(),
+                )
+                .unwrap();
+            let recovered = reopened
+                .commit_player_authority_command(&mut store, &opened.session_id, request())
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
+            assert!(recovered.duplicate, "{fault:?}");
+            assert_eq!(recovered.revision, clean.revision, "{fault:?}");
+            assert_eq!(
+                recovered.summary.canonical_sha256, clean.summary.canonical_sha256,
+                "{fault:?}"
+            );
+            assert!(recovered.changed_entity_ids.is_empty(), "{fault:?}");
+            assert!(recovered.changed_belt_ids.is_empty(), "{fault:?}");
+            assert!(recovered.topology_dirty, "{fault:?}");
+            let membership = reopened
+                .blueprint_workspace_projection(
+                    &opened.session_id,
+                    recovered.revision,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    "library-membership",
+                    Some("blueprint_9"),
+                    None,
+                    0,
+                    32,
+                )
+                .unwrap();
+            assert_eq!(
+                membership["page"]["rows"],
+                json!([{ "id": "blueprint_9" }]),
+                "{fault:?}"
+            );
+            reopened
+                .export_v47(
+                    &store,
+                    &opened.session_id,
+                    "blueprint-import-recovered",
+                    100,
+                )
+                .unwrap();
+            let recovered_export: Value = serde_json::from_slice(
+                &std::fs::read(root.path().join("exports/blueprint-import-recovered.json"))
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(recovered_export["state"]["nextId"], 10, "{fault:?}");
+            assert_eq!(
+                recovered_export["state"]["blueprints"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                1,
+                "{fault:?}"
+            );
+            let lease = store.require_exact_realtime_lease().unwrap();
+            assert_eq!(lease.acknowledged.revision, recovered.revision, "{fault:?}");
+            assert!(lease.pending_command.is_none(), "{fault:?}");
+        }
     }
 
     #[test]

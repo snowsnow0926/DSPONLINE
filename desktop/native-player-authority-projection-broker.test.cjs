@@ -75,6 +75,18 @@ function fixture(initialSnapshot = {}) {
       calls.push(["blueprint-workspace-v1", ownerId, request]);
       return { projectionType: "blueprint-workspace-v1", schemaVersion: 1, revision: request.expectedRevision };
     },
+    async blueprintCaptureContext(ownerId, request) {
+      calls.push(["blueprint-capture-context-v1", ownerId, request]);
+      return { projectionType: "blueprint-capture-context-v1", schemaVersion: 1, revision: request.expectedRevision };
+    },
+    async blueprintImportContext(ownerId, request) {
+      calls.push(["blueprint-import-context-v1", ownerId, request]);
+      return { projectionType: "blueprint-import-context-v1", schemaVersion: 1, revision: request.expectedRevision };
+    },
+    async blueprintExportContext(ownerId, request) {
+      calls.push(["blueprint-export-context-v1", ownerId, request]);
+      return { projectionType: "blueprint-export-context-v1", schemaVersion: 1, revision: request.expectedRevision };
+    },
     async blueprintEnqueueContext(ownerId, request) {
       calls.push(["blueprint-enqueue-context-v1", ownerId, request]);
       return { projectionType: "blueprint-enqueue-context-v1", schemaVersion: 1, revision: request.expectedRevision };
@@ -129,7 +141,7 @@ function fixture(initialSnapshot = {}) {
 
 test("active same-session same-revision reads use only the main owner identity", async () => {
   const value = fixture();
-  for (const projectionType of ["viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "blueprint-workspace-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "command-palette-entity-search-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"]) {
+  for (const projectionType of ["viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "blueprint-workspace-v1", "blueprint-capture-context-v1", "blueprint-import-context-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "command-palette-entity-search-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"]) {
     const request = { sessionId: "core-main-1", expectedRevision: 17 };
     const result = await value.broker.read(23, projectionType, request);
     assert.equal(result.revision, 17);
@@ -149,6 +161,9 @@ test("active same-session same-revision reads use only the main owner identity",
     ["technology-v1", "main-player-authority"],
     ["recipe-workspace-v1", "main-player-authority"],
     ["blueprint-workspace-v1", "main-player-authority"],
+    ["blueprint-capture-context-v1", "main-player-authority"],
+    ["blueprint-import-context-v1", "main-player-authority"],
+    ["blueprint-export-context-v1", "main-player-authority"],
     ["blueprint-enqueue-context-v1", "main-player-authority"],
     ["blueprint-direct-deploy-context-v1", "main-player-authority"],
     ["command-palette-entity-search-v1", "main-player-authority"],

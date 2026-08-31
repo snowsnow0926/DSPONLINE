@@ -480,6 +480,45 @@ describe("NativeBlueprintWorkspaceStore", () => {
     await expect(sourceValue.readVerifiedQueueMembership(target)).resolves.toBeNull();
   });
 
+  it("returns a target-bound same-revision whole-library membership proof", async () => {
+    const target = "blueprint_17";
+    const present = projection(
+      IDENTITY,
+      "library-membership",
+      target,
+      0,
+      [{ id: target }],
+      { library: 40, queue: 3 },
+      1,
+    );
+    const reader = vi.fn().mockResolvedValue(present);
+    const sourceValue = createNativePlayerAuthorityBlueprintWorkspaceSource({
+      getNativeCoreBlueprintWorkspace: reader,
+    }, IDENTITY)!;
+
+    await expect(sourceValue.readVerifiedLibraryMembership?.(target)).resolves.toEqual({
+      ...IDENTITY,
+      blueprintId: target,
+      present: true,
+    });
+    expect(reader).toHaveBeenCalledWith({
+      sessionId: IDENTITY.sessionId,
+      expectedRevision: IDENTITY.revision,
+      expectedRegistryFingerprint: IDENTITY.registryFingerprint,
+      section: "library-membership",
+      blueprintId: target,
+      queueEntryId: null,
+      cursor: 0,
+      limit: 32,
+    });
+
+    reader.mockResolvedValueOnce({
+      ...present,
+      request: { ...present.request, blueprintId: "blueprint_18" },
+    });
+    await expect(sourceValue.readVerifiedLibraryMembership?.(target)).resolves.toBeNull();
+  });
+
   it("fails closed for a mismatched source identity", async () => {
     const store = new NativeBlueprintWorkspaceStore();
     const wrong = fixtureSource({ ...IDENTITY, sessionId: "other" }, [], []);

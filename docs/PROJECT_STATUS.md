@@ -1,5 +1,11 @@
 # DSP极简网络项目现状
 
+> **Windows Rust ordinary 蓝图完整生命周期（2026-09-01，开发候选，未发布）**：普通内置蓝图的 capture、严格 import、只读 export、direct deploy、queue-only enqueue、fund、queued deploy 和 cancel 已在同一条 Rust/Host/薄 UI 链中闭合。import/export 统一限制 512 entities、1,024 belts、1 MiB 和 64 library rows；Rust 独占解析、规范化、目录语义和跨实体/线路/蓝图/版本/队列八个持久 ID 域的分配复检。WAL 只保存已验证的语义 marker，live、cold-WAL、重复 command ID 与五个故障边界保持同状态/哈希；UI 一次操作只发一次 mutation，未知结果只做六次只读 receipt 对账，并在连续 ACK 后等待同 lineage/registry 的精确成员证明。拒绝保存时不会播放成功反馈或进入放置态。
+>
+> 独立审计结论为该开发切片 **GO、未发现 P0/P1**。当前最终组合源码已通过 Rust `1038/1038`、Windows native/desktop `491` 通过/`1` 个 symlink 权限条件跳过/`0` 失败、UI focused `190/190`、Node focused `58/58`、fresh Release Host integration `6/6`、完整 Vitest `2851` 通过/`28` 条件跳过/`0` 失败，以及 typecheck、Rust fmt、strict clippy、diff check 和 production build。生产构建为 2,088 modules，startup 总 gzip `180,576 B`、JavaScript `86,989 B`、CSS `93,587 B`、最大启动 JavaScript `58,974 B`、menu `257,943 B`、forbidden startup module `0`。完整 Chromium 与 durable E2E 的本轮最终计数记录在 `TESTING_RELEASE.md`；desktop pack/install/覆盖升级、24 小时、多硬件、真实 Defender/磁盘、签名和灰度仍是正式发布 No-Go 门禁。固定进度暂保持 `Rust 83% / 薄 UI 96% / O(active) 96% / 并行 72% / 综合开发 88% / 发布成熟度 60%`，不因单个工作包人为跳点。
+>
+> 本切片没有改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`，也没有连接生产、部署、签名或读取/修改真实玩家存档。MOD、resource anchor、external port、空间站/舰队与其他特殊蓝图仍失败关闭；下一大块是恒星系空间站有界原生投影与命令，而不是放宽普通蓝图域。
+
 > **Windows Rust ordinary 蓝图直接部署（2026-08-31，开发候选，未发布）**：原生蓝图工作区新增“直接部署”，但按钮只进入画布定位；实际点击时 renderer 以当前 session/run/revision、registry fingerprint、蓝图 ID/行 revision 和有限坐标请求 `blueprint-direct-deploy-context-v1`。Rust 在同 revision 返回绑定活动陆地行星与支持结论的有界 context；随后唯一允许的 durable marker 为 `{kind:"direct-deploy",blueprintId,blueprintRevision,position:{x,y},revision}`，不包含 planet、蓝图正文、材料表、余额、实体/线路正文、生成 ID 或 `nextId`。
 >
 > Rust 会从当前 live blueprint、内置 catalog、完成科技和权威 `construction` 重新推导完整 ordinary 需求，并在一次事务中全额扣料、按当前 `nextId` 先实体后线路确定性分配 ID、生成规范拓扑并只递增一次 authority revision。它不创建 `constructionQueue` 行、不创建 immutable queue version，也没有“材料不足或语义不支持时自动入队”的隐式回退；缺料、MOD/命名空间目录、非陆地活动行星、特殊建筑、resource anchor、external port、目录/行 revision 漂移、allocator 碰撞或耗尽均原子失败，库存、队列、拓扑、revision 和规范哈希保持不变。
@@ -14,7 +20,7 @@
 >
 > UI 不乐观删除订单，也不自动重发 mutation。未知结果固定六次只读 receipt reconciliation；连续 `R+1`、空 dirty IDs、`topologyDirty=true` 的 ACK 之后，仍需同 lineage/registry、当前或更晚 revision 的精确全队列 `present=false` 证明才解锁。当前新跑 typecheck、diff check、前端 `95/95`、桌面投影 `8/8`、完整 Vitest `2704` 通过/`28` 条件跳过/`0` 失败；Rust Core `803/803`、Host library `188/188`、Host main `1/1`，合计 `992/992`，fmt 与 strict clippy 通过。Windows native/desktop `489/1/0`；production build 2,073 modules，startup gzip `180,401 B`、menu `257,769 B`、forbidden `0`；完整 Chromium `433/27/0`（7.0 分钟），durable E2E `7/7`（50.7 秒）。固定进度暂不人为跳点，仍为 `Rust 83% / 薄 UI 96% / O(active) 96% / 并行 72% / 综合开发 88% / 发布成熟度 60%`。
 >
-> 当前限制仍包括 MOD、空间站/舰队、资源锚点、外部端口、特殊建筑、部分放置和 exact overlap；自动队列调度、blueprint capture/import/direct deploy 仍未迁移。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 不变，`authorityEligible=false`；本工作树未签名、未部署、未连接生产，也未读取或修改真实玩家存档。
+> 当前限制仍包括 MOD、空间站/舰队、资源锚点、外部端口、特殊建筑、部分放置和 exact overlap；自动队列调度仍未迁移，ordinary blueprint capture/import/direct deploy 已由上方 2026-09-01 完整生命周期切片闭合。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 不变，`authorityEligible=false`；本工作树未签名、未部署、未连接生产，也未读取或修改真实玩家存档。
 
 > **Windows Rust 待建施工领料（2026-08-31，开发候选，未发布）**：queue-only 蓝图入队后的下一段写链已经迁到 Rust。原生队列行新增“补充全部”，但这一步只从权威施工库存计算、扣取并预留当前可用材料，不创建实体/线路、不自动部署。WAL 只保存 `{kind:"fund",id,scope,revision}`；需求明细、库存数和预留结果由 Rust 在 live、generic replay 与冷恢复时重新推导。
 >

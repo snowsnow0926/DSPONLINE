@@ -112,6 +112,10 @@ const UNSUPPORTED_ORDINARY_PLACEMENT_BUILDINGS: &[&str] = &[
     "time_warp_device",
 ];
 
+pub(crate) fn ordinary_placement_building_domain_supported(building_id: &str) -> bool {
+    !UNSUPPORTED_ORDINARY_PLACEMENT_BUILDINGS.contains(&building_id)
+}
+
 const UNSUPPORTED_ORDINARY_REMOVAL_BUILDINGS: &[&str] = &[
     "construction_center",
     "galactic_material_exporter",
@@ -874,7 +878,7 @@ pub(crate) fn ordinary_placement_support_reason_on_planet(
             OrdinaryPlacementUnsupportedReason::UnsupportedBuildingKind,
         ));
     }
-    if UNSUPPORTED_ORDINARY_PLACEMENT_BUILDINGS.contains(&building_id) {
+    if !ordinary_placement_building_domain_supported(building_id) {
         return Ok(Some(
             OrdinaryPlacementUnsupportedReason::UnsupportedBuildingDomain,
         ));
@@ -8967,7 +8971,8 @@ impl CoreState {
         let expanded_construction_queue_intent;
         let expanded_entity_recipe_intent;
         let mut compact_entity_recipe_receipt_id = None;
-        let mut blueprint_delete_index = None;
+        let mut blueprint_workspace_refresh = false;
+        let mut blueprint_intent = None;
         let mut construction_queue_intent = None;
         let applied_command = if command_contains_active_planet_intent(command) {
             expanded_active_planet_intent = expand_active_planet_intent(self, command)?;
@@ -9008,7 +9013,8 @@ impl CoreState {
             &expanded_entity_recipe_intent
         } else if crate::blueprint_command::command_contains_intent(command) {
             expanded_blueprint_intent = crate::blueprint_command::expand_intent(self, command)?;
-            blueprint_delete_index = expanded_blueprint_intent.delete_index();
+            blueprint_workspace_refresh = expanded_blueprint_intent.requires_workspace_refresh();
+            blueprint_intent = Some(&expanded_blueprint_intent);
             expanded_blueprint_intent.command()
         } else if crate::construction_queue_command::command_contains_intent(command) {
             expanded_construction_queue_intent =
@@ -9040,22 +9046,15 @@ impl CoreState {
         for change in &applied_command.top_level_changes {
             apply_value_patch(&mut base, change)?;
         }
-        if let Some(index) = blueprint_delete_index {
-            let blueprints = base
-                .get_mut("blueprints")
-                .and_then(Value::as_array_mut)
-                .ok_or_else(|| anyhow!("native player-authority blueprint directory is invalid"))?;
-            if index >= blueprints.len() {
-                bail!("native player-authority blueprint delete index is invalid")
-            }
-            blueprints.remove(index);
-        }
         let mut base = match base {
             Value::Object(base) => base,
             _ => bail!("native command replaced the GameState root"),
         };
+        if let Some(expansion) = blueprint_intent {
+            expansion.apply_to_base(self, &mut base)?;
+        }
         if let Some(expansion) = construction_queue_intent {
-            expansion.apply_to_base(&mut base)?;
+            expansion.apply_to_base(self, &mut base)?;
         }
         next.install_base_from_command(base, rebuild_production_history);
 
@@ -9171,7 +9170,7 @@ impl CoreState {
             }
         }
         next.revision += 1;
-        let only_pause_changed = blueprint_delete_index.is_none()
+        let only_pause_changed = !blueprint_workspace_refresh
             && construction_queue_intent.is_none()
             && applied_command.changed_entities.is_empty()
             && applied_command.added_entities.is_empty()
@@ -9217,11 +9216,11 @@ impl CoreState {
             result.changed_belt_ids.clear();
             result.topology_dirty = true;
         }
-        if blueprint_delete_index.is_some() {
-            // The compact semantic marker and private delete plan carry no
-            // renderer-derived dirty set. Blueprint workspace consumers must
-            // therefore re-read their bounded projection after live apply just
-            // as they do after cold WAL recovery.
+        if blueprint_workspace_refresh {
+            // Compact delete/capture markers and their private blueprint
+            // mutations carry no renderer-derived dirty set. Workspace
+            // consumers must therefore re-read a bounded projection after live
+            // apply just as they do after cold WAL recovery.
             result.topology_dirty = true;
         }
         if construction_queue_intent.is_some() {
@@ -19772,10 +19771,15 @@ mod tests {
         assert!(!encoded.contains("constructionQueue"));
 
         let expansion = crate::blueprint_command::expand_intent(&state, &command).unwrap();
-        assert_eq!(expansion.delete_index(), Some(0));
+        assert!(expansion.requires_workspace_refresh());
         assert!(expansion.command().top_level_changes.is_empty());
         assert!(expansion.command().changed_entities.is_empty());
         assert!(expansion.command().changed_belts.is_empty());
+        let mut privately_applied = state.base_value().clone();
+        expansion
+            .apply_to_base(&state, &mut privately_applied)
+            .unwrap();
+        assert_eq!(privately_applied["blueprints"][0]["id"], "builtin-second");
 
         let before = state.base_value().clone();
         let versions_before = serde_json::to_vec(&before["blueprintVersions"]).unwrap();
@@ -20401,6 +20405,1651 @@ mod tests {
         state
     }
 
+    const PERSISTENT_ALLOCATOR_COLLISION_DOMAINS: [&str; 7] = [
+        "entities.id",
+        "belts.id",
+        "blueprints.id",
+        "blueprintVersions.id",
+        "blueprintVersions.blueprintId",
+        "constructionQueue.id",
+        "constructionQueue.blueprintId",
+    ];
+
+    const PERSISTENT_ALLOCATOR_VERSION_REFERENCE_DOMAIN: &str =
+        "constructionQueue.blueprintVersionId";
+
+    #[derive(Debug)]
+    struct PersistentAllocatorSnapshot {
+        revision: u64,
+        canonical_sha256: String,
+        next_id: Value,
+        blueprints: Value,
+        blueprint_versions: Option<Value>,
+        construction_queue: Value,
+        entities: Vec<Value>,
+        belts: Vec<Value>,
+    }
+
+    fn persistent_allocator_snapshot(state: &CoreState) -> PersistentAllocatorSnapshot {
+        PersistentAllocatorSnapshot {
+            revision: state.revision,
+            canonical_sha256: state.canonical_sha256().unwrap(),
+            next_id: state.base_value()["nextId"].clone(),
+            blueprints: state.base_value()["blueprints"].clone(),
+            blueprint_versions: state.base_value().get("blueprintVersions").cloned(),
+            construction_queue: state.base_value()["constructionQueue"].clone(),
+            entities: (0..state.entity_index.len())
+                .map(|index| state.parse_entity(index).unwrap())
+                .collect(),
+            belts: (0..state.belt_index.len())
+                .map(|index| state.parse_belt(index).unwrap())
+                .collect(),
+        }
+    }
+
+    fn assert_persistent_allocator_snapshot(
+        state: &CoreState,
+        expected: &PersistentAllocatorSnapshot,
+        label: &str,
+    ) {
+        assert_eq!(state.revision, expected.revision, "{label}: revision");
+        assert_eq!(
+            state.canonical_sha256().unwrap(),
+            expected.canonical_sha256,
+            "{label}: canonical hash"
+        );
+        assert_eq!(
+            state.base_value()["nextId"],
+            expected.next_id,
+            "{label}: nextId"
+        );
+        assert_eq!(
+            state.base_value()["blueprints"],
+            expected.blueprints,
+            "{label}: blueprints"
+        );
+        assert_eq!(
+            state.base_value().get("blueprintVersions"),
+            expected.blueprint_versions.as_ref(),
+            "{label}: blueprintVersions"
+        );
+        assert_eq!(
+            state.base_value()["constructionQueue"],
+            expected.construction_queue,
+            "{label}: constructionQueue"
+        );
+        assert_eq!(
+            (0..state.entity_index.len())
+                .map(|index| state.parse_entity(index).unwrap())
+                .collect::<Vec<_>>(),
+            expected.entities,
+            "{label}: entities"
+        );
+        assert_eq!(
+            (0..state.belt_index.len())
+                .map(|index| state.parse_belt(index).unwrap())
+                .collect::<Vec<_>>(),
+            expected.belts,
+            "{label}: belts"
+        );
+    }
+
+    fn allocator_collision_definition(state: &CoreState, blueprint_id: &str) -> Value {
+        let mut definition = state.base_value()["blueprints"][0].clone();
+        definition["id"] = Value::from(blueprint_id);
+        definition["name"] = Value::from(format!("allocator collision {blueprint_id}"));
+        definition
+    }
+
+    fn append_allocator_collision_version(
+        state: &mut CoreState,
+        version_id: &str,
+        blueprint_id: &str,
+    ) {
+        let definition = allocator_collision_definition(state, blueprint_id);
+        state.base_value_mut()["blueprintVersions"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": version_id,
+                "blueprintId": blueprint_id,
+                "revision": 2,
+                "definition": definition
+            }));
+    }
+
+    fn append_allocator_collision_queue(
+        state: &mut CoreState,
+        queue_id: &str,
+        blueprint_id: &str,
+        blueprint_version_id: Option<&str>,
+    ) {
+        let mut row = serde_json::json!({
+            "id": queue_id,
+            "blueprintId": blueprint_id,
+            "blueprintRevision": 2,
+            "blueprintName": "allocator collision queue",
+            "planetId": "home",
+            "position": { "x": 800.0, "y": 800.0 },
+            "rotation": 0,
+            "mirror": "none",
+            "queuedAt": 50,
+            "status": "waiting-fleet",
+            "reservedConstruction": {},
+            "reservedFleet": {},
+            "placedEntityIdsByKey": {}
+        });
+        if let Some(version_id) = blueprint_version_id {
+            row["blueprintVersionId"] = Value::from(version_id);
+        }
+        state.base_value_mut()["constructionQueue"]
+            .as_array_mut()
+            .unwrap()
+            .push(row);
+    }
+
+    fn install_persistent_allocator_collision(
+        state: &mut CoreState,
+        domain: &str,
+        generated_id: &str,
+    ) {
+        match domain {
+            "entities.id" => {
+                state.entity_raw_mut_topology().push(Arc::<str>::from(
+                    serde_json::json!({
+                        "id": generated_id,
+                        "kind": "machine",
+                        "planetId": "home",
+                        "position": { "x": 700.0, "y": 700.0 },
+                        "buildingId": "arc_smelter"
+                    })
+                    .to_string(),
+                ));
+                state.rebuild_indexes().unwrap();
+            }
+            "belts.id" => {
+                let mut belt = state.parse_belt(0).unwrap();
+                belt["id"] = Value::from(generated_id);
+                state
+                    .belt_raw_mut_topology()
+                    .push(Arc::<str>::from(belt.to_string()));
+                state.rebuild_indexes().unwrap();
+            }
+            "blueprints.id" => {
+                let definition = allocator_collision_definition(state, generated_id);
+                state.base_value_mut()["blueprints"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(definition);
+            }
+            "blueprintVersions.id" => {
+                append_allocator_collision_version(state, generated_id, "ordinary-alpha");
+            }
+            "blueprintVersions.blueprintId" => {
+                append_allocator_collision_version(
+                    state,
+                    &format!("allocator-owner-{generated_id}"),
+                    generated_id,
+                );
+            }
+            "constructionQueue.id" => {
+                append_allocator_collision_queue(state, generated_id, "ordinary-alpha", None);
+            }
+            "constructionQueue.blueprintId" => {
+                let version_id = format!("allocator-queue-owner-{generated_id}");
+                append_allocator_collision_version(state, &version_id, generated_id);
+                append_allocator_collision_queue(
+                    state,
+                    &format!("allocator-queue-{generated_id}"),
+                    generated_id,
+                    Some(&version_id),
+                );
+            }
+            "constructionQueue.blueprintVersionId" => {
+                append_allocator_collision_version(state, generated_id, "ordinary-alpha");
+                append_allocator_collision_queue(
+                    state,
+                    &format!("allocator-version-queue-{generated_id}"),
+                    "ordinary-alpha",
+                    Some(generated_id),
+                );
+            }
+            _ => unreachable!("unknown persistent allocator collision domain"),
+        }
+    }
+
+    fn blueprint_capture_state() -> CoreState {
+        let mut state = player_command_state();
+        // The generic player-command fixture predates blueprint recipe-option
+        // projections and intentionally omitted display names. Real built-in
+        // catalogs carry them; add only that missing proof input here.
+        let mut catalog = serde_json::to_value(state.catalog.snapshot.clone()).unwrap();
+        for recipe in catalog["recipes"].as_array_mut().unwrap() {
+            let id = recipe["id"].as_str().unwrap().to_owned();
+            recipe["name"] = Value::from(match id.as_str() {
+                "iron_ingot" => "铁块",
+                "solar_sail_launch" => "太阳帆发射",
+                _ => "测试配方",
+            });
+        }
+        state.catalog = Arc::new(
+            RuntimeCatalog::from_value(catalog, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT).unwrap(),
+        );
+        state
+            .base_value_mut()
+            .insert("blueprints".to_owned(), serde_json::json!([]));
+        state
+    }
+
+    fn blueprint_capture_intent_command(
+        revision: u64,
+        entity_ids: &[&str],
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("blueprints".to_owned()),
+                PathSegment::Key("intent".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(serde_json::json!({
+                "kind": "capture",
+                "entityIds": entity_ids,
+                "revision": revision
+            })),
+        }];
+        command
+    }
+
+    fn blueprint_import_exchange(format_version: u64, name: &str) -> String {
+        serde_json::json!({
+            "type": "dsp-idle-blueprint",
+            "formatVersion": format_version,
+            "exportedAt": "2026-09-01T00:00:00.000Z",
+            "blueprint": {
+                "id": "renderer_source_is_ignored",
+                "name": name,
+                "revision": 77,
+                "entities": [{
+                    "key": "node_1",
+                    "buildingId": "arc_smelter",
+                    "offset": { "x": -0.5, "y": 2.49 },
+                    "machineCount": 3,
+                    "recipeId": "iron_ingot",
+                    "powerGridId": "grid-a",
+                    "powerPriority": 2
+                }],
+                "resourceAnchors": [],
+                "belts": [],
+                "externalPorts": [],
+                "rotation": 0,
+                "mirror": "none",
+                "recipeOverrides": {}
+            }
+        })
+        .to_string()
+    }
+
+    fn blueprint_import_command_from_context(context: &Value) -> SimulationCommandPatch {
+        let revision = context["revision"].as_u64().unwrap();
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("blueprints".to_owned()),
+                PathSegment::Key("intent".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(context["preparedIntent"].clone()),
+        }];
+        command
+    }
+
+    #[test]
+    fn blueprint_import_v1_v2_is_canonical_bounded_atomic_and_replayable() {
+        let mut prepared = Vec::new();
+        for format_version in [1, 2] {
+            let state = blueprint_capture_state();
+            let raw = blueprint_import_exchange(format_version, "  普通导入蓝图  ");
+            let context = state
+                .blueprint_import_context_projection(
+                    9,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    &raw,
+                )
+                .unwrap();
+            assert_eq!(context["projectionType"], "blueprint-import-context-v1");
+            assert_eq!(
+                context["support"],
+                serde_json::json!({
+                    "supported": true,
+                    "reason": null
+                })
+            );
+            assert_eq!(context["request"]["rawBytes"], raw.len());
+            assert_eq!(context["request"]["rawSha256"].as_str().unwrap().len(), 64);
+            assert_eq!(context["activePlanetId"], "home");
+            assert_eq!(
+                context["limits"],
+                serde_json::json!({
+                    "rawBytes": 1_048_576,
+                    "projectionBytes": 1_048_576,
+                    "commandBytes": 1_048_576,
+                    "libraryRows": 64,
+                    "blueprintEntities": 512,
+                    "blueprintBelts": 1024
+                })
+            );
+            assert!(serde_json::to_vec(&context).unwrap().len() <= 1_048_576);
+            let marker = context["preparedIntent"].as_object().unwrap();
+            assert_eq!(marker.len(), 5);
+            assert_eq!(marker["kind"], "import");
+            assert_eq!(marker["sourceName"], "普通导入蓝图");
+            assert_eq!(marker["revision"], 9);
+            let blueprint = &marker["blueprint"];
+            assert_eq!(blueprint["id"], "blueprint_9");
+            assert_eq!(blueprint["name"], "普通导入蓝图");
+            assert_eq!(blueprint["revision"], 1);
+            assert_eq!(blueprint["entities"][0]["offset"]["x"].as_i64(), Some(0));
+            assert_eq!(blueprint["entities"][0]["offset"]["x"].as_f64(), Some(0.0));
+            assert!(
+                !blueprint["entities"][0]["offset"]["x"]
+                    .as_f64()
+                    .unwrap()
+                    .is_sign_negative()
+            );
+            assert_eq!(blueprint["entities"][0]["offset"]["y"], 2.0);
+            assert_eq!(
+                marker["blueprintSha256"],
+                crate::canonical::canonical_sha256(blueprint)
+            );
+            let encoded = serde_json::to_string(&context).unwrap();
+            for forbidden in ["renderer_source_is_ignored", "nextId", "construction\":"] {
+                assert!(!encoded.contains(forbidden), "context leaked {forbidden}");
+            }
+            prepared.push(context["preparedIntent"].clone());
+        }
+        assert_eq!(prepared[0], prepared[1]);
+
+        let mut ignored_source_id: Value =
+            serde_json::from_str(&blueprint_import_exchange(2, "忽略来源 ID")).unwrap();
+        ignored_source_id["blueprint"]["id"] = serde_json::json!({
+            "untrusted": ["any", "shape"]
+        });
+        let ignored_context = blueprint_capture_state()
+            .blueprint_import_context_projection(
+                9,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                &ignored_source_id.to_string(),
+            )
+            .unwrap();
+        assert_eq!(ignored_context["support"]["supported"], true);
+        assert_eq!(
+            ignored_context["preparedIntent"]["blueprint"]["id"],
+            "blueprint_9"
+        );
+
+        let raw = blueprint_import_exchange(2, "普通导入蓝图");
+        let mut live = blueprint_capture_state();
+        let context = live
+            .blueprint_import_context_projection(9, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, &raw)
+            .unwrap();
+        let command = blueprint_import_command_from_context(&context);
+        assert!(serde_json::to_vec(&command).unwrap().len() <= 1_048_576);
+        let durable = serde_json::to_string(&command).unwrap();
+        assert!(!durable.contains(&raw));
+        assert!(durable.contains(r#""offset":{"x":0,"y":2}"#));
+        assert!(!durable.contains(r#""offset":{"x":0.0"#));
+        let replayed: SimulationCommandPatch = serde_json::from_str(&durable).unwrap();
+        let mut replay = live.clone();
+        let live_receipt = live.apply_player_authority_command(&command).unwrap();
+        let replay_receipt = replay.apply_command(&replayed).unwrap();
+        assert_eq!(live_receipt, replay_receipt);
+        assert_eq!(live_receipt.previous_revision, 9);
+        assert_eq!(live_receipt.revision, 10);
+        assert!(live_receipt.changed_entity_ids.is_empty());
+        assert!(live_receipt.changed_belt_ids.is_empty());
+        assert!(live_receipt.topology_dirty);
+        assert_eq!(live.base_value()["nextId"], 10);
+        assert_eq!(live.base_value()["blueprints"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            live.canonical_sha256().unwrap(),
+            replay.canonical_sha256().unwrap()
+        );
+    }
+
+    #[test]
+    fn blueprint_capture_and_import_private_apply_recheck_every_allocator_domain() {
+        let mut source = blueprint_capture_state();
+        source.base_value_mut()["blueprints"] = serde_json::json!([{
+            "id": "ordinary-alpha",
+            "name": "基础蓝图",
+            "revision": 1,
+            "entities": [],
+            "resourceAnchors": [],
+            "belts": [],
+            "externalPorts": [],
+            "rotation": 0,
+            "mirror": "none",
+            "recipeOverrides": {}
+        }]);
+        let import_raw = blueprint_import_exchange(2, "apply 二次校验");
+        let import_context = source
+            .blueprint_import_context_projection(
+                9,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                &import_raw,
+            )
+            .unwrap();
+        let expansions = [
+            (
+                "capture",
+                crate::blueprint_command::expand_intent(
+                    &source,
+                    &blueprint_capture_intent_command(9, &["smelter-a"]),
+                )
+                .unwrap(),
+            ),
+            (
+                "import",
+                crate::blueprint_command::expand_intent(
+                    &source,
+                    &blueprint_import_command_from_context(&import_context),
+                )
+                .unwrap(),
+            ),
+        ];
+        for (operation, expansion) in expansions {
+            for domain in [
+                "entities.id",
+                "belts.id",
+                "blueprints.id",
+                "blueprintVersions.id",
+                "blueprintVersions.blueprintId",
+                "constructionQueue.id",
+                "constructionQueue.blueprintId",
+                "constructionQueue.blueprintVersionId",
+            ] {
+                let mut collision = source.clone();
+                install_persistent_allocator_collision(&mut collision, domain, "blueprint_9");
+                let mut candidate = collision.base_value().clone();
+                let before = candidate.clone();
+                assert!(
+                    expansion.apply_to_base(&collision, &mut candidate).is_err(),
+                    "{operation}: {domain}"
+                );
+                assert_eq!(candidate, before, "{operation}: {domain}");
+            }
+        }
+    }
+
+    #[test]
+    fn blueprint_import_strict_parser_rejects_duplicates_unknowns_depth_and_nonordinary_fields() {
+        let valid = blueprint_import_exchange(2, "严格导入");
+        let duplicate_nested = valid.replacen(
+            "\"offset\":{\"x\":-0.5,\"y\":2.49}",
+            "\"offset\":{\"x\":-0.5,\"x\":0,\"y\":2.49}",
+            1,
+        );
+        let unknown_nested = valid.replacen(
+            "\"machineCount\":3",
+            "\"machineCount\":3,\"runtimeProgress\":0",
+            1,
+        );
+        let invalid_optional = valid.replacen(
+            "\"powerPriority\":2",
+            "\"powerPriority\":2,\"sprayCoaterInstalled\":\"yes\"",
+            1,
+        );
+        let v1_anchor = valid
+            .replacen("\"formatVersion\":2", "\"formatVersion\":1", 1)
+            .replacen(
+                "\"resourceAnchors\":[]",
+                "\"resourceAnchors\":[{\"key\":\"vein_1\"}]",
+                1,
+            );
+        let target_port = valid.replacen(
+            "\"belts\":[]",
+            "\"belts\":[{\"key\":\"line_1\",\"sourceKey\":\"node_1\",\"targetKey\":\"node_1\",\"itemId\":\"iron_ingot\",\"lanes\":1,\"tier\":1,\"priority\":0,\"targetPortIndex\":0}]",
+            1,
+        );
+        let deep = format!(
+            "{{\"type\":\"dsp-idle-blueprint\",\"formatVersion\":2,\"exportedAt\":{},\"blueprint\":{{}}}}",
+            "[".repeat(140) + &"]".repeat(140)
+        );
+        let bad_exported_at =
+            valid.replacen("2026-09-01T00:00:00.000Z", "2026-02-29T00:00:00.000Z", 1);
+        for (label, raw) in [
+            ("duplicate-nested", duplicate_nested),
+            ("unknown-nested", unknown_nested),
+            ("invalid-optional", invalid_optional),
+            ("v1-anchor", v1_anchor),
+            ("target-port", target_port),
+            ("too-deep", deep),
+            ("bad-exported-at", bad_exported_at),
+        ] {
+            let state = blueprint_capture_state();
+            let context = state
+                .blueprint_import_context_projection(
+                    9,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    &raw,
+                )
+                .unwrap();
+            assert_eq!(context["support"]["supported"], false, "{label}");
+            assert_eq!(context["support"]["reason"], "invalid-exchange", "{label}");
+            assert_eq!(context["preparedIntent"], Value::Null, "{label}");
+        }
+    }
+
+    #[test]
+    fn blueprint_import_reports_domain_overlap_library_and_allocator_boundaries_without_mutation() {
+        let mut overlap_value: Value =
+            serde_json::from_str(&blueprint_import_exchange(2, "重叠")).unwrap();
+        let second = overlap_value["blueprint"]["entities"][0].clone();
+        overlap_value["blueprint"]["entities"]
+            .as_array_mut()
+            .unwrap()
+            .push(second);
+        overlap_value["blueprint"]["entities"][1]["key"] = Value::from("node_2");
+        let overlap = overlap_value.to_string();
+        let modded = blueprint_import_exchange(2, "MOD").replacen(
+            "\"buildingId\":\"arc_smelter\"",
+            "\"buildingId\":\"MOD/custom_smelter\"",
+            1,
+        );
+        for (case, expected_reason, raw) in [
+            ("overlap", "position-overlap", overlap),
+            ("modded", "unsupported-blueprint-domain", modded),
+            (
+                "missing-catalog",
+                "catalog-incomplete",
+                blueprint_import_exchange(2, "缺目录").replacen(
+                    "\"buildingId\":\"arc_smelter\"",
+                    "\"buildingId\":\"missing_machine\"",
+                    1,
+                ),
+            ),
+        ] {
+            let state = blueprint_capture_state();
+            let before = state.canonical_sha256().unwrap();
+            let context = state
+                .blueprint_import_context_projection(
+                    9,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    &raw,
+                )
+                .unwrap();
+            assert_eq!(context["support"]["supported"], false, "{case}");
+            assert_eq!(context["support"]["reason"], expected_reason, "{case}");
+            assert_eq!(context["preparedIntent"], Value::Null, "{case}");
+            assert_eq!(state.canonical_sha256().unwrap(), before, "{case}");
+        }
+
+        for case in ["library-full", "allocator-collision", "gas-active"] {
+            let mut state = blueprint_capture_state();
+            match case {
+                "library-full" => {
+                    state.base_value_mut()["blueprints"] = Value::Array(
+                        (0..64)
+                            .map(|index| {
+                                serde_json::json!({
+                                    "id": format!("existing_{index}"),
+                                    "name": format!("现有 {index}"),
+                                    "revision": 1,
+                                    "entities": [],
+                                    "belts": []
+                                })
+                            })
+                            .collect(),
+                    );
+                }
+                "allocator-collision" => {
+                    state.base_value_mut()["blueprintVersions"] = serde_json::json!([{
+                        "id": "historic_version",
+                        "blueprintId": "blueprint_9",
+                        "revision": 1,
+                        "definition": {
+                            "id": "historic_definition",
+                            "name": "历史定义",
+                            "revision": 1,
+                            "entities": [],
+                            "belts": []
+                        }
+                    }]);
+                }
+                "gas-active" => state.base_value_mut()["activePlanetId"] = Value::from("giant"),
+                _ => unreachable!(),
+            }
+            let before = state.canonical_sha256().unwrap();
+            let context = state
+                .blueprint_import_context_projection(
+                    9,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    &blueprint_import_exchange(2, "边界"),
+                )
+                .unwrap();
+            let expected = match case {
+                "library-full" => "library-full",
+                "allocator-collision" => "next-id-exhausted",
+                "gas-active" => "unsupported-active-planet",
+                _ => unreachable!(),
+            };
+            assert_eq!(context["support"]["reason"], expected, "{case}");
+            assert_eq!(state.canonical_sha256().unwrap(), before, "{case}");
+        }
+    }
+
+    #[test]
+    fn blueprint_import_name_suffix_and_forged_markers_are_bounded_and_atomic() {
+        let source_name = "名".repeat(48);
+        let mut state = blueprint_capture_state();
+        state.base_value_mut()["blueprints"] = serde_json::json!([{
+            "id": "existing_name",
+            "name": source_name,
+            "revision": 1,
+            "entities": [],
+            "belts": []
+        }]);
+        let raw = blueprint_import_exchange(2, &"名".repeat(48));
+        let context = state
+            .blueprint_import_context_projection(9, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, &raw)
+            .unwrap();
+        assert_eq!(context["support"]["supported"], true);
+        let final_name = context["preparedIntent"]["blueprint"]["name"]
+            .as_str()
+            .unwrap();
+        assert!(final_name.ends_with(" 2"));
+        assert_eq!(final_name.encode_utf16().count(), 48);
+
+        let valid = blueprint_import_command_from_context(&context);
+        let mut forged = Vec::new();
+        let mut extra = valid.clone();
+        extra.top_level_changes[0].value.as_mut().unwrap()["nextId"] = Value::from(10);
+        forged.push(extra);
+        let mut wrong_hash = valid.clone();
+        wrong_hash.top_level_changes[0].value.as_mut().unwrap()["blueprintSha256"] =
+            Value::from("0".repeat(64));
+        forged.push(wrong_hash);
+        let mut wrong_id = valid.clone();
+        let marker = wrong_id.top_level_changes[0].value.as_mut().unwrap();
+        marker["blueprint"]["id"] = Value::from("blueprint_10");
+        marker["blueprintSha256"] =
+            Value::from(crate::canonical::canonical_sha256(&marker["blueprint"]));
+        forged.push(wrong_id);
+        let mut stale = valid.clone();
+        stale.base_revision = 8;
+        forged.push(stale);
+        for command in forged {
+            let mut candidate = state.clone();
+            let before = candidate.canonical_sha256().unwrap();
+            assert!(candidate.apply_player_authority_command(&command).is_err());
+            assert_eq!(candidate.revision, 9);
+            assert_eq!(candidate.canonical_sha256().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn blueprint_export_is_bounded_deterministic_and_round_trips_through_strict_import() {
+        let raw = blueprint_import_exchange(2, "CON");
+        let mut state = blueprint_capture_state();
+        let import_context = state
+            .blueprint_import_context_projection(9, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, &raw)
+            .unwrap();
+        state
+            .apply_player_authority_command(&blueprint_import_command_from_context(&import_context))
+            .unwrap();
+        let before = state.canonical_sha256().unwrap();
+        let export = state
+            .blueprint_export_context_projection(
+                10,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "blueprint_9",
+                1,
+            )
+            .unwrap();
+        assert_eq!(export["projectionType"], "blueprint-export-context-v1");
+        assert_eq!(
+            export["support"],
+            serde_json::json!({
+                "supported": true,
+                "reason": null
+            })
+        );
+        assert_eq!(export["blueprintName"], "CON");
+        assert_eq!(export["fileNameStem"], "_CON");
+        let raw_exchange = export["rawExchange"].as_str().unwrap();
+        assert!(!raw_exchange.contains("exportedAt"));
+        assert_eq!(export["rawBytes"], raw_exchange.len());
+        assert_eq!(export["rawSha256"].as_str().unwrap().len(), 64);
+        assert!(serde_json::to_vec(&export).unwrap().len() <= 1_048_576);
+        assert_eq!(state.canonical_sha256().unwrap(), before);
+
+        let clean = blueprint_capture_state();
+        let round_trip = clean
+            .blueprint_import_context_projection(
+                9,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                raw_exchange,
+            )
+            .unwrap();
+        assert_eq!(round_trip["support"]["supported"], true);
+        assert_eq!(round_trip["request"]["rawSha256"], export["rawSha256"]);
+        assert_eq!(
+            round_trip["preparedIntent"]["blueprint"],
+            state.base_value()["blueprints"][0]
+        );
+
+        let second = state
+            .blueprint_export_context_projection(
+                10,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "blueprint_9",
+                1,
+            )
+            .unwrap();
+        assert_eq!(second, export);
+    }
+
+    #[test]
+    fn blueprint_export_reports_version_domain_catalog_overlap_and_planet_failures_without_mutation()
+     {
+        let raw = blueprint_import_exchange(2, "导出边界");
+        let base = || {
+            let mut state = blueprint_capture_state();
+            let context = state
+                .blueprint_import_context_projection(
+                    9,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    &raw,
+                )
+                .unwrap();
+            state
+                .apply_player_authority_command(&blueprint_import_command_from_context(&context))
+                .unwrap();
+            state
+        };
+        for case in [
+            "missing",
+            "stale",
+            "resource",
+            "external",
+            "special",
+            "mod",
+            "catalog",
+            "overlap",
+            "over-cap",
+            "overrides-over-cap",
+            "gas",
+        ] {
+            let mut state = base();
+            let (id, revision) = match case {
+                "missing" => ("missing", 1),
+                "stale" => ("blueprint_9", 2),
+                _ => ("blueprint_9", 1),
+            };
+            match case {
+                "resource" => {
+                    state.base_value_mut()["blueprints"][0]["resourceAnchors"] =
+                        serde_json::json!([{ "key": "vein_1" }]);
+                }
+                "external" => {
+                    state.base_value_mut()["blueprints"][0]["externalPorts"] =
+                        serde_json::json!([{ "key": "port_1" }]);
+                }
+                "special" => {
+                    state.base_value_mut()["blueprints"][0]["entities"][0]["buildingId"] =
+                        Value::from("time_warp_device");
+                }
+                "mod" => {
+                    state.base_value_mut()["blueprints"][0]["entities"][0]["buildingId"] =
+                        Value::from("MOD/custom_machine");
+                }
+                "catalog" => {
+                    state.base_value_mut()["blueprints"][0]["entities"][0]["buildingId"] =
+                        Value::from("missing_machine");
+                }
+                "overlap" => {
+                    let mut second = state.base_value()["blueprints"][0]["entities"][0].clone();
+                    second["key"] = Value::from("node_2");
+                    state.base_value_mut()["blueprints"][0]["entities"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(second);
+                }
+                "over-cap" => {
+                    let entity = state.base_value()["blueprints"][0]["entities"][0].clone();
+                    state.base_value_mut()["blueprints"][0]["entities"] =
+                        Value::Array(vec![entity; 513]);
+                }
+                "overrides-over-cap" => {
+                    state.base_value_mut()["blueprints"][0]["recipeOverrides"] = Value::Object(
+                        (0..=4_096)
+                            .map(|index| {
+                                (
+                                    format!("source_{index}"),
+                                    Value::from(format!("target_{index}")),
+                                )
+                            })
+                            .collect(),
+                    );
+                }
+                "gas" => state.base_value_mut()["activePlanetId"] = Value::from("giant"),
+                _ => {}
+            }
+            let before = state.canonical_sha256().unwrap();
+            let export = state
+                .blueprint_export_context_projection(
+                    10,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    id,
+                    revision,
+                )
+                .unwrap();
+            let expected_reason = match case {
+                "missing" | "stale" => "version-conflict",
+                "catalog" => "catalog-incomplete",
+                "overlap" => "position-overlap",
+                "gas" => "unsupported-active-planet",
+                _ => "unsupported-blueprint-domain",
+            };
+            assert_eq!(export["support"]["supported"], false, "{case}");
+            assert_eq!(export["support"]["reason"], expected_reason, "{case}");
+            for key in [
+                "rawExchange",
+                "rawBytes",
+                "rawSha256",
+                "blueprintName",
+                "fileNameStem",
+            ] {
+                assert_eq!(export[key], Value::Null, "{case}:{key}");
+            }
+            assert_eq!(state.canonical_sha256().unwrap(), before, "{case}");
+        }
+    }
+
+    #[test]
+    fn blueprint_export_rejects_ambiguous_owner_ids_but_allows_valid_references() {
+        for domain in [
+            "entities.id",
+            "belts.id",
+            "blueprints.id",
+            "blueprintVersions.id",
+            "constructionQueue.id",
+            "constructionQueue.blueprintVersionId",
+        ] {
+            let raw = blueprint_import_exchange(2, "导出身份冲突");
+            let mut state = blueprint_capture_state();
+            let context = state
+                .blueprint_import_context_projection(
+                    9,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    &raw,
+                )
+                .unwrap();
+            state
+                .apply_player_authority_command(&blueprint_import_command_from_context(&context))
+                .unwrap();
+            install_persistent_allocator_collision(&mut state, domain, "blueprint_9");
+            let before = state.canonical_sha256().unwrap();
+            match state.blueprint_export_context_projection(
+                10,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "blueprint_9",
+                1,
+            ) {
+                Err(_) => {}
+                Ok(export) => {
+                    assert_eq!(export["support"]["supported"], false, "{domain}");
+                    assert_eq!(export["support"]["reason"], "version-conflict", "{domain}");
+                    for key in [
+                        "rawExchange",
+                        "rawBytes",
+                        "rawSha256",
+                        "blueprintName",
+                        "fileNameStem",
+                    ] {
+                        assert_eq!(export[key], Value::Null, "{domain}:{key}");
+                    }
+                }
+            }
+            assert_eq!(state.canonical_sha256().unwrap(), before, "{domain}");
+        }
+
+        let raw = blueprint_import_exchange(2, "合法引用仍可导出");
+        let mut state = blueprint_capture_state();
+        let context = state
+            .blueprint_import_context_projection(9, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, &raw)
+            .unwrap();
+        state
+            .apply_player_authority_command(&blueprint_import_command_from_context(&context))
+            .unwrap();
+        state
+            .apply_player_authority_command(&construction_queue_enqueue_intent_command(
+                10,
+                "blueprint_9",
+                1,
+                20.0,
+                30.0,
+            ))
+            .unwrap();
+        assert!(
+            state.base_value()["blueprintVersions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["blueprintId"] == "blueprint_9")
+        );
+        assert!(
+            state.base_value()["constructionQueue"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["blueprintId"] == "blueprint_9")
+        );
+        let before = state.canonical_sha256().unwrap();
+        let export = state
+            .blueprint_export_context_projection(
+                11,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "blueprint_9",
+                1,
+            )
+            .unwrap();
+        assert_eq!(export["support"]["supported"], true);
+        assert_eq!(export["support"]["reason"], Value::Null);
+        assert!(export["rawExchange"].as_str().is_some());
+        assert_eq!(state.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn blueprint_export_allows_maximum_safe_read_only_revision_without_mutation() {
+        let raw = blueprint_import_exchange(2, "终止版本导出");
+        let mut state = blueprint_capture_state();
+        let import_context = state
+            .blueprint_import_context_projection(9, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, &raw)
+            .unwrap();
+        state
+            .apply_player_authority_command(&blueprint_import_command_from_context(&import_context))
+            .unwrap();
+        state.revision = MAX_JAVASCRIPT_SAFE_INTEGER;
+        let before = state.canonical_sha256().unwrap();
+
+        let export = state
+            .blueprint_export_context_projection(
+                MAX_JAVASCRIPT_SAFE_INTEGER,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "blueprint_9",
+                1,
+            )
+            .unwrap();
+
+        assert_eq!(export["revision"], MAX_JAVASCRIPT_SAFE_INTEGER);
+        assert_eq!(export["support"]["supported"], true);
+        assert_eq!(export["support"]["reason"], Value::Null);
+        assert_eq!(state.revision, MAX_JAVASCRIPT_SAFE_INTEGER);
+        assert_eq!(state.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn blueprint_export_projection_budget_accepts_exact_and_rejects_just_over_independently() {
+        let state = blueprint_capture_state();
+        let before = state.canonical_sha256().unwrap();
+
+        // Locate the exact projection boundary using payloads that remain
+        // below the independently tested 1 MiB raw-exchange ceiling.
+        let mut supported_bytes = 0usize;
+        let mut unsupported_bytes = 1_048_576usize;
+        while supported_bytes + 1 < unsupported_bytes {
+            let probe = supported_bytes + (unsupported_bytes - supported_bytes) / 2;
+            let context =
+                crate::blueprint_import::export_projection_budget_probe(&state, probe).unwrap();
+            if context["support"]["supported"] == true {
+                supported_bytes = probe;
+            } else {
+                unsupported_bytes = probe;
+            }
+        }
+        assert_eq!(unsupported_bytes, supported_bytes + 1);
+        assert!(unsupported_bytes <= 1_048_576);
+
+        let exact =
+            crate::blueprint_import::export_projection_budget_probe(&state, supported_bytes)
+                .unwrap();
+        assert_eq!(exact["support"]["supported"], true);
+        assert_eq!(serde_json::to_vec(&exact).unwrap().len(), 1_048_576);
+
+        let over =
+            crate::blueprint_import::export_projection_budget_probe(&state, unsupported_bytes)
+                .unwrap();
+        assert_eq!(over["support"]["supported"], false);
+        assert_eq!(over["support"]["reason"], "serialized-budget-exceeded");
+        assert_eq!(over["rawExchange"], Value::Null);
+        assert_eq!(state.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn blueprint_capture_context_is_bounded_and_native_capture_replays_atomically() {
+        let entity_ids = vec!["smelter-a".to_owned()];
+        let mut live = blueprint_capture_state();
+        let context = live
+            .blueprint_capture_context_projection(
+                9,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                &entity_ids,
+            )
+            .unwrap();
+        assert_eq!(
+            context,
+            serde_json::json!({
+                "schemaVersion": 1,
+                "projectionType": "blueprint-capture-context-v1",
+                "source": "native-core",
+                "revision": 9,
+                "stateVersion": 47,
+                "registryFingerprint": EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "request": {
+                    "expectedRevision": 9,
+                    "expectedRegistryFingerprint": EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    "entityIds": ["smelter-a"]
+                },
+                "activePlanetId": "home",
+                "support": { "supported": true, "reason": null },
+                "expectedBlueprintId": "blueprint_9",
+                "expectedBlueprintName": "蓝图 01",
+                "expectedBlueprintRevision": 1,
+                "limits": {
+                    "selectionEntityIds": 512,
+                    "blueprintEntities": 512,
+                    "blueprintBelts": 1024,
+                    "opaqueIdBytes": 512,
+                    "projectionBytes": 1_048_576
+                }
+            })
+        );
+        let encoded_context = serde_json::to_vec(&context).unwrap();
+        assert!(encoded_context.len() <= 1_048_576);
+        for forbidden in [
+            "sessionId",
+            "runId",
+            "nextId",
+            "machineCount",
+            "inputs",
+            "outputs",
+        ] {
+            assert!(!String::from_utf8_lossy(&encoded_context).contains(forbidden));
+        }
+
+        let command = blueprint_capture_intent_command(9, &["smelter-a"]);
+        let durable = serde_json::to_string(&command).unwrap();
+        assert_eq!(
+            command.top_level_changes[0].value,
+            Some(serde_json::json!({
+                "kind": "capture",
+                "entityIds": ["smelter-a"],
+                "revision": 9
+            }))
+        );
+        for forbidden in [
+            "buildingId",
+            "position",
+            "recipeId",
+            "inputs",
+            "outputs",
+            "nextId",
+            "blueprint_9",
+        ] {
+            assert!(!durable.contains(forbidden), "WAL leaked {forbidden}");
+        }
+        let replayed: SimulationCommandPatch = serde_json::from_str(&durable).unwrap();
+        let mut replay = live.clone();
+        let live_receipt = live.apply_player_authority_command(&command).unwrap();
+        let replay_receipt = replay.apply_command(&replayed).unwrap();
+        assert_eq!(live_receipt, replay_receipt);
+        assert_eq!(live_receipt.previous_revision, 9);
+        assert_eq!(live_receipt.revision, 10);
+        assert!(live_receipt.changed_entity_ids.is_empty());
+        assert!(live_receipt.changed_belt_ids.is_empty());
+        assert!(live_receipt.topology_dirty);
+        assert_eq!(
+            live.canonical_sha256().unwrap(),
+            replay.canonical_sha256().unwrap()
+        );
+        assert_eq!(live.base_value()["nextId"], 10);
+        assert_eq!(live.base_value()["blueprints"].as_array().unwrap().len(), 1);
+        let blueprint = &live.base_value()["blueprints"][0];
+        assert_eq!(blueprint["id"], "blueprint_9");
+        assert_eq!(blueprint["name"], "蓝图 01");
+        assert_eq!(blueprint["revision"], 1);
+        assert_eq!(blueprint["rotation"], 0);
+        assert_eq!(blueprint["mirror"], "none");
+        assert_eq!(blueprint["resourceAnchors"], serde_json::json!([]));
+        assert_eq!(blueprint["externalPorts"], serde_json::json!([]));
+        assert_eq!(blueprint["recipeOverrides"], serde_json::json!({}));
+        assert_eq!(blueprint["belts"], serde_json::json!([]));
+        let entity = blueprint["entities"][0].as_object().unwrap();
+        assert_eq!(entity["key"], "node_1");
+        assert_eq!(entity["buildingId"], "arc_smelter");
+        assert_eq!(entity["machineCount"], 3);
+        assert_eq!(entity["recipeId"], "iron_ingot");
+        assert_eq!(entity["powerGridId"], "grid-a");
+        assert_eq!(entity["powerPriority"], 2);
+        assert_eq!(entity["offset"], serde_json::json!({ "x": 0.0, "y": 0.0 }));
+        for runtime_field in [
+            "id",
+            "planetId",
+            "inputs",
+            "outputs",
+            "progress",
+            "routingCursor",
+            "utilization",
+            "productionRate",
+        ] {
+            assert!(!entity.contains_key(runtime_field));
+        }
+        assert_eq!(
+            live.base_value()["blueprintVersions"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            live.base_value()["constructionQueue"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            live.parse_entity(0).unwrap()["inputs"],
+            serde_json::json!({})
+        );
+        assert_eq!(live.parse_belt(0).unwrap()["id"], "belt-priority");
+    }
+
+    #[test]
+    fn blueprint_capture_uses_authoritative_order_and_preserves_internal_belt_configuration() {
+        let mut forward = blueprint_capture_state();
+        let mut second_belt = forward.parse_belt(0).unwrap();
+        second_belt["id"] = Value::from("belt-secondary");
+        second_belt["source"] = Value::from("ejector-b");
+        second_belt["target"] = Value::from("ejector-a");
+        second_belt["priority"] = Value::from(2);
+        second_belt["routeMode"] = Value::from("manual");
+        second_belt["routeOffsetY"] = Value::from(-3);
+        forward
+            .belt_raw_mut_topology()
+            .push(Arc::<str>::from(second_belt.to_string()));
+        forward.rebuild_indexes().unwrap();
+        let mut reverse = forward.clone();
+        forward
+            .apply_player_authority_command(&blueprint_capture_intent_command(
+                9,
+                &["ejector-a", "ejector-b"],
+            ))
+            .unwrap();
+        reverse
+            .apply_player_authority_command(&blueprint_capture_intent_command(
+                9,
+                &["ejector-b", "ejector-a"],
+            ))
+            .unwrap();
+        assert_eq!(
+            forward.base_value()["blueprints"][0],
+            reverse.base_value()["blueprints"][0]
+        );
+        let blueprint = &forward.base_value()["blueprints"][0];
+        assert_eq!(blueprint["entities"][0]["key"], "node_1");
+        assert_eq!(blueprint["entities"][0]["buildingId"], "em_rail_ejector");
+        assert_eq!(
+            blueprint["entities"][0]["targetDysonOrbitId"],
+            "orbit-home-old"
+        );
+        assert_eq!(
+            blueprint["entities"][0]["offset"],
+            serde_json::json!({"x":0.0,"y":0.0})
+        );
+        assert_eq!(blueprint["entities"][1]["key"], "node_2");
+        assert_eq!(
+            blueprint["entities"][1]["offset"],
+            serde_json::json!({"x":2.0,"y":0.0})
+        );
+        assert_eq!(blueprint["belts"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            blueprint["belts"][0],
+            serde_json::json!({
+                "key": "line_1",
+                "sourceKey": "node_1",
+                "targetKey": "node_2",
+                "itemId": "solar_sail",
+                "lanes": 1,
+                "tier": 1,
+                "sorterTier": 1,
+                "priority": 1,
+                "stackSize": 1,
+                "monitorEnabled": false,
+                "routeMode": "auto"
+            })
+        );
+        assert_eq!(
+            blueprint["belts"][1],
+            serde_json::json!({
+                "key": "line_2",
+                "sourceKey": "node_2",
+                "targetKey": "node_1",
+                "itemId": "solar_sail",
+                "lanes": 1,
+                "tier": 1,
+                "sorterTier": 1,
+                "priority": 2,
+                "stackSize": 1,
+                "monitorEnabled": false,
+                "routeMode": "manual",
+                "routeOffsetY": -3
+            })
+        );
+        for runtime_field in ["id", "planetId", "source", "target", "progress", "lastFlow"] {
+            assert!(blueprint["belts"][0].get(runtime_field).is_none());
+        }
+    }
+
+    #[test]
+    fn blueprint_capture_preserves_proven_recipe_orbit_storage_fuel_power_and_spray_config() {
+        let mut state = blueprint_capture_state();
+        let mut catalog = serde_json::to_value(state.catalog.snapshot.clone()).unwrap();
+        catalog["items"].as_array_mut().unwrap().extend([
+            serde_json::json!({
+                "id": "coal", "kind": "solid", "fuelEnergyMj": 2.7
+            }),
+            serde_json::json!({
+                "id": "proliferator_mk1", "kind": "solid"
+            }),
+        ]);
+        catalog["buildings"].as_array_mut().unwrap().extend([
+            serde_json::json!({
+                "id": "thermal_power_plant",
+                "kind": "power",
+                "speed": 1,
+                "inputCapacity": 120,
+                "outputCapacity": 0,
+                "powerGenerationKw": 2_160,
+                "fuelItemIds": ["coal"]
+            }),
+            serde_json::json!({
+                "id": "spray_coater", "kind": "machine", "speed": 1,
+                "inputCapacity": 100, "outputCapacity": 100
+            }),
+        ]);
+        catalog["constructions"].as_array_mut().unwrap().extend([
+            serde_json::json!({
+                "id": "splitter_4way", "outputAmount": 1,
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+            }),
+            serde_json::json!({
+                "id": "thermal_power_plant", "outputAmount": 1,
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+            }),
+            serde_json::json!({
+                "id": "spray_coater", "outputAmount": 1,
+                "requiredTechId": "proliferator_1",
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+            }),
+        ]);
+        catalog["technologies"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "proliferator_1",
+                "costs": [{ "itemId": "electromagnetic_matrix", "amount": 1 }],
+                "prerequisites": []
+            }));
+        catalog["proliferators"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "tier": 1,
+                "itemId": "proliferator_mk1",
+                "sprayPoints": 12,
+                "extraProductBonus": 0.125,
+                "speedBonus": 0.25,
+                "powerMultiplier": 1.3,
+                "requiredTechId": "proliferator_1"
+            }));
+        state.catalog = Arc::new(
+            RuntimeCatalog::from_value(catalog, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT).unwrap(),
+        );
+        state.base_value_mut()["research"]["completedTechIds"] =
+            serde_json::json!(["proliferator_1"]);
+
+        let mut smelter = state.parse_entity(0).unwrap();
+        smelter["sprayCoaterInstalled"] = Value::from(true);
+        smelter["proliferatorTier"] = Value::from(1);
+        smelter["proliferatorMode"] = Value::from("speed");
+        smelter["proliferatorPoints"] = Value::from(777);
+        state.replace_entity_raw(0, Arc::<str>::from(smelter.to_string()));
+
+        let mut splitter = state.parse_entity(2).unwrap();
+        splitter["kind"] = Value::from("splitter");
+        splitter["buildingId"] = Value::from("splitter_4way");
+        splitter["storedItemId"] = Value::from("iron_ingot");
+        splitter["distributionMode"] = Value::from("priority");
+        splitter.as_object_mut().unwrap().remove("recipeId");
+        splitter
+            .as_object_mut()
+            .unwrap()
+            .remove("targetDysonOrbitId");
+        state.replace_entity_raw(2, Arc::<str>::from(splitter.to_string()));
+
+        state.entity_raw_mut_topology().push(Arc::<str>::from(
+            serde_json::json!({
+                "id": "thermal-a",
+                "kind": "power",
+                "planetId": "home",
+                "position": { "x": 7.0, "y": 2.0 },
+                "interactionLocked": false,
+                "buildingId": "thermal_power_plant",
+                "powerGridId": "grid-b",
+                "powerPriority": 1,
+                "generationPriority": 3,
+                "fuelItemId": "coal",
+                "fuelRemainingMj": 42,
+                "machineCount": 2,
+                "minerCount": 0,
+                "inputs": { "coal": 99 },
+                "outputs": {},
+                "progress": 0.75,
+                "routingCursor": 1,
+                "utilization": 0.5,
+                "productionRate": 2
+            })
+            .to_string(),
+        ));
+        state.rebuild_indexes().unwrap();
+
+        let ids = ["smelter-a", "ejector-a", "ejector-b", "thermal-a"];
+        let context = state
+            .blueprint_capture_context_projection(
+                9,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                &ids.iter().map(|id| (*id).to_owned()).collect::<Vec<_>>(),
+            )
+            .unwrap();
+        assert_eq!(
+            context["support"],
+            serde_json::json!({
+                "supported": true,
+                "reason": null
+            })
+        );
+        state
+            .apply_player_authority_command(&blueprint_capture_intent_command(9, &ids))
+            .unwrap();
+        let entities = state.base_value()["blueprints"][0]["entities"]
+            .as_array()
+            .unwrap();
+        assert_eq!(entities[0]["recipeId"], "iron_ingot");
+        assert_eq!(entities[0]["sprayCoaterInstalled"], true);
+        assert_eq!(entities[0]["proliferatorTier"], 1);
+        assert_eq!(entities[0]["proliferatorMode"], "speed");
+        assert!(entities[0].get("proliferatorPoints").is_none());
+        assert_eq!(entities[1]["targetDysonOrbitId"], "orbit-home-old");
+        assert_eq!(entities[2]["storedItemId"], "iron_ingot");
+        assert_eq!(entities[2]["distributionMode"], "priority");
+        assert_eq!(entities[3]["fuelItemId"], "coal");
+        assert_eq!(entities[3]["powerGridId"], "grid-b");
+        assert_eq!(entities[3]["powerPriority"], 1);
+        assert_eq!(entities[3]["generationPriority"], 3);
+        for runtime_field in [
+            "fuelRemainingMj",
+            "inputs",
+            "outputs",
+            "progress",
+            "routingCursor",
+            "utilization",
+            "productionRate",
+        ] {
+            assert!(entities[3].get(runtime_field).is_none());
+        }
+    }
+
+    #[test]
+    fn blueprint_capture_uses_the_current_terrestrial_active_planet() {
+        let mut state = blueprint_capture_state();
+        state.base_value_mut()["activePlanetId"] = Value::from("ashen");
+        let mut entity = state.parse_entity(0).unwrap();
+        entity["planetId"] = Value::from("ashen");
+        state.replace_entity_raw(0, Arc::<str>::from(entity.to_string()));
+        let ids = vec!["smelter-a".to_owned()];
+        let context = state
+            .blueprint_capture_context_projection(9, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, &ids)
+            .unwrap();
+        assert_eq!(context["activePlanetId"], "ashen");
+        assert_eq!(context["support"]["supported"], true);
+        state
+            .apply_player_authority_command(&blueprint_capture_intent_command(9, &["smelter-a"]))
+            .unwrap();
+        assert_eq!(state.base_value()["blueprints"][0]["id"], "blueprint_9");
+        assert_eq!(state.parse_entity(0).unwrap()["planetId"], "ashen");
+    }
+
+    #[test]
+    fn blueprint_capture_reports_domain_overlap_allocator_and_selection_boundaries() {
+        let cases = [
+            ("missing", "selection-conflict"),
+            ("external-belt", "unsupported-blueprint-domain"),
+            ("target-port", "unsupported-blueprint-domain"),
+            ("vein", "unsupported-blueprint-domain"),
+            ("station", "unsupported-blueprint-domain"),
+            ("special", "unsupported-blueprint-domain"),
+            ("mod-registry", "unsupported-blueprint-domain"),
+            ("gas-active", "unsupported-active-planet"),
+            ("overlap", "position-overlap"),
+            ("allocator", "next-id-exhausted"),
+            ("collision", "next-id-exhausted"),
+            ("version-collision", "next-id-exhausted"),
+            ("queue-collision", "next-id-exhausted"),
+            ("library-full", "library-full"),
+        ];
+        for (case, expected_reason) in cases {
+            let mut state = if case == "mod-registry" {
+                let mut state = player_command_state_for_registry("modded-capture-test");
+                state
+                    .base_value_mut()
+                    .insert("blueprints".to_owned(), serde_json::json!([]));
+                state
+            } else {
+                blueprint_capture_state()
+            };
+            let ids = match case {
+                "missing" => vec!["missing".to_owned()],
+                "external-belt" => vec!["ejector-a".to_owned()],
+                "target-port" | "overlap" => {
+                    vec!["ejector-a".to_owned(), "ejector-b".to_owned()]
+                }
+                _ => vec!["smelter-a".to_owned()],
+            };
+            match case {
+                "target-port" => {
+                    let mut belt = state.parse_belt(0).unwrap();
+                    belt["targetPortIndex"] = Value::from(1);
+                    state.replace_belt_raw(0, Arc::<str>::from(belt.to_string()));
+                }
+                "vein" => {
+                    let mut entity = state.parse_entity(0).unwrap();
+                    entity["kind"] = Value::from("vein");
+                    entity["resourceId"] = Value::from("iron_ore");
+                    entity["minerCount"] = Value::from(1);
+                    state.replace_entity_raw(0, Arc::<str>::from(entity.to_string()));
+                }
+                "station" => {
+                    let mut entity = state.parse_entity(0).unwrap();
+                    entity["kind"] = Value::from("station");
+                    entity["buildingId"] = Value::from("planetary_logistics_station");
+                    state.replace_entity_raw(0, Arc::<str>::from(entity.to_string()));
+                }
+                "special" => {
+                    let mut entity = state.parse_entity(0).unwrap();
+                    entity["buildingId"] = Value::from("time_warp_device");
+                    state.replace_entity_raw(0, Arc::<str>::from(entity.to_string()));
+                }
+                "gas-active" => {
+                    state.base_value_mut()["activePlanetId"] = Value::from("giant");
+                }
+                "overlap" => {
+                    let first_position = state.parse_entity(1).unwrap()["position"].clone();
+                    let mut second = state.parse_entity(2).unwrap();
+                    second["position"] = first_position;
+                    state.replace_entity_raw(2, Arc::<str>::from(second.to_string()));
+                }
+                "allocator" => {
+                    state.base_value_mut()["nextId"] = Value::from(MAX_JAVASCRIPT_SAFE_INTEGER);
+                }
+                "collision" => {
+                    state.base_value_mut()["blueprints"] = serde_json::json!([{
+                        "id": "blueprint_9",
+                        "name": "冲突",
+                        "revision": 1,
+                        "entities": [],
+                        "belts": []
+                    }]);
+                }
+                "version-collision" => {
+                    state.base_value_mut()["blueprintVersions"] = serde_json::json!([{
+                        "id": "version-collision",
+                        "blueprintId": "blueprint_9",
+                        "revision": 1,
+                        "definition": {
+                            "id": "historic-definition",
+                            "name": "历史定义",
+                            "revision": 1,
+                            "entities": [],
+                            "belts": []
+                        }
+                    }]);
+                }
+                "queue-collision" => {
+                    state.base_value_mut()["constructionQueue"] = serde_json::json!([{
+                        "id": "queue-collision",
+                        "blueprintId": "blueprint_9",
+                        "blueprintName": "历史订单",
+                        "planetId": "home",
+                        "position": { "x": 0, "y": 0 },
+                        "rotation": 0,
+                        "mirror": "none",
+                        "queuedAt": 1,
+                        "status": "pending-materials"
+                    }]);
+                }
+                "library-full" => {
+                    state.base_value_mut()["blueprints"] = Value::Array(
+                        (0..4_096)
+                            .map(|index| {
+                                serde_json::json!({
+                                    "id": format!("existing-{index}"),
+                                    "name": format!("蓝图 {index}"),
+                                    "revision": 1,
+                                    "entities": [],
+                                    "belts": []
+                                })
+                            })
+                            .collect(),
+                    );
+                }
+                _ => {}
+            }
+            let projection = state
+                .blueprint_capture_context_projection(
+                    9,
+                    state.catalog.snapshot.registry_fingerprint.as_str(),
+                    &ids,
+                )
+                .unwrap();
+            assert_eq!(projection["support"]["supported"], false, "{case}");
+            assert_eq!(projection["support"]["reason"], expected_reason, "{case}");
+            assert_eq!(projection["expectedBlueprintId"], Value::Null, "{case}");
+            assert_eq!(projection["expectedBlueprintName"], Value::Null, "{case}");
+            assert_eq!(
+                projection["expectedBlueprintRevision"],
+                Value::Null,
+                "{case}"
+            );
+            let before_hash = state.canonical_sha256().unwrap();
+            let ids = ids.iter().map(String::as_str).collect::<Vec<_>>();
+            assert!(
+                state
+                    .apply_player_authority_command(&blueprint_capture_intent_command(9, &ids))
+                    .is_err(),
+                "{case}"
+            );
+            assert_eq!(state.revision, 9, "{case}");
+            assert_eq!(state.canonical_sha256().unwrap(), before_hash, "{case}");
+        }
+    }
+
+    #[test]
+    fn blueprint_capture_rejects_forged_requests_and_corruption_without_mutation() {
+        let mut forged = vec![
+            blueprint_capture_intent_command(8, &["smelter-a"]),
+            blueprint_capture_intent_command(9, &[]),
+            blueprint_capture_intent_command(9, &["smelter-a", "smelter-a"]),
+        ];
+        let mut extra = blueprint_capture_intent_command(9, &["smelter-a"]);
+        extra.top_level_changes[0].value.as_mut().unwrap()["nextId"] = Value::from(10);
+        forged.push(extra);
+        let mut mixed = blueprint_capture_intent_command(9, &["smelter-a"]);
+        mixed.changed_entities.push(RecordPatch {
+            id: "smelter-a".to_owned(),
+            changes: Vec::new(),
+        });
+        forged.push(mixed);
+        for command in forged {
+            let mut state = blueprint_capture_state();
+            let before_hash = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before_hash);
+        }
+
+        let state = blueprint_capture_state();
+        for (revision, registry, ids) in [
+            (
+                8,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                vec!["smelter-a".to_owned()],
+            ),
+            (9, "wrong", vec!["smelter-a".to_owned()]),
+            (9, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, Vec::new()),
+            (
+                9,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                vec!["smelter-a".to_owned(), "smelter-a".to_owned()],
+            ),
+        ] {
+            assert!(
+                state
+                    .blueprint_capture_context_projection(revision, registry, &ids)
+                    .is_err()
+            );
+        }
+
+        let mut corrupted = blueprint_capture_state();
+        corrupted.base_value_mut()["nextId"] = serde_json::json!(9.5);
+        let before_hash = corrupted.canonical_sha256().unwrap();
+        assert!(
+            corrupted
+                .blueprint_capture_context_projection(
+                    9,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    &["smelter-a".to_owned()],
+                )
+                .is_err()
+        );
+        assert!(
+            corrupted
+                .apply_player_authority_command(&blueprint_capture_intent_command(
+                    9,
+                    &["smelter-a"],
+                ))
+                .is_err()
+        );
+        assert_eq!(corrupted.revision, 9);
+        assert_eq!(corrupted.canonical_sha256().unwrap(), before_hash);
+    }
+
     #[test]
     fn player_authority_blueprint_direct_deploys_from_live_definition_atomically_and_replays() {
         let command = blueprint_direct_deploy_intent_command(9, "ordinary-alpha", 2, 20.25, 30.5);
@@ -20877,6 +22526,52 @@ mod tests {
                 .is_err()
         );
         assert_eq!(corrupted_inventory.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn blueprint_direct_deploy_rejects_generated_ids_across_all_persistent_domains() {
+        for generated_id in ["entity_9", "belt_11"] {
+            for domain in PERSISTENT_ALLOCATOR_COLLISION_DOMAINS
+                .iter()
+                .copied()
+                .chain(std::iter::once(
+                    PERSISTENT_ALLOCATOR_VERSION_REFERENCE_DOMAIN,
+                ))
+            {
+                let label = format!("{generated_id} in {domain}");
+                let mut state = blueprint_direct_deploy_state();
+                install_persistent_allocator_collision(&mut state, domain, generated_id);
+                let before = persistent_allocator_snapshot(&state);
+
+                let context = state
+                    .blueprint_direct_deploy_context_projection(
+                        9,
+                        EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                        "ordinary-alpha",
+                        2,
+                        20.25,
+                        30.5,
+                    )
+                    .unwrap();
+                assert_eq!(context["support"]["supported"], false, "{label}");
+                assert_eq!(context["support"]["reason"], "next-id-exhausted", "{label}");
+                assert_persistent_allocator_snapshot(&state, &before, &format!("{label}: context"));
+
+                assert!(
+                    state
+                        .apply_player_authority_command(&blueprint_direct_deploy_intent_command(
+                            9,
+                            "ordinary-alpha",
+                            2,
+                            20.25,
+                            30.5,
+                        ))
+                        .is_err(),
+                    "{label}"
+                );
+                assert_persistent_allocator_snapshot(&state, &before, &format!("{label}: apply"));
+            }
+        }
     }
 
     #[test]
@@ -22010,6 +23705,52 @@ mod tests {
                 ))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn blueprint_enqueue_rejects_construction_id_across_all_persistent_domains() {
+        for domain in PERSISTENT_ALLOCATOR_COLLISION_DOMAINS
+            .iter()
+            .copied()
+            .chain(std::iter::once(
+                PERSISTENT_ALLOCATOR_VERSION_REFERENCE_DOMAIN,
+            ))
+        {
+            let label = format!("construction_9 in {domain}");
+            let mut state = construction_queue_enqueue_state();
+            install_persistent_allocator_collision(&mut state, domain, "construction_9");
+            let before = persistent_allocator_snapshot(&state);
+
+            let context = state
+                .blueprint_enqueue_context_projection(
+                    9,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    "ordinary-alpha",
+                    2,
+                )
+                .unwrap();
+            assert_eq!(context["support"]["supported"], false, "{label}");
+            assert_eq!(
+                context["support"]["reason"], "queue-id-collision",
+                "{label}"
+            );
+            assert!(context["expectedQueueId"].is_null(), "{label}");
+            assert_persistent_allocator_snapshot(&state, &before, &format!("{label}: context"));
+
+            assert!(
+                state
+                    .apply_player_authority_command(&construction_queue_enqueue_intent_command(
+                        9,
+                        "ordinary-alpha",
+                        2,
+                        20.0,
+                        30.0,
+                    ))
+                    .is_err(),
+                "{label}"
+            );
+            assert_persistent_allocator_snapshot(&state, &before, &format!("{label}: apply"));
+        }
     }
 
     #[test]

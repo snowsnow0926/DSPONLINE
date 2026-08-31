@@ -174,4 +174,92 @@ describe("SelectionToolbar bounded read model", () => {
     expect((host.querySelector("[aria-label='清空选择']") as HTMLButtonElement).disabled).toBe(false);
     expect((host.querySelector("[aria-label='完成多选']") as HTMLButtonElement).disabled).toBe(false);
   });
+
+  it("can enable only the Rust-backed native copy action", () => {
+    const onCopy = vi.fn();
+    act(() => root.render(<SelectionToolbar
+      model={{
+        schema: "factory-read-model-v1",
+        source: "native-core",
+        revision: 33,
+        activePlanetId: "home",
+        projectionIdentity: { sessionId: "session-a", runId: "run-a", revision: 33, planetId: "home" },
+        selectedCount: 2,
+        selectedBeltCount: 0,
+        canLock: false,
+        canUnlock: false,
+      }}
+      eligibleCount={2}
+      canUpgrade
+      canUpgradeBelts
+      unsafeActionsEnabled={false}
+      copyActionEnabled
+      onFocus={noop}
+      onAutoLayout={noop}
+      onCopy={onCopy}
+      onUpgrade={noop}
+      onUpgradeBelts={noop}
+      onBatchIncrease={noop}
+      onLock={noop}
+      onUnlock={noop}
+      onRemove={noop}
+      onClear={noop}
+      onDone={noop}
+    />));
+
+    const copy = host.querySelector("[aria-label='复制所选为蓝图']") as HTMLButtonElement;
+    expect(copy.disabled).toBe(false);
+    act(() => copy.click());
+    expect(onCopy).toHaveBeenCalledTimes(1);
+    for (const selector of [
+      "[aria-label='自动整理所选设备']",
+      "[aria-label='批量升级所选设备']",
+      "[aria-label='一键升级所选传送带']",
+      "[title='批量增加 1']",
+      "[aria-label='批量回收所选设备与线路']",
+    ]) {
+      expect((host.querySelector(selector) as HTMLButtonElement).disabled).toBe(true);
+    }
+  });
+
+  it.each([
+    { copyActionEnabled: false, eligibleCount: 2, label: "explicitly unavailable" },
+    { copyActionEnabled: true, eligibleCount: 0, label: "empty selection" },
+  ])("keeps native copy disabled when $label", ({ copyActionEnabled, eligibleCount }) => {
+    const onCopy = vi.fn();
+    act(() => root.render(<SelectionToolbar
+      model={{
+        schema: "factory-read-model-v1",
+        source: "native-core",
+        revision: 34,
+        activePlanetId: "home",
+        projectionIdentity: { sessionId: "session-a", runId: "run-a", revision: 34, planetId: "home" },
+        selectedCount: 2,
+        selectedBeltCount: 0,
+        canLock: false,
+        canUnlock: false,
+      }}
+      eligibleCount={eligibleCount}
+      canUpgrade
+      canUpgradeBelts
+      unsafeActionsEnabled={false}
+      copyActionEnabled={copyActionEnabled}
+      onFocus={noop}
+      onAutoLayout={noop}
+      onCopy={onCopy}
+      onUpgrade={noop}
+      onUpgradeBelts={noop}
+      onBatchIncrease={noop}
+      onLock={noop}
+      onUnlock={noop}
+      onRemove={noop}
+      onClear={noop}
+      onDone={noop}
+    />));
+
+    const copy = host.querySelector("[aria-label='复制所选为蓝图']") as HTMLButtonElement;
+    expect(copy.disabled).toBe(true);
+    act(() => copy.click());
+    expect(onCopy).not.toHaveBeenCalled();
+  });
 });

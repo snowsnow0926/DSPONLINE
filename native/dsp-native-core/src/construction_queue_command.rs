@@ -13,6 +13,7 @@ use anyhow::{anyhow, bail};
 use serde_json::{Map, Value, json};
 
 use crate::{
+    blueprint_import::blueprint_allocator_available,
     blueprint_workspace::{
         queue_only_definition_supported, queue_only_definition_supported_on_planet,
         validate_blueprint_directory, validate_queue_directory, validate_version_directory,
@@ -206,13 +207,19 @@ impl ConstructionQueueExpansion {
         &self.command
     }
 
-    pub(crate) fn apply_to_base(&self, base: &mut Map<String, Value>) -> anyhow::Result<()> {
+    pub(crate) fn apply_to_base(
+        &self,
+        state: &CoreState,
+        base: &mut Map<String, Value>,
+    ) -> anyhow::Result<()> {
         match &self.plan {
             ConstructionQueuePlan::Cancel(plan) => apply_cancel_plan(base, plan),
-            ConstructionQueuePlan::Enqueue(plan) => apply_enqueue_plan(base, plan),
+            ConstructionQueuePlan::Enqueue(plan) => apply_enqueue_plan(state, base, plan),
             ConstructionQueuePlan::Fund(plan) => apply_fund_plan(base, plan),
-            ConstructionQueuePlan::Deploy(plan) => apply_deploy_plan(base, plan),
-            ConstructionQueuePlan::DirectDeploy(plan) => apply_direct_deploy_plan(base, plan),
+            ConstructionQueuePlan::Deploy(plan) => apply_deploy_plan(state, base, plan),
+            ConstructionQueuePlan::DirectDeploy(plan) => {
+                apply_direct_deploy_plan(state, base, plan)
+            }
         }
     }
 
@@ -225,9 +232,14 @@ impl ConstructionQueueExpansion {
 }
 
 fn apply_direct_deploy_plan(
+    state: &CoreState,
     base: &mut Map<String, Value>,
     plan: &ConstructionQueueDirectDeployPlan,
 ) -> anyhow::Result<()> {
+    let candidate_ids = added_record_allocator_ids(&plan.added_entities, &plan.added_belts)?;
+    if !persistent_allocator_ids_available(state, base, &candidate_ids)? {
+        bail!("native direct blueprint deploy generated ID is no longer available")
+    }
     if safe_integer(base.get("nextId"), "next ID")? != plan.next_id {
         bail!("native direct blueprint deploy allocator is no longer current")
     }
@@ -250,9 +262,14 @@ fn apply_direct_deploy_plan(
 }
 
 fn apply_deploy_plan(
+    state: &CoreState,
     base: &mut Map<String, Value>,
     plan: &ConstructionQueueDeployPlan,
 ) -> anyhow::Result<()> {
+    let candidate_ids = added_record_allocator_ids(&plan.added_entities, &plan.added_belts)?;
+    if !persistent_allocator_ids_available(state, base, &candidate_ids)? {
+        bail!("native construction queue deploy generated ID is no longer available")
+    }
     if safe_integer(base.get("nextId"), "next ID")? != plan.next_id {
         bail!("native construction queue deploy allocator is no longer current")
     }
@@ -377,9 +394,13 @@ fn apply_cancel_plan(
 }
 
 fn apply_enqueue_plan(
+    state: &CoreState,
     base: &mut Map<String, Value>,
     plan: &ConstructionQueueEnqueuePlan,
 ) -> anyhow::Result<()> {
+    if !persistent_allocator_ids_available(state, base, &[plan.expected_queue_id.as_str()])? {
+        bail!("native construction queue ID is no longer available")
+    }
     let current_next_id = safe_integer(base.get("nextId"), "next ID")?;
     if current_next_id != plan.next_id {
         bail!("native construction queue allocator is no longer current")
@@ -1049,6 +1070,60 @@ fn validated_deployment_directories(
     })
 }
 
+/// One allocator domain proof for every native blueprint mutation that derives
+/// a durable public-v47 ID. Callers pass the exact base they are about to
+/// mutate so click-time preparation, command re-derivation and private base
+/// application all reject the same cross-domain collision set.
+fn persistent_allocator_ids_available(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    candidate_ids: &[&str],
+) -> anyhow::Result<bool> {
+    let blueprint_values = base
+        .get("blueprints")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native construction queue blueprint directory is invalid"))?;
+    let version_values: &[Value] = match base.get("blueprintVersions") {
+        None | Some(Value::Null) => &[],
+        Some(Value::Array(values)) => values.as_slice(),
+        _ => bail!("native construction queue blueprint versions are invalid"),
+    };
+    let queue_values = base
+        .get("constructionQueue")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native construction queue directory is invalid"))?;
+    let blueprints = validate_blueprint_directory(blueprint_values)?;
+    let versions = validate_version_directory(version_values)?;
+    let queue = validate_queue_directory(queue_values)?;
+    let mut unique_candidates = HashSet::with_capacity(candidate_ids.len());
+    for candidate_id in candidate_ids {
+        if !valid_opaque_text(candidate_id)
+            || !unique_candidates.insert(*candidate_id)
+            || !blueprint_allocator_available(state, &blueprints, &versions, &queue, candidate_id)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn added_record_allocator_ids<'a>(
+    added_entities: &'a [AddedRecord],
+    added_belts: &'a [AddedRecord],
+) -> anyhow::Result<Vec<&'a str>> {
+    added_entities
+        .iter()
+        .chain(added_belts)
+        .map(|record| {
+            record
+                .value
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("native construction queue generated ID is invalid"))
+        })
+        .collect()
+}
+
 fn prepare_enqueue(
     state: &CoreState,
     blueprint_id: &str,
@@ -1187,11 +1262,7 @@ fn prepare_enqueue(
     }
     let expected_queue_id = format!("construction_{next_id}");
     if !valid_opaque_text(&expected_queue_id)
-        || state.entity_index.contains_key(&expected_queue_id)
-        || state.belt_index.contains_key(&expected_queue_id)
-        || queue
-            .iter()
-            .any(|row| row.get("id").and_then(Value::as_str) == Some(expected_queue_id.as_str()))
+        || !persistent_allocator_ids_available(state, base, &[expected_queue_id.as_str()])?
     {
         return Ok(EnqueuePreparation::Unsupported("queue-id-collision"));
     }
@@ -2028,6 +2099,36 @@ fn deploy_definition_semantics_supported(
     Ok(true)
 }
 
+/// Shared ordinary-blueprint proof used by both direct deployment and native
+/// capture. Capture first reconstructs a definition exclusively from the live
+/// authoritative records, then asks the same deploy compiler whether every
+/// retained configuration field is in the built-in deterministic domain.
+pub(crate) fn ordinary_blueprint_definition_supported_on_planet(
+    state: &CoreState,
+    definition: &Map<String, Value>,
+    planet_id: &str,
+) -> anyhow::Result<bool> {
+    if !queue_only_definition_supported_on_planet(state, definition, planet_id)? {
+        return Ok(false);
+    }
+    deploy_definition_semantics_supported(state, definition, planet_id)
+}
+
+/// Deployment already rejects duplicate candidate positions after applying a
+/// transform. Native capture has no placement origin yet, but must reject the
+/// same exact-overlap ambiguity before persisting a reusable definition.
+pub(crate) fn ordinary_blueprint_definition_has_no_internal_overlap(
+    definition: &Map<String, Value>,
+) -> anyhow::Result<bool> {
+    let mut occupied = HashSet::new();
+    for (x, y) in definition_offsets(definition)? {
+        if !occupied.insert(rounded_position_key(x, y)?) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub(crate) fn queue_entry_deploy_ready(
     state: &CoreState,
     row: &Map<String, Value>,
@@ -2521,7 +2622,6 @@ fn direct_allocator_available(
     state: &CoreState,
     definition: &Map<String, Value>,
     next_id: u64,
-    queue: &[&Map<String, Value>],
 ) -> anyhow::Result<bool> {
     let entity_count = definition
         .get("entities")
@@ -2542,29 +2642,18 @@ fn direct_allocator_available(
     {
         return Ok(false);
     }
-    let queue_ids = queue
-        .iter()
-        .filter_map(|row| row.get("id").and_then(Value::as_str))
-        .collect::<HashSet<_>>();
+    let mut candidate_ids = Vec::with_capacity(record_count);
     for ordinal in 0..entity_count {
-        let id = format!("entity_{}", next_id + ordinal as u64);
-        if state.entity_index.contains_key(&id)
-            || state.belt_index.contains_key(&id)
-            || queue_ids.contains(id.as_str())
-        {
-            return Ok(false);
-        }
+        candidate_ids.push(format!("entity_{}", next_id + ordinal as u64));
     }
     for ordinal in 0..belt_count {
-        let id = format!("belt_{}", next_id + entity_count as u64 + ordinal as u64);
-        if state.entity_index.contains_key(&id)
-            || state.belt_index.contains_key(&id)
-            || queue_ids.contains(id.as_str())
-        {
-            return Ok(false);
-        }
+        candidate_ids.push(format!(
+            "belt_{}",
+            next_id + entity_count as u64 + ordinal as u64
+        ));
     }
-    Ok(true)
+    let candidate_id_refs = candidate_ids.iter().map(String::as_str).collect::<Vec<_>>();
+    persistent_allocator_ids_available(state, state.base_value(), &candidate_id_refs)
 }
 
 fn prepare_direct_deploy<'a>(
@@ -2641,7 +2730,7 @@ fn prepare_direct_deploy<'a>(
         }
     };
     let next_id = safe_integer(state.base_value().get("nextId"), "next ID")?;
-    if !direct_allocator_available(state, definition, next_id, &directories.queue)? {
+    if !direct_allocator_available(state, definition, next_id)? {
         return Ok(DirectDeployPreparation::Unsupported("next-id-exhausted"));
     }
     Ok(DirectDeployPreparation::Supported(Box::new(
@@ -2731,7 +2820,7 @@ fn validated_deploy_plan(
         bail!("native construction queue deploy has an exact position overlap")
     }
     let next_id = safe_integer(base.get("nextId"), "next ID")?;
-    if !direct_allocator_available(state, definition, next_id, &directories.queue)? {
+    if !direct_allocator_available(state, definition, next_id)? {
         bail!("native construction queue deploy generated ID collides with a queue ID")
     }
     let (added_entities, added_belts, next_id_after) = compile_deploy_records(

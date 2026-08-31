@@ -1,32 +1,50 @@
-//! Minimal, durable blueprint metadata intents.
+//! Minimal, durable blueprint intents.
 //!
 //! The renderer sends the exact rename marker `{ kind, id, name }`, the exact
 //! target-state transform marker `{ kind, id, rotation, mirror }`, the exact
-//! recipe override marker `{ kind, id, sourceRecipeId, targetRecipeId }`, or
-//! the exact delete marker `{ kind, id, revision }`.
+//! recipe override marker `{ kind, id, sourceRecipeId, targetRecipeId }`, the
+//! exact delete marker `{ kind, id, revision }`, or the exact native capture
+//! marker `{ kind: "capture", entityIds, revision }`.
 //! Rust validates the complete public-v47 blueprint directory and expands the
 //! marker to an authoritative mutation. Rename and transform use ordinary leaf
-//! patches. Delete keeps its validated array index in a private Core-only plan,
-//! so the generic patch engine still forbids renderer-accessible array deletion
-//! and no complete blueprint directory is copied into the command. No blueprint
-//! body, version snapshot, queue, inventory, entity, belt, or allocator field is
-//! renderer-derived.
+//! patches. Delete and capture keep their validated mutations in private
+//! Core-only plans, so the generic patch engine still forbids renderer-accessible
+//! array mutation and no complete blueprint directory or captured body is copied
+//! into the command. No blueprint body, version snapshot, queue, inventory,
+//! entity, belt, or allocator field is renderer-derived.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Value, json};
 
 use crate::{
+    blueprint_import::{
+        BlueprintImportMarker, BlueprintImportPlan, BlueprintImportPreparation,
+        MAX_BLUEPRINT_IMPORT_COMMAND_BYTES, blueprint_allocator_available, parse_import_marker,
+        prepare_import_marker,
+    },
+    blueprint_workspace::{
+        validate_blueprint_directory, validate_queue_directory, validate_version_directory,
+    },
     command::{PathSegment, SimulationCommandPatch, ValuePatch},
+    construction_queue_command::{
+        ordinary_blueprint_definition_has_no_internal_overlap,
+        ordinary_blueprint_definition_supported_on_planet,
+    },
     state::CoreState,
 };
 
+const BLUEPRINT_CAPTURE_CONTEXT_PROJECTION: &str = "blueprint-capture-context-v1";
+const MAX_PROJECTION_BYTES: usize = 1_048_576;
 const MAX_BLUEPRINT_ROWS: usize = 4_096;
 const MAX_RECIPE_OVERRIDE_ROWS: usize = 4_096;
 const MAX_OPAQUE_ID_BYTES: usize = 512;
 const MAX_EXISTING_NAME_BYTES: usize = 256;
 const MAX_RENAME_UTF16_UNITS: usize = 32;
+const MAX_CAPTURE_ENTITIES: usize = 512;
+const MAX_CAPTURE_BELTS: usize = 1_024;
+const MAX_BUILDING_STACK_COUNT: u64 = 100_000_000;
 const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,11 +74,19 @@ struct BlueprintRecipeOverrideIntent {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct BlueprintCaptureIntent {
+    entity_ids: Vec<String>,
+    revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum BlueprintIntent {
     Rename(BlueprintRenameIntent),
     Transform(BlueprintTransformIntent),
     RecipeOverride(BlueprintRecipeOverrideIntent),
     Delete(BlueprintDeleteIntent),
+    Capture(BlueprintCaptureIntent),
+    Import(BlueprintImportMarker),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,21 +120,43 @@ struct ValidatedBlueprintRecipeOverride {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct BlueprintCapturePlan {
+    expected_next_id: u64,
+    expected_library_len: usize,
+    blueprint: Value,
+    next_id_after: u64,
+}
+
+enum BlueprintCapturePreparation {
+    Supported(BlueprintCapturePlan),
+    Unsupported(&'static str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ValidatedBlueprintIntent {
     Rename(ValidatedBlueprintRename),
     Transform(ValidatedBlueprintTransform),
     RecipeOverride(ValidatedBlueprintRecipeOverride),
     Delete(ValidatedBlueprintDelete),
+    Capture(BlueprintCapturePlan),
+    Import(BlueprintImportPlan),
+}
+
+#[derive(Debug, Clone)]
+enum BlueprintPrivateMutation {
+    Delete { index: usize },
+    Capture(BlueprintCapturePlan),
+    Import(BlueprintImportPlan),
 }
 
 /// Core-only expansion of a validated semantic blueprint marker.
 ///
-/// `delete_index` is deliberately not serializable and never crosses the Host
-/// or WAL boundary. It can only be produced after `validated_intent()` has
-/// proved the complete blueprint directory and exact target revision.
+/// The private mutation is deliberately not serializable and never crosses the
+/// Host or WAL boundary. It can only be produced after `validated_intent()` has
+/// proved the complete blueprint directory and exact authoritative capture.
 pub(crate) struct BlueprintCommandExpansion {
     command: SimulationCommandPatch,
-    delete_index: Option<usize>,
+    mutation: Option<BlueprintPrivateMutation>,
 }
 
 impl BlueprintCommandExpansion {
@@ -116,9 +164,113 @@ impl BlueprintCommandExpansion {
         &self.command
     }
 
-    pub(crate) fn delete_index(&self) -> Option<usize> {
-        self.delete_index
+    pub(crate) fn requires_workspace_refresh(&self) -> bool {
+        self.mutation.is_some()
     }
+
+    pub(crate) fn apply_to_base(
+        &self,
+        state: &CoreState,
+        base: &mut Map<String, Value>,
+    ) -> anyhow::Result<()> {
+        match &self.mutation {
+            None => Ok(()),
+            Some(BlueprintPrivateMutation::Delete { index }) => {
+                let blueprints = base
+                    .get_mut("blueprints")
+                    .and_then(Value::as_array_mut)
+                    .ok_or_else(|| {
+                        anyhow!("native player-authority blueprint directory is invalid")
+                    })?;
+                if *index >= blueprints.len() {
+                    bail!("native player-authority blueprint delete index is invalid")
+                }
+                blueprints.remove(*index);
+                Ok(())
+            }
+            Some(BlueprintPrivateMutation::Capture(plan)) => {
+                ensure_private_blueprint_allocator_available(state, base, &plan.blueprint)?;
+                let current_next_id = base
+                    .get("nextId")
+                    .and_then(Value::as_u64)
+                    .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                    .ok_or_else(|| {
+                        anyhow!("native player-authority blueprint next ID is invalid")
+                    })?;
+                if current_next_id != plan.expected_next_id {
+                    bail!("native player-authority blueprint capture allocator changed")
+                }
+                let blueprints = base
+                    .get_mut("blueprints")
+                    .and_then(Value::as_array_mut)
+                    .ok_or_else(|| {
+                        anyhow!("native player-authority blueprint directory is invalid")
+                    })?;
+                if blueprints.len() != plan.expected_library_len {
+                    bail!("native player-authority blueprint capture library changed")
+                }
+                blueprints.push(plan.blueprint.clone());
+                base.insert("nextId".to_owned(), Value::from(plan.next_id_after));
+                Ok(())
+            }
+            Some(BlueprintPrivateMutation::Import(plan)) => {
+                ensure_private_blueprint_allocator_available(state, base, &plan.blueprint)?;
+                let current_next_id = base
+                    .get("nextId")
+                    .and_then(Value::as_u64)
+                    .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                    .ok_or_else(|| {
+                        anyhow!("native player-authority blueprint next ID is invalid")
+                    })?;
+                if current_next_id != plan.expected_next_id {
+                    bail!("native player-authority blueprint import allocator changed")
+                }
+                let blueprints = base
+                    .get_mut("blueprints")
+                    .and_then(Value::as_array_mut)
+                    .ok_or_else(|| {
+                        anyhow!("native player-authority blueprint directory is invalid")
+                    })?;
+                if blueprints.len() != plan.expected_library_len {
+                    bail!("native player-authority blueprint import library changed")
+                }
+                blueprints.push(plan.blueprint.clone());
+                base.insert("nextId".to_owned(), Value::from(plan.next_id_after));
+                Ok(())
+            }
+        }
+    }
+}
+
+fn ensure_private_blueprint_allocator_available(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    blueprint: &Value,
+) -> anyhow::Result<()> {
+    let blueprint_id = blueprint
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority blueprint ID is invalid"))?;
+    let blueprint_values = base
+        .get("blueprints")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native player-authority blueprint directory is invalid"))?;
+    let version_values: &[Value] = match base.get("blueprintVersions") {
+        None | Some(Value::Null) => &[],
+        Some(Value::Array(values)) => values.as_slice(),
+        _ => bail!("native player-authority blueprint versions are invalid"),
+    };
+    let queue_values = base
+        .get("constructionQueue")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native player-authority construction queue is invalid"))?;
+    let blueprints = validate_blueprint_directory(blueprint_values)?;
+    let versions = validate_version_directory(version_values)?;
+    let queue = validate_queue_directory(queue_values)?;
+    if !blueprint_allocator_available(state, &blueprints, &versions, &queue, blueprint_id) {
+        bail!("native player-authority blueprint allocator is no longer available")
+    }
+    Ok(())
 }
 
 fn path_matches(path: &[PathSegment], expected: &[&str]) -> bool {
@@ -157,6 +309,21 @@ fn canonical_blueprint_name(value: &str) -> Option<String> {
     (!canonical.is_empty() && !canonical.chars().any(char::is_control)).then_some(canonical)
 }
 
+fn validate_capture_entity_ids(entity_ids: Vec<String>) -> anyhow::Result<Vec<String>> {
+    if entity_ids.is_empty() || entity_ids.len() > MAX_CAPTURE_ENTITIES {
+        bail!("native player-authority blueprint capture entity IDs are invalid")
+    }
+    let mut unique = HashSet::with_capacity(entity_ids.len());
+    if entity_ids
+        .iter()
+        .any(|id| !valid_opaque_text(id, MAX_OPAQUE_ID_BYTES) || !unique.insert(id.as_str()))
+    {
+        bail!("native player-authority blueprint capture entity IDs are invalid")
+    }
+    drop(unique);
+    Ok(entity_ids)
+}
+
 pub(crate) fn command_contains_intent(command: &SimulationCommandPatch) -> bool {
     command
         .top_level_changes
@@ -188,11 +355,13 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<BlueprintI
         .get("kind")
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow!("native player-authority blueprint intent kind is invalid"))?;
-    let id = intent
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|id| valid_opaque_text(id, MAX_OPAQUE_ID_BYTES))
-        .ok_or_else(|| anyhow!("native player-authority blueprint intent ID is invalid"))?;
+    let existing_id = || {
+        intent
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| valid_opaque_text(id, MAX_OPAQUE_ID_BYTES))
+            .ok_or_else(|| anyhow!("native player-authority blueprint intent ID is invalid"))
+    };
     match kind {
         "rename" => {
             if intent.len() != 3 || !intent.contains_key("name") {
@@ -206,6 +375,7 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<BlueprintI
                 .ok_or_else(|| {
                     anyhow!("native player-authority blueprint rename name is not canonical")
                 })?;
+            let id = existing_id()?;
             Ok(BlueprintIntent::Rename(BlueprintRenameIntent {
                 id: id.to_owned(),
                 name: canonical,
@@ -232,6 +402,7 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<BlueprintI
                 .ok_or_else(|| {
                     anyhow!("native player-authority blueprint transform mirror is invalid")
                 })?;
+            let id = existing_id()?;
             Ok(BlueprintIntent::Transform(BlueprintTransformIntent {
                 id: id.to_owned(),
                 rotation,
@@ -259,6 +430,7 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<BlueprintI
                 .ok_or_else(|| {
                     anyhow!("native player-authority blueprint target recipe ID is invalid")
                 })?;
+            let id = existing_id()?;
             Ok(BlueprintIntent::RecipeOverride(
                 BlueprintRecipeOverrideIntent {
                     id: id.to_owned(),
@@ -278,10 +450,51 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<BlueprintI
                 .ok_or_else(|| {
                     anyhow!("native player-authority blueprint delete revision is invalid")
                 })?;
+            let id = existing_id()?;
             Ok(BlueprintIntent::Delete(BlueprintDeleteIntent {
                 id: id.to_owned(),
                 revision,
             }))
+        }
+        "capture" => {
+            if intent.len() != 3
+                || !intent.contains_key("entityIds")
+                || !intent.contains_key("revision")
+            {
+                bail!("native player-authority blueprint capture intent is invalid")
+            }
+            let entity_ids = intent
+                .get("entityIds")
+                .and_then(Value::as_array)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority blueprint capture entity IDs are invalid")
+                })?;
+            let entity_ids = entity_ids
+                .iter()
+                .map(|value| {
+                    value.as_str().map(str::to_owned).ok_or_else(|| {
+                        anyhow!("native player-authority blueprint capture entity IDs are invalid")
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let entity_ids = validate_capture_entity_ids(entity_ids)?;
+            let revision = intent
+                .get("revision")
+                .and_then(Value::as_u64)
+                .filter(|revision| *revision < MAX_JAVASCRIPT_SAFE_INTEGER)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority blueprint capture revision is invalid")
+                })?;
+            Ok(BlueprintIntent::Capture(BlueprintCaptureIntent {
+                entity_ids,
+                revision,
+            }))
+        }
+        "import" => {
+            if serde_json::to_vec(command)?.len() > MAX_BLUEPRINT_IMPORT_COMMAND_BYTES {
+                bail!("native player-authority blueprint import command exceeds the byte limit")
+            }
+            Ok(BlueprintIntent::Import(parse_import_marker(intent)?))
         }
         _ => bail!("native player-authority blueprint intent kind is invalid"),
     }
@@ -369,11 +582,434 @@ fn validate_blueprint_row(
     Ok((id, name, blueprint_revision(row)?, rotation, mirror))
 }
 
+fn required_capture_text<'a>(
+    row: &'a Map<String, Value>,
+    key: &str,
+    label: &str,
+) -> anyhow::Result<&'a str> {
+    row.get(key)
+        .and_then(Value::as_str)
+        .filter(|value| valid_opaque_text(value, MAX_OPAQUE_ID_BYTES))
+        .ok_or_else(|| anyhow!("native blueprint capture {label} is invalid"))
+}
+
+fn finite_capture_number(value: Option<&Value>, label: &str) -> anyhow::Result<f64> {
+    value
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| anyhow!("native blueprint capture {label} is invalid"))
+}
+
+fn exact_capture_stack(value: Option<&Value>) -> anyhow::Result<u64> {
+    value
+        .and_then(Value::as_u64)
+        .filter(|value| (1..=MAX_BUILDING_STACK_COUNT).contains(value))
+        .ok_or_else(|| anyhow!("native blueprint capture machine count is invalid"))
+}
+
+fn builtin_content_id(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn copy_present_fields(
+    source: &Map<String, Value>,
+    target: &mut Map<String, Value>,
+    keys: &[&str],
+) {
+    for key in keys {
+        if let Some(value) = source.get(*key) {
+            target.insert((*key).to_owned(), value.clone());
+        }
+    }
+}
+
+fn active_capture_planet_id(state: &CoreState) -> anyhow::Result<&str> {
+    let active_planet_id = state
+        .base_value()
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .filter(|value| valid_opaque_text(value, MAX_OPAQUE_ID_BYTES))
+        .ok_or_else(|| anyhow!("native blueprint capture active planet is invalid"))?;
+    if !state
+        .catalog
+        .planets
+        .iter()
+        .any(|planet| planet.id == active_planet_id)
+    {
+        bail!("native blueprint capture active planet is missing from the catalog")
+    }
+    Ok(active_planet_id)
+}
+
+fn prepare_capture(
+    state: &CoreState,
+    intent: &BlueprintCaptureIntent,
+) -> anyhow::Result<BlueprintCapturePreparation> {
+    let base = state.base_value();
+    let blueprint_values = base
+        .get("blueprints")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native blueprint capture library is invalid"))?;
+    let blueprints = validate_blueprint_directory(blueprint_values)?;
+    let empty_version_values = Vec::new();
+    let version_values = match base.get("blueprintVersions") {
+        None | Some(Value::Null) => &empty_version_values,
+        Some(Value::Array(values)) => values,
+        _ => bail!("native blueprint capture version directory is invalid"),
+    };
+    let queue_values = base
+        .get("constructionQueue")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native blueprint capture queue directory is invalid"))?;
+    let versions = validate_version_directory(version_values)?;
+    let queue = validate_queue_directory(queue_values)?;
+    let mut strict_ids = HashSet::with_capacity(blueprints.len());
+    for row in &blueprints {
+        let (id, _, _, _, _) = validate_blueprint_row(row)?;
+        if !strict_ids.insert(id) {
+            bail!("native blueprint capture library IDs are not unique")
+        }
+    }
+    if blueprints.len() >= MAX_BLUEPRINT_ROWS {
+        return Ok(BlueprintCapturePreparation::Unsupported("library-full"));
+    }
+
+    let active_planet_id = active_capture_planet_id(state)?.to_owned();
+    let active_planet = state
+        .catalog
+        .planets
+        .iter()
+        .find(|planet| planet.id == active_planet_id)
+        .expect("active capture planet membership was validated");
+    if active_planet.kind != "terrestrial" {
+        return Ok(BlueprintCapturePreparation::Unsupported(
+            "unsupported-active-planet",
+        ));
+    }
+    if state.identity.registry_fingerprint
+        != crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.catalog.snapshot.registry_fingerprint
+            != crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    {
+        return Ok(BlueprintCapturePreparation::Unsupported(
+            "unsupported-blueprint-domain",
+        ));
+    }
+
+    let mut selected = Vec::with_capacity(intent.entity_ids.len());
+    for entity_id in &intent.entity_ids {
+        let Some(index) = state.entity_index.get(entity_id).copied() else {
+            return Ok(BlueprintCapturePreparation::Unsupported(
+                "selection-conflict",
+            ));
+        };
+        selected.push((index, entity_id.clone()));
+    }
+    selected.sort_unstable_by_key(|(index, _)| *index);
+
+    const ENTITY_CONFIG_KEYS: &[&str] = &[
+        "recipeId",
+        "storedItemId",
+        "distributionMode",
+        "fuelItemId",
+        "energyMode",
+        "powerGridId",
+        "powerPriority",
+        "generationPriority",
+        "sprayCoaterInstalled",
+        "proliferatorTier",
+        "proliferatorMode",
+    ];
+    let mut pending_entities = Vec::with_capacity(selected.len());
+    let mut key_by_id = HashMap::with_capacity(selected.len());
+    let mut origin_x = f64::INFINITY;
+    let mut origin_y = f64::INFINITY;
+    for (ordinal, (index, requested_id)) in selected.iter().enumerate() {
+        let entity = state.parse_entity(*index)?;
+        let entity = entity
+            .as_object()
+            .ok_or_else(|| anyhow!("native blueprint capture entity is invalid"))?;
+        if required_capture_text(entity, "id", "entity ID")? != requested_id {
+            bail!("native blueprint capture entity index is inconsistent")
+        }
+        if entity.get("planetId").and_then(Value::as_str) != Some(&active_planet_id) {
+            return Ok(BlueprintCapturePreparation::Unsupported(
+                "selection-conflict",
+            ));
+        }
+        if entity.get("kind").and_then(Value::as_str) == Some("vein") {
+            return Ok(BlueprintCapturePreparation::Unsupported(
+                "unsupported-blueprint-domain",
+            ));
+        }
+        let building_id = required_capture_text(entity, "buildingId", "building ID")?;
+        if !builtin_content_id(building_id) {
+            return Ok(BlueprintCapturePreparation::Unsupported(
+                "unsupported-blueprint-domain",
+            ));
+        }
+        if !crate::command::ordinary_placement_building_domain_supported(building_id) {
+            return Ok(BlueprintCapturePreparation::Unsupported(
+                "unsupported-blueprint-domain",
+            ));
+        }
+        let Some(building) = state.catalog.buildings.get(building_id) else {
+            return Ok(BlueprintCapturePreparation::Unsupported(
+                "catalog-incomplete",
+            ));
+        };
+        let expected_kind = match building.kind.as_str() {
+            "machine" => "machine",
+            "power" => "power",
+            "storage" => "storage",
+            "splitter" => "splitter",
+            _ => {
+                return Ok(BlueprintCapturePreparation::Unsupported(
+                    "unsupported-blueprint-domain",
+                ));
+            }
+        };
+        if entity.get("kind").and_then(Value::as_str) != Some(expected_kind) {
+            bail!("native blueprint capture entity kind is inconsistent")
+        }
+        if let Some(reason) = crate::command::ordinary_placement_support_reason_on_planet(
+            state,
+            building_id,
+            &active_planet_id,
+        )? {
+            return Ok(BlueprintCapturePreparation::Unsupported(match reason {
+                crate::command::OrdinaryPlacementUnsupportedReason::UnknownBuilding
+                | crate::command::OrdinaryPlacementUnsupportedReason::MissingConstructionDefinition
+                | crate::command::OrdinaryPlacementUnsupportedReason::TechnologyLocked => {
+                    "catalog-incomplete"
+                }
+                crate::command::OrdinaryPlacementUnsupportedReason::UnsupportedBuildingKind
+                | crate::command::OrdinaryPlacementUnsupportedReason::UnsupportedBuildingDomain => {
+                    "unsupported-blueprint-domain"
+                }
+                crate::command::OrdinaryPlacementUnsupportedReason::UnsupportedActivePlanet => {
+                    "unsupported-active-planet"
+                }
+            }));
+        }
+        let position = entity
+            .get("position")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native blueprint capture entity position is invalid"))?;
+        let x = finite_capture_number(position.get("x"), "entity x position")?;
+        let y = finite_capture_number(position.get("y"), "entity y position")?;
+        origin_x = origin_x.min(x);
+        origin_y = origin_y.min(y);
+        let key = format!("node_{}", ordinal + 1);
+        key_by_id.insert(requested_id.clone(), key.clone());
+        let mut template = Map::new();
+        template.insert("key".to_owned(), Value::from(key));
+        template.insert("buildingId".to_owned(), Value::from(building_id));
+        template.insert(
+            "machineCount".to_owned(),
+            Value::from(exact_capture_stack(entity.get("machineCount"))?),
+        );
+        copy_present_fields(entity, &mut template, ENTITY_CONFIG_KEYS);
+        if building_id == "em_rail_ejector"
+            && let Some(value) = entity.get("targetDysonOrbitId")
+        {
+            template.insert("targetDysonOrbitId".to_owned(), value.clone());
+        }
+        pending_entities.push((template, x, y));
+    }
+
+    let entity_templates = pending_entities
+        .into_iter()
+        .map(|(mut template, x, y)| {
+            template.insert(
+                "offset".to_owned(),
+                json!({ "x": x - origin_x, "y": y - origin_y }),
+            );
+            Value::Object(template)
+        })
+        .collect::<Vec<_>>();
+
+    const BELT_CONFIG_KEYS: &[&str] = &[
+        "sorterTier",
+        "priority",
+        "stackSize",
+        "monitorEnabled",
+        "routeOffsetY",
+    ];
+    let mut belt_templates = Vec::new();
+    for index in 0..state.belt_index.len() {
+        let belt = state.parse_belt(index)?;
+        let belt = belt
+            .as_object()
+            .ok_or_else(|| anyhow!("native blueprint capture belt is invalid"))?;
+        let source = required_capture_text(belt, "source", "belt source")?;
+        let target = required_capture_text(belt, "target", "belt target")?;
+        let source_selected = key_by_id.contains_key(source);
+        let target_selected = key_by_id.contains_key(target);
+        if source_selected != target_selected {
+            return Ok(BlueprintCapturePreparation::Unsupported(
+                "unsupported-blueprint-domain",
+            ));
+        }
+        if !source_selected {
+            continue;
+        }
+        if belt_templates.len() >= MAX_CAPTURE_BELTS {
+            return Ok(BlueprintCapturePreparation::Unsupported(
+                "unsupported-blueprint-domain",
+            ));
+        }
+        if belt.get("planetId").and_then(Value::as_str) != Some(&active_planet_id) {
+            bail!("native blueprint capture belt planet is inconsistent")
+        }
+        if belt
+            .get("targetPortIndex")
+            .is_some_and(|value| !value.is_null())
+            || belt
+                .get("elevatorOutputIndex")
+                .is_some_and(|value| !value.is_null())
+        {
+            return Ok(BlueprintCapturePreparation::Unsupported(
+                "unsupported-blueprint-domain",
+            ));
+        }
+        let item_id = required_capture_text(belt, "itemId", "belt item ID")?;
+        if !builtin_content_id(item_id) {
+            return Ok(BlueprintCapturePreparation::Unsupported(
+                "unsupported-blueprint-domain",
+            ));
+        }
+        if !state.catalog.items.contains_key(item_id) {
+            return Ok(BlueprintCapturePreparation::Unsupported(
+                "catalog-incomplete",
+            ));
+        }
+        let source_key = key_by_id
+            .get(source)
+            .ok_or_else(|| anyhow!("native blueprint capture source key is missing"))?;
+        let target_key = key_by_id
+            .get(target)
+            .ok_or_else(|| anyhow!("native blueprint capture target key is missing"))?;
+        let mut template = Map::new();
+        template.insert(
+            "key".to_owned(),
+            Value::from(format!("line_{}", belt_templates.len() + 1)),
+        );
+        template.insert("sourceKey".to_owned(), Value::from(source_key.clone()));
+        template.insert("targetKey".to_owned(), Value::from(target_key.clone()));
+        template.insert("itemId".to_owned(), Value::from(item_id));
+        template.insert(
+            "lanes".to_owned(),
+            belt.get("lanes")
+                .cloned()
+                .ok_or_else(|| anyhow!("native blueprint capture belt lanes are invalid"))?,
+        );
+        template.insert(
+            "tier".to_owned(),
+            belt.get("tier")
+                .cloned()
+                .ok_or_else(|| anyhow!("native blueprint capture belt tier is invalid"))?,
+        );
+        copy_present_fields(belt, &mut template, BELT_CONFIG_KEYS);
+        template.insert(
+            "routeMode".to_owned(),
+            match belt.get("routeMode") {
+                None | Some(Value::Null) => Value::from("auto"),
+                Some(value) => value.clone(),
+            },
+        );
+        belt_templates.push(Value::Object(template));
+    }
+
+    let next_id = base
+        .get("nextId")
+        .and_then(Value::as_u64)
+        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        .ok_or_else(|| anyhow!("native blueprint capture next ID is invalid"))?;
+    let Some(next_id_after) = next_id.checked_add(1) else {
+        return Ok(BlueprintCapturePreparation::Unsupported(
+            "next-id-exhausted",
+        ));
+    };
+    if next_id_after > MAX_JAVASCRIPT_SAFE_INTEGER {
+        return Ok(BlueprintCapturePreparation::Unsupported(
+            "next-id-exhausted",
+        ));
+    }
+    let blueprint_id = format!("blueprint_{next_id}");
+    if !blueprint_allocator_available(state, &blueprints, &versions, &queue, &blueprint_id) {
+        return Ok(BlueprintCapturePreparation::Unsupported(
+            "next-id-exhausted",
+        ));
+    }
+    let blueprint_name = format!("蓝图 {:02}", blueprints.len() + 1);
+    let blueprint = json!({
+        "id": blueprint_id,
+        "name": blueprint_name,
+        "revision": 1,
+        "entities": entity_templates,
+        "resourceAnchors": [],
+        "belts": belt_templates,
+        "externalPorts": [],
+        "rotation": 0,
+        "mirror": "none",
+        "recipeOverrides": {},
+    });
+    let blueprint = blueprint
+        .as_object()
+        .expect("native capture blueprint literal is an object");
+    if !ordinary_blueprint_definition_supported_on_planet(state, blueprint, &active_planet_id)? {
+        return Ok(BlueprintCapturePreparation::Unsupported(
+            "catalog-incomplete",
+        ));
+    }
+    if !ordinary_blueprint_definition_has_no_internal_overlap(blueprint)? {
+        return Ok(BlueprintCapturePreparation::Unsupported("position-overlap"));
+    }
+    Ok(BlueprintCapturePreparation::Supported(
+        BlueprintCapturePlan {
+            expected_next_id: next_id,
+            expected_library_len: blueprints.len(),
+            blueprint: Value::Object(blueprint.clone()),
+            next_id_after,
+        },
+    ))
+}
+
 fn validated_intent(
     state: &CoreState,
     command: &SimulationCommandPatch,
 ) -> anyhow::Result<ValidatedBlueprintIntent> {
     let intent = require_intent(command)?;
+    if let BlueprintIntent::Capture(capture) = &intent {
+        if capture.revision != command.base_revision || command.base_revision != state.revision {
+            bail!("native player-authority blueprint capture revision is not current")
+        }
+        return match prepare_capture(state, capture)? {
+            BlueprintCapturePreparation::Supported(plan) => {
+                Ok(ValidatedBlueprintIntent::Capture(plan))
+            }
+            BlueprintCapturePreparation::Unsupported(reason) => {
+                bail!("native blueprint capture is unsupported: {reason}")
+            }
+        };
+    }
+    if let BlueprintIntent::Import(import) = &intent {
+        if import.revision != command.base_revision || command.base_revision != state.revision {
+            bail!("native player-authority blueprint import revision is not current")
+        }
+        return match prepare_import_marker(state, import)? {
+            BlueprintImportPreparation::Supported { plan, .. } => {
+                Ok(ValidatedBlueprintIntent::Import(plan))
+            }
+            BlueprintImportPreparation::Unsupported(reason) => {
+                bail!("native blueprint import is unsupported: {reason}")
+            }
+        };
+    }
     let blueprints = state
         .base_value()
         .get("blueprints")
@@ -398,6 +1034,8 @@ fn validated_intent(
             BlueprintIntent::Transform(intent) => intent.id.as_str(),
             BlueprintIntent::RecipeOverride(intent) => intent.id.as_str(),
             BlueprintIntent::Delete(intent) => intent.id.as_str(),
+            BlueprintIntent::Capture(_) => unreachable!("capture returned before target lookup"),
+            BlueprintIntent::Import(_) => unreachable!("import returned before target lookup"),
         };
         if id == target_id {
             if target.is_some() {
@@ -582,6 +1220,12 @@ fn validated_intent(
                     }
                     ValidatedBlueprintIntent::Delete(ValidatedBlueprintDelete { index })
                 }
+                BlueprintIntent::Capture(_) => {
+                    unreachable!("capture returned before target validation")
+                }
+                BlueprintIntent::Import(_) => {
+                    unreachable!("import returned before target validation")
+                }
             });
         }
     }
@@ -604,7 +1248,7 @@ pub(crate) fn expand_intent(
     command: &SimulationCommandPatch,
 ) -> anyhow::Result<BlueprintCommandExpansion> {
     let intent = validated_intent(state, command)?;
-    let (top_level_changes, delete_index) = match intent {
+    let (top_level_changes, mutation) = match intent {
         ValidatedBlueprintIntent::Rename(rename) => (
             vec![
                 ValuePatch {
@@ -701,7 +1345,18 @@ pub(crate) fn expand_intent(
                 None,
             )
         }
-        ValidatedBlueprintIntent::Delete(delete) => (Vec::new(), Some(delete.index)),
+        ValidatedBlueprintIntent::Delete(delete) => (
+            Vec::new(),
+            Some(BlueprintPrivateMutation::Delete {
+                index: delete.index,
+            }),
+        ),
+        ValidatedBlueprintIntent::Capture(plan) => {
+            (Vec::new(), Some(BlueprintPrivateMutation::Capture(plan)))
+        }
+        ValidatedBlueprintIntent::Import(plan) => {
+            (Vec::new(), Some(BlueprintPrivateMutation::Import(plan)))
+        }
     };
     Ok(BlueprintCommandExpansion {
         command: SimulationCommandPatch {
@@ -715,6 +1370,88 @@ pub(crate) fn expand_intent(
             added_belts: Vec::new(),
             removed_belt_ids: Vec::new(),
         },
-        delete_index,
+        mutation,
     })
+}
+
+impl CoreState {
+    /// Same-revision, bounded authority proof for capturing one closed ordinary
+    /// selection. The blueprint body and allocator remain Core-private; the
+    /// renderer receives only enough identity to reconcile the durable marker.
+    pub fn blueprint_capture_context_projection(
+        &self,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        entity_ids: &[String],
+    ) -> anyhow::Result<Value> {
+        if expected_revision != self.revision
+            || expected_revision >= MAX_JAVASCRIPT_SAFE_INTEGER
+            || expected_registry_fingerprint != self.catalog.snapshot.registry_fingerprint
+        {
+            bail!("native blueprint capture context request is invalid")
+        }
+        let entity_ids = validate_capture_entity_ids(entity_ids.to_vec())?;
+        let active_planet_id = active_capture_planet_id(self)?.to_owned();
+        let intent = BlueprintCaptureIntent {
+            entity_ids: entity_ids.clone(),
+            revision: expected_revision,
+        };
+        let preparation = prepare_capture(self, &intent)?;
+        let (supported, reason, expected_id, expected_name, expected_blueprint_revision) =
+            match preparation {
+                BlueprintCapturePreparation::Supported(plan) => {
+                    let blueprint = plan.blueprint.as_object().ok_or_else(|| {
+                        anyhow!("native blueprint capture prepared blueprint is invalid")
+                    })?;
+                    let id = required_capture_text(blueprint, "id", "prepared blueprint ID")?;
+                    let name = required_capture_text(blueprint, "name", "prepared blueprint name")?;
+                    (
+                        true,
+                        Value::Null,
+                        Value::from(id),
+                        Value::from(name),
+                        Value::from(1),
+                    )
+                }
+                BlueprintCapturePreparation::Unsupported(reason) => (
+                    false,
+                    Value::from(reason),
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                ),
+            };
+        let value = json!({
+            "schemaVersion": 1,
+            "projectionType": BLUEPRINT_CAPTURE_CONTEXT_PROJECTION,
+            "source": "native-core",
+            "revision": self.revision,
+            "stateVersion": self.identity.state_version,
+            "registryFingerprint": self.catalog.snapshot.registry_fingerprint,
+            "request": {
+                "expectedRevision": expected_revision,
+                "expectedRegistryFingerprint": expected_registry_fingerprint,
+                "entityIds": entity_ids,
+            },
+            "activePlanetId": active_planet_id,
+            "support": {
+                "supported": supported,
+                "reason": reason,
+            },
+            "expectedBlueprintId": expected_id,
+            "expectedBlueprintName": expected_name,
+            "expectedBlueprintRevision": expected_blueprint_revision,
+            "limits": {
+                "selectionEntityIds": MAX_CAPTURE_ENTITIES,
+                "blueprintEntities": MAX_CAPTURE_ENTITIES,
+                "blueprintBelts": MAX_CAPTURE_BELTS,
+                "opaqueIdBytes": MAX_OPAQUE_ID_BYTES,
+                "projectionBytes": MAX_PROJECTION_BYTES,
+            },
+        });
+        if serde_json::to_vec(&value)?.len() > MAX_PROJECTION_BYTES {
+            bail!("native blueprint capture context exceeds the byte limit")
+        }
+        Ok(value)
+    }
 }

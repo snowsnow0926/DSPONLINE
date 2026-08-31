@@ -1764,6 +1764,9 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.match(source, /function nativeFactoryInventoryResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?cursor:[\s\S]*?limit:/);
   assert.match(source, /function nativeConstructionInventoryResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?cursor:[\s\S]*?limit:/);
   assert.match(source, /function nativeBlueprintWorkspaceResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?section:[\s\S]*?blueprintId:[\s\S]*?cursor:[\s\S]*?limit:/);
+  assert.match(source, /function nativeBlueprintCaptureContextResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?entityIds:/);
+  assert.match(source, /function nativeBlueprintImportContextResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?raw:/);
+  assert.match(source, /function nativeBlueprintExportContextResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?blueprintId:[\s\S]*?blueprintRevision:/);
   assert.match(source, /function nativeBlueprintEnqueueContextResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?blueprintId:[\s\S]*?blueprintRevision:/);
   assert.match(source, /function nativeBlueprintDirectDeployContextResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?blueprintId:[\s\S]*?blueprintRevision:[\s\S]*?position:/);
   assert.match(source, /function nativeStatisticsProjectionResultContext[\s\S]*?minElapsedSeconds:[\s\S]*?maxElapsedSeconds:[\s\S]*?cursor:[\s\S]*?limit:[\s\S]*?planetId:[\s\S]*?itemId:/);
@@ -1775,6 +1778,7 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.match(source, /desktop:native-core-factory-inventory"[\s\S]*?runRendererNativeOperation\("coreFactoryInventoryProjection"[\s\S]*?resultContext:\s*nativeFactoryInventoryResultContext\(request\)/);
   assert.match(source, /desktop:native-core-construction-inventory"[\s\S]*?runRendererNativeOperation\("coreConstructionInventoryProjection"[\s\S]*?resultContext:\s*nativeConstructionInventoryResultContext\(request\)/);
   assert.match(source, /desktop:native-core-blueprint-workspace"[\s\S]*?runRendererNativeOperation\("coreBlueprintWorkspaceProjection"[\s\S]*?resultContext:\s*nativeBlueprintWorkspaceResultContext\(request\)/);
+  assert.match(source, /desktop:native-core-blueprint-capture-context"[\s\S]*?runRendererNativeOperation\("coreBlueprintCaptureContext"[\s\S]*?resultContext:\s*nativeBlueprintCaptureContextResultContext\(request\)/);
   assert.match(source, /desktop:native-core-blueprint-enqueue-context"[\s\S]*?runRendererNativeOperation\("coreBlueprintEnqueueContext"[\s\S]*?resultContext:\s*nativeBlueprintEnqueueContextResultContext\(request\)/);
   assert.match(source, /desktop:native-core-blueprint-direct-deploy-context"[\s\S]*?runRendererNativeOperation\("coreBlueprintDirectDeployContext"[\s\S]*?resultContext:\s*nativeBlueprintDirectDeployContextResultContext\(request\)/);
   assert.match(source, /desktop:native-core-statistics-projection"[\s\S]*?resultContext:\s*nativeStatisticsProjectionResultContext\(request\)/);
@@ -1791,7 +1795,7 @@ test("Electron main uses the dedicated native renderer boundary", () => {
     .map((match) => match[1]);
   const preloadChannels = [...preload.matchAll(/invokeNative\("(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  assert.equal(mainChannels.length, 55);
+  assert.equal(mainChannels.length, 58);
   assert.ok(mainChannels.includes("desktop:native-core-reconcile-command"));
   assert.ok(preloadChannels.includes("desktop:native-core-reconcile-command"));
   assert.ok(mainChannels.includes("desktop:native-player-authority-set-paused"));
@@ -1808,6 +1812,12 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.ok(preloadChannels.includes("desktop:native-core-construction-inventory"));
   assert.ok(mainChannels.includes("desktop:native-core-blueprint-workspace"));
   assert.ok(preloadChannels.includes("desktop:native-core-blueprint-workspace"));
+  assert.ok(mainChannels.includes("desktop:native-core-blueprint-capture-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-blueprint-capture-context"));
+  assert.ok(mainChannels.includes("desktop:native-core-blueprint-import-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-blueprint-import-context"));
+  assert.ok(mainChannels.includes("desktop:native-core-blueprint-export-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-blueprint-export-context"));
   assert.ok(mainChannels.includes("desktop:native-core-blueprint-enqueue-context"));
   assert.ok(preloadChannels.includes("desktop:native-core-blueprint-enqueue-context"));
   assert.ok(mainChannels.includes("desktop:native-core-blueprint-direct-deploy-context"));

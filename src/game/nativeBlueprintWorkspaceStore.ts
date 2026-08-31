@@ -157,6 +157,12 @@ export interface NativeConstructionQueueMembershipProof extends NativeBlueprintW
   readonly present: boolean;
 }
 
+/** Rust-derived whole-library membership proof pinned to one authority revision. */
+export interface NativeBlueprintLibraryMembershipProof extends NativeBlueprintWorkspaceIdentity {
+  readonly blueprintId: string;
+  readonly present: boolean;
+}
+
 export interface NativeBlueprintWorkspaceSource {
   readonly boundIdentity: NativeBlueprintWorkspaceIdentity;
   readVerifiedBlueprintPage(
@@ -167,6 +173,9 @@ export interface NativeBlueprintWorkspaceSource {
   readVerifiedQueueMembership(
     queueEntryId: string,
   ): Promise<NativeConstructionQueueMembershipProof | null>;
+  readVerifiedLibraryMembership?(
+    blueprintId: string,
+  ): Promise<NativeBlueprintLibraryMembershipProof | null>;
 }
 
 export interface NativeBlueprintWorkspaceFrame extends NativeBlueprintWorkspaceIdentity {
@@ -387,7 +396,8 @@ function validProjection(
     : cursor < expectedTotal ? cursor
       : Math.floor((expectedTotal - 1) / NATIVE_BLUEPRINT_PAGE_ROWS) * NATIVE_BLUEPRINT_PAGE_ROWS;
   if (value.page.totalCount !== expectedTotal || value.page.cursor !== expectedPageCursor ||
-      (section === "detail" || section === "queue-membership") && expectedTotal > 1 ||
+      (section === "detail" || section === "queue-membership" ||
+        section === "library-membership") && expectedTotal > 1 ||
       value.page.rows.length !== Math.min(NATIVE_BLUEPRINT_PAGE_ROWS, expectedTotal - expectedPageCursor)) return false;
   const consumed = expectedPageCursor + value.page.rows.length;
   const expectedNext = consumed < expectedTotal ? consumed : null;
@@ -396,11 +406,12 @@ function validProjection(
     ? validSummary(row as DesktopNativeCoreBlueprintSummary)
     : section === "detail"
       ? blueprintId !== null && validDetail(row as DesktopNativeCoreBlueprintDetail, blueprintId)
-      : section === "queue-membership"
-        ? queueEntryId !== null && validOpaqueText(
+      : section === "queue-membership" || section === "library-membership"
+        ? (section === "queue-membership" ? queueEntryId : blueprintId) !== null && validOpaqueText(
           (row as DesktopNativeCoreBlueprintQueueMembershipRow).id,
           512,
-        ) && (row as DesktopNativeCoreBlueprintQueueMembershipRow).id === queueEntryId &&
+        ) && (row as DesktopNativeCoreBlueprintQueueMembershipRow).id ===
+          (section === "queue-membership" ? queueEntryId : blueprintId) &&
           Object.keys(row as object).length === 1
         : validQueueRow(row as DesktopNativeCoreBlueprintQueueRow));
 }
@@ -428,7 +439,8 @@ export function createNativePlayerAuthorityBlueprintWorkspaceSource(
       blueprintId: string | null,
       cursor: number,
     ) {
-      if (section === "queue-membership" || (section === "detail") !== (blueprintId !== null) ||
+      if (["queue-membership", "library-membership"].includes(section) ||
+          (section === "detail") !== (blueprintId !== null) ||
           blueprintId !== null && !validOpaqueText(blueprintId, 512) ||
           !Number.isSafeInteger(cursor) || cursor < 0 || cursor > NATIVE_BLUEPRINT_MAX_SOURCE_ROWS ||
           section === "detail" && cursor !== 0) return null;
@@ -472,6 +484,36 @@ export function createNativePlayerAuthorityBlueprintWorkspaceSource(
         return Object.freeze({
           ...boundIdentity,
           queueEntryId,
+          present: page.page.totalCount === 1,
+        });
+      } catch {
+        return null;
+      }
+    },
+    async readVerifiedLibraryMembership(blueprintId: string) {
+      if (!validOpaqueText(blueprintId, 512)) return null;
+      try {
+        const page = await reader({
+          sessionId: boundIdentity.sessionId,
+          expectedRevision: boundIdentity.revision,
+          expectedRegistryFingerprint: boundIdentity.registryFingerprint,
+          section: "library-membership",
+          blueprintId,
+          queueEntryId: null,
+          cursor: 0,
+          limit: NATIVE_BLUEPRINT_PAGE_ROWS,
+        });
+        if (!validProjection(
+          page,
+          boundIdentity,
+          "library-membership",
+          blueprintId,
+          0,
+          null,
+        )) return null;
+        return Object.freeze({
+          ...boundIdentity,
+          blueprintId,
           present: page.page.totalCount === 1,
         });
       } catch {

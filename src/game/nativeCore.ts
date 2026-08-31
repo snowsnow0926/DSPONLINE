@@ -20,6 +20,12 @@ import {
   type DesktopNativeCoreConstructionInventoryResult,
   type DesktopNativeCoreBlueprintWorkspaceRequest,
   type DesktopNativeCoreBlueprintWorkspaceResult,
+  type DesktopNativeCoreBlueprintCaptureContextRequest,
+  type DesktopNativeCoreBlueprintCaptureContextResult,
+  type DesktopNativeCoreBlueprintImportContextRequest,
+  type DesktopNativeCoreBlueprintImportContextResult,
+  type DesktopNativeCoreBlueprintExportContextRequest,
+  type DesktopNativeCoreBlueprintExportContextResult,
   type DesktopNativeCoreBlueprintEnqueueContextRequest,
   type DesktopNativeCoreBlueprintEnqueueContextResult,
   type DesktopNativeCoreBlueprintDirectDeployContextRequest,
@@ -72,6 +78,9 @@ type NativeCoreTransferProjection =
   | DesktopNativeCoreFactoryInventoryResult
   | DesktopNativeCoreConstructionInventoryResult
   | DesktopNativeCoreBlueprintWorkspaceResult
+  | DesktopNativeCoreBlueprintCaptureContextResult
+  | DesktopNativeCoreBlueprintImportContextResult
+  | DesktopNativeCoreBlueprintExportContextResult
   | DesktopNativeCoreBlueprintEnqueueContextResult
   | DesktopNativeCoreBlueprintDirectDeployContextResult
   | DesktopNativeCoreConstructionPlacementContextResult
@@ -136,6 +145,9 @@ export interface WindowsNativeCoreShadow {
   factoryInventoryProjection?(request: Omit<DesktopNativeCoreFactoryInventoryRequest, "sessionId">): Promise<DesktopNativeCoreFactoryInventoryResult>;
   constructionInventoryProjection?(request: Omit<DesktopNativeCoreConstructionInventoryRequest, "sessionId">): Promise<DesktopNativeCoreConstructionInventoryResult>;
   blueprintWorkspaceProjection?(request: Omit<DesktopNativeCoreBlueprintWorkspaceRequest, "sessionId">): Promise<DesktopNativeCoreBlueprintWorkspaceResult>;
+  blueprintCaptureContext?(request: Omit<DesktopNativeCoreBlueprintCaptureContextRequest, "sessionId">): Promise<DesktopNativeCoreBlueprintCaptureContextResult>;
+  blueprintImportContext?(request: Omit<DesktopNativeCoreBlueprintImportContextRequest, "sessionId">): Promise<DesktopNativeCoreBlueprintImportContextResult>;
+  blueprintExportContext?(request: Omit<DesktopNativeCoreBlueprintExportContextRequest, "sessionId">): Promise<DesktopNativeCoreBlueprintExportContextResult>;
   blueprintEnqueueContext?(request: Omit<DesktopNativeCoreBlueprintEnqueueContextRequest, "sessionId">): Promise<DesktopNativeCoreBlueprintEnqueueContextResult>;
   blueprintDirectDeployContext?(request: Omit<DesktopNativeCoreBlueprintDirectDeployContextRequest, "sessionId">): Promise<DesktopNativeCoreBlueprintDirectDeployContextResult>;
   constructionPlacementContext?(request: Omit<DesktopNativeCoreConstructionPlacementContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionPlacementContextResult>;
@@ -456,6 +468,75 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
       throw new Error("Windows 原生蓝图只读模型不可用");
     }
     return desktop.getNativeCoreBlueprintWorkspace({ sessionId: this.sessionId, ...request });
+  }
+
+  async blueprintCaptureContext(
+    request: Omit<DesktopNativeCoreBlueprintCaptureContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreBlueprintCaptureContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "blueprint-capture-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreBlueprintCaptureContextResult>(
+        transfer,
+        { sessionId: this.sessionId, projectionType: "blueprint-capture-context-v1" },
+      );
+    }
+    if (typeof desktop.getNativeCoreBlueprintCaptureContext !== "function") {
+      throw new Error("Windows 原生蓝图捕获上下文不可用");
+    }
+    return desktop.getNativeCoreBlueprintCaptureContext({ sessionId: this.sessionId, ...request });
+  }
+
+  async blueprintImportContext(
+    request: Omit<DesktopNativeCoreBlueprintImportContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreBlueprintImportContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "blueprint-import-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreBlueprintImportContextResult>(
+        transfer,
+        { sessionId: this.sessionId, projectionType: "blueprint-import-context-v1" },
+      );
+    }
+    if (typeof desktop.getNativeCoreBlueprintImportContext !== "function") {
+      throw new Error("Windows 原生蓝图导入上下文不可用");
+    }
+    return desktop.getNativeCoreBlueprintImportContext({ sessionId: this.sessionId, ...request });
+  }
+
+  async blueprintExportContext(
+    request: Omit<DesktopNativeCoreBlueprintExportContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreBlueprintExportContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "blueprint-export-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreBlueprintExportContextResult>(
+        transfer,
+        { sessionId: this.sessionId, projectionType: "blueprint-export-context-v1" },
+      );
+    }
+    if (typeof desktop.getNativeCoreBlueprintExportContext !== "function") {
+      throw new Error("Windows 原生蓝图导出上下文不可用");
+    }
+    return desktop.getNativeCoreBlueprintExportContext({ sessionId: this.sessionId, ...request });
   }
 
   async blueprintEnqueueContext(

@@ -27,6 +27,25 @@ function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
+function canonicalJson(value) {
+  if (value === null || typeof value === "boolean" || typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new TypeError("canonical JSON number must be finite");
+    return Object.is(value, -0) ? "0" : String(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  throw new TypeError("canonical JSON value is invalid");
+}
+
+function canonicalSha256(value) {
+  return sha256(canonicalJson(value));
+}
+
 function fnv1a(value) {
   let hash = 0x811c9dc5;
   for (const byte of Buffer.from(value, "utf8")) {
@@ -1472,4 +1491,248 @@ test("pure-idle conservative host operations preserve credit, WAL atomicity and 
   assert.equal(exhausted.approximatedSeconds, 15);
   assert.equal((await project(opened.sessionId)).entities[0].outputs.iron_ore, exportedVein.outputs.iron_ore);
   assert.equal((await client.request({ operation: "coreClose", sessionId: opened.sessionId })).closed, true);
+});
+
+test("real Node client imports an ordinary blueprint through Rust Host and reconciles +0 marker, library, and hash after cold restart", {
+  skip: !fs.existsSync(binaryPath) ? "release native host has not been built" : false,
+  timeout: 30_000,
+}, async (t) => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-blueprint-import-host-"));
+  const root = path.join(temporary, "native-root");
+  const sourcePath = path.join(temporary, "source-v47.json");
+  fs.mkdirSync(root, { recursive: true });
+  let client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 10_000 });
+  t.after(async () => {
+    await client.stop();
+    fs.rmSync(temporary, { recursive: true, force: true });
+  });
+
+  const registryFingerprint = "7df8cf3a";
+  const catalog = {
+    protocolVersion: 1,
+    registryFingerprint,
+    planets: [{
+      id: "home", name: "home", systemId: "helios", kind: "terrestrial",
+      orbitIndex: 1, simulationOrder: 0, orbitalYields: {},
+    }],
+    items: [
+      { id: "iron_ore", name: "iron_ore", kind: "solid" },
+      { id: "iron_ingot", name: "iron_ingot", kind: "solid" },
+    ],
+    buildings: [
+      {
+        id: "mining_machine", kind: "miner", speed: 1, inputCapacity: 0,
+        outputCapacity: 50, powerDemandKw: 1, powerGenerationKw: 0,
+      },
+      {
+        id: "arc_smelter", kind: "machine", speed: 1, inputCapacity: 100,
+        outputCapacity: 100, powerDemandKw: 1, powerGenerationKw: 0,
+      },
+    ],
+    recipes: [{
+      id: "iron_ingot", buildingId: "arc_smelter", duration: 1,
+      inputs: [{ itemId: "iron_ore", amount: 1 }],
+      outputs: [{ itemId: "iron_ingot", amount: 1 }],
+    }],
+    constructions: [{
+      id: "arc_smelter", outputAmount: 1,
+      costs: [{ itemId: "iron_ingot", amount: 1 }],
+    }],
+    belts: [{ tier: 1, speed: 6 }],
+    proliferators: [],
+    technologies: [],
+  };
+  const state = {
+    version: 47,
+    mode: "normal",
+    activePlanetId: "home",
+    elapsedSeconds: 2,
+    paused: false,
+    tray: {},
+    entities: [],
+    belts: [],
+    blueprints: [],
+    blueprintVersions: [],
+    constructionQueue: [],
+    nextId: 9,
+    research: {
+      selectedTechId: null,
+      pausedTechId: null,
+      queuedTechIds: [],
+      progressByTech: {},
+      completedTechIds: [],
+    },
+  };
+  const envelope = {
+    formatVersion: 2,
+    kind: "primary",
+    savedAt: 42,
+    mode: "normal",
+    slot: "main",
+    state,
+    checksum: fnv1aUtf16(JSON.stringify({ formatVersion: 2, state })),
+  };
+  fs.writeFileSync(sourcePath, JSON.stringify(envelope));
+
+  let hello = await client.start("blueprint-import-host-lifecycle");
+  assert.ok(hello.capabilities.includes("native-core-v47-stream-import-v1"));
+  assert.ok(hello.capabilities.includes("native-core-blueprint-import-context-v1"));
+  assert.ok(hello.capabilities.includes("native-core-blueprint-workspace-v1"));
+  const imported = await client.request({
+    operation: "coreImportV47",
+    sourcePath,
+    registryFingerprint,
+    catalog,
+  }, 30_000);
+  assert.doesNotThrow(() => normalizeRendererNativeResult("coreImport", imported));
+
+  // Keep the lexical negative zero inside the untrusted raw exchange. The
+  // outer Node -> Host frame carries it as a JSON string; the returned marker
+  // has crossed the real Host response frame and must already be canonical +0.
+  const raw = "{\"type\":\"dsp-idle-blueprint\",\"formatVersion\":2,\"blueprint\":{\"id\":\"untrusted-source-id\",\"name\":\"Host 冷重启蓝图\",\"revision\":77,\"entities\":[{\"key\":\"node_1\",\"buildingId\":\"arc_smelter\",\"offset\":{\"x\":-0,\"y\":0},\"machineCount\":1}],\"resourceAnchors\":[],\"belts\":[],\"externalPorts\":[],\"rotation\":0,\"mirror\":\"none\",\"recipeOverrides\":{}}}";
+  assert.match(raw, /\"offset\":\{\"x\":-0,\"y\":0\}/);
+  const importContextRequest = {
+    operation: "coreBlueprintImportContext",
+    sessionId: imported.sessionId,
+    expectedRevision: imported.summary.revision,
+    expectedRegistryFingerprint: registryFingerprint,
+    raw,
+  };
+  const context = await client.request(importContextRequest).catch((error) => {
+    throw new Error(`blueprint import context stage failed: ${error.message}`, { cause: error });
+  });
+  assert.equal(context.preparedIntent.blueprint.entities[0].offset.x, 0);
+  assert.equal(Object.is(context.preparedIntent.blueprint.entities[0].offset.x, -0), false);
+  const normalizedContext = normalizeRendererNativeResult(
+    "coreBlueprintImportContext",
+    context,
+    {
+      sessionId: imported.sessionId,
+      expectedRevision: imported.summary.revision,
+      expectedRegistryFingerprint: registryFingerprint,
+      raw,
+    },
+  );
+  assert.deepEqual(normalizedContext.support, { supported: true, reason: null });
+  const preparedMarker = normalizedContext.preparedIntent;
+  assert.ok(preparedMarker);
+  assert.equal(preparedMarker.kind, "import");
+  assert.equal(preparedMarker.revision, imported.summary.revision);
+  assert.equal(preparedMarker.blueprint.id, "blueprint_9");
+  assert.equal(preparedMarker.blueprint.revision, 1);
+  const preparedOffsetX = preparedMarker.blueprint.entities[0].offset.x;
+  assert.equal(preparedOffsetX, 0);
+  assert.equal(Object.is(preparedOffsetX, -0), false);
+  assert.equal(canonicalSha256(preparedMarker.blueprint), preparedMarker.blueprintSha256);
+
+  // Exercise the second real Node JSON frame as well: this is the exact marker
+  // object sent back for the durable command, not a test-only Rust shortcut.
+  const commandMarker = JSON.parse(JSON.stringify(preparedMarker));
+  assert.equal(commandMarker.blueprint.entities[0].offset.x, 0);
+  assert.equal(Object.is(commandMarker.blueprint.entities[0].offset.x, -0), false);
+  assert.equal(canonicalSha256(commandMarker.blueprint), preparedMarker.blueprintSha256);
+  const command = {
+    protocolVersion: 1,
+    baseRevision: imported.summary.revision,
+    topLevelChanges: [{
+      path: ["blueprints", "intent"],
+      operation: "set",
+      value: commandMarker,
+    }],
+    changedEntities: [],
+    addedEntities: [],
+    removedEntityIds: [],
+    changedBelts: [],
+    addedBelts: [],
+    removedBeltIds: [],
+  };
+  const committed = await client.request({
+    operation: "coreCommitOperation",
+    sessionId: imported.sessionId,
+    request: {
+      commandId: "real-host-blueprint-import-negative-zero",
+      baseRevision: imported.summary.revision,
+      command,
+      simulationSeconds: 0,
+      wallSeconds: 0,
+      advanceMode: "exact",
+      includeDiagnostics: true,
+    },
+  }).catch((error) => {
+    throw new Error(`blueprint import durable commit stage failed: ${error.message}`, { cause: error });
+  });
+  assert.doesNotThrow(() => normalizeRendererNativeResult("coreCommit", committed));
+  assert.equal(committed.duplicate, false);
+  assert.equal(committed.revision, imported.summary.revision + 1);
+  assert.equal(committed.currentRevision, committed.revision);
+  assert.equal(committed.summary.revision, committed.revision);
+  assert.notEqual(committed.summary.canonicalSha256, imported.summary.canonicalSha256);
+
+  const membershipRequest = (sessionId) => ({
+    operation: "coreBlueprintWorkspaceProjection",
+    sessionId,
+    expectedRevision: committed.revision,
+    expectedRegistryFingerprint: registryFingerprint,
+    section: "library-membership",
+    blueprintId: preparedMarker.blueprint.id,
+    queueEntryId: null,
+    cursor: 0,
+    limit: 32,
+  });
+  const liveMembership = await client.request(membershipRequest(imported.sessionId));
+  assert.deepEqual(liveMembership.page.rows, [{ id: preparedMarker.blueprint.id }]);
+  assert.equal(liveMembership.page.totalCount, 1);
+  await client.request({
+    operation: "coreExportV47",
+    sessionId: imported.sessionId,
+    exportId: "blueprint-import-live",
+    savedAtMs: 100,
+  });
+  const liveEnvelope = JSON.parse(fs.readFileSync(
+    path.join(root, "exports", "blueprint-import-live.json"),
+    "utf8",
+  ));
+  assert.deepEqual(liveEnvelope.state.blueprints, [preparedMarker.blueprint]);
+  assert.equal(canonicalSha256(liveEnvelope.state.blueprints[0]), preparedMarker.blueprintSha256);
+  assert.equal(Object.is(liveEnvelope.state.blueprints[0].entities[0].offset.x, -0), false);
+  assert.equal(canonicalSha256(liveEnvelope.state), committed.summary.canonicalSha256);
+  const liveState = liveEnvelope.state;
+  const liveHash = committed.summary.canonicalSha256;
+  const checkpoint = imported.checkpoint;
+
+  assert.equal((await client.request({ operation: "coreClose", sessionId: imported.sessionId })).closed, true);
+  await client.stop();
+  client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 10_000 });
+  hello = await client.start("blueprint-import-host-cold-restart");
+  assert.ok(hello.capabilities.includes("native-core-blueprint-import-context-v1"));
+  const reopened = await client.request({
+    operation: "coreOpen",
+    slot: "normal-main",
+    generation: checkpoint.generation,
+    rootHash: checkpoint.rootHash,
+    revision: checkpoint.revision,
+    registryFingerprint,
+    catalog,
+  });
+  assert.equal(reopened.replayedWalEntries, 1);
+  assert.equal(reopened.replayedRevision, committed.revision);
+  assert.equal(reopened.summary.revision, committed.revision);
+  assert.equal(reopened.summary.canonicalSha256, liveHash);
+  const coldMembership = await client.request(membershipRequest(reopened.sessionId));
+  assert.deepEqual(coldMembership.page.rows, [{ id: preparedMarker.blueprint.id }]);
+  assert.equal(coldMembership.page.totalCount, 1);
+  await client.request({
+    operation: "coreExportV47",
+    sessionId: reopened.sessionId,
+    exportId: "blueprint-import-cold",
+    savedAtMs: 101,
+  });
+  const coldEnvelope = JSON.parse(fs.readFileSync(
+    path.join(root, "exports", "blueprint-import-cold.json"),
+    "utf8",
+  ));
+  assert.deepEqual(coldEnvelope.state, liveState);
+  assert.equal(canonicalSha256(coldEnvelope.state.blueprints[0]), preparedMarker.blueprintSha256);
+  assert.equal(Object.is(coldEnvelope.state.blueprints[0].entities[0].offset.x, -0), false);
+  assert.equal(canonicalSha256(coldEnvelope.state), liveHash);
 });

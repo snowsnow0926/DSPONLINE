@@ -2,6 +2,7 @@ import { ArrowUp, BoxSelect, Check, ChevronLeft, ChevronRight, Clock3, Copy, Dow
 import { getConstructionDefinition, getItem, getPlanet, getRecipe, getRecipesForBuilding } from "../game/content";
 import { canPlaceBlueprint, canQueueBlueprint, getBlueprintFleetLoadPreview, getBlueprintRequirements, getConstructionQueueDetails, isTechnologyCompleted, transformBlueprintOffset } from "../game/engine";
 import type { FactoryConstructionHeadlineReadModel, FactoryConstructionWorkspaceReadModel, FactorySelectionToolbarReadModel } from "../game/factoryReadModels";
+import { blueprintExchangeFileFailureMessage, dispatchBlueprintExchangeFile } from "../game/blueprintExchangeFile";
 import { formatQuantityCompact, formatQuantityExact } from "../game/quantityFormat";
 import type { BlueprintDefinition, BlueprintMirror, BlueprintRotation, CanvasRegion, CanvasViewport, GameState, PlanetId, RecipeId } from "../game/types";
 import { Fragment, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
@@ -172,13 +173,15 @@ export function CanvasRegionEditor({ region, onChange, onRemove, onClose }: {
   );
 }
 
-export function SelectionToolbar({ model, eligibleCount, canUpgrade, canUpgradeBelts, unsafeActionsEnabled = true, onFocus, onAutoLayout, onCopy, onUpgrade, onUpgradeBelts, onBatchIncrease, onLock, onUnlock, onRemove, onClear, onDone }: {
+export function SelectionToolbar({ model, eligibleCount, canUpgrade, canUpgradeBelts, unsafeActionsEnabled = true, copyActionEnabled = unsafeActionsEnabled, onFocus, onAutoLayout, onCopy, onUpgrade, onUpgradeBelts, onBatchIncrease, onLock, onUnlock, onRemove, onClear, onDone }: {
   model: FactorySelectionToolbarReadModel;
   eligibleCount: number;
   canUpgrade: boolean;
   canUpgradeBelts: boolean;
   /** Defaults to the historical full toolbar; native authority can opt into lock-only mutations. */
   unsafeActionsEnabled?: boolean;
+  /** Native authority may expose only the Rust-backed capture action. */
+  copyActionEnabled?: boolean;
   onFocus: () => void;
   onAutoLayout: () => void;
   onCopy: () => void;
@@ -211,7 +214,7 @@ export function SelectionToolbar({ model, eligibleCount, canUpgrade, canUpgradeB
       <span><BoxSelect size={14} /><strong>{selectedCount}</strong> 节点 · <strong>{selectedBeltCount}</strong> 线路</span>
       <button type="button" disabled={selectedCount === 0} onClick={onFocus} title="定位到所选设备" aria-label="定位到所选设备"><Focus size={16} /></button>
       <button type="button" disabled={!unsafeActionsEnabled || selectedCount === 0} onClick={onAutoLayout} title="按物流上下游整理所选设备" aria-label="自动整理所选设备"><WandSparkles size={16} /></button>
-      <button type="button" disabled={!unsafeActionsEnabled || eligibleCount === 0} onClick={onCopy} title="复制所选设备为蓝图并进入粘贴" aria-label="复制所选为蓝图"><Copy size={16} /></button>
+      <button type="button" disabled={!copyActionEnabled || eligibleCount === 0} onClick={onCopy} title="复制所选设备为蓝图并进入粘贴" aria-label="复制所选为蓝图"><Copy size={16} /></button>
       <button type="button" disabled={!unsafeActionsEnabled || !canUpgrade} onClick={onUpgrade} title="批量升级所有可升级设备" aria-label="批量升级所选设备"><ArrowUp size={16} /></button>
       <button type="button" disabled={!unsafeActionsEnabled || !canUpgradeBelts} onClick={onUpgradeBelts} title="一键升级所有选中传送带并保持连接" aria-label="一键升级所选传送带"><Route size={16} /><ArrowUp size={12} /></button>
       <div className="selection-toolbar__batch" role="group" aria-label="批量增加建筑或传送带数量" aria-disabled={!unsafeActionsEnabled}>
@@ -535,7 +538,15 @@ export function BlueprintWorkspace({ open, game, factoryHeadlineReadModel, const
         <button className={activeTab === "pending" ? "active" : ""} type="button" onClick={() => setActiveTab("pending")}><ListChecks size={14} />待建与补足{pendingCount > 0 ? <em>{pendingCount}</em> : null}</button>
       </nav>
       {activeTab === "library" ? <>
-      <input ref={fileInputRef} className="blueprint-import-file" type="file" accept="application/json,.json" aria-label="选择要导入的蓝图文件" onChange={async (event) => { const file = event.target.files?.[0]; if (file) importRaw(await file.text()); event.target.value = ""; }} />
+      <input ref={fileInputRef} className="blueprint-import-file" type="file" accept="application/json,.json" aria-label="选择要导入的蓝图文件" onChange={async (event) => {
+        const input = event.currentTarget;
+        const file = input.files?.[0];
+        if (file) {
+          const result = await dispatchBlueprintExchangeFile(file, importRaw);
+          if (!result.ok) setImportMessage(blueprintExchangeFileFailureMessage(result.reason));
+        }
+        input.value = "";
+      }} />
       {mobile && !detailBlueprintId ? <div className="mobile-blueprint-library-actions">
         <button type="button" onClick={() => {
           setImportOpen(true);

@@ -125,10 +125,12 @@ describe("factory thin-view App consumption", () => {
     expect(toolbar).toMatch(/data-factory-read-model-source=\{model\.source\}/);
     expect(toolbar).not.toMatch(/GameState|FactoryEntity|game\.entities/);
 
-    // Legacy-only controls retain their exact Web inputs but are inert while
-    // native authority owns runtime state.
-    expect(app).toMatch(/canUpgrade=\{canUpgradeEntities\(game, selectedEntityIds\)\}/);
-    expect(app).toMatch(/eligibleCount=\{blueprintEligibleIds\.length\}/);
+    // Upgrade remains legacy-only, while Copy now has a separately bounded
+    // Rust capture path and therefore derives its native count from the exact
+    // capture selection rather than the hollow renderer GameState.
+    expect(app).toMatch(/canUpgrade=\{!nativePlayerAuthorityOwnsRuntime && canUpgradeEntities\(game, selectedEntityIds\)\}/);
+    expect(app).toMatch(/copyActionEnabled=\{!nativePlayerAuthorityOwnsRuntime \|\| Boolean\([\s\S]*?nativeBlueprintCaptureSelection/);
+    expect(app).toMatch(/eligibleCount=\{nativePlayerAuthorityOwnsRuntime[\s\S]*?nativeBlueprintCaptureSelection\?\.entityIds\.length[\s\S]*?: blueprintEligibleIds\.length\}/);
   });
 
   it("submits native selection locks only from the exact bounded selection projection", () => {

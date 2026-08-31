@@ -34,6 +34,7 @@ const MAX_RECIPE_OVERRIDE_CONSTRUCTION_BYTES: usize = MAX_PROJECTION_BYTES / 2;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
     Library,
+    LibraryMembership,
     Detail,
     Queue,
     QueueMembership,
@@ -43,6 +44,7 @@ impl Section {
     fn parse(value: &str) -> anyhow::Result<Self> {
         match value {
             "library" => Ok(Self::Library),
+            "library-membership" => Ok(Self::LibraryMembership),
             "detail" => Ok(Self::Detail),
             "queue" => Ok(Self::Queue),
             "queue-membership" => Ok(Self::QueueMembership),
@@ -53,6 +55,7 @@ impl Section {
     fn as_str(self) -> &'static str {
         match self {
             Self::Library => "library",
+            Self::LibraryMembership => "library-membership",
             Self::Detail => "detail",
             Self::Queue => "queue",
             Self::QueueMembership => "queue-membership",
@@ -1140,13 +1143,13 @@ impl CoreState {
         }
         let section = Section::parse(section)?;
         match section {
-            Section::Detail => {
+            Section::Detail | Section::LibraryMembership => {
                 if cursor != 0
                     || queue_entry_id.is_some()
                     || !blueprint_id
                         .is_some_and(|value| valid_opaque_text(value, MAX_OPAQUE_ID_BYTES))
                 {
-                    bail!("native blueprint workspace detail selector is invalid")
+                    bail!("native blueprint workspace blueprint selector is invalid")
                 }
             }
             Section::QueueMembership => {
@@ -1194,6 +1197,17 @@ impl CoreState {
                     .map(|blueprint| library_summary(blueprint))
                     .collect::<anyhow::Result<Vec<_>>>()?;
                 (blueprints.len(), page_cursor, rows)
+            }
+            Section::LibraryMembership => {
+                let selected_id = blueprint_id.expect("membership selector checked above");
+                let rows = blueprints
+                    .iter()
+                    .filter(|blueprint| {
+                        blueprint.get("id").and_then(Value::as_str) == Some(selected_id)
+                    })
+                    .map(|_| json!({ "id": selected_id }))
+                    .collect::<Vec<_>>();
+                (rows.len(), 0, rows)
             }
             Section::Detail => {
                 let selected_id = blueprint_id.expect("detail selector checked above");
@@ -2077,5 +2091,87 @@ mod tests {
         assert_eq!(absent["request"]["queueEntryId"], "queue-missing");
         assert_eq!(absent["page"]["totalCount"], 0);
         assert_eq!(absent["page"]["rows"], json!([]));
+    }
+
+    #[test]
+    fn blueprint_capture_library_membership_is_bounded_and_returns_only_identity() {
+        let blueprints = (0..40)
+            .map(|index| blueprint(&format!("bp-{index:02}"), "arc_smelter"))
+            .collect::<Vec<_>>();
+        let state = state(blueprints, Vec::new(), Vec::new());
+        let before = state.canonical_sha256().unwrap();
+
+        let present = state
+            .blueprint_workspace_projection(
+                7,
+                REGISTRY,
+                "library-membership",
+                Some("bp-39"),
+                None,
+                0,
+                PAGE_ROWS,
+            )
+            .unwrap();
+        assert_eq!(present["revision"], 7);
+        assert_eq!(present["request"]["section"], "library-membership");
+        assert_eq!(present["request"]["blueprintId"], "bp-39");
+        assert_eq!(present["request"]["queueEntryId"], Value::Null);
+        assert_eq!(present["page"]["totalCount"], 1);
+        assert_eq!(present["page"]["rows"], json!([{ "id": "bp-39" }]));
+        let encoded = serde_json::to_vec(&present).unwrap();
+        assert!(encoded.len() <= MAX_PROJECTION_BYTES);
+        let encoded = String::from_utf8(encoded).unwrap();
+        for forbidden in ["buildingId", "machineCount", "entities", "belts", "nextId"] {
+            assert!(
+                !encoded.contains(forbidden),
+                "membership leaked {forbidden}"
+            );
+        }
+
+        let absent = state
+            .blueprint_workspace_projection(
+                7,
+                REGISTRY,
+                "library-membership",
+                Some("bp-missing"),
+                None,
+                0,
+                PAGE_ROWS,
+            )
+            .unwrap();
+        assert_eq!(absent["page"]["totalCount"], 0);
+        assert_eq!(absent["page"]["rows"], json!([]));
+        for invalid in [
+            state.blueprint_workspace_projection(
+                7,
+                REGISTRY,
+                "library-membership",
+                None,
+                None,
+                0,
+                PAGE_ROWS,
+            ),
+            state.blueprint_workspace_projection(
+                7,
+                REGISTRY,
+                "library-membership",
+                Some("bp-39"),
+                Some("queue-forged"),
+                0,
+                PAGE_ROWS,
+            ),
+            state.blueprint_workspace_projection(
+                7,
+                REGISTRY,
+                "library-membership",
+                Some("bp-39"),
+                None,
+                1,
+                PAGE_ROWS,
+            ),
+        ] {
+            assert!(invalid.is_err());
+        }
+        assert_eq!(state.canonical_sha256().unwrap(), before);
     }
 }

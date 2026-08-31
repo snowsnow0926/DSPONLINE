@@ -338,6 +338,12 @@ export interface DesktopBridge {
   getNativeCoreConstructionInventory?: (request: DesktopNativeCoreConstructionInventoryRequest) => Promise<DesktopNativeCoreConstructionInventoryResult>;
   /** Paged native blueprint library, one selected compact detail, and construction queue; never a full GameState. */
   getNativeCoreBlueprintWorkspace?: (request: DesktopNativeCoreBlueprintWorkspaceRequest) => Promise<DesktopNativeCoreBlueprintWorkspaceResult>;
+  /** Same-revision Rust proof for capturing one ordered ordinary-building selection. */
+  getNativeCoreBlueprintCaptureContext?: (request: DesktopNativeCoreBlueprintCaptureContextRequest) => Promise<DesktopNativeCoreBlueprintCaptureContextResult>;
+  /** Rust parses one bounded exchange string and returns an opaque prepared import marker. */
+  getNativeCoreBlueprintImportContext?: (request: DesktopNativeCoreBlueprintImportContextRequest) => Promise<DesktopNativeCoreBlueprintImportContextResult>;
+  /** Rust serializes one exact ordinary blueprint row into a bounded canonical exchange. */
+  getNativeCoreBlueprintExportContext?: (request: DesktopNativeCoreBlueprintExportContextRequest) => Promise<DesktopNativeCoreBlueprintExportContextResult>;
   /** Click-time Rust proof for queueing one exact blueprint row at a renderer-supplied finite position. */
   getNativeCoreBlueprintEnqueueContext?: (request: DesktopNativeCoreBlueprintEnqueueContextRequest) => Promise<DesktopNativeCoreBlueprintEnqueueContextResult>;
   /** Click-time Rust proof for directly deploying one exact ordinary blueprint row. */
@@ -1069,7 +1075,8 @@ export type DesktopNativeCoreBlueprintWorkspaceSection =
   | "library"
   | "detail"
   | "queue"
-  | "queue-membership";
+  | "queue-membership"
+  | "library-membership";
 
 export interface DesktopNativeCoreBlueprintWorkspaceRequest extends DesktopNativeCoreSessionRequest {
   expectedRevision: number;
@@ -1188,6 +1195,10 @@ export interface DesktopNativeCoreBlueprintQueueMembershipRow {
   id: string;
 }
 
+/** Minimal same-revision whole-library membership proof row. */
+export type DesktopNativeCoreBlueprintLibraryMembershipRow =
+  DesktopNativeCoreBlueprintQueueMembershipRow;
+
 export interface DesktopNativeCoreBlueprintWorkspaceResult {
   schemaVersion: 1;
   projectionType: "blueprint-workspace-v1";
@@ -1217,6 +1228,142 @@ export interface DesktopNativeCoreBlueprintWorkspaceResult {
     projectionBytes: 1048576;
     opaqueIdBytes: 512;
     nameBytes: 256;
+  };
+}
+
+export interface DesktopNativeCoreBlueprintCaptureContextRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  /** Stable native selection order; no entity body may cross this boundary. */
+  entityIds: string[];
+}
+
+export type DesktopNativeCoreBlueprintCaptureUnsupportedReason =
+  | "selection-conflict"
+  | "unsupported-active-planet"
+  | "unsupported-blueprint-domain"
+  | "catalog-incomplete"
+  | "position-overlap"
+  | "library-full"
+  | "next-id-exhausted";
+
+export interface DesktopNativeCoreBlueprintCaptureContextResult {
+  schemaVersion: 1;
+  projectionType: "blueprint-capture-context-v1";
+  source: "native-core";
+  revision: number;
+  stateVersion: 47;
+  registryFingerprint: string;
+  request: Omit<DesktopNativeCoreBlueprintCaptureContextRequest, "sessionId">;
+  activePlanetId: string;
+  support: {
+    supported: boolean;
+    reason: DesktopNativeCoreBlueprintCaptureUnsupportedReason | null;
+  };
+  expectedBlueprintId: string | null;
+  expectedBlueprintName: string | null;
+  expectedBlueprintRevision: 1 | null;
+  limits: {
+    selectionEntityIds: 512;
+    blueprintEntities: 512;
+    blueprintBelts: 1024;
+    opaqueIdBytes: 512;
+    projectionBytes: 1048576;
+  };
+}
+
+export interface DesktopNativeCoreBlueprintImportContextRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  /** Bounded UTF-8 exchange source; the desktop bridge never parses it. */
+  raw: string;
+}
+
+export type DesktopNativeCoreBlueprintImportUnsupportedReason =
+  | "invalid-exchange"
+  | "unsupported-active-planet"
+  | "unsupported-blueprint-domain"
+  | "catalog-incomplete"
+  | "position-overlap"
+  | "library-full"
+  | "next-id-exhausted"
+  | "serialized-budget-exceeded";
+
+export interface DesktopNativeCoreBlueprintImportPreparedIntent {
+  kind: "import";
+  sourceName: string;
+  blueprint: Record<string, unknown>;
+  blueprintSha256: string;
+  revision: number;
+}
+
+export interface DesktopNativeCoreBlueprintImportContextResult {
+  schemaVersion: 1;
+  projectionType: "blueprint-import-context-v1";
+  source: "native-core";
+  revision: number;
+  stateVersion: 47;
+  registryFingerprint: string;
+  request: {
+    expectedRevision: number;
+    expectedRegistryFingerprint: string;
+    rawBytes: number;
+    rawSha256: string;
+  };
+  activePlanetId: string;
+  support: {
+    supported: boolean;
+    reason: DesktopNativeCoreBlueprintImportUnsupportedReason | null;
+  };
+  preparedIntent: DesktopNativeCoreBlueprintImportPreparedIntent | null;
+  limits: {
+    rawBytes: 1048576;
+    projectionBytes: 1048576;
+    commandBytes: 1048576;
+    libraryRows: 64;
+    blueprintEntities: 512;
+    blueprintBelts: 1024;
+  };
+}
+
+export interface DesktopNativeCoreBlueprintExportContextRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  blueprintId: string;
+  blueprintRevision: number;
+}
+
+export type DesktopNativeCoreBlueprintExportUnsupportedReason =
+  | "version-conflict"
+  | "unsupported-active-planet"
+  | "unsupported-blueprint-domain"
+  | "catalog-incomplete"
+  | "position-overlap"
+  | "serialized-budget-exceeded";
+
+export interface DesktopNativeCoreBlueprintExportContextResult {
+  schemaVersion: 1;
+  projectionType: "blueprint-export-context-v1";
+  source: "native-core";
+  revision: number;
+  stateVersion: 47;
+  registryFingerprint: string;
+  request: Omit<DesktopNativeCoreBlueprintExportContextRequest, "sessionId">;
+  activePlanetId: string;
+  support: {
+    supported: boolean;
+    reason: DesktopNativeCoreBlueprintExportUnsupportedReason | null;
+  };
+  rawExchange: string | null;
+  rawBytes: number | null;
+  rawSha256: string | null;
+  blueprintName: string | null;
+  fileNameStem: string | null;
+  limits: {
+    exchangeBytes: 1048576;
+    projectionBytes: 1048576;
+    blueprintEntities: 512;
+    blueprintBelts: 1024;
   };
 }
 
@@ -2559,6 +2706,21 @@ export type DesktopNativeCoreProjectionTransferRequest =
     }
   | {
       sessionId: string;
+      projectionType: "blueprint-capture-context-v1";
+      payload: Omit<DesktopNativeCoreBlueprintCaptureContextRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      projectionType: "blueprint-import-context-v1";
+      payload: Omit<DesktopNativeCoreBlueprintImportContextRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      projectionType: "blueprint-export-context-v1";
+      payload: Omit<DesktopNativeCoreBlueprintExportContextRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
       projectionType: "blueprint-enqueue-context-v1";
       payload: Omit<DesktopNativeCoreBlueprintEnqueueContextRequest, "sessionId">;
     }
@@ -2648,7 +2810,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "blueprint-workspace-v1" | "blueprint-enqueue-context-v1" | "blueprint-direct-deploy-context-v1" | "construction-placement-context-v1" | "construction-belt-placement-context-v1" | "construction-belt-lane-context-v1" | "construction-belt-removal-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "blueprint-workspace-v1" | "blueprint-capture-context-v1" | "blueprint-import-context-v1" | "blueprint-export-context-v1" | "blueprint-enqueue-context-v1" | "blueprint-direct-deploy-context-v1" | "construction-placement-context-v1" | "construction-belt-placement-context-v1" | "construction-belt-lane-context-v1" | "construction-belt-removal-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
   payloadLength: number;
   sha256: string;
 }

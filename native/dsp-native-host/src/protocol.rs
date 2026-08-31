@@ -89,6 +89,25 @@ pub struct CoreBlueprintDirectDeployContextPosition {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreBlueprintImportContextControlRequest {
+    pub session_id: String,
+    pub expected_revision: u64,
+    pub expected_registry_fingerprint: String,
+    pub raw: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreBlueprintExportContextControlRequest {
+    pub session_id: String,
+    pub expected_revision: u64,
+    pub expected_registry_fingerprint: String,
+    pub blueprint_id: String,
+    pub blueprint_revision: u64,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -247,6 +266,14 @@ pub enum ControlRequest {
         blueprint_id: String,
         blueprint_revision: u64,
     },
+    CoreBlueprintCaptureContext {
+        session_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        entity_ids: Vec<String>,
+    },
+    CoreBlueprintImportContext(CoreBlueprintImportContextControlRequest),
+    CoreBlueprintExportContext(CoreBlueprintExportContextControlRequest),
     CoreBlueprintDirectDeployContext {
         session_id: String,
         expected_revision: u64,
@@ -1116,6 +1143,119 @@ mod tests {
             }
             _ => panic!("blueprint enqueue context decoded as the wrong variant"),
         }
+    }
+
+    #[test]
+    fn blueprint_capture_context_protocol_preserves_exact_identity_and_entity_order() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreBlueprintCaptureContext",
+            "sessionId": "core-blueprint-capture",
+            "expectedRevision": 47,
+            "expectedRegistryFingerprint": "builtin:test",
+            "entityIds": ["entity-z", "实体-β", "entity-a"]
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreBlueprintCaptureContext {
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                entity_ids,
+            } => {
+                assert_eq!(session_id, "core-blueprint-capture");
+                assert_eq!(expected_revision, 47);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(entity_ids, ["entity-z", "实体-β", "entity-a"]);
+            }
+            _ => panic!("blueprint capture context decoded as the wrong variant"),
+        }
+
+        assert!(
+            serde_json::from_value::<ControlRequest>(json!({
+                "operation": "coreBlueprintCaptureContext",
+                "sessionId": "core-blueprint-capture",
+                "expectedRevision": 47,
+                "expectedRegistryFingerprint": "builtin:test",
+                "entityIds": "entity-z"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn blueprint_import_context_protocol_is_exact_and_preserves_raw_utf8() {
+        let raw = "{\"type\":\"dsp-idle-blueprint\",\"name\":\"中文🙂\"}";
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreBlueprintImportContext",
+            "sessionId": "core-blueprint-import",
+            "expectedRevision": 47,
+            "expectedRegistryFingerprint": "builtin:test",
+            "raw": raw
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreBlueprintImportContext(request) => {
+                assert_eq!(request.session_id, "core-blueprint-import");
+                assert_eq!(request.expected_revision, 47);
+                assert_eq!(request.expected_registry_fingerprint, "builtin:test");
+                assert_eq!(request.raw, raw);
+            }
+            _ => panic!("blueprint import context decoded as the wrong variant"),
+        }
+        for invalid in [
+            json!({
+                "operation": "coreBlueprintImportContext",
+                "sessionId": "core-blueprint-import",
+                "expectedRevision": 47,
+                "expectedRegistryFingerprint": "builtin:test",
+                "raw": raw,
+                "unknown": true
+            }),
+            json!({
+                "operation": "coreBlueprintImportContext",
+                "sessionId": "core-blueprint-import",
+                "expectedRevision": 47,
+                "expectedRegistryFingerprint": "builtin:test",
+                "raw": { "not": "text" }
+            }),
+        ] {
+            assert!(serde_json::from_value::<ControlRequest>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn blueprint_export_context_protocol_is_exact() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreBlueprintExportContext",
+            "sessionId": "core-blueprint-export",
+            "expectedRevision": 47,
+            "expectedRegistryFingerprint": "builtin:test",
+            "blueprintId": "blueprint_9",
+            "blueprintRevision": 3
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreBlueprintExportContext(request) => {
+                assert_eq!(request.session_id, "core-blueprint-export");
+                assert_eq!(request.expected_revision, 47);
+                assert_eq!(request.expected_registry_fingerprint, "builtin:test");
+                assert_eq!(request.blueprint_id, "blueprint_9");
+                assert_eq!(request.blueprint_revision, 3);
+            }
+            _ => panic!("blueprint export context decoded as the wrong variant"),
+        }
+        assert!(
+            serde_json::from_value::<ControlRequest>(json!({
+                "operation": "coreBlueprintExportContext",
+                "sessionId": "core-blueprint-export",
+                "expectedRevision": 47,
+                "expectedRegistryFingerprint": "builtin:test",
+                "blueprintId": "blueprint_9",
+                "blueprintRevision": 3,
+                "raw": "forbidden"
+            }))
+            .is_err()
+        );
     }
 
     #[test]

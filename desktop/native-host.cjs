@@ -34,6 +34,12 @@ const NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY =
 const NATIVE_FACTORY_INVENTORY_CAPABILITY = "native-core-factory-inventory-v1";
 const NATIVE_CONSTRUCTION_INVENTORY_CAPABILITY = "native-core-construction-inventory-v1";
 const NATIVE_BLUEPRINT_WORKSPACE_CAPABILITY = "native-core-blueprint-workspace-v1";
+const NATIVE_BLUEPRINT_CAPTURE_CONTEXT_CAPABILITY =
+  "native-core-blueprint-capture-context-v1";
+const NATIVE_BLUEPRINT_IMPORT_CONTEXT_CAPABILITY =
+  "native-core-blueprint-import-context-v1";
+const NATIVE_BLUEPRINT_EXPORT_CONTEXT_CAPABILITY =
+  "native-core-blueprint-export-context-v1";
 const NATIVE_BLUEPRINT_ENQUEUE_CONTEXT_CAPABILITY =
   "native-core-blueprint-enqueue-context-v1";
 const NATIVE_BLUEPRINT_DIRECT_DEPLOY_CONTEXT_CAPABILITY =
@@ -387,6 +393,21 @@ class NativeHostClient {
 
 function validLogicalId(value, maximumLength) {
   return typeof value === "string" && value.length > 0 && value.length <= maximumLength && /^[A-Za-z0-9_.:-]+$/.test(value);
+}
+
+function hasWellFormedUnicode(value) {
+  if (typeof value !== "string") return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function validOpaqueId(value, maximumBytes = 512) {
@@ -1201,13 +1222,15 @@ class NativeCoreSessionRegistry {
     ], "native blueprint workspace projection request");
     if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
       !validLogicalId(request.expectedRegistryFingerprint, 256) ||
-      !["library", "detail", "queue", "queue-membership"].includes(request.section) ||
+      !["library", "detail", "queue", "queue-membership", "library-membership"].includes(request.section) ||
       request.blueprintId !== null && !validBlueprintWorkspaceId(request.blueprintId) ||
       request.queueEntryId !== null && !validBlueprintWorkspaceId(request.queueEntryId) ||
-      (request.section === "detail") !== (request.blueprintId !== null) ||
+      ["detail", "library-membership"].includes(request.section) !==
+        (request.blueprintId !== null) ||
       (request.section === "queue-membership") !== (request.queueEntryId !== null) ||
       !Number.isSafeInteger(request.cursor) || request.cursor < 0 || request.cursor > 4_096 ||
-      ["detail", "queue-membership"].includes(request.section) && request.cursor !== 0 ||
+      ["detail", "queue-membership", "library-membership"].includes(request.section) &&
+        request.cursor !== 0 ||
       request.limit !== 32) {
       throw new TypeError("native blueprint workspace projection request is invalid");
     }
@@ -1221,6 +1244,88 @@ class NativeCoreSessionRegistry {
       queueEntryId: request.queueEntryId,
       cursor: request.cursor,
       limit: request.limit,
+    });
+  }
+
+  blueprintCaptureContext(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    exactObjectKeys(request, [
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "entityIds",
+    ], "native blueprint capture context request");
+    if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256) ||
+      !Array.isArray(request.entityIds) || request.entityIds.length < 1 ||
+      request.entityIds.length > 512 ||
+      request.entityIds.some((entityId) => !validBlueprintWorkspaceId(entityId)) ||
+      new Set(request.entityIds).size !== request.entityIds.length) {
+      throw new TypeError("native blueprint capture context request is invalid");
+    }
+    if (!this.client.hello?.capabilities?.includes(NATIVE_BLUEPRINT_CAPTURE_CONTEXT_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide blueprint capture context",
+        "NATIVE_CORE_CAPABILITY_MISSING",
+      );
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreBlueprintCaptureContext",
+      sessionId: request.sessionId,
+      expectedRevision: request.expectedRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      entityIds: [...request.entityIds],
+    });
+  }
+
+  blueprintImportContext(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    exactObjectKeys(request, [
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "raw",
+    ], "native blueprint import context request");
+    if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256) ||
+      typeof request.raw !== "string" || request.raw.trim().length < 1 ||
+      !hasWellFormedUnicode(request.raw) || Buffer.byteLength(request.raw, "utf8") > 1_048_576) {
+      throw new TypeError("native blueprint import context request is invalid");
+    }
+    if (!this.client.hello?.capabilities?.includes(NATIVE_BLUEPRINT_IMPORT_CONTEXT_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide blueprint import context",
+        "NATIVE_CORE_CAPABILITY_MISSING",
+      );
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreBlueprintImportContext",
+      sessionId: request.sessionId,
+      expectedRevision: request.expectedRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      raw: request.raw,
+    });
+  }
+
+  blueprintExportContext(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    exactObjectKeys(request, [
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "blueprintId",
+      "blueprintRevision",
+    ], "native blueprint export context request");
+    if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256) ||
+      !validBlueprintWorkspaceId(request.blueprintId) ||
+      !Number.isSafeInteger(request.blueprintRevision) || request.blueprintRevision < 1) {
+      throw new TypeError("native blueprint export context request is invalid");
+    }
+    if (!this.client.hello?.capabilities?.includes(NATIVE_BLUEPRINT_EXPORT_CONTEXT_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide blueprint export context",
+        "NATIVE_CORE_CAPABILITY_MISSING",
+      );
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreBlueprintExportContext",
+      sessionId: request.sessionId,
+      expectedRevision: request.expectedRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+      blueprintId: request.blueprintId,
+      blueprintRevision: request.blueprintRevision,
     });
   }
 
@@ -2332,6 +2437,9 @@ module.exports = {
   NATIVE_FACTORY_INVENTORY_CAPABILITY,
   NATIVE_CONSTRUCTION_INVENTORY_CAPABILITY,
   NATIVE_BLUEPRINT_WORKSPACE_CAPABILITY,
+  NATIVE_BLUEPRINT_CAPTURE_CONTEXT_CAPABILITY,
+  NATIVE_BLUEPRINT_IMPORT_CONTEXT_CAPABILITY,
+  NATIVE_BLUEPRINT_EXPORT_CONTEXT_CAPABILITY,
   NATIVE_BLUEPRINT_ENQUEUE_CONTEXT_CAPABILITY,
   NATIVE_BLUEPRINT_DIRECT_DEPLOY_CONTEXT_CAPABILITY,
   NATIVE_CONSTRUCTION_BELT_PLACEMENT_CONTEXT_CAPABILITY,

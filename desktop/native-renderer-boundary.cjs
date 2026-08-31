@@ -1,5 +1,7 @@
 "use strict";
 
+const { createHash } = require("node:crypto");
+
 const NATIVE_ERROR_CODE_PATTERN = /^NATIVE_[A-Z0-9_]{1,95}$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const CHECKSUM_PATTERN = /^[a-f0-9]{8,64}$/;
@@ -428,7 +430,7 @@ function normalizeBlueprintWorkspaceContext(value, label) {
   );
   const section = oneOf(
     source.section,
-    ["library", "detail", "queue", "queue-membership"],
+    ["library", "detail", "queue", "queue-membership", "library-membership"],
     `${label} section`,
   );
   const blueprintId = source.blueprintId === null
@@ -438,9 +440,11 @@ function normalizeBlueprintWorkspaceContext(value, label) {
     ? null
     : blueprintOpaqueText(source.queueEntryId, `${label} queue entry ID`, 512);
   const cursor = safeInteger(source.cursor, `${label} cursor`);
-  if (cursor > 4_096 || (section === "detail") !== (blueprintId !== null) ||
-      (section === "queue-membership") !== (queueEntryId !== null) ||
-      ["detail", "queue-membership"].includes(section) && cursor !== 0 ||
+  const expectsBlueprintId = ["detail", "library-membership"].includes(section);
+  const expectsQueueEntryId = section === "queue-membership";
+  if (cursor > 4_096 || expectsBlueprintId !== (blueprintId !== null) ||
+      expectsQueueEntryId !== (queueEntryId !== null) ||
+      ["detail", "queue-membership", "library-membership"].includes(section) && cursor !== 0 ||
       source.limit !== 32) throw protocolError(`${label} selector`);
   return {
     sessionId: logicalId(source.sessionId, `${label} session`, 128),
@@ -455,6 +459,97 @@ function normalizeBlueprintWorkspaceContext(value, label) {
     queueEntryId,
     cursor,
     limit: 32,
+  };
+}
+
+function normalizeBlueprintCaptureContext(value, label) {
+  const source = exactObject(
+    value,
+    ["sessionId", "expectedRevision", "expectedRegistryFingerprint", "entityIds"],
+    label,
+  );
+  if (!Array.isArray(source.entityIds) || source.entityIds.length < 1 ||
+      source.entityIds.length > 512) throw protocolError(`${label} entity IDs`);
+  const entityIds = source.entityIds.map((id, index) => blueprintOpaqueText(
+    id,
+    `${label} entity IDs[${index}]`,
+    512,
+  ));
+  if (new Set(entityIds).size !== entityIds.length) {
+    throw protocolError(`${label} duplicate entity IDs`);
+  }
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} expected registry fingerprint`,
+      256,
+    ),
+    entityIds,
+  };
+}
+
+function wellFormedUnicodeText(value) {
+  if (typeof value !== "string") return false;
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) return false;
+  }
+  return true;
+}
+
+function normalizeBlueprintImportContext(value, label) {
+  const source = exactObject(
+    value,
+    ["sessionId", "expectedRevision", "expectedRegistryFingerprint", "raw"],
+    label,
+  );
+  if (typeof source.raw !== "string" || source.raw.trim().length < 1 ||
+      !wellFormedUnicodeText(source.raw) || Buffer.byteLength(source.raw, "utf8") > 1_048_576) {
+    throw protocolError(`${label} raw exchange`);
+  }
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} expected registry fingerprint`,
+      256,
+    ),
+    raw: source.raw,
+    rawBytes: Buffer.byteLength(source.raw, "utf8"),
+    rawSha256: createHash("sha256").update(source.raw, "utf8").digest("hex"),
+  };
+}
+
+function normalizeBlueprintExportContext(value, label) {
+  const source = exactObject(
+    value,
+    [
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "blueprintId",
+      "blueprintRevision",
+    ],
+    label,
+  );
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} expected registry fingerprint`,
+      256,
+    ),
+    blueprintId: blueprintOpaqueText(source.blueprintId, `${label} blueprint ID`, 512),
+    blueprintRevision: safeInteger(
+      source.blueprintRevision,
+      `${label} blueprint revision`,
+      1,
+    ),
   };
 }
 
@@ -2980,14 +3075,15 @@ function normalizeCoreBlueprintWorkspaceProjection(value, context) {
       totalCount !== expectedTotal || projectionContext.section === "detail" && totalCount > 1) {
     throw protocolError("native blueprint workspace page cardinality");
   }
-  if (projectionContext.section === "queue-membership" && totalCount > 1) {
+  if (["queue-membership", "library-membership"].includes(projectionContext.section) &&
+      totalCount > 1) {
     throw protocolError("native blueprint workspace membership cardinality");
   }
   const rows = pageSource.rows.map((row, index) => projectionContext.section === "library"
     ? normalizeBlueprintSummary(row, `native blueprint workspace library row[${index}]`)
     : projectionContext.section === "detail"
       ? normalizeBlueprintDetail(row, `native blueprint workspace detail row[${index}]`)
-      : projectionContext.section === "queue-membership"
+      : ["queue-membership", "library-membership"].includes(projectionContext.section)
         ? {
             id: blueprintOpaqueText(
               exactObject(row, ["id"], `native blueprint workspace membership row[${index}]`).id,
@@ -3008,8 +3104,10 @@ function normalizeCoreBlueprintWorkspaceProjection(value, context) {
       rows[0].summary.id !== projectionContext.blueprintId) {
     throw protocolError("native blueprint workspace detail selection");
   }
-  if (projectionContext.section === "queue-membership" && rows.length === 1 &&
-      rows[0].id !== projectionContext.queueEntryId) {
+  if (["queue-membership", "library-membership"].includes(projectionContext.section) &&
+      rows.length === 1 && rows[0].id !== (projectionContext.section === "queue-membership"
+        ? projectionContext.queueEntryId
+        : projectionContext.blueprintId)) {
     throw protocolError("native blueprint workspace membership selection");
   }
   const consumed = expectedPageCursor + rows.length;
@@ -3071,6 +3169,515 @@ function normalizeCoreBlueprintWorkspaceProjection(value, context) {
       projectionBytes: MAX_NATIVE_PROJECTION_BYTES,
       opaqueIdBytes: 512,
       nameBytes: 256,
+    },
+  };
+}
+
+function normalizeCoreBlueprintCaptureContext(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "revision", "stateVersion",
+    "registryFingerprint", "request", "activePlanetId", "support",
+    "expectedBlueprintId", "expectedBlueprintName", "expectedBlueprintRevision", "limits",
+  ], "native blueprint capture context");
+  if (source.schemaVersion !== 1 || source.projectionType !== "blueprint-capture-context-v1" ||
+      source.source !== "native-core" || source.stateVersion !== 47) {
+    throw protocolError("native blueprint capture context identity");
+  }
+  requireProjectionByteBudget(source, "native blueprint capture context");
+  const projectionContext = normalizeBlueprintCaptureContext(
+    context,
+    "native blueprint capture request context",
+  );
+  const revision = safeInteger(source.revision, "native blueprint capture revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native blueprint capture registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint) {
+    throw protocolError("native blueprint capture revision binding");
+  }
+  const requestSource = exactObject(
+    source.request,
+    ["expectedRevision", "expectedRegistryFingerprint", "entityIds"],
+    "native blueprint capture request echo",
+  );
+  if (!Array.isArray(requestSource.entityIds) ||
+      requestSource.entityIds.length !== projectionContext.entityIds.length) {
+    throw protocolError("native blueprint capture echoed entity IDs");
+  }
+  const echoedEntityIds = requestSource.entityIds.map((id, index) => blueprintOpaqueText(
+    id,
+    `native blueprint capture echoed entity IDs[${index}]`,
+    512,
+  ));
+  if (new Set(echoedEntityIds).size !== echoedEntityIds.length ||
+      requestSource.expectedRevision !== projectionContext.expectedRevision ||
+      requestSource.expectedRegistryFingerprint !== projectionContext.expectedRegistryFingerprint ||
+      echoedEntityIds.some((id, index) => id !== projectionContext.entityIds[index])) {
+    throw protocolError("native blueprint capture request binding");
+  }
+  const activePlanetId = blueprintOpaqueText(
+    source.activePlanetId,
+    "native blueprint capture active planet",
+    512,
+  );
+  const supportSource = exactObject(
+    source.support,
+    ["supported", "reason"],
+    "native blueprint capture support",
+  );
+  const supported = boolean(supportSource.supported, "native blueprint capture support flag");
+  const reason = supportSource.reason === null
+    ? null
+    : oneOf(
+        supportSource.reason,
+        [
+          "selection-conflict",
+          "unsupported-active-planet",
+          "unsupported-blueprint-domain",
+          "catalog-incomplete",
+          "position-overlap",
+          "library-full",
+          "next-id-exhausted",
+        ],
+        "native blueprint capture support reason",
+      );
+  let expectedBlueprintId = null;
+  let expectedBlueprintName = null;
+  let expectedBlueprintRevision = null;
+  if (source.expectedBlueprintId !== null) {
+    expectedBlueprintId = blueprintOpaqueText(
+      source.expectedBlueprintId,
+      "native blueprint capture expected blueprint ID",
+      512,
+    );
+    const match = /^blueprint_(0|[1-9][0-9]*)$/.exec(expectedBlueprintId);
+    const suffix = match ? Number(match[1]) : Number.NaN;
+    if (!Number.isSafeInteger(suffix) || suffix < 0 || suffix >= Number.MAX_SAFE_INTEGER) {
+      throw protocolError("native blueprint capture expected blueprint ID");
+    }
+  }
+  if (source.expectedBlueprintName !== null) {
+    expectedBlueprintName = blueprintOpaqueText(
+      source.expectedBlueprintName,
+      "native blueprint capture expected blueprint name",
+      256,
+    );
+    if (!/^蓝图 [0-9]{2,}$/u.test(expectedBlueprintName)) {
+      throw protocolError("native blueprint capture expected blueprint name");
+    }
+  }
+  if (source.expectedBlueprintRevision !== null) {
+    expectedBlueprintRevision = safeInteger(
+      source.expectedBlueprintRevision,
+      "native blueprint capture expected blueprint revision",
+      1,
+    );
+    if (expectedBlueprintRevision !== 1) {
+      throw protocolError("native blueprint capture expected blueprint revision");
+    }
+  }
+  const hasExpectedBlueprint = expectedBlueprintId !== null && expectedBlueprintName !== null &&
+    expectedBlueprintRevision === 1;
+  if (supported !== (reason === null && hasExpectedBlueprint) ||
+      !supported && (reason === null || expectedBlueprintId !== null ||
+        expectedBlueprintName !== null || expectedBlueprintRevision !== null)) {
+    throw protocolError("native blueprint capture support binding");
+  }
+  const limitsSource = exactObject(
+    source.limits,
+    [
+      "selectionEntityIds", "blueprintEntities", "blueprintBelts", "opaqueIdBytes",
+      "projectionBytes",
+    ],
+    "native blueprint capture limits",
+  );
+  if (limitsSource.selectionEntityIds !== 512 || limitsSource.blueprintEntities !== 512 ||
+      limitsSource.blueprintBelts !== 1_024 || limitsSource.opaqueIdBytes !== 512 ||
+      limitsSource.projectionBytes !== MAX_NATIVE_PROJECTION_BYTES) {
+    throw protocolError("native blueprint capture limits");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "blueprint-capture-context-v1",
+    source: "native-core",
+    revision,
+    stateVersion: 47,
+    registryFingerprint,
+    request: {
+      expectedRevision: projectionContext.expectedRevision,
+      expectedRegistryFingerprint: projectionContext.expectedRegistryFingerprint,
+      entityIds: echoedEntityIds,
+    },
+    activePlanetId,
+    support: { supported, reason },
+    expectedBlueprintId,
+    expectedBlueprintName,
+    expectedBlueprintRevision,
+    limits: {
+      selectionEntityIds: 512,
+      blueprintEntities: 512,
+      blueprintBelts: 1_024,
+      opaqueIdBytes: 512,
+      projectionBytes: MAX_NATIVE_PROJECTION_BYTES,
+    },
+  };
+}
+
+const BLUEPRINT_IMPORT_ENTITY_REQUIRED_KEYS = Object.freeze([
+  "key", "buildingId", "offset", "machineCount",
+]);
+const BLUEPRINT_IMPORT_ENTITY_OPTIONAL_KEYS = Object.freeze([
+  "recipeId", "targetDysonOrbitId", "storedItemId", "distributionMode", "fuelItemId",
+  "energyMode", "powerGridId", "powerPriority", "generationPriority", "sprayCoaterInstalled",
+  "proliferatorTier", "proliferatorMode",
+]);
+const BLUEPRINT_IMPORT_BELT_REQUIRED_KEYS = Object.freeze([
+  "key", "sourceKey", "targetKey", "itemId", "lanes", "tier", "priority",
+]);
+const BLUEPRINT_IMPORT_BELT_OPTIONAL_KEYS = Object.freeze([
+  "sorterTier", "stackSize", "monitorEnabled", "routeMode", "routeOffsetY",
+]);
+
+function cloneBlueprintImportJson(value, label) {
+  let serialized;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    throw protocolError(label);
+  }
+  if (typeof serialized !== "string" || Buffer.byteLength(serialized, "utf8") > 1_048_576) {
+    throw protocolError(label);
+  }
+  return JSON.parse(serialized);
+}
+
+function normalizeBlueprintImportName(value, label) {
+  if (typeof value !== "string" || value.length < 1 || value.length > 48 ||
+      !wellFormedUnicodeText(value) || /[\u0000-\u001f\u007f-\u009f]/u.test(value) ||
+      Buffer.byteLength(value, "utf8") > 192) throw protocolError(label);
+  return value;
+}
+
+function normalizeBlueprintImportPreparedBlueprint(value) {
+  const source = exactObject(value, [
+    "id", "name", "revision", "entities", "resourceAnchors", "belts", "externalPorts",
+    "rotation", "mirror", "recipeOverrides",
+  ], "native blueprint import prepared blueprint");
+  const id = blueprintOpaqueText(source.id, "native blueprint import prepared ID", 512);
+  const idMatch = /^blueprint_(0|[1-9][0-9]*)$/.exec(id);
+  if (!idMatch || !Number.isSafeInteger(Number(idMatch[1])) || Number(idMatch[1]) < 0 ||
+      Number(idMatch[1]) >= Number.MAX_SAFE_INTEGER || source.revision !== 1 ||
+      !Array.isArray(source.entities) || source.entities.length > 512 ||
+      !Array.isArray(source.resourceAnchors) || source.resourceAnchors.length !== 0 ||
+      !Array.isArray(source.belts) || source.belts.length > 1_024 ||
+      !Array.isArray(source.externalPorts) || source.externalPorts.length !== 0 ||
+      ![0, 90, 180, 270].includes(source.rotation) ||
+      !["none", "horizontal"].includes(source.mirror)) {
+    throw protocolError("native blueprint import prepared blueprint identity");
+  }
+  const entities = source.entities.map((entity, index) => {
+    const normalized = objectWithKeys(
+      entity,
+      BLUEPRINT_IMPORT_ENTITY_REQUIRED_KEYS,
+      BLUEPRINT_IMPORT_ENTITY_OPTIONAL_KEYS,
+      `native blueprint import entity[${index}]`,
+    );
+    blueprintOpaqueText(normalized.key, `native blueprint import entity[${index}] key`, 512);
+    blueprintOpaqueText(normalized.buildingId, `native blueprint import entity[${index}] building`, 512);
+    const offset = exactObject(normalized.offset, ["x", "y"], `native blueprint import entity[${index}] offset`);
+    finiteNumber(offset.x, `native blueprint import entity[${index}] offset.x`, -Number.MAX_VALUE);
+    finiteNumber(offset.y, `native blueprint import entity[${index}] offset.y`, -Number.MAX_VALUE);
+    safeInteger(normalized.machineCount, `native blueprint import entity[${index}] machine count`, 1);
+    return cloneBlueprintImportJson(normalized, `native blueprint import entity[${index}] JSON`);
+  });
+  const belts = source.belts.map((belt, index) => {
+    const normalized = objectWithKeys(
+      belt,
+      BLUEPRINT_IMPORT_BELT_REQUIRED_KEYS,
+      BLUEPRINT_IMPORT_BELT_OPTIONAL_KEYS,
+      `native blueprint import belt[${index}]`,
+    );
+    for (const key of ["key", "sourceKey", "targetKey", "itemId"]) {
+      blueprintOpaqueText(normalized[key], `native blueprint import belt[${index}] ${key}`, 512);
+    }
+    return cloneBlueprintImportJson(normalized, `native blueprint import belt[${index}] JSON`);
+  });
+  const recipeOverridesSource = jsonObject(
+    source.recipeOverrides,
+    "native blueprint import recipe overrides",
+  );
+  const recipeOverrides = {};
+  for (const [key, target] of Object.entries(recipeOverridesSource)) {
+    const sourceId = blueprintOpaqueText(key, "native blueprint import recipe source", 512);
+    recipeOverrides[sourceId] = blueprintOpaqueText(
+      target,
+      "native blueprint import recipe target",
+      512,
+    );
+  }
+  return {
+    id,
+    name: normalizeBlueprintImportName(source.name, "native blueprint import prepared name"),
+    revision: 1,
+    entities,
+    resourceAnchors: [],
+    belts,
+    externalPorts: [],
+    rotation: source.rotation,
+    mirror: source.mirror,
+    recipeOverrides,
+  };
+}
+
+function normalizeCoreBlueprintImportContext(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "revision", "stateVersion",
+    "registryFingerprint", "request", "activePlanetId", "support", "preparedIntent", "limits",
+  ], "native blueprint import context");
+  if (source.schemaVersion !== 1 || source.projectionType !== "blueprint-import-context-v1" ||
+      source.source !== "native-core" || source.stateVersion !== 47) {
+    throw protocolError("native blueprint import context identity");
+  }
+  requireProjectionByteBudget(source, "native blueprint import context");
+  const projectionContext = normalizeBlueprintImportContext(
+    context,
+    "native blueprint import request context",
+  );
+  const revision = safeInteger(source.revision, "native blueprint import revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native blueprint import registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint) {
+    throw protocolError("native blueprint import revision binding");
+  }
+  const requestSource = exactObject(source.request, [
+    "expectedRevision", "expectedRegistryFingerprint", "rawBytes", "rawSha256",
+  ], "native blueprint import request echo");
+  if (requestSource.expectedRevision !== projectionContext.expectedRevision ||
+      requestSource.expectedRegistryFingerprint !== projectionContext.expectedRegistryFingerprint ||
+      requestSource.rawBytes !== projectionContext.rawBytes ||
+      sha256(requestSource.rawSha256, "native blueprint import raw SHA-256") !== projectionContext.rawSha256) {
+    throw protocolError("native blueprint import request binding");
+  }
+  const activePlanetId = blueprintOpaqueText(
+    source.activePlanetId,
+    "native blueprint import active planet",
+    512,
+  );
+  const supportSource = exactObject(
+    source.support,
+    ["supported", "reason"],
+    "native blueprint import support",
+  );
+  const supported = boolean(supportSource.supported, "native blueprint import support flag");
+  const reason = supportSource.reason === null ? null : oneOf(
+    supportSource.reason,
+    [
+      "invalid-exchange", "unsupported-active-planet", "unsupported-blueprint-domain",
+      "catalog-incomplete", "position-overlap", "library-full", "next-id-exhausted",
+      "serialized-budget-exceeded",
+    ],
+    "native blueprint import support reason",
+  );
+  let preparedIntent = null;
+  if (source.preparedIntent !== null) {
+    const marker = exactObject(source.preparedIntent, [
+      "kind", "sourceName", "blueprint", "blueprintSha256", "revision",
+    ], "native blueprint import prepared marker");
+    if (marker.kind !== "import" || marker.revision !== revision) {
+      throw protocolError("native blueprint import prepared marker identity");
+    }
+    preparedIntent = {
+      kind: "import",
+      sourceName: normalizeBlueprintImportName(
+        marker.sourceName,
+        "native blueprint import source name",
+      ),
+      blueprint: normalizeBlueprintImportPreparedBlueprint(marker.blueprint),
+      blueprintSha256: sha256(
+        marker.blueprintSha256,
+        "native blueprint import prepared SHA-256",
+      ),
+      revision,
+    };
+  }
+  if (supported !== (reason === null && preparedIntent !== null) ||
+      !supported && (reason === null || preparedIntent !== null)) {
+    throw protocolError("native blueprint import support binding");
+  }
+  const limitsSource = exactObject(source.limits, [
+    "rawBytes", "projectionBytes", "commandBytes", "libraryRows", "blueprintEntities",
+    "blueprintBelts",
+  ], "native blueprint import limits");
+  if (limitsSource.rawBytes !== 1_048_576 ||
+      limitsSource.projectionBytes !== MAX_NATIVE_PROJECTION_BYTES ||
+      limitsSource.commandBytes !== 1_048_576 || limitsSource.libraryRows !== 64 ||
+      limitsSource.blueprintEntities !== 512 || limitsSource.blueprintBelts !== 1_024) {
+    throw protocolError("native blueprint import limits");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "blueprint-import-context-v1",
+    source: "native-core",
+    revision,
+    stateVersion: 47,
+    registryFingerprint,
+    request: {
+      expectedRevision: projectionContext.expectedRevision,
+      expectedRegistryFingerprint: projectionContext.expectedRegistryFingerprint,
+      rawBytes: projectionContext.rawBytes,
+      rawSha256: projectionContext.rawSha256,
+    },
+    activePlanetId,
+    support: { supported, reason },
+    preparedIntent,
+    limits: {
+      rawBytes: 1_048_576,
+      projectionBytes: MAX_NATIVE_PROJECTION_BYTES,
+      commandBytes: 1_048_576,
+      libraryRows: 64,
+      blueprintEntities: 512,
+      blueprintBelts: 1_024,
+    },
+  };
+}
+
+function normalizeCoreBlueprintExportContext(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "revision", "stateVersion",
+    "registryFingerprint", "request", "activePlanetId", "support", "rawExchange",
+    "rawBytes", "rawSha256", "blueprintName", "fileNameStem", "limits",
+  ], "native blueprint export context");
+  if (source.schemaVersion !== 1 || source.projectionType !== "blueprint-export-context-v1" ||
+      source.source !== "native-core" || source.stateVersion !== 47) {
+    throw protocolError("native blueprint export context identity");
+  }
+  requireProjectionByteBudget(source, "native blueprint export context");
+  const projectionContext = normalizeBlueprintExportContext(
+    context,
+    "native blueprint export request context",
+  );
+  const revision = safeInteger(source.revision, "native blueprint export revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native blueprint export registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint) {
+    throw protocolError("native blueprint export revision binding");
+  }
+  const requestSource = exactObject(source.request, [
+    "expectedRevision", "expectedRegistryFingerprint", "blueprintId", "blueprintRevision",
+  ], "native blueprint export request echo");
+  if (requestSource.expectedRevision !== projectionContext.expectedRevision ||
+      requestSource.expectedRegistryFingerprint !== projectionContext.expectedRegistryFingerprint ||
+      requestSource.blueprintId !== projectionContext.blueprintId ||
+      requestSource.blueprintRevision !== projectionContext.blueprintRevision) {
+    throw protocolError("native blueprint export request binding");
+  }
+  const activePlanetId = blueprintOpaqueText(
+    source.activePlanetId,
+    "native blueprint export active planet",
+    512,
+  );
+  const supportSource = exactObject(
+    source.support,
+    ["supported", "reason"],
+    "native blueprint export support",
+  );
+  const supported = boolean(supportSource.supported, "native blueprint export support flag");
+  const reason = supportSource.reason === null ? null : oneOf(
+    supportSource.reason,
+    [
+      "version-conflict", "unsupported-active-planet", "unsupported-blueprint-domain",
+      "catalog-incomplete", "position-overlap", "serialized-budget-exceeded",
+    ],
+    "native blueprint export support reason",
+  );
+  let rawExchange = null;
+  let rawBytes = null;
+  let rawSha256 = null;
+  let blueprintName = null;
+  let fileNameStem = null;
+  if (supported) {
+    if (reason !== null || typeof source.rawExchange !== "string" ||
+        source.rawExchange.length < 1 || !wellFormedUnicodeText(source.rawExchange)) {
+      throw protocolError("native blueprint export supported payload");
+    }
+    const measuredBytes = Buffer.byteLength(source.rawExchange, "utf8");
+    if (measuredBytes < 1 || measuredBytes > MAX_NATIVE_PROJECTION_BYTES ||
+        source.rawBytes !== measuredBytes) {
+      throw protocolError("native blueprint export raw byte binding");
+    }
+    const measuredSha256 = createHash("sha256").update(source.rawExchange, "utf8").digest("hex");
+    if (sha256(source.rawSha256, "native blueprint export raw SHA-256") !== measuredSha256) {
+      throw protocolError("native blueprint export raw digest binding");
+    }
+    const normalizedName = normalizeBlueprintImportName(
+      source.blueprintName,
+      "native blueprint export blueprint name",
+    );
+    const normalizedStem = blueprintOpaqueText(
+      source.fileNameStem,
+      "native blueprint export file stem",
+      320,
+    );
+    const windowsDeviceBase = normalizedStem.split(".", 1)[0].replace(/[. ]+$/u, "");
+    if (normalizedStem.length > 80 || /[/\\<>:"|?*]/u.test(normalizedStem) ||
+        /^(?:con|prn|aux|nul|(?:com|lpt)[1-9\u00b9\u00b2\u00b3])$/iu.test(windowsDeviceBase) ||
+        /[. ]$/u.test(normalizedStem) ||
+        normalizedStem === "." || normalizedStem === "..") {
+      throw protocolError("native blueprint export file stem safety");
+    }
+    rawExchange = source.rawExchange;
+    rawBytes = measuredBytes;
+    rawSha256 = measuredSha256;
+    blueprintName = normalizedName;
+    fileNameStem = normalizedStem;
+  } else if (reason === null || source.rawExchange !== null || source.rawBytes !== null ||
+      source.rawSha256 !== null || source.blueprintName !== null || source.fileNameStem !== null) {
+    throw protocolError("native blueprint export unsupported payload");
+  }
+  const limitsSource = exactObject(source.limits, [
+    "exchangeBytes", "projectionBytes", "blueprintEntities", "blueprintBelts",
+  ], "native blueprint export limits");
+  if (limitsSource.exchangeBytes !== MAX_NATIVE_PROJECTION_BYTES ||
+      limitsSource.projectionBytes !== MAX_NATIVE_PROJECTION_BYTES ||
+      limitsSource.blueprintEntities !== 512 || limitsSource.blueprintBelts !== 1_024) {
+    throw protocolError("native blueprint export limits");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "blueprint-export-context-v1",
+    source: "native-core",
+    revision,
+    stateVersion: 47,
+    registryFingerprint,
+    request: {
+      expectedRevision: projectionContext.expectedRevision,
+      expectedRegistryFingerprint: projectionContext.expectedRegistryFingerprint,
+      blueprintId: projectionContext.blueprintId,
+      blueprintRevision: projectionContext.blueprintRevision,
+    },
+    activePlanetId,
+    support: { supported, reason },
+    rawExchange,
+    rawBytes,
+    rawSha256,
+    blueprintName,
+    fileNameStem,
+    limits: {
+      exchangeBytes: MAX_NATIVE_PROJECTION_BYTES,
+      projectionBytes: MAX_NATIVE_PROJECTION_BYTES,
+      blueprintEntities: 512,
+      blueprintBelts: 1_024,
     },
   };
 }
@@ -7447,6 +8054,9 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreFactoryInventoryProjection: normalizeCoreFactoryInventoryProjection,
   coreConstructionInventoryProjection: normalizeCoreConstructionInventoryProjection,
   coreBlueprintWorkspaceProjection: normalizeCoreBlueprintWorkspaceProjection,
+  coreBlueprintCaptureContext: normalizeCoreBlueprintCaptureContext,
+  coreBlueprintImportContext: normalizeCoreBlueprintImportContext,
+  coreBlueprintExportContext: normalizeCoreBlueprintExportContext,
   coreBlueprintEnqueueContext: normalizeCoreBlueprintEnqueueContext,
   coreBlueprintDirectDeployContext: normalizeCoreBlueprintDirectDeployContext,
   coreConstructionPlacementContext: normalizeCoreConstructionPlacementContext,

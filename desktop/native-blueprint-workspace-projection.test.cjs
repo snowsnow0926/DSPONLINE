@@ -221,6 +221,37 @@ test("blueprint queue membership is a target-bound global presence or absence pr
   );
 });
 
+test("blueprint library membership proves only one exact captured ID", () => {
+  const context = {
+    ...CONTEXT,
+    section: "library-membership",
+    blueprintId: "blueprint_17",
+  };
+  const present = normalizeRendererNativeResult(
+    "coreBlueprintWorkspaceProjection",
+    result(context, [{ id: "blueprint_17" }], { library: 40, queue: 0 }, 1),
+    context,
+  );
+  assert.deepEqual(present.page.rows, [{ id: "blueprint_17" }]);
+  assert.equal(present.page.totalCount, 1);
+  assert.throws(
+    () => normalizeRendererNativeResult(
+      "coreBlueprintWorkspaceProjection",
+      result(context, [{ id: "blueprint_18" }], { library: 40, queue: 0 }, 1),
+      context,
+    ),
+    /membership selection/i,
+  );
+  assert.throws(
+    () => normalizeRendererNativeResult(
+      "coreBlueprintWorkspaceProjection",
+      result({ ...context, queueEntryId: "queue-1" }, [], { library: 40, queue: 1 }, 0),
+      { ...context, queueEntryId: "queue-1" },
+    ),
+    /selector/i,
+  );
+});
+
 test("blueprint normalizer rejects forged detail and queue semantic combinations", () => {
   const detailContext = { ...CONTEXT, section: "detail", blueprintId: "bp-forged" };
   const detailSummary = summary("bp-forged", "Forged", { entities: 1 });

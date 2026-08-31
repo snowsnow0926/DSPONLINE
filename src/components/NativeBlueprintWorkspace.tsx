@@ -2,6 +2,7 @@ import {
   BoxSelect,
   ChevronLeft,
   ChevronRight,
+  Download,
   GitBranch,
   Hammer,
   Layers3,
@@ -15,9 +16,15 @@ import {
   RotateCw,
   ShieldCheck,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import {
+  readNativeBlueprintImportFile,
+  validateNativeBlueprintImportRaw,
+  type NativeBlueprintImportInputFailure,
+} from "../game/nativeBlueprintImportInput";
 import { canonicalizeNativeBlueprintName } from "../game/nativeBlueprintRenameIntentCommands";
 import {
   NATIVE_BLUEPRINT_PAGE_ROWS,
@@ -68,15 +75,36 @@ import type {
 import type {
   NativeBlueprintDirectDeployPendingCommand,
 } from "../game/nativeBlueprintDirectDeployCommandReconciliation";
+import type {
+  NativeBlueprintImportPendingCommand,
+} from "../game/nativeBlueprintImportCommandReconciliation";
+import type {
+  NativeBlueprintImportConfirmation,
+} from "../game/useNativeBlueprintImportCommandTransaction";
+import type { NativeBlueprintExportBinding } from "../game/nativeBlueprintExportContext";
 import {
   nativeBlueprintRenameEditorTargetState,
   type NativeBlueprintRenamePendingIdentity,
   type NativeBlueprintRenameResolution,
   type NativeBlueprintRenameSubmitOutcome,
 } from "../game/nativeBlueprintRenameWorkflow";
+import { StableTextArea, clearStableTextDraft } from "./CompositionSafeInput";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 
 export type NativeBlueprintWorkspaceReadStatus = NativeBlueprintWorkspaceSnapshot["status"];
+
+export interface NativeBlueprintImportAcceptedSubmission {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly registryFingerprint: string;
+  readonly commandRevision: number;
+  readonly blueprintId: string;
+}
+
+export type NativeBlueprintImportSubmitOutcome = Readonly<
+  | ({ success: true; message: string } & NativeBlueprintImportAcceptedSubmission)
+  | { success: false; message: string }
+>;
 
 export interface NativeBlueprintWorkspaceProps {
   open: boolean;
@@ -109,6 +137,10 @@ export interface NativeBlueprintWorkspaceProps {
   onSubmitQueueDeployIntent: (binding: NativeConstructionQueueDeployBinding) => boolean;
   onBeginQueuePlacement: (binding: NativeBlueprintEnqueueSelectionBinding) => boolean;
   onBeginDirectPlacement: (binding: NativeBlueprintDirectDeploySelectionBinding) => boolean;
+  onSubmitImportRaw: (raw: string) => Promise<NativeBlueprintImportSubmitOutcome>;
+  onExportBlueprint: (
+    binding: NativeBlueprintExportBinding,
+  ) => Promise<Readonly<{ success: boolean; message: string }>>;
   pendingIdentity: NativeBlueprintRenamePendingIdentity | null;
   transformPending: NativeBlueprintTransformPendingCommand | null;
   recipeOverridePending: NativeBlueprintRecipeOverridePendingCommand | null;
@@ -118,12 +150,25 @@ export interface NativeBlueprintWorkspaceProps {
   queueDeployPending: NativeConstructionQueueDeployPendingCommand | null;
   enqueuePending: NativeBlueprintEnqueuePendingCommand | null;
   directDeployPending: NativeBlueprintDirectDeployPendingCommand | null;
+  importPending: NativeBlueprintImportPendingCommand | null;
+  importConfirmation: NativeBlueprintImportConfirmation | null;
   resolution: NativeBlueprintRenameResolution | null;
   onConsumeRenameResolution: (submissionId: number) => void;
   commandPending: boolean;
 }
 
 const DETAIL_PREVIEW_ROWS = 24;
+const NATIVE_BLUEPRINT_IMPORT_DRAFT_ID = "native-blueprint-import-json";
+
+function nativeBlueprintImportInputMessage(reason: NativeBlueprintImportInputFailure): string {
+  switch (reason) {
+    case "empty": return "请选择非空文件或粘贴蓝图交换 JSON";
+    case "invalid-unicode": return "文本包含不完整 Unicode 字符；未发送到 Rust";
+    case "invalid-utf8": return "文件不是严格 UTF-8 文本；未发送到 Rust";
+    case "too-large": return "蓝图交换文本超过 1 MiB 安全上限；未读取或发送";
+    case "read-failed": return "无法读取所选文件；未发送到 Rust";
+  }
+}
 
 function formatSimulationTime(value: number): string {
   const seconds = Math.max(0, Math.floor(value));
@@ -288,6 +333,26 @@ function sameRenameIdentity(
     left.currentRevision === right.currentRevision;
 }
 
+function importedDraftHasConfirmedRow(
+  accepted: NativeBlueprintImportAcceptedSubmission,
+  confirmation: NativeBlueprintImportConfirmation,
+  frame: NativeBlueprintWorkspaceFrame,
+): boolean {
+  if (!Number.isSafeInteger(accepted.commandRevision) || accepted.commandRevision < 0 ||
+      !Number.isSafeInteger(confirmation.previousRevision) ||
+      !Number.isSafeInteger(confirmation.ackRevision) ||
+      confirmation.ackRevision !== confirmation.previousRevision + 1 ||
+      confirmation.previousRevision !== accepted.commandRevision ||
+      confirmation.sessionId !== accepted.sessionId || confirmation.runId !== accepted.runId ||
+      confirmation.registryFingerprint !== accepted.registryFingerprint ||
+      confirmation.blueprintId !== accepted.blueprintId ||
+      frame.sessionId !== accepted.sessionId || frame.runId !== accepted.runId ||
+      frame.registryFingerprint !== accepted.registryFingerprint ||
+      frame.revision < confirmation.ackRevision) return false;
+  const row = frame.libraryById.get(accepted.blueprintId);
+  return row?.id === accepted.blueprintId && frame.library.some((candidate) => candidate === row);
+}
+
 export function NativeBlueprintWorkspace({
   open,
   status,
@@ -306,6 +371,8 @@ export function NativeBlueprintWorkspace({
   onSubmitQueueDeployIntent,
   onBeginQueuePlacement,
   onBeginDirectPlacement,
+  onSubmitImportRaw,
+  onExportBlueprint,
   pendingIdentity,
   transformPending,
   recipeOverridePending,
@@ -315,11 +382,19 @@ export function NativeBlueprintWorkspace({
   queueDeployPending,
   enqueuePending,
   directDeployPending,
+  importPending,
+  importConfirmation,
   resolution,
   onConsumeRenameResolution,
   commandPending,
 }: NativeBlueprintWorkspaceProps) {
   const [activeTab, setActiveTab] = useState<"library" | "queue">("library");
+  const [importOpen, setImportOpen] = useState(false);
+  const [importText, setImportText] = useState("");
+  const [importFeedback, setImportFeedback] = useState<string | null>(null);
+  const [importReadPending, setImportReadPending] = useState(false);
+  const [acceptedImport, setAcceptedImport] = useState<NativeBlueprintImportAcceptedSubmission | null>(null);
+  const importFileRef = useRef<HTMLInputElement | null>(null);
   const [renameEditor, setRenameEditor] = useState<{
     identity: NativeBlueprintRenameIdentity;
     draft: string;
@@ -338,6 +413,15 @@ export function NativeBlueprintWorkspace({
     ? "ready"
     : status === "loading" || status === "empty" ? status : "unavailable";
   const syncing = readStatus === "loading" || readStatus === "empty";
+
+  useEffect(() => {
+    if (!acceptedImport || importPending !== null || !importConfirmation || !readyFrame ||
+        !importedDraftHasConfirmedRow(acceptedImport, importConfirmation, readyFrame)) return;
+    setAcceptedImport(null);
+    setImportText("");
+    clearStableTextDraft(NATIVE_BLUEPRINT_IMPORT_DRAFT_ID);
+    setImportOpen(false);
+  }, [acceptedImport, importConfirmation, importPending, readyFrame]);
   const observedEditorTargetState = renameEditor
     ? nativeBlueprintRenameEditorTargetState(renameEditor.identity, latestIdentity, readyFrame)
     : null;
@@ -348,7 +432,13 @@ export function NativeBlueprintWorkspace({
     setRenameEditor((current) => current?.composing
       ? { ...current, composing: false }
       : current);
+    setImportReadPending(false);
   }, [open]);
+
+  useEffect(() => {
+    if (!readyFrame?.selectedBlueprintId) return;
+    setActiveTab("library");
+  }, [readyFrame?.selectedBlueprintId]);
 
   useEffect(() => {
     if (!renameEditor || !resolution ||
@@ -387,7 +477,8 @@ export function NativeBlueprintWorkspace({
   const interactionLocked = commandPending || pendingIdentity !== null ||
     transformPending !== null || recipeOverridePending !== null || deletePending !== null ||
     queueCancelPending !== null || queueFundPending !== null || enqueuePending !== null ||
-    queueDeployPending !== null || directDeployPending !== null ||
+    queueDeployPending !== null || directDeployPending !== null || importPending !== null ||
+    importReadPending ||
     renameEditor !== null;
   const editorTargetState = renameEditor?.conflict === "lineage"
     ? "lineage-conflict"
@@ -397,7 +488,7 @@ export function NativeBlueprintWorkspace({
   const editorLocked = Boolean(
     editorAccepted || pendingIdentity || transformPending || recipeOverridePending || deletePending ||
     queueCancelPending || queueFundPending || queueDeployPending || enqueuePending ||
-    directDeployPending || editorConflict
+    directDeployPending || importPending || editorConflict
   );
   const canonicalDraft = renameEditor ? canonicalizeNativeBlueprintName(renameEditor.draft) : null;
   const editorCanSubmit = Boolean(renameEditor && editorTargetState === "ready" &&
@@ -475,6 +566,15 @@ export function NativeBlueprintWorkspace({
           ? `蓝图直接部署已耐久提交；等待不早于 revision ${directDeployPending.receipt?.revision} 的原生工厂拓扑`
           : "蓝图直接部署回执或拓扑身份无法证明；当前 lineage 保持锁定"
     : null;
+  const importPendingCopy = importPending
+    ? importPending.phase === "dispatching"
+      ? "蓝图导入正在等待 main-owned durable ACK"
+      : importPending.phase === "reconciling"
+        ? "蓝图导入结果不确定；仅进行六次有界只读对账，绝不自动重发"
+        : importPending.phase === "awaiting-projection"
+          ? `蓝图导入已耐久提交；等待不早于 revision ${importPending.receipt?.revision} 的精确蓝图库成员证明`
+          : "蓝图导入回执或成员证明无法匹配；当前 lineage 保持锁定"
+    : null;
   const pendingCopy = pendingIdentity
     ? pendingIdentity.phase === "awaiting-ack"
       ? "重命名正在等待 main-owned durable ACK"
@@ -485,7 +585,7 @@ export function NativeBlueprintWorkspace({
           : "重命名身份或投影发生冲突；保持锁定并停止猜测"
     : transformPendingCopy ?? recipeOverridePendingCopy ?? deletePendingCopy ??
       queueCancelPendingCopy ?? queueFundPendingCopy ?? queueDeployPendingCopy ?? enqueuePendingCopy ??
-      directDeployPendingCopy ?? (commandPending
+      directDeployPendingCopy ?? importPendingCopy ?? (commandPending
       ? "另一条原生命令正在等待 durable ACK"
       : "页面按存储顺序显示；名称、方向、配方、入队与删除由 Rust 权威提交。");
   const editorCopy = renameEditor
@@ -529,9 +629,109 @@ export function NativeBlueprintWorkspace({
       {readyFrame ? <>
         <button disabled={interactionLocked} className={activeTab === "library" ? "active" : ""} type="button" aria-current={activeTab === "library" ? "page" : undefined} onClick={() => setActiveTab("library")} data-native-blueprint-action="tab-library"><Layers3 size={14} />蓝图库</button>
         <button disabled={interactionLocked} className={activeTab === "queue" ? "active" : ""} type="button" aria-current={activeTab === "queue" ? "page" : undefined} onClick={() => setActiveTab("queue")} data-native-blueprint-action="tab-queue"><ListChecks size={14} />待建施工{readyFrame.queuePage.totalCount > 0 ? <em>{readyFrame.queuePage.totalCount}</em> : null}</button>
+        <button
+          disabled={interactionLocked}
+          className={importOpen ? "active" : ""}
+          type="button"
+          aria-expanded={importOpen}
+          onClick={() => {
+            setImportOpen((current) => !current);
+            setImportFeedback(null);
+            setActiveTab("library");
+          }}
+          data-native-blueprint-action="toggle-import"
+        ><Upload size={14} />导入普通蓝图</button>
         <span role="status">{pendingCopy}</span>
       </> : <span role="status">{syncing ? "正在完成同 revision 的蓝图库、详情与施工队列分页" : "原生权威蓝图投影暂不可用"}</span>}
     </nav>
+
+    {readyFrame && importOpen ? <section
+      className="blueprint-import-panel"
+      aria-label="Rust 原生普通蓝图导入"
+      data-native-blueprint-import="bounded-raw"
+    >
+      <div className="blueprint-resource-note">
+        <strong><ShieldCheck size={12} /> Rust 权威解析与导入</strong>
+        <span>界面只传递最多 1 MiB 的严格 UTF-8 原文；不会在 JavaScript 中解析蓝图、库存或生成 ID。</span>
+      </div>
+      <StableTextArea
+        draftId={NATIVE_BLUEPRINT_IMPORT_DRAFT_ID}
+        value={importText}
+        onValueChange={(value) => {
+          setAcceptedImport(null);
+          setImportText(value);
+          setImportFeedback(null);
+        }}
+        disabled={interactionLocked}
+        rows={6}
+        placeholder="粘贴普通蓝图交换 JSON（最多 1 MiB）"
+        aria-label="粘贴 Rust 原生普通蓝图交换 JSON"
+      />
+      <input
+        ref={importFileRef}
+        hidden
+        type="file"
+        accept="application/json,text/plain,.json"
+        aria-label="选择普通蓝图交换文件"
+        data-native-blueprint-import-file
+        onChange={(event) => {
+          const file = event.currentTarget.files?.[0] ?? null;
+          event.currentTarget.value = "";
+          if (!file || interactionLocked) return;
+          setImportReadPending(true);
+          setImportFeedback(null);
+          void readNativeBlueprintImportFile(file).then((result) => {
+            setImportReadPending(false);
+            if (!result.ok) {
+              setImportFeedback(nativeBlueprintImportInputMessage(result.reason));
+              return;
+            }
+            setImportText(result.raw);
+            return onSubmitImportRaw(result.raw).then((outcome) => {
+              setImportFeedback(outcome.message);
+              if (!outcome.success) return;
+              setAcceptedImport(outcome);
+            });
+          }).catch(() => {
+            setImportReadPending(false);
+            setImportFeedback("文件读取或原生导入请求失败；未重复发送");
+          });
+        }}
+      />
+      <footer className="blueprint-import-actions">
+        <button
+          type="button"
+          disabled={interactionLocked}
+          onClick={() => importFileRef.current?.click()}
+          data-native-blueprint-action="choose-import-file"
+        ><Upload size={14} />选择文件并导入</button>
+        <button
+          type="button"
+          disabled={interactionLocked || importText.length === 0}
+          data-native-blueprint-action="submit-import-raw"
+          onClick={() => {
+            if (interactionLocked) return;
+            const validated = validateNativeBlueprintImportRaw(importText);
+            if (!validated.ok) {
+              setImportFeedback(nativeBlueprintImportInputMessage(validated.reason));
+              return;
+            }
+            setImportReadPending(true);
+            setImportFeedback(null);
+            void onSubmitImportRaw(validated.raw).then((outcome) => {
+              setImportReadPending(false);
+              setImportFeedback(outcome.message);
+              if (!outcome.success) return;
+              setAcceptedImport(outcome);
+            }).catch(() => {
+              setImportReadPending(false);
+              setImportFeedback("原生导入请求失败；存档未改变，且没有自动重发");
+            });
+          }}
+        ><ShieldCheck size={14} />交给 Rust 验证并导入</button>
+      </footer>
+      {importFeedback ? <p role="status" data-native-blueprint-import-feedback>{importFeedback}</p> : null}
+    </section> : null}
 
     {renameEditor ? <form
       style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto", gap: 6, padding: 8 }}
@@ -720,6 +920,24 @@ export function NativeBlueprintWorkspace({
               aria-label={`直接部署${summary.name}`}
               data-native-blueprint-action="begin-direct-deploy-placement"
             ><Hammer size={14} />直接部署</button> : null}
+            {selected ? <button
+              type="button"
+              disabled={interactionLocked}
+              onClick={() => {
+                void onExportBlueprint(Object.freeze({
+                  sessionId: readyFrame.sessionId,
+                  runId: readyFrame.runId,
+                  revision: readyFrame.revision,
+                  registryFingerprint: readyFrame.registryFingerprint,
+                  blueprintId: summary.id,
+                  blueprintName: summary.name,
+                  blueprintRevision: summary.revision,
+                }));
+              }}
+              title={`由 Rust 生成${summary.name}的标准蓝图交换文件`}
+              aria-label={`导出${summary.name}`}
+              data-native-blueprint-action="export-blueprint"
+            ><Download size={14} />导出</button> : null}
             {selected ? <button
               className="danger"
               type="button"

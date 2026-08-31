@@ -22,6 +22,13 @@ use dsp_native_host::save_store::SaveStore;
 use dsp_native_host::v47_import::open_v47_import_source;
 use serde_json::{Value, json, to_value};
 
+const NATIVE_CORE_BLUEPRINT_CAPTURE_CONTEXT_V1_CAPABILITY: &str =
+    "native-core-blueprint-capture-context-v1";
+const NATIVE_CORE_BLUEPRINT_IMPORT_CONTEXT_V1_CAPABILITY: &str =
+    "native-core-blueprint-import-context-v1";
+const NATIVE_CORE_BLUEPRINT_EXPORT_CONTEXT_V1_CAPABILITY: &str =
+    "native-core-blueprint-export-context-v1";
+
 enum HostAction {
     Continue(Value),
     Shutdown(Value),
@@ -104,6 +111,9 @@ fn handle_request(
                     "native-core-construction-inventory-v1",
                     "native-core-blueprint-workspace-v1",
                     "native-core-blueprint-enqueue-context-v1",
+                    NATIVE_CORE_BLUEPRINT_CAPTURE_CONTEXT_V1_CAPABILITY,
+                    NATIVE_CORE_BLUEPRINT_IMPORT_CONTEXT_V1_CAPABILITY,
+                    NATIVE_CORE_BLUEPRINT_EXPORT_CONTEXT_V1_CAPABILITY,
                     "native-core-blueprint-direct-deploy-context-v1",
                     "native-core-construction-placement-context-v1",
                     "native-core-construction-belt-placement-context-v1",
@@ -367,6 +377,30 @@ fn handle_request(
             &expected_registry_fingerprint,
             &blueprint_id,
             blueprint_revision,
+        )?,
+        ControlRequest::CoreBlueprintCaptureContext {
+            session_id,
+            expected_revision,
+            expected_registry_fingerprint,
+            entity_ids,
+        } => cores.blueprint_capture_context(
+            &session_id,
+            expected_revision,
+            &expected_registry_fingerprint,
+            &entity_ids,
+        )?,
+        ControlRequest::CoreBlueprintImportContext(request) => cores.blueprint_import_context(
+            &request.session_id,
+            request.expected_revision,
+            &request.expected_registry_fingerprint,
+            &request.raw,
+        )?,
+        ControlRequest::CoreBlueprintExportContext(request) => cores.blueprint_export_context(
+            &request.session_id,
+            request.expected_revision,
+            &request.expected_registry_fingerprint,
+            &request.blueprint_id,
+            request.blueprint_revision,
         )?,
         ControlRequest::CoreBlueprintDirectDeployContext {
             session_id,
@@ -896,5 +930,36 @@ mod tests {
             dsp_native_core::ProfileOperationPurpose::LocalDispatchTimingV1,
             &profile_request(1.0, 1.0),
         ));
+    }
+
+    #[test]
+    fn hello_advertises_blueprint_capture_context_capability() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut cores = CoreRegistry::default();
+        let mut recovery = None;
+        let action = handle_request(
+            &mut store,
+            &mut cores,
+            &mut recovery,
+            1,
+            ControlRequest::Hello {
+                client_version: "capture-capability-test".to_owned(),
+            },
+        )
+        .unwrap();
+        let HostAction::Continue(value) = action else {
+            panic!("hello unexpectedly requested shutdown");
+        };
+        let capabilities = value["capabilities"].as_array().unwrap();
+        assert!(capabilities.iter().any(|capability| {
+            capability.as_str() == Some(NATIVE_CORE_BLUEPRINT_CAPTURE_CONTEXT_V1_CAPABILITY)
+        }));
+        assert!(capabilities.iter().any(|capability| {
+            capability.as_str() == Some(NATIVE_CORE_BLUEPRINT_IMPORT_CONTEXT_V1_CAPABILITY)
+        }));
+        assert!(capabilities.iter().any(|capability| {
+            capability.as_str() == Some(NATIVE_CORE_BLUEPRINT_EXPORT_CONTEXT_V1_CAPABILITY)
+        }));
     }
 }

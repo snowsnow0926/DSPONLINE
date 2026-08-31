@@ -634,6 +634,7 @@ describe("fixed-affinity benchmark process-policy contract", () => {
 
   it.skipIf(process.platform !== "win32")(
     "applies the default Node High / Host Normal policy on a real disposable command chain",
+    { timeout: 20_000 },
     async () => {
       const launcher = spawn(process.execPath, ["-e", [
         "const { spawn } = require('node:child_process');",

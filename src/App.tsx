@@ -50,7 +50,10 @@ import { FactoryRunStatus } from "./components/FactoryRunStatus";
 import { ItemReferenceActionsProvider } from "./components/ItemReference";
 import { NativeResourceRail } from "./components/NativeResourceRail";
 import { NativeConstructionDock } from "./components/NativeConstructionDock";
-import { NativeBlueprintWorkspace } from "./components/NativeBlueprintWorkspace";
+import {
+  NativeBlueprintWorkspace,
+  type NativeBlueprintImportSubmitOutcome,
+} from "./components/NativeBlueprintWorkspace";
 import { NativeConstructionCenterWorkspace } from "./components/NativeConstructionCenterWorkspace";
 import {
   NativeFactoryInspectorPanel,
@@ -292,7 +295,12 @@ import { getCampaignTask, getCampaignTaskRequirements, selectCampaignTask, syncC
 import { inspectSaveInWorker } from "./game/saveInspection";
 import { clearGameSlotVerified, clearSaveSnapshotVerified, clearSaveSnapshotsVerified, exportGame, getSaveSummariesInWorker, getSaveSlotSummaries, getSaveSnapshotSummaries, loadGameSlotFromPersistence, loadSaveSnapshotFromPersistence, repairSave, SAVE_KEY, saveGame, saveGameSnapshotVerified, saveGameSlotVerified, saveGameVerified, saveGameVerifiedFromEnvelopeTransfer, serializeEnvelopeInWorker, type LoadedGame, type OfflineReport, type SaveGameResult, type SaveInspection, type SaveSlotId, type SaveSnapshotSummary } from "./game/storage";
 import { runAutomaticPerformanceReport, type AutomaticPerformanceReport } from "./game/benchmark";
-import { importBlueprintExchange, parseBlueprintExchange, serializeBlueprintExchange } from "./game/blueprintExchange";
+import {
+  BLUEPRINT_LIBRARY_MAX_ROWS,
+  importBlueprintExchange,
+  parseBlueprintExchange,
+  serializeBlueprintExchange,
+} from "./game/blueprintExchange";
 import { exportBinaryFile, exportTextFile } from "./game/fileExport";
 import { compressSaveTextToGzipBlob } from "./game/saveFileCodec";
 import { alignToDevicePixel } from "./game/displayPixels";
@@ -458,6 +466,7 @@ import {
 } from "./game/nativeConstructionInventoryStore";
 import {
   NativeBlueprintWorkspaceStore,
+  NATIVE_BLUEPRINT_PAGE_ROWS,
   createNativePlayerAuthorityBlueprintWorkspaceSource,
   nativeBlueprintDirectDeploySelectionBindingMatchesFrame,
   nativeBlueprintEnqueueSelectionBindingMatchesFrame,
@@ -494,6 +503,25 @@ import {
   type NativeBlueprintRenameSubmitOutcome,
 } from "./game/nativeBlueprintRenameWorkflow";
 import { useNativeBlueprintDeleteCommandTransaction } from "./game/useNativeBlueprintDeleteCommandTransaction";
+import {
+  readVerifiedNativeBlueprintCaptureContext,
+  type NativeBlueprintCaptureSelectionBinding,
+  type NativeBlueprintCaptureSupportReason,
+} from "./game/nativeBlueprintCaptureContext";
+import { useNativeBlueprintCaptureCommandTransaction } from "./game/useNativeBlueprintCaptureCommandTransaction";
+import {
+  readVerifiedNativeBlueprintImportContext,
+  type NativeBlueprintImportSupportReason,
+} from "./game/nativeBlueprintImportContext";
+import {
+  useNativeBlueprintImportCommandTransaction,
+  type NativeBlueprintImportConfirmation,
+} from "./game/useNativeBlueprintImportCommandTransaction";
+import {
+  readVerifiedNativeBlueprintExportContext,
+  type NativeBlueprintExportBinding,
+  type NativeBlueprintExportSupportReason,
+} from "./game/nativeBlueprintExportContext";
 import {
   readVerifiedNativeBlueprintDirectDeployContext,
   type NativeBlueprintDirectDeploySupportReason,
@@ -1247,6 +1275,42 @@ function nativeBlueprintEnqueueBlockedMessage(reason: NativeBlueprintEnqueueSupp
   }
 }
 
+function nativeBlueprintCaptureBlockedMessage(reason: NativeBlueprintCaptureSupportReason): string {
+  switch (reason) {
+    case "selection-conflict": return "所选建筑已经变化或包含重复 ID；存档未改变，请重新选择";
+    case "unsupported-active-planet": return "当前行星不支持普通蓝图捕获；本次复制未执行";
+    case "unsupported-blueprint-domain": return "选区包含资源点、特殊建筑或尚未证明的模组语义；本次复制未执行";
+    case "catalog-incomplete": return "Rust 内容目录无法完整证明这个选区；为保护存档，本次复制已拒绝";
+    case "position-overlap": return "选区内建筑位置无法形成合法 ordinary 蓝图；本次复制未执行";
+    case "library-full": return "蓝图库已达到安全上限；请先删除不用的蓝图";
+    case "next-id-exhausted": return "蓝图 ID 已达到安全上限；请导出备份并联系存档救援";
+  }
+}
+
+function nativeBlueprintImportBlockedMessage(reason: NativeBlueprintImportSupportReason): string {
+  switch (reason) {
+    case "invalid-exchange": return "蓝图交换文本无效；Rust 未写入任何蓝图";
+    case "unsupported-active-planet": return "当前行星不支持这份普通蓝图；本次导入未执行";
+    case "unsupported-blueprint-domain": return "交换文件包含特殊建筑、资源锚点、外部端口或尚未支持的模组语义";
+    case "catalog-incomplete": return "Rust 内容目录无法完整证明交换文件中的设备、物品或配方";
+    case "position-overlap": return "交换文件内建筑位置重叠；本次导入未执行";
+    case "library-full": return "蓝图库已达到 64 条安全上限；请先删除不用的蓝图";
+    case "next-id-exhausted": return "蓝图 ID 已达到安全上限；请导出备份并联系存档救援";
+    case "serialized-budget-exceeded": return "导入后的标准蓝图或耐久命令超过 1 MiB 安全上限";
+  }
+}
+
+function nativeBlueprintExportBlockedMessage(reason: NativeBlueprintExportSupportReason): string {
+  switch (reason) {
+    case "version-conflict": return "蓝图行 revision 已变化；请重新选中后再导出";
+    case "unsupported-active-planet": return "当前行星不支持这份普通蓝图的原生导出";
+    case "unsupported-blueprint-domain": return "这份蓝图包含原生导出尚未接管的特殊或模组语义";
+    case "catalog-incomplete": return "Rust 内容目录无法完整证明这份蓝图；本次没有生成下载文件";
+    case "position-overlap": return "蓝图内建筑位置重叠；本次没有生成下载文件";
+    case "serialized-budget-exceeded": return "标准蓝图交换文本超过 1 MiB 安全上限；本次没有生成下载文件";
+  }
+}
+
 function nativeBlueprintDirectDeployBlockedMessage(
   reason: NativeBlueprintDirectDeploySupportReason,
 ): string {
@@ -1966,6 +2030,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     position: Readonly<{ x: number; y: number }>,
     screenPoint: Readonly<{ x: number; y: number }>,
   ) => void>(() => undefined);
+  const [nativeBlueprintCaptureContextPending, setNativeBlueprintCaptureContextPending] =
+    useState(false);
+  const nativeBlueprintCaptureContextPendingRef = useRef(false);
+  const nativeBlueprintCaptureRequestGenerationRef = useRef(0);
+  const nativeBlueprintCaptureSelectionRef =
+    useRef<NativeBlueprintCaptureSelectionBinding | null>(null);
+  const [nativeBlueprintImportContextPending, setNativeBlueprintImportContextPending] =
+    useState(false);
+  const nativeBlueprintImportContextPendingRef = useRef(false);
+  const nativeBlueprintImportRequestGenerationRef = useRef(0);
+  const [nativeBlueprintImportConfirmation, setNativeBlueprintImportConfirmation] =
+    useState<NativeBlueprintImportConfirmation | null>(null);
+  const [nativeBlueprintExportContextPending, setNativeBlueprintExportContextPending] =
+    useState(false);
+  const nativeBlueprintExportContextPendingRef = useRef(false);
+  const nativeBlueprintExportRequestGenerationRef = useRef(0);
   const [nativeRemovalContextPending, setNativeRemovalContextPending] = useState(false);
   const nativeRemovalContextPendingRef = useRef(false);
   const nativeRemovalRequestGenerationRef = useRef(0);
@@ -9528,8 +9608,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   ]);
   useEffect(() => {
     if (nativeBlueprintEnqueuePlacement &&
-        (nativePlacementBuildingId || blueprintPlacementId || selectionMode || deleteMode ||
-          regionMode || connectionDraft)) {
+        (nativePlacementBuildingId || nativeBlueprintDirectDeployPlacement || blueprintPlacementId ||
+          selectionMode || deleteMode || regionMode || connectionDraft)) {
       cancelNativeBlueprintEnqueuePlacement();
     }
   }, [
@@ -9537,6 +9617,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     cancelNativeBlueprintEnqueuePlacement,
     connectionDraft,
     deleteMode,
+    nativeBlueprintDirectDeployPlacement,
     nativeBlueprintEnqueuePlacement,
     nativePlacementBuildingId,
     regionMode,
@@ -14253,8 +14334,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const downloadBlueprint = useCallback((blueprintId: string) => {
     const blueprint = gameRef.current.blueprints.find((candidate) => candidate.id === blueprintId);
     if (!blueprint) return;
+    let contents: string;
+    try {
+      contents = serializeBlueprintExchange(blueprint);
+    } catch (error) {
+      setNotice(error instanceof Error ? `蓝图导出失败：${error.message}` : "蓝图导出失败");
+      playTone("alert");
+      return;
+    }
     void exportTextFile({
-      contents: serializeBlueprintExchange(blueprint),
+      contents,
       fileName: `${blueprint.name.replace(/[\\/:*?"<>|]/g, "-").slice(0, 40) || "dsp-blueprint"}.dspblueprint.json`,
       title: `导出蓝图：${blueprint.name}`,
     }).then(() => {
@@ -14267,6 +14356,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [playTone]);
 
   const importBlueprint = useCallback((raw: string) => {
+    if (gameRef.current.blueprints.length >= BLUEPRINT_LIBRARY_MAX_ROWS) {
+      const message = `蓝图导入失败：蓝图库已达到 ${BLUEPRINT_LIBRARY_MAX_ROWS} 条安全上限`;
+      setNotice(message);
+      playTone("alert");
+      return { success: false, message };
+    }
     const result = parseBlueprintExchange(raw);
     if (!result.valid || !result.blueprint) {
       const message = `蓝图导入失败：${result.issues[0] ?? "格式无效"}`;
@@ -14275,7 +14370,34 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return { success: false, message };
     }
     const importedName = result.blueprint.name;
-    commitGame((current) => importBlueprintExchange(current, result.blueprint!));
+    let failureReason: "library-full" | "invalid-next-id" | "allocator-exhausted" | "id-collision" | "name-exhausted" | null = null;
+    let importedBlueprintId: string | null = null;
+    const committed = commitGame((current) => {
+      const imported = importBlueprintExchange(current, result.blueprint!);
+      if (!imported.ok) {
+        failureReason = imported.reason;
+        return current;
+      }
+      importedBlueprintId = imported.blueprintId;
+      return imported.state;
+    });
+    if (!committed || !importedBlueprintId) {
+      const reasonLabel = failureReason === "library-full"
+        ? `蓝图库已达到 ${BLUEPRINT_LIBRARY_MAX_ROWS} 条安全上限`
+        : failureReason === "invalid-next-id"
+          ? "存档的编号分配器无效"
+          : failureReason === "allocator-exhausted"
+            ? "存档的安全编号已经耗尽"
+            : failureReason === "id-collision"
+              ? "新蓝图编号与现有存档内容冲突"
+              : failureReason === "name-exhausted"
+                ? "蓝图名称冲突且无法安全分配后缀"
+                : "当前存档状态拒绝了这次修改";
+      const message = `蓝图导入失败：${reasonLabel}`;
+      setNotice(message);
+      playTone("alert");
+      return { success: false, message };
+    }
     const message = `已导入蓝图：${importedName} · ${result.blueprint.entities.length} 个建筑 · ${result.blueprint.belts.length} 条传送带`;
     setNotice(message);
     playTone("complete");
@@ -17050,7 +17172,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       const deployable = preview.canPlace && compatible;
       const fleetPreview = deployable ? getBlueprintFleetLoadPreview(gameRef.current, blueprintPlacementId) : null;
       const blueprintName = blueprint?.name ?? "蓝图";
-      commitGame((current) => {
+      const committed = commitGame((current) => {
         const currentPreview = getBlueprintPlacementPreview(current, blueprintPlacementId, position, laneOptions);
         const currentCompatible = canQueueBlueprint(current, blueprintPlacementId, current.activePlanetId, position, laneOptions) &&
           Boolean(current.blueprints.find((candidate) => candidate.id === blueprintPlacementId)?.entities.length || currentPreview.matchedResourceAnchors > 0);
@@ -17061,6 +17183,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             : current;
         return next;
       });
+      if (compatible && !committed) {
+        setNotice(`${blueprintName}未部署或入队：主存档正在保存，或点击后目标状态已经变化；存档未改变`);
+        playTone("alert");
+        return;
+      }
       if (deployable) playTone("place");
       setSelectedEntityIds([]);
       const fleetShortfall = fleetPreview
@@ -17585,30 +17712,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     }
     return commitNativeConstructionQueueDeployCommand(binding);
   }, [commitNativeConstructionQueueDeployCommand, nativeBlueprintWorkspaceFrame]);
-  const {
-    pending: nativeBlueprintDirectDeployPending,
-    commit: commitNativeBlueprintDirectDeployCommand,
-  } = useNativeBlueprintDirectDeployCommandTransaction({
-    authority: nativeEntityRecipeAuthorityObservation,
-    topology: nativeBlueprintDirectDeployTopologyObservation,
-    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
-    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
-    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
-    setCommandPending: setNativePlayerAuthorityCommandPending,
-    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
-    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
-    setNotice,
-  });
-  const beginNativeBlueprintDirectDeployPlacement = useCallback((
+  const enterNativeBlueprintDirectDeployPlacement = useCallback((
     binding: NativeBlueprintDirectDeploySelectionBinding,
   ): boolean => {
-    if (!blueprintsOpenRef.current || nativeBlueprintRenamePendingIdentityRef.current ||
-        nativePlayerAuthorityCommandInFlightRef.current ||
-        !nativeBlueprintDirectDeploySelectionBindingMatchesFrame(
-          binding,
-          nativeBlueprintWorkspaceFrame,
-        )) {
-      setNotice("蓝图工作区、ordinary 选中行或权威 lineage 已漂移；直接部署定位未开始");
+    const currentIdentity = nativeBlueprintWorkspaceIdentityRef.current;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current || !currentIdentity ||
+        currentIdentity.sessionId !== binding.sessionId || currentIdentity.runId !== binding.runId ||
+        currentIdentity.registryFingerprint !== binding.registryFingerprint) {
+      setNotice("蓝图直接部署的权威 lineage 或 registry 已变化；定位未开始");
       return false;
     }
     cancelNativeBlueprintEnqueuePlacement();
@@ -17657,9 +17769,88 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     cancelNativeBlueprintEnqueuePlacement,
     cancelNativeBuildingPlacement,
     flowStore,
-    nativeBlueprintWorkspaceFrame,
     updateConnectionDraft,
   ]);
+  const {
+    pending: nativeBlueprintDirectDeployPending,
+    commit: commitNativeBlueprintDirectDeployCommand,
+  } = useNativeBlueprintDirectDeployCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    topology: nativeBlueprintDirectDeployTopologyObservation,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+  });
+  const beginNativeBlueprintDirectDeployPlacement = useCallback((
+    binding: NativeBlueprintDirectDeploySelectionBinding,
+  ): boolean => {
+    if (!blueprintsOpenRef.current || nativeBlueprintRenamePendingIdentityRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current ||
+        !nativeBlueprintDirectDeploySelectionBindingMatchesFrame(
+          binding,
+          nativeBlueprintWorkspaceFrame,
+        )) {
+      setNotice("蓝图工作区、ordinary 选中行或权威 lineage 已漂移；直接部署定位未开始");
+      return false;
+    }
+    return enterNativeBlueprintDirectDeployPlacement(binding);
+  }, [
+    enterNativeBlueprintDirectDeployPlacement,
+    nativeBlueprintWorkspaceFrame,
+  ]);
+  const {
+    pending: nativeBlueprintCapturePending,
+    commit: commitNativeBlueprintCaptureCommand,
+  } = useNativeBlueprintCaptureCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    membershipSource: nativeBlueprintWorkspaceSource,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+    onConfirmed: enterNativeBlueprintDirectDeployPlacement,
+  });
+  const confirmNativeBlueprintImport = useCallback((
+    confirmation: NativeBlueprintImportConfirmation,
+  ): void => {
+    setNativeBlueprintImportConfirmation(confirmation);
+    const identity = nativeBlueprintWorkspaceIdentityRef.current;
+    if (!identity || identity.sessionId !== confirmation.sessionId ||
+        identity.runId !== confirmation.runId ||
+        identity.registryFingerprint !== confirmation.registryFingerprint) {
+      setNotice("蓝图已由 Rust 安全导入，但界面 lineage 已变化；请重新打开蓝图库查看");
+      return;
+    }
+    const previousTotal = nativeBlueprintWorkspaceFrameRef.current?.libraryPage.totalCount ?? 0;
+    setNativeBlueprintLibraryCursor(
+      Math.floor(previousTotal / NATIVE_BLUEPRINT_PAGE_ROWS) * NATIVE_BLUEPRINT_PAGE_ROWS,
+    );
+    setNativeBlueprintSelectedId(confirmation.blueprintId);
+    setBlueprintsOpen(true);
+    setNotice(`已导入${confirmation.blueprintName}；正在读取 Rust 蓝图库中的新记录`);
+  }, []);
+  const {
+    pending: nativeBlueprintImportPending,
+    commit: commitNativeBlueprintImportCommand,
+  } = useNativeBlueprintImportCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    membershipSource: nativeBlueprintWorkspaceSource,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+    onConfirmed: confirmNativeBlueprintImport,
+  });
   const submitNativeBlueprintDirectDeployAt = useCallback(async (
     position: Readonly<{ x: number; y: number }>,
     screenPoint: Readonly<{ x: number; y: number }>,
@@ -17960,6 +18151,46 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       selectedEntityIds,
     ],
   );
+  const nativeBlueprintCaptureSelection = useMemo<NativeBlueprintCaptureSelectionBinding | null>(() => {
+    const projectionIdentity = factorySelectionToolbarReadModel.projectionIdentity;
+    if (!nativePlayerAuthorityOwnsRuntime || factoryInteractionRows.source !== "native-authoritative" ||
+        !nativeFactoryInventoryIdentity || !projectionIdentity ||
+        projectionIdentity.sessionId !== nativeFactoryInventoryIdentity.sessionId ||
+        projectionIdentity.runId !== nativeFactoryInventoryIdentity.runId ||
+        projectionIdentity.revision !== nativeFactoryInventoryIdentity.revision ||
+        projectionIdentity.planetId !== factorySelectionToolbarReadModel.activePlanetId ||
+        factorySelectionToolbarReadModel.revision !== nativeFactoryInventoryIdentity.revision ||
+        factorySelectionToolbarReadModel.selectedCount < 1 ||
+        selectedEntityIds.length < 1 || selectedEntityIds.length > 512 ||
+        new Set(selectedEntityIds).size !== selectedEntityIds.length) return null;
+    return Object.freeze({
+      ...nativeFactoryInventoryIdentity,
+      activePlanetId: projectionIdentity.planetId,
+      entityIds: Object.freeze([...selectedEntityIds]),
+    });
+  }, [
+    factoryInteractionRows.source,
+    factorySelectionToolbarReadModel,
+    nativeFactoryInventoryIdentity,
+    nativePlayerAuthorityOwnsRuntime,
+    selectedEntityIds,
+  ]);
+  nativeBlueprintCaptureSelectionRef.current = nativeBlueprintCaptureSelection;
+  useEffect(() => {
+    nativeBlueprintCaptureRequestGenerationRef.current += 1;
+    nativeBlueprintCaptureContextPendingRef.current = false;
+    setNativeBlueprintCaptureContextPending(false);
+    nativeBlueprintImportRequestGenerationRef.current += 1;
+    nativeBlueprintImportContextPendingRef.current = false;
+    setNativeBlueprintImportContextPending(false);
+    nativeBlueprintExportRequestGenerationRef.current += 1;
+    nativeBlueprintExportContextPendingRef.current = false;
+    setNativeBlueprintExportContextPending(false);
+  }, [
+    nativePlayerAuthorityActiveFrame?.runId,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
   const commitNativeSelectionInteractionLock = useCallback((targetInteractionLocked: boolean): boolean => {
     if (factoryInteractionRows.source !== "native-authoritative") {
       setNotice("原生选区投影尚未完成当前 revision 校验；本次操作未应用");
@@ -18922,7 +19153,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       playTone("alert");
       return;
     }
-    commitGame(() => next);
+    if (!commitGame(() => next)) {
+      setNotice("蓝图未创建：主存档正在保存或当前状态拒绝了这次修改");
+      playTone("alert");
+      return;
+    }
     setBlueprintPlacementId(blueprintId);
     setPlacement(null);
     setSelectionMode(false);
@@ -18931,7 +19166,193 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setNotice(`已复制 ${eligibleIds.length} 个设备，点击画布粘贴蓝图`);
   };
 
-  const copySelectionAsBlueprint = () => copyEntitiesAsBlueprint(selectedEntityIds);
+  const captureNativeSelectionAsBlueprint = async (): Promise<void> => {
+    const selection = nativeBlueprintCaptureSelectionRef.current;
+    const identity = nativeBlueprintWorkspaceIdentityRef.current;
+    if (!selection || !identity || nativeBlueprintCaptureContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("原生选区尚未绑定当前 revision，或上一项操作仍在确认；本次蓝图复制未提交");
+      return;
+    }
+    nativeBlueprintCaptureContextPendingRef.current = true;
+    setNativeBlueprintCaptureContextPending(true);
+    nativeBlueprintCaptureRequestGenerationRef.current += 1;
+    const generation = nativeBlueprintCaptureRequestGenerationRef.current;
+    const context = await readVerifiedNativeBlueprintCaptureContext(
+      desktopBridge,
+      identity,
+      selection,
+    );
+    if (nativeBlueprintCaptureRequestGenerationRef.current !== generation) return;
+    const latestSelection = nativeBlueprintCaptureSelectionRef.current;
+    nativeBlueprintCaptureContextPendingRef.current = false;
+    setNativeBlueprintCaptureContextPending(false);
+    if (latestSelection !== selection) {
+      setNotice("读取 Rust 蓝图捕获凭证时选区或权威 revision 已变化；存档未改变");
+      return;
+    }
+    if (!context) {
+      setNotice("没有取得同一 revision/registry/选区顺序的 Rust 蓝图捕获凭证；存档未改变");
+      return;
+    }
+    if (!context.support.supported) {
+      setNotice(nativeBlueprintCaptureBlockedMessage(
+        context.support.reason ?? "unsupported-blueprint-domain",
+      ));
+      return;
+    }
+    if (context.activePlanetId !== selection.activePlanetId) {
+      setNotice("蓝图捕获凭证所属行星已变化；存档未改变，请等待画布刷新");
+      return;
+    }
+    if (commitNativeBlueprintCaptureCommand(context)) {
+      setNotice("已向 Rust 提交蓝图捕获；等待耐久回执和蓝图库成员证明，期间不会重复发送");
+    }
+  };
+
+  const submitNativeBlueprintImportRaw = async (
+    raw: string,
+  ): Promise<NativeBlueprintImportSubmitOutcome> => {
+    const identity = nativeBlueprintWorkspaceIdentityRef.current;
+    if (!blueprintsOpenRef.current || !identity ||
+        nativeBlueprintImportContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current || nativeBlueprintImportPending) {
+      const message = "原生蓝图工作区未绑定当前 revision，或上一项操作仍在确认；本次导入未提交";
+      setNotice(message);
+      return { success: false, message };
+    }
+    nativeBlueprintImportContextPendingRef.current = true;
+    setNativeBlueprintImportContextPending(true);
+    nativeBlueprintImportRequestGenerationRef.current += 1;
+    const generation = nativeBlueprintImportRequestGenerationRef.current;
+    const context = await readVerifiedNativeBlueprintImportContext(desktopBridge, identity, raw);
+    if (nativeBlueprintImportRequestGenerationRef.current !== generation) {
+      return { success: false, message: "权威 lineage 已变化；旧导入读取已安全退役" };
+    }
+    nativeBlueprintImportContextPendingRef.current = false;
+    setNativeBlueprintImportContextPending(false);
+    const latestIdentity = nativeBlueprintWorkspaceIdentityRef.current;
+    if (!blueprintsOpenRef.current || !latestIdentity ||
+        latestIdentity.sessionId !== identity.sessionId || latestIdentity.runId !== identity.runId ||
+        latestIdentity.revision !== identity.revision ||
+        latestIdentity.registryFingerprint !== identity.registryFingerprint) {
+      const message = "读取 Rust 导入凭证期间工作区或权威 revision 已变化；存档未改变";
+      setNotice(message);
+      return { success: false, message };
+    }
+    if (!context) {
+      const message = "没有取得同一 revision/registry/原文摘要的 Rust 蓝图导入凭证；存档未改变";
+      setNotice(message);
+      return { success: false, message };
+    }
+    if (!context.support.supported) {
+      const message = nativeBlueprintImportBlockedMessage(
+        context.support.reason ?? "invalid-exchange",
+      );
+      setNotice(message);
+      return { success: false, message };
+    }
+    const expectedBlueprintId = context.preparedIntent?.blueprint.id ?? null;
+    if (!expectedBlueprintId) {
+      const message = "Rust 导入凭证缺少规范蓝图 ID；存档未改变";
+      setNotice(message);
+      return { success: false, message };
+    }
+    if (!commitNativeBlueprintImportCommand(context)) {
+      return { success: false, message: "蓝图导入事务未通过当前权威写入门禁" };
+    }
+    setNativeBlueprintImportConfirmation(null);
+    const message = "已向 Rust 提交标准蓝图导入；等待耐久回执和蓝图库成员证明，绝不会重复发送";
+    setNotice(message);
+    return {
+      success: true,
+      message,
+      sessionId: context.sessionId,
+      runId: context.runId,
+      registryFingerprint: context.registryFingerprint,
+      commandRevision: context.revision,
+      blueprintId: expectedBlueprintId,
+    };
+  };
+
+  const exportNativeBlueprint = async (binding: NativeBlueprintExportBinding): Promise<{
+    success: boolean;
+    message: string;
+  }> => {
+    if (!blueprintsOpenRef.current || nativeBlueprintExportContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      const message = "原生蓝图工作区尚未绑定当前 revision，或另一项操作仍在确认；本次未导出";
+      setNotice(message);
+      return { success: false, message };
+    }
+    nativeBlueprintExportContextPendingRef.current = true;
+    setNativeBlueprintExportContextPending(true);
+    nativeBlueprintExportRequestGenerationRef.current += 1;
+    const generation = nativeBlueprintExportRequestGenerationRef.current;
+    const context = await readVerifiedNativeBlueprintExportContext(desktopBridge, binding);
+    if (nativeBlueprintExportRequestGenerationRef.current !== generation) {
+      return { success: false, message: "权威 lineage 已变化；旧导出读取已安全退役" };
+    }
+    const frame = nativeBlueprintWorkspaceFrameRef.current;
+    const row = frame?.libraryById.get(binding.blueprintId) ?? null;
+    if (!blueprintsOpenRef.current || !frame || frame.sessionId !== binding.sessionId ||
+        frame.runId !== binding.runId || frame.revision !== binding.revision ||
+        frame.registryFingerprint !== binding.registryFingerprint ||
+        frame.selectedBlueprintId !== binding.blueprintId ||
+        row?.revision !== binding.blueprintRevision || row.name !== binding.blueprintName) {
+      nativeBlueprintExportContextPendingRef.current = false;
+      setNativeBlueprintExportContextPending(false);
+      const message = "读取 Rust 导出凭证期间蓝图选中行或权威 revision 已变化；没有生成下载文件";
+      setNotice(message);
+      return { success: false, message };
+    }
+    if (!context) {
+      nativeBlueprintExportContextPendingRef.current = false;
+      setNativeBlueprintExportContextPending(false);
+      const message = "没有取得同一 revision/registry/蓝图行的 Rust 导出凭证；没有生成下载文件";
+      setNotice(message);
+      return { success: false, message };
+    }
+    if (!context.support.supported || context.rawExchange === null ||
+        context.blueprintName === null || context.fileNameStem === null) {
+      nativeBlueprintExportContextPendingRef.current = false;
+      setNativeBlueprintExportContextPending(false);
+      const message = nativeBlueprintExportBlockedMessage(
+        context.support.reason ?? "unsupported-blueprint-domain",
+      );
+      setNotice(message);
+      return { success: false, message };
+    }
+    try {
+      await exportTextFile({
+        contents: context.rawExchange,
+        fileName: `${context.fileNameStem}.dspblueprint.json`,
+        title: `导出蓝图：${context.blueprintName}`,
+      });
+      const message = `蓝图已由 Rust 导出：${context.blueprintName}`;
+      setNotice(message);
+      playTone("confirm");
+      return { success: true, message };
+    } catch (error) {
+      const message = error instanceof Error ? `蓝图导出失败：${error.message}` : "蓝图导出失败";
+      setNotice(message);
+      playTone("alert");
+      return { success: false, message };
+    } finally {
+      if (nativeBlueprintExportRequestGenerationRef.current === generation) {
+        nativeBlueprintExportContextPendingRef.current = false;
+        setNativeBlueprintExportContextPending(false);
+      }
+    }
+  };
+
+  const copySelectionAsBlueprint = () => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      void captureNativeSelectionAsBlueprint();
+      return;
+    }
+    copyEntitiesAsBlueprint(selectedEntityIds);
+  };
 
   const deployBlueprint = (blueprintId: string) => {
     if (rejectLegacyFactoryInteractionWhileNative("蓝图部署")) return;
@@ -20360,7 +20781,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           <SelectionToolbar
             model={factorySelectionToolbarReadModel}
             unsafeActionsEnabled={!nativePlayerAuthorityOwnsRuntime}
-            eligibleCount={blueprintEligibleIds.length}
+            copyActionEnabled={!nativePlayerAuthorityOwnsRuntime || Boolean(
+              nativeBlueprintCaptureSelection && !nativeBlueprintCaptureContextPending &&
+              !nativePlayerAuthorityCommandPending && !nativeBlueprintCapturePending,
+            )}
+            eligibleCount={nativePlayerAuthorityOwnsRuntime
+              ? nativeBlueprintCaptureSelection?.entityIds.length ?? 0
+              : blueprintEligibleIds.length}
             canUpgrade={!nativePlayerAuthorityOwnsRuntime && canUpgradeEntities(game, selectedEntityIds)}
             canUpgradeBelts={!nativePlayerAuthorityOwnsRuntime && selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}
             onFocus={() => focusEntityIds(selectedEntityIds)}
@@ -20780,7 +21207,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           nativeBlueprintDeletePending !== null ||
           nativeConstructionQueueCancelPending !== null || nativeConstructionQueueFundPending !== null ||
           nativeConstructionQueueDeployPending !== null ||
-          nativeBlueprintEnqueuePending !== null || nativeBlueprintDirectDeployPending !== null)}
+          nativeBlueprintEnqueuePending !== null || nativeBlueprintDirectDeployPending !== null ||
+          nativeBlueprintImportPending !== null || nativeBlueprintExportContextPending)}
         status={nativeBlueprintWorkspaceSnapshot.status}
         frame={nativeBlueprintWorkspaceFrame}
         latestIdentity={nativeFactoryInventoryIdentity}
@@ -20792,6 +21220,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               nativeConstructionQueueCancelPending || nativeConstructionQueueFundPending ||
               nativeConstructionQueueDeployPending ||
               nativeBlueprintEnqueuePending || nativeBlueprintDirectDeployPending ||
+              nativeBlueprintImportPending ||
+              nativeBlueprintExportContextPending ||
               nativePlayerAuthorityCommandPending) return;
           setNativeBlueprintSelectedId(null);
           setNativeBlueprintLibraryCursor(cursor);
@@ -20802,6 +21232,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               nativeConstructionQueueCancelPending || nativeConstructionQueueFundPending ||
               nativeConstructionQueueDeployPending ||
               nativeBlueprintEnqueuePending || nativeBlueprintDirectDeployPending ||
+              nativeBlueprintImportPending ||
+              nativeBlueprintExportContextPending ||
               nativePlayerAuthorityCommandPending) return;
           setNativeBlueprintQueueCursor(cursor);
         }}
@@ -20814,6 +21246,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         onSubmitQueueDeployIntent={submitNativeConstructionQueueDeployIntent}
         onBeginQueuePlacement={beginNativeBlueprintEnqueuePlacement}
         onBeginDirectPlacement={beginNativeBlueprintDirectDeployPlacement}
+        onSubmitImportRaw={submitNativeBlueprintImportRaw}
+        onExportBlueprint={exportNativeBlueprint}
         pendingIdentity={nativeBlueprintRenamePendingIdentity}
         transformPending={nativeBlueprintTransformPending}
         recipeOverridePending={nativeBlueprintRecipeOverridePending}
@@ -20823,10 +21257,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         queueDeployPending={nativeConstructionQueueDeployPending}
         enqueuePending={nativeBlueprintEnqueuePending}
         directDeployPending={nativeBlueprintDirectDeployPending}
+        importPending={nativeBlueprintImportPending}
+        importConfirmation={nativeBlueprintImportConfirmation}
         resolution={nativeBlueprintRenameResolution}
         onConsumeRenameResolution={consumeNativeBlueprintRenameResolution}
         commandPending={nativePlayerAuthorityCommandPending || nativeBlueprintEnqueueContextPending ||
-          nativeBlueprintDirectDeployContextPending}
+          nativeBlueprintDirectDeployContextPending || nativeBlueprintImportContextPending ||
+          nativeBlueprintExportContextPending}
       />
       {!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&
         !nativeBlueprintTransformPending &&
@@ -20837,6 +21274,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         !nativeConstructionQueueDeployPending &&
         !nativeBlueprintEnqueuePending &&
         !nativeBlueprintDirectDeployPending &&
+        !nativeBlueprintImportPending &&
+        !nativeBlueprintExportContextPending &&
         !nativeBlueprintRenameResolution ? <BlueprintWorkspace
         open={blueprintsOpen}
         game={game}

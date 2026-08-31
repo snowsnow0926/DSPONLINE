@@ -10,13 +10,154 @@ const {
 
 const MAX_NATIVE_PROJECTION_TRANSFER_BYTES = 1024 * 1024;
 const MAX_STELLAR_PROJECTION_REQUEST_BYTES = 32_768;
+const MAX_BLUEPRINT_CAPTURE_REQUEST_BYTES = 1024 * 1024;
+const MAX_BLUEPRINT_CAPTURE_ENTITY_IDS = 512;
+const MAX_BLUEPRINT_CAPTURE_OPAQUE_ID_BYTES = 512;
 const NATIVE_CORE_TRANSFER_PROJECTION_TYPES = Object.freeze([
-  "viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "blueprint-workspace-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1",
+  "viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "blueprint-workspace-v1", "blueprint-capture-context-v1", "blueprint-import-context-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1",
   "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2",
   "stellar-quantum-v1",
   "dyson-workspace-v1",
 ]);
 let nativeProjectionSequence = 0;
+
+function isPlainRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function hasExactKeys(value, expected) {
+  if (!isPlainRecord(value)) return false;
+  const keys = Reflect.ownKeys(value);
+  return keys.length === expected.length && keys.every(
+    (key) => typeof key === "string" && expected.includes(key),
+  ) && expected.every((key) => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function hasWellFormedUnicode(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
+      index += 1;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function validBoundedPreloadText(value, maximumBytes) {
+  return typeof value === "string" && value.length > 0 && hasWellFormedUnicode(value) &&
+    !/[\u0000-\u001f\u007f-\u009f]/u.test(value) && Buffer.byteLength(value, "utf8") <= maximumBytes;
+}
+
+function validLogicalPreloadId(value, maximumLength) {
+  return typeof value === "string" && value.length > 0 && value.length <= maximumLength &&
+    /^[A-Za-z0-9_.:-]+$/.test(value);
+}
+
+function normalizeBlueprintCapturePreloadRequest(request) {
+  if (!hasExactKeys(request, [
+    "sessionId",
+    "expectedRevision",
+    "expectedRegistryFingerprint",
+    "entityIds",
+  ]) || !validLogicalPreloadId(request.sessionId, 128) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      request.expectedRevision >= Number.MAX_SAFE_INTEGER ||
+      !validLogicalPreloadId(request.expectedRegistryFingerprint, 256) ||
+      !Array.isArray(request.entityIds) || request.entityIds.length < 1 ||
+      request.entityIds.length > MAX_BLUEPRINT_CAPTURE_ENTITY_IDS) {
+    throw new TypeError("原生蓝图捕获请求无效");
+  }
+  const seen = new Set();
+  const entityIds = [];
+  for (const id of request.entityIds) {
+    if (!validBoundedPreloadText(id, MAX_BLUEPRINT_CAPTURE_OPAQUE_ID_BYTES) || seen.has(id)) {
+      throw new TypeError("原生蓝图捕获实体 ID 无效");
+    }
+    seen.add(id);
+    entityIds.push(id);
+  }
+  const normalized = {
+    sessionId: request.sessionId,
+    expectedRevision: request.expectedRevision,
+    expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+    entityIds,
+  };
+  if (Buffer.byteLength(JSON.stringify(normalized), "utf8") > MAX_BLUEPRINT_CAPTURE_REQUEST_BYTES) {
+    throw new TypeError("原生蓝图捕获请求超过安全上限");
+  }
+  return normalized;
+}
+
+function normalizeBlueprintImportPreloadRequest(request) {
+  if (!hasExactKeys(request, [
+    "sessionId", "expectedRevision", "expectedRegistryFingerprint", "raw",
+  ]) || !validLogicalPreloadId(request.sessionId, 128) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      request.expectedRevision >= Number.MAX_SAFE_INTEGER ||
+      !validLogicalPreloadId(request.expectedRegistryFingerprint, 256) ||
+      typeof request.raw !== "string" || request.raw.trim().length < 1 ||
+      !hasWellFormedUnicode(request.raw) ||
+      Buffer.byteLength(request.raw, "utf8") > MAX_NATIVE_PROJECTION_TRANSFER_BYTES) {
+    throw new TypeError("原生蓝图导入请求无效");
+  }
+  return {
+    sessionId: request.sessionId,
+    expectedRevision: request.expectedRevision,
+    expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+    raw: request.raw,
+  };
+}
+
+function normalizeBlueprintExportPreloadRequest(request) {
+  if (!hasExactKeys(request, [
+    "sessionId", "expectedRevision", "expectedRegistryFingerprint", "blueprintId",
+    "blueprintRevision",
+  ]) || !validLogicalPreloadId(request.sessionId, 128) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      request.expectedRevision > Number.MAX_SAFE_INTEGER ||
+      !validLogicalPreloadId(request.expectedRegistryFingerprint, 256) ||
+      !validBoundedPreloadText(request.blueprintId, 512) ||
+      !Number.isSafeInteger(request.blueprintRevision) || request.blueprintRevision < 1) {
+    throw new TypeError("原生蓝图导出请求无效");
+  }
+  return {
+    sessionId: request.sessionId,
+    expectedRevision: request.expectedRevision,
+    expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+    blueprintId: request.blueprintId,
+    blueprintRevision: request.blueprintRevision,
+  };
+}
+
+function invokeNativeBlueprintCaptureContext(request) {
+  const normalized = normalizeBlueprintCapturePreloadRequest(request);
+  return invokeNative("desktop:native-core-blueprint-capture-context", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生蓝图捕获上下文请求失败，请重试",
+  }, normalized);
+}
+
+function invokeNativeBlueprintImportContext(request) {
+  const normalized = normalizeBlueprintImportPreloadRequest(request);
+  return invokeNative("desktop:native-core-blueprint-import-context", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生蓝图导入上下文请求失败，请重试",
+  }, normalized);
+}
+
+function invokeNativeBlueprintExportContext(request) {
+  const normalized = normalizeBlueprintExportPreloadRequest(request);
+  return invokeNative("desktop:native-core-blueprint-export-context", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生蓝图导出上下文请求失败，请重试",
+  }, normalized);
+}
 
 function invokeNative(channel, options, ...args) {
   return ipcRenderer.invoke(channel, ...args).catch((error) => {
@@ -46,17 +187,77 @@ function subscribeNativePlayerAuthorityState(listener) {
 
 function requestNativeCoreProjectionTransfer(request) {
   return new Promise((resolve, reject) => {
-    if (!request || typeof request !== "object" || typeof request.sessionId !== "string" ||
+    if (!hasExactKeys(request, ["sessionId", "projectionType", "payload"]) ||
+      typeof request.sessionId !== "string" ||
       !NATIVE_CORE_TRANSFER_PROJECTION_TYPES.includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object") {
       reject(localNativeError({ fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生投影请求无效" }));
       return;
     }
-    if (["blueprint-workspace-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType)) {
+    let normalizedPayload = request.payload;
+    if (request.projectionType === "blueprint-capture-context-v1") {
+      try {
+        if (!hasExactKeys(request.payload, [
+          "expectedRevision",
+          "expectedRegistryFingerprint",
+          "entityIds",
+        ])) throw new TypeError("原生蓝图捕获 transfer payload 无效");
+        const normalized = normalizeBlueprintCapturePreloadRequest({
+          ...request.payload,
+          sessionId: request.sessionId,
+        });
+        normalizedPayload = {
+          expectedRevision: normalized.expectedRevision,
+          expectedRegistryFingerprint: normalized.expectedRegistryFingerprint,
+          entityIds: normalized.entityIds,
+        };
+      } catch {
+        reject(localNativeError({ fallbackCode: "NATIVE_PROTOCOL_INVALID", message: "原生蓝图捕获请求无效" }));
+        return;
+      }
+    } else if (request.projectionType === "blueprint-import-context-v1") {
+      try {
+        if (!hasExactKeys(request.payload, [
+          "expectedRevision", "expectedRegistryFingerprint", "raw",
+        ])) throw new TypeError("原生蓝图导入 transfer payload 无效");
+        const normalized = normalizeBlueprintImportPreloadRequest({
+          ...request.payload,
+          sessionId: request.sessionId,
+        });
+        normalizedPayload = {
+          expectedRevision: normalized.expectedRevision,
+          expectedRegistryFingerprint: normalized.expectedRegistryFingerprint,
+          raw: normalized.raw,
+        };
+      } catch {
+        reject(localNativeError({ fallbackCode: "NATIVE_PROTOCOL_INVALID", message: "原生蓝图导入请求无效" }));
+        return;
+      }
+    } else if (request.projectionType === "blueprint-export-context-v1") {
+      try {
+        if (!hasExactKeys(request.payload, [
+          "expectedRevision", "expectedRegistryFingerprint", "blueprintId", "blueprintRevision",
+        ])) throw new TypeError("原生蓝图导出 transfer payload 无效");
+        const normalized = normalizeBlueprintExportPreloadRequest({
+          ...request.payload,
+          sessionId: request.sessionId,
+        });
+        normalizedPayload = {
+          expectedRevision: normalized.expectedRevision,
+          expectedRegistryFingerprint: normalized.expectedRegistryFingerprint,
+          blueprintId: normalized.blueprintId,
+          blueprintRevision: normalized.blueprintRevision,
+        };
+      } catch {
+        reject(localNativeError({ fallbackCode: "NATIVE_PROTOCOL_INVALID", message: "原生蓝图导出请求无效" }));
+        return;
+      }
+    }
+    if (["blueprint-workspace-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType)) {
       let requestBytes;
       try {
         requestBytes = Buffer.byteLength(JSON.stringify({
-          ...request.payload,
+          ...normalizedPayload,
           sessionId: request.sessionId,
         }), "utf8");
       } catch {
@@ -127,7 +328,7 @@ function requestNativeCoreProjectionTransfer(request) {
       sessionId: request.sessionId,
       projectionType: request.projectionType,
       sequence,
-      payload: request.payload,
+      payload: normalizedPayload,
     }, [channel.port2]);
   });
 }
@@ -183,6 +384,9 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   getNativeCoreFactoryInventory: (request) => invokeNative("desktop:native-core-factory-inventory", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生工厂库存请求失败，请重试" }, request),
   getNativeCoreConstructionInventory: (request) => invokeNative("desktop:native-core-construction-inventory", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生建筑库存请求失败，请重试" }, request),
   getNativeCoreBlueprintWorkspace: (request) => invokeNative("desktop:native-core-blueprint-workspace", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生蓝图只读模型请求失败，请重试" }, request),
+  getNativeCoreBlueprintCaptureContext: invokeNativeBlueprintCaptureContext,
+  getNativeCoreBlueprintImportContext: invokeNativeBlueprintImportContext,
+  getNativeCoreBlueprintExportContext: invokeNativeBlueprintExportContext,
   getNativeCoreBlueprintEnqueueContext: (request) => invokeNative("desktop:native-core-blueprint-enqueue-context", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生蓝图入队上下文请求失败，请重试" }, request),
   getNativeCoreBlueprintDirectDeployContext: (request) => invokeNative("desktop:native-core-blueprint-direct-deploy-context", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生蓝图直接部署上下文请求失败，请重试" }, request),
   getNativeCoreConstructionPlacementContext: (request) => invokeNative("desktop:native-core-construction-placement-context", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生建筑放置上下文请求失败，请重试" }, request),

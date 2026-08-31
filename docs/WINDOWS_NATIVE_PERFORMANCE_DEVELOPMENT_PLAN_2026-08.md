@@ -1890,3 +1890,15 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版�
 8. 冻结源码后新跑 typecheck 通过，前端专项 8 文件、124 项通过。启用 `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 的完整 Vitest 为 350 文件总计（337 通过、13 条件跳过）、2,695 项总计（2,667 通过、28 条件跳过、0 失败），用时 553.36 秒。Rust fmt、strict clippy 与全量通过：Core `791/791`、Host library `186/186`、Host main `1/1`，合计 `978/978`；最终 native/desktop 为 490 总项、489 通过、1 个 Windows symlink 权限条件跳过、0 失败。production build 与 startup budget 通过：startup 总 gzip `180,401 B`、menu `257,770 B`、forbidden module `0`。普通 Chromium E2E 为 460 总项、433 通过、27 条件跳过、0 失败（7.2 分钟）；durable WAL E2E 为 7 总项、7 通过、0 跳过、0 失败（51.8 秒）。
 
 并发开发期间的失败史保留：前端在 props/fixture 尚未合拢时出现两次 TypeScript 失败；App 集成测试有一条旧 fallback 断言；Host 合成 fixture 有两条旧 checksum 失败；Rust strict clippy 曾拒绝过大的命令枚举；蓝图工作区测试有一条错误断言。fresh Release Host 能力检查还曾以 `34/35` 揭露磁盘上的 Host 过旧；第一次 native 全量有两条旧 projection 枚举断言失败。它们均已分别通过补齐精确 props/边界、更新旧断言、重算 fixture checksum、缩小/装箱枚举、重建 Host 及更新旧枚举预期按根因处理，并由后续对应门禁覆盖；失败历史没有被最终绿灯抹去。当前源码门禁通过仍不等于 24 小时、多硬件、安装、签名或灰度发布门禁通过。
+
+### 24.17 Rust 权威待建施工领料事务（2026-08-31，开发候选）
+
+本切片紧接 24.16，把 queue-only 订单从“只能入队/取消”推进到“可以由 Rust 权威领取并预留材料”。它有意仍不在同一事务部署实体或线路，以便先单独证明库存守恒、WAL 重放和未知传输结果不会重复扣料。固定能力百分比暂不因这个中间切片重估；ordinary 部署闭环完成后再统一审计分母。
+
+1. renderer 只允许在 `constructionQueue.intent` 写入 `{kind:"fund",id,scope,revision}`，其中 scope 只能为 `construction/fleet/all`。marker 不含蓝图正文、需求表、库存余额、预留数、行下标、planet 或 allocator；Rust 每次从当前 v47 权威状态、immutable blueprint version 或合法 live definition 重新推导。
+2. 当前只承接 24.16 已证明的内置 ordinary 子域。需求按模板顺序累计 building `machineCount`、每个 `sprayCoaterInstalled=true` 模板一个 `spray_coater`，以及每条 belt 的 tier→construction 映射乘 lanes；所有求和、扣取和返还都受 JavaScript 安全整数上限约束。MOD、资源锚点、外部端口、特殊建筑、损坏引用或非 `pending-materials` 行失败关闭。
+3. `construction` 只规范并补充施工件；`fleet` 只处理载具；`all` 顺序执行两者。ordinary 子域不含 station，因此载具目标严格为零，fleet/all 只把历史 reserved fleet 守恒返还 `portableFleet`，不能由 renderer 指定新目标。缺料允许部分预留；超出需求或不再属于需求的施工预留守恒返还。合法旧 v47 缺失/null `blueprintVersions` 可按空版本目录解析 live blueprint，missing/null reservation map 按空记录处理；损坏非对象/非数组仍拒绝。
+4. 成功候选只更新 `construction`、`portableFleet` 和目标行 reservation，并递增一次 authority revision。它不创建/修改/删除实体或线路，不改变队列 status，不部署，不清理版本。完全 no-op 明确拒绝，重复点击不会制造空 revision；任何晚期失败都丢弃克隆候选，源 revision/hash 与工厂拓扑保持不变。
+5. 前端绑定点击时可见的 session/run/revision/registry、队列 ID、页游标、队列总数、pending 状态和两类初始预留总数。mutation 只 dispatch 一次；响应未知时只按六个固定延迟查询 durable receipt。receipt 必须是连续 `R+1`、实体/线路 dirty ID 为空且 `topologyDirty=true`；确认投影可位于 R+1 或同 lineage 更晚 revision，以避免模拟时钟推进造成永久锁，但必须与当前 authority revision 完全一致、仍在同页找到同 ID pending 行，并证明至少一类预留总数变化。旧投影继续等待，分页/行/语义漂移或 totals 未变保持锁定。
+6. 本切片不升级 GameState v47、envelope v2、cloud schema v8 或 SQLite layout v3；package 仍为 1.2.3，`authorityEligible=false` 保持关闭。它尚不等于自动队列调度、ordinary deploy、蓝图 capture/import 或 direct deploy；未签名、未部署、未连接生产，也未读取或修改真实玩家存档。
+7. 当前源码实际新跑 typecheck 与 diff check 通过；前端领料专项 `30/30`、App 组合专项 `14/14`；启用 long differential 的完整 Vitest 为 353 文件总计（340 通过、13 条件跳过）、2,706 项总计（2,678 通过、28 条件跳过、0 失败，543.73 秒）。Rust 领料专项 `6/6`、fmt、strict clippy 与 Core 串行全量 `797/797` 通过。默认并行 Core 曾在既有 interstellar logistics 稀疏线路测试触发 BTree unsafe-precondition 进程中止，同一源码串行重跑该项及全量均通过；该失败历史保留。本切片没有复用上一节的 Host/native、build、E2E 或发布结果，这些门禁需在 ordinary deployment 合拢后重新执行。

@@ -21,11 +21,14 @@ import type {
   NativeBlueprintWorkspaceFrame,
   NativeBlueprintWorkspaceIdentity,
   NativeConstructionQueueCancelBinding,
+  NativeConstructionQueueFundBinding,
+  NativeConstructionQueueFundScope,
 } from "../game/nativeBlueprintWorkspaceStore";
 import type { NativeBlueprintTransformPendingCommand } from "../game/nativeBlueprintTransformCommandReconciliation";
 import type { NativeBlueprintRecipeOverridePendingCommand } from "../game/nativeBlueprintRecipeOverrideCommandReconciliation";
 import type { NativeBlueprintDeletePendingCommand } from "../game/nativeBlueprintDeleteCommandReconciliation";
 import type { NativeConstructionQueueCancelPendingCommand } from "../game/nativeConstructionQueueCancelCommandReconciliation";
+import type { NativeConstructionQueueFundPendingCommand } from "../game/nativeConstructionQueueFundCommandReconciliation";
 import type { NativeBlueprintEnqueuePendingCommand } from "../game/nativeBlueprintEnqueueCommandReconciliation";
 import type {
   NativeBlueprintRenamePendingIdentity,
@@ -189,12 +192,17 @@ describe("NativeBlueprintWorkspace", () => {
       ) => boolean;
       onSubmitDeleteIntent?: (binding: NativeBlueprintDeleteBinding) => boolean;
       onSubmitQueueCancelIntent?: (binding: NativeConstructionQueueCancelBinding) => boolean;
+      onSubmitQueueFundIntent?: (
+        binding: NativeConstructionQueueFundBinding,
+        scope: NativeConstructionQueueFundScope,
+      ) => boolean;
       onBeginQueuePlacement?: (binding: NativeBlueprintEnqueueSelectionBinding) => boolean;
       pendingIdentity?: NativeBlueprintRenamePendingIdentity | null;
       transformPending?: NativeBlueprintTransformPendingCommand | null;
       recipeOverridePending?: NativeBlueprintRecipeOverridePendingCommand | null;
       deletePending?: NativeBlueprintDeletePendingCommand | null;
       queueCancelPending?: NativeConstructionQueueCancelPendingCommand | null;
+      queueFundPending?: NativeConstructionQueueFundPendingCommand | null;
       enqueuePending?: NativeBlueprintEnqueuePendingCommand | null;
       latestIdentity?: NativeBlueprintWorkspaceIdentity | null;
       resolution?: NativeBlueprintRenameResolution | null;
@@ -223,6 +231,9 @@ describe("NativeBlueprintWorkspace", () => {
       vi.fn<(binding: NativeBlueprintDeleteBinding) => boolean>().mockReturnValue(true);
     const onSubmitQueueCancelIntent = callbacks.onSubmitQueueCancelIntent ??
       vi.fn<(binding: NativeConstructionQueueCancelBinding) => boolean>().mockReturnValue(true);
+    const onSubmitQueueFundIntent = callbacks.onSubmitQueueFundIntent ??
+      vi.fn<(binding: NativeConstructionQueueFundBinding, scope: NativeConstructionQueueFundScope) => boolean>()
+        .mockReturnValue(true);
     const onBeginQueuePlacement = callbacks.onBeginQueuePlacement ??
       vi.fn<(binding: NativeBlueprintEnqueueSelectionBinding) => boolean>().mockReturnValue(true);
     const onConsumeRenameResolution = callbacks.onConsumeRenameResolution ?? vi.fn<(submissionId: number) => void>();
@@ -248,12 +259,14 @@ describe("NativeBlueprintWorkspace", () => {
       onSubmitRecipeOverrideIntent={onSubmitRecipeOverrideIntent}
       onSubmitDeleteIntent={onSubmitDeleteIntent}
       onSubmitQueueCancelIntent={onSubmitQueueCancelIntent}
+      onSubmitQueueFundIntent={onSubmitQueueFundIntent}
       onBeginQueuePlacement={onBeginQueuePlacement}
       pendingIdentity={callbacks.pendingIdentity ?? null}
       transformPending={callbacks.transformPending ?? null}
       recipeOverridePending={callbacks.recipeOverridePending ?? null}
       deletePending={callbacks.deletePending ?? null}
       queueCancelPending={callbacks.queueCancelPending ?? null}
+      queueFundPending={callbacks.queueFundPending ?? null}
       enqueuePending={callbacks.enqueuePending ?? null}
       resolution={callbacks.resolution ?? null}
       onConsumeRenameResolution={onConsumeRenameResolution}

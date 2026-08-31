@@ -95,6 +95,26 @@ export interface NativeConstructionQueueCancelBinding {
   readonly queueTotalCount: number;
 }
 
+export type NativeConstructionQueueFundScope = "construction" | "fleet" | "all";
+
+/**
+ * Exact visible pending row used by one Rust-owned material reservation. The
+ * two starting totals are part of the binding so renderer confirmation can
+ * prove that the R+1 projection changed this row without inspecting inventory.
+ */
+export interface NativeConstructionQueueFundBinding {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly registryFingerprint: string;
+  readonly queueEntryId: string;
+  readonly queueTotalCount: number;
+  readonly queuePageCursor: number;
+  readonly initialStatus: "pending-materials";
+  readonly initialReservedConstructionTotal: number;
+  readonly initialReservedFleetTotal: number;
+}
+
 /** Rust-derived whole-queue membership proof pinned to one authority revision. */
 export interface NativeConstructionQueueMembershipProof extends NativeBlueprintWorkspaceIdentity {
   readonly queueEntryId: string;
@@ -652,6 +672,51 @@ export function selectNativeConstructionQueueCancelBinding(
     queueTotalCount: frame.queuePage.totalCount,
   });
   return nativeConstructionQueueCancelBindingMatchesFrame(binding, frame) ? binding : null;
+}
+
+export function nativeConstructionQueueFundBindingMatchesFrame(
+  binding: NativeConstructionQueueFundBinding,
+  frame: NativeBlueprintWorkspaceFrame | null,
+): boolean {
+  if (!frame || frame.sessionId !== binding.sessionId || frame.runId !== binding.runId ||
+      frame.revision !== binding.revision ||
+      frame.registryFingerprint !== binding.registryFingerprint ||
+      !validOpaqueText(binding.queueEntryId, 512) ||
+      !Number.isSafeInteger(binding.queueTotalCount) || binding.queueTotalCount < 1 ||
+      !Number.isSafeInteger(binding.queuePageCursor) || binding.queuePageCursor < 0 ||
+      binding.initialStatus !== "pending-materials" ||
+      !safeNonnegativeInteger(binding.initialReservedConstructionTotal) ||
+      !safeNonnegativeInteger(binding.initialReservedFleetTotal) ||
+      frame.queuePage.totalCount !== binding.queueTotalCount ||
+      frame.queuePage.cursor !== binding.queuePageCursor) return false;
+  const row = frame.queue.find((candidate) => candidate.id === binding.queueEntryId);
+  return row?.semanticStatus === "catalog-backed" && row.status === binding.initialStatus &&
+    row.reservedConstructionTotal === binding.initialReservedConstructionTotal &&
+    row.reservedFleetTotal === binding.initialReservedFleetTotal;
+}
+
+export function selectNativeConstructionQueueFundBinding(
+  frame: NativeBlueprintWorkspaceFrame | null,
+  queueEntryId: string,
+): NativeConstructionQueueFundBinding | null {
+  if (!frame) return null;
+  const row = frame.queue.find((candidate) => candidate.id === queueEntryId);
+  if (!row || row.semanticStatus !== "catalog-backed" || row.status !== "pending-materials") {
+    return null;
+  }
+  const binding: NativeConstructionQueueFundBinding = Object.freeze({
+    sessionId: frame.sessionId,
+    runId: frame.runId,
+    revision: frame.revision,
+    registryFingerprint: frame.registryFingerprint,
+    queueEntryId: row.id,
+    queueTotalCount: frame.queuePage.totalCount,
+    queuePageCursor: frame.queuePage.cursor,
+    initialStatus: "pending-materials" as const,
+    initialReservedConstructionTotal: row.reservedConstructionTotal,
+    initialReservedFleetTotal: row.reservedFleetTotal,
+  });
+  return nativeConstructionQueueFundBindingMatchesFrame(binding, frame) ? binding : null;
 }
 
 export class NativeBlueprintWorkspaceStore {

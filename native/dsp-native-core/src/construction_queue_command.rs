@@ -54,10 +54,24 @@ struct EnqueueIntent {
     y: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FundScope {
+    Construction,
+    Fleet,
+    All,
+}
+
+#[derive(Debug, Clone)]
+struct FundIntent {
+    id: String,
+    scope: FundScope,
+}
+
 #[derive(Debug, Clone)]
 enum ConstructionQueueIntent {
     Cancel(String),
     Enqueue(EnqueueIntent),
+    Fund(FundIntent),
 }
 
 #[derive(Debug, Clone)]
@@ -91,10 +105,27 @@ struct ConstructionQueueEnqueuePlan {
     queue_row: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InventoryUpdate {
+    id: String,
+    amount_after: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ConstructionQueueFundPlan {
+    id: String,
+    index: usize,
+    construction_updates: Vec<InventoryUpdate>,
+    fleet_updates: Vec<InventoryUpdate>,
+    reserved_construction: Option<Map<String, Value>>,
+    reserved_fleet: Option<Map<String, Value>>,
+}
+
 #[derive(Debug, Clone)]
 enum ConstructionQueuePlan {
     Cancel(ConstructionQueueCancelPlan),
     Enqueue(ConstructionQueueEnqueuePlan),
+    Fund(ConstructionQueueFundPlan),
 }
 
 enum EnqueuePreparation {
@@ -116,8 +147,53 @@ impl ConstructionQueueExpansion {
         match &self.plan {
             ConstructionQueuePlan::Cancel(plan) => apply_cancel_plan(base, plan),
             ConstructionQueuePlan::Enqueue(plan) => apply_enqueue_plan(base, plan),
+            ConstructionQueuePlan::Fund(plan) => apply_fund_plan(base, plan),
         }
     }
+}
+
+fn apply_fund_plan(
+    base: &mut Map<String, Value>,
+    plan: &ConstructionQueueFundPlan,
+) -> anyhow::Result<()> {
+    let construction = base
+        .get_mut("construction")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native construction queue construction inventory is invalid"))?;
+    for update in &plan.construction_updates {
+        construction.insert(update.id.clone(), Value::from(update.amount_after));
+    }
+    let fleet = base
+        .get_mut("portableFleet")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native construction queue portable fleet is invalid"))?;
+    for update in &plan.fleet_updates {
+        fleet.insert(update.id.clone(), Value::from(update.amount_after));
+    }
+
+    let queue = base
+        .get_mut("constructionQueue")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("native construction queue directory is invalid"))?;
+    let row = queue
+        .get_mut(plan.index)
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| anyhow!("native construction queue fund row is invalid"))?;
+    if row.get("id").and_then(Value::as_str) != Some(plan.id.as_str())
+        || queue_status(row)? != "pending-materials"
+    {
+        bail!("native construction queue fund target is no longer current")
+    }
+    if let Some(reserved) = &plan.reserved_construction {
+        row.insert(
+            "reservedConstruction".to_owned(),
+            Value::Object(reserved.clone()),
+        );
+    }
+    if let Some(reserved) = &plan.reserved_fleet {
+        row.insert("reservedFleet".to_owned(), Value::Object(reserved.clone()));
+    }
+    Ok(())
 }
 
 fn apply_cancel_plan(
@@ -316,6 +392,26 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<Constructi
                     .clone(),
                 x,
                 y,
+            }))
+        }
+        Some("fund") => {
+            if command.base_revision == MAX_JAVASCRIPT_SAFE_INTEGER || intent.len() != 4 {
+                bail!("native construction queue fund intent shape is invalid")
+            }
+            let id = intent
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| valid_opaque_text(id))
+                .ok_or_else(|| anyhow!("native construction queue fund ID is invalid"))?;
+            let scope = match intent.get("scope").and_then(Value::as_str) {
+                Some("construction") => FundScope::Construction,
+                Some("fleet") => FundScope::Fleet,
+                Some("all") => FundScope::All,
+                _ => bail!("native construction queue fund scope is invalid"),
+            };
+            Ok(ConstructionQueueIntent::Fund(FundIntent {
+                id: id.to_owned(),
+                scope,
             }))
         }
         _ => bail!("native construction queue intent kind is invalid"),
@@ -1044,6 +1140,278 @@ fn validated_enqueue_plan(
     })
 }
 
+fn add_construction_requirement(
+    requirements: &mut Vec<(String, u64)>,
+    indices: &mut HashMap<String, usize>,
+    construction_id: &str,
+    amount: u64,
+) -> anyhow::Result<()> {
+    if amount == 0 {
+        return Ok(());
+    }
+    if let Some(index) = indices.get(construction_id).copied() {
+        requirements[index].1 = requirements[index]
+            .1
+            .checked_add(amount)
+            .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+            .ok_or_else(|| anyhow!("native construction queue requirement overflows"))?;
+    } else {
+        indices.insert(construction_id.to_owned(), requirements.len());
+        requirements.push((construction_id.to_owned(), amount));
+    }
+    Ok(())
+}
+
+fn construction_requirements(
+    state: &CoreState,
+    definition: &Map<String, Value>,
+) -> anyhow::Result<Vec<(String, u64)>> {
+    let mut requirements = Vec::new();
+    let mut indices = HashMap::new();
+    let entities = definition
+        .get("entities")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native construction queue blueprint entities are invalid"))?;
+    for value in entities {
+        let entity = value
+            .as_object()
+            .ok_or_else(|| anyhow!("native construction queue blueprint entity is invalid"))?;
+        let building_id = entity
+            .get("buildingId")
+            .and_then(Value::as_str)
+            .filter(|id| valid_opaque_text(id))
+            .ok_or_else(|| anyhow!("native construction queue blueprint building ID is invalid"))?;
+        if !state.catalog.constructions.contains_key(building_id) {
+            bail!("native construction queue blueprint construction is missing")
+        }
+        add_construction_requirement(
+            &mut requirements,
+            &mut indices,
+            building_id,
+            positive_integer(entity.get("machineCount"), "blueprint machine count")?,
+        )?;
+        match entity.get("sprayCoaterInstalled") {
+            None | Some(Value::Null) | Some(Value::Bool(false)) => {}
+            Some(Value::Bool(true)) => {
+                if !state.catalog.constructions.contains_key("spray_coater") {
+                    bail!("native construction queue spray coater construction is missing")
+                }
+                add_construction_requirement(&mut requirements, &mut indices, "spray_coater", 1)?;
+            }
+            _ => bail!("native construction queue spray coater intent is invalid"),
+        }
+    }
+    let belts = definition
+        .get("belts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native construction queue blueprint belts are invalid"))?;
+    for value in belts {
+        let belt = value
+            .as_object()
+            .ok_or_else(|| anyhow!("native construction queue blueprint belt is invalid"))?;
+        let tier = positive_integer(belt.get("tier"), "blueprint belt tier")?;
+        let tier = u8::try_from(tier)
+            .map_err(|_| anyhow!("native construction queue blueprint belt tier is invalid"))?;
+        let construction_id = crate::command::builtin_belt_construction_id(state, tier)?;
+        add_construction_requirement(
+            &mut requirements,
+            &mut indices,
+            construction_id,
+            positive_integer(belt.get("lanes"), "blueprint belt lanes")?,
+        )?;
+    }
+    Ok(requirements)
+}
+
+fn validated_fund_plan(
+    state: &CoreState,
+    intent: FundIntent,
+) -> anyhow::Result<ConstructionQueueFundPlan> {
+    if state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    {
+        bail!("native construction queue funding domain is unsupported")
+    }
+    let base = state.base_value();
+    let construction = validate_inventory(base, "construction", "construction inventory")?;
+    let fleet = validate_inventory(base, "portableFleet", "portable fleet")?;
+    let blueprint_values = base
+        .get("blueprints")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native construction queue blueprint directory is invalid"))?;
+    let empty_version_values = Vec::new();
+    let version_values = match base.get("blueprintVersions") {
+        None | Some(Value::Null) => &empty_version_values,
+        Some(Value::Array(values)) => values,
+        _ => bail!("native construction queue blueprint versions are invalid"),
+    };
+    let queue_values = base
+        .get("constructionQueue")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native construction queue directory is invalid"))?;
+    let blueprints = validate_blueprint_directory(blueprint_values)?;
+    let versions = validate_version_directory(version_values)?;
+    let queue = validate_queue_directory(queue_values)?;
+    let blueprint_indices = blueprints
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            (
+                row.get("id")
+                    .and_then(Value::as_str)
+                    .expect("blueprint ID was validated")
+                    .to_owned(),
+                index,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let version_indices = versions
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            (
+                row.get("id")
+                    .and_then(Value::as_str)
+                    .expect("version ID was validated")
+                    .to_owned(),
+                index,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let (index, row) = queue
+        .iter()
+        .enumerate()
+        .find(|(_, row)| row.get("id").and_then(Value::as_str) == Some(intent.id.as_str()))
+        .ok_or_else(|| anyhow!("native construction queue fund target is missing"))?;
+    if queue_status(row)? != "pending-materials" {
+        bail!("native construction queue fund target status is unsupported")
+    }
+    let definition = resolve_queue_definition(
+        row,
+        &blueprints,
+        &blueprint_indices,
+        &versions,
+        &version_indices,
+    )?;
+    if !queue_only_definition_supported(state, definition)? {
+        bail!("native construction queue fund definition is unsupported")
+    }
+    let requirements = construction_requirements(state, definition)?;
+    let targets = requirements
+        .iter()
+        .map(|(id, amount)| (id.as_str(), *amount))
+        .collect::<HashMap<_, _>>();
+    let mut inventory_after = HashMap::<String, u64>::new();
+    let mut reserved_after = Map::new();
+    let mut construction_changed = false;
+    if intent.scope != FundScope::Fleet {
+        let reserved_source = match row.get("reservedConstruction") {
+            None | Some(Value::Null) => Map::new(),
+            Some(Value::Object(values)) if values.len() <= MAX_REFUND_ROWS => values.clone(),
+            _ => bail!("native construction queue reserved construction is invalid"),
+        };
+        for (id, raw_amount) in &reserved_source {
+            if !valid_opaque_text(id) {
+                bail!("native construction queue reserved construction ID is invalid")
+            }
+            let amount = safe_inventory_amount(Some(raw_amount), "reserved construction")?;
+            let target = targets.get(id.as_str()).copied().unwrap_or(0);
+            let retained = amount.min(target);
+            if retained > 0 {
+                reserved_after.insert(id.clone(), Value::from(retained));
+            }
+            let refund = amount - retained;
+            if refund > 0 {
+                let current = inventory_after
+                    .get(id)
+                    .copied()
+                    .unwrap_or(safe_inventory_amount(
+                        construction.get(id),
+                        "construction inventory",
+                    )?);
+                let returned = current
+                    .checked_add(refund)
+                    .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                    .ok_or_else(|| {
+                        anyhow!("native construction queue construction refund overflows")
+                    })?;
+                inventory_after.insert(id.clone(), returned);
+                construction_changed = true;
+            }
+        }
+        for (id, target) in &requirements {
+            let reserved = reserved_after.get(id).and_then(Value::as_u64).unwrap_or(0);
+            let current = inventory_after
+                .get(id)
+                .copied()
+                .unwrap_or(safe_inventory_amount(
+                    construction.get(id),
+                    "construction inventory",
+                )?);
+            let taken = (target - reserved).min(current);
+            let reserved = reserved + taken;
+            if reserved > 0 {
+                reserved_after.insert(id.clone(), Value::from(reserved));
+            }
+            if taken > 0 {
+                inventory_after.insert(id.clone(), current - taken);
+                construction_changed = true;
+            }
+        }
+    }
+
+    // The current queue-only ordinary blueprint domain has no supported
+    // station templates, so its authoritative fleet target is exactly zero.
+    // Fleet/all therefore only normalize legacy/excess reservations back into
+    // the portable inventory; they never invent a renderer-provided target.
+    let mut fleet_after = HashMap::<String, u64>::new();
+    let mut fleet_changed = false;
+    if intent.scope != FundScope::Construction {
+        let reserved_fleet = match row.get("reservedFleet") {
+            None | Some(Value::Null) => Map::new(),
+            Some(Value::Object(values)) if values.len() <= MAX_REFUND_ROWS => values.clone(),
+            _ => bail!("native construction queue reserved fleet is invalid"),
+        };
+        for (id, raw_amount) in reserved_fleet {
+            if !valid_opaque_text(&id) {
+                bail!("native construction queue reserved fleet ID is invalid")
+            }
+            let amount = safe_inventory_amount(Some(&raw_amount), "reserved fleet")?;
+            if amount == 0 {
+                continue;
+            }
+            let current = safe_inventory_amount(fleet.get(&id), "portable fleet")?;
+            let returned = current
+                .checked_add(amount)
+                .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                .ok_or_else(|| anyhow!("native construction queue fleet refund overflows"))?;
+            fleet_after.insert(id, returned);
+            fleet_changed = true;
+        }
+    }
+    if !construction_changed && !fleet_changed {
+        bail!("native construction queue fund intent is a no-op")
+    }
+    let mut construction_updates = inventory_after
+        .into_iter()
+        .map(|(id, amount_after)| InventoryUpdate { id, amount_after })
+        .collect::<Vec<_>>();
+    construction_updates.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut fleet_updates = fleet_after
+        .into_iter()
+        .map(|(id, amount_after)| InventoryUpdate { id, amount_after })
+        .collect::<Vec<_>>();
+    fleet_updates.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(ConstructionQueueFundPlan {
+        id: intent.id,
+        index,
+        construction_updates,
+        fleet_updates,
+        reserved_construction: construction_changed.then_some(reserved_after),
+        reserved_fleet: fleet_changed.then(Map::new),
+    })
+}
+
 fn validated_plan(
     state: &CoreState,
     command: &SimulationCommandPatch,
@@ -1054,6 +1422,9 @@ fn validated_plan(
         }
         ConstructionQueueIntent::Enqueue(intent) => {
             validated_enqueue_plan(state, intent).map(ConstructionQueuePlan::Enqueue)
+        }
+        ConstructionQueueIntent::Fund(intent) => {
+            validated_fund_plan(state, intent).map(ConstructionQueuePlan::Fund)
         }
     }
 }

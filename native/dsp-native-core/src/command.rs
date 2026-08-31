@@ -20285,6 +20285,407 @@ mod tests {
         command
     }
 
+    fn construction_queue_fund_state() -> CoreState {
+        let mut state = construction_queue_enqueue_state();
+        let definition = state.base_value()["blueprints"][0].clone();
+        state.base_value_mut()["blueprintVersions"] = serde_json::json!([{
+            "id": "ordinary-alpha@2",
+            "blueprintId": "ordinary-alpha",
+            "revision": 2,
+            "definition": definition
+        }]);
+        state.base_value_mut()["constructionQueue"] = serde_json::json!([{
+            "id": "queue-fund",
+            "blueprintId": "ordinary-alpha",
+            "blueprintVersionId": "ordinary-alpha@2",
+            "blueprintRevision": 2,
+            "blueprintName": "普通蓝图",
+            "planetId": "home",
+            "position": { "x": 20.0, "y": 30.0 },
+            "rotation": 90,
+            "mirror": "horizontal",
+            "queuedAt": 50,
+            "status": "pending-materials",
+            "reservedConstruction": {},
+            "reservedFleet": {},
+            "placedEntityIdsByKey": {}
+        }]);
+        state
+    }
+
+    fn construction_queue_fund_intent_command(
+        revision: u64,
+        id: &str,
+        scope: &str,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("constructionQueue".to_owned()),
+                PathSegment::Key("intent".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(serde_json::json!({
+                "kind": "fund",
+                "id": id,
+                "scope": scope,
+                "revision": revision
+            })),
+        }];
+        command
+    }
+
+    #[test]
+    fn player_authority_construction_queue_fund_reserves_partially_and_replays_without_deploying() {
+        let command = construction_queue_fund_intent_command(9, "queue-fund", "construction");
+        let durable = serde_json::to_string(&command).unwrap();
+        for forbidden in [
+            "reservedConstruction",
+            "reservedFleet",
+            "portableFleet",
+            "arc_smelter\":2",
+            "entities\":",
+            "belts\":",
+        ] {
+            assert!(!durable.contains(forbidden), "WAL leaked {forbidden}");
+        }
+
+        let mut live = construction_queue_fund_state();
+        live.base_value_mut()["construction"]["arc_smelter"] = Value::from(1);
+        live.base_value_mut()["construction"]["conveyor_belt_mk1"] = Value::from(0);
+        let entities_before = (0..live.entity_index.len())
+            .map(|index| live.parse_entity(index).unwrap())
+            .collect::<Vec<_>>();
+        let belts_before = (0..live.belt_index.len())
+            .map(|index| live.parse_belt(index).unwrap())
+            .collect::<Vec<_>>();
+        let mut replay = live.clone();
+        let receipt = live.apply_player_authority_command(&command).unwrap();
+        let replayed: SimulationCommandPatch = serde_json::from_str(&durable).unwrap();
+        let replay_receipt = replay.apply_command(&replayed).unwrap();
+
+        assert_eq!(receipt, replay_receipt);
+        assert_eq!((receipt.previous_revision, receipt.revision), (9, 10));
+        assert!(receipt.changed_entity_ids.is_empty());
+        assert!(receipt.changed_belt_ids.is_empty());
+        assert!(receipt.topology_dirty);
+        assert_eq!(
+            live.canonical_sha256().unwrap(),
+            replay.canonical_sha256().unwrap()
+        );
+        assert_eq!(
+            live.base_value()["constructionQueue"][0]["reservedConstruction"],
+            serde_json::json!({ "arc_smelter": 1 })
+        );
+        assert_eq!(live.base_value()["construction"]["arc_smelter"], 0);
+        assert_eq!(live.base_value()["construction"]["conveyor_belt_mk1"], 0);
+        assert_eq!(
+            (0..live.entity_index.len())
+                .map(|index| live.parse_entity(index).unwrap())
+                .collect::<Vec<_>>(),
+            entities_before
+        );
+        assert_eq!(
+            (0..live.belt_index.len())
+                .map(|index| live.parse_belt(index).unwrap())
+                .collect::<Vec<_>>(),
+            belts_before
+        );
+        assert_eq!(
+            live.deterministic_player_authority_resume_result(&replayed, 9, 10)
+                .unwrap(),
+            receipt
+        );
+    }
+
+    #[test]
+    fn player_authority_construction_queue_fund_completes_reservation_but_never_deploys() {
+        let mut state = construction_queue_fund_state();
+        state.base_value_mut()["construction"]["arc_smelter"] = Value::from(2);
+        state.base_value_mut()["construction"]["conveyor_belt_mk1"] = Value::from(1);
+        let base_before = state.base_value().clone();
+        let entities_before = (0..state.entity_index.len())
+            .map(|index| state.parse_entity(index).unwrap())
+            .collect::<Vec<_>>();
+        let belts_before = (0..state.belt_index.len())
+            .map(|index| state.parse_belt(index).unwrap())
+            .collect::<Vec<_>>();
+        state
+            .apply_player_authority_command(&construction_queue_fund_intent_command(
+                9,
+                "queue-fund",
+                "all",
+            ))
+            .unwrap();
+        assert_eq!(state.revision, 10);
+        assert_eq!(
+            state.base_value()["constructionQueue"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            state.base_value()["constructionQueue"][0]["status"],
+            "pending-materials"
+        );
+        assert_eq!(
+            state.base_value()["constructionQueue"][0]["reservedConstruction"],
+            serde_json::json!({ "arc_smelter": 2, "conveyor_belt_mk1": 1 })
+        );
+        assert_eq!(state.base_value()["construction"]["arc_smelter"], 0);
+        assert_eq!(state.base_value()["construction"]["conveyor_belt_mk1"], 0);
+        assert_eq!(
+            state.base_value()["portableFleet"],
+            base_before["portableFleet"]
+        );
+        assert_eq!(
+            (0..state.entity_index.len())
+                .map(|index| state.parse_entity(index).unwrap())
+                .collect::<Vec<_>>(),
+            entities_before
+        );
+        assert_eq!(
+            (0..state.belt_index.len())
+                .map(|index| state.parse_belt(index).unwrap())
+                .collect::<Vec<_>>(),
+            belts_before
+        );
+
+        let before = state.canonical_sha256().unwrap();
+        assert!(
+            state
+                .apply_player_authority_command(&construction_queue_fund_intent_command(
+                    10,
+                    "queue-fund",
+                    "all",
+                ))
+                .is_err()
+        );
+        assert_eq!(state.revision, 10);
+        assert_eq!(state.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_construction_queue_fund_refunds_excess_and_preserves_material_total() {
+        let mut state = construction_queue_fund_state();
+        state.base_value_mut()["construction"]["arc_smelter"] = Value::from(4);
+        state.base_value_mut()["construction"]["conveyor_belt_mk1"] = Value::from(0);
+        state.base_value_mut()["constructionQueue"][0]["reservedConstruction"] =
+            serde_json::json!({ "arc_smelter": 5, "orphan": 7 });
+        let total_before = state.base_value()["construction"]["arc_smelter"]
+            .as_u64()
+            .unwrap()
+            + state.base_value()["constructionQueue"][0]["reservedConstruction"]["arc_smelter"]
+                .as_u64()
+                .unwrap();
+        state
+            .apply_player_authority_command(&construction_queue_fund_intent_command(
+                9,
+                "queue-fund",
+                "construction",
+            ))
+            .unwrap();
+        assert_eq!(
+            state.base_value()["constructionQueue"][0]["reservedConstruction"],
+            serde_json::json!({ "arc_smelter": 2 })
+        );
+        assert_eq!(state.base_value()["construction"]["arc_smelter"], 7);
+        assert_eq!(state.base_value()["construction"]["orphan"], 7);
+        assert_eq!(
+            state.base_value()["construction"]["arc_smelter"]
+                .as_u64()
+                .unwrap()
+                + state.base_value()["constructionQueue"][0]["reservedConstruction"]["arc_smelter"]
+                    .as_u64()
+                    .unwrap(),
+            total_before
+        );
+    }
+
+    #[test]
+    fn player_authority_construction_queue_fund_honors_construction_fleet_and_all_scopes() {
+        let mut construction_only = construction_queue_fund_state();
+        construction_only.base_value_mut()["construction"]["arc_smelter"] = Value::from(1);
+        construction_only.base_value_mut()["construction"]["conveyor_belt_mk1"] = Value::from(0);
+        construction_only.base_value_mut()["constructionQueue"][0]["reservedFleet"] =
+            serde_json::json!({ "logistics_drone": 6 });
+        let fleet_before = construction_only.base_value()["portableFleet"].clone();
+        construction_only
+            .apply_player_authority_command(&construction_queue_fund_intent_command(
+                9,
+                "queue-fund",
+                "construction",
+            ))
+            .unwrap();
+        assert_eq!(
+            construction_only.base_value()["portableFleet"],
+            fleet_before
+        );
+        assert_eq!(
+            construction_only.base_value()["constructionQueue"][0]["reservedFleet"],
+            serde_json::json!({ "logistics_drone": 6 })
+        );
+
+        let mut fleet_only = construction_queue_fund_state();
+        fleet_only.base_value_mut()["construction"]["arc_smelter"] = Value::from(1);
+        fleet_only.base_value_mut()["constructionQueue"][0]["reservedFleet"] =
+            serde_json::json!({ "logistics_drone": 6, "logistics_vessel": 2 });
+        let construction_before = fleet_only.base_value()["construction"].clone();
+        fleet_only
+            .apply_player_authority_command(&construction_queue_fund_intent_command(
+                9,
+                "queue-fund",
+                "fleet",
+            ))
+            .unwrap();
+        assert_eq!(fleet_only.base_value()["construction"], construction_before);
+        assert_eq!(
+            fleet_only.base_value()["portableFleet"]["logistics_drone"],
+            26
+        );
+        assert_eq!(
+            fleet_only.base_value()["portableFleet"]["logistics_vessel"],
+            7
+        );
+        assert_eq!(
+            fleet_only.base_value()["constructionQueue"][0]["reservedFleet"],
+            serde_json::json!({})
+        );
+
+        let mut all = construction_queue_fund_state();
+        all.base_value_mut()["construction"]["arc_smelter"] = Value::from(1);
+        all.base_value_mut()["construction"]["conveyor_belt_mk1"] = Value::from(0);
+        all.base_value_mut()["constructionQueue"][0]["reservedFleet"] =
+            serde_json::json!({ "logistics_drone": 3 });
+        all.apply_player_authority_command(&construction_queue_fund_intent_command(
+            9,
+            "queue-fund",
+            "all",
+        ))
+        .unwrap();
+        assert_eq!(
+            all.base_value()["constructionQueue"][0]["reservedConstruction"],
+            serde_json::json!({ "arc_smelter": 1 })
+        );
+        assert_eq!(
+            all.base_value()["constructionQueue"][0]["reservedFleet"],
+            serde_json::json!({})
+        );
+        assert_eq!(all.base_value()["portableFleet"]["logistics_drone"], 23);
+        assert_eq!(all.revision, 10);
+    }
+
+    #[test]
+    fn player_authority_construction_queue_fund_treats_missing_maps_as_zero_and_accepts_live_definitions()
+     {
+        for version_container in ["missing", "null"] {
+            let mut state = construction_queue_fund_state();
+            state.base_value_mut()["constructionQueue"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("blueprintVersionId");
+            state.base_value_mut()["constructionQueue"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("reservedConstruction");
+            state.base_value_mut()["constructionQueue"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("reservedFleet");
+            if version_container == "missing" {
+                state.base_value_mut().remove("blueprintVersions");
+            } else {
+                state.base_value_mut()["blueprintVersions"] = Value::Null;
+            }
+            state.base_value_mut()["construction"]["arc_smelter"] = Value::from(1);
+            state.base_value_mut()["construction"]["conveyor_belt_mk1"] = Value::from(0);
+            state
+                .apply_player_authority_command(&construction_queue_fund_intent_command(
+                    9,
+                    "queue-fund",
+                    "construction",
+                ))
+                .unwrap();
+            assert_eq!(
+                state.base_value()["constructionQueue"][0]["reservedConstruction"],
+                serde_json::json!({ "arc_smelter": 1 }),
+                "{version_container}"
+            );
+            match version_container {
+                "missing" => assert!(state.base_value().get("blueprintVersions").is_none()),
+                "null" => assert!(state.base_value()["blueprintVersions"].is_null()),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn player_authority_construction_queue_fund_scopes_and_failures_are_atomic() {
+        let malformed_scopes = ["", "construction-and-fleet"];
+        for scope in malformed_scopes {
+            let mut state = construction_queue_fund_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(
+                state
+                    .apply_player_authority_command(&construction_queue_fund_intent_command(
+                        9,
+                        "queue-fund",
+                        scope,
+                    ))
+                    .is_err(),
+                "{scope}"
+            );
+            assert_eq!(state.revision, 9, "{scope}");
+            assert_eq!(state.canonical_sha256().unwrap(), before, "{scope}");
+        }
+
+        for malformed in [
+            "missing-target",
+            "waiting-fleet",
+            "invalid-definition",
+            "overflow",
+        ] {
+            let mut state = construction_queue_fund_state();
+            match malformed {
+                "missing-target" => {}
+                "waiting-fleet" => {
+                    state.base_value_mut()["constructionQueue"][0]["status"] =
+                        Value::from("waiting-fleet");
+                }
+                "invalid-definition" => {
+                    state.base_value_mut()["blueprintVersions"][0]["definition"]["entities"][0]["buildingId"] =
+                        Value::from("MOD/forged");
+                }
+                "overflow" => {
+                    state.base_value_mut()["construction"]["arc_smelter"] =
+                        Value::from(MAX_JAVASCRIPT_SAFE_INTEGER);
+                    state.base_value_mut()["constructionQueue"][0]["reservedConstruction"] =
+                        serde_json::json!({ "arc_smelter": 3 });
+                }
+                _ => unreachable!(),
+            }
+            let target = if malformed == "missing-target" {
+                "missing"
+            } else {
+                "queue-fund"
+            };
+            let before = state.canonical_sha256().unwrap();
+            assert!(
+                state
+                    .apply_player_authority_command(&construction_queue_fund_intent_command(
+                        9,
+                        target,
+                        "construction",
+                    ))
+                    .is_err(),
+                "{malformed}"
+            );
+            assert_eq!(state.revision, 9, "{malformed}");
+            assert_eq!(state.canonical_sha256().unwrap(), before, "{malformed}");
+        }
+    }
+
     #[test]
     fn player_authority_blueprint_enqueue_derives_one_atomic_queue_row_and_replays() {
         let command =

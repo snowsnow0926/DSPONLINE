@@ -1,5 +1,11 @@
 # 测试与发布基线
 
+> **Windows Rust 待建施工领料门禁（2026-08-31，开发候选）**：必须覆盖 construction/fleet/all 三个 scope、部分领料、刚好补齐、重复 no-op、超额/孤儿预留返还、missing/null `blueprintVersions` 使用 live definition、missing reservation map、WAL/generic replay 一致、实体与线路不变，以及 target/status/definition/overflow 等失败前后 revision/hash 不变。物料总量必须满足“全局库存减少 = 队列预留增加”或“队列预留减少 = 全局库存增加”；不得在领料事务创建建筑、线路或切换 `waiting-fleet`。
+>
+> renderer 门禁必须证明 exact marker 不夹带库存正文、mutation 只发送一次、unknown transport 最多执行 `0/100/250/500/1000/2000 ms` 六次只读 reconciliation、receipt 恰好 `R+1` 且 dirty IDs 为空、stale projection 只等待、同 lineage 的未来 revision 不误锁、页面/行/语义漂移及 totals 未变均失败关闭。明确的发送前 no-op 拒绝可以安全解锁；无法证明是否提交时不得解锁或重发。
+>
+> 当前源码实际新跑：typecheck、diff check、Rust fmt 与 strict clippy 通过；前端领料专项 `30/30`、App 组合专项 `14/14`；完整 Vitest 为 353 文件总计（340 通过、13 条件跳过）、2,706 项总计（2,678 通过、28 条件跳过、0 失败，543.73 秒）；Rust 领料专项 `6/6`、Core 串行全量 `797/797`。默认并行 Core 的既有 interstellar logistics 稀疏线路测试触发 BTree unsafe-precondition 进程中止，串行重跑同项及全量均通过；必须保留该并行失败历史。本切片尚未新跑 Host/native、build、完整 E2E 或发布打包，不能借用 24.16 的结果。
+
 > **Windows Rust queue-only 蓝图入队组合门禁（2026-08-31，开发候选，当前源码门禁通过）**：专项覆盖“工作区按钮只进入画布定位 → click-time Rust context → exact enqueue marker → 连续 `R+1` durable ACK → exact queue-membership `present=true`”整链；一次定位只能产生一次 mutation，未知结果只能按 `0/100/250/500/1000/2000 ms` 做六次只读 reconciliation。测试还证明分页/total 不参与确认，revision 前进会重读 membership，session/run 切换会退役旧事务，明确未提交才安全解锁。
 >
 > Core/Host 矩阵必须覆盖内置 ordinary 成功、MOD/resource anchor/external port/special building/exact overlap/队列满/ID 冲突/安全整数耗尽失败关闭，缺失或 `null` 的 `blueprintVersions` 原子创建、非数组拒绝，immutable version 复用/冲突、已有 pending 队列重叠、live/generic replay/WAL 冷恢复一致，以及所有失败前后源 revision/hash 不变。成功行只能是空 reservation 的 `pending-materials`，不能扣库存或创建实体/线路；完整 fund/deploy 不属于本门禁。

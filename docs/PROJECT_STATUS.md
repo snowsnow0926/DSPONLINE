@@ -1,5 +1,13 @@
 # DSP极简网络项目现状
 
+> **Windows Rust 待建施工领料（2026-08-31，开发候选，未发布）**：queue-only 蓝图入队后的下一段写链已经迁到 Rust。原生队列行新增“补充全部”，但这一步只从权威施工库存计算、扣取并预留当前可用材料，不创建实体/线路、不自动部署。WAL 只保存 `{kind:"fund",id,scope,revision}`；需求明细、库存数和预留结果由 Rust 在 live、generic replay 与冷恢复时重新推导。
+>
+> ordinary 子域按建筑数量、每模板一个已安装喷涂模块以及 belt tier/lanes 计算需求；缺料可部分预留，超额或孤儿施工预留守恒返还。该子域不包含物流站，所以载具目标为零；`fleet/all` 只返还历史载具预留，`construction` 不触碰载具。完全 no-op、非 pending 状态、MOD/特殊域、目录损坏和溢出均在克隆候选上原子拒绝。前端 unknown outcome 仍只读对账六次且不重发，最终以连续 ACK 和不早于 ACK 的实际队列行预留变化确认。
+>
+> 当前源码新跑 typecheck 与 diff check 通过；前端领料专项 `30/30`、App 组合专项 `14/14`，启用 `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 的完整 Vitest 为 353 文件总计（340 通过、13 条件跳过）、2,706 项总计（2,678 通过、28 条件跳过、0 失败，543.73 秒）。Rust 领料专项 `6/6`、fmt、strict clippy 通过，Core 串行全量 `797/797`。默认并行 Core 曾在既有 interstellar logistics 稀疏线路测试触发 Rust BTree unsafe-precondition 进程中止；同一源码改为单线程后该项及全部 797 项通过，该失败历史保留，不能冒充并行门禁已通过。本切片尚未新跑 Host/native、build 或 E2E。
+>
+> 本切片解决“已入队但无法由 Rust 安全领料”，尚未解决“材料齐全后自动放置建筑和线路”；下一闭环是 ordinary deployment compiler 与队列完成事务。固定能力百分比暂不因一个中间切片跳点，GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 和 `authorityEligible=false` 不变；未连接生产、未部署、未签名、未处理真实玩家存档。
+
 > **Windows Rust queue-only 蓝图入队与画布定位（2026-08-31，开发候选，未发布）**：原生蓝图工作区的“加入待建施工”现在先进入独立画布定位，实际点击时再读取同 revision 的 `blueprint-enqueue-context-v1`。renderer 只提供有限坐标和蓝图行身份；Rust 从当前权威状态推导活动行星、`construction_${nextId}`、名称、transform、queuedAt 和 immutable version，并再次验证完整蓝图/版本/队列目录、allocator、队列上限及精确重叠。
 >
 > durable marker 精确为 `{kind:"enqueue",blueprintId,blueprintRevision,position:{x,y},revision}`，不保存 planet/queue/name/transform/version/body 或库存结果。成功只创建 `pending-materials` 订单、必要版本并递增 `nextId`；不会预扣 construction、portable fleet、托盘或量子库存，也不会在这个事务创建实体/线路。缺失/null 的合法旧 v47 `blueprintVersions` 可原子创建；畸形非数组拒绝。MOD、resource anchor、external port、special building、exact overlap 和无法证明的既有队列形状继续失败关闭。

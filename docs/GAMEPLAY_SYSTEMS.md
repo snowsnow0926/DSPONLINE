@@ -1,5 +1,11 @@
 # 玩法与系统基线
 
+> **Windows Rust 待建施工领料事务（2026-08-31，开发候选，未发布）**：原生待建施工列表对 Rust 已证明的 `pending-materials` 普通蓝图提供“补充全部”。renderer 只提交 `{kind:"fund",id,scope,revision}`，不提交物料种类、需求量、库存余额或预留结果；Rust 在当前 revision 重新解析不可变蓝图版本（合法旧档缺失或 `null` 的版本数组按空目录处理）、按建筑堆叠、喷涂模块和传送带等级/并联数计算施工需求，再从权威 `construction` 与 `portableFleet` 领料。
+>
+> 本事务只做预留，不部署建筑或线路。缺料时允许部分领料；超出真实需求的历史施工预留会原样返还，当前 ordinary 子域的载具目标严格为零，因此 `fleet/all` 只会把历史载具预留返还便携库存，绝不会凭 renderer 指定目标。`construction` scope 不碰载具。完全无变化、状态已进入 `waiting-fleet`、MOD/特殊蓝图、畸形目录、安全整数溢出或库存守恒无法证明时整笔拒绝；失败前后 revision、实体、线路和存档哈希不变。
+>
+> mutation 一次最多发送一次；响应丢失只做六次有界只读 durable receipt 对账，绝不自动重发。正常回执必须是连续 `R+1`、无实体/线路 dirty ID 且要求重读投影；随后在同 lineage、同页面的 `R+1` 或更晚权威 revision 上确认目标行仍为 `pending-materials` 且预留总数确实变化。旧 revision 继续等待，行/分页/目录漂移或总数未变会保持锁定。该切片不等于自动施工或部署，不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3，`authorityEligible=false` 继续保持关闭。
+
 > **Windows Rust queue-only 蓝图入队（2026-08-31，开发候选，未发布）**：原生蓝图工作区在 Rust 已证明详情完整且适合第一阶段普通入队时提供“加入待建施工”。点击按钮只进入画布定位，不会立刻改存档；玩家在画布选择位置后，renderer 只交出有限的吸附坐标，并在点击当刻重新取得绑定当前 revision、目录指纹和蓝图行 revision 的 Rust context。活动行星、订单 ID、蓝图名称、旋转/镜像、排队时间和不可变版本快照都由 Rust 从当前权威状态决定，界面不能自填。
 >
 > 成功只创建一条 `pending-materials` 待建订单及必要的不可变版本，不预扣施工件、舰队、托盘或量子库存，也不立即创建建筑和线路。合法旧 v47 若没有 `blueprintVersions` 或值为 `null`，系统把它当空目录并在同一事务创建首个版本数组；损坏的非数组不会被猜测修复。第一阶段固定禁止 exact overlap，并对 MOD/命名空间内容、资源锚点、外部端口、特殊建筑、目录漂移或无法证明的既有同星球待建订单失败关闭；它不是完整 capture/import/fund/deploy。

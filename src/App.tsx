@@ -462,6 +462,7 @@ import {
   nativeBlueprintEnqueueSelectionBindingMatchesFrame,
   nativeBlueprintRecipeOverrideBindingMatchesFrame,
   nativeConstructionQueueCancelBindingMatchesFrame,
+  nativeConstructionQueueFundBindingMatchesFrame,
   selectNativeBlueprintDeleteBinding,
   selectNativeBlueprintTransformBinding,
   selectNativeBlueprintWorkspaceFrame,
@@ -473,6 +474,8 @@ import {
   type NativeBlueprintRotation,
   type NativeBlueprintTransformBinding,
   type NativeConstructionQueueCancelBinding,
+  type NativeConstructionQueueFundBinding,
+  type NativeConstructionQueueFundScope,
 } from "./game/nativeBlueprintWorkspaceStore";
 import {
   prepareNativeBlueprintRenameIntentCommand,
@@ -495,6 +498,7 @@ import { useNativeBlueprintEnqueueCommandTransaction } from "./game/useNativeBlu
 import { useNativeBlueprintRecipeOverrideCommandTransaction } from "./game/useNativeBlueprintRecipeOverrideCommandTransaction";
 import { useNativeBlueprintTransformCommandTransaction } from "./game/useNativeBlueprintTransformCommandTransaction";
 import { useNativeConstructionQueueCancelCommandTransaction } from "./game/useNativeConstructionQueueCancelCommandTransaction";
+import { useNativeConstructionQueueFundCommandTransaction } from "./game/useNativeConstructionQueueFundCommandTransaction";
 import {
   createNativeProjectedOrdinaryBuildingPlacementCommand,
   readVerifiedNativeConstructionPlacementContext,
@@ -17415,6 +17419,31 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     return commitNativeConstructionQueueCancelCommand(binding);
   }, [commitNativeConstructionQueueCancelCommand, nativeBlueprintWorkspaceFrame]);
   const {
+    pending: nativeConstructionQueueFundPending,
+    commit: commitNativeConstructionQueueFundCommand,
+  } = useNativeConstructionQueueFundCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    frame: nativeBlueprintWorkspaceFrame,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+  });
+  const submitNativeConstructionQueueFundIntent = useCallback((
+    binding: NativeConstructionQueueFundBinding,
+    scope: NativeConstructionQueueFundScope,
+  ): boolean => {
+    if (!blueprintsOpenRef.current || nativeBlueprintRenamePendingIdentityRef.current ||
+        !nativeConstructionQueueFundBindingMatchesFrame(binding, nativeBlueprintWorkspaceFrame)) {
+      setNotice("蓝图工作区、待领料行或 revision 已漂移；本次领料未提交");
+      return false;
+    }
+    return commitNativeConstructionQueueFundCommand(binding, scope);
+  }, [commitNativeConstructionQueueFundCommand, nativeBlueprintWorkspaceFrame]);
+  const {
     pending: nativeBlueprintEnqueuePending,
     commit: commitNativeBlueprintEnqueueCommand,
   } = useNativeBlueprintEnqueueCommandTransaction({
@@ -20461,7 +20490,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           nativeBlueprintRenamePendingIdentity !== null || nativeBlueprintRenameResolution !== null ||
           nativeBlueprintTransformPending !== null || nativeBlueprintRecipeOverridePending !== null ||
           nativeBlueprintDeletePending !== null ||
-          nativeConstructionQueueCancelPending !== null || nativeBlueprintEnqueuePending !== null)}
+          nativeConstructionQueueCancelPending !== null || nativeConstructionQueueFundPending !== null ||
+          nativeBlueprintEnqueuePending !== null)}
         status={nativeBlueprintWorkspaceSnapshot.status}
         frame={nativeBlueprintWorkspaceFrame}
         latestIdentity={nativeFactoryInventoryIdentity}
@@ -20470,7 +20500,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         onLibraryCursorChange={(cursor) => {
           if (nativeBlueprintRenamePendingIdentity || nativeBlueprintTransformPending ||
               nativeBlueprintRecipeOverridePending || nativeBlueprintDeletePending ||
-              nativeConstructionQueueCancelPending || nativeBlueprintEnqueuePending ||
+              nativeConstructionQueueCancelPending || nativeConstructionQueueFundPending ||
+              nativeBlueprintEnqueuePending ||
               nativePlayerAuthorityCommandPending) return;
           setNativeBlueprintSelectedId(null);
           setNativeBlueprintLibraryCursor(cursor);
@@ -20478,7 +20509,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         onQueueCursorChange={(cursor) => {
           if (nativeBlueprintRenamePendingIdentity || nativeBlueprintTransformPending ||
               nativeBlueprintRecipeOverridePending || nativeBlueprintDeletePending ||
-              nativeConstructionQueueCancelPending || nativeBlueprintEnqueuePending ||
+              nativeConstructionQueueCancelPending || nativeConstructionQueueFundPending ||
+              nativeBlueprintEnqueuePending ||
               nativePlayerAuthorityCommandPending) return;
           setNativeBlueprintQueueCursor(cursor);
         }}
@@ -20487,12 +20519,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         onSubmitRecipeOverrideIntent={submitNativeBlueprintRecipeOverrideIntent}
         onSubmitDeleteIntent={submitNativeBlueprintDeleteIntent}
         onSubmitQueueCancelIntent={submitNativeConstructionQueueCancelIntent}
+        onSubmitQueueFundIntent={submitNativeConstructionQueueFundIntent}
         onBeginQueuePlacement={beginNativeBlueprintEnqueuePlacement}
         pendingIdentity={nativeBlueprintRenamePendingIdentity}
         transformPending={nativeBlueprintTransformPending}
         recipeOverridePending={nativeBlueprintRecipeOverridePending}
         deletePending={nativeBlueprintDeletePending}
         queueCancelPending={nativeConstructionQueueCancelPending}
+        queueFundPending={nativeConstructionQueueFundPending}
         enqueuePending={nativeBlueprintEnqueuePending}
         resolution={nativeBlueprintRenameResolution}
         onConsumeRenameResolution={consumeNativeBlueprintRenameResolution}
@@ -20503,6 +20537,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         !nativeBlueprintRecipeOverridePending &&
         !nativeBlueprintDeletePending &&
         !nativeConstructionQueueCancelPending &&
+        !nativeConstructionQueueFundPending &&
         !nativeBlueprintEnqueuePending &&
         !nativeBlueprintRenameResolution ? <BlueprintWorkspace
         open={blueprintsOpen}

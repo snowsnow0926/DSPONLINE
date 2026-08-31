@@ -2514,7 +2514,11 @@ fn finite_research_boundary_proof(
         .and_then(|progress| progress.get(technology_id))
         .and_then(Value::as_object);
     let mut total_remaining = 0_u128;
+    let mut cost_item_ids = HashSet::with_capacity(technology.costs.len());
     for cost in &technology.costs {
+        if !cost_item_ids.insert(cost.item_id.as_str()) {
+            return ResearchCompletionBoundaryProof::RequiresFullScan("finite-duplicate-cost-item");
+        }
         let Some(required) = catalog_integer(cost.amount) else {
             return ResearchCompletionBoundaryProof::RequiresFullScan("finite-cost-unproved");
         };
@@ -8575,6 +8579,82 @@ pub(crate) mod tests {
             research_completion_boundary_proof(&near, near.base_value(), &opaque_entities, 1.0)
                 .requires_full_scan(),
             "opaque research writers must never enter the sparse proof"
+        );
+    }
+
+    #[test]
+    fn duplicate_finite_research_cost_item_forces_full_and_matches_oracle_same_step() {
+        let mut indexed = research_boundary_fixture(32, 100.0, 0.0);
+        let mut snapshot = indexed.catalog.snapshot.clone();
+        let technology = snapshot
+            .technologies
+            .iter_mut()
+            .find(|technology| technology.id == "research_speed_1")
+            .unwrap();
+        technology.costs = vec![
+            ItemAmount {
+                item_id: "universe_matrix".to_owned(),
+                amount: 100.0,
+            },
+            ItemAmount {
+                item_id: "universe_matrix".to_owned(),
+                amount: 100.0,
+            },
+        ];
+        indexed.catalog = std::sync::Arc::new(
+            RuntimeCatalog::validate(
+                snapshot,
+                crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+            )
+            .unwrap(),
+        );
+        let lab_index = *indexed.entity_index.get("research-boundary-lab").unwrap();
+        let mut lab = indexed.parse_entity(lab_index).unwrap();
+        lab["machineCount"] = Value::from(100);
+        indexed.replace_entity_raw(lab_index, serde_json::to_string(&lab).unwrap().into());
+        indexed.rebuild_indexes().unwrap();
+
+        let entities = indexed.parse_entities_parallel().unwrap();
+        let maximum_cycles =
+            maximum_research_cycles_this_step(&indexed, indexed.base_value(), &entities, 1.0)
+                .unwrap();
+        assert!(
+            (100..200).contains(&maximum_cycles),
+            "the cycle ceiling must sit between the shared-item requirement and the invalid per-row sum: {maximum_cycles}"
+        );
+        assert_eq!(
+            research_completion_boundary_proof(&indexed, indexed.base_value(), &entities, 1.0,),
+            ResearchCompletionBoundaryProof::RequiresFullScan("finite-duplicate-cost-item")
+        );
+
+        let mut oracle = indexed.clone();
+        install_forced_ordinary_oracle(&mut oracle);
+        let indexed_scans = advance_and_install_ordinary_test_state(&mut indexed, 1.0);
+        let oracle_scans = advance_and_install_ordinary_test_state(&mut oracle, 1.0);
+        assert!(indexed_scans[0].full_scan && oracle_scans[0].full_scan);
+        assert_eq!(
+            serde_json::to_vec(&indexed.materialize().unwrap()).unwrap(),
+            serde_json::to_vec(&oracle.materialize().unwrap()).unwrap()
+        );
+        assert_eq!(
+            (
+                indexed.canonical_sha256().unwrap(),
+                indexed.domain_sha256().unwrap(),
+                synthetic_conservation_sha256(&indexed),
+            ),
+            (
+                oracle.canonical_sha256().unwrap(),
+                oracle.domain_sha256().unwrap(),
+                synthetic_conservation_sha256(&oracle),
+            )
+        );
+        assert!(
+            indexed.base_value()["research"]["completedTechIds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|technology_id| technology_id == "research_speed_1"),
+            "the shared 100 matrices complete both duplicate rows in this step"
         );
     }
 

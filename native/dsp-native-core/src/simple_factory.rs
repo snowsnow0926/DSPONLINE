@@ -4124,21 +4124,26 @@ fn material_delivery_hub_stays_awake(
     false
 }
 
-fn drain_material_delivery_hubs(
+#[derive(Clone, Copy)]
+enum MaterialDeliveryDrainMode {
+    Indexed,
+    #[cfg(test)]
+    FlatFull,
+}
+
+fn drain_material_delivery_hub_indices(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    runtime: &mut crate::material_delivery::MaterialDeliveryRuntime,
+    entity_indices: &[usize],
     seconds: f64,
-    second_phase: bool,
-) -> anyhow::Result<crate::material_delivery::MaterialDeliveryScan> {
-    let selection = runtime.select(state, entities);
+) -> anyhow::Result<()> {
     let active_planet_id = base
         .get("activePlanetId")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    for &entity_index in &selection.entity_indices {
+    for &entity_index in entity_indices {
         let Some(entity) = entities[entity_index].as_object() else {
             continue;
         };
@@ -4230,6 +4235,39 @@ fn drain_material_delivery_hubs(
         )?;
         set_number(object, "progress", if delivered > 0.0 { 1.0 } else { 0.0 })?;
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drain_material_delivery_hubs(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    runtime: &mut crate::material_delivery::MaterialDeliveryRuntime,
+    seconds: f64,
+    second_phase: bool,
+    mode: MaterialDeliveryDrainMode,
+) -> anyhow::Result<crate::material_delivery::MaterialDeliveryScan> {
+    match mode {
+        MaterialDeliveryDrainMode::Indexed => {}
+        #[cfg(test)]
+        MaterialDeliveryDrainMode::FlatFull => {
+            let entity_indices = state.factory_topology.material_delivery_hub_indices.clone();
+            drain_material_delivery_hub_indices(state, base, entities, &entity_indices, seconds)?;
+            let scan = crate::material_delivery::MaterialDeliveryScan {
+                selected_rows: entity_indices.len(),
+                total_rows: entity_indices.len(),
+                stable_rows_skipped: 0,
+                dense_fallback: false,
+                directory_fallback: false,
+                full_scan: true,
+            };
+            runtime.record_flat_full_scan_for_test(scan);
+            return Ok(scan);
+        }
+    }
+    let selection = runtime.select(state, entities);
+    drain_material_delivery_hub_indices(state, base, entities, &selection.entity_indices, seconds)?;
     if second_phase {
         let stay_awake = selection
             .entity_indices
@@ -4386,6 +4424,7 @@ fn simulate_step(
     material_delivery_runtime: &mut std::sync::Arc<
         crate::material_delivery::MaterialDeliveryRuntime,
     >,
+    material_delivery_mode: MaterialDeliveryDrainMode,
     ordinary_production_runtime: &mut std::sync::Arc<
         crate::ordinary_production::OrdinaryProductionRuntime,
     >,
@@ -4647,6 +4686,7 @@ fn simulate_step(
         std::sync::Arc::make_mut(material_delivery_runtime),
         seconds,
         false,
+        material_delivery_mode,
     )?;
     if profile_enabled {
         eprintln!(
@@ -5834,6 +5874,7 @@ fn simulate_step(
         std::sync::Arc::make_mut(material_delivery_runtime),
         seconds,
         true,
+        material_delivery_mode,
     )?;
     if profile_enabled {
         eprintln!(
@@ -6698,6 +6739,48 @@ fn prepare_advance_with_runtime(
     isolate_construction_automation: bool,
     deterministic_runtime: &DeterministicRuntime,
 ) -> anyhow::Result<PreparedFactoryAdvance> {
+    prepare_advance_with_runtime_options(
+        state,
+        simulation_seconds,
+        wall_seconds,
+        isolate_construction_automation,
+        deterministic_runtime,
+        MaterialDeliveryDrainMode::Indexed,
+        None,
+    )
+}
+
+#[cfg(test)]
+fn prepare_advance_with_material_delivery_test_options(
+    state: &CoreState,
+    simulation_seconds: f64,
+    wall_seconds: f64,
+    isolate_construction_automation: bool,
+    deterministic_runtime: &DeterministicRuntime,
+    material_delivery_mode: MaterialDeliveryDrainMode,
+    step_size_override: Option<f64>,
+) -> anyhow::Result<PreparedFactoryAdvance> {
+    prepare_advance_with_runtime_options(
+        state,
+        simulation_seconds,
+        wall_seconds,
+        isolate_construction_automation,
+        deterministic_runtime,
+        material_delivery_mode,
+        step_size_override,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_advance_with_runtime_options(
+    state: &CoreState,
+    simulation_seconds: f64,
+    wall_seconds: f64,
+    isolate_construction_automation: bool,
+    deterministic_runtime: &DeterministicRuntime,
+    material_delivery_mode: MaterialDeliveryDrainMode,
+    step_size_override: Option<f64>,
+) -> anyhow::Result<PreparedFactoryAdvance> {
     let profile_enabled = crate::profile_evidence::profile_environment_enabled();
     let quantum_oactive_profile =
         crate::quantum_logistics::QuantumOactiveProfileGuard::begin_if_requested();
@@ -6819,6 +6902,10 @@ fn prepare_advance_with_runtime(
     {
         step_size = step_size.min(crate::system_space_station::boundary_seconds());
     }
+    if let Some(override_seconds) = step_size_override {
+        debug_assert!(matches!(override_seconds, 1.0 | 10.0 | 30.0));
+        step_size = override_seconds;
+    }
     let mut remaining = total;
     let mut remaining_wall = wall_seconds.max(0.0);
     let wall_per_simulation_second = if total > EPSILON {
@@ -6868,6 +6955,7 @@ fn prepare_advance_with_runtime(
             &belt_routes,
             &mut logistics_buffer_runtime,
             &mut material_delivery_runtime,
+            material_delivery_mode,
             &mut ordinary_production_runtime,
             &mut local_peer_directory,
             &mut quantum_logistics_directory,
@@ -8341,6 +8429,45 @@ pub(crate) mod tests {
     }
 
     fn material_delivery_oactive_fixture(hub_count: usize) -> CoreState {
+        material_delivery_belt_fixture(hub_count, true, false)
+    }
+
+    fn material_delivery_output_belt_fixture(hub_count: usize) -> CoreState {
+        material_delivery_belt_fixture(hub_count, false, true)
+    }
+
+    fn material_delivery_segment_fixture(hub_count: usize) -> CoreState {
+        let mut base = construction_isolation_base();
+        base["tray"]["iron_ingot"] = Value::from(0);
+        base["planetTrays"]["home"]["iron_ingot"] = Value::from(0);
+        let mut entities = vec![json!({
+            "id": "material-delivery-segment-wind",
+            "kind": "power",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "wind_turbine",
+            "machineCount": 1,
+            "minerCount": 0,
+            "inputs": {},
+            "outputs": {},
+            "progress": 0,
+            "utilization": 0,
+            "productionRate": 0,
+            "routingCursor": 0
+        })];
+        entities.extend((0..hub_count).map(material_delivery_hub));
+        fixture_state_from_base_with_registry(
+            base,
+            &entities,
+            crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        )
+    }
+
+    fn material_delivery_belt_fixture(
+        hub_count: usize,
+        include_input_belts: bool,
+        include_output_belt: bool,
+    ) -> CoreState {
         let mut base = construction_isolation_base();
         base["tray"]["iron_ingot"] = Value::from(0);
         base["planetTrays"]["home"]["iron_ingot"] = Value::from(0);
@@ -8365,6 +8492,23 @@ pub(crate) mod tests {
         });
         let mut direct = ordinary_oactive_machine(96_001, 100.0, 0.0);
         direct["id"] = Value::from("material-delivery-direct");
+        let output_sink = json!({
+            "id": "material-delivery-output-sink",
+            "kind": "storage",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "storage_mk1",
+            "recipeId": null,
+            "storedItemId": "iron_ingot",
+            "machineCount": 1,
+            "minerCount": 0,
+            "inputs": { "iron_ingot": 0 },
+            "outputs": { "iron_ingot": 0 },
+            "progress": 0,
+            "utilization": 0,
+            "productionRate": 0,
+            "routingCursor": 0
+        });
         let mut entities = vec![
             json!({
                 "id": "material-delivery-wind",
@@ -8384,8 +8528,17 @@ pub(crate) mod tests {
             feeder,
             relay,
             direct,
+            output_sink,
         ];
         entities.extend((0..hub_count).map(material_delivery_hub));
+        if include_output_belt {
+            let hub = entities
+                .iter_mut()
+                .find(|entity| entity["id"] == "material-delivery-hub-00000")
+                .expect("output hub");
+            hub["storedItemId"] = Value::from("iron_ingot");
+            hub["outputs"]["iron_ingot"] = Value::from(100);
+        }
         let belt = |id: &str, source: &str, target: &str, target_port_index: Option<u8>| {
             let mut belt = json!({
                 "id": id,
@@ -8408,26 +8561,37 @@ pub(crate) mod tests {
             belt
         };
         let target = "material-delivery-hub-00000";
-        let belts = vec![
-            belt(
-                "material-delivery-relay-to-hub",
-                "material-delivery-relay",
+        let mut belts = Vec::new();
+        if include_input_belts {
+            belts.extend([
+                belt(
+                    "material-delivery-relay-to-hub",
+                    "material-delivery-relay",
+                    target,
+                    Some(0),
+                ),
+                belt(
+                    "material-delivery-feeder-to-relay",
+                    "material-delivery-feeder",
+                    "material-delivery-relay",
+                    None,
+                ),
+                belt(
+                    "material-delivery-direct-to-hub",
+                    "material-delivery-direct",
+                    target,
+                    Some(0),
+                ),
+            ]);
+        }
+        if include_output_belt {
+            belts.push(belt(
+                "material-delivery-hub-to-output-sink",
                 target,
-                Some(0),
-            ),
-            belt(
-                "material-delivery-feeder-to-relay",
-                "material-delivery-feeder",
-                "material-delivery-relay",
+                "material-delivery-output-sink",
                 None,
-            ),
-            belt(
-                "material-delivery-direct-to-hub",
-                "material-delivery-direct",
-                target,
-                Some(0),
-            ),
-        ];
+            ));
+        }
         fixture_state_from_base_belts_with_registry(
             base,
             &entities,
@@ -8445,29 +8609,24 @@ pub(crate) mod tests {
         scans: Vec<crate::material_delivery::MaterialDeliveryScan>,
     }
 
-    fn install_forced_material_delivery_oracle(state: &mut CoreState) {
-        let mut runtime = state
-            .prepared_material_delivery_runtime()
-            .expect("material delivery runtime");
-        std::sync::Arc::make_mut(&mut runtime).force_full_scan_for_test(true);
-        state.install_prepared_material_delivery_runtime(runtime);
-    }
-
     fn run_material_delivery_oactive_advance(
         seconds: f64,
         worker_count: usize,
-        force_full_scan: bool,
+        flat_full_control: bool,
     ) -> MaterialDeliveryOactiveRun {
         let mut state = material_delivery_oactive_fixture(1_024);
-        if force_full_scan {
-            install_forced_material_delivery_oracle(&mut state);
-        }
-        let prepared = prepare_advance_with_runtime(
+        let prepared = prepare_advance_with_material_delivery_test_options(
             &state,
             seconds,
             seconds,
             false,
             &DeterministicRuntime::for_test(worker_count),
+            if flat_full_control {
+                MaterialDeliveryDrainMode::FlatFull
+            } else {
+                MaterialDeliveryDrainMode::Indexed
+            },
+            None,
         )
         .unwrap();
         let scans = prepared
@@ -8490,6 +8649,87 @@ pub(crate) mod tests {
             conservation: synthetic_conservation_sha256(&state),
             scans,
         }
+    }
+
+    fn commit_and_install_factory_test_state(
+        state: &mut CoreState,
+        prepared: PreparedFactoryAdvance,
+    ) {
+        let belt_routes = prepared.belt_routes.clone();
+        let belt_activity = prepared.belt_activity.clone();
+        let logistics_buffer_runtime = prepared.logistics_buffer_runtime.clone();
+        let material_delivery_runtime = prepared.material_delivery_runtime.clone();
+        let ordinary_production_runtime = prepared.ordinary_production_runtime.clone();
+        let local_peer_directory = prepared.local_peer_directory.clone();
+        let quantum_logistics_directory = prepared.quantum_logistics_directory.clone();
+        let construction_runtime = prepared.construction_runtime.clone();
+        let station_mode_transition_runtime = prepared.station_mode_transition_runtime.clone();
+        let quantum_transition_runtime = prepared.quantum_transition_runtime.clone();
+        let interstellar_peer_directory = prepared.interstellar_peer_directory.clone();
+        let interstellar_route_activity = prepared.interstellar_route_activity.clone();
+        let next_revision = state.revision + 1;
+        state
+            .commit_simulated_state(
+                prepared.base,
+                prepared.entities,
+                prepared.belt_commit,
+                next_revision,
+                false,
+            )
+            .unwrap();
+        state.install_prepared_belt_routes(belt_routes);
+        state.install_prepared_belt_activity(belt_activity);
+        state.install_prepared_logistics_buffer_runtime(logistics_buffer_runtime);
+        state.install_prepared_material_delivery_runtime(material_delivery_runtime);
+        state.install_prepared_ordinary_production_runtime(ordinary_production_runtime);
+        state.install_prepared_local_peer_directory(local_peer_directory);
+        state.install_prepared_quantum_logistics_directory(quantum_logistics_directory);
+        state.install_prepared_construction_runtime(construction_runtime);
+        state.install_prepared_station_mode_transition_runtime(station_mode_transition_runtime);
+        state.install_prepared_quantum_transition_runtime(quantum_transition_runtime);
+        state.install_prepared_interstellar_peer_directory(interstellar_peer_directory);
+        state.install_prepared_interstellar_route_activity(interstellar_route_activity);
+    }
+
+    fn advance_material_delivery_test_state(
+        state: &mut CoreState,
+        seconds: f64,
+        step_size_override: f64,
+    ) {
+        let prepared = prepare_advance_with_material_delivery_test_options(
+            state,
+            seconds,
+            seconds,
+            false,
+            &DeterministicRuntime::for_test(4),
+            MaterialDeliveryDrainMode::Indexed,
+            Some(step_size_override),
+        )
+        .unwrap();
+        commit_and_install_factory_test_state(state, prepared);
+    }
+
+    fn material_delivery_state_fingerprint(state: &CoreState) -> (Vec<u8>, String, String, String) {
+        (
+            serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+            state.canonical_sha256().unwrap(),
+            state.domain_sha256().unwrap(),
+            synthetic_conservation_sha256(state),
+        )
+    }
+
+    fn assert_material_delivery_state_equal_except_revision(
+        left: &CoreState,
+        right: &CoreState,
+        context: &str,
+    ) {
+        let mut normalized_left = left.clone();
+        normalized_left.revision = right.revision;
+        assert_eq!(
+            material_delivery_state_fingerprint(&normalized_left),
+            material_delivery_state_fingerprint(right),
+            "{context}; revision was asserted separately and no other state field was omitted"
+        );
     }
 
     fn run_research_boundary_advance(
@@ -8871,10 +9111,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn material_delivery_oactive_matches_force_full_at_1_5_60_and_workers() {
+    fn material_delivery_oactive_matches_flat_full_at_1_5_60_and_workers() {
         for seconds in [1.0, 5.0, 60.0] {
             let indexed = run_material_delivery_oactive_advance(seconds, 1, false);
-            let oracle = run_material_delivery_oactive_advance(seconds, 1, true);
+            let flat_full = run_material_delivery_oactive_advance(seconds, 1, true);
             assert_eq!(
                 (
                     &indexed.bytes,
@@ -8883,10 +9123,10 @@ pub(crate) mod tests {
                     &indexed.conservation,
                 ),
                 (
-                    &oracle.bytes,
-                    &oracle.canonical,
-                    &oracle.domain,
-                    &oracle.conservation,
+                    &flat_full.bytes,
+                    &flat_full.canonical,
+                    &flat_full.domain,
+                    &flat_full.conservation,
                 ),
                 "material delivery diverged at {seconds}s"
             );
@@ -8907,8 +9147,13 @@ pub(crate) mod tests {
                     .map(|scan| scan.selected_rows)
                     .collect::<Vec<_>>()
             );
-            assert!(oracle.scans.iter().all(|scan| scan.full_scan));
-            assert!(oracle.scans.iter().all(|scan| scan.selected_rows == 1_024));
+            assert!(flat_full.scans.iter().all(|scan| scan.full_scan));
+            assert!(
+                flat_full
+                    .scans
+                    .iter()
+                    .all(|scan| scan.selected_rows == 1_024)
+            );
         }
 
         let expected = run_material_delivery_oactive_advance(60.0, 1, false);
@@ -8924,7 +9169,7 @@ pub(crate) mod tests {
     #[test]
     fn material_delivery_real_belts_wake_both_drain_phases_after_cold_step() {
         let indexed = run_material_delivery_oactive_advance(5.0, 4, false);
-        let oracle = run_material_delivery_oactive_advance(5.0, 4, true);
+        let flat_full = run_material_delivery_oactive_advance(5.0, 4, true);
         assert_eq!(
             (
                 &indexed.bytes,
@@ -8933,10 +9178,10 @@ pub(crate) mod tests {
                 &indexed.conservation,
             ),
             (
-                &oracle.bytes,
-                &oracle.canonical,
-                &oracle.domain,
-                &oracle.conservation,
+                &flat_full.bytes,
+                &flat_full.canonical,
+                &flat_full.domain,
+                &flat_full.conservation,
             )
         );
         let steady = indexed.scans[2..]
@@ -8956,6 +9201,91 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(hub["inputs"]["iron_ingot"], json!(0.0));
         assert!(materialized["tray"]["iron_ingot"].as_f64().unwrap() > 1.0);
+    }
+
+    #[test]
+    fn material_delivery_real_output_belt_wakes_sleeping_hub_as_source() {
+        let mut state = material_delivery_output_belt_fixture(64);
+        advance_material_delivery_test_state(&mut state, 1.0, 1.0);
+        let hub_index = state.factory_topology.material_delivery_hub_indices[0];
+        let after_cold = state.parse_entity(hub_index).unwrap();
+        let cold_output = after_cold["outputs"]["iron_ingot"].as_f64().unwrap();
+        assert!(cold_output > 0.0 && cold_output < 100.0);
+        assert!(
+            state
+                .prepared_material_delivery_runtime()
+                .unwrap()
+                .pending_rows_for_test()
+                .is_empty(),
+            "output inventory alone must not keep a delivery hub awake"
+        );
+
+        advance_material_delivery_test_state(&mut state, 1.0, 1.0);
+        let runtime = state.prepared_material_delivery_runtime().unwrap();
+        let scans = runtime.scan_history_for_test();
+        let steady_pair = &scans[scans.len() - 2..];
+        assert_eq!(
+            steady_pair
+                .iter()
+                .map(|scan| scan.selected_rows)
+                .collect::<Vec<_>>(),
+            vec![1, 1],
+            "a real source-side output movement must wake the hub before the first drain and carry it through the second"
+        );
+        let after_wake = state.parse_entity(hub_index).unwrap();
+        assert!(after_wake["outputs"]["iron_ingot"].as_f64().unwrap() < cold_output);
+        let belt_index = state
+            .belt_index
+            .get("material-delivery-hub-to-output-sink")
+            .copied()
+            .unwrap();
+        assert!(
+            state.parse_belt(belt_index).unwrap()["totalTransferred"]
+                .as_f64()
+                .unwrap()
+                > 0.0
+        );
+    }
+
+    #[test]
+    fn material_delivery_long_advance_matches_segmented_commits_at_1_10_30_second_steps() {
+        for (step_size, segments) in [
+            (1.0, vec![1.0; 60]),
+            (10.0, vec![10.0; 6]),
+            (30.0, vec![30.0; 2]),
+        ] {
+            let mut long = material_delivery_segment_fixture(64);
+            let long_source_revision = long.revision;
+            advance_material_delivery_test_state(&mut long, 60.0, step_size);
+
+            let mut segmented = material_delivery_segment_fixture(64);
+            let segmented_source_revision = segmented.revision;
+            for &seconds in &segments {
+                advance_material_delivery_test_state(&mut segmented, seconds, step_size);
+            }
+
+            assert_eq!(long.revision, long_source_revision + 1);
+            assert_eq!(
+                segmented.revision,
+                segmented_source_revision + segments.len() as u64
+            );
+            assert_ne!(
+                long.revision, segmented.revision,
+                "revision is deliberately asserted outside the complete persisted-state comparison"
+            );
+            assert_material_delivery_state_equal_except_revision(
+                &long,
+                &segmented,
+                &format!("material delivery state diverged for {step_size}s internal steps"),
+            );
+            assert_eq!(
+                long.prepared_material_delivery_runtime()
+                    .unwrap()
+                    .scan_history_for_test()
+                    .len(),
+                (60.0 / step_size) as usize * 2
+            );
+        }
     }
 
     #[test]
@@ -9004,6 +9334,7 @@ pub(crate) mod tests {
             &mut full_runtime,
             1.0,
             false,
+            MaterialDeliveryDrainMode::Indexed,
         )
         .unwrap();
         drain_material_delivery_hubs(
@@ -9013,6 +9344,7 @@ pub(crate) mod tests {
             &mut full_runtime,
             1.0,
             true,
+            MaterialDeliveryDrainMode::Indexed,
         )
         .unwrap();
         assert_eq!(full_runtime.pending_rows_for_test(), hub_indices);
@@ -9060,11 +9392,49 @@ pub(crate) mod tests {
         assert!(drift.scan.directory_fallback && drift.scan.full_scan);
 
         let mut rebuilt_topology = state.clone();
+        let topology_pointer_before = std::sync::Arc::as_ptr(&rebuilt_topology.factory_topology);
+        let topology_len = rebuilt_topology
+            .factory_topology
+            .material_delivery_hub_indices
+            .len();
+        let topology_capacity = rebuilt_topology
+            .factory_topology
+            .material_delivery_hub_indices
+            .capacity();
         std::sync::Arc::make_mut(&mut rebuilt_topology.factory_topology)
             .material_delivery_hub_indices
-            .shrink_to_fit();
+            .swap(0, 1);
+        assert_eq!(
+            rebuilt_topology
+                .factory_topology
+                .material_delivery_hub_indices
+                .len(),
+            topology_len
+        );
+        assert_eq!(
+            rebuilt_topology
+                .factory_topology
+                .material_delivery_hub_indices
+                .capacity(),
+            topology_capacity
+        );
+        assert_ne!(
+            std::sync::Arc::as_ptr(&rebuilt_topology.factory_topology),
+            topology_pointer_before,
+            "the runtime-held Arc must force COW even for same-length/same-capacity edits"
+        );
         let rebuilt = runtime.select(&rebuilt_topology, &entities);
         assert!(rebuilt.scan.directory_fallback && rebuilt.scan.full_scan);
+
+        let peak_estimate = runtime.estimated_bytes();
+        let one_runtime_and_full_key_payload =
+            std::mem::size_of::<crate::material_delivery::MaterialDeliveryRuntime>() as u64
+                + 256
+                + hub_indices.len() as u64 * std::mem::size_of::<usize>() as u64 * 4;
+        assert!(
+            peak_estimate >= one_runtime_and_full_key_payload * 2,
+            "memory estimate must include first-node overhead, a full temporary selection, and source/candidate COW copies"
+        );
     }
 
     #[test]

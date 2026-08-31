@@ -2,7 +2,9 @@
 
 > **Windows material-delivery hub 双阶段活动队列（2026-09-01，开发候选，未发布）**：Rust `simple_factory` 对内置物资配送枢纽增加 session-only、按持久实体行排序的 wake queue。冷拍仍在历史前/后两个 drain 阶段各全扫一次；第一阶段选中的行必定带到第二阶段，只有输入已经合法归零、三个 delivery slot 可证明且目标托盘未满的 hub 才休眠。两段真实 belt changed-entity 事件分别闭合前后唤醒；托盘满、残留输入、MOD/opaque、identity/topology 漂移、精确 75% 稠密都保持常醒或回退原 full scan。
 >
-> 1,024 hub 的 `1/5/60` 秒 indexed 与独立 force-full oracle 在完整 bytes、canonical、domain 和物料守恒 SHA-256 上一致；共 `2/10/120` 次 drain，indexed 冷拍两次各选 1,024，之后每阶段最多 1 行，force-full 每次 1,024。真实 relay 与 producer belt 覆盖同拍前后两阶段唤醒，60 秒结果在 1/2/4/8 workers 一致；失败候选保留源 wake 和源字节。最终 Core 串行全量 `899/899`（278.82 秒）、workspace all-targets/all-features strict clippy、fmt 与 diff check 通过。strict clippy 首轮只报告一处测试 `manual_contains`，按等价 `contains` 修复后转绿，失败史保留。
+> 1,024 hub 的 `1/5/60` 秒 indexed 与 flat-full 选择对照在完整 bytes、canonical、domain 和物料守恒 SHA-256 上一致；该对照完全绕过 `MaterialDeliveryRuntime::select`，把完整 topology 行直接送入共享的旧 drain 结算体，因此是独立选择对照、不是独立结算实现。共 `2/10/120` 次 drain，indexed 冷拍两次各选 1,024，之后每阶段最多 1 行，flat-full 每次 1,024。真实 relay、producer 与 hub-as-source output belt 覆盖同拍前后两阶段及输出端唤醒；60 秒一次 advance 与 `1/10/30` 秒内部分步、以及对应 `60/6/2` 次提交在显式区分 revision 后保持全部其余状态字段一致；60 秒结果在 1/2/4/8 workers 一致。runtime 持有 topology `Arc` clone，使同长度/同容量内容编辑必经 COW 并稳定触发全扫；内存估算包含首个 `BTreeSet` 节点固定开销、全行候选及源/候选 Arc COW 双份峰值。失败候选保留源 wake 和源字节。
+>
+> 此前 Core 串行全量 `899/899`（278.82 秒）是隔离源码 `ab109bc` 的证据，不代表 `df47619` 或当前组合工作树的全量结果；最终组合 Core/Host/Node/renderer/E2E 门禁由 root 冻结后重新执行。本修复块只运行 focused Rust、workspace all-targets/all-features strict clippy、fmt 与 diff check，不冒充组合全量。
 >
 > 该结果是扫描形状与确定性证据，不是墙钟收益或全部物流完成声明；continuous production、opaque/MOD hub、quantum fanout 与其他 fail-closed 路径仍未闭合。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不变；未连接生产、未部署、未签名，也未读取或修改真实玩家存档。
 

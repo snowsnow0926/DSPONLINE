@@ -1,5 +1,11 @@
 # 系统架构
 
+> **Windows Rust ordinary producer/miner 活动结算边界（2026-09-01，开发候选，未发布）**：`simple_factory` 为内置目录中的本地普通机器与矿脉增加 session-only、按持久实体行号排序的 wake index。冷启动先执行原有完整生产/矿脉结算；随后只有仍可运行、处于一拍零值归一、被两段 belt 真实库存移动触及，或在本步取得正 output credit 的行进入电力需求探针和结算。机器消费最后输入、机器刚填满输出或矿机刚填满输出时，会因 `pre-step runnable || post-step runnable` 再保持一拍，直到旧路径已经把 `utilization`、`productionRate`、`progress` 与适用的 `powerFactor` 归一后才可休眠。有限矿耗尽也保持同一拍间零值一致性，但旧语义仍把“输出未满但资源耗尽”的矿机视为耗电活动行，因此这类矿脉归零后仍常醒，不会被错误休眠。full-output 矿机休眠期间的 connected/disconnected 计数由同 topology 的逐电网静态整数聚合补回。
+>
+> 该索引不持久化；普通命令、配方/科技/设置/容量/拓扑变化会丢弃 prepared runtime，电源行本身仍按旧路径检查。活跃科研会保守扫描全部普通 producer/miner，以覆盖本步科研完成引起的科技、生产速度或矿速变化；`matrix_research`、太阳帆与火箭发射行始终保持旧稳定行序的活动 barrier。非空 MOD registry、opaque/命名空间身份、实体或 topology 漂移、writer 证明不足，以及活动行达到 `75%` 都使用原 full-scan oracle。候选 runtime 只在完整 simulation revision 成功后安装；就绪顺序或更晚写回失败不会清除源 wake。
+>
+> 合成 4,164 行的固定输入在 `1/5/60` 秒得到 `4164`、`4164→2×4`、`4164→2×59` 的逐秒扫描计数；force-full A/B 的完整字节、canonical、domain 与物料守恒 SHA-256 一致，1/2/4/8 worker 也一致。这只是扫描计数证据，不是墙钟或吞吐承诺。仍有意全扫或常醒的域包括 power sources、科研/戴森全局 barrier、活动科研、行星指标的全实体归集、production-history 采样、material-delivery hubs、自然稠密与所有 fail-closed 路径，因此不能称为“全部生产已经 O(active)”。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不改变；未连接生产、未部署，也未读取或修改真实玩家存档。
+
 > **Windows Rust 固定分区 prepare/串行提交边界（2026-09-01，开发候选，未发布）**：`DeterministicRuntime` 现在可以在同一个进程生命周期、最多 8 线程的 Rayon 池中并发执行固定 4/8 个异构只读 prepare 分区。工厂打开或缓存失效时，线路路由、普通物流 buffer、本地/量子目录、施工、站点/量子过渡和星际目录/活动从同一不可变 revision 生成私有结果；每个模拟步的 ready station、矿脉和普通机器电力需求同样先生成独立事件缓冲。所有分区必须全部 join，随后才按历史领域顺序检查错误并串行回放；任何失败都丢弃整组结果，不安装先完成的缓存，也不改源 revision。
 >
 > 分区少于 2 个、总工作量少于 4,096 或线程策略为 1 时自动走调用线程；其他情况仍只使用同一有界池，不创建临时线程池。profile 只报告活动分区、工作量、策略选择、实际参与外层分区的 worker 数和是否并行，不把扫描计数冒充墙钟收益。合成完整候选回归覆盖 1/2/4/8 worker 的完整状态字节、规范 SHA-256、领域 SHA-256 和物料投影 SHA-256 一致，并覆盖“较晚领域失败但较早领域成功”时所有 prepared cache 仍为空。该切片只并行无共享写的准备阶段；共享物料提交、线路冲突提交、完整 pure-idle/offline/time-warp 和跨 CPU/Windows 版本长跑仍未闭合，所以 `authorityEligible=false` 保持不变，GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 1.2.3 均不改变。

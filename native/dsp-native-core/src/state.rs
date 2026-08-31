@@ -2548,6 +2548,11 @@ pub struct CoreState {
     /// the drained queue together with its entity revision.
     prepared_logistics_buffer_runtime:
         Option<Arc<crate::logistics_buffers::LogisticsBufferRuntime>>,
+    /// Runtime-only deterministic wake index for built-in local machines and
+    /// veins. It is candidate-owned during simulation and published only
+    /// after the matching entity revision commits.
+    prepared_ordinary_production_runtime:
+        Option<Arc<crate::ordinary_production::OrdinaryProductionRuntime>>,
     prepared_local_peer_directory: Option<Arc<crate::local_logistics::LocalPeerDirectory>>,
     /// Runtime-only static quantum endpoint/slot directory plus active wake
     /// queues. Installed only after the complete simulation candidate commits.
@@ -3299,6 +3304,7 @@ impl CoreState {
             prepared_belt_routes: None,
             prepared_belt_activity: None,
             prepared_logistics_buffer_runtime: None,
+            prepared_ordinary_production_runtime: None,
             prepared_local_peer_directory: None,
             prepared_quantum_logistics_directory: None,
             prepared_construction_runtime: None,
@@ -3344,6 +3350,7 @@ impl CoreState {
             }
             state.prepared_belt_routes = Some(prepared.belt_routes);
             state.prepared_logistics_buffer_runtime = Some(prepared.logistics_buffer_runtime);
+            state.prepared_ordinary_production_runtime = Some(prepared.ordinary_production_runtime);
             state.prepared_local_peer_directory = Some(prepared.local_peer_directory);
             state.prepared_quantum_logistics_directory = Some(prepared.quantum_logistics_directory);
             state.prepared_construction_runtime = Some(prepared.construction_runtime);
@@ -3768,6 +3775,7 @@ impl CoreState {
         self.prepared_belt_routes = None;
         self.prepared_belt_activity = None;
         self.prepared_logistics_buffer_runtime = None;
+        self.prepared_ordinary_production_runtime = None;
         self.prepared_quantum_logistics_directory = None;
         self.prepared_construction_runtime = None;
         self.prepared_quantum_transition_runtime = None;
@@ -3784,6 +3792,7 @@ impl CoreState {
         self.prepared_belt_routes = None;
         self.prepared_belt_activity = None;
         self.prepared_logistics_buffer_runtime = None;
+        self.prepared_ordinary_production_runtime = None;
         self.prepared_local_peer_directory = None;
         self.prepared_quantum_logistics_directory = None;
         self.prepared_construction_runtime = None;
@@ -3836,6 +3845,19 @@ impl CoreState {
         runtime: Arc<crate::logistics_buffers::LogisticsBufferRuntime>,
     ) {
         self.prepared_logistics_buffer_runtime = Some(runtime);
+    }
+
+    pub(crate) fn prepared_ordinary_production_runtime(
+        &self,
+    ) -> Option<Arc<crate::ordinary_production::OrdinaryProductionRuntime>> {
+        self.prepared_ordinary_production_runtime.clone()
+    }
+
+    pub(crate) fn install_prepared_ordinary_production_runtime(
+        &mut self,
+        runtime: Arc<crate::ordinary_production::OrdinaryProductionRuntime>,
+    ) {
+        self.prepared_ordinary_production_runtime = Some(runtime);
     }
 
     pub(crate) fn install_prepared_local_peer_directory(
@@ -4256,6 +4278,7 @@ impl CoreState {
         // records; keeping the previous one would route against stale topology.
         self.prepared_local_peer_directory = None;
         self.prepared_logistics_buffer_runtime = None;
+        self.prepared_ordinary_production_runtime = None;
         self.prepared_quantum_logistics_directory = None;
         self.prepared_construction_runtime = None;
         self.prepared_interstellar_peer_directory = None;
@@ -6092,6 +6115,11 @@ impl CoreState {
             .as_ref()
             .map(|runtime| runtime.estimated_bytes())
             .unwrap_or(0);
+        let prepared_ordinary_production_bytes = self
+            .prepared_ordinary_production_runtime
+            .as_ref()
+            .map(|runtime| runtime.estimated_bytes())
+            .unwrap_or(0);
         let prepared_quantum_logistics_bytes = self
             .prepared_quantum_logistics_directory
             .as_ref()
@@ -6125,6 +6153,7 @@ impl CoreState {
         let factory_topology_bytes = self.factory_topology.estimated_bytes();
         let topology_index_bytes = prepared_belt_route_bytes
             + prepared_logistics_buffer_bytes
+            + prepared_ordinary_production_bytes
             + prepared_local_peer_bytes
             + prepared_quantum_logistics_bytes
             + prepared_construction_runtime_bytes
@@ -6135,7 +6164,7 @@ impl CoreState {
             + factory_topology_bytes;
         if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
             eprintln!(
-                "DSP_NATIVE_CORE_PROFILE\tmemory-topology-breakdown\tbelts={prepared_belt_route_bytes},buffers={prepared_logistics_buffer_bytes},local={prepared_local_peer_bytes},quantum={prepared_quantum_logistics_bytes},construction={prepared_construction_runtime_bytes},stationMode={prepared_station_mode_transition_bytes},quantumTransition={prepared_quantum_transition_bytes},interstellar={prepared_interstellar_peer_bytes},activity={prepared_interstellar_activity_bytes},factory={factory_topology_bytes}"
+                "DSP_NATIVE_CORE_PROFILE\tmemory-topology-breakdown\tbelts={prepared_belt_route_bytes},buffers={prepared_logistics_buffer_bytes},production={prepared_ordinary_production_bytes},local={prepared_local_peer_bytes},quantum={prepared_quantum_logistics_bytes},construction={prepared_construction_runtime_bytes},stationMode={prepared_station_mode_transition_bytes},quantumTransition={prepared_quantum_transition_bytes},interstellar={prepared_interstellar_peer_bytes},activity={prepared_interstellar_activity_bytes},factory={factory_topology_bytes}"
             );
         }
         let belt_activity_runtime_bytes = self

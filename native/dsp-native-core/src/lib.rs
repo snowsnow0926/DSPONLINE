@@ -38,6 +38,7 @@ mod local_logistics;
 mod logistics_buffers;
 mod manual_mining;
 mod orbital_station;
+mod ordinary_production;
 pub mod production_history;
 mod profile_evidence;
 mod pure_idle;

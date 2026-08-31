@@ -21,6 +21,8 @@ const TICK_MILLISECONDS = 1_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const MAX_DURABLE_COMMAND_BYTES = 1_750_000;
 const MAX_MACRO_BUDGET_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
+const SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE =
+  "NATIVE_CORE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED";
 const COMMAND_KEYS = Object.freeze([
   "protocolVersion", "baseRevision", "topLevelChanges", "changedEntities", "addedEntities",
   "removedEntityIds", "changedBelts", "addedBelts", "removedBeltIds",
@@ -41,6 +43,11 @@ function runtimeError(message, code = "NATIVE_PLAYER_AUTHORITY_RUNTIME_INVALID",
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isDefiniteSystemSpaceStationPreStageRejection(entry, cause) {
+  return entry?.request?.kind === "system-space-station" && isRecord(cause) &&
+    cause.code === SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE;
 }
 
 function requireLogicalId(value, label) {
@@ -1560,18 +1567,37 @@ class NativePlayerAuthorityRuntime {
       this.transition("active");
       return { ok: true, command: context.lastCommand };
     }).catch((cause) => {
-      const error = cause instanceof NativePlayerAuthorityRuntimeError
-        ? cause
-        : runtimeError(
-          "native player-authority command outcome is uncertain",
-          "NATIVE_PLAYER_AUTHORITY_COMMAND_UNCERTAIN",
+      const definitePreStageRejection =
+        isDefiniteSystemSpaceStationPreStageRejection(entry, cause);
+      const error = definitePreStageRejection
+        ? runtimeError(
+          typeof cause.message === "string" && cause.message.length > 0
+            ? cause.message
+            : "native system-space-station command was rejected before durable staging",
+          SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
           cause,
-        );
+        )
+        : cause instanceof NativePlayerAuthorityRuntimeError
+          ? cause
+          : runtimeError(
+            "native player-authority command outcome is uncertain",
+            "NATIVE_PLAYER_AUTHORITY_COMMAND_UNCERTAIN",
+            cause,
+          );
       if (!this.shutdownRequested) {
         this.rejectQueuedCommands(error);
-        this.transition("uncertain", error);
+        if (definitePreStageRejection) {
+          // Rust emits this code only before creating a durable pending
+          // command. The active intent and every command whose base revision
+          // depended on it are therefore safe to discard. Keep the published
+          // checkpoint unchanged and resume the exact clock immediately.
+          this.activeCommand = null;
+          this.transition("active");
+        } else {
+          this.transition("uncertain", error);
+        }
       }
-      return { ok: false, error };
+      return { ok: false, error, definitePreStageRejection };
     }).then((outcome) => {
       this.inFlight = null;
       this.currentOperation = null;
@@ -1589,6 +1615,7 @@ class NativePlayerAuthorityRuntime {
       } else {
         entry.reject(outcome.error);
         resolveInFlight(this.snapshot());
+        if (outcome.definitePreStageRejection && this.phase === "active") this.pump();
       }
     });
     return completion;
@@ -1729,5 +1756,6 @@ class NativePlayerAuthorityRuntime {
 module.exports = {
   NativePlayerAuthorityRuntime,
   NativePlayerAuthorityRuntimeError,
+  SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
   TICK_MILLISECONDS,
 };

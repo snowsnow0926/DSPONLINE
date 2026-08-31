@@ -15,6 +15,7 @@ use dsp_native_core::{
 };
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Value, json};
+use thiserror::Error;
 
 use crate::exact_realtime_lease::{
     ExactRealtimeCheckpoint, ExactRealtimeLease, ExactRealtimeLeasePurpose,
@@ -68,12 +69,37 @@ pub const PLAYER_AUTHORITY_TICK_CAPABILITY: &str = "native-core-player-authority
 pub const PLAYER_AUTHORITY_COMMAND_CAPABILITY: &str = "native-core-player-authority-command-v1";
 pub const PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY: &str =
     "native-core-player-authority-system-space-station-command-v1";
+pub const PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE: &str =
+    "NATIVE_CORE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED";
 pub const PLAYER_AUTHORITY_PAUSE_CAPABILITY: &str =
     "native-core-player-authority-pause-lifecycle-v1";
 pub const PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY: &str =
     "native-core-player-authority-pure-idle-macro-v1";
 pub const PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY: &str =
     "native-core-player-authority-startup-recovery-v1";
+
+/// A semantic or patch-preflight rejection that occurred before the Host
+/// created a durable pending command.  The explicit type is intentionally
+/// narrow: the protocol may expose its code as a definite rejection, while
+/// transport loss and every error after durable staging stay recoverable and
+/// therefore uncertain to the main-process runtime.
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct PlayerAuthoritySystemSpaceStationPreStageRejected {
+    message: String,
+}
+
+impl PlayerAuthoritySystemSpaceStationPreStageRejected {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    fn from_error(error: anyhow::Error) -> Self {
+        Self::new(format!("{error:#}"))
+    }
+}
 
 #[derive(Clone)]
 enum CoreLeaseAuthorization {
@@ -2000,7 +2026,8 @@ impl CoreRegistry {
                 self.session(session_id)?,
                 &authority,
                 semantic_request,
-            )?;
+            )
+            .map_err(PlayerAuthoritySystemSpaceStationPreStageRejected::from_error)?;
             if prepared.command_id() != request.command_id
                 || prepared.expected_revision() != request.base_revision
             {
@@ -2011,7 +2038,9 @@ impl CoreRegistry {
             // prepare/apply TOCTOU proof; the generic transaction performs its
             // own second patch preflight before stage/WAL/checkpoint/ACK.
             let mut proof = self.session(session_id)?.clone();
-            let applied = prepared.apply(&mut proof, &authority)?;
+            let applied = prepared
+                .apply(&mut proof, &authority)
+                .map_err(PlayerAuthoritySystemSpaceStationPreStageRejected::from_error)?;
             if applied.previous_revision != request.base_revision
                 || applied.revision != request.base_revision + 1
             {
@@ -6353,6 +6382,30 @@ mod tests {
     ) {
         player_authority_fixture_from_parts(
             player_authority_system_space_station_envelope(status),
+            player_authority_system_space_station_catalog(),
+        )
+    }
+
+    fn player_authority_system_space_station_fixture_with_state(
+        status: &str,
+        mutate: impl FnOnce(&mut Value),
+    ) -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        let mut envelope: Value =
+            serde_json::from_slice(&player_authority_system_space_station_envelope(status))
+                .unwrap();
+        mutate(&mut envelope["state"]);
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        player_authority_fixture_from_parts(
+            serde_json::to_vec(&envelope).unwrap(),
             player_authority_system_space_station_catalog(),
         )
     }
@@ -17031,6 +17084,89 @@ mod tests {
     }
 
     #[test]
+    fn system_space_station_semantic_rejections_are_typed_only_before_durable_stage() {
+        let cases = vec![
+            (
+                "missing-tech",
+                player_authority_system_space_station_fixture_with_state(
+                    "not-started",
+                    |state| state["research"]["completedTechIds"] = json!([]),
+                ),
+                SystemSpaceStationIntent::Start {
+                    system_id: "helios".to_owned(),
+                },
+                "construction technology is missing",
+            ),
+            (
+                "insufficient-module-inventory",
+                player_authority_system_space_station_fixture_with_state(
+                    "operational",
+                    |state| {
+                        state["systemSpaceStations"]["helios"]["inventory"]["frame_material"] =
+                            Value::String("0".to_owned())
+                    },
+                ),
+                SystemSpaceStationIntent::ModuleTarget {
+                    system_id: "helios".to_owned(),
+                    module: dsp_native_core::system_space_station_command::SystemSpaceStationModule::Backbone,
+                    target: 1,
+                },
+                "module inventory is insufficient",
+            ),
+            (
+                "unchanged-module-target",
+                player_authority_system_space_station_fixture("operational"),
+                SystemSpaceStationIntent::ModuleTarget {
+                    system_id: "helios".to_owned(),
+                    module: dsp_native_core::system_space_station_command::SystemSpaceStationModule::Backbone,
+                    target: 0,
+                },
+                "module target is unchanged",
+            ),
+        ];
+
+        for (label, (_root, mut store, mut registry, session_id, _), intent, fragment) in cases {
+            let before = registry.status(&session_id).unwrap();
+            let before_lease = store.require_exact_realtime_lease().unwrap();
+            assert!(before_lease.pending_command.is_none(), "{label}");
+            let request =
+                player_authority_system_space_station_request(&session_id, before.revision, intent);
+            let error = registry
+                .commit_player_authority_system_space_station_command(
+                    &mut store,
+                    &session_id,
+                    request,
+                )
+                .unwrap_err();
+            assert!(
+                error
+                    .downcast_ref::<PlayerAuthoritySystemSpaceStationPreStageRejected>()
+                    .is_some(),
+                "{label}: {error:#}"
+            );
+            assert!(
+                format!("{error:#}").contains(fragment),
+                "{label}: {error:#}"
+            );
+
+            let after = registry.status(&session_id).unwrap();
+            assert_eq!(after.revision, before.revision, "{label}");
+            assert_eq!(after.canonical_sha256, before.canonical_sha256, "{label}");
+            assert_eq!(after.domain_sha256, before.domain_sha256, "{label}");
+            let after_lease = store.require_exact_realtime_lease().unwrap();
+            assert_eq!(
+                after_lease.acknowledged.revision, before_lease.acknowledged.revision,
+                "{label}"
+            );
+            assert_eq!(
+                after_lease.acknowledged.sequence, before_lease.acknowledged.sequence,
+                "{label}"
+            );
+            assert!(after_lease.pending_command.is_none(), "{label}");
+        }
+    }
+
+    #[test]
     fn system_space_station_pending_patch_recovers_cold_and_same_intent_replays_without_old_base() {
         let (_root, mut store, registry, session_id, _) =
             player_authority_system_space_station_fixture("not-started");
@@ -17152,6 +17288,12 @@ mod tests {
             assert!(
                 format!("{error:#}").contains("lost response"),
                 "{fault:?}: {error:#}"
+            );
+            assert!(
+                error
+                    .downcast_ref::<PlayerAuthoritySystemSpaceStationPreStageRejected>()
+                    .is_none(),
+                "{fault:?}: after-stage failures must remain uncertain"
             );
             if fault == PlayerAuthorityCommandFault::AfterStage {
                 let after = registry.status(&session_id).unwrap();

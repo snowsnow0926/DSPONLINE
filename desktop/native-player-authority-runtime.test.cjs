@@ -6,6 +6,7 @@ const test = require("node:test");
 
 const {
   NativePlayerAuthorityRuntime,
+  SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
 } = require("./native-player-authority-runtime.cjs");
 const {
   NativePlayerAuthorityMacroBroker,
@@ -85,6 +86,22 @@ function playerCommand(baseRevision, commandId, value = true) {
       addedBelts: [],
       removedBeltIds: [],
     },
+  };
+}
+
+function systemSpaceStationRequest(baseRevision, intent) {
+  const identity = deriveSystemSpaceStationCommandIdentity({
+    sessionId: "core-main-1",
+    runId: "player-run-1",
+    expectedRevision: baseRevision,
+    expectedRegistryFingerprint: "7df8cf3a",
+    intent,
+  });
+  return {
+    commandId: identity.commandId,
+    baseRevision,
+    expectedRegistryFingerprint: "7df8cf3a",
+    intent,
   };
 }
 
@@ -981,6 +998,155 @@ test("system-space-station intents share the exact command FIFO without exposing
   }
 });
 
+test("typed station pre-stage rejections stay definite, cancel dependent commands, and resume", async () => {
+  const cases = [
+    {
+      id: "insufficient-inventory",
+      label: "insufficient module inventory",
+      intent: { type: "module-target", systemId: "helios", module: "backbone", target: 1 },
+    },
+    {
+      id: "missing-tech",
+      label: "missing construction technology",
+      intent: { type: "start", systemId: "helios" },
+    },
+    {
+      id: "unchanged-target",
+      label: "unchanged module target",
+      intent: { type: "module-target", systemId: "helios", module: "backbone", target: 0 },
+    },
+  ];
+
+  for (const scenario of cases) {
+    const value = fixture({
+      registry: {
+        async commitPlayerAuthoritySystemSpaceStationCommand(ownerId, request) {
+          value.calls.push(["station-command", ownerId, request]);
+          throw Object.assign(new Error(scenario.label), {
+            code: SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
+          });
+        },
+      },
+    });
+    await value.runtime.activate({
+      sessionId: "core-main-1", runId: "player-run-1",
+      expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+    });
+
+    const rejected = value.runtime.commitSystemSpaceStationIntent(
+      systemSpaceStationRequest(7, scenario.intent),
+    );
+    const dependent = value.runtime
+      .commitCommand(playerCommand(8, `dependent-${scenario.id}`, 1))
+      .catch((error) => error);
+    await assert.rejects(rejected, (error) => {
+      assert.equal(error.code, SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE, scenario.label);
+      assert.equal(error.message, scenario.label);
+      return true;
+    });
+    assert.equal(
+      (await dependent).code,
+      "NATIVE_PLAYER_AUTHORITY_COMMAND_QUEUE_ABORTED",
+      scenario.label,
+    );
+    assert.deepEqual(
+      value.runtime.snapshot(),
+      {
+        phase: "active",
+        sessionId: "core-main-1",
+        runId: "player-run-1",
+        revision: 7,
+        acknowledgedSequence: 0,
+        nextSequence: 1,
+        nextDeadlineMs: 11_000,
+        inFlight: false,
+        currentOperation: null,
+        queuedCommands: 0,
+        macroSessionId: null,
+        macroAlgorithmVersion: null,
+        lastErrorCode: null,
+      },
+      scenario.label,
+    );
+    assert.equal(value.timers.length, 1, scenario.label);
+    assert.equal(value.timers[0].cancelled, false, scenario.label);
+
+    const resumed = await value.runtime.commitCommand(
+      playerCommand(7, `replacement-${scenario.id}`, 2),
+    );
+    assert.equal(resumed.revision, 8, scenario.label);
+    assert.equal(value.runtime.snapshot().phase, "active", scenario.label);
+  }
+});
+
+test("lost station response stays uncertain until its byte-identical retry receives typed rejection", async () => {
+  let attempts = 0;
+  const value = fixture({
+    registry: {
+      async commitPlayerAuthoritySystemSpaceStationCommand(ownerId, request) {
+        value.calls.push(["station-command", ownerId, request]);
+        attempts += 1;
+        if (attempts === 1) {
+          throw Object.assign(new Error("pipe closed before response"), { code: "EPIPE" });
+        }
+        throw Object.assign(new Error("module inventory is insufficient"), {
+          code: SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
+        });
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  const request = systemSpaceStationRequest(7, {
+    type: "module-target", systemId: "helios", module: "backbone", target: 1,
+  });
+
+  await assert.rejects(
+    value.runtime.commitSystemSpaceStationIntent(request),
+    { code: "NATIVE_PLAYER_AUTHORITY_COMMAND_UNCERTAIN" },
+  );
+  assert.equal(value.runtime.snapshot().phase, "uncertain");
+  assert.equal(value.runtime.snapshot().revision, 7);
+
+  await assert.rejects(value.runtime.retryUncertain(), (error) => {
+    assert.equal(error.code, SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE);
+    return true;
+  });
+  assert.equal(value.runtime.snapshot().phase, "active");
+  assert.equal(value.runtime.snapshot().revision, 7);
+  assert.equal(value.runtime.snapshot().nextSequence, 1);
+  const calls = value.calls.filter(([operation]) => operation === "station-command");
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0][2], calls[1][2]);
+});
+
+test("ordinary generic commands never trust the station-only pre-stage rejection code", async () => {
+  const value = fixture({
+    registry: {
+      async commitPlayerAuthorityCommand(ownerId, request) {
+        value.calls.push(["command", ownerId, request]);
+        throw Object.assign(new Error("forged station-only code"), {
+          code: SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
+        });
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+
+  await assert.rejects(
+    value.runtime.commitCommand(playerCommand(7, "ordinary-command-with-station-code", 1)),
+    { code: "NATIVE_PLAYER_AUTHORITY_COMMAND_UNCERTAIN" },
+  );
+  assert.equal(value.runtime.snapshot().phase, "uncertain");
+  assert.equal(value.runtime.snapshot().revision, 7);
+  assert.equal(value.runtime.snapshot().nextSequence, 1);
+});
+
 test("lost system-space-station response retries the byte-identical intent command", async () => {
   let attempts = 0;
   const value = fixture({
@@ -1025,6 +1191,8 @@ test("lost system-space-station response retries the byte-identical intent comma
     value.runtime.commitSystemSpaceStationIntent(request),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_COMMAND_UNCERTAIN",
   );
+  assert.equal(value.runtime.snapshot().phase, "uncertain");
+  assert.equal(value.runtime.snapshot().revision, 7);
   const recovered = await value.runtime.retryUncertain();
   assert.equal(recovered.revision, 8);
   assert.deepEqual(recovered.changedEntityIds, ["station-1"]);
@@ -1038,6 +1206,55 @@ test("lost system-space-station response retries the byte-identical intent comma
     value.calls.filter(([operation]) => operation === "command").length,
     0,
   );
+});
+
+test("generic Host failure after station durable stage remains uncertain and retryable", async () => {
+  let attempts = 0;
+  const value = fixture({
+    registry: {
+      async commitPlayerAuthoritySystemSpaceStationCommand(ownerId, request) {
+        value.calls.push(["station-command", ownerId, request]);
+        attempts += 1;
+        if (attempts === 1) {
+          throw Object.assign(
+            new Error("lost response after durable stage: module inventory is insufficient"),
+            { code: "NATIVE_OPERATION_FAILED" },
+          );
+        }
+        return {
+          sequence: 1,
+          commandId: request.commandId,
+          baseRevision: request.baseRevision,
+          revision: 8,
+          settledDeadlineMs: 10_000,
+          duplicate: true,
+          ...changeReceipt(),
+          checkpoint: { generation: 4, rootHash: HASH_A, revision: 8 },
+          summary: summary(8),
+        };
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  const request = systemSpaceStationRequest(7, {
+    type: "module-target", systemId: "helios", module: "backbone", target: 1,
+  });
+
+  await assert.rejects(
+    value.runtime.commitSystemSpaceStationIntent(request),
+    { code: "NATIVE_PLAYER_AUTHORITY_COMMAND_UNCERTAIN" },
+  );
+  assert.equal(value.runtime.snapshot().phase, "uncertain");
+  assert.equal(value.runtime.snapshot().revision, 7);
+  const recovered = await value.runtime.retryUncertain();
+  assert.equal(recovered.phase, "active");
+  assert.equal(recovered.revision, 8);
+  const calls = value.calls.filter(([operation]) => operation === "station-command");
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0][2], calls[1][2]);
 });
 
 test("a command queued behind an in-flight tick waits and uses the next exact revision", async () => {

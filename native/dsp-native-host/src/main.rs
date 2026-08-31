@@ -11,7 +11,9 @@ use dsp_native_host::core_runtime::{
     NATIVE_CORE_VIEWPORT_ENTITY_PRESENTATION_V1_CAPABILITY, PLAYER_AUTHORITY_COMMAND_CAPABILITY,
     PLAYER_AUTHORITY_GATE_CAPABILITY, PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
     PLAYER_AUTHORITY_PAUSE_CAPABILITY, PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
-    PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY, PLAYER_AUTHORITY_TICK_CAPABILITY,
+    PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_CAPABILITY,
+    PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
+    PLAYER_AUTHORITY_TICK_CAPABILITY, PlayerAuthoritySystemSpaceStationPreStageRejected,
 };
 use dsp_native_host::exact_realtime_lease::{
     EXACT_REALTIME_LEASE_CAPABILITY, EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
@@ -874,6 +876,11 @@ fn response_bytes(result: anyhow::Result<HostAction>) -> anyhow::Result<(Vec<u8>
                 .is_some()
             {
                 V47_IMPORT_JS_COMPATIBILITY_REQUIRED_CODE
+            } else if error
+                .downcast_ref::<PlayerAuthoritySystemSpaceStationPreStageRejected>()
+                .is_some()
+            {
+                PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE
             } else {
                 "NATIVE_OPERATION_FAILED"
             };
@@ -999,5 +1006,30 @@ mod tests {
         assert!(capabilities.iter().any(|capability| {
             capability.as_str() == Some(NATIVE_CORE_BLUEPRINT_EXPORT_CONTEXT_V1_CAPABILITY)
         }));
+    }
+
+    #[test]
+    fn response_exposes_only_the_typed_station_pre_stage_rejection_code() {
+        let (typed_bytes, shutdown) = response_bytes(Err(anyhow::Error::new(
+            PlayerAuthoritySystemSpaceStationPreStageRejected::new(
+                "native system-space-station module inventory is insufficient",
+            ),
+        )))
+        .unwrap();
+        assert!(!shutdown);
+        let typed: Value = serde_json::from_slice(&typed_bytes).unwrap();
+        assert_eq!(typed["ok"], false);
+        assert_eq!(
+            typed["error"]["code"],
+            PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE
+        );
+
+        let (generic_bytes, shutdown) = response_bytes(Err(anyhow!(
+            "native system-space-station lost response after durable stage"
+        )))
+        .unwrap();
+        assert!(!shutdown);
+        let generic: Value = serde_json::from_slice(&generic_bytes).unwrap();
+        assert_eq!(generic["error"]["code"], "NATIVE_OPERATION_FAILED");
     }
 }

@@ -1,5 +1,9 @@
 # 系统架构
 
+> **Windows Rust 固定分区 prepare/串行提交边界（2026-09-01，开发候选，未发布）**：`DeterministicRuntime` 现在可以在同一个进程生命周期、最多 8 线程的 Rayon 池中并发执行固定 4/8 个异构只读 prepare 分区。工厂打开或缓存失效时，线路路由、普通物流 buffer、本地/量子目录、施工、站点/量子过渡和星际目录/活动从同一不可变 revision 生成私有结果；每个模拟步的 ready station、矿脉和普通机器电力需求同样先生成独立事件缓冲。所有分区必须全部 join，随后才按历史领域顺序检查错误并串行回放；任何失败都丢弃整组结果，不安装先完成的缓存，也不改源 revision。
+>
+> 分区少于 2 个、总工作量少于 4,096 或线程策略为 1 时自动走调用线程；其他情况仍只使用同一有界池，不创建临时线程池。profile 只报告活动分区、工作量、策略选择、实际参与外层分区的 worker 数和是否并行，不把扫描计数冒充墙钟收益。合成完整候选回归覆盖 1/2/4/8 worker 的完整状态字节、规范 SHA-256、领域 SHA-256 和物料投影 SHA-256 一致，并覆盖“较晚领域失败但较早领域成功”时所有 prepared cache 仍为空。该切片只并行无共享写的准备阶段；共享物料提交、线路冲突提交、完整 pure-idle/offline/time-warp 和跨 CPU/Windows 版本长跑仍未闭合，所以 `authorityEligible=false` 保持不变，GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 1.2.3 均不改变。
+
 > **Windows ordinary storage/splitter 活动桥接边界（2026-09-01，开发候选，未启用）**：Rust 普通物流 buffer 的 `inputs → outputs` 桥接不再在每个模拟步遍历全部 storage/splitter 行。冷启动/拓扑重建执行一次全扫描，随后 session-only `BTreeSet<entity-row>` 仅接收传送带真实物料移动的 source/target wake；桥接按持久实体行顺序提交，处理后休眠，直到下一次库存事件。活动达到 75%、目录/实体数量漂移或无法证明 built-in 形状时回到同一全扫描语义。runtime queue 只在完整候选提交后安装，不序列化、不参与规范哈希，失败候选保留源 revision 与 wake 证据。该边界只关闭 ordinary storage/splitter 桥接外层全扫，不能代表普通生产、电力、material-delivery、量子高扇出或全部物流已经严格 `O(active)`。
 
 > **Windows Rust ordinary 蓝图完整生命周期边界（2026-09-01，开发候选，未发布）**：原生权威模式下，普通内置蓝图现已把捕获、严格导入、确定性导出、直接部署、仅入队、领料、队列部署和取消闭合到同一条 Rust/Host/薄 UI 事务链。renderer 只提交与当前 session/run/revision/registry 绑定的最小语义 marker；Rust 独占目录解析、canonicalization、材料与拓扑推导，并在 prepare 和私有 apply 两层重验实体、线路、蓝图、版本和施工队列八个持久 ID 域。live、generic cold-WAL、重复 command ID 与五个 durable fault boundary 复用同一展开器；候选失败只丢弃副本，不允许部分扣料、部分建造、假成功或 renderer 自动重发。

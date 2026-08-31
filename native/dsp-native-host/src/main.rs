@@ -103,6 +103,7 @@ fn handle_request(
                     "native-core-factory-inventory-v1",
                     "native-core-construction-inventory-v1",
                     "native-core-blueprint-workspace-v1",
+                    "native-core-blueprint-enqueue-context-v1",
                     "native-core-construction-placement-context-v1",
                     "native-core-construction-belt-placement-context-v1",
                     "native-core-construction-belt-lane-context-v1",
@@ -352,6 +353,19 @@ fn handle_request(
             queue_entry_id.as_deref(),
             cursor,
             limit,
+        )?,
+        ControlRequest::CoreBlueprintEnqueueContext {
+            session_id,
+            expected_revision,
+            expected_registry_fingerprint,
+            blueprint_id,
+            blueprint_revision,
+        } => cores.blueprint_enqueue_context(
+            &session_id,
+            expected_revision,
+            &expected_registry_fingerprint,
+            &blueprint_id,
+            blueprint_revision,
         )?,
         ControlRequest::CoreConstructionPlacementContext {
             session_id,

@@ -19,10 +19,12 @@ import { useEffect, useRef, useState } from "react";
 import { canonicalizeNativeBlueprintName } from "../game/nativeBlueprintRenameIntentCommands";
 import {
   NATIVE_BLUEPRINT_PAGE_ROWS,
+  selectNativeBlueprintEnqueueSelectionBinding,
   selectNativeBlueprintRecipeOverrideBinding,
 } from "../game/nativeBlueprintWorkspaceStore";
 import type {
   NativeBlueprintDeleteBinding,
+  NativeBlueprintEnqueueSelectionBinding,
   NativeBlueprintMirror,
   NativeBlueprintRecipeOverrideBinding,
   NativeBlueprintRenameIdentity,
@@ -45,6 +47,9 @@ import type {
 import type {
   NativeConstructionQueueCancelPendingCommand,
 } from "../game/nativeConstructionQueueCancelCommandReconciliation";
+import type {
+  NativeBlueprintEnqueuePendingCommand,
+} from "../game/nativeBlueprintEnqueueCommandReconciliation";
 import {
   nativeBlueprintRenameEditorTargetState,
   type NativeBlueprintRenamePendingIdentity,
@@ -79,11 +84,13 @@ export interface NativeBlueprintWorkspaceProps {
   ) => boolean;
   onSubmitDeleteIntent: (binding: NativeBlueprintDeleteBinding) => boolean;
   onSubmitQueueCancelIntent: (binding: NativeConstructionQueueCancelBinding) => boolean;
+  onBeginQueuePlacement: (binding: NativeBlueprintEnqueueSelectionBinding) => boolean;
   pendingIdentity: NativeBlueprintRenamePendingIdentity | null;
   transformPending: NativeBlueprintTransformPendingCommand | null;
   recipeOverridePending: NativeBlueprintRecipeOverridePendingCommand | null;
   deletePending: NativeBlueprintDeletePendingCommand | null;
   queueCancelPending: NativeConstructionQueueCancelPendingCommand | null;
+  enqueuePending: NativeBlueprintEnqueuePendingCommand | null;
   resolution: NativeBlueprintRenameResolution | null;
   onConsumeRenameResolution: (submissionId: number) => void;
   commandPending: boolean;
@@ -268,11 +275,13 @@ export function NativeBlueprintWorkspace({
   onSubmitRecipeOverrideIntent,
   onSubmitDeleteIntent,
   onSubmitQueueCancelIntent,
+  onBeginQueuePlacement,
   pendingIdentity,
   transformPending,
   recipeOverridePending,
   deletePending,
   queueCancelPending,
+  enqueuePending,
   resolution,
   onConsumeRenameResolution,
   commandPending,
@@ -290,6 +299,7 @@ export function NativeBlueprintWorkspace({
   const renameCompositionRef = useRef(false);
   const renameSubmittedRef = useRef(false);
   const readyFrame = nativeFrameIsComplete(frame, status) ? frame : null;
+  const enqueueSelectionBinding = selectNativeBlueprintEnqueueSelectionBinding(readyFrame);
   const readStatus = readyFrame
     ? "ready"
     : status === "loading" || status === "empty" ? status : "unavailable";
@@ -342,7 +352,7 @@ export function NativeBlueprintWorkspace({
   if (!open) return null;
   const interactionLocked = commandPending || pendingIdentity !== null ||
     transformPending !== null || recipeOverridePending !== null || deletePending !== null ||
-    queueCancelPending !== null ||
+    queueCancelPending !== null || enqueuePending !== null ||
     renameEditor !== null;
   const editorTargetState = renameEditor?.conflict === "lineage"
     ? "lineage-conflict"
@@ -351,7 +361,7 @@ export function NativeBlueprintWorkspace({
   const editorConflict = editorTargetState === "lineage-conflict" || editorTargetState === "row-conflict";
   const editorLocked = Boolean(
     editorAccepted || pendingIdentity || transformPending || recipeOverridePending || deletePending ||
-    queueCancelPending || editorConflict,
+    queueCancelPending || enqueuePending || editorConflict,
   );
   const canonicalDraft = renameEditor ? canonicalizeNativeBlueprintName(renameEditor.draft) : null;
   const editorCanSubmit = Boolean(renameEditor && editorTargetState === "ready" &&
@@ -393,6 +403,15 @@ export function NativeBlueprintWorkspace({
           ? `施工取消已耐久提交；等待同 lineage revision ${queueCancelPending.receipt?.revision} 缺席投影`
           : "施工取消回执或投影无法证明；当前 lineage 保持锁定"
     : null;
+  const enqueuePendingCopy = enqueuePending
+    ? enqueuePending.phase === "dispatching"
+      ? "蓝图入队正在等待 main-owned durable ACK"
+      : enqueuePending.phase === "reconciling"
+        ? "蓝图入队结果不确定；仅进行六次有界只读对账，绝不自动重发"
+        : enqueuePending.phase === "awaiting-projection"
+          ? `蓝图入队已耐久提交；等待同 lineage revision ${enqueuePending.receipt?.revision} 精确成员投影`
+          : "蓝图入队回执或成员投影无法证明；当前 lineage 保持锁定"
+    : null;
   const pendingCopy = pendingIdentity
     ? pendingIdentity.phase === "awaiting-ack"
       ? "重命名正在等待 main-owned durable ACK"
@@ -402,9 +421,9 @@ export function NativeBlueprintWorkspace({
           ? "重命名结果无法确认；保持锁定并仅等待权威对账，绝不自动重发"
           : "重命名身份或投影发生冲突；保持锁定并停止猜测"
     : transformPendingCopy ?? recipeOverridePendingCopy ?? deletePendingCopy ??
-      queueCancelPendingCopy ?? (commandPending
+      queueCancelPendingCopy ?? enqueuePendingCopy ?? (commandPending
       ? "另一条原生命令正在等待 durable ACK"
-      : "页面按存储顺序显示；名称、方向、配方与删除由 Rust 权威提交。");
+      : "页面按存储顺序显示；名称、方向、配方、入队与删除由 Rust 权威提交。");
   const editorCopy = renameEditor
     ? pendingIdentity?.phase === "uncertain"
       ? "提交结果不确定：草稿已保留，禁止自动重发"
@@ -613,6 +632,18 @@ export function NativeBlueprintWorkspace({
               summary.mirror === "horizontal" ? "none" : "horizontal")}
               data-native-blueprint-action="mirror-transform"
             ><FlipHorizontal size={14} />{summary.mirror === "horizontal" ? "取消水平镜像" : "水平镜像"}</button> : null}
+            {selected ? <button
+              type="button"
+              disabled={interactionLocked || enqueueSelectionBinding === null}
+              onClick={() => {
+                if (enqueueSelectionBinding) onBeginQueuePlacement(enqueueSelectionBinding);
+              }}
+              title={enqueueSelectionBinding
+                ? `在原生画布选择${summary.name}的待建位置`
+                : `${summary.name}的完整 Rust 详情尚不能证明可进入待建定位`}
+              aria-label={`加入待建施工${summary.name}`}
+              data-native-blueprint-action="begin-enqueue-placement"
+            ><MapPin size={14} />加入待建施工</button> : null}
             {selected ? <button
               className="danger"
               type="button"

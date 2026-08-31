@@ -458,6 +458,32 @@ function normalizeBlueprintWorkspaceContext(value, label) {
   };
 }
 
+function normalizeBlueprintEnqueueContext(value, label) {
+  const source = exactObject(
+    value,
+    [
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "blueprintId",
+      "blueprintRevision",
+    ],
+    label,
+  );
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} expected registry fingerprint`,
+      256,
+    ),
+    blueprintId: blueprintOpaqueText(source.blueprintId, `${label} blueprint ID`, 512),
+    blueprintRevision: safeInteger(
+      source.blueprintRevision,
+      `${label} blueprint revision`,
+      1,
+    ),
+  };
+}
+
 function normalizeConstructionPlacementContext(value, label) {
   const source = exactObject(
     value,
@@ -3008,6 +3034,128 @@ function normalizeCoreBlueprintWorkspaceProjection(value, context) {
       opaqueIdBytes: 512,
       nameBytes: 256,
     },
+  };
+}
+
+function normalizeCoreBlueprintEnqueueContext(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "revision", "stateVersion",
+    "registryFingerprint", "request", "activePlanetId", "support", "expectedQueueId",
+    "limits",
+  ], "native blueprint enqueue context");
+  if (source.schemaVersion !== 1 ||
+      source.projectionType !== "blueprint-enqueue-context-v1" ||
+      source.source !== "native-core" || source.stateVersion !== 47) {
+    throw protocolError("native blueprint enqueue context identity");
+  }
+  requireProjectionByteBudget(source, "native blueprint enqueue context");
+  const projectionContext = normalizeBlueprintEnqueueContext(
+    context,
+    "native blueprint enqueue request context",
+  );
+  const revision = safeInteger(source.revision, "native blueprint enqueue revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native blueprint enqueue registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint) {
+    throw protocolError("native blueprint enqueue revision binding");
+  }
+  const requestSource = exactObject(
+    source.request,
+    [
+      "expectedRevision", "expectedRegistryFingerprint", "blueprintId", "blueprintRevision",
+    ],
+    "native blueprint enqueue request echo",
+  );
+  const requestBlueprintId = blueprintOpaqueText(
+    requestSource.blueprintId,
+    "native blueprint enqueue echoed blueprint ID",
+    512,
+  );
+  const requestBlueprintRevision = safeInteger(
+    requestSource.blueprintRevision,
+    "native blueprint enqueue echoed blueprint revision",
+    1,
+  );
+  if (requestSource.expectedRevision !== projectionContext.expectedRevision ||
+      requestSource.expectedRegistryFingerprint !==
+        projectionContext.expectedRegistryFingerprint ||
+      requestBlueprintId !== projectionContext.blueprintId ||
+      requestBlueprintRevision !== projectionContext.blueprintRevision) {
+    throw protocolError("native blueprint enqueue request binding");
+  }
+  const activePlanetId = blueprintOpaqueText(
+    source.activePlanetId,
+    "native blueprint enqueue active planet",
+    512,
+  );
+  const supportSource = exactObject(
+    source.support,
+    ["supported", "reason"],
+    "native blueprint enqueue support",
+  );
+  const supported = boolean(supportSource.supported, "native blueprint enqueue support flag");
+  const unsupportedReasons = [
+    "queue-full",
+    "next-id-exhausted",
+    "queue-id-collision",
+    "unsupported-blueprint-domain",
+    "unsupported-active-planet",
+    "unsupported-existing-queue-domain",
+    "version-conflict",
+  ];
+  const reason = supportSource.reason === null
+    ? null
+    : oneOf(
+        supportSource.reason,
+        unsupportedReasons,
+        "native blueprint enqueue support reason",
+      );
+  let expectedQueueId = null;
+  if (source.expectedQueueId !== null) {
+    expectedQueueId = blueprintOpaqueText(
+      source.expectedQueueId,
+      "native blueprint enqueue expected queue ID",
+      512,
+    );
+    const match = /^construction_(0|[1-9][0-9]*)$/.exec(expectedQueueId);
+    const suffix = match ? Number(match[1]) : Number.NaN;
+    if (!Number.isSafeInteger(suffix) || suffix < 0 || suffix >= Number.MAX_SAFE_INTEGER) {
+      throw protocolError("native blueprint enqueue expected queue ID");
+    }
+  }
+  if (supported !== (reason === null && expectedQueueId !== null) ||
+      !supported && (reason === null || expectedQueueId !== null)) {
+    throw protocolError("native blueprint enqueue support binding");
+  }
+  const limitsSource = exactObject(
+    source.limits,
+    ["projectionBytes"],
+    "native blueprint enqueue limits",
+  );
+  if (limitsSource.projectionBytes !== MAX_NATIVE_PROJECTION_BYTES) {
+    throw protocolError("native blueprint enqueue limits");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "blueprint-enqueue-context-v1",
+    source: "native-core",
+    revision,
+    stateVersion: 47,
+    registryFingerprint,
+    request: {
+      expectedRevision: projectionContext.expectedRevision,
+      expectedRegistryFingerprint: projectionContext.expectedRegistryFingerprint,
+      blueprintId: projectionContext.blueprintId,
+      blueprintRevision: projectionContext.blueprintRevision,
+    },
+    activePlanetId,
+    support: { supported, reason },
+    expectedQueueId,
+    limits: { projectionBytes: MAX_NATIVE_PROJECTION_BYTES },
   };
 }
 
@@ -7128,6 +7276,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreFactoryInventoryProjection: normalizeCoreFactoryInventoryProjection,
   coreConstructionInventoryProjection: normalizeCoreConstructionInventoryProjection,
   coreBlueprintWorkspaceProjection: normalizeCoreBlueprintWorkspaceProjection,
+  coreBlueprintEnqueueContext: normalizeCoreBlueprintEnqueueContext,
   coreConstructionPlacementContext: normalizeCoreConstructionPlacementContext,
   coreConstructionBeltPlacementContext: normalizeCoreConstructionBeltPlacementContext,
   coreConstructionBeltLaneContext: normalizeCoreConstructionBeltLaneContext,

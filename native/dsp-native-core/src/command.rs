@@ -8956,11 +8956,11 @@ impl CoreState {
         let expanded_black_hole_pause_intent;
         let expanded_time_warp_intent;
         let expanded_blueprint_intent;
-        let expanded_construction_queue_cancel_intent;
+        let expanded_construction_queue_intent;
         let expanded_entity_recipe_intent;
         let mut compact_entity_recipe_receipt_id = None;
         let mut blueprint_delete_index = None;
-        let mut construction_queue_cancel_intent = None;
+        let mut construction_queue_intent = None;
         let applied_command = if command_contains_active_planet_intent(command) {
             expanded_active_planet_intent = expand_active_planet_intent(self, command)?;
             &expanded_active_planet_intent
@@ -9003,10 +9003,10 @@ impl CoreState {
             blueprint_delete_index = expanded_blueprint_intent.delete_index();
             expanded_blueprint_intent.command()
         } else if crate::construction_queue_command::command_contains_intent(command) {
-            expanded_construction_queue_cancel_intent =
+            expanded_construction_queue_intent =
                 crate::construction_queue_command::expand_intent(self, command)?;
-            construction_queue_cancel_intent = Some(&expanded_construction_queue_cancel_intent);
-            expanded_construction_queue_cancel_intent.command()
+            construction_queue_intent = Some(&expanded_construction_queue_intent);
+            expanded_construction_queue_intent.command()
         } else if crate::manual_mining::command_contains_intent(command) {
             expanded_manual_mining_intent = crate::manual_mining::expand_intent(self, command)?;
             &expanded_manual_mining_intent
@@ -9046,7 +9046,7 @@ impl CoreState {
             Value::Object(base) => base,
             _ => bail!("native command replaced the GameState root"),
         };
-        if let Some(expansion) = construction_queue_cancel_intent {
+        if let Some(expansion) = construction_queue_intent {
             expansion.apply_to_base(&mut base)?;
         }
         next.install_base_from_command(base, rebuild_production_history);
@@ -9164,7 +9164,7 @@ impl CoreState {
         }
         next.revision += 1;
         let only_pause_changed = blueprint_delete_index.is_none()
-            && construction_queue_cancel_intent.is_none()
+            && construction_queue_intent.is_none()
             && applied_command.changed_entities.is_empty()
             && applied_command.added_entities.is_empty()
             && applied_command.removed_entity_ids.is_empty()
@@ -9216,7 +9216,7 @@ impl CoreState {
             // as they do after cold WAL recovery.
             result.topology_dirty = true;
         }
-        if construction_queue_cancel_intent.is_some() {
+        if construction_queue_intent.is_some() {
             result.topology_dirty = true;
         }
         *self = next;
@@ -20215,5 +20215,409 @@ mod tests {
             assert_eq!(state.revision, 9);
             assert_eq!(state.canonical_sha256().unwrap(), before_hash);
         }
+    }
+
+    fn construction_queue_enqueue_state() -> CoreState {
+        let mut state = player_command_state();
+        state.base_value_mut().insert(
+            "blueprints".to_owned(),
+            serde_json::json!([{
+                "id": "ordinary-alpha",
+                "name": "普通蓝图",
+                "revision": 2,
+                "rotation": 90,
+                "mirror": "horizontal",
+                "entities": [
+                    {
+                        "key": "smelter-left",
+                        "buildingId": "arc_smelter",
+                        "offset": { "x": 0.0, "y": 0.0 },
+                        "machineCount": 1,
+                        "recipeId": null
+                    },
+                    {
+                        "key": "smelter-right",
+                        "buildingId": "arc_smelter",
+                        "offset": { "x": 2.0, "y": 0.0 },
+                        "machineCount": 1,
+                        "recipeId": null
+                    }
+                ],
+                "belts": [{
+                    "key": "belt-link",
+                    "sourceKey": "smelter-left",
+                    "targetKey": "smelter-right",
+                    "itemId": "iron_ingot",
+                    "lanes": 1,
+                    "tier": 1
+                }],
+                "resourceAnchors": [],
+                "externalPorts": [],
+                "recipeOverrides": {},
+                "opaqueDefinitionPayload": { "preserve": [1, 2, 3] }
+            }]),
+        );
+        state
+    }
+
+    fn construction_queue_enqueue_intent_command(
+        revision: u64,
+        blueprint_id: &str,
+        blueprint_revision: u64,
+        x: f64,
+        y: f64,
+    ) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("constructionQueue".to_owned()),
+                PathSegment::Key("intent".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(serde_json::json!({
+                "kind": "enqueue",
+                "blueprintId": blueprint_id,
+                "blueprintRevision": blueprint_revision,
+                "position": { "x": x, "y": y },
+                "revision": revision
+            })),
+        }];
+        command
+    }
+
+    #[test]
+    fn player_authority_blueprint_enqueue_derives_one_atomic_queue_row_and_replays() {
+        let command =
+            construction_queue_enqueue_intent_command(9, "ordinary-alpha", 2, 20.25, 30.5);
+        let durable = serde_json::to_string(&command).unwrap();
+        for forbidden in [
+            "construction_9",
+            "ordinary-alpha@2",
+            "blueprintName",
+            "queuedAt",
+            "rotation",
+            "mirror",
+            "allowExactOverlap",
+            "reservedConstruction",
+            "placedEntityIdsByKey",
+            "opaqueDefinitionPayload",
+        ] {
+            assert!(!durable.contains(forbidden), "WAL leaked {forbidden}");
+        }
+
+        let mut live = construction_queue_enqueue_state();
+        let context = live
+            .blueprint_enqueue_context_projection(
+                9,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "ordinary-alpha",
+                2,
+            )
+            .unwrap();
+        assert_eq!(context["projectionType"], "blueprint-enqueue-context-v1");
+        assert_eq!(context["activePlanetId"], "home");
+        assert_eq!(context["expectedQueueId"], "construction_9");
+        assert_eq!(
+            context["support"],
+            serde_json::json!({ "supported": true, "reason": null })
+        );
+        assert!(context.get("blueprint").is_none());
+        assert!(context.get("position").is_none());
+
+        let before = live.base_value().clone();
+        let entities_before = (0..live.entity_index.len())
+            .map(|index| live.parse_entity(index).unwrap())
+            .collect::<Vec<_>>();
+        let belts_before = (0..live.belt_index.len())
+            .map(|index| live.parse_belt(index).unwrap())
+            .collect::<Vec<_>>();
+        let mut replay = live.clone();
+        let receipt = live.apply_player_authority_command(&command).unwrap();
+        let replayed: SimulationCommandPatch = serde_json::from_str(&durable).unwrap();
+        let replay_receipt = replay.apply_command(&replayed).unwrap();
+
+        assert_eq!(receipt, replay_receipt);
+        assert_eq!(receipt.previous_revision, 9);
+        assert_eq!(receipt.revision, 10);
+        assert!(receipt.changed_entity_ids.is_empty());
+        assert!(receipt.changed_belt_ids.is_empty());
+        assert!(receipt.topology_dirty);
+        assert_eq!(
+            live.canonical_sha256().unwrap(),
+            replay.canonical_sha256().unwrap()
+        );
+        assert_eq!(live.base_value()["nextId"], 10);
+        assert_eq!(live.base_value()["construction"], before["construction"]);
+        assert_eq!(live.base_value()["portableFleet"], before["portableFleet"]);
+        assert_eq!(live.base_value()["blueprints"], before["blueprints"]);
+        assert_eq!(
+            live.base_value()["blueprintVersions"],
+            serde_json::json!([{
+                "id": "ordinary-alpha@2",
+                "blueprintId": "ordinary-alpha",
+                "revision": 2,
+                "definition": before["blueprints"][0]
+            }])
+        );
+        let row = &live.base_value()["constructionQueue"][0];
+        assert_eq!(row["id"], "construction_9");
+        assert_eq!(row["blueprintId"], "ordinary-alpha");
+        assert_eq!(row["blueprintVersionId"], "ordinary-alpha@2");
+        assert_eq!(row["blueprintRevision"], 2);
+        assert_eq!(row["blueprintName"], "普通蓝图");
+        assert_eq!(row["planetId"], "home");
+        assert_eq!(
+            row["position"],
+            serde_json::json!({ "x": 20.25, "y": 30.5 })
+        );
+        assert_eq!(row["rotation"], 90);
+        assert_eq!(row["mirror"], "horizontal");
+        assert_eq!(row["queuedAt"], 100);
+        assert_eq!(row["status"], "pending-materials");
+        assert_eq!(row["reservedConstruction"], serde_json::json!({}));
+        assert_eq!(row["reservedFleet"], serde_json::json!({}));
+        assert_eq!(row["placedEntityIdsByKey"], serde_json::json!({}));
+        assert!(row.get("allowExactOverlap").is_none());
+        assert_eq!(
+            (0..live.entity_index.len())
+                .map(|index| live.parse_entity(index).unwrap())
+                .collect::<Vec<_>>(),
+            entities_before
+        );
+        assert_eq!(
+            (0..live.belt_index.len())
+                .map(|index| live.parse_belt(index).unwrap())
+                .collect::<Vec<_>>(),
+            belts_before
+        );
+        assert_eq!(
+            live.deterministic_player_authority_resume_result(&replayed, 9, 10)
+                .unwrap(),
+            receipt
+        );
+    }
+
+    #[test]
+    fn player_authority_blueprint_enqueue_fails_closed_for_overlap_mod_and_allocator_edges() {
+        let overlap = construction_queue_enqueue_intent_command(9, "ordinary-alpha", 2, 1.0, 2.0);
+        let mut state = construction_queue_enqueue_state();
+        let before = state.canonical_sha256().unwrap();
+        assert!(state.apply_player_authority_command(&overlap).is_err());
+        assert_eq!(state.canonical_sha256().unwrap(), before);
+
+        let mut internal = construction_queue_enqueue_state();
+        internal.base_value_mut()["blueprints"][0]["entities"][1]["offset"] =
+            serde_json::json!({ "x": 0.49, "y": 0.0 });
+        let before = internal.canonical_sha256().unwrap();
+        assert!(
+            internal
+                .apply_player_authority_command(&construction_queue_enqueue_intent_command(
+                    9,
+                    "ordinary-alpha",
+                    2,
+                    20.0,
+                    30.0,
+                ))
+                .is_err()
+        );
+        assert_eq!(internal.canonical_sha256().unwrap(), before);
+
+        let mut exhausted = construction_queue_enqueue_state();
+        exhausted.base_value_mut()["nextId"] = Value::from(MAX_JAVASCRIPT_SAFE_INTEGER);
+        let projection = exhausted
+            .blueprint_enqueue_context_projection(
+                9,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "ordinary-alpha",
+                2,
+            )
+            .unwrap();
+        assert_eq!(projection["support"]["reason"], "next-id-exhausted");
+        assert!(projection["expectedQueueId"].is_null());
+
+        let mut max_revision = construction_queue_enqueue_state();
+        max_revision.revision = MAX_JAVASCRIPT_SAFE_INTEGER;
+        let before = max_revision.canonical_sha256().unwrap();
+        assert!(
+            max_revision
+                .blueprint_enqueue_context_projection(
+                    MAX_JAVASCRIPT_SAFE_INTEGER,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    "ordinary-alpha",
+                    2,
+                )
+                .is_err()
+        );
+        assert!(
+            max_revision
+                .apply_player_authority_command(&construction_queue_enqueue_intent_command(
+                    MAX_JAVASCRIPT_SAFE_INTEGER,
+                    "ordinary-alpha",
+                    2,
+                    20.0,
+                    30.0,
+                ))
+                .is_err()
+        );
+        assert_eq!(max_revision.canonical_sha256().unwrap(), before);
+
+        let mut mod_state = construction_queue_enqueue_state();
+        let mut catalog = serde_json::to_value(mod_state.catalog.snapshot.clone()).unwrap();
+        catalog["buildings"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "MOD/custom-machine",
+                "kind": "machine",
+                "speed": 1,
+                "inputCapacity": 10,
+                "outputCapacity": 10
+            }));
+        catalog["constructions"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "MOD/custom-machine",
+                "outputAmount": 1,
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+            }));
+        mod_state.catalog = Arc::new(
+            RuntimeCatalog::from_value(catalog, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT).unwrap(),
+        );
+        mod_state.base_value_mut()["blueprints"][0]["entities"][0]["buildingId"] =
+            Value::from("MOD/custom-machine");
+        mod_state.base_value_mut()["blueprints"][0]["entities"][0]["recipeId"] = Value::Null;
+        let projection = mod_state
+            .blueprint_enqueue_context_projection(
+                9,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "ordinary-alpha",
+                2,
+            )
+            .unwrap();
+        assert_eq!(
+            projection["support"]["reason"],
+            "unsupported-blueprint-domain"
+        );
+        assert!(
+            mod_state
+                .apply_player_authority_command(&construction_queue_enqueue_intent_command(
+                    9,
+                    "ordinary-alpha",
+                    2,
+                    20.0,
+                    30.0,
+                ))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn player_authority_blueprint_enqueue_creates_optional_version_directory_live_and_replay() {
+        for missing_kind in ["missing", "null"] {
+            let mut live = construction_queue_enqueue_state();
+            if missing_kind == "missing" {
+                live.base_value_mut().remove("blueprintVersions");
+            } else {
+                live.base_value_mut()["blueprintVersions"] = Value::Null;
+            }
+            let mut replay = live.clone();
+            let command =
+                construction_queue_enqueue_intent_command(9, "ordinary-alpha", 2, 20.0, 30.0);
+            let durable = serde_json::to_string(&command).unwrap();
+            let replayed: SimulationCommandPatch = serde_json::from_str(&durable).unwrap();
+            let live_receipt = live.apply_player_authority_command(&command).unwrap();
+            let replay_receipt = replay.apply_command(&replayed).unwrap();
+            assert_eq!(live_receipt, replay_receipt, "{missing_kind}");
+            assert_eq!(
+                live.canonical_sha256().unwrap(),
+                replay.canonical_sha256().unwrap(),
+                "{missing_kind}"
+            );
+            assert_eq!(
+                live.base_value()["blueprintVersions"][0]["id"],
+                "ordinary-alpha@2",
+                "{missing_kind}"
+            );
+        }
+
+        let mut fractional = construction_queue_enqueue_state();
+        fractional.base_value_mut()["blueprints"][0]["revision"] = serde_json::json!(1.9);
+        fractional
+            .apply_player_authority_command(&construction_queue_enqueue_intent_command(
+                9,
+                "ordinary-alpha",
+                1,
+                20.0,
+                30.0,
+            ))
+            .unwrap();
+        assert_eq!(
+            fractional.base_value()["blueprintVersions"][0]["id"],
+            "ordinary-alpha@1"
+        );
+        assert_eq!(
+            fractional.base_value()["blueprintVersions"][0]["definition"]["revision"],
+            serde_json::json!(1.9)
+        );
+        assert_eq!(
+            fractional.base_value()["constructionQueue"][0]["blueprintRevision"],
+            1
+        );
+    }
+
+    #[test]
+    fn player_authority_blueprint_enqueue_overlap_uses_historical_immutable_snapshot() {
+        let mut state = construction_queue_enqueue_state();
+        let mut live_historical = state.base_value()["blueprints"][0].clone();
+        live_historical["id"] = Value::from("historical");
+        live_historical["name"] = Value::from("历史蓝图-当前版");
+        live_historical["revision"] = Value::from(2);
+        live_historical["entities"][0]["offset"] = serde_json::json!({ "x": 50.0, "y": 50.0 });
+        live_historical["entities"][1]["offset"] = serde_json::json!({ "x": 52.0, "y": 50.0 });
+        state.base_value_mut()["blueprints"]
+            .as_array_mut()
+            .unwrap()
+            .push(live_historical);
+
+        let mut immutable = state.base_value()["blueprints"][0].clone();
+        immutable["id"] = Value::from("historical");
+        immutable["name"] = Value::from("历史蓝图-排队快照");
+        immutable["revision"] = Value::from(1);
+        state.base_value_mut()["blueprintVersions"] = serde_json::json!([{
+            "id": "historical@1",
+            "blueprintId": "historical",
+            "revision": 1,
+            "definition": immutable
+        }]);
+        state.base_value_mut()["constructionQueue"] = serde_json::json!([{
+            "id": "historical-order",
+            "blueprintId": "historical",
+            "blueprintVersionId": "historical@1",
+            "blueprintRevision": 1,
+            "blueprintName": "历史蓝图-排队快照",
+            "planetId": "home",
+            "position": { "x": 20.0, "y": 30.0 },
+            "rotation": 90,
+            "mirror": "horizontal",
+            "queuedAt": 50,
+            "status": "pending-materials",
+            "reservedConstruction": {},
+            "reservedFleet": {},
+            "placedEntityIdsByKey": {}
+        }]);
+        let before = state.canonical_sha256().unwrap();
+        assert!(
+            state
+                .apply_player_authority_command(&construction_queue_enqueue_intent_command(
+                    9,
+                    "ordinary-alpha",
+                    2,
+                    20.0,
+                    30.0,
+                ))
+                .is_err()
+        );
+        assert_eq!(state.canonical_sha256().unwrap(), before);
     }
 }

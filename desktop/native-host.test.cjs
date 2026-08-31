@@ -9,6 +9,7 @@ const {
   MAX_NATIVE_PROJECTION_TRANSFER_BYTES,
   NATIVE_FACTORY_INVENTORY_CAPABILITY,
   NATIVE_CONSTRUCTION_INVENTORY_CAPABILITY,
+  NATIVE_BLUEPRINT_ENQUEUE_CONTEXT_CAPABILITY,
   NATIVE_CONSTRUCTION_PLACEMENT_CONTEXT_CAPABILITY,
   NATIVE_CONSTRUCTION_REMOVAL_CONTEXT_CAPABILITY,
   NATIVE_CONSTRUCTION_STACK_CONTEXT_CAPABILITY,
@@ -36,6 +37,10 @@ const {
 test("native factory inventory capability matches the Rust host contract", () => {
   assert.equal(NATIVE_FACTORY_INVENTORY_CAPABILITY, "native-core-factory-inventory-v1");
   assert.equal(NATIVE_CONSTRUCTION_INVENTORY_CAPABILITY, "native-core-construction-inventory-v1");
+  assert.equal(
+    NATIVE_BLUEPRINT_ENQUEUE_CONTEXT_CAPABILITY,
+    "native-core-blueprint-enqueue-context-v1",
+  );
   assert.equal(
     NATIVE_CONSTRUCTION_PLACEMENT_CONTEXT_CAPABILITY,
     "native-core-construction-placement-context-v1",

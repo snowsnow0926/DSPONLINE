@@ -116,7 +116,7 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <PendingBlueprintLayer/);
     expect(app).not.toMatch(/!nativePlayerAuthorityOwnsRuntime \? <SelectionToolbar/);
     expect(app).toMatch(/<SelectionToolbar[\s\S]*?unsafeActionsEnabled=\{!nativePlayerAuthorityOwnsRuntime\}/);
-    expect(app).toMatch(/<NativeBlueprintWorkspace[\s\S]*?!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintTransformPending &&[\s\S]*?!nativeBlueprintRecipeOverridePending &&[\s\S]*?!nativeBlueprintDeletePending &&[\s\S]*?!nativeConstructionQueueCancelPending &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace/);
+    expect(app).toMatch(/<NativeBlueprintWorkspace[\s\S]*?!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintTransformPending &&[\s\S]*?!nativeBlueprintRecipeOverridePending &&[\s\S]*?!nativeBlueprintDeletePending &&[\s\S]*?!nativeConstructionQueueCancelPending &&[\s\S]*?!nativeBlueprintEnqueuePending &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <RuntimeRenderProfile id="onboarding">/);
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeFactoryInspectorPanel[\s\S]*?: <StableInspectorPanel/);
     expect(app).toMatch(/<HeaderControls[\s\S]*?constructionCenterVisible=\{nativePlayerAuthorityOwnsRuntime \|\| game\.entities\.some/);

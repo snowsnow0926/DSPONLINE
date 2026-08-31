@@ -1,5 +1,15 @@
 # DSP极简网络项目现状
 
+> **Windows Rust queue-only 蓝图入队与画布定位（2026-08-31，开发候选，未发布）**：原生蓝图工作区的“加入待建施工”现在先进入独立画布定位，实际点击时再读取同 revision 的 `blueprint-enqueue-context-v1`。renderer 只提供有限坐标和蓝图行身份；Rust 从当前权威状态推导活动行星、`construction_${nextId}`、名称、transform、queuedAt 和 immutable version，并再次验证完整蓝图/版本/队列目录、allocator、队列上限及精确重叠。
+>
+> durable marker 精确为 `{kind:"enqueue",blueprintId,blueprintRevision,position:{x,y},revision}`，不保存 planet/queue/name/transform/version/body 或库存结果。成功只创建 `pending-materials` 订单、必要版本并递增 `nextId`；不会预扣 construction、portable fleet、托盘或量子库存，也不会在这个事务创建实体/线路。缺失/null 的合法旧 v47 `blueprintVersions` 可原子创建；畸形非数组拒绝。MOD、resource anchor、external port、special building、exact overlap 和无法证明的既有队列形状继续失败关闭。
+>
+> 前端每次定位只 dispatch 一次；正常路径要求连续 `R+1` durable ACK，未知 transport outcome 只按六个固定延迟做 main-owned read-only reconciliation，绝不 resend。ACK 后用完整队列对 `expectedQueueId` 的 exact membership `present=true` 证明确认，不依赖分页或 total；revision 前进会重读，lineage 变化会安全退役。live、generic replay 与 Host WAL 冷恢复共用同一 marker，失败不部分提交。
+>
+> 冻结源码后新跑 typecheck 通过；前端专项 8 文件、124 项通过；`DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 的完整 Vitest 为 350 文件总计（337 通过、13 条件跳过），2,695 项总计（2,667 通过、28 条件跳过、0 失败，553.36 秒）；Rust fmt、strict clippy 和全量测试通过，Core `791/791`、Host library `186/186`、Host main `1/1`，合计 `978/978`；最终 Windows native/desktop 为 490 总项（489 通过、1 个 Windows symlink 权限条件跳过、0 失败）。production build 与 startup budget 通过：startup 总 gzip `180,401 B`、menu `257,770 B`、forbidden module `0`。
+>
+> 普通 Chromium E2E 新跑 460 总项、433 通过、27 条件跳过、0 失败（7.2 分钟）；durable WAL E2E 新跑 `7/7` 通过、0 跳过、0 失败（51.8 秒）。失败历史继续保留：并发实现期间有两次 props/fixture 未合拢的 typecheck、一次 App 旧 fallback 断言、两条 Host fixture checksum、一次 workspace 错误断言和一次 strict-clippy large-enum；fresh Release Host 能力门禁还曾以 `34/35` 揭露磁盘上的 Host 过旧；第一次 native 全量又有两条旧 projection 枚举断言失败。以上均按根因修复并由后续对应门禁覆盖，不能从历史中删除。固定进度暂不人为跳点，仍为 `Rust 83% / 薄 UI 96% / O(active) 96% / 并行 72% / 综合开发 88% / 发布成熟度 60%`。本切片不是完整蓝图 capture/import/fund/deploy，也不表示 Windows 计划完成；GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 不变，且未签名、未部署、未连接生产、未读取或修改玩家存档。
+
 > **Windows 量子脏键证明与蓝图配方覆盖权威（2026-08-31，开发候选，未发布）**：提交 `c9be64f` 把量子网络稀疏写回证明收敛为只访问本步 dirty inventory key；三分之四稠密退化、MOD/非规范失败关闭、稳定顺序和 full-oracle 一致性不变。没有执行新的可信固定输入 A/B，因此没有新增速度百分比。
 >
 > 蓝图详情现在由 Rust 投影按源配方生成有界候选，内置及 registry 明确 family 的 MOD 建筑均按当前 catalog、完成科技和全部匹配模板验证。renderer 只提交 `{kind:"recipe-override",id,sourceRecipeId,targetRecipeId}`；Rust 再重验完整目录、源/目标配方、科技、building family、当前覆盖和安全整数 revision，只新增/删除对应的一个 map 键。缺失/null 的可选 v47 map 可原子创建首项，已有 4,096 项时不能扩成 4,097；失败不改变源 revision 或规范哈希。

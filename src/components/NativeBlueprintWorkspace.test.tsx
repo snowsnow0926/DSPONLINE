@@ -12,6 +12,7 @@ import type {
 } from "../desktop";
 import type {
   NativeBlueprintDeleteBinding,
+  NativeBlueprintEnqueueSelectionBinding,
   NativeBlueprintMirror,
   NativeBlueprintRecipeOverrideBinding,
   NativeBlueprintRenameIdentity,
@@ -25,6 +26,7 @@ import type { NativeBlueprintTransformPendingCommand } from "../game/nativeBluep
 import type { NativeBlueprintRecipeOverridePendingCommand } from "../game/nativeBlueprintRecipeOverrideCommandReconciliation";
 import type { NativeBlueprintDeletePendingCommand } from "../game/nativeBlueprintDeleteCommandReconciliation";
 import type { NativeConstructionQueueCancelPendingCommand } from "../game/nativeConstructionQueueCancelCommandReconciliation";
+import type { NativeBlueprintEnqueuePendingCommand } from "../game/nativeBlueprintEnqueueCommandReconciliation";
 import type {
   NativeBlueprintRenamePendingIdentity,
   NativeBlueprintRenameResolution,
@@ -187,11 +189,13 @@ describe("NativeBlueprintWorkspace", () => {
       ) => boolean;
       onSubmitDeleteIntent?: (binding: NativeBlueprintDeleteBinding) => boolean;
       onSubmitQueueCancelIntent?: (binding: NativeConstructionQueueCancelBinding) => boolean;
+      onBeginQueuePlacement?: (binding: NativeBlueprintEnqueueSelectionBinding) => boolean;
       pendingIdentity?: NativeBlueprintRenamePendingIdentity | null;
       transformPending?: NativeBlueprintTransformPendingCommand | null;
       recipeOverridePending?: NativeBlueprintRecipeOverridePendingCommand | null;
       deletePending?: NativeBlueprintDeletePendingCommand | null;
       queueCancelPending?: NativeConstructionQueueCancelPendingCommand | null;
+      enqueuePending?: NativeBlueprintEnqueuePendingCommand | null;
       latestIdentity?: NativeBlueprintWorkspaceIdentity | null;
       resolution?: NativeBlueprintRenameResolution | null;
       onConsumeRenameResolution?: (submissionId: number) => void;
@@ -219,6 +223,8 @@ describe("NativeBlueprintWorkspace", () => {
       vi.fn<(binding: NativeBlueprintDeleteBinding) => boolean>().mockReturnValue(true);
     const onSubmitQueueCancelIntent = callbacks.onSubmitQueueCancelIntent ??
       vi.fn<(binding: NativeConstructionQueueCancelBinding) => boolean>().mockReturnValue(true);
+    const onBeginQueuePlacement = callbacks.onBeginQueuePlacement ??
+      vi.fn<(binding: NativeBlueprintEnqueueSelectionBinding) => boolean>().mockReturnValue(true);
     const onConsumeRenameResolution = callbacks.onConsumeRenameResolution ?? vi.fn<(submissionId: number) => void>();
     const latestIdentity = callbacks.latestIdentity === undefined && value
       ? {
@@ -242,11 +248,13 @@ describe("NativeBlueprintWorkspace", () => {
       onSubmitRecipeOverrideIntent={onSubmitRecipeOverrideIntent}
       onSubmitDeleteIntent={onSubmitDeleteIntent}
       onSubmitQueueCancelIntent={onSubmitQueueCancelIntent}
+      onBeginQueuePlacement={onBeginQueuePlacement}
       pendingIdentity={callbacks.pendingIdentity ?? null}
       transformPending={callbacks.transformPending ?? null}
       recipeOverridePending={callbacks.recipeOverridePending ?? null}
       deletePending={callbacks.deletePending ?? null}
       queueCancelPending={callbacks.queueCancelPending ?? null}
+      enqueuePending={callbacks.enqueuePending ?? null}
       resolution={callbacks.resolution ?? null}
       onConsumeRenameResolution={onConsumeRenameResolution}
       commandPending={callbacks.commandPending ?? false}
@@ -260,6 +268,7 @@ describe("NativeBlueprintWorkspace", () => {
       onSubmitRecipeOverrideIntent,
       onSubmitDeleteIntent,
       onSubmitQueueCancelIntent,
+      onBeginQueuePlacement,
       onConsumeRenameResolution,
     };
   }
@@ -381,6 +390,35 @@ describe("NativeBlueprintWorkspace", () => {
     expect(host.textContent).toContain(copy);
     expect(host.querySelector("[data-native-blueprint-entity-key]")).toBeNull();
     expect(host.querySelector("[data-native-blueprint-recipe-target]")).toBeNull();
+  });
+
+  it("enters canvas placement only from a Rust-supported selected detail", () => {
+    const onBeginQueuePlacement = vi.fn<(
+      binding: NativeBlueprintEnqueueSelectionBinding,
+    ) => boolean>().mockReturnValue(true);
+    renderWorkspace(frame(), "ready", { onBeginQueuePlacement });
+    const button = host.querySelector<HTMLButtonElement>(
+      "[data-native-blueprint-action='begin-enqueue-placement']",
+    )!;
+    expect(button.textContent).toContain("加入待建施工");
+    expect(button.disabled).toBe(false);
+    act(() => button.click());
+    expect(onBeginQueuePlacement).toHaveBeenCalledWith({
+      sessionId: "session-a",
+      runId: "run-a",
+      registryFingerprint: "registry-a",
+      blueprintId: "mod:Ω/🚀",
+      blueprintName: "模组蓝图 Ω",
+      currentRowRevision: 4,
+    });
+
+    for (const detailStatus of ["unsupported", "truncated"] as const) {
+      renderWorkspace(frame({ detailStatus }), "ready", { onBeginQueuePlacement });
+      expect(host.querySelector<HTMLButtonElement>(
+        "[data-native-blueprint-action='begin-enqueue-placement']",
+      )?.disabled).toBe(true);
+    }
+    expect(onBeginQueuePlacement).toHaveBeenCalledTimes(1);
   });
 
   it("preserves one focused IME draft from active N through inFlight to active N+1 and submits once", () => {
@@ -753,7 +791,7 @@ describe("NativeBlueprintWorkspace", () => {
     });
     expect([...host.querySelectorAll<HTMLElement>("[data-native-blueprint-library-id]")]
       .some((node) => node.dataset.nativeBlueprintLibraryId === "mod:Ω/🚀")).toBe(true);
-    expect(host.textContent).toContain("名称、方向、配方与删除由 Rust 权威提交");
+    expect(host.textContent).toContain("名称、方向、配方、入队与删除由 Rust 权威提交");
 
     const deletePending = Object.freeze({
       token: 1,
@@ -803,6 +841,7 @@ describe("NativeBlueprintWorkspace", () => {
     expect(source).toMatch(/onSubmitRecipeOverrideIntent/);
     expect(source).toMatch(/onSubmitDeleteIntent/);
     expect(source).toMatch(/onSubmitQueueCancelIntent/);
+    expect(source).toMatch(/onBeginQueuePlacement/);
     expect(source).not.toMatch(/onBlur=|onKeyDown=/);
 
     renderWorkspace(frame());
@@ -815,7 +854,7 @@ describe("NativeBlueprintWorkspace", () => {
     expect(actions).toEqual(new Set([
       "close", "tab-library", "tab-queue", "select",
       "begin-rename", "cancel-rename", "submit-rename",
-      "rotate-transform", "mirror-transform", "delete-blueprint",
+      "rotate-transform", "mirror-transform", "begin-enqueue-placement", "delete-blueprint",
       "cancel-queue", "page-library-prev", "page-library-next", "page-queue-prev", "page-queue-next",
     ]));
   });

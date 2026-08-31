@@ -145,7 +145,13 @@ fn finite_number(value: Option<&Value>, label: &str) -> anyhow::Result<f64> {
 fn blueprint_revision(object: &Map<String, Value>) -> anyhow::Result<u64> {
     match object.get("revision") {
         None | Some(Value::Null) => Ok(1),
-        value => positive_integer(value, "blueprint revision"),
+        Some(value) => value
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .map(|value| value.floor().max(1.0))
+            .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER as f64)
+            .map(|value| value as u64)
+            .ok_or_else(|| anyhow!("native blueprint workspace blueprint revision is invalid")),
     }
 }
 
@@ -207,7 +213,9 @@ fn bounded_page_cursor(requested: usize, total_count: usize) -> usize {
     }
 }
 
-fn validate_blueprint_directory(values: &[Value]) -> anyhow::Result<Vec<&Map<String, Value>>> {
+pub(crate) fn validate_blueprint_directory(
+    values: &[Value],
+) -> anyhow::Result<Vec<&Map<String, Value>>> {
     if values.len() > MAX_SOURCE_ROWS {
         bail!("native blueprint workspace library source limit is exceeded")
     }
@@ -229,7 +237,9 @@ fn validate_blueprint_directory(values: &[Value]) -> anyhow::Result<Vec<&Map<Str
     Ok(rows)
 }
 
-fn validate_version_directory(values: &[Value]) -> anyhow::Result<Vec<&Map<String, Value>>> {
+pub(crate) fn validate_version_directory(
+    values: &[Value],
+) -> anyhow::Result<Vec<&Map<String, Value>>> {
     if values.len() > MAX_SOURCE_ROWS {
         bail!("native blueprint workspace version source limit is exceeded")
     }
@@ -729,6 +739,93 @@ fn compact_detail(state: &CoreState, blueprint: &Map<String, Value>) -> anyhow::
     }))
 }
 
+/// Proves the deliberately narrow P0 queue-only blueprint domain.
+///
+/// The ordinary workspace detail validator already owns the bounded entity,
+/// belt, recipe, endpoint and catalog checks. Queue admission adds the stricter
+/// policy that at least one ordinary building is present and that resource
+/// anchors, external ports and special-building deployment semantics are all
+/// absent. The complete definition is still snapshotted byte-for-byte after
+/// this proof; this helper never rewrites renderer-opaque fields.
+pub(crate) fn queue_only_definition_supported(
+    state: &CoreState,
+    blueprint: &Map<String, Value>,
+) -> anyhow::Result<bool> {
+    // Built-in catalog identifiers are lower snake case. Content packs use
+    // namespaced IDs (the public convention is `MOD/...`; older opaque saves
+    // also contain `mod:...`). Requiring the built-in alphabet makes this P0
+    // proof independent of a forged catalog row carrying a MOD ID.
+    let builtin_content_id = |value: &str| {
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    };
+    let detail = compact_detail(state, blueprint)?;
+    if detail.get("status").and_then(Value::as_str) != Some("supported") {
+        return Ok(false);
+    }
+    let entities = detail
+        .get("entities")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native blueprint workspace queue-only entities are invalid"))?;
+    let anchors = detail
+        .get("resourceAnchors")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native blueprint workspace queue-only anchors are invalid"))?;
+    let ports = detail
+        .get("externalPorts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native blueprint workspace queue-only ports are invalid"))?;
+    if entities.is_empty() || !anchors.is_empty() || !ports.is_empty() {
+        return Ok(false);
+    }
+    for entity in entities {
+        let building_id = entity
+            .get("buildingId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                anyhow!("native blueprint workspace queue-only building ID is invalid")
+            })?;
+        if !builtin_content_id(building_id)
+            || crate::command::ordinary_placement_support_reason(state, building_id)?.is_some()
+        {
+            return Ok(false);
+        }
+    }
+    for belt in detail
+        .get("belts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native blueprint workspace queue-only belts are invalid"))?
+    {
+        if !belt
+            .get("itemId")
+            .and_then(Value::as_str)
+            .is_some_and(builtin_content_id)
+        {
+            return Ok(false);
+        }
+    }
+    for group in detail
+        .get("recipeOverrideGroups")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native blueprint workspace queue-only recipes are invalid"))?
+    {
+        if !group
+            .get("sourceRecipeId")
+            .and_then(Value::as_str)
+            .is_some_and(builtin_content_id)
+            || !group
+                .get("targetRecipeId")
+                .and_then(Value::as_str)
+                .is_some_and(builtin_content_id)
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn truncate_detail_for_projection_byte_budget(value: &mut Value) -> anyhow::Result<bool> {
     let rows = value
         .get_mut("page")
@@ -800,7 +897,9 @@ fn safe_record_count(value: Option<&Value>, label: &str) -> anyhow::Result<usize
     Ok(object.len())
 }
 
-fn validate_queue_directory(values: &[Value]) -> anyhow::Result<Vec<&Map<String, Value>>> {
+pub(crate) fn validate_queue_directory(
+    values: &[Value],
+) -> anyhow::Result<Vec<&Map<String, Value>>> {
     if values.len() > MAX_SOURCE_ROWS {
         bail!("native blueprint workspace queue source limit is exceeded")
     }
@@ -1023,10 +1122,12 @@ impl CoreState {
             .get("blueprints")
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow!("native blueprint workspace library is invalid"))?;
-        let version_values = base
-            .get("blueprintVersions")
-            .and_then(Value::as_array)
-            .ok_or_else(|| anyhow!("native blueprint workspace versions are invalid"))?;
+        let empty_version_values = Vec::new();
+        let version_values = match base.get("blueprintVersions") {
+            None | Some(Value::Null) => &empty_version_values,
+            Some(Value::Array(values)) => values,
+            _ => bail!("native blueprint workspace versions are invalid"),
+        };
         let queue_values = base
             .get("constructionQueue")
             .and_then(Value::as_array)
@@ -1336,6 +1437,44 @@ mod tests {
         assert_eq!(queue["page"]["rows"][0]["id"], "queue-z");
         assert_eq!(queue["page"]["rows"][1]["id"], "queue-a");
         assert_eq!(state.summary().unwrap().canonical_sha256, before);
+    }
+
+    #[test]
+    fn optional_blueprint_version_directory_remains_workspace_reachable() {
+        for representation in ["missing", "null"] {
+            let mut state = state(
+                vec![blueprint("ordinary-alpha", "arc_smelter")],
+                Vec::new(),
+                Vec::new(),
+            );
+            let base = state.base_value_mut();
+            if representation == "missing" {
+                base.remove("blueprintVersions");
+            } else {
+                base.insert("blueprintVersions".to_owned(), Value::Null);
+            }
+            let before = state.canonical_sha256().unwrap();
+
+            let library = project(&state, "library", None, 0);
+            assert_eq!(library["page"]["rows"][0]["id"], "ordinary-alpha");
+            let detail = project(&state, "detail", Some("ordinary-alpha"), 0);
+            assert_eq!(detail["page"]["rows"][0]["summary"]["id"], "ordinary-alpha");
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut malformed = state(
+            vec![blueprint("ordinary-alpha", "arc_smelter")],
+            Vec::new(),
+            Vec::new(),
+        );
+        malformed.base_value_mut()["blueprintVersions"] = Value::from("not-an-array");
+        assert!(
+            malformed
+                .blueprint_workspace_projection(7, REGISTRY, "library", None, None, 0, PAGE_ROWS,)
+                .unwrap_err()
+                .to_string()
+                .contains("versions are invalid")
+        );
     }
 
     #[test]

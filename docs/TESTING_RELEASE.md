@@ -1,5 +1,20 @@
 # 测试与发布基线
 
+> **Windows Rust queue-only 蓝图入队组合门禁（2026-08-31，开发候选，当前源码门禁通过）**：专项覆盖“工作区按钮只进入画布定位 → click-time Rust context → exact enqueue marker → 连续 `R+1` durable ACK → exact queue-membership `present=true`”整链；一次定位只能产生一次 mutation，未知结果只能按 `0/100/250/500/1000/2000 ms` 做六次只读 reconciliation。测试还证明分页/total 不参与确认，revision 前进会重读 membership，session/run 切换会退役旧事务，明确未提交才安全解锁。
+>
+> Core/Host 矩阵必须覆盖内置 ordinary 成功、MOD/resource anchor/external port/special building/exact overlap/队列满/ID 冲突/安全整数耗尽失败关闭，缺失或 `null` 的 `blueprintVersions` 原子创建、非数组拒绝，immutable version 复用/冲突、已有 pending 队列重叠、live/generic replay/WAL 冷恢复一致，以及所有失败前后源 revision/hash 不变。成功行只能是空 reservation 的 `pending-materials`，不能扣库存或创建实体/线路；完整 fund/deploy 不属于本门禁。
+>
+> 冻结源码后的新跑结果如下；没有复用 24.15 数字：
+>
+> - typecheck 通过；前端专项 8 文件、124 项通过、0 失败。
+> - `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 的完整 Vitest 用时 553.36 秒：350 文件总计，337 通过、13 条件跳过；2,695 项总计，2,667 通过、28 条件跳过、0 失败。
+> - Rust fmt 与 workspace strict clippy `-D warnings` 通过；全量 Core `791/791`、Host library `186/186`、Host main `1/1`，合计 978 通过、0 跳过、0 失败。
+> - 最终 `npm run test:native` 为 490 总项、489 通过、1 个 Windows symlink 权限条件跳过、0 失败。
+> - production build 与 startup budget 通过：startup 总 gzip `180,401 B`、menu `257,770 B`、forbidden module `0`。
+> - `npm run test:e2e` 为 460 总项、433 通过、27 条件跳过、0 失败，用时 7.2 分钟；`npm run test:e2e:durable` 为 7 总项、7 通过、0 跳过、0 失败，用时 51.8 秒。
+>
+> 失败历史不得删除：并发中间态曾有两次 props/fixture 未合拢的 typecheck、一次 App 旧 fallback 断言、两条 Host fixture checksum、一次 workspace 错误断言及一次 strict-clippy large-enum；fresh Release Host 能力检查曾以 `34/35` 揭露旧 Host；第一次 native 全量有两条旧 projection 枚举断言失败。它们均按根因修复，最终对应门禁见上。24 小时、多硬件、Defender/磁盘故障、安装/覆盖升级、签名和灰度仍是独立未闭合门禁。
+
 > **Windows Rust pure-idle v14 当前源码门禁（2026-08-30，当前共享开发树，未发布）**：最终 Rust Core 单线程全量 `716/716`、Host `174/174`，均为 `0` 失败、`0` 跳过。三项审计回归已经进入 Core 全量：pending construction quantum credit 缺少当前正 ordinary release rate 时在安装前原子拒绝；fractional construction tail 只允许 exact path，宏观尾段要求整秒起止且不得向上取整；量子物流 owner 使用长度前缀结构化 key，旧 `order_key` 只排序，含 MOD/Unicode/冒号 ID 的两个 owner 以 `101 = 100 + 1` 验证无别名、无丢料并保持总库存守恒。它们均不改变公开 GameState v47、envelope 或 canonical hash。
 >
 > fresh Release Host 构建后，以 `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 运行完整 Vitest，结果为 **315 文件通过 / 14 条件跳过，2,472 项通过 / 28 条件跳过 / 0 失败**，201.81 秒；long differential 已实际执行，真实玩家档条件用例没有执行。修订发布编排后重跑 `npm run test:native` 为 **453 总项 / 452 通过 / 1 个 Windows symlink 权限条件跳过 / 0 失败**，7.437 秒。当前脚本新纳入此前漏列的 `native-player-authority-state-delivery.test.cjs`、`native-player-authority-pause-ipc.test.cjs`、`native-construction-belt-lane-context.test.cjs`、`native-construction-belt-placement-context.test.cjs`、`native-dyson-workspace-projection-ipc.test.cjs` 与 `account-archive-download.test.cjs`，并验证正式 feed 精确跟随本次成功的标准或 fallback 打包目录、feed 失败不会误报成功；旧 `422/1/0` 只属于扩容前诊断史，不是当前门禁。

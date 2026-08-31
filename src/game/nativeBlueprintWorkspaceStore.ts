@@ -60,6 +60,20 @@ export interface NativeBlueprintRecipeOverrideBinding {
   readonly currentTargetRecipeId: string;
 }
 
+/**
+ * Position-independent selection handed from the workspace to native canvas
+ * placement. The authority revision is intentionally not captured: a later
+ * canvas click must read a fresh Rust enqueue context for the same row.
+ */
+export interface NativeBlueprintEnqueueSelectionBinding {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly registryFingerprint: string;
+  readonly blueprintId: string;
+  readonly blueprintName: string;
+  readonly currentRowRevision: number;
+}
+
 /** Exact selected-row compare-and-delete binding for one library entry. */
 export interface NativeBlueprintDeleteBinding {
   readonly sessionId: string;
@@ -536,6 +550,45 @@ export function selectNativeBlueprintRecipeOverrideProjectionBinding(
   sourceRecipeId: string,
 ): NativeBlueprintRecipeOverrideBinding | null {
   return selectNativeBlueprintRecipeOverrideBindingInternal(frame, sourceRecipeId, false);
+}
+
+export function nativeBlueprintEnqueueSelectionBindingMatchesFrame(
+  binding: NativeBlueprintEnqueueSelectionBinding,
+  frame: NativeBlueprintWorkspaceFrame | null,
+): boolean {
+  if (!frame || frame.sessionId !== binding.sessionId || frame.runId !== binding.runId ||
+      frame.registryFingerprint !== binding.registryFingerprint ||
+      !validOpaqueText(binding.blueprintId, 512) ||
+      !validOpaqueText(binding.blueprintName, 256) ||
+      !Number.isSafeInteger(binding.currentRowRevision) || binding.currentRowRevision < 1 ||
+      binding.currentRowRevision > Number.MAX_SAFE_INTEGER ||
+      frame.selectedBlueprintId !== binding.blueprintId ||
+      frame.detail?.status !== "supported" ||
+      frame.detail.summary.id !== binding.blueprintId) return false;
+  const row = frame.libraryById.get(binding.blueprintId);
+  return row?.name === binding.blueprintName &&
+    row.revision === binding.currentRowRevision &&
+    frame.detail.summary.name === binding.blueprintName &&
+    frame.detail.summary.revision === binding.currentRowRevision;
+}
+
+export function selectNativeBlueprintEnqueueSelectionBinding(
+  frame: NativeBlueprintWorkspaceFrame | null,
+): NativeBlueprintEnqueueSelectionBinding | null {
+  if (!frame || frame.selectedBlueprintId === null || frame.detail?.status !== "supported") {
+    return null;
+  }
+  const row = frame.libraryById.get(frame.selectedBlueprintId);
+  if (!row) return null;
+  const binding: NativeBlueprintEnqueueSelectionBinding = Object.freeze({
+    sessionId: frame.sessionId,
+    runId: frame.runId,
+    registryFingerprint: frame.registryFingerprint,
+    blueprintId: row.id,
+    blueprintName: row.name,
+    currentRowRevision: row.revision,
+  });
+  return nativeBlueprintEnqueueSelectionBindingMatchesFrame(binding, frame) ? binding : null;
 }
 
 export function nativeBlueprintDeleteBindingMatchesFrame(

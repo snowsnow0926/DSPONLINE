@@ -1764,6 +1764,7 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.match(source, /function nativeFactoryInventoryResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?cursor:[\s\S]*?limit:/);
   assert.match(source, /function nativeConstructionInventoryResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?cursor:[\s\S]*?limit:/);
   assert.match(source, /function nativeBlueprintWorkspaceResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?section:[\s\S]*?blueprintId:[\s\S]*?cursor:[\s\S]*?limit:/);
+  assert.match(source, /function nativeBlueprintEnqueueContextResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision[\s\S]*?expectedRegistryFingerprint:\s*request\?\.expectedRegistryFingerprint[\s\S]*?blueprintId:[\s\S]*?blueprintRevision:/);
   assert.match(source, /function nativeStatisticsProjectionResultContext[\s\S]*?minElapsedSeconds:[\s\S]*?maxElapsedSeconds:[\s\S]*?cursor:[\s\S]*?limit:[\s\S]*?planetId:[\s\S]*?itemId:/);
   assert.match(source, /function nativeTechnologyProjectionResultContext[\s\S]*?sessionId:\s*request\?\.sessionId[\s\S]*?expectedRevision:\s*request\?\.expectedRevision/);
   assert.match(source, /desktop:native-core-projection"[\s\S]*?resultContext:\s*nativeCoreProjectionResultContext\(request\)/);
@@ -1773,6 +1774,7 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.match(source, /desktop:native-core-factory-inventory"[\s\S]*?runRendererNativeOperation\("coreFactoryInventoryProjection"[\s\S]*?resultContext:\s*nativeFactoryInventoryResultContext\(request\)/);
   assert.match(source, /desktop:native-core-construction-inventory"[\s\S]*?runRendererNativeOperation\("coreConstructionInventoryProjection"[\s\S]*?resultContext:\s*nativeConstructionInventoryResultContext\(request\)/);
   assert.match(source, /desktop:native-core-blueprint-workspace"[\s\S]*?runRendererNativeOperation\("coreBlueprintWorkspaceProjection"[\s\S]*?resultContext:\s*nativeBlueprintWorkspaceResultContext\(request\)/);
+  assert.match(source, /desktop:native-core-blueprint-enqueue-context"[\s\S]*?runRendererNativeOperation\("coreBlueprintEnqueueContext"[\s\S]*?resultContext:\s*nativeBlueprintEnqueueContextResultContext\(request\)/);
   assert.match(source, /desktop:native-core-statistics-projection"[\s\S]*?resultContext:\s*nativeStatisticsProjectionResultContext\(request\)/);
   assert.match(source, /desktop:native-core-technology-projection"[\s\S]*?resultContext:\s*nativeTechnologyProjectionResultContext\(request\)/);
   assert.match(source, /desktop:native-core-projection-transfer[\s\S]*?nativeViewportProjectionResultContext\(request\.payload\)[\s\S]*?nativeViewportProjectionV2ResultContext\(normalizedRequest\)[\s\S]*?nativeFactoryReadModelResultContext\(normalizedRequest\)[\s\S]*?nativeStatisticsProjectionResultContext\(request\.payload\)[\s\S]*?nativeTechnologyProjectionResultContext\(normalizedRequest\)/);
@@ -1787,7 +1789,7 @@ test("Electron main uses the dedicated native renderer boundary", () => {
     .map((match) => match[1]);
   const preloadChannels = [...preload.matchAll(/invokeNative\("(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  assert.equal(mainChannels.length, 53);
+  assert.equal(mainChannels.length, 54);
   assert.ok(mainChannels.includes("desktop:native-core-reconcile-command"));
   assert.ok(preloadChannels.includes("desktop:native-core-reconcile-command"));
   assert.ok(mainChannels.includes("desktop:native-player-authority-set-paused"));
@@ -1804,6 +1806,8 @@ test("Electron main uses the dedicated native renderer boundary", () => {
   assert.ok(preloadChannels.includes("desktop:native-core-construction-inventory"));
   assert.ok(mainChannels.includes("desktop:native-core-blueprint-workspace"));
   assert.ok(preloadChannels.includes("desktop:native-core-blueprint-workspace"));
+  assert.ok(mainChannels.includes("desktop:native-core-blueprint-enqueue-context"));
+  assert.ok(preloadChannels.includes("desktop:native-core-blueprint-enqueue-context"));
   assert.ok(mainChannels.includes("desktop:native-core-construction-placement-context"));
   assert.ok(preloadChannels.includes("desktop:native-core-construction-placement-context"));
   assert.ok(mainChannels.includes("desktop:native-core-construction-belt-placement-context"));

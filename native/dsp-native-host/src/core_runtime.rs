@@ -3053,6 +3053,23 @@ impl CoreRegistry {
             )
     }
 
+    pub fn blueprint_enqueue_context(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        blueprint_id: &str,
+        blueprint_revision: u64,
+    ) -> anyhow::Result<Value> {
+        self.session(session_id)?
+            .blueprint_enqueue_context_projection(
+                expected_revision,
+                expected_registry_fingerprint,
+                blueprint_id,
+                blueprint_revision,
+            )
+    }
+
     // Keep the internal Host forwarding call field-for-field identical to the
     // bounded protocol variant; no loosely typed options object crosses it.
     #[allow(clippy::too_many_arguments)]
@@ -5612,6 +5629,52 @@ mod tests {
         serde_json::to_vec(&envelope).unwrap()
     }
 
+    fn player_authority_blueprint_enqueue_envelope() -> Vec<u8> {
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["blueprints"] = json!([{
+            "id": "ordinary-alpha",
+            "name": "普通蓝图",
+            "revision": 2,
+            "rotation": 90,
+            "mirror": "horizontal",
+            "entities": [
+                {
+                    "key": "smelter-left",
+                    "buildingId": "arc_smelter",
+                    "offset": { "x": 0, "y": 0 },
+                    "machineCount": 1,
+                    "recipeId": null
+                },
+                {
+                    "key": "smelter-right",
+                    "buildingId": "arc_smelter",
+                    "offset": { "x": 2, "y": 0 },
+                    "machineCount": 1,
+                    "recipeId": null
+                }
+            ],
+            "belts": [{
+                "key": "belt-link",
+                "sourceKey": "smelter-left",
+                "targetKey": "smelter-right",
+                "itemId": "iron_ingot",
+                "lanes": 1,
+                "tier": 1
+            }],
+            "resourceAnchors": [],
+            "externalPorts": [],
+            "recipeOverrides": {},
+            "opaqueDefinitionPayload": { "preserve": [1, 2, 3] }
+        }]);
+        envelope["state"]["blueprintVersions"] = json!([]);
+        envelope["state"]["constructionQueue"] = json!([]);
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        serde_json::to_vec(&envelope).unwrap()
+    }
+
     fn player_authority_fixture() -> (
         tempfile::TempDir,
         SaveStore,
@@ -5709,6 +5772,19 @@ mod tests {
     ) {
         player_authority_fixture_from_parts(
             player_authority_construction_queue_cancel_envelope(),
+            player_authority_catalog(),
+        )
+    }
+
+    fn player_authority_blueprint_enqueue_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        player_authority_fixture_from_parts(
+            player_authority_blueprint_enqueue_envelope(),
             player_authority_catalog(),
         )
     }
@@ -6545,6 +6621,43 @@ mod tests {
                     "value": {
                         "kind": "cancel",
                         "id": queue_entry_id,
+                        "revision": base_revision
+                    }
+                }],
+                "changedEntities": [],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
+    fn player_authority_blueprint_enqueue_intent_command(
+        base_revision: u64,
+        command_id: &str,
+        blueprint_id: &str,
+        blueprint_revision: u64,
+        x: f64,
+        y: f64,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [{
+                    "path": ["constructionQueue", "intent"],
+                    "operation": "set",
+                    "value": {
+                        "kind": "enqueue",
+                        "blueprintId": blueprint_id,
+                        "blueprintRevision": blueprint_revision,
+                        "position": { "x": x, "y": y },
                         "revision": base_revision
                     }
                 }],
@@ -11329,6 +11442,185 @@ mod tests {
                 "{fault:?}"
             );
         }
+    }
+
+    #[test]
+    fn blueprint_enqueue_context_bridge_is_exact_and_same_revision() {
+        let (_root, _store, registry, session_id, checkpoint) =
+            player_authority_blueprint_enqueue_fixture();
+        let projection = registry
+            .blueprint_enqueue_context(
+                &session_id,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "ordinary-alpha",
+                2,
+            )
+            .unwrap();
+        assert_eq!(projection["schemaVersion"], 1);
+        assert_eq!(projection["projectionType"], "blueprint-enqueue-context-v1");
+        assert_eq!(projection["source"], "native-core");
+        assert_eq!(projection["revision"], checkpoint.revision);
+        assert_eq!(projection["stateVersion"], 47);
+        assert_eq!(
+            projection["registryFingerprint"],
+            EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        );
+        assert_eq!(projection["request"]["blueprintId"], "ordinary-alpha");
+        assert_eq!(projection["request"]["blueprintRevision"], 2);
+        assert_eq!(projection["activePlanetId"], "home");
+        assert_eq!(projection["expectedQueueId"], "construction_9");
+        assert_eq!(
+            projection["support"],
+            json!({ "supported": true, "reason": null })
+        );
+        assert_eq!(projection["limits"]["projectionBytes"], 1_048_576);
+        assert!(projection.get("blueprint").is_none());
+        assert!(projection.get("position").is_none());
+        assert!(
+            registry
+                .blueprint_enqueue_context(
+                    &session_id,
+                    checkpoint.revision + 1,
+                    EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                    "ordinary-alpha",
+                    2,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn blueprint_enqueue_semantic_intent_survives_generic_cold_wal_reopen() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = player_authority_blueprint_enqueue_envelope();
+        let source: Value = serde_json::from_slice(&bytes).unwrap();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        let checkpoint = imported.checkpoint.clone();
+        let request = player_authority_blueprint_enqueue_intent_command(
+            checkpoint.revision,
+            "blueprint-enqueue-generic-wal",
+            "ordinary-alpha",
+            2,
+            20.25,
+            30.5,
+        );
+        let committed = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id: request.command_id,
+                    base_revision: checkpoint.revision,
+                    command: Some(request.command),
+                    simulation_seconds: 0.0,
+                    wall_seconds: 0.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(committed.revision, checkpoint.revision + 1);
+
+        let wal = store
+            .read_wal(&checkpoint.slot, checkpoint.revision)
+            .unwrap();
+        assert_eq!(wal.len(), 1);
+        let wal_payload = serde_json::to_string(&wal).unwrap();
+        assert!(wal_payload.contains("constructionQueue"));
+        assert!(wal_payload.contains("ordinary-alpha"));
+        assert!(wal_payload.contains("\"kind\":\"enqueue\""));
+        for forbidden in [
+            "construction_9",
+            "ordinary-alpha@2",
+            "blueprintName",
+            "queuedAt",
+            "rotation",
+            "mirror",
+            "allowExactOverlap",
+            "reservedConstruction",
+            "placedEntityIdsByKey",
+            "opaqueDefinitionPayload",
+        ] {
+            assert!(!wal_payload.contains(forbidden), "{forbidden}");
+        }
+
+        registry
+            .export_v47(&store, &imported.session_id, "blueprint-enqueue-live", 100)
+            .unwrap();
+        let live_bytes =
+            std::fs::read(root.path().join("exports/blueprint-enqueue-live.json")).unwrap();
+        let live: Value = serde_json::from_slice(&live_bytes).unwrap();
+        assert_eq!(live["state"]["nextId"], 10);
+        assert_eq!(
+            live["state"]["blueprintVersions"][0]["id"],
+            "ordinary-alpha@2"
+        );
+        assert_eq!(
+            live["state"]["blueprintVersions"][0]["definition"],
+            source["state"]["blueprints"][0]
+        );
+        let row = &live["state"]["constructionQueue"][0];
+        assert_eq!(row["id"], "construction_9");
+        assert_eq!(row["blueprintVersionId"], "ordinary-alpha@2");
+        assert_eq!(row["position"], json!({ "x": 20.25, "y": 30.5 }));
+        assert_eq!(row["status"], "pending-materials");
+        assert!(row.get("allowExactOverlap").is_none());
+        assert_eq!(
+            live["state"]["construction"],
+            source["state"]["construction"]
+        );
+        assert_eq!(
+            live["state"]["portableFleet"],
+            source["state"]["portableFleet"]
+        );
+        assert_eq!(live["state"]["entities"], source["state"]["entities"]);
+        assert_eq!(live["state"]["belts"], source["state"]["belts"]);
+        assert_eq!(live["state"]["blueprints"], source["state"]["blueprints"]);
+        let live_state = live["state"].clone();
+        let live_hash = committed.summary.as_ref().unwrap().canonical_sha256.clone();
+
+        drop(registry);
+        drop(store);
+        let reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = CoreRegistry::default();
+        let reopened = reopened_registry
+            .open(
+                &reopened_store,
+                &checkpoint.slot,
+                checkpoint.generation,
+                &checkpoint.root_hash,
+                checkpoint.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                player_authority_catalog(),
+            )
+            .unwrap();
+        assert_eq!(reopened.replayed_wal_entries, 1);
+        assert_eq!(reopened.replayed_revision, committed.revision);
+        assert_eq!(reopened.summary.canonical_sha256, live_hash);
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &reopened.session_id,
+                "blueprint-enqueue-replayed",
+                100,
+            )
+            .unwrap();
+        let replayed: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/blueprint-enqueue-replayed.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replayed["state"], live_state);
     }
 
     #[test]

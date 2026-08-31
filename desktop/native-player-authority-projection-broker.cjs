@@ -16,6 +16,7 @@ const PROJECTION_METHODS = Object.freeze({
   "factory-inventory-v1": "factoryInventoryProjection",
   "construction-inventory-v1": "constructionInventoryProjection",
   "blueprint-workspace-v1": "blueprintWorkspaceProjection",
+  "blueprint-enqueue-context-v1": "blueprintEnqueueContext",
   "construction-placement-context-v1": "constructionPlacementContext",
   "construction-belt-placement-context-v1": "constructionBeltPlacementContext",
   "construction-belt-lane-context-v1": "constructionBeltLaneContext",

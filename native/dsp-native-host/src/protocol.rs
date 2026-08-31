@@ -233,6 +233,13 @@ pub enum ControlRequest {
         cursor: usize,
         limit: usize,
     },
+    CoreBlueprintEnqueueContext {
+        session_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        blueprint_id: String,
+        blueprint_revision: u64,
+    },
     CoreConstructionPlacementContext {
         session_id: String,
         expected_revision: u64,
@@ -1064,6 +1071,35 @@ mod tests {
                 assert_eq!(building_id, "MOD/custom-machine");
             }
             _ => panic!("construction placement context decoded as the wrong variant"),
+        }
+    }
+
+    #[test]
+    fn blueprint_enqueue_context_protocol_preserves_exact_identity() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreBlueprintEnqueueContext",
+            "sessionId": "core-blueprint-enqueue",
+            "expectedRevision": 47,
+            "expectedRegistryFingerprint": "builtin:test",
+            "blueprintId": "蓝图-β",
+            "blueprintRevision": 9
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreBlueprintEnqueueContext {
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                blueprint_id,
+                blueprint_revision,
+            } => {
+                assert_eq!(session_id, "core-blueprint-enqueue");
+                assert_eq!(expected_revision, 47);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(blueprint_id, "蓝图-β");
+                assert_eq!(blueprint_revision, 9);
+            }
+            _ => panic!("blueprint enqueue context decoded as the wrong variant"),
         }
     }
 

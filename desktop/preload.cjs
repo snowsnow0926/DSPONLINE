@@ -11,7 +11,7 @@ const {
 const MAX_NATIVE_PROJECTION_TRANSFER_BYTES = 1024 * 1024;
 const MAX_STELLAR_PROJECTION_REQUEST_BYTES = 32_768;
 const NATIVE_CORE_TRANSFER_PROJECTION_TYPES = Object.freeze([
-  "viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "blueprint-workspace-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1",
+  "viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "blueprint-workspace-v1", "blueprint-enqueue-context-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1",
   "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2",
   "stellar-quantum-v1",
   "dyson-workspace-v1",
@@ -52,7 +52,7 @@ function requestNativeCoreProjectionTransfer(request) {
       reject(localNativeError({ fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生投影请求无效" }));
       return;
     }
-    if (["blueprint-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType)) {
+    if (["blueprint-workspace-v1", "blueprint-enqueue-context-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType)) {
       let requestBytes;
       try {
         requestBytes = Buffer.byteLength(JSON.stringify({
@@ -183,6 +183,7 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   getNativeCoreFactoryInventory: (request) => invokeNative("desktop:native-core-factory-inventory", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生工厂库存请求失败，请重试" }, request),
   getNativeCoreConstructionInventory: (request) => invokeNative("desktop:native-core-construction-inventory", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生建筑库存请求失败，请重试" }, request),
   getNativeCoreBlueprintWorkspace: (request) => invokeNative("desktop:native-core-blueprint-workspace", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生蓝图只读模型请求失败，请重试" }, request),
+  getNativeCoreBlueprintEnqueueContext: (request) => invokeNative("desktop:native-core-blueprint-enqueue-context", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生蓝图入队上下文请求失败，请重试" }, request),
   getNativeCoreConstructionPlacementContext: (request) => invokeNative("desktop:native-core-construction-placement-context", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生建筑放置上下文请求失败，请重试" }, request),
   getNativeCoreConstructionBeltPlacementContext: (request) => invokeNative("desktop:native-core-construction-belt-placement-context", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生传送带放置上下文请求失败，请重试" }, request),
   getNativeCoreConstructionBeltLaneContext: (request) => invokeNative("desktop:native-core-construction-belt-lane-context", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生传送带并联调整上下文请求失败，请重试" }, request),

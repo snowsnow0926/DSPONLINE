@@ -52,6 +52,14 @@ describe("native blueprint workspace App integration", () => {
     fileURLToPath(new URL("./nativeConstructionQueueFundCommandReconciliation.ts", import.meta.url)),
     "utf8",
   );
+  const queueDeployHook = readFileSync(
+    fileURLToPath(new URL("./useNativeConstructionQueueDeployCommandTransaction.ts", import.meta.url)),
+    "utf8",
+  );
+  const queueDeployReconciliation = readFileSync(
+    fileURLToPath(new URL("./nativeConstructionQueueDeployCommandReconciliation.ts", import.meta.url)),
+    "utf8",
+  );
   const enqueueHook = readFileSync(
     fileURLToPath(new URL("./useNativeBlueprintEnqueueCommandTransaction.ts", import.meta.url)),
     "utf8",
@@ -96,6 +104,7 @@ describe("native blueprint workspace App integration", () => {
     expect(nativeTag).toContain("onSubmitDeleteIntent={submitNativeBlueprintDeleteIntent}");
     expect(nativeTag).toContain("onSubmitQueueCancelIntent={submitNativeConstructionQueueCancelIntent}");
     expect(nativeTag).toContain("onSubmitQueueFundIntent={submitNativeConstructionQueueFundIntent}");
+    expect(nativeTag).toContain("onSubmitQueueDeployIntent={submitNativeConstructionQueueDeployIntent}");
     expect(nativeTag).toContain("onBeginQueuePlacement={beginNativeBlueprintEnqueuePlacement}");
     expect(nativeTag).toContain("pendingIdentity={nativeBlueprintRenamePendingIdentity}");
     expect(nativeTag).toContain("transformPending={nativeBlueprintTransformPending}");
@@ -103,6 +112,7 @@ describe("native blueprint workspace App integration", () => {
     expect(nativeTag).toContain("deletePending={nativeBlueprintDeletePending}");
     expect(nativeTag).toContain("queueCancelPending={nativeConstructionQueueCancelPending}");
     expect(nativeTag).toContain("queueFundPending={nativeConstructionQueueFundPending}");
+    expect(nativeTag).toContain("queueDeployPending={nativeConstructionQueueDeployPending}");
     expect(nativeTag).toContain("enqueuePending={nativeBlueprintEnqueuePending}");
     expect(nativeTag).toContain("resolution={nativeBlueprintRenameResolution}");
     expect(nativeTag).toContain("onConsumeRenameResolution={consumeNativeBlueprintRenameResolution}");
@@ -120,6 +130,7 @@ describe("native blueprint workspace App integration", () => {
     expect(component).toMatch(/onSubmitDeleteIntent/);
     expect(component).toMatch(/onSubmitQueueCancelIntent/);
     expect(component).toMatch(/onSubmitQueueFundIntent/);
+    expect(component).toMatch(/onSubmitQueueDeployIntent/);
     expect(component).toMatch(/onBeginQueuePlacement/);
     expect(component).toMatch(/readOnly !== true/);
   });
@@ -214,6 +225,27 @@ describe("native blueprint workspace App integration", () => {
     expect(queueFundReconciliation).toMatch(/row\.reservedConstructionTotal === pending\.initialReservedConstructionTotal/);
     expect(queueFundReconciliation).toMatch(/row\.reservedFleetTotal === pending\.initialReservedFleetTotal/);
     expect(component).toMatch(/data-native-blueprint-action="fund-queue-all"/);
+  });
+
+  it("routes Rust-actionable queue deployment through one marker and exact absence proof", () => {
+    expect(app).toMatch(/useNativeConstructionQueueDeployCommandTransaction\(\{[\s\S]*?authority: nativeEntityRecipeAuthorityObservation,[\s\S]*?frame: nativeBlueprintWorkspaceFrame,[\s\S]*?membershipSource: nativeBlueprintWorkspaceSource,[\s\S]*?commandInFlightRef: nativePlayerAuthorityCommandInFlightRef/);
+    expect(app).toMatch(/const submitNativeConstructionQueueDeployIntent = useCallback[\s\S]*?nativeConstructionQueueDeployBindingMatchesFrame[\s\S]*?commitNativeConstructionQueueDeployCommand\(binding\)/);
+    expect(queueDeployHook.match(/\.applyCommand\(/g)).toHaveLength(1);
+    expect(queueDeployHook).toMatch(/reconcileNativeConstructionQueueDeployPendingCommand/);
+    const reconcileBlock = queueDeployHook.slice(
+      queueDeployHook.indexOf("const reconcileTransport"),
+      queueDeployHook.indexOf("const handleDispatchFailure"),
+    );
+    expect(reconcileBlock).not.toMatch(/applyCommand\(/);
+    expect(queueDeployReconciliation).toMatch(/\[\s*0,\s*100,\s*250,\s*500,\s*1_000,\s*2_000,/);
+    expect(queueDeployHook).toMatch(/readVerifiedQueueMembership\(currentPending\.queueEntryId\)/);
+    expect(queueDeployReconciliation).toMatch(/marker\.value\.kind !== "deploy"/);
+    expect(queueDeployReconciliation).toMatch(/receipt\.changedEntityIds\.length !== 0/);
+    expect(queueDeployReconciliation).toMatch(/pending\.membershipProof\.queueEntryId !== pending\.queueEntryId/);
+    expect(queueDeployReconciliation).toMatch(/pending\.membershipProof\.revision !== authority\.revision/);
+    expect(queueDeployReconciliation).not.toMatch(/NativeBlueprintWorkspaceFrame|frame\./);
+    expect(component).toMatch(/selectNativeConstructionQueueDeployBinding\(readyFrame, entry\.id\)/);
+    expect(component).toMatch(/data-native-blueprint-action="deploy-queue"/);
   });
 
   it("routes queue-only placement through a click-time Rust context and exact presence reconciliation", () => {

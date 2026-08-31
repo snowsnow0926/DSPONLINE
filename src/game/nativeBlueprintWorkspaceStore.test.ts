@@ -13,9 +13,11 @@ import {
   nativeBlueprintRecipeOverrideBindingMatchesFrame,
   nativeBlueprintRenameIdentityMatchesFrame,
   nativeBlueprintTransformBindingMatchesFrame,
+  nativeConstructionQueueDeployBindingMatchesFrame,
   selectNativeBlueprintRecipeOverrideBinding,
   selectNativeBlueprintRecipeOverrideProjectionBinding,
   selectNativeBlueprintTransformBinding,
+  selectNativeConstructionQueueDeployBinding,
   selectNativeBlueprintWorkspaceFrame,
   type NativeBlueprintWorkspaceIdentity,
   type NativeBlueprintWorkspaceSource,
@@ -204,6 +206,49 @@ describe("NativeBlueprintWorkspaceStore", () => {
     expect(frame?.readOnly).toBe(true);
     expect(calls).toEqual(["library:-:32", "queue:-:0", "detail:bp-034:0"]);
     expect(JSON.stringify({ library, queue })).toBe(before);
+  });
+
+  it("accepts only a coherent Rust-actionable ordinary queue row for deploy binding", async () => {
+    const blueprint = {
+      ...summary("bp-deploy"),
+      counts: { entities: 2, belts: 1, resourceAnchors: 0, externalPorts: 0 },
+    };
+    const ready: DesktopNativeCoreBlueprintQueueRow = {
+      ...queueRow("construction_7", blueprint),
+      actionable: true,
+    };
+    const store = new NativeBlueprintWorkspaceStore();
+    await expect(store.refresh(
+      fixtureSource(IDENTITY, [blueprint], [ready]),
+      IDENTITY,
+      null,
+    )).resolves.toBe("committed");
+    const frame = selectNativeBlueprintWorkspaceFrame(store.getSnapshot(), IDENTITY);
+    const binding = selectNativeConstructionQueueDeployBinding(frame, ready.id);
+    expect(binding).toMatchObject({
+      queueEntryId: "construction_7",
+      revision: 17,
+      blueprintRevision: 1,
+      status: "pending-materials",
+      semanticStatus: "catalog-backed",
+      actionable: true,
+      counts: { entities: 2, belts: 1, resourceAnchors: 0, externalPorts: 0 },
+    });
+    expect(nativeConstructionQueueDeployBindingMatchesFrame(binding!, frame)).toBe(true);
+
+    for (const forged of [
+      { ...ready, actionable: "true" as unknown as boolean },
+      { ...ready, status: "waiting-fleet" as const },
+      { ...ready, counts: { ...ready.counts!, resourceAnchors: 1 } },
+      { ...ready, placedEntityCount: 1 },
+    ] satisfies DesktopNativeCoreBlueprintQueueRow[]) {
+      const rejected = new NativeBlueprintWorkspaceStore();
+      await expect(rejected.refresh(
+        fixtureSource(IDENTITY, [blueprint], [forged]),
+        IDENTITY,
+        null,
+      )).resolves.toBe("unavailable");
+    }
   });
 
   it("normalizes a removed selection to null and never asks for unrelated detail", async () => {

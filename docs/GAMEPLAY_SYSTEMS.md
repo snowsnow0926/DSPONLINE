@@ -1,10 +1,18 @@
 # 玩法与系统基线
 
+> **Windows Rust ordinary 待建施工部署（2026-08-31，开发候选，未发布）**：原生施工队列只对 Rust 投影为 `actionable=true` 的内置 ordinary `pending-materials` 行显示“开始建造”。renderer 只提交 `{kind:"deploy",id,revision}`，不提交蓝图正文、库存、实体、线路、ID 或 `nextId`；Rust 从不可变版本或合法 live definition、持久 `row.planetId` 和当前 catalog 重新验证完整目录、精确施工预留、零 fleet 预留、科技、配方、喷涂、电力、燃料、仓储和线路语义。玩家此时切换活动行星不会改变订单的目标行星。
+>
+> 提交时 Rust 以 `O(实体 + 队列 + 蓝图)` 重新检查目标位置与现有实体及其他订单的精确重叠，并从当前 `nextId` 按“全部实体在前、全部线路在后”确定性分配 ID。成功候选生成规范实体与线路，删除目标订单并随行消费 reservation，只清理由其他订单不再引用的 immutable version，更新 `nextId` 且 authority revision 只增加一次。任何晚期校验、插入、持久化或恢复失败都会丢弃克隆候选，不会半部署、退款、修改源哈希或留下半条线路。
+>
+> live apply、generic replay 和冷 WAL 使用同一个最小 marker。成功回执固定不枚举 dirty entity/belt ID，而是 `topologyDirty=true`，要求界面重新读取有界工作区和完整拓扑。mutation 只发送一次；响应不确定时只按 `0/100/250/500/1000/2000 ms` 查询六次 durable receipt，绝不重发。取得连续 `R+1` 回执后，还必须在同 lineage/registry、不早于 ACK 的权威 revision 取得目标队列 ID 的全队列 `present=false` 证明；旧 proof 会重读，仍存在、身份漂移或证明畸形会保持锁定，lineage 变化只安全退役旧事务。
+>
+> 当前仍明确排除 MOD、空间站/舰队、resource anchor、external port、特殊建筑/唯一巨构、已部分放置订单及 exact overlap；这不是自动队列调度、蓝图 capture/import 或 direct deploy。当前源码门禁已通过 typecheck、diff check、前端相关 `95/95`、桌面投影 `8/8`、完整 Vitest `2704/28/0`，以及 Rust Core `803/803`、Host library `188/188`、Host main `1/1`、fmt 和 strict clippy。Windows native/desktop 为 `489/1/0`；production build 为 2,073 modules，startup gzip `180,401 B`、menu `257,769 B`、forbidden `0`；完整 Chromium `433/27/0`（7.0 分钟），durable E2E `7/7`（50.7 秒）。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 不变，`authorityEligible=false`；未签名、未部署、未连接生产，也未读取或修改真实玩家存档。
+
 > **Windows Rust 待建施工领料事务（2026-08-31，开发候选，未发布）**：原生待建施工列表对 Rust 已证明的 `pending-materials` 普通蓝图提供“补充全部”。renderer 只提交 `{kind:"fund",id,scope,revision}`，不提交物料种类、需求量、库存余额或预留结果；Rust 在当前 revision 重新解析不可变蓝图版本（合法旧档缺失或 `null` 的版本数组按空目录处理）、按建筑堆叠、喷涂模块和传送带等级/并联数计算施工需求，再从权威 `construction` 与 `portableFleet` 领料。
 >
 > 本事务只做预留，不部署建筑或线路。缺料时允许部分领料；超出真实需求的历史施工预留会原样返还，当前 ordinary 子域的载具目标严格为零，因此 `fleet/all` 只会把历史载具预留返还便携库存，绝不会凭 renderer 指定目标。`construction` scope 不碰载具。完全无变化、状态已进入 `waiting-fleet`、MOD/特殊蓝图、畸形目录、安全整数溢出或库存守恒无法证明时整笔拒绝；失败前后 revision、实体、线路和存档哈希不变。
 >
-> mutation 一次最多发送一次；响应丢失只做六次有界只读 durable receipt 对账，绝不自动重发。正常回执必须是连续 `R+1`、无实体/线路 dirty ID 且要求重读投影；随后在同 lineage、同页面的 `R+1` 或更晚权威 revision 上确认目标行仍为 `pending-materials` 且预留总数确实变化。旧 revision 继续等待，行/分页/目录漂移或总数未变会保持锁定。该切片不等于自动施工或部署，不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3，`authorityEligible=false` 继续保持关闭。
+> mutation 一次最多发送一次；响应丢失只做六次有界只读 durable receipt 对账，绝不自动重发。正常回执必须是连续 `R+1`、无实体/线路 dirty ID 且要求重读投影；随后在同 lineage、同页面的 `R+1` 或更晚权威 revision 上确认目标行仍为 `pending-materials` 且预留总数确实变化。旧 revision 继续等待，行/分页/目录漂移或总数未变会保持锁定。该领料事务本身不部署；ordinary 部署由上方最新切片独立闭合。它不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3，`authorityEligible=false` 继续保持关闭。
 
 > **Windows Rust queue-only 蓝图入队（2026-08-31，开发候选，未发布）**：原生蓝图工作区在 Rust 已证明详情完整且适合第一阶段普通入队时提供“加入待建施工”。点击按钮只进入画布定位，不会立刻改存档；玩家在画布选择位置后，renderer 只交出有限的吸附坐标，并在点击当刻重新取得绑定当前 revision、目录指纹和蓝图行 revision 的 Rust context。活动行星、订单 ID、蓝图名称、旋转/镜像、排队时间和不可变版本快照都由 Rust 从当前权威状态决定，界面不能自填。
 >

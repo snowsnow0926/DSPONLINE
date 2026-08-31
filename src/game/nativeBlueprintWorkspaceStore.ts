@@ -1,5 +1,6 @@
 import type {
   DesktopBridge,
+  DesktopNativeCoreBlueprintCounts,
   DesktopNativeCoreBlueprintDetail,
   DesktopNativeCoreBlueprintQueueMembershipRow,
   DesktopNativeCoreBlueprintQueueRow,
@@ -113,6 +114,27 @@ export interface NativeConstructionQueueFundBinding {
   readonly initialStatus: "pending-materials";
   readonly initialReservedConstructionTotal: number;
   readonly initialReservedFleetTotal: number;
+}
+
+/** Exact visible Rust-ready row used by one ordinary queue-only deployment. */
+export interface NativeConstructionQueueDeployBinding {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly registryFingerprint: string;
+  readonly queueEntryId: string;
+  readonly queueTotalCount: number;
+  readonly queuePageCursor: number;
+  readonly blueprintRevision: number;
+  readonly status: "pending-materials";
+  readonly semanticStatus: "catalog-backed";
+  readonly counts: Readonly<DesktopNativeCoreBlueprintCounts> & {
+    readonly entities: number;
+    readonly belts: number;
+    readonly resourceAnchors: 0;
+    readonly externalPorts: 0;
+  };
+  readonly actionable: true;
 }
 
 /** Rust-derived whole-queue membership proof pinned to one authority revision. */
@@ -294,12 +316,16 @@ function validQueueRow(value: DesktopNativeCoreBlueprintQueueRow): boolean {
     !["catalog-backed", "truncated", "unsupported"].includes(value.semanticStatus) ||
     !safeNonnegativeInteger(value.reservedConstructionTotal) ||
     !safeNonnegativeInteger(value.reservedFleetTotal) || !safeNonnegativeInteger(value.placedEntityCount) ||
-    value.actionable !== false) return false;
+    typeof value.actionable !== "boolean") return false;
   const overDetailLimit = value.counts !== null && (value.counts.entities > 512 ||
     value.counts.belts > 1_024 || value.counts.resourceAnchors > 256 || value.counts.externalPorts > 256);
   if (value.semanticStatus === "catalog-backed" && (value.counts === null || overDetailLimit) ||
       value.semanticStatus === "truncated" && (value.counts === null || !overDetailLimit) ||
       value.semanticStatus === "unsupported" && overDetailLimit) return false;
+  if (value.actionable && (value.status !== "pending-materials" ||
+      value.semanticStatus !== "catalog-backed" || value.counts === null ||
+      value.counts.entities < 1 || value.counts.resourceAnchors !== 0 ||
+      value.counts.externalPorts !== 0 || value.placedEntityCount !== 0)) return false;
   return value.counts === null || value.placedEntityCount <= value.counts.entities + value.counts.resourceAnchors;
 }
 
@@ -717,6 +743,64 @@ export function selectNativeConstructionQueueFundBinding(
     initialReservedFleetTotal: row.reservedFleetTotal,
   });
   return nativeConstructionQueueFundBindingMatchesFrame(binding, frame) ? binding : null;
+}
+
+export function nativeConstructionQueueDeployBindingMatchesFrame(
+  binding: NativeConstructionQueueDeployBinding,
+  frame: NativeBlueprintWorkspaceFrame | null,
+): boolean {
+  if (!frame || frame.sessionId !== binding.sessionId || frame.runId !== binding.runId ||
+      frame.revision !== binding.revision ||
+      frame.registryFingerprint !== binding.registryFingerprint ||
+      !validOpaqueText(binding.queueEntryId, 512) ||
+      !Number.isSafeInteger(binding.queueTotalCount) || binding.queueTotalCount < 1 ||
+      !Number.isSafeInteger(binding.queuePageCursor) || binding.queuePageCursor < 0 ||
+      !Number.isSafeInteger(binding.blueprintRevision) || binding.blueprintRevision < 1 ||
+      binding.status !== "pending-materials" || binding.semanticStatus !== "catalog-backed" ||
+      binding.actionable !== true || !validCounts(binding.counts) || binding.counts.entities < 1 ||
+      binding.counts.resourceAnchors !== 0 || binding.counts.externalPorts !== 0 ||
+      frame.queuePage.totalCount !== binding.queueTotalCount ||
+      frame.queuePage.cursor !== binding.queuePageCursor) return false;
+  const row = frame.queue.find((candidate) => candidate.id === binding.queueEntryId);
+  return Boolean(row && row.actionable === true && row.status === binding.status &&
+    row.semanticStatus === binding.semanticStatus && row.blueprintRevision === binding.blueprintRevision &&
+    row.placedEntityCount === 0 && row.counts !== null &&
+    row.counts.entities === binding.counts.entities && row.counts.belts === binding.counts.belts &&
+    row.counts.resourceAnchors === binding.counts.resourceAnchors &&
+    row.counts.externalPorts === binding.counts.externalPorts);
+}
+
+export function selectNativeConstructionQueueDeployBinding(
+  frame: NativeBlueprintWorkspaceFrame | null,
+  queueEntryId: string,
+): NativeConstructionQueueDeployBinding | null {
+  if (!frame) return null;
+  const row = frame.queue.find((candidate) => candidate.id === queueEntryId);
+  if (!row || row.actionable !== true || row.status !== "pending-materials" ||
+      row.semanticStatus !== "catalog-backed" || row.placedEntityCount !== 0 || row.counts === null ||
+      row.counts.entities < 1 || row.counts.resourceAnchors !== 0 || row.counts.externalPorts !== 0) {
+    return null;
+  }
+  const binding: NativeConstructionQueueDeployBinding = Object.freeze({
+    sessionId: frame.sessionId,
+    runId: frame.runId,
+    revision: frame.revision,
+    registryFingerprint: frame.registryFingerprint,
+    queueEntryId: row.id,
+    queueTotalCount: frame.queuePage.totalCount,
+    queuePageCursor: frame.queuePage.cursor,
+    blueprintRevision: row.blueprintRevision,
+    status: "pending-materials" as const,
+    semanticStatus: "catalog-backed" as const,
+    counts: Object.freeze({
+      entities: row.counts.entities,
+      belts: row.counts.belts,
+      resourceAnchors: 0 as const,
+      externalPorts: 0 as const,
+    }),
+    actionable: true as const,
+  });
+  return nativeConstructionQueueDeployBindingMatchesFrame(binding, frame) ? binding : null;
 }
 
 export class NativeBlueprintWorkspaceStore {

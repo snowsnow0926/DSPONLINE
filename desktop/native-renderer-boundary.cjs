@@ -2853,11 +2853,18 @@ function normalizeBlueprintQueueRow(value, label) {
   }
   const queuedAt = finiteNumber(source.queuedAt, `${label} queued time`);
   if (queuedAt < 0) throw protocolError(`${label} queued time`);
+  const status = oneOf(source.status, ["pending-materials", "waiting-fleet"], `${label} status`);
   const placedEntityCount = safeInteger(source.placedEntityCount, `${label} placed entity count`);
   if (counts !== null && placedEntityCount > counts.entities + counts.resourceAnchors) {
     throw protocolError(`${label} placed entity count`);
   }
-  if (source.actionable !== false) throw protocolError(`${label} actionable`);
+  if (typeof source.actionable !== "boolean") throw protocolError(`${label} actionable`);
+  const actionable = source.actionable;
+  if (actionable && (status !== "pending-materials" || semanticStatus !== "catalog-backed" ||
+      counts === null || counts.entities < 1 || counts.resourceAnchors !== 0 ||
+      counts.externalPorts !== 0 || placedEntityCount !== 0)) {
+    throw protocolError(`${label} actionable`);
+  }
   return {
     id: blueprintOpaqueText(source.id, `${label} ID`, 512),
     blueprintId: blueprintOpaqueText(source.blueprintId, `${label} blueprint ID`, 512),
@@ -2870,13 +2877,13 @@ function normalizeBlueprintQueueRow(value, label) {
     rotation: normalizeBlueprintRotation(source.rotation, `${label} rotation`),
     mirror: oneOf(source.mirror, ["none", "horizontal"], `${label} mirror`),
     queuedAt,
-    status: oneOf(source.status, ["pending-materials", "waiting-fleet"], `${label} status`),
+    status,
     counts,
     semanticStatus,
     reservedConstructionTotal: safeInteger(source.reservedConstructionTotal, `${label} reserved construction`),
     reservedFleetTotal: safeInteger(source.reservedFleetTotal, `${label} reserved fleet`),
     placedEntityCount,
-    actionable: false,
+    actionable,
   };
 }
 

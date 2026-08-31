@@ -21,6 +21,7 @@ import type {
   NativeBlueprintWorkspaceFrame,
   NativeBlueprintWorkspaceIdentity,
   NativeConstructionQueueCancelBinding,
+  NativeConstructionQueueDeployBinding,
   NativeConstructionQueueFundBinding,
   NativeConstructionQueueFundScope,
 } from "../game/nativeBlueprintWorkspaceStore";
@@ -29,6 +30,7 @@ import type { NativeBlueprintRecipeOverridePendingCommand } from "../game/native
 import type { NativeBlueprintDeletePendingCommand } from "../game/nativeBlueprintDeleteCommandReconciliation";
 import type { NativeConstructionQueueCancelPendingCommand } from "../game/nativeConstructionQueueCancelCommandReconciliation";
 import type { NativeConstructionQueueFundPendingCommand } from "../game/nativeConstructionQueueFundCommandReconciliation";
+import type { NativeConstructionQueueDeployPendingCommand } from "../game/nativeConstructionQueueDeployCommandReconciliation";
 import type { NativeBlueprintEnqueuePendingCommand } from "../game/nativeBlueprintEnqueueCommandReconciliation";
 import type {
   NativeBlueprintRenamePendingIdentity,
@@ -45,7 +47,7 @@ const summaries: readonly DesktopNativeCoreBlueprintSummary[] = Object.freeze([
 ]);
 
 const queue: readonly DesktopNativeCoreBlueprintQueueRow[] = Object.freeze([
-  { id: "queue-z", blueprintId: "builtin-second", blueprintVersionId: "version-z", blueprintRevision: 2, blueprintName: "\u540e\u5199\u5165\u4f46\u5148\u5b58\u50a8", planetId: "planet-z", planetName: "Z \u661f", position: { x: 8, y: 9 }, rotation: 270, mirror: "horizontal", queuedAt: 200, status: "waiting-fleet", counts: summaries[1].counts, semanticStatus: "catalog-backed", reservedConstructionTotal: 12, reservedFleetTotal: 2, placedEntityCount: 1, actionable: false },
+  { id: "queue-z", blueprintId: "builtin-second", blueprintVersionId: "version-z", blueprintRevision: 2, blueprintName: "\u540e\u5199\u5165\u4f46\u5148\u5b58\u50a8", planetId: "planet-z", planetName: "Z \u661f", position: { x: 8, y: 9 }, rotation: 270, mirror: "horizontal", queuedAt: 200, status: "pending-materials", counts: summaries[1].counts, semanticStatus: "catalog-backed", reservedConstructionTotal: 12, reservedFleetTotal: 0, placedEntityCount: 0, actionable: true },
   { id: "queue-a", blueprintId: "mod:\u03a9/\ud83d\ude80", blueprintVersionId: null, blueprintRevision: 4, blueprintName: "\u5148\u5199\u5165\u4f46\u540e\u5b58\u50a8", planetId: "planet-a", planetName: null, position: { x: 1, y: 2 }, rotation: 0, mirror: "none", queuedAt: 100, status: "pending-materials", counts: null, semanticStatus: "unsupported", reservedConstructionTotal: 0, reservedFleetTotal: 0, placedEntityCount: 0, actionable: false },
 ]);
 
@@ -196,6 +198,7 @@ describe("NativeBlueprintWorkspace", () => {
         binding: NativeConstructionQueueFundBinding,
         scope: NativeConstructionQueueFundScope,
       ) => boolean;
+      onSubmitQueueDeployIntent?: (binding: NativeConstructionQueueDeployBinding) => boolean;
       onBeginQueuePlacement?: (binding: NativeBlueprintEnqueueSelectionBinding) => boolean;
       pendingIdentity?: NativeBlueprintRenamePendingIdentity | null;
       transformPending?: NativeBlueprintTransformPendingCommand | null;
@@ -203,6 +206,7 @@ describe("NativeBlueprintWorkspace", () => {
       deletePending?: NativeBlueprintDeletePendingCommand | null;
       queueCancelPending?: NativeConstructionQueueCancelPendingCommand | null;
       queueFundPending?: NativeConstructionQueueFundPendingCommand | null;
+      queueDeployPending?: NativeConstructionQueueDeployPendingCommand | null;
       enqueuePending?: NativeBlueprintEnqueuePendingCommand | null;
       latestIdentity?: NativeBlueprintWorkspaceIdentity | null;
       resolution?: NativeBlueprintRenameResolution | null;
@@ -234,6 +238,8 @@ describe("NativeBlueprintWorkspace", () => {
     const onSubmitQueueFundIntent = callbacks.onSubmitQueueFundIntent ??
       vi.fn<(binding: NativeConstructionQueueFundBinding, scope: NativeConstructionQueueFundScope) => boolean>()
         .mockReturnValue(true);
+    const onSubmitQueueDeployIntent = callbacks.onSubmitQueueDeployIntent ??
+      vi.fn<(binding: NativeConstructionQueueDeployBinding) => boolean>().mockReturnValue(true);
     const onBeginQueuePlacement = callbacks.onBeginQueuePlacement ??
       vi.fn<(binding: NativeBlueprintEnqueueSelectionBinding) => boolean>().mockReturnValue(true);
     const onConsumeRenameResolution = callbacks.onConsumeRenameResolution ?? vi.fn<(submissionId: number) => void>();
@@ -260,6 +266,7 @@ describe("NativeBlueprintWorkspace", () => {
       onSubmitDeleteIntent={onSubmitDeleteIntent}
       onSubmitQueueCancelIntent={onSubmitQueueCancelIntent}
       onSubmitQueueFundIntent={onSubmitQueueFundIntent}
+      onSubmitQueueDeployIntent={onSubmitQueueDeployIntent}
       onBeginQueuePlacement={onBeginQueuePlacement}
       pendingIdentity={callbacks.pendingIdentity ?? null}
       transformPending={callbacks.transformPending ?? null}
@@ -267,6 +274,7 @@ describe("NativeBlueprintWorkspace", () => {
       deletePending={callbacks.deletePending ?? null}
       queueCancelPending={callbacks.queueCancelPending ?? null}
       queueFundPending={callbacks.queueFundPending ?? null}
+      queueDeployPending={callbacks.queueDeployPending ?? null}
       enqueuePending={callbacks.enqueuePending ?? null}
       resolution={callbacks.resolution ?? null}
       onConsumeRenameResolution={onConsumeRenameResolution}
@@ -281,6 +289,7 @@ describe("NativeBlueprintWorkspace", () => {
       onSubmitRecipeOverrideIntent,
       onSubmitDeleteIntent,
       onSubmitQueueCancelIntent,
+      onSubmitQueueDeployIntent,
       onBeginQueuePlacement,
       onConsumeRenameResolution,
     };
@@ -314,6 +323,24 @@ describe("NativeBlueprintWorkspace", () => {
     expect(host.textContent).toContain("Z \u661f");
     expect(host.textContent).toContain("\u8bed\u4e49\u672a\u8bc1\u660e");
     expect(host.textContent).toContain("\u4e0d\u4ee3\u8868\u53ef\u90e8\u7f72");
+    const deploy = host.querySelector<HTMLButtonElement>("[data-native-blueprint-queue-deploy='queue-z']")!;
+    expect(deploy.textContent).toContain("开始建造");
+    expect(deploy.disabled).toBe(false);
+    act(() => deploy.click());
+    expect(callbacks.onSubmitQueueDeployIntent).toHaveBeenCalledWith({
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 47,
+      registryFingerprint: "registry-a",
+      queueEntryId: "queue-z",
+      queueTotalCount: 34,
+      queuePageCursor: 32,
+      blueprintRevision: 2,
+      status: "pending-materials",
+      semanticStatus: "catalog-backed",
+      counts: { entities: 1, belts: 0, resourceAnchors: 0, externalPorts: 0 },
+      actionable: true,
+    });
     act(() => host.querySelector<HTMLButtonElement>("[data-native-blueprint-queue-cancel='queue-z']")!.click());
     expect(callbacks.onSubmitQueueCancelIntent).toHaveBeenCalledWith({
       sessionId: "session-a",
@@ -323,6 +350,15 @@ describe("NativeBlueprintWorkspace", () => {
       queueEntryId: "queue-z",
       queueTotalCount: 34,
     });
+  });
+
+  it("does not render start-build unless the Rust queue row is explicitly actionable", () => {
+    renderWorkspace(frame({
+      queue: queue.map((row) => ({ ...row, actionable: false })),
+    }));
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-blueprint-action='tab-queue']")!.click());
+    expect(host.querySelector("[data-native-blueprint-action='deploy-queue']")).toBeNull();
+    expect(host.textContent).toContain("只有 Rust 明确证明可原子部署");
   });
 
   it("shows the selected supported detail with opaque ids and child order intact", () => {
@@ -854,6 +890,7 @@ describe("NativeBlueprintWorkspace", () => {
     expect(source).toMatch(/onSubmitRecipeOverrideIntent/);
     expect(source).toMatch(/onSubmitDeleteIntent/);
     expect(source).toMatch(/onSubmitQueueCancelIntent/);
+    expect(source).toMatch(/onSubmitQueueDeployIntent/);
     expect(source).toMatch(/onBeginQueuePlacement/);
     expect(source).not.toMatch(/onBlur=|onKeyDown=/);
 
@@ -868,7 +905,7 @@ describe("NativeBlueprintWorkspace", () => {
       "close", "tab-library", "tab-queue", "select",
       "begin-rename", "cancel-rename", "submit-rename",
       "rotate-transform", "mirror-transform", "begin-enqueue-placement", "delete-blueprint",
-      "cancel-queue", "page-library-prev", "page-library-next", "page-queue-prev", "page-queue-next",
+      "deploy-queue", "cancel-queue", "page-library-prev", "page-library-next", "page-queue-prev", "page-queue-next",
     ]));
   });
 });

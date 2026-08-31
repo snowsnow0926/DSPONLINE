@@ -1,12 +1,20 @@
 # DSP极简网络项目现状
 
+> **Windows Rust ordinary 施工队列部署闭环（2026-08-31，开发候选，未发布）**：在 queue-only 入队和权威领料之后，材料齐全的内置 ordinary 订单现在可以由 Rust 一次性部署。renderer 只发 `{kind:"deploy",id,revision}`；蓝图、目标行星、reservation、catalog 语义、重叠、allocator、实体和线路结果都由 Rust 从当前 v47 权威状态重新派生。活动行星切换不改变持久订单目标。
+>
+> 成功事务按 `nextId` 先实体后线路分配稳定 ID，写入规范 recipe/spray/power/fuel/storage/belt 配置，删除目标订单、消费其 reservation、清理仅在无人引用时才可删除的 immutable version，并只递增一次 revision。失败丢弃克隆候选，不修改源 revision/hash/queue/inventory/topology。live、generic replay、冷 WAL 和五个 Host 故障边界复用同一最小 marker；重启后的相同 command ID 只返回 duplicate，不会重复建造。
+>
+> UI 不乐观删除订单，也不自动重发 mutation。未知结果固定六次只读 receipt reconciliation；连续 `R+1`、空 dirty IDs、`topologyDirty=true` 的 ACK 之后，仍需同 lineage/registry、当前或更晚 revision 的精确全队列 `present=false` 证明才解锁。当前新跑 typecheck、diff check、前端 `95/95`、桌面投影 `8/8`、完整 Vitest `2704` 通过/`28` 条件跳过/`0` 失败；Rust Core `803/803`、Host library `188/188`、Host main `1/1`，合计 `992/992`，fmt 与 strict clippy 通过。Windows native/desktop `489/1/0`；production build 2,073 modules，startup gzip `180,401 B`、menu `257,769 B`、forbidden `0`；完整 Chromium `433/27/0`（7.0 分钟），durable E2E `7/7`（50.7 秒）。固定进度暂不人为跳点，仍为 `Rust 83% / 薄 UI 96% / O(active) 96% / 并行 72% / 综合开发 88% / 发布成熟度 60%`。
+>
+> 当前限制仍包括 MOD、空间站/舰队、资源锚点、外部端口、特殊建筑、部分放置和 exact overlap；自动队列调度、blueprint capture/import/direct deploy 仍未迁移。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 不变，`authorityEligible=false`；本工作树未签名、未部署、未连接生产，也未读取或修改真实玩家存档。
+
 > **Windows Rust 待建施工领料（2026-08-31，开发候选，未发布）**：queue-only 蓝图入队后的下一段写链已经迁到 Rust。原生队列行新增“补充全部”，但这一步只从权威施工库存计算、扣取并预留当前可用材料，不创建实体/线路、不自动部署。WAL 只保存 `{kind:"fund",id,scope,revision}`；需求明细、库存数和预留结果由 Rust 在 live、generic replay 与冷恢复时重新推导。
 >
 > ordinary 子域按建筑数量、每模板一个已安装喷涂模块以及 belt tier/lanes 计算需求；缺料可部分预留，超额或孤儿施工预留守恒返还。该子域不包含物流站，所以载具目标为零；`fleet/all` 只返还历史载具预留，`construction` 不触碰载具。完全 no-op、非 pending 状态、MOD/特殊域、目录损坏和溢出均在克隆候选上原子拒绝。前端 unknown outcome 仍只读对账六次且不重发，最终以连续 ACK 和不早于 ACK 的实际队列行预留变化确认。
 >
 > 当前源码新跑 typecheck 与 diff check 通过；前端领料专项 `30/30`、App 组合专项 `14/14`，启用 `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 的完整 Vitest 为 353 文件总计（340 通过、13 条件跳过）、2,706 项总计（2,678 通过、28 条件跳过、0 失败，543.73 秒）。Rust 领料专项 `6/6`、fmt、strict clippy 通过，Core 串行全量 `797/797`。默认并行 Core 曾在既有 interstellar logistics 稀疏线路测试触发 Rust BTree unsafe-precondition 进程中止；同一源码改为单线程后该项及全部 797 项通过，该失败历史保留，不能冒充并行门禁已通过。本切片尚未新跑 Host/native、build 或 E2E。
 >
-> 本切片解决“已入队但无法由 Rust 安全领料”，尚未解决“材料齐全后自动放置建筑和线路”；下一闭环是 ordinary deployment compiler 与队列完成事务。固定能力百分比暂不因一个中间切片跳点，GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 和 `authorityEligible=false` 不变；未连接生产、未部署、未签名、未处理真实玩家存档。
+> 该领料切片自身只解决“已入队但无法由 Rust 安全领料”；“材料齐全后放置建筑和线路”已由上方最新 ordinary deployment 切片独立闭合。固定能力百分比暂不因一个中间切片跳点，GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 和 `authorityEligible=false` 不变；未连接生产、未部署、未签名、未处理真实玩家存档。
 
 > **Windows Rust queue-only 蓝图入队与画布定位（2026-08-31，开发候选，未发布）**：原生蓝图工作区的“加入待建施工”现在先进入独立画布定位，实际点击时再读取同 revision 的 `blueprint-enqueue-context-v1`。renderer 只提供有限坐标和蓝图行身份；Rust 从当前权威状态推导活动行星、`construction_${nextId}`、名称、transform、queuedAt 和 immutable version，并再次验证完整蓝图/版本/队列目录、allocator、队列上限及精确重叠。
 >
@@ -16,7 +24,7 @@
 >
 > 冻结源码后新跑 typecheck 通过；前端专项 8 文件、124 项通过；`DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 的完整 Vitest 为 350 文件总计（337 通过、13 条件跳过），2,695 项总计（2,667 通过、28 条件跳过、0 失败，553.36 秒）；Rust fmt、strict clippy 和全量测试通过，Core `791/791`、Host library `186/186`、Host main `1/1`，合计 `978/978`；最终 Windows native/desktop 为 490 总项（489 通过、1 个 Windows symlink 权限条件跳过、0 失败）。production build 与 startup budget 通过：startup 总 gzip `180,401 B`、menu `257,770 B`、forbidden module `0`。
 >
-> 普通 Chromium E2E 新跑 460 总项、433 通过、27 条件跳过、0 失败（7.2 分钟）；durable WAL E2E 新跑 `7/7` 通过、0 跳过、0 失败（51.8 秒）。失败历史继续保留：并发实现期间有两次 props/fixture 未合拢的 typecheck、一次 App 旧 fallback 断言、两条 Host fixture checksum、一次 workspace 错误断言和一次 strict-clippy large-enum；fresh Release Host 能力门禁还曾以 `34/35` 揭露磁盘上的 Host 过旧；第一次 native 全量又有两条旧 projection 枚举断言失败。以上均按根因修复并由后续对应门禁覆盖，不能从历史中删除。固定进度暂不人为跳点，仍为 `Rust 83% / 薄 UI 96% / O(active) 96% / 并行 72% / 综合开发 88% / 发布成熟度 60%`。本切片不是完整蓝图 capture/import/fund/deploy，也不表示 Windows 计划完成；GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 不变，且未签名、未部署、未连接生产、未读取或修改玩家存档。
+> 普通 Chromium E2E 新跑 460 总项、433 通过、27 条件跳过、0 失败（7.2 分钟）；durable WAL E2E 新跑 `7/7` 通过、0 跳过、0 失败（51.8 秒）。失败历史继续保留：并发实现期间有两次 props/fixture 未合拢的 typecheck、一次 App 旧 fallback 断言、两条 Host fixture checksum、一次 workspace 错误断言和一次 strict-clippy large-enum；fresh Release Host 能力门禁还曾以 `34/35` 揭露磁盘上的 Host 过旧；第一次 native 全量又有两条旧 projection 枚举断言失败。以上均按根因修复并由后续对应门禁覆盖，不能从历史中删除。固定进度暂不人为跳点，仍为 `Rust 83% / 薄 UI 96% / O(active) 96% / 并行 72% / 综合开发 88% / 发布成熟度 60%`。24.16 入队切片自身不是完整蓝图 capture/import/fund/deploy，也不表示 Windows 计划完成；其中 fund 与 ordinary deploy 已由后续独立切片闭合。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 不变，且未签名、未部署、未连接生产、未读取或修改玩家存档。
 
 > **Windows 量子脏键证明与蓝图配方覆盖权威（2026-08-31，开发候选，未发布）**：提交 `c9be64f` 把量子网络稀疏写回证明收敛为只访问本步 dirty inventory key；三分之四稠密退化、MOD/非规范失败关闭、稳定顺序和 full-oracle 一致性不变。没有执行新的可信固定输入 A/B，因此没有新增速度百分比。
 >

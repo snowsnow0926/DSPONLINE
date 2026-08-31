@@ -1,5 +1,13 @@
 # 测试与发布基线
 
+> **Windows Rust ordinary 队列部署门禁（2026-08-31，开发候选）**：Core 必须拒绝 marker 夹带蓝图、库存、实体、线路、allocator 或 renderer 派生 ID；合法 marker 只能是 `{kind:"deploy",id,revision}`。ready 条件必须覆盖完整 construction reservation 恰好等于 catalog 推导需求、fleet reservation 为零、持久 `row.planetId` 与活动行星解耦，以及缺失/超额/孤儿/小数/溢出 reservation、非 pending、`allowExactOverlap`、非空 placed map、未知 optional 字段、MOD/特殊域和损坏目录的失败关闭。
+>
+> 提交门禁必须以 `O(实体 + 队列 + 蓝图)` 重新扫描同星球 live entity 与其他订单的精确位置，覆盖内部/外部 overlap、`nextId` 碰撞和耗尽。规范编译测试必须覆盖实体先于 belt 的确定 ID、recipe override、spray、Dyson orbit、storage/fuel、power grid/priority/generation priority，以及 belt tier/lanes/默认 priority `1`/stack/monitor/route；同一 storage 或 fuel 目标接入冲突物料必须拒绝。成功只删除目标行，保留共享 version、清理无人引用 version，并随行消费 reservation；失败前后源 revision/hash/queue/inventory/topology 必须不变，普通精确模拟结果不得改变。
+>
+> Host 必须证明 live、generic replay、冷 WAL 的完整状态与 canonical hash 一致，且 WAL 不泄漏展开结果；`AfterStage/AfterWal/AfterCheckpoint/AfterReceipt/AfterLeaseAcknowledge` 五个故障边界重开后只能返回同 revision/hash 的 duplicate。live 与恢复回执都必须为空 entity/belt dirty ID 且 `topologyDirty=true`。renderer/UI 只允许 `actionable=true` 行显示按钮，每个事务一次 mutation；未知结果六次只读 receipt，对 ACK 要求严格 `R+1`，最终以同 lineage/registry、当前 revision 的全队列 `present=false` 确认。旧 proof 必须重读，仍存在或不一致保持锁定，lineage 变化安全退役，任何路径不得 resend。
+>
+> 当前源码实际新跑且未复用旧结果：typecheck、diff check、Rust fmt 和 Core/Host strict clippy 通过；前端相关 12 文件 `95/95`、desktop projection `8/8`；启用 `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 的完整 Vitest 为 356 文件总计（343 通过、13 条件跳过）、2,732 项总计（2,704 通过、28 条件跳过、0 失败），用时 545.22 秒；Rust Core `803/803`、Host library `188/188`、Host main `1/1`，合计 `992/992`。新增 Host deploy 定向为 `2/2`；`npm run test:native` 为 490 总项（489 通过、1 个 Windows symlink 权限条件跳过、0 失败）；production build 为 2,073 modules，startup 总 gzip `180,401 B`、menu `257,769 B`、forbidden module `0`；完整 Chromium 为 460 总项（433 通过、27 条件跳过、0 失败，7.0 分钟），durable E2E 为 `7/7`、0 跳过、0 失败（50.7 秒）。测试编写期间曾因合成 v47 夹具用 `20.0/30.0` 而不符合 JavaScript checksum 数字规范出现一次 `0/2`，改为语义等价整数后通过；该失败历史保留。发布制品、24 小时、多硬件、真实磁盘/Defender、安装/覆盖升级、签名和灰度仍须对冻结提交单独执行。
+
 > **Windows Rust 待建施工领料门禁（2026-08-31，开发候选）**：必须覆盖 construction/fleet/all 三个 scope、部分领料、刚好补齐、重复 no-op、超额/孤儿预留返还、missing/null `blueprintVersions` 使用 live definition、missing reservation map、WAL/generic replay 一致、实体与线路不变，以及 target/status/definition/overflow 等失败前后 revision/hash 不变。物料总量必须满足“全局库存减少 = 队列预留增加”或“队列预留减少 = 全局库存增加”；不得在领料事务创建建筑、线路或切换 `waiting-fleet`。
 >
 > renderer 门禁必须证明 exact marker 不夹带库存正文、mutation 只发送一次、unknown transport 最多执行 `0/100/250/500/1000/2000 ms` 六次只读 reconciliation、receipt 恰好 `R+1` 且 dirty IDs 为空、stale projection 只等待、同 lineage 的未来 revision 不误锁、页面/行/语义漂移及 totals 未变均失败关闭。明确的发送前 no-op 拒绝可以安全解锁；无法证明是否提交时不得解锁或重发。

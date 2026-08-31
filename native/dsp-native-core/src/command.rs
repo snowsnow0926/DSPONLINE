@@ -836,6 +836,19 @@ pub(crate) fn ordinary_placement_support_reason(
     state: &CoreState,
     building_id: &str,
 ) -> anyhow::Result<Option<OrdinaryPlacementUnsupportedReason>> {
+    let active_planet_id = state
+        .base_value()
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native player-authority active planet is missing"))?;
+    ordinary_placement_support_reason_on_planet(state, building_id, active_planet_id)
+}
+
+pub(crate) fn ordinary_placement_support_reason_on_planet(
+    state: &CoreState,
+    building_id: &str,
+    planet_id: &str,
+) -> anyhow::Result<Option<OrdinaryPlacementUnsupportedReason>> {
     let Some(building) = state.catalog.buildings.get(building_id) else {
         return Ok(Some(OrdinaryPlacementUnsupportedReason::UnknownBuilding));
     };
@@ -866,18 +879,13 @@ pub(crate) fn ordinary_placement_support_reason(
             OrdinaryPlacementUnsupportedReason::UnsupportedBuildingDomain,
         ));
     }
-    let active_planet_id = state
-        .base_value()
-        .get("activePlanetId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("native player-authority active planet is missing"))?;
-    let active_planet = state
+    let destination_planet = state
         .catalog
         .planets
         .iter()
-        .find(|planet| planet.id == active_planet_id)
-        .ok_or_else(|| anyhow!("native player-authority active planet is missing"))?;
-    if active_planet.kind != "terrestrial" {
+        .find(|planet| planet.id == planet_id)
+        .ok_or_else(|| anyhow!("native player-authority destination planet is missing"))?;
+    if destination_planet.kind != "terrestrial" {
         return Ok(Some(
             OrdinaryPlacementUnsupportedReason::UnsupportedActivePlanet,
         ));
@@ -9217,6 +9225,13 @@ impl CoreState {
             result.topology_dirty = true;
         }
         if construction_queue_intent.is_some() {
+            if construction_queue_intent.is_some_and(|expansion| expansion.is_deploy()) {
+                // A durable deploy WAL contains only its semantic queue ID.
+                // Keep live and cold-recovery receipts identical and bounded;
+                // consumers re-read the complete topology after this ACK.
+                result.changed_entity_ids.clear();
+                result.changed_belt_ids.clear();
+            }
             result.topology_dirty = true;
         }
         *self = next;
@@ -20333,6 +20348,464 @@ mod tests {
             })),
         }];
         command
+    }
+
+    fn construction_queue_deploy_intent_command(revision: u64, id: &str) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("constructionQueue".to_owned()),
+                PathSegment::Key("intent".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(serde_json::json!({
+                "kind": "deploy",
+                "id": id,
+                "revision": revision
+            })),
+        }];
+        command
+    }
+
+    fn fully_reserved_construction_queue_deploy_state() -> CoreState {
+        let mut state = construction_queue_fund_state();
+        state.base_value_mut()["constructionQueue"][0]["reservedConstruction"] =
+            serde_json::json!({ "arc_smelter": 2, "conveyor_belt_mk1": 1 });
+        state
+    }
+
+    fn configured_construction_queue_deploy_state() -> CoreState {
+        let mut state = fully_reserved_construction_queue_deploy_state();
+        let mut catalog = serde_json::to_value(state.catalog.snapshot.clone()).unwrap();
+        catalog["recipes"][0]["name"] = Value::from("铁块");
+        catalog["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "proliferator_mk1", "kind": "solid"
+            }));
+        catalog["buildings"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "spray_coater", "kind": "machine", "speed": 1,
+                "inputCapacity": 100, "outputCapacity": 100
+            }));
+        catalog["constructions"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "spray_coater", "outputAmount": 1,
+                "requiredTechId": "proliferator_1",
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+            }));
+        catalog["technologies"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "proliferator_1",
+                "costs": [{ "itemId": "electromagnetic_matrix", "amount": 1 }],
+                "prerequisites": []
+            }));
+        catalog["proliferators"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "tier": 1,
+                "itemId": "proliferator_mk1",
+                "sprayPoints": 12,
+                "extraProductBonus": 0.125,
+                "speedBonus": 0.25,
+                "powerMultiplier": 1.3,
+                "requiredTechId": "proliferator_1"
+            }));
+        state.catalog = Arc::new(
+            RuntimeCatalog::from_value(catalog, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT).unwrap(),
+        );
+        state.base_value_mut()["research"]["completedTechIds"] =
+            serde_json::json!(["proliferator_1"]);
+        let definition = &mut state.base_value_mut()["blueprintVersions"][0]["definition"];
+        definition["entities"][0]["recipeId"] = Value::from("iron_ingot");
+        definition["entities"][0]["sprayCoaterInstalled"] = Value::from(true);
+        definition["entities"][0]["proliferatorTier"] = Value::from(1);
+        definition["entities"][0]["proliferatorMode"] = Value::from("speed");
+        definition["recipeOverrides"] = serde_json::json!({});
+        definition["belts"][0]["sorterTier"] = Value::from(1);
+        definition["belts"][0]["priority"] = Value::from(2);
+        definition["belts"][0]["stackSize"] = Value::from(1);
+        definition["belts"][0]["monitorEnabled"] = Value::from(true);
+        definition["belts"][0]["routeMode"] = Value::from("manual");
+        definition["belts"][0]["routeOffsetY"] = Value::from(64);
+        state.base_value_mut()["constructionQueue"][0]["reservedConstruction"] = serde_json::json!({
+            "arc_smelter": 2,
+            "spray_coater": 1,
+            "conveyor_belt_mk1": 1
+        });
+        state
+    }
+
+    #[test]
+    fn player_authority_construction_queue_deploys_canonical_records_atomically_and_replays() {
+        let command = construction_queue_deploy_intent_command(9, "queue-fund");
+        let durable = serde_json::to_string(&command).unwrap();
+        for forbidden in [
+            "ordinary-alpha",
+            "reservedConstruction",
+            "machineCount",
+            "sourceKey",
+            "entity_9",
+            "belt_11",
+        ] {
+            assert!(!durable.contains(forbidden), "WAL leaked {forbidden}");
+        }
+
+        let mut live = fully_reserved_construction_queue_deploy_state();
+        // Queue work belongs to its persisted planet and remains valid after
+        // the player travels elsewhere.
+        live.base_value_mut()["activePlanetId"] = Value::from("ashen");
+        let queue_projection = live
+            .blueprint_workspace_projection(
+                9,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "queue",
+                None,
+                None,
+                0,
+                32,
+            )
+            .unwrap();
+        assert_eq!(queue_projection["page"]["rows"][0]["actionable"], true);
+        let construction_before = live.base_value()["construction"].clone();
+        let entity_count_before = live.entity_index.len();
+        let belt_count_before = live.belt_index.len();
+        let mut replay = live.clone();
+        let receipt = live.apply_player_authority_command(&command).unwrap();
+        let replayed: SimulationCommandPatch = serde_json::from_str(&durable).unwrap();
+        let replay_receipt = replay.apply_command(&replayed).unwrap();
+
+        assert_eq!(receipt, replay_receipt);
+        assert_eq!((receipt.previous_revision, receipt.revision), (9, 10));
+        assert!(receipt.changed_entity_ids.is_empty());
+        assert!(receipt.changed_belt_ids.is_empty());
+        assert!(receipt.topology_dirty);
+        assert_eq!(
+            live.canonical_sha256().unwrap(),
+            replay.canonical_sha256().unwrap()
+        );
+        assert_eq!(live.base_value()["construction"], construction_before);
+        assert_eq!(
+            live.base_value()["constructionQueue"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            live.base_value()["blueprintVersions"],
+            serde_json::json!([])
+        );
+        assert_eq!(live.base_value()["nextId"], 12);
+        assert_eq!(live.entity_index.len(), entity_count_before + 2);
+        assert_eq!(live.belt_index.len(), belt_count_before + 1);
+
+        let left = live.parse_entity(entity_count_before).unwrap();
+        let right = live.parse_entity(entity_count_before + 1).unwrap();
+        assert_eq!(left["id"], "entity_9");
+        assert_eq!(left["planetId"], "home");
+        assert_eq!(
+            left["position"],
+            serde_json::json!({ "x": 20.0, "y": 30.0 })
+        );
+        assert_eq!(left["machineCount"], 1);
+        assert_eq!(left["recipeId"], "iron_ingot");
+        assert_eq!(left["proliferatorPoints"], 0);
+        assert_eq!(right["id"], "entity_10");
+        assert_eq!(
+            right["position"],
+            serde_json::json!({ "x": 20.0, "y": 28.0 })
+        );
+        let belt = live.parse_belt(belt_count_before).unwrap();
+        assert_eq!(belt["id"], "belt_11");
+        assert_eq!(belt["source"], "entity_9");
+        assert_eq!(belt["target"], "entity_10");
+        assert_eq!(belt["itemId"], "iron_ingot");
+        assert_eq!(belt["sorterTier"], 1);
+        assert_eq!(belt["priority"], 1);
+        assert_eq!(belt["stackSize"], 1);
+        assert_eq!(belt["routeMode"], "auto");
+        assert_eq!(
+            live.deterministic_player_authority_resume_result(&replayed, 9, 10)
+                .unwrap(),
+            receipt
+        );
+    }
+
+    #[test]
+    fn player_authority_construction_queue_deploy_preserves_typed_recipe_spray_and_belt_configuration()
+     {
+        let mut state = configured_construction_queue_deploy_state();
+        let entity_index = state.entity_index.len();
+        let belt_index = state.belt_index.len();
+        state
+            .apply_player_authority_command(&construction_queue_deploy_intent_command(
+                9,
+                "queue-fund",
+            ))
+            .unwrap();
+        let entity = state.parse_entity(entity_index).unwrap();
+        assert_eq!(entity["recipeId"], "iron_ingot");
+        assert_eq!(entity["sprayCoaterInstalled"], true);
+        assert_eq!(entity["proliferatorTier"], 1);
+        assert_eq!(entity["proliferatorMode"], "speed");
+        assert_eq!(entity["proliferatorPoints"], 0);
+        assert_eq!(entity["proliferatorBonusProgress"], serde_json::json!({}));
+        let belt = state.parse_belt(belt_index).unwrap();
+        assert_eq!(belt["priority"], 2);
+        assert_eq!(belt["stackSize"], 1);
+        assert_eq!(belt["monitorEnabled"], true);
+        assert_eq!(belt["routeMode"], "manual");
+        assert_eq!(belt["routeOffsetY"], 64);
+    }
+
+    #[test]
+    fn player_authority_construction_queue_deploy_preserves_authoritative_power_default() {
+        let mut state = fully_reserved_construction_queue_deploy_state();
+        let mut catalog = serde_json::to_value(state.catalog.snapshot.clone()).unwrap();
+        catalog["constructions"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id": "wind_turbine",
+                "outputAmount": 1,
+                "costs": [{ "itemId": "iron_ingot", "amount": 1 }]
+            }));
+        state.catalog = Arc::new(
+            RuntimeCatalog::from_value(catalog, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT).unwrap(),
+        );
+        state.base_value_mut()["blueprintVersions"][0]["definition"]["entities"] = serde_json::json!([{
+            "key": "wind",
+            "buildingId": "wind_turbine",
+            "offset": { "x": 0, "y": 0 },
+            "machineCount": 1
+        }]);
+        state.base_value_mut()["blueprintVersions"][0]["definition"]["belts"] =
+            serde_json::json!([]);
+        state.base_value_mut()["constructionQueue"][0]["reservedConstruction"] =
+            serde_json::json!({ "wind_turbine": 1 });
+        let append_index = state.entity_index.len();
+
+        state
+            .apply_player_authority_command(&construction_queue_deploy_intent_command(
+                9,
+                "queue-fund",
+            ))
+            .unwrap();
+        let wind = state.parse_entity(append_index).unwrap();
+        assert_eq!(wind["buildingId"], "wind_turbine");
+        assert_eq!(wind["generationPriority"], 3);
+        assert_eq!(wind["powerOutputKw"], 0);
+        assert_eq!(wind["powerInputKw"], 0);
+    }
+
+    #[test]
+    fn construction_queue_projection_keeps_unsupported_optional_rows_visible_but_not_actionable() {
+        let mut state = fully_reserved_construction_queue_deploy_state();
+        state.base_value_mut()["blueprintVersions"][0]["definition"]["entities"][0]["stationMode"] =
+            Value::from("supply");
+        let projection = state
+            .blueprint_workspace_projection(
+                9,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+                "queue",
+                None,
+                None,
+                0,
+                32,
+            )
+            .unwrap();
+        assert_eq!(projection["page"]["rows"][0]["id"], "queue-fund");
+        assert_eq!(
+            projection["page"]["rows"][0]["semanticStatus"],
+            "catalog-backed"
+        );
+        assert_eq!(projection["page"]["rows"][0]["actionable"], false);
+    }
+
+    #[test]
+    fn player_authority_construction_queue_deploy_revalidates_readiness_overlap_and_allocator() {
+        let command = construction_queue_deploy_intent_command(9, "queue-fund");
+        for case in [
+            "partial-reservation",
+            "extra-reservation",
+            "fleet-reservation",
+            "allow-overlap-flag",
+            "live-overlap",
+            "queued-overlap",
+            "unsupported-template-field",
+            "stored-item-on-machine",
+            "fuel-item-on-machine",
+            "foreign-dyson-orbit",
+            "locked-belt-stack",
+            "nonmanual-route-offset",
+            "out-of-range-route-offset",
+            "generated-id-queue-collision",
+            "off-planet-missing-version",
+            "gas-giant",
+            "allocator-overflow",
+        ] {
+            let mut state = fully_reserved_construction_queue_deploy_state();
+            match case {
+                "partial-reservation" => {
+                    state.base_value_mut()["constructionQueue"][0]["reservedConstruction"]["arc_smelter"] =
+                        Value::from(1);
+                }
+                "extra-reservation" => {
+                    state.base_value_mut()["constructionQueue"][0]["reservedConstruction"]["orphan"] =
+                        Value::from(1);
+                }
+                "fleet-reservation" => {
+                    state.base_value_mut()["constructionQueue"][0]["reservedFleet"] =
+                        serde_json::json!({ "logistics_drone": 1 });
+                }
+                "allow-overlap-flag" => {
+                    state.base_value_mut()["constructionQueue"][0]["allowExactOverlap"] =
+                        Value::from(false);
+                }
+                "live-overlap" => {
+                    state.entity_raw_mut_topology().push(Arc::<str>::from(
+                        serde_json::json!({
+                            "id": "late-overlap",
+                            "kind": "machine",
+                            "planetId": "home",
+                            "position": { "x": 20, "y": 30 },
+                            "buildingId": "arc_smelter"
+                        })
+                        .to_string(),
+                    ));
+                    state.rebuild_indexes().unwrap();
+                }
+                "queued-overlap" => {
+                    let mut peer = state.base_value()["constructionQueue"][0].clone();
+                    peer["id"] = Value::from("queue-peer");
+                    peer["position"] = serde_json::json!({ "x": 20, "y": 30 });
+                    state.base_value_mut()["constructionQueue"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(peer);
+                }
+                "unsupported-template-field" => {
+                    state.base_value_mut()["blueprintVersions"][0]["definition"]["entities"][0]["stationMode"] =
+                        Value::from("supply");
+                }
+                "stored-item-on-machine" => {
+                    state.base_value_mut()["blueprintVersions"][0]["definition"]["entities"][0]["storedItemId"] =
+                        Value::from("iron_ingot");
+                }
+                "fuel-item-on-machine" => {
+                    state.base_value_mut()["blueprintVersions"][0]["definition"]["entities"][0]["fuelItemId"] =
+                        Value::from("iron_ingot");
+                }
+                "foreign-dyson-orbit" => {
+                    state.base_value_mut()["blueprintVersions"][0]["definition"]["entities"][0]["buildingId"] =
+                        Value::from("em_rail_ejector");
+                    state.base_value_mut()["blueprintVersions"][0]["definition"]["entities"][0]["targetDysonOrbitId"] =
+                        Value::from("orbit-foreign");
+                    state.base_value_mut()["constructionQueue"][0]["reservedConstruction"] = serde_json::json!({
+                        "em_rail_ejector": 1,
+                        "arc_smelter": 1,
+                        "conveyor_belt_mk1": 1
+                    });
+                }
+                "locked-belt-stack" => {
+                    state.base_value_mut()["blueprintVersions"][0]["definition"]["belts"][0]["stackSize"] =
+                        Value::from(2);
+                }
+                "nonmanual-route-offset" => {
+                    state.base_value_mut()["blueprintVersions"][0]["definition"]["belts"][0]["routeOffsetY"] =
+                        Value::from(12);
+                }
+                "out-of-range-route-offset" => {
+                    state.base_value_mut()["blueprintVersions"][0]["definition"]["belts"][0]["routeMode"] =
+                        Value::from("manual");
+                    state.base_value_mut()["blueprintVersions"][0]["definition"]["belts"][0]["routeOffsetY"] =
+                        Value::from(601);
+                }
+                "generated-id-queue-collision" => {
+                    let mut peer = state.base_value()["constructionQueue"][0].clone();
+                    peer["id"] = Value::from("entity_9");
+                    peer["position"] = serde_json::json!({ "x": 100, "y": 100 });
+                    state.base_value_mut()["constructionQueue"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(peer);
+                }
+                "off-planet-missing-version" => {
+                    let mut peer = state.base_value()["constructionQueue"][0].clone();
+                    peer["id"] = Value::from("queue-peer");
+                    peer["planetId"] = Value::from("ashen");
+                    peer["position"] = serde_json::json!({ "x": 100, "y": 100 });
+                    peer["blueprintVersionId"] = Value::from("missing-version");
+                    state.base_value_mut()["constructionQueue"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(peer);
+                }
+                "gas-giant" => {
+                    state.base_value_mut()["constructionQueue"][0]["planetId"] =
+                        Value::from("giant");
+                }
+                "allocator-overflow" => {
+                    state.base_value_mut()["nextId"] = Value::from(MAX_JAVASCRIPT_SAFE_INTEGER - 2);
+                }
+                _ => unreachable!(),
+            }
+            let before = state.canonical_sha256().unwrap();
+            assert!(
+                state.apply_player_authority_command(&command).is_err(),
+                "{case}"
+            );
+            assert_eq!(state.revision, 9, "{case}");
+            assert_eq!(state.canonical_sha256().unwrap(), before, "{case}");
+        }
+    }
+
+    #[test]
+    fn player_authority_construction_queue_deploy_retains_shared_version_only_while_referenced() {
+        let mut state = fully_reserved_construction_queue_deploy_state();
+        let mut peer = state.base_value()["constructionQueue"][0].clone();
+        peer["id"] = Value::from("queue-peer");
+        peer["position"] = serde_json::json!({ "x": 100, "y": 100 });
+        peer["reservedConstruction"] = serde_json::json!({});
+        state.base_value_mut()["constructionQueue"]
+            .as_array_mut()
+            .unwrap()
+            .push(peer);
+
+        state
+            .apply_player_authority_command(&construction_queue_deploy_intent_command(
+                9,
+                "queue-fund",
+            ))
+            .unwrap();
+        assert_eq!(
+            state.base_value()["constructionQueue"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            state.base_value()["constructionQueue"][0]["id"],
+            "queue-peer"
+        );
+        assert_eq!(
+            state.base_value()["blueprintVersions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            state.base_value()["blueprintVersions"][0]["id"],
+            "ordinary-alpha@2"
+        );
     }
 
     #[test]

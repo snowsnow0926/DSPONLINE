@@ -1177,7 +1177,8 @@ export interface DesktopNativeCoreBlueprintQueueRow {
   reservedConstructionTotal: number;
   reservedFleetTotal: number;
   placedEntityCount: number;
-  actionable: false;
+  /** Rust-only deployment readiness; renderer must never derive this value. */
+  actionable: boolean;
 }
 
 /** Minimal same-revision global membership proof row; no mutable queue payload crosses IPC. */

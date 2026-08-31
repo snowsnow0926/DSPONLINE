@@ -751,6 +751,19 @@ pub(crate) fn queue_only_definition_supported(
     state: &CoreState,
     blueprint: &Map<String, Value>,
 ) -> anyhow::Result<bool> {
+    let active_planet_id = state
+        .base_value()
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native blueprint workspace active planet is invalid"))?;
+    queue_only_definition_supported_on_planet(state, blueprint, active_planet_id)
+}
+
+pub(crate) fn queue_only_definition_supported_on_planet(
+    state: &CoreState,
+    blueprint: &Map<String, Value>,
+    planet_id: &str,
+) -> anyhow::Result<bool> {
     // Built-in catalog identifiers are lower snake case. Content packs use
     // namespaced IDs (the public convention is `MOD/...`; older opaque saves
     // also contain `mod:...`). Requiring the built-in alphabet makes this P0
@@ -788,7 +801,12 @@ pub(crate) fn queue_only_definition_supported(
                 anyhow!("native blueprint workspace queue-only building ID is invalid")
             })?;
         if !builtin_content_id(building_id)
-            || crate::command::ordinary_placement_support_reason(state, building_id)?.is_some()
+            || crate::command::ordinary_placement_support_reason_on_planet(
+                state,
+                building_id,
+                planet_id,
+            )?
+            .is_some()
         {
             return Ok(false);
         }
@@ -1029,6 +1047,36 @@ fn queue_row(
         None | Some(Value::Null) => resolved.map(blueprint_revision).transpose()?.unwrap_or(1),
         value => positive_integer(value, "queue blueprint revision")?,
     };
+    let deployment_identity_matches = match version_id {
+        Some(id) => versions
+            .iter()
+            .copied()
+            .find(|version| version.get("id").and_then(Value::as_str) == Some(id))
+            .is_some_and(|version| {
+                let owner = version.get("blueprintId").and_then(Value::as_str);
+                let version_revision =
+                    positive_integer(version.get("revision"), "version revision").ok();
+                let definition = version.get("definition").and_then(Value::as_object);
+                owner == Some(blueprint_id)
+                    && version_revision == Some(revision)
+                    && definition.is_some_and(|definition| {
+                        definition.get("id").and_then(Value::as_str) == Some(blueprint_id)
+                            && blueprint_revision(definition).ok() == Some(revision)
+                    })
+            }),
+        None => resolved.is_some_and(|definition| {
+            definition.get("id").and_then(Value::as_str) == Some(blueprint_id)
+                && blueprint_revision(definition).ok() == Some(revision)
+        }),
+    };
+    let actionable = if deployment_identity_matches {
+        resolved.is_some_and(|definition| {
+            crate::construction_queue_command::queue_entry_deploy_ready(state, object, definition)
+                .unwrap_or(false)
+        })
+    } else {
+        false
+    };
     let placed_entity_count =
         safe_record_count(object.get("placedEntityIdsByKey"), "placed entity map")?;
     if let Some(counts) = counts {
@@ -1067,7 +1115,7 @@ fn queue_row(
         "reservedConstructionTotal": safe_record_total(object.get("reservedConstruction"), "reserved construction")?,
         "reservedFleetTotal": safe_record_total(object.get("reservedFleet"), "reserved fleet")?,
         "placedEntityCount": placed_entity_count,
-        "actionable": false,
+        "actionable": actionable,
     }))
 }
 

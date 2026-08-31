@@ -3,6 +3,7 @@ import {
   ChevronLeft,
   ChevronRight,
   GitBranch,
+  Hammer,
   Layers3,
   ListChecks,
   LockKeyhole,
@@ -22,6 +23,7 @@ import {
   NATIVE_BLUEPRINT_PAGE_ROWS,
   selectNativeBlueprintEnqueueSelectionBinding,
   selectNativeBlueprintRecipeOverrideBinding,
+  selectNativeConstructionQueueDeployBinding,
   selectNativeConstructionQueueFundBinding,
 } from "../game/nativeBlueprintWorkspaceStore";
 import type {
@@ -36,6 +38,7 @@ import type {
   NativeBlueprintWorkspaceIdentity,
   NativeBlueprintWorkspaceSnapshot,
   NativeConstructionQueueCancelBinding,
+  NativeConstructionQueueDeployBinding,
   NativeConstructionQueueFundBinding,
   NativeConstructionQueueFundScope,
 } from "../game/nativeBlueprintWorkspaceStore";
@@ -54,6 +57,9 @@ import type {
 import type {
   NativeConstructionQueueFundPendingCommand,
 } from "../game/nativeConstructionQueueFundCommandReconciliation";
+import type {
+  NativeConstructionQueueDeployPendingCommand,
+} from "../game/nativeConstructionQueueDeployCommandReconciliation";
 import type {
   NativeBlueprintEnqueuePendingCommand,
 } from "../game/nativeBlueprintEnqueueCommandReconciliation";
@@ -95,6 +101,7 @@ export interface NativeBlueprintWorkspaceProps {
     binding: NativeConstructionQueueFundBinding,
     scope: NativeConstructionQueueFundScope,
   ) => boolean;
+  onSubmitQueueDeployIntent: (binding: NativeConstructionQueueDeployBinding) => boolean;
   onBeginQueuePlacement: (binding: NativeBlueprintEnqueueSelectionBinding) => boolean;
   pendingIdentity: NativeBlueprintRenamePendingIdentity | null;
   transformPending: NativeBlueprintTransformPendingCommand | null;
@@ -102,6 +109,7 @@ export interface NativeBlueprintWorkspaceProps {
   deletePending: NativeBlueprintDeletePendingCommand | null;
   queueCancelPending: NativeConstructionQueueCancelPendingCommand | null;
   queueFundPending: NativeConstructionQueueFundPendingCommand | null;
+  queueDeployPending: NativeConstructionQueueDeployPendingCommand | null;
   enqueuePending: NativeBlueprintEnqueuePendingCommand | null;
   resolution: NativeBlueprintRenameResolution | null;
   onConsumeRenameResolution: (submissionId: number) => void;
@@ -288,6 +296,7 @@ export function NativeBlueprintWorkspace({
   onSubmitDeleteIntent,
   onSubmitQueueCancelIntent,
   onSubmitQueueFundIntent,
+  onSubmitQueueDeployIntent,
   onBeginQueuePlacement,
   pendingIdentity,
   transformPending,
@@ -295,6 +304,7 @@ export function NativeBlueprintWorkspace({
   deletePending,
   queueCancelPending,
   queueFundPending,
+  queueDeployPending,
   enqueuePending,
   resolution,
   onConsumeRenameResolution,
@@ -367,6 +377,7 @@ export function NativeBlueprintWorkspace({
   const interactionLocked = commandPending || pendingIdentity !== null ||
     transformPending !== null || recipeOverridePending !== null || deletePending !== null ||
     queueCancelPending !== null || queueFundPending !== null || enqueuePending !== null ||
+    queueDeployPending !== null ||
     renameEditor !== null;
   const editorTargetState = renameEditor?.conflict === "lineage"
     ? "lineage-conflict"
@@ -375,7 +386,7 @@ export function NativeBlueprintWorkspace({
   const editorConflict = editorTargetState === "lineage-conflict" || editorTargetState === "row-conflict";
   const editorLocked = Boolean(
     editorAccepted || pendingIdentity || transformPending || recipeOverridePending || deletePending ||
-    queueCancelPending || queueFundPending || enqueuePending || editorConflict,
+    queueCancelPending || queueFundPending || queueDeployPending || enqueuePending || editorConflict
   );
   const canonicalDraft = renameEditor ? canonicalizeNativeBlueprintName(renameEditor.draft) : null;
   const editorCanSubmit = Boolean(renameEditor && editorTargetState === "ready" &&
@@ -435,6 +446,15 @@ export function NativeBlueprintWorkspace({
           ? `蓝图入队已耐久提交；等待同 lineage revision ${enqueuePending.receipt?.revision} 精确成员投影`
           : "蓝图入队回执或成员投影无法证明；当前 lineage 保持锁定"
     : null;
+  const queueDeployPendingCopy = queueDeployPending
+    ? queueDeployPending.phase === "dispatching"
+      ? "开始建造正在等待 main-owned durable ACK"
+      : queueDeployPending.phase === "reconciling"
+        ? "施工部署结果不确定；仅进行六次有界只读对账，绝不自动重发"
+        : queueDeployPending.phase === "awaiting-projection"
+          ? `施工部署已耐久提交；等待不早于 revision ${queueDeployPending.receipt?.revision} 的精确队列缺席证明`
+          : "施工部署回执或成员投影无法证明；当前 lineage 保持锁定"
+    : null;
   const pendingCopy = pendingIdentity
     ? pendingIdentity.phase === "awaiting-ack"
       ? "重命名正在等待 main-owned durable ACK"
@@ -444,7 +464,7 @@ export function NativeBlueprintWorkspace({
           ? "重命名结果无法确认；保持锁定并仅等待权威对账，绝不自动重发"
           : "重命名身份或投影发生冲突；保持锁定并停止猜测"
     : transformPendingCopy ?? recipeOverridePendingCopy ?? deletePendingCopy ??
-      queueCancelPendingCopy ?? queueFundPendingCopy ?? enqueuePendingCopy ?? (commandPending
+      queueCancelPendingCopy ?? queueFundPendingCopy ?? queueDeployPendingCopy ?? enqueuePendingCopy ?? (commandPending
       ? "另一条原生命令正在等待 durable ACK"
       : "页面按存储顺序显示；名称、方向、配方、入队与删除由 Rust 权威提交。");
   const editorCopy = renameEditor
@@ -688,7 +708,7 @@ export function NativeBlueprintWorkspace({
         </article>;
       })}
     </div> : <section className="pending-construction-workspace" aria-label="原生待建施工" data-native-blueprint-section="queue">
-      <header><div><ListChecks size={17} /><span><strong>施工队列 · Rust 权威领料与取消</strong><small>领料只预留当前可用材料；不会在本步骤部署建筑或线路</small></span></div></header>
+      <header><div><ListChecks size={17} /><span><strong>施工队列 · Rust 权威领料、部署与取消</strong><small>只有 Rust 明确证明可原子部署的普通订单才显示“开始建造”</small></span></div></header>
       <NativeBlueprintPagination
         section="queue"
         cursor={readyFrame.queuePage.cursor}
@@ -700,7 +720,8 @@ export function NativeBlueprintWorkspace({
       />
       {readyFrame.queue.length === 0 ? <div className="blueprint-empty"><ListChecks size={28} /><strong>没有待建施工记录</strong><span>当前 revision 的原生队列为空。</span></div> : <div className="pending-construction-list">
         {readyFrame.queue.map((entry) => {
-          const fundBinding = selectNativeConstructionQueueFundBinding(readyFrame, entry.id);
+          const deployBinding = selectNativeConstructionQueueDeployBinding(readyFrame, entry.id);
+          const fundBinding = deployBinding ? null : selectNativeConstructionQueueFundBinding(readyFrame, entry.id);
           return <article
           className={`pending-construction-order pending-construction-order--${entry.semanticStatus === "catalog-backed" ? entry.status : "invalid"}`}
           key={entry.id}
@@ -718,6 +739,15 @@ export function NativeBlueprintWorkspace({
             <span>已放置 {entry.placedEntityCount}</span><span>保留施工 {entry.reservedConstructionTotal.toLocaleString("zh-CN")}</span><span>保留载具 {entry.reservedFleetTotal.toLocaleString("zh-CN")}</span>
           </div>
           <footer>
+            {deployBinding ? <button
+              type="button"
+              disabled={interactionLocked}
+              onClick={() => onSubmitQueueDeployIntent(deployBinding)}
+              title={`由 Rust 从当前权威订单原子部署${entry.blueprintName}`}
+              aria-label={`开始建造${entry.blueprintName}`}
+              data-native-blueprint-action="deploy-queue"
+              data-native-blueprint-queue-deploy={entry.id}
+            ><Hammer size={14} />开始建造</button> : null}
             {fundBinding ? <button
               type="button"
               disabled={interactionLocked}

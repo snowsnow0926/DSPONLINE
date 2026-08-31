@@ -298,6 +298,9 @@ test("blueprint normalizer rejects forged detail and queue semantic combinations
     { ...queueRow, counts: { ...queueRow.counts, entities: 513 }, semanticStatus: "unsupported" },
     { ...queueRow, queuedAt: -1 },
     { ...queueRow, placedEntityCount: 2 },
+    { ...queueRow, actionable: "true" },
+    { ...queueRow, actionable: true, status: "waiting-fleet" },
+    { ...queueRow, actionable: true, counts: { ...queueRow.counts, resourceAnchors: 1 } },
   ];
   for (const forged of invalidQueueRows) {
     assert.throws(
@@ -309,6 +312,13 @@ test("blueprint normalizer rejects forged detail and queue semantic combinations
       /native blueprint workspace/i,
     );
   }
+
+  const deployReady = normalizeRendererNativeResult(
+    "coreBlueprintWorkspaceProjection",
+    result(queueContext, [{ ...queueRow, actionable: true }], { library: 1, queue: 1 }, 1),
+    queueContext,
+  );
+  assert.equal(deployReady.page.rows[0].actionable, true);
 });
 
 test("blueprint normalizer rejects stale identity, stale selection, malformed continuation, and unknown fields", () => {

@@ -13007,6 +13007,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setNotice(cloud ? "当前本地身份已绑定云账号" : "当前本地身份已解除云账号绑定");
   }, []);
 
+  const updateNativeGalaxyCloudBinding = useCallback((
+    expectedAccountId: string,
+    cloud: { id: string; email: string } | null,
+  ): boolean => {
+    const current = accountStateRef.current;
+    if (current.activeAccountId !== expectedAccountId) return false;
+    const next = setActiveCloudBinding(current, cloud);
+    accountStateRef.current = next;
+    setAccountState(next);
+    setNotice(cloud ? "当前本地身份已绑定云账号" : "当前本地身份已解除云账号绑定");
+    return true;
+  }, []);
+
   const createGalaxyAccount = useCallback((displayName: string) => {
     if (nativePlayerAuthorityOwnsRuntimeRef.current) {
       const next = createLocalAccount(accountStateRef.current, displayName);
@@ -21626,7 +21639,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             focusTab={galaxyFocusTab}
             onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setGalaxyOpen(false)}
             onUpdateProfile={updateGalaxyProfile}
-            onUpdateCloudBinding={updateGalaxyCloudBinding}
+            onUpdateCloudBinding={updateNativeGalaxyCloudBinding}
             onCreateAccount={createGalaxyAccount}
             onSwitchAccount={switchGalaxyAccount}
           />

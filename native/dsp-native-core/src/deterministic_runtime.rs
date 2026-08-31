@@ -32,6 +32,18 @@ pub(crate) struct PartitionedPrepareDiagnostics {
     pub parallel: bool,
 }
 
+/// Diagnostics for one ordered indexed prepare. The observed mask is recorded
+/// by the mapping closure itself, so tests can prove that an injected runtime
+/// owns the actual row parsing rather than merely reporting its configured
+/// worker limit while another global pool performs the work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IndexedPrepareDiagnostics {
+    pub item_count: usize,
+    pub selected_worker_count: usize,
+    pub observed_worker_count: usize,
+    pub parallel: bool,
+}
+
 /// One process-lifetime pool shared by every deterministic native-core phase.
 /// Indexed Rayon iterators preserve input order; fallible work is collected
 /// before errors are inspected so scheduling can never choose which error the
@@ -405,6 +417,80 @@ impl DeterministicRuntime {
         // scheduling. Ordered collection followed by serial Result collection
         // always propagates the lowest failing input index.
         self.indexed_map(values, map).into_iter().collect()
+    }
+
+    /// Fallible ordered map with evidence from the workers that actually ran
+    /// the mapping closure. This method uses only this runtime's existing
+    /// bounded pool and completes the indexed collection before selecting the
+    /// lowest input error. Callers must invoke it outside a partitioned
+    /// prepare closure; nested Rayon scheduling is intentionally unsupported.
+    pub(crate) fn indexed_try_map_with_diagnostics<T, R, F>(
+        &self,
+        values: &[T],
+        map: F,
+    ) -> (Result<Vec<R>>, IndexedPrepareDiagnostics)
+    where
+        T: Sync,
+        R: Send,
+        F: Fn(usize, &T) -> Result<R> + Send + Sync,
+    {
+        let item_count = values.len();
+        if item_count == 0 {
+            return (
+                Ok(Vec::new()),
+                IndexedPrepareDiagnostics {
+                    item_count,
+                    selected_worker_count: 0,
+                    observed_worker_count: 0,
+                    parallel: false,
+                },
+            );
+        }
+        let selected_worker_count = self.worker_count_for_items(item_count);
+        if selected_worker_count == 1 {
+            return (
+                values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| map(index, value))
+                    .collect(),
+                IndexedPrepareDiagnostics {
+                    item_count,
+                    selected_worker_count,
+                    observed_worker_count: 1,
+                    parallel: false,
+                },
+            );
+        }
+
+        let worker_mask = AtomicU16::new(0);
+        let mapped = self
+            .pool
+            .as_ref()
+            .expect("parallel deterministic runtime lost its worker pool")
+            .install(|| {
+                values
+                    .par_iter()
+                    .enumerate()
+                    .map(|(index, value)| {
+                        if let Some(worker_index) = rayon::current_thread_index() {
+                            worker_mask.fetch_or(1_u16 << worker_index, Ordering::Relaxed);
+                        }
+                        map(index, value)
+                    })
+                    .collect::<Vec<_>>()
+            });
+        let observed_worker_count =
+            worker_mask.load(Ordering::Relaxed).count_ones().max(1) as usize;
+        (
+            mapped.into_iter().collect(),
+            IndexedPrepareDiagnostics {
+                item_count,
+                selected_worker_count,
+                observed_worker_count,
+                parallel: true,
+            },
+        )
     }
 
     /// Maps an ascending integer range into its final ordered output buffer.

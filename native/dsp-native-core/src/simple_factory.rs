@@ -4011,19 +4011,134 @@ fn material_delivery_items(state: &CoreState, entity: &Map<String, Value>) -> Ve
     items
 }
 
+fn material_delivery_hub_stays_awake(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entity: &Value,
+) -> bool {
+    let Some(entity) = entity.as_object() else {
+        return true;
+    };
+    let Some(inputs) = entity.get("inputs").and_then(Value::as_object) else {
+        return true;
+    };
+    if inputs.values().any(|value| {
+        value
+            .as_f64()
+            .is_none_or(|amount| !amount.is_finite() || amount != 0.0)
+    }) {
+        return true;
+    }
+    let Some(slots) = entity.get("deliverySlots").and_then(Value::as_array) else {
+        // Legacy/opaque slot layouts retain the exact full-scan behavior.
+        return true;
+    };
+    if slots.len() != 3 {
+        return true;
+    }
+    let mut items = Vec::new();
+    for slot in slots {
+        let Some(slot) = slot.as_object() else {
+            return true;
+        };
+        if slot.keys().any(|key| key.starts_with("mod:")) {
+            return true;
+        }
+        let mode = string_at(slot, "mode");
+        let item_id = slot.get("itemId");
+        let configured = match mode {
+            Some("disabled") if item_id.is_none_or(Value::is_null) => None,
+            Some("auto") if item_id.is_none_or(Value::is_null) => None,
+            Some("auto" | "manual") => {
+                let Some(item_id) = item_id.and_then(Value::as_str) else {
+                    return true;
+                };
+                if !state.catalog.items.contains_key(item_id) {
+                    return true;
+                }
+                Some(item_id)
+            }
+            _ => return true,
+        };
+        if let Some(item_id) = configured
+            && !items.contains(&item_id)
+        {
+            items.push(item_id);
+        }
+    }
+    let Some(planet_id) = string_at(entity, "planetId") else {
+        return true;
+    };
+    let Some(active_planet_id) = base.get("activePlanetId").and_then(Value::as_str) else {
+        return true;
+    };
+    for item_id in items {
+        if matches!(item_id, "logistics_drone" | "logistics_vessel") {
+            continue;
+        }
+        let limit = match base
+            .get("planetTrayItemLimits")
+            .and_then(Value::as_object)
+            .and_then(|limits| limits.get(planet_id))
+        {
+            Some(value) => {
+                let Some(limit) = value.as_f64().filter(|limit| limit.is_finite()) else {
+                    return true;
+                };
+                limit.floor().clamp(1_000.0, 100_000_000.0)
+            }
+            None => 1_000_000.0,
+        };
+        let tray = if planet_id == active_planet_id {
+            let Some(tray) = base.get("tray").and_then(Value::as_object) else {
+                return true;
+            };
+            Some(tray)
+        } else {
+            let Some(planet_trays) = base.get("planetTrays").and_then(Value::as_object) else {
+                return true;
+            };
+            match planet_trays.get(planet_id) {
+                Some(tray) => {
+                    let Some(tray) = tray.as_object() else {
+                        return true;
+                    };
+                    Some(tray)
+                }
+                None => None,
+            }
+        };
+        let current = match tray.and_then(|tray| tray.get(item_id)) {
+            Some(value) => {
+                let Some(current) = value.as_f64().filter(|current| current.is_finite()) else {
+                    return true;
+                };
+                current.floor()
+            }
+            None => 0.0,
+        };
+        if current >= limit {
+            return true;
+        }
+    }
+    false
+}
+
 fn drain_material_delivery_hubs(
     state: &CoreState,
     base: &mut Map<String, Value>,
     entities: &mut [Value],
-    entity_indices: &[usize],
+    runtime: &mut crate::material_delivery::MaterialDeliveryRuntime,
     seconds: f64,
-) -> anyhow::Result<()> {
+    second_phase: bool,
+) -> anyhow::Result<crate::material_delivery::MaterialDeliveryScan> {
+    let selection = runtime.select(state, entities);
     let active_planet_id = base
         .get("activePlanetId")
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    for &entity_index in entity_indices {
+    for &entity_index in &selection.entity_indices {
         let Some(entity) = entities[entity_index].as_object() else {
             continue;
         };
@@ -4115,7 +4230,21 @@ fn drain_material_delivery_hubs(
         )?;
         set_number(object, "progress", if delivered > 0.0 { 1.0 } else { 0.0 })?;
     }
-    Ok(())
+    if second_phase {
+        let stay_awake = selection
+            .entity_indices
+            .iter()
+            .map(|&entity_index| {
+                (
+                    entity_index,
+                    material_delivery_hub_stays_awake(state, base, &entities[entity_index]),
+                )
+            })
+            .collect::<Vec<_>>();
+        runtime.commit_second_phase(selection, &stay_awake)
+    } else {
+        Ok(runtime.commit_first_phase(selection))
+    }
 }
 
 fn prepare_time_warp(
@@ -4254,6 +4383,9 @@ fn simulate_step(
     belt_runtime: &mut crate::belts::BeltRuntime,
     belt_routes: &crate::belts::PreparedRoutes,
     logistics_buffer_runtime: &mut std::sync::Arc<crate::logistics_buffers::LogisticsBufferRuntime>,
+    material_delivery_runtime: &mut std::sync::Arc<
+        crate::material_delivery::MaterialDeliveryRuntime,
+    >,
     ordinary_production_runtime: &mut std::sync::Arc<
         crate::ordinary_production::OrdinaryProductionRuntime,
     >,
@@ -4469,6 +4601,8 @@ fn simulate_step(
     )?;
     std::sync::Arc::make_mut(logistics_buffer_runtime)
         .wake_from_changed_entities(state, &belt_changed_entity_indices);
+    std::sync::Arc::make_mut(material_delivery_runtime)
+        .wake_from_changed_entities(state, &belt_changed_entity_indices);
     std::sync::Arc::make_mut(ordinary_production_runtime)
         .wake_from_changed_entities(&belt_changed_entity_indices);
     local_step_runtime.wake_ready_from_changed_stations(&belt_changed_entity_indices);
@@ -4506,13 +4640,24 @@ fn simulate_step(
         interstellar_peer_directory,
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
-    drain_material_delivery_hubs(
+    let material_delivery_scan = drain_material_delivery_hubs(
         state,
         base,
         entities,
-        &state.factory_topology.material_delivery_hub_indices,
+        std::sync::Arc::make_mut(material_delivery_runtime),
         seconds,
+        false,
     )?;
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tmaterial-delivery-active-pre\t{}/{}\tskipped={}\tdense={}\tdirectory-fallback={}",
+            material_delivery_scan.selected_rows,
+            material_delivery_scan.total_rows,
+            material_delivery_scan.stable_rows_skipped,
+            material_delivery_scan.dense_fallback,
+            material_delivery_scan.directory_fallback,
+        );
+    }
     let reception = crate::dyson::calculate_reception(state, base, entities)?;
     profile_mark!("collectors-delivery-and-reception");
     let planet_ids = state
@@ -5668,6 +5813,8 @@ fn simulate_step(
     )?;
     std::sync::Arc::make_mut(logistics_buffer_runtime)
         .wake_from_changed_entities(state, &belt_changed_entity_indices);
+    std::sync::Arc::make_mut(material_delivery_runtime)
+        .wake_from_changed_entities(state, &belt_changed_entity_indices);
     production_step_runtime.wake_from_changed_entities(&belt_changed_entity_indices);
     local_step_runtime.wake_ready_from_changed_stations(&late_logistics_changed_entity_indices);
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
@@ -5680,13 +5827,24 @@ fn simulate_step(
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
     quantum_step_runtime.wake_from_stations(&belt_changed_entity_indices);
-    drain_material_delivery_hubs(
+    let material_delivery_scan = drain_material_delivery_hubs(
         state,
         base,
         entities,
-        &state.factory_topology.material_delivery_hub_indices,
+        std::sync::Arc::make_mut(material_delivery_runtime),
         seconds,
+        true,
     )?;
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tmaterial-delivery-active-post\t{}/{}\tskipped={}\tdense={}\tdirectory-fallback={}",
+            material_delivery_scan.selected_rows,
+            material_delivery_scan.total_rows,
+            material_delivery_scan.stable_rows_skipped,
+            material_delivery_scan.dense_fallback,
+            material_delivery_scan.directory_fallback,
+        );
+    }
     profile_mark!("belt-output-transfer");
 
     crate::interstellar_logistics::refresh_peer_directory(
@@ -6300,6 +6458,8 @@ pub(crate) struct PreparedFactoryDomains {
     pub(crate) belt_routes: std::sync::Arc<crate::belts::PreparedRoutes>,
     pub(crate) logistics_buffer_runtime:
         std::sync::Arc<crate::logistics_buffers::LogisticsBufferRuntime>,
+    pub(crate) material_delivery_runtime:
+        std::sync::Arc<crate::material_delivery::MaterialDeliveryRuntime>,
     pub(crate) ordinary_production_runtime:
         std::sync::Arc<crate::ordinary_production::OrdinaryProductionRuntime>,
     pub(crate) local_peer_directory: std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
@@ -6328,6 +6488,7 @@ pub(crate) fn prepare_factory_domains_with_runtime(
 ) -> anyhow::Result<PreparedFactoryDomains> {
     let cached_belt_routes = state.prepared_belt_routes();
     let cached_logistics_buffer_runtime = state.prepared_logistics_buffer_runtime();
+    let cached_material_delivery_runtime = state.prepared_material_delivery_runtime();
     let cached_ordinary_production_runtime = state.prepared_ordinary_production_runtime();
     let cached_local_peer_directory = state.prepared_local_peer_directory();
     let cached_quantum_logistics_directory = state.prepared_quantum_logistics_directory();
@@ -6341,6 +6502,7 @@ pub(crate) fn prepare_factory_domains_with_runtime(
     let active_mask = u8::from(cached_belt_routes.is_none())
         | (u8::from(
             cached_logistics_buffer_runtime.is_none()
+                || cached_material_delivery_runtime.is_none()
                 || cached_ordinary_production_runtime.is_none(),
         ) << 1)
         | (u8::from(cached_local_peer_directory.is_none()) << 2)
@@ -6353,7 +6515,7 @@ pub(crate) fn prepare_factory_domains_with_runtime(
     let (
         (
             belt_routes,
-            (logistics_buffer_runtime, ordinary_production_runtime),
+            (logistics_buffer_runtime, material_delivery_runtime, ordinary_production_runtime),
             local_peer_directory,
             quantum_logistics_directory,
             construction_runtime,
@@ -6378,6 +6540,11 @@ pub(crate) fn prepare_factory_domains_with_runtime(
             (
                 cached_logistics_buffer_runtime.unwrap_or_else(|| {
                     std::sync::Arc::new(crate::logistics_buffers::LogisticsBufferRuntime::build(
+                        state, entities,
+                    ))
+                }),
+                cached_material_delivery_runtime.unwrap_or_else(|| {
+                    std::sync::Arc::new(crate::material_delivery::MaterialDeliveryRuntime::build(
                         state, entities,
                     ))
                 }),
@@ -6469,6 +6636,7 @@ pub(crate) fn prepare_factory_domains_with_runtime(
     Ok(PreparedFactoryDomains {
         belt_routes,
         logistics_buffer_runtime,
+        material_delivery_runtime,
         ordinary_production_runtime,
         local_peer_directory,
         quantum_logistics_directory,
@@ -6490,6 +6658,8 @@ pub(crate) struct PreparedFactoryAdvance {
     pub belt_routes: std::sync::Arc<crate::belts::PreparedRoutes>,
     pub belt_activity: std::sync::Arc<crate::belts::BeltActivitySnapshot>,
     pub logistics_buffer_runtime: std::sync::Arc<crate::logistics_buffers::LogisticsBufferRuntime>,
+    pub material_delivery_runtime:
+        std::sync::Arc<crate::material_delivery::MaterialDeliveryRuntime>,
     pub ordinary_production_runtime:
         std::sync::Arc<crate::ordinary_production::OrdinaryProductionRuntime>,
     pub local_peer_directory: std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
@@ -6592,6 +6762,7 @@ fn prepare_advance_with_runtime(
     }
     let mut belt_routes = prepared_domains.belt_routes;
     let mut logistics_buffer_runtime = prepared_domains.logistics_buffer_runtime;
+    let mut material_delivery_runtime = prepared_domains.material_delivery_runtime;
     let mut ordinary_production_runtime = prepared_domains.ordinary_production_runtime;
     let mut local_peer_directory = prepared_domains.local_peer_directory;
     let mut quantum_logistics_directory = prepared_domains.quantum_logistics_directory;
@@ -6696,6 +6867,7 @@ fn prepare_advance_with_runtime(
             &mut belt_runtime,
             &belt_routes,
             &mut logistics_buffer_runtime,
+            &mut material_delivery_runtime,
             &mut ordinary_production_runtime,
             &mut local_peer_directory,
             &mut quantum_logistics_directory,
@@ -6830,6 +7002,7 @@ fn prepare_advance_with_runtime(
         belt_routes,
         belt_activity,
         logistics_buffer_runtime,
+        material_delivery_runtime,
         ordinary_production_runtime,
         local_peer_directory,
         quantum_logistics_directory,
@@ -6978,7 +7151,7 @@ pub(crate) mod tests {
         BuildingDefinition {
             id: id.to_owned(),
             kind: match id {
-                "storage_mk1" => "storage",
+                "storage_mk1" | "material_delivery_hub" => "storage",
                 "splitter" => "splitter",
                 _ if renewable || fuel_generator => "power",
                 _ => "machine",
@@ -7080,6 +7253,7 @@ pub(crate) mod tests {
                     "geothermal_power_station",
                     "thermal_power_plant",
                     "storage_mk1",
+                    "material_delivery_hub",
                     "splitter",
                 ]
                 .into_iter()
@@ -7894,6 +8068,7 @@ pub(crate) mod tests {
     fn assert_prepared_factory_domains_are_clear(state: &CoreState) {
         assert!(state.prepared_belt_routes().is_none());
         assert!(state.prepared_logistics_buffer_runtime().is_none());
+        assert!(state.prepared_material_delivery_runtime().is_none());
         assert!(state.prepared_ordinary_production_runtime().is_none());
         assert!(state.prepared_local_peer_directory().is_none());
         assert!(state.prepared_quantum_logistics_directory().is_none());
@@ -8140,6 +8315,183 @@ pub(crate) mod tests {
         )
     }
 
+    fn material_delivery_hub(index: usize) -> Value {
+        json!({
+            "id": format!("material-delivery-hub-{index:05}"),
+            "kind": "storage",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "material_delivery_hub",
+            "recipeId": null,
+            "machineCount": 1,
+            "minerCount": 0,
+            "deliveryItemIds": ["iron_ingot"],
+            "deliverySlots": [
+                { "itemId": "iron_ingot", "mode": "manual" },
+                { "itemId": null, "mode": "auto" },
+                { "itemId": null, "mode": "disabled" }
+            ],
+            "inputs": { "iron_ingot": 0 },
+            "outputs": {},
+            "progress": 0.75,
+            "utilization": 0.5,
+            "productionRate": 12.5,
+            "routingCursor": 0
+        })
+    }
+
+    fn material_delivery_oactive_fixture(hub_count: usize) -> CoreState {
+        let mut base = construction_isolation_base();
+        base["tray"]["iron_ingot"] = Value::from(0);
+        base["planetTrays"]["home"]["iron_ingot"] = Value::from(0);
+        let mut feeder = ordinary_oactive_machine(96_000, 100.0, 0.0);
+        feeder["id"] = Value::from("material-delivery-feeder");
+        let relay = json!({
+            "id": "material-delivery-relay",
+            "kind": "storage",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "storage_mk1",
+            "recipeId": null,
+            "storedItemId": "iron_ingot",
+            "machineCount": 1,
+            "minerCount": 0,
+            "inputs": { "iron_ingot": 0 },
+            "outputs": { "iron_ingot": 0 },
+            "progress": 0,
+            "utilization": 0,
+            "productionRate": 0,
+            "routingCursor": 0
+        });
+        let mut direct = ordinary_oactive_machine(96_001, 100.0, 0.0);
+        direct["id"] = Value::from("material-delivery-direct");
+        let mut entities = vec![
+            json!({
+                "id": "material-delivery-wind",
+                "kind": "power",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "wind_turbine",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "routingCursor": 0
+            }),
+            feeder,
+            relay,
+            direct,
+        ];
+        entities.extend((0..hub_count).map(material_delivery_hub));
+        let belt = |id: &str, source: &str, target: &str, target_port_index: Option<u8>| {
+            let mut belt = json!({
+                "id": id,
+                "planetId": "home",
+                "source": source,
+                "target": target,
+                "itemId": "iron_ingot",
+                "lanes": 1,
+                "stackSize": 1,
+                "tier": 1,
+                "priority": 1,
+                "progress": 0,
+                "totalTransferred": 0,
+                "lastFlow": 0,
+                "congestion": 0
+            });
+            if let Some(target_port_index) = target_port_index {
+                belt["targetPortIndex"] = Value::from(target_port_index);
+            }
+            belt
+        };
+        let target = "material-delivery-hub-00000";
+        let belts = vec![
+            belt(
+                "material-delivery-relay-to-hub",
+                "material-delivery-relay",
+                target,
+                Some(0),
+            ),
+            belt(
+                "material-delivery-feeder-to-relay",
+                "material-delivery-feeder",
+                "material-delivery-relay",
+                None,
+            ),
+            belt(
+                "material-delivery-direct-to-hub",
+                "material-delivery-direct",
+                target,
+                Some(0),
+            ),
+        ];
+        fixture_state_from_base_belts_with_registry(
+            base,
+            &entities,
+            &belts,
+            crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        )
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct MaterialDeliveryOactiveRun {
+        bytes: Vec<u8>,
+        canonical: String,
+        domain: String,
+        conservation: String,
+        scans: Vec<crate::material_delivery::MaterialDeliveryScan>,
+    }
+
+    fn install_forced_material_delivery_oracle(state: &mut CoreState) {
+        let mut runtime = state
+            .prepared_material_delivery_runtime()
+            .expect("material delivery runtime");
+        std::sync::Arc::make_mut(&mut runtime).force_full_scan_for_test(true);
+        state.install_prepared_material_delivery_runtime(runtime);
+    }
+
+    fn run_material_delivery_oactive_advance(
+        seconds: f64,
+        worker_count: usize,
+        force_full_scan: bool,
+    ) -> MaterialDeliveryOactiveRun {
+        let mut state = material_delivery_oactive_fixture(1_024);
+        if force_full_scan {
+            install_forced_material_delivery_oracle(&mut state);
+        }
+        let prepared = prepare_advance_with_runtime(
+            &state,
+            seconds,
+            seconds,
+            false,
+            &DeterministicRuntime::for_test(worker_count),
+        )
+        .unwrap();
+        let scans = prepared
+            .material_delivery_runtime
+            .scan_history_for_test()
+            .to_vec();
+        state
+            .commit_simulated_state(
+                prepared.base,
+                prepared.entities,
+                prepared.belt_commit,
+                state.revision + 1,
+                false,
+            )
+            .unwrap();
+        MaterialDeliveryOactiveRun {
+            bytes: serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+            canonical: state.canonical_sha256().unwrap(),
+            domain: state.domain_sha256().unwrap(),
+            conservation: synthetic_conservation_sha256(&state),
+            scans,
+        }
+    }
+
     fn run_research_boundary_advance(
         seconds: f64,
         worker_count: usize,
@@ -8335,6 +8687,7 @@ pub(crate) mod tests {
         let belt_routes = prepared.belt_routes.clone();
         let belt_activity = prepared.belt_activity.clone();
         let logistics_buffer_runtime = prepared.logistics_buffer_runtime.clone();
+        let material_delivery_runtime = prepared.material_delivery_runtime.clone();
         let ordinary_production_runtime = prepared.ordinary_production_runtime.clone();
         let local_peer_directory = prepared.local_peer_directory.clone();
         let quantum_logistics_directory = prepared.quantum_logistics_directory.clone();
@@ -8357,6 +8710,7 @@ pub(crate) mod tests {
         state.install_prepared_belt_routes(belt_routes);
         state.install_prepared_belt_activity(belt_activity);
         state.install_prepared_logistics_buffer_runtime(logistics_buffer_runtime);
+        state.install_prepared_material_delivery_runtime(material_delivery_runtime);
         state.install_prepared_ordinary_production_runtime(ordinary_production_runtime);
         state.install_prepared_local_peer_directory(local_peer_directory);
         state.install_prepared_quantum_logistics_directory(quantum_logistics_directory);
@@ -8514,6 +8868,242 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn material_delivery_oactive_matches_force_full_at_1_5_60_and_workers() {
+        for seconds in [1.0, 5.0, 60.0] {
+            let indexed = run_material_delivery_oactive_advance(seconds, 1, false);
+            let oracle = run_material_delivery_oactive_advance(seconds, 1, true);
+            assert_eq!(
+                (
+                    &indexed.bytes,
+                    &indexed.canonical,
+                    &indexed.domain,
+                    &indexed.conservation,
+                ),
+                (
+                    &oracle.bytes,
+                    &oracle.canonical,
+                    &oracle.domain,
+                    &oracle.conservation,
+                ),
+                "material delivery diverged at {seconds}s"
+            );
+            assert_eq!(indexed.scans.len(), seconds as usize * 2);
+            assert_eq!(indexed.scans[0].selected_rows, 1_024);
+            assert_eq!(indexed.scans[1].selected_rows, 1_024);
+            assert!(indexed.scans[0].full_scan && indexed.scans[1].full_scan);
+            assert!(
+                indexed
+                    .scans
+                    .iter()
+                    .skip(2)
+                    .all(|scan| !scan.full_scan && scan.selected_rows <= 1),
+                "steady delivery scans must remain sparse: {:?}",
+                indexed
+                    .scans
+                    .iter()
+                    .map(|scan| scan.selected_rows)
+                    .collect::<Vec<_>>()
+            );
+            assert!(oracle.scans.iter().all(|scan| scan.full_scan));
+            assert!(oracle.scans.iter().all(|scan| scan.selected_rows == 1_024));
+        }
+
+        let expected = run_material_delivery_oactive_advance(60.0, 1, false);
+        for worker_count in [2, 4, 8] {
+            assert_eq!(
+                run_material_delivery_oactive_advance(60.0, worker_count, false),
+                expected,
+                "material delivery workers={worker_count}"
+            );
+        }
+    }
+
+    #[test]
+    fn material_delivery_real_belts_wake_both_drain_phases_after_cold_step() {
+        let indexed = run_material_delivery_oactive_advance(5.0, 4, false);
+        let oracle = run_material_delivery_oactive_advance(5.0, 4, true);
+        assert_eq!(
+            (
+                &indexed.bytes,
+                &indexed.canonical,
+                &indexed.domain,
+                &indexed.conservation,
+            ),
+            (
+                &oracle.bytes,
+                &oracle.canonical,
+                &oracle.domain,
+                &oracle.conservation,
+            )
+        );
+        let steady = indexed.scans[2..]
+            .chunks_exact(2)
+            .map(|pair| (pair[0].selected_rows, pair[1].selected_rows))
+            .collect::<Vec<_>>();
+        assert!(
+            steady.contains(&(1, 1)),
+            "a relay belt must wake the pre-production drain while a producer belt wakes the post-production drain: {steady:?}"
+        );
+        let materialized: Value = serde_json::from_slice(&indexed.bytes).unwrap();
+        let hub = materialized["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["id"] == "material-delivery-hub-00000")
+            .unwrap();
+        assert_eq!(hub["inputs"]["iron_ingot"], json!(0.0));
+        assert!(materialized["tray"]["iron_ingot"].as_f64().unwrap() > 1.0);
+    }
+
+    #[test]
+    fn material_delivery_cold_dense_full_tray_mod_opaque_and_drift_fail_closed() {
+        let state = material_delivery_oactive_fixture(8);
+        let entities = state.parse_entities_parallel().unwrap();
+        let hub_indices = state.factory_topology.material_delivery_hub_indices.clone();
+        let mut runtime =
+            crate::material_delivery::MaterialDeliveryRuntime::build(&state, &entities);
+        let cold_first = runtime.select(&state, &entities);
+        assert_eq!(cold_first.scan.selected_rows, 8);
+        assert!(cold_first.scan.full_scan);
+        runtime.commit_first_phase(cold_first);
+        let cold_second = runtime.select(&state, &entities);
+        assert_eq!(cold_second.scan.selected_rows, 8);
+        assert!(cold_second.scan.full_scan);
+        runtime
+            .commit_second_phase(
+                cold_second,
+                &hub_indices
+                    .iter()
+                    .copied()
+                    .map(|index| (index, false))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let quiet = runtime.select(&state, &entities);
+        assert_eq!(quiet.scan.selected_rows, 0);
+        assert_eq!(quiet.scan.stable_rows_skipped, 8);
+
+        runtime.wake_from_changed_entities(&state, &hub_indices[..6]);
+        let dense = runtime.select(&state, &entities);
+        assert_eq!(dense.scan.selected_rows, 8);
+        assert!(dense.scan.dense_fallback && dense.scan.full_scan);
+
+        let mut full_base = state.base_value().clone();
+        full_base["tray"]["iron_ingot"] = Value::from(1_000);
+        full_base["planetTrayItemLimits"]["home"] = Value::from(1_000);
+        let mut full_entities = entities.clone();
+        let mut full_runtime =
+            crate::material_delivery::MaterialDeliveryRuntime::build(&state, &full_entities);
+        drain_material_delivery_hubs(
+            &state,
+            &mut full_base,
+            &mut full_entities,
+            &mut full_runtime,
+            1.0,
+            false,
+        )
+        .unwrap();
+        drain_material_delivery_hubs(
+            &state,
+            &mut full_base,
+            &mut full_entities,
+            &mut full_runtime,
+            1.0,
+            true,
+        )
+        .unwrap();
+        assert_eq!(full_runtime.pending_rows_for_test(), hub_indices);
+        for &index in &hub_indices {
+            assert_eq!(full_entities[index]["utilization"], json!(0.0));
+            assert_eq!(full_entities[index]["productionRate"], json!(0.0));
+            assert_eq!(full_entities[index]["progress"], json!(0.0));
+        }
+
+        let mut mod_state = state.clone();
+        mod_state.identity.registry_fingerprint = "mod:opaque-writer".to_owned();
+        let mod_scan =
+            crate::material_delivery::MaterialDeliveryRuntime::build(&mod_state, &entities)
+                .select(&mod_state, &entities)
+                .scan;
+        assert!(mod_scan.directory_fallback && mod_scan.full_scan);
+
+        let mut opaque_entities = entities.clone();
+        opaque_entities[hub_indices[0]]["mod:inventory-writer"] = json!({ "enabled": true });
+        let opaque_scan =
+            crate::material_delivery::MaterialDeliveryRuntime::build(&state, &opaque_entities)
+                .select(&state, &opaque_entities)
+                .scan;
+        assert!(opaque_scan.directory_fallback && opaque_scan.full_scan);
+
+        let mut drift_entities = entities.clone();
+        let mut drift_runtime =
+            crate::material_delivery::MaterialDeliveryRuntime::build(&state, &drift_entities);
+        let first = drift_runtime.select(&state, &drift_entities);
+        drift_runtime.commit_first_phase(first);
+        let second = drift_runtime.select(&state, &drift_entities);
+        drift_runtime
+            .commit_second_phase(
+                second,
+                &hub_indices
+                    .iter()
+                    .copied()
+                    .map(|index| (index, false))
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        drift_entities[hub_indices[3]]["id"] = Value::from("identity-drift");
+        drift_runtime.wake_from_changed_entities(&state, &[hub_indices[3]]);
+        let drift = drift_runtime.select(&state, &drift_entities);
+        assert!(drift.scan.directory_fallback && drift.scan.full_scan);
+
+        let mut rebuilt_topology = state.clone();
+        std::sync::Arc::make_mut(&mut rebuilt_topology.factory_topology)
+            .material_delivery_hub_indices
+            .shrink_to_fit();
+        let rebuilt = runtime.select(&rebuilt_topology, &entities);
+        assert!(rebuilt.scan.directory_fallback && rebuilt.scan.full_scan);
+    }
+
+    #[test]
+    fn failed_material_delivery_candidate_retains_source_wake_and_bytes() {
+        let mut state = material_delivery_oactive_fixture(8);
+        advance_and_install_ordinary_test_state(&mut state, 1.0);
+        let hub_index = state.factory_topology.material_delivery_hub_indices[4];
+        let mut runtime = state
+            .prepared_material_delivery_runtime()
+            .expect("material delivery runtime");
+        std::sync::Arc::make_mut(&mut runtime).wake_from_changed_entities(&state, &[hub_index]);
+        state.install_prepared_material_delivery_runtime(runtime);
+        state.base_value_mut().remove("totalProduced");
+        let source_bytes = serde_json::to_vec(&state.materialize().unwrap()).unwrap();
+        let source_runtime = state
+            .prepared_material_delivery_runtime()
+            .expect("source material delivery runtime");
+        let pending = source_runtime.pending_rows_for_test();
+        let history = source_runtime.scan_history_for_test().to_vec();
+        let error = prepare_advance_with_runtime(
+            &state,
+            1.0,
+            1.0,
+            false,
+            &DeterministicRuntime::for_test(4),
+        )
+        .err()
+        .expect("malformed totalProduced must fail");
+        assert!(format!("{error:#}").contains("total production record is missing"));
+        assert_eq!(
+            serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+            source_bytes
+        );
+        let retained = state
+            .prepared_material_delivery_runtime()
+            .expect("retained material delivery runtime");
+        assert!(std::sync::Arc::ptr_eq(&source_runtime, &retained));
+        assert_eq!(retained.pending_rows_for_test(), pending);
+        assert_eq!(retained.scan_history_for_test(), history);
     }
 
     #[test]

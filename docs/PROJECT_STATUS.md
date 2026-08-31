@@ -1,10 +1,16 @@
 # DSP极简网络项目现状
 
+> **Windows material-delivery hub 双阶段活动队列（2026-09-01，开发候选，未发布）**：Rust `simple_factory` 对内置物资配送枢纽增加 session-only、按持久实体行排序的 wake queue。冷拍仍在历史前/后两个 drain 阶段各全扫一次；第一阶段选中的行必定带到第二阶段，只有输入已经合法归零、三个 delivery slot 可证明且目标托盘未满的 hub 才休眠。两段真实 belt changed-entity 事件分别闭合前后唤醒；托盘满、残留输入、MOD/opaque、identity/topology 漂移、精确 75% 稠密都保持常醒或回退原 full scan。
+>
+> 1,024 hub 的 `1/5/60` 秒 indexed 与独立 force-full oracle 在完整 bytes、canonical、domain 和物料守恒 SHA-256 上一致；共 `2/10/120` 次 drain，indexed 冷拍两次各选 1,024，之后每阶段最多 1 行，force-full 每次 1,024。真实 relay 与 producer belt 覆盖同拍前后两阶段唤醒，60 秒结果在 1/2/4/8 workers 一致；失败候选保留源 wake 和源字节。最终 Core 串行全量 `899/899`（278.82 秒）、workspace all-targets/all-features strict clippy、fmt 与 diff check 通过。strict clippy 首轮只报告一处测试 `manual_contains`，按等价 `contains` 修复后转绿，失败史保留。
+>
+> 该结果是扫描形状与确定性证据，不是墙钟收益或全部物流完成声明；continuous production、opaque/MOD hub、quantum fanout 与其他 fail-closed 路径仍未闭合。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不变；未连接生产、未部署、未签名，也未读取或修改真实玩家存档。
+
 > **Windows Campaign / Galaxy 薄 UI 纵切（2026-09-01，开发候选，未发布）**：Rust authority 下两个原先被隐藏的玩家入口现已可达。Campaign 使用 16 章/64 任务/256 KiB 的只读投影；Galaxy 使用 64 KiB、256 位十进制的游戏摘要，并继续把本地身份/云登录绑定放在 renderer 账户域。两页都要求 session/run/revision/registry 完全一致，truncated/stale/ABA/目录漂移整页失败关闭；Web fallback 不变。Galaxy 不接收 GameState，也没有恢复、导入或覆盖活动主档入口；native authority 下本地账户创建/切换不再从 renderer shell 记账。
 >
 > Campaign 当前打开时由 Rust 对实体与线路做一次 `O(E+B)` 只读扫描以计算进度，不是缓存命中或 `O(active)` 查询，后续若要降成本必须建立同 revision metrics cache/事件账本。本纵切 fresh focused 结果为 Core `3/3`、Host exact lease `1/1`、Host bin `3/3`、Node `62 passed / 6 skipped / 0 failed`（未构建 release Host 的真实进程集成用例跳过）、Vitest `12/12`；typecheck、strict clippy、fmt、production build/startup budget 与 diff check 通过。本纵切不改固定百分比、公开 v47/schema/package 或 `authorityEligible=false`；没有真实存档、生产连接、部署、打包或签名，这些数字也不替代 root 的组合全量门禁。
 
-> **Windows 四目标固定分母复审（2026-09-01）**：独立只读审计在 `7a359be` 产品源码与 `47fa7b9` docs-only HEAD 上均未发现 P0/P1；新口径为 `Rust 唯一玩家可见权威 85% / 完整薄 UI 97% / 真正 O(active) 物流 97% / 全领域确定性原生并行 74% / 四目标能力加权开发 89% / 发布成熟度 60%`。上调来自累计的 ordinary 蓝图完整生命周期、恒星系空间站可达七 intent、ordinary buffer wake queue，以及八类冷准备和三类电力需求固定分区；不是因为本轮改动行数多。剩余约 11% 仍含 productive pure-idle/offline/time-warp、合同/运营/银河/MOD/戴森几何、continuous production/material hubs/quantum fanout、共享 inventory/Dyson/belt-conflict/物流 commit。发布成熟度不动，因为 24 小时、多硬件/Win10/11、Defender/磁盘、安装/覆盖升级、签名和灰度仍未通过。
+> **Windows 四目标固定分母复审（2026-09-01）**：独立只读审计在 `7a359be` 产品源码与 `47fa7b9` docs-only HEAD 上均未发现 P0/P1；新口径为 `Rust 唯一玩家可见权威 85% / 完整薄 UI 97% / 真正 O(active) 物流 97% / 全领域确定性原生并行 74% / 四目标能力加权开发 89% / 发布成熟度 60%`。上调来自累计的 ordinary 蓝图完整生命周期、恒星系空间站可达七 intent、ordinary buffer wake queue，以及八类冷准备和三类电力需求固定分区；不是因为本轮改动行数多。剩余约 11% 仍含 productive pure-idle/offline/time-warp、合同/运营/银河/MOD/戴森几何、continuous production、opaque/MOD material hubs、quantum fanout、共享 inventory/Dyson/belt-conflict/物流 commit。发布成熟度不动，因为 24 小时、多硬件/Win10/11、Defender/磁盘、安装/覆盖升级、签名和灰度仍未通过。
 
 > **Windows 恒星系空间站 Rust 写面 P1 收口（2026-09-01，开发候选，未发布）**：原生星图现在有真实可达的“管理本系空间站”入口；七类空间站操作经过有界 Rust 投影、main-owned FIFO、Host WAL/checkpoint/receipt 和冷恢复提交，renderer 不提供 patch、完整状态、库存结果或派生升级范围。投影的 session/run/revision/registry/system 五重身份进入命令哈希并由 Rust 重新验证实体所属恒星系，避免旧窗口、跨存档同 revision 和跨系点击误写。
 >

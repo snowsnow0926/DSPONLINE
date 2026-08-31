@@ -8,6 +8,7 @@ use crate::core_runtime::{
     CoreCheckpointExactRealtimeFinalizationRequest, CoreCommitOperationExactRealtimeRequest,
     CoreCommitOperationRequest, CoreCommitPlayerAuthorityCommandRequest,
     CoreCommitPlayerAuthorityMacroAdvanceRequest,
+    CoreCommitPlayerAuthorityOperationsSettingCommandRequest,
     CoreCommitPlayerAuthorityOrbitalContractCommandRequest, CoreCommitPlayerAuthorityPauseRequest,
     CoreCommitPlayerAuthoritySystemSpaceStationCommandRequest,
     CoreCommitPlayerAuthorityTickRequest, CoreFinishPlayerAuthorityMacroSessionRequest,
@@ -62,6 +63,13 @@ pub struct CoreCommitPlayerAuthoritySystemSpaceStationCommandControlRequest {
 pub struct CoreCommitPlayerAuthorityOrbitalContractCommandControlRequest {
     pub session_id: String,
     pub request: CoreCommitPlayerAuthorityOrbitalContractCommandRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreCommitPlayerAuthorityOperationsSettingCommandControlRequest {
+    pub session_id: String,
+    pub request: CoreCommitPlayerAuthorityOperationsSettingCommandRequest,
 }
 
 #[derive(Debug, Deserialize)]
@@ -505,6 +513,12 @@ pub enum ControlRequest {
         expected_revision: u64,
         expected_registry_fingerprint: String,
     },
+    CoreOperationsWorkspaceProjection {
+        session_id: String,
+        run_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+    },
     CoreGalaxyAccountWorkspaceProjection {
         session_id: String,
         run_id: String,
@@ -538,6 +552,9 @@ pub enum ControlRequest {
     ),
     CoreCommitPlayerAuthorityOrbitalContractCommand(
         CoreCommitPlayerAuthorityOrbitalContractCommandControlRequest,
+    ),
+    CoreCommitPlayerAuthorityOperationsSettingCommand(
+        CoreCommitPlayerAuthorityOperationsSettingCommandControlRequest,
     ),
     CoreCommitPlayerAuthorityPause(CoreCommitPlayerAuthorityPauseControlRequest),
     CoreRecoverPlayerAuthorityCommand(CoreRecoverPlayerAuthorityCommandControlRequest),
@@ -2009,6 +2026,47 @@ mod tests {
                     "expectedSystemId": "helios",
                     "intent": { "type": "start", "systemId": "helios" },
                     "command": { "protocolVersion": 1 }
+                }
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn operations_setting_protocol_accepts_only_semantic_leaf_requests() {
+        let request: ControlRequest = serde_json::from_value(serde_json::json!({
+            "operation": "coreCommitPlayerAuthorityOperationsSettingCommand",
+            "sessionId": "core-1",
+            "request": {
+                "runId": "run-1",
+                "commandId": format!("operations-setting-v1-{}", "a".repeat(64)),
+                "baseRevision": 7,
+                "expectedRegistryFingerprint": "7df8cf3a",
+                "intent": { "type": "set-production-buffer-limit", "value": 1000 }
+            }
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreCommitPlayerAuthorityOperationsSettingCommand(control) => {
+                assert_eq!(control.session_id, "core-1");
+                assert!(matches!(
+                    control.request.intent,
+                    dsp_native_core::operations_workspace::OperationsSettingIntent::SetProductionBufferLimit { value: 1000 }
+                ));
+            }
+            _ => panic!("operations setting intent decoded as another operation"),
+        }
+        assert!(
+            serde_json::from_value::<ControlRequest>(serde_json::json!({
+                "operation": "coreCommitPlayerAuthorityOperationsSettingCommand",
+                "sessionId": "core-1",
+                "request": {
+                    "runId": "run-1",
+                    "commandId": format!("operations-setting-v1-{}", "a".repeat(64)),
+                    "baseRevision": 7,
+                    "expectedRegistryFingerprint": "7df8cf3a",
+                    "intent": { "type": "set-production-buffer-limit", "value": 1000 },
+                    "command": { "topLevelChanges": [] }
                 }
             }))
             .is_err()

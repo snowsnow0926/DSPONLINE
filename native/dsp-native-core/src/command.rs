@@ -308,7 +308,10 @@ fn top_level_change_is_projection_safe(change: &ValuePatch) -> bool {
         change.path.as_slice(),
         [PathSegment::Key(root), PathSegment::Key(field)]
             if root == "settings"
-                && field == "technologyLayout"
+                && matches!(field.as_str(),
+                    "simulationSpeed" | "technologyLayout" | "defaultBeltRouteMode"
+                    | "productionBufferLimit" | "logisticsBufferLimit"
+                    | "beltBufferLimit" | "proliferatorBufferLimit")
                 && change.operation == "set"
                 && change.value.is_some()
     ) || matches!(

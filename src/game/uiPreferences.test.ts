@@ -8,6 +8,7 @@ import {
   DEFAULT_BELT_LANES_PREFERENCE_KEY,
   FULL_REALTIME_SIMULATION_PREFERENCE_KEY,
   FACTORY_ALERTS_PREFERENCE_KEY,
+  UI_FONT_SCALE_PREFERENCE_KEY,
   LARGE_SAVE_AUTOSAVE_THROTTLE_PREFERENCE_KEY,
   MEMORY_AUTO_PAUSE_PREFERENCE_KEY,
   MEMORY_AUTO_PAUSE_THRESHOLD_PREFERENCE_KEY,
@@ -19,6 +20,7 @@ import {
   readDefaultBeltLanesPreference,
   readFullRealtimeSimulationPreference,
   readFactoryAlertsPreference,
+  readFontScalePreference,
   readLargeSaveAutosaveThrottlePreference,
   readMemoryAutoPauseEnabledPreference,
   readMemoryAutoPauseThresholdPreference,
@@ -42,6 +44,7 @@ import {
   writeDefaultBeltLanesPreference,
   writeFullRealtimeSimulationPreference,
   writeFactoryAlertsPreference,
+  writeFontScalePreference,
   writeLargeSaveAutosaveThrottlePreference,
   writeMemoryAutoPauseEnabledPreference,
   writeMemoryAutoPauseThresholdPreference,
@@ -66,6 +69,7 @@ describe("device-only UI preferences", () => {
     Object.defineProperty(globalThis, "window", { configurable: true, value: { localStorage: storage, matchMedia: () => ({ matches: false }) } });
     try {
       expect(readThemePreference()).toBeNull();
+      expect(readFontScalePreference()).toBeNull();
       expect(readShowRunLogPreference()).toBe(true);
       expect(readShowItemHoverPreference()).toBe(true);
       expect(readSettingsCategoryPreference()).toBe("all");
@@ -83,6 +87,7 @@ describe("device-only UI preferences", () => {
       expect(readMemoryAutoPauseEnabledPreference()).toBe(true);
       expect(readMemoryAutoPauseThresholdPreference()).toBeNull();
       writeThemePreference("light");
+      writeFontScalePreference(1.5);
       writeShowRunLogPreference(false);
       writeShowItemHoverPreference(false);
       writeSettingsCategoryPreference("statistics");
@@ -100,6 +105,8 @@ describe("device-only UI preferences", () => {
       writeMemoryAutoPauseEnabledPreference(false);
       writeMemoryAutoPauseThresholdPreference(1_536);
       expect(readThemePreference()).toBe("light");
+      expect(readFontScalePreference()).toBe(1.5);
+      expect(storage.getItem(UI_FONT_SCALE_PREFERENCE_KEY)).toBe("1.5");
       expect(readShowRunLogPreference()).toBe(false);
       expect(readShowItemHoverPreference()).toBe(false);
       expect(readSettingsCategoryPreference()).toBe("statistics");
@@ -134,6 +141,7 @@ describe("device-only UI preferences", () => {
   it("falls back safely when a stored value is invalid", () => {
     const storage = memoryStorage();
     storage.setItem("dsp-idle-network.ui.theme.v1", "neon");
+    storage.setItem(UI_FONT_SCALE_PREFERENCE_KEY, "1.1");
     storage.setItem("dsp-idle-network.ui.show-run-log.v1", "maybe");
     storage.setItem("dsp-idle-network.ui.show-item-hover.v1", "maybe");
     storage.setItem("dsp-idle-network.ui.settings-category.v1", "unknown");
@@ -154,6 +162,7 @@ describe("device-only UI preferences", () => {
     Object.defineProperty(globalThis, "window", { configurable: true, value: { localStorage: storage, matchMedia: () => ({ matches: false }) } });
     try {
       expect(readThemePreference()).toBeNull();
+      expect(readFontScalePreference()).toBeNull();
       expect(readShowRunLogPreference()).toBe(true);
       expect(readShowItemHoverPreference()).toBe(true);
       expect(readSettingsCategoryPreference()).toBe("all");

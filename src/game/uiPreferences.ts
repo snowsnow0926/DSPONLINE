@@ -1,4 +1,4 @@
-import type { ThemeMode } from "./types";
+import type { FontScale, ThemeMode } from "./types";
 import type {
   CanvasDetailPreference,
   CanvasInteractionDetailPreference,
@@ -11,6 +11,7 @@ import {
 
 /** Device-only preferences. These values never belong in GameState or cloud payloads. */
 export const UI_THEME_PREFERENCE_KEY = "dsp-idle-network.ui.theme.v1";
+export const UI_FONT_SCALE_PREFERENCE_KEY = "dsp-idle-network.ui.font-scale.v1";
 export const SHOW_RUN_LOG_PREFERENCE_KEY = "dsp-idle-network.ui.show-run-log.v1";
 export const SHOW_ITEM_HOVER_PREFERENCE_KEY = "dsp-idle-network.ui.show-item-hover.v1";
 export const SETTINGS_CATEGORY_PREFERENCE_KEY = "dsp-idle-network.ui.settings-category.v1";
@@ -62,6 +63,21 @@ export function writeThemePreference(mode: ThemeMode): void {
   const storage = localStorageOrNull();
   if (!storage) return;
   try { storage.setItem(UI_THEME_PREFERENCE_KEY, mode); } catch { /* optional preference */ }
+}
+
+export function readFontScalePreference(): FontScale | null {
+  const storage = localStorageOrNull();
+  if (!storage) return null;
+  try {
+    const value = Number(storage.getItem(UI_FONT_SCALE_PREFERENCE_KEY));
+    return value === 0.8 || value === 1 || value === 1.25 || value === 1.5 || value === 2 ? value : null;
+  } catch { return null; }
+}
+
+export function writeFontScalePreference(scale: FontScale): void {
+  const storage = localStorageOrNull();
+  if (!storage) return;
+  try { storage.setItem(UI_FONT_SCALE_PREFERENCE_KEY, String(scale)); } catch { /* optional preference */ }
 }
 
 export function readShowRunLogPreference(): boolean {

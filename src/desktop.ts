@@ -384,10 +384,12 @@ export interface DesktopBridge {
   getNativeCoreOrbitalContractWorkspaceProjection?: (request: DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest) => Promise<DesktopNativeCoreOrbitalContractWorkspaceProjectionResult>;
   /** Fixed-catalog campaign progress only; navigation locators cannot mutate the game. */
   getNativeCoreCampaignWorkspaceProjection?: (request: DesktopNativeCoreCampaignWorkspaceProjectionRequest) => Promise<DesktopNativeCoreCampaignWorkspaceProjectionResult>;
+  getNativeCoreOperationsWorkspaceProjection?: (request: DesktopNativeCoreOperationsWorkspaceProjectionRequest) => Promise<DesktopNativeCoreOperationsWorkspaceProjectionResult>;
   /** Game-only Galaxy summary; renderer-owned account data stays outside this projection. */
   getNativeCoreGalaxyAccountWorkspaceProjection?: (request: DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest) => Promise<DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult>;
   /** Intent-only durable contract mutation; reward/material totals stay Rust-owned. */
   commitNativeOrbitalContractIntent?: (request: DesktopNativeOrbitalContractIntentRequest) => Promise<DesktopNativeCoreCommandResult>;
+  commitNativeOperationsSettingIntent?: (request: DesktopNativeOperationsSettingIntentRequest) => Promise<DesktopNativeCoreCommandResult>;
   /** Current Windows thin-UI host only; native authority never falls back to a renderer entity scan. */
   getNativeCoreCommandPaletteEntitySearch?: (request: DesktopNativeCoreCommandPaletteEntitySearchRequest) => Promise<DesktopNativeCoreCommandPaletteEntitySearchResult>;
   requestNativeCoreProjectionTransfer?: (request: DesktopNativeCoreProjectionTransferRequest) => Promise<DesktopNativeCoreProjectionTransferResult>;
@@ -2886,6 +2888,79 @@ export interface DesktopNativeCoreAuthorityWorkspaceProjectionRequest extends De
   runId: string;
   expectedRevision: number;
   expectedRegistryFingerprint: string;
+}
+
+export type DesktopNativeCoreOperationsWorkspaceProjectionRequest = DesktopNativeCoreSessionRequest & {
+  readonly runId: string;
+  readonly expectedRevision: number;
+  readonly expectedRegistryFingerprint: string;
+};
+
+export type DesktopNativeOperationsSettingIntent =
+  | { readonly type: "set-simulation-speed"; readonly value: 1 | 2 | 4 }
+  | { readonly type: "set-technology-layout"; readonly value: "standard" | "compact" }
+  | { readonly type: "set-default-belt-route-mode"; readonly value: "auto" | "bezier" | "upper" | "lower" }
+  | { readonly type: "set-production-buffer-limit"; readonly value: number }
+  | { readonly type: "set-logistics-buffer-limit"; readonly value: number }
+  | { readonly type: "set-belt-buffer-limit"; readonly value: number }
+  | { readonly type: "set-proliferator-buffer-limit"; readonly value: number };
+
+export interface DesktopNativeOperationsSettingIntentRequest {
+  readonly expectedSessionId: string;
+  readonly expectedRunId: string;
+  readonly expectedRevision: number;
+  readonly expectedRegistryFingerprint: string;
+  readonly intent: DesktopNativeOperationsSettingIntent;
+}
+
+export interface DesktopNativeCoreOperationsAlertRow {
+  readonly entityId: string;
+  readonly planetId: string;
+  readonly buildingId: string | null;
+  readonly recipeId: string | null;
+  readonly resourceId: string | null;
+  readonly severity: "critical" | "warning";
+  readonly code: string;
+  readonly label: string;
+}
+
+export interface DesktopNativeCoreOperationsWorkspaceProjectionResult {
+  readonly schemaVersion: 1;
+  readonly projectionType: "operations-workspace-v1";
+  readonly source: "native-core";
+  readonly stateVersion: 47;
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly registryFingerprint: string;
+  readonly truncated: false;
+  readonly settings: {
+    readonly simulationSpeed: 1 | 2 | 4;
+    readonly technologyLayout: "standard" | "compact";
+    readonly defaultBeltRouteMode: "auto" | "bezier" | "upper" | "lower";
+    readonly productionBufferLimit: number;
+    readonly logisticsBufferLimit: number;
+    readonly beltBufferLimit: number;
+    readonly proliferatorBufferLimit: number;
+  };
+  readonly summary: {
+    readonly paused: boolean;
+    readonly elapsedSeconds: number;
+    readonly entityCount: number;
+    readonly beltCount: number;
+    readonly activePlanetId: string;
+    readonly activePlanetEntityCount: number;
+    readonly activePlanetBeltCount: number;
+    readonly constructionQueueCount: number;
+  };
+  readonly alerts: {
+    readonly status: "complete" | "overflow";
+    readonly totalCount: number;
+    readonly criticalCount: number;
+    readonly warningCount: number;
+    readonly rows: readonly DesktopNativeCoreOperationsAlertRow[];
+  };
+  readonly limits: { readonly alertRows: 1024; readonly projectionBytes: 524288 };
 }
 
 export type DesktopNativeCoreCampaignWorkspaceProjectionRequest =

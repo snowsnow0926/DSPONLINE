@@ -6,6 +6,7 @@ const test = require("node:test");
 
 const {
   NativePlayerAuthorityRuntime,
+  OPERATIONS_SETTING_PRE_STAGE_REJECTED_CODE,
   ORBITAL_CONTRACT_PRE_STAGE_REJECTED_CODE,
   SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
 } = require("./native-player-authority-runtime.cjs");
@@ -18,6 +19,9 @@ const {
 const {
   deriveOrbitalContractCommandIdentity,
 } = require("./native-orbital-contract-intent.cjs");
+const {
+  deriveOperationsSettingCommandIdentity,
+} = require("./native-operations-setting-intent.cjs");
 
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
@@ -129,6 +133,22 @@ function orbitalContractRequest(baseRevision, intent) {
   };
 }
 
+function operationsSettingRequest(baseRevision, intent) {
+  const identity = deriveOperationsSettingCommandIdentity({
+    sessionId: "core-main-1",
+    runId: "player-run-1",
+    expectedRevision: baseRevision,
+    expectedRegistryFingerprint: "7df8cf3a",
+    intent,
+  });
+  return {
+    commandId: identity.commandId,
+    baseRevision,
+    expectedRegistryFingerprint: "7df8cf3a",
+    intent,
+  };
+}
+
 function pauseLifecycleReceipt(request, sequence, generation, duplicate = false) {
   const revision = request.baseRevision + 1;
   return {
@@ -220,6 +240,21 @@ function fixture(overrides = {}) {
         settledDeadlineMs: 10_000,
         duplicate: false,
         ...changeReceipt(),
+        checkpoint: { generation: 3 + revision - checkpoint.revision, rootHash: HASH_A, revision },
+        summary: summary(revision),
+      };
+    },
+    async commitPlayerAuthorityOperationsSettingCommand(ownerId, request) {
+      calls.push(["operations-command", ownerId, request]);
+      const revision = request.baseRevision + 1;
+      return {
+        sequence: revision - checkpoint.revision,
+        commandId: request.commandId,
+        baseRevision: request.baseRevision,
+        revision,
+        settledDeadlineMs: 10_000,
+        duplicate: false,
+        ...changeReceipt({ topologyDirty: false }),
         checkpoint: { generation: 3 + revision - checkpoint.revision, rootHash: HASH_A, revision },
         summary: summary(revision),
       };
@@ -1071,6 +1106,72 @@ test("orbital-contract intents share the main-owned FIFO and never expose a patc
       "baseRevision", "commandId", "confirmedWallClockMs", "expectedRegistryFingerprint", "intent", "runId", "sessionId",
     ]);
   }
+});
+
+test("operations leaf intents share the main-owned FIFO and never expose a patch", async () => {
+  const value = fixture();
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  const results = await Promise.all([
+    value.runtime.commitOperationsSettingIntent(operationsSettingRequest(7, {
+      type: "set-simulation-speed", value: 2,
+    })),
+    value.runtime.commitCommand(playerCommand(8, "ordinary-after-operations", 1)),
+    value.runtime.commitOperationsSettingIntent(operationsSettingRequest(9, {
+      type: "set-production-buffer-limit", value: 4000,
+    })),
+  ]);
+  assert.deepEqual(results.map((result) => result.revision), [8, 9, 10]);
+  assert.deepEqual(
+    value.calls
+      .filter(([operation]) => operation === "operations-command" || operation === "command")
+      .map(([operation]) => operation),
+    ["operations-command", "command", "operations-command"],
+  );
+  for (const [, , request] of value.calls.filter(([operation]) => operation === "operations-command")) {
+    assert.equal(Object.hasOwn(request, "command"), false);
+    assert.deepEqual(Object.keys(request).sort(), [
+      "baseRevision", "commandId", "expectedRegistryFingerprint", "intent", "runId", "sessionId",
+    ]);
+  }
+});
+
+test("operations typed pre-stage rejection is definite after an uncertain retry", async () => {
+  let attempts = 0;
+  const value = fixture({
+    registry: {
+      async commitPlayerAuthorityOperationsSettingCommand(ownerId, request) {
+        value.calls.push(["operations-command", ownerId, request]);
+        attempts += 1;
+        if (attempts === 1) throw Object.assign(new Error("pipe closed"), { code: "EPIPE" });
+        throw Object.assign(new Error("buffer leaf proof failed"), {
+          code: OPERATIONS_SETTING_PRE_STAGE_REJECTED_CODE,
+        });
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  await assert.rejects(
+    value.runtime.commitOperationsSettingIntent(operationsSettingRequest(7, {
+      type: "set-belt-buffer-limit", value: 4000,
+    })),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_COMMAND_UNCERTAIN",
+  );
+  assert.equal(value.runtime.snapshot().phase, "uncertain");
+  await assert.rejects(
+    value.runtime.retryUncertain(),
+    (error) => error.code === OPERATIONS_SETTING_PRE_STAGE_REJECTED_CODE,
+  );
+  assert.equal(value.runtime.snapshot().phase, "active");
+  assert.equal(value.runtime.snapshot().revision, 7);
+  const calls = value.calls.filter(([operation]) => operation === "operations-command");
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0][2], calls[1][2]);
 });
 
 test("orbital-contract pre-stage rejection is definite but transport loss stays retryable", async () => {

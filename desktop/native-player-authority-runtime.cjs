@@ -6,6 +6,7 @@ const {
 const {
   normalizeOrbitalContractIntent,
 } = require("./native-orbital-contract-intent.cjs");
+const { normalizeOperationsSettingIntent } = require("./native-operations-setting-intent.cjs");
 
 /*
  * Main-process-only player-authority clock.
@@ -28,6 +29,8 @@ const SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE =
   "NATIVE_CORE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED";
 const ORBITAL_CONTRACT_PRE_STAGE_REJECTED_CODE =
   "NATIVE_CORE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_PRE_STAGE_REJECTED";
+const OPERATIONS_SETTING_PRE_STAGE_REJECTED_CODE =
+  "NATIVE_CORE_PLAYER_AUTHORITY_OPERATIONS_SETTING_PRE_STAGE_REJECTED";
 const COMMAND_KEYS = Object.freeze([
   "protocolVersion", "baseRevision", "topLevelChanges", "changedEntities", "addedEntities",
   "removedEntityIds", "changedBelts", "addedBelts", "removedBeltIds",
@@ -58,6 +61,11 @@ function isDefiniteSystemSpaceStationPreStageRejection(entry, cause) {
 function isDefiniteOrbitalContractPreStageRejection(entry, cause) {
   return entry?.request?.kind === "orbital-contract" && isRecord(cause) &&
     cause.code === ORBITAL_CONTRACT_PRE_STAGE_REJECTED_CODE;
+}
+
+function isDefiniteOperationsSettingPreStageRejection(entry, cause) {
+  return entry?.request?.kind === "operations-setting" && isRecord(cause) &&
+    cause.code === OPERATIONS_SETTING_PRE_STAGE_REJECTED_CODE;
 }
 
 function requireLogicalId(value, label) {
@@ -343,6 +351,25 @@ function normalizeOrbitalContractCommandRequest(value) {
     confirmedWallClockMs,
     intent,
   });
+}
+
+function normalizeOperationsSettingCommandRequest(value) {
+  if (!isRecord(value) || !hasExactKeys(value, [
+    "commandId", "baseRevision", "expectedRegistryFingerprint", "intent",
+  ])) {
+    throw runtimeError("native player-authority operations setting request is invalid");
+  }
+  const commandId = requireLogicalId(value.commandId, "commandId");
+  const baseRevision = requireSafeInteger(value.baseRevision, 0, "baseRevision");
+  if (baseRevision >= Number.MAX_SAFE_INTEGER) {
+    throw runtimeError("native operations setting revision is exhausted", "NATIVE_PLAYER_AUTHORITY_COMMAND_REVISION_EXHAUSTED");
+  }
+  const expectedRegistryFingerprint = requireLogicalId(value.expectedRegistryFingerprint, "expectedRegistryFingerprint");
+  let intent;
+  try { intent = normalizeOperationsSettingIntent(value.intent); } catch (cause) {
+    throw runtimeError("native operations setting intent is invalid", "NATIVE_PLAYER_AUTHORITY_OPERATIONS_SETTING_INTENT_INVALID", cause);
+  }
+  return Object.freeze({ kind: "operations-setting", commandId, baseRevision, expectedRegistryFingerprint, intent });
 }
 
 function validateRecoveryReceipt(value, sessionId) {
@@ -1137,6 +1164,36 @@ class NativePlayerAuthorityRuntime {
     return promise;
   }
 
+  commitOperationsSettingIntent(rawRequest) {
+    if (this.phase !== "active" || !this.context) {
+      return Promise.reject(runtimeError("native player-authority runtime is not accepting operations setting intents"));
+    }
+    let request;
+    let replay = false;
+    try {
+      request = normalizeOperationsSettingCommandRequest(rawRequest);
+      if (this.commandQueue.length >= 64) {
+        throw runtimeError("native player-authority command queue is full", "NATIVE_PLAYER_AUTHORITY_COMMAND_QUEUE_FULL");
+      }
+      replay = !this.inFlight && !this.activeCommand && this.commandQueue.length === 0 &&
+        this.context.lastCommand?.commandId === request.commandId &&
+        this.context.lastCommand?.baseRevision === request.baseRevision &&
+        this.context.lastCommand?.revision === this.context.revision;
+      let projectedRevision = this.context.revision;
+      if (!replay && (this.currentOperation === "tick" || this.currentOperation === "command")) projectedRevision += 1;
+      if (!replay) projectedRevision += this.commandQueue.length;
+      if (!Number.isSafeInteger(projectedRevision) || !replay && request.baseRevision !== projectedRevision) {
+        throw runtimeError("native operations setting revision is not the queued revision", "NATIVE_PLAYER_AUTHORITY_COMMAND_REVISION_MISMATCH");
+      }
+    } catch (error) { return Promise.reject(error); }
+    let resolveCommand;
+    let rejectCommand;
+    const promise = new Promise((resolve, reject) => { resolveCommand = resolve; rejectCommand = reject; });
+    this.commandQueue.push({ request, replay, promise, resolve: resolveCommand, reject: rejectCommand });
+    this.pump();
+    return promise;
+  }
+
   /**
    * Commits the player-visible pause flag and the exact-realtime lease phase as
    * one durable Host transaction. The caller supplies only the desired state:
@@ -1653,6 +1710,19 @@ class NativePlayerAuthorityRuntime {
           intent: entry.request.intent,
         });
       }
+      if (entry.request.kind === "operations-setting") {
+        if (typeof this.registry.commitPlayerAuthorityOperationsSettingCommand !== "function") {
+          throw runtimeError("native player-authority operations setting capability is unavailable", "NATIVE_PLAYER_AUTHORITY_OPERATIONS_SETTING_UNAVAILABLE");
+        }
+        return this.registry.commitPlayerAuthorityOperationsSettingCommand(this.ownerId, {
+          sessionId: context.sessionId,
+          runId: context.runId,
+          commandId: entry.request.commandId,
+          baseRevision: entry.request.baseRevision,
+          expectedRegistryFingerprint: entry.request.expectedRegistryFingerprint,
+          intent: entry.request.intent,
+        });
+      }
       return this.registry.commitPlayerAuthorityCommand(this.ownerId, {
         sessionId: context.sessionId,
         runId: context.runId,
@@ -1693,18 +1763,24 @@ class NativePlayerAuthorityRuntime {
         isDefiniteSystemSpaceStationPreStageRejection(entry, cause);
       const definiteOrbitalContractRejection =
         isDefiniteOrbitalContractPreStageRejection(entry, cause);
+      const definiteOperationsSettingRejection =
+        isDefiniteOperationsSettingPreStageRejection(entry, cause);
       const definitePreStageRejection =
-        definiteSystemSpaceStationRejection || definiteOrbitalContractRejection;
+        definiteSystemSpaceStationRejection || definiteOrbitalContractRejection || definiteOperationsSettingRejection;
       const error = definitePreStageRejection
         ? runtimeError(
           typeof cause.message === "string" && cause.message.length > 0
             ? cause.message
             : definiteOrbitalContractRejection
               ? "native orbital-contract command was rejected before durable staging"
-              : "native system-space-station command was rejected before durable staging",
+              : definiteOperationsSettingRejection
+                ? "native operations setting command was rejected before durable staging"
+                : "native system-space-station command was rejected before durable staging",
           definiteOrbitalContractRejection
             ? ORBITAL_CONTRACT_PRE_STAGE_REJECTED_CODE
-            : SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
+            : definiteOperationsSettingRejection
+              ? OPERATIONS_SETTING_PRE_STAGE_REJECTED_CODE
+              : SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
           cause,
         )
         : cause instanceof NativePlayerAuthorityRuntimeError
@@ -1886,6 +1962,7 @@ class NativePlayerAuthorityRuntime {
 module.exports = {
   NativePlayerAuthorityRuntime,
   NativePlayerAuthorityRuntimeError,
+  OPERATIONS_SETTING_PRE_STAGE_REJECTED_CODE,
   ORBITAL_CONTRACT_PRE_STAGE_REJECTED_CODE,
   SYSTEM_SPACE_STATION_PRE_STAGE_REJECTED_CODE,
   TICK_MILLISECONDS,

@@ -4,6 +4,10 @@ use std::io::Read;
 use anyhow::{Context, anyhow, bail};
 use dsp_native_core::canonical::canonical_sha256;
 use dsp_native_core::catalog::RuntimeCatalog;
+use dsp_native_core::operations_workspace::{
+    OperationsSettingAuthority, OperationsSettingCommandRequest, OperationsSettingIntent,
+    derive_operations_setting_command_id, prepare_operations_setting_command,
+};
 use dsp_native_core::orbital_contract_command::{
     OrbitalContractAuthority, OrbitalContractCommandRequest, OrbitalContractIntent,
     derive_orbital_contract_command_id, prepare_orbital_contract_command,
@@ -38,6 +42,7 @@ const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const MAX_COMMAND_PALETTE_SEARCH_REQUEST_BYTES: usize = 32_768;
 const MAX_SYSTEM_SPACE_STATION_INTENT_REQUEST_BYTES: usize = 32_768;
 const MAX_ORBITAL_CONTRACT_INTENT_REQUEST_BYTES: usize = 32_768;
+const MAX_OPERATIONS_SETTING_INTENT_REQUEST_BYTES: usize = 16_384;
 
 pub const NATIVE_CORE_VIEWPORT_ENTITY_PRESENTATION_V1_CAPABILITY: &str =
     "native-core-viewport-entity-presentation-v1";
@@ -80,6 +85,10 @@ pub const PLAYER_AUTHORITY_ORBITAL_CONTRACT_COMMAND_CAPABILITY: &str =
     "native-core-player-authority-orbital-contract-command-v1";
 pub const PLAYER_AUTHORITY_ORBITAL_CONTRACT_PRE_STAGE_REJECTED_CODE: &str =
     "NATIVE_CORE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_PRE_STAGE_REJECTED";
+pub const PLAYER_AUTHORITY_OPERATIONS_SETTING_COMMAND_CAPABILITY: &str =
+    "native-core-player-authority-operations-setting-command-v1";
+pub const PLAYER_AUTHORITY_OPERATIONS_SETTING_PRE_STAGE_REJECTED_CODE: &str =
+    "NATIVE_CORE_PLAYER_AUTHORITY_OPERATIONS_SETTING_PRE_STAGE_REJECTED";
 pub const PLAYER_AUTHORITY_PAUSE_CAPABILITY: &str =
     "native-core-player-authority-pause-lifecycle-v1";
 pub const PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY: &str =
@@ -123,6 +132,23 @@ impl PlayerAuthorityOrbitalContractPreStageRejected {
         }
     }
 
+    fn from_error(error: anyhow::Error) -> Self {
+        Self::new(format!("{error:#}"))
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct PlayerAuthorityOperationsSettingPreStageRejected {
+    message: String,
+}
+
+impl PlayerAuthorityOperationsSettingPreStageRejected {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
     fn from_error(error: anyhow::Error) -> Self {
         Self::new(format!("{error:#}"))
     }
@@ -642,6 +668,16 @@ pub struct CoreCommitPlayerAuthorityOrbitalContractCommandRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreCommitPlayerAuthorityOperationsSettingCommandRequest {
+    pub run_id: String,
+    pub command_id: String,
+    pub base_revision: u64,
+    pub expected_registry_fingerprint: String,
+    pub intent: OperationsSettingIntent,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CoreCommitPlayerAuthorityPauseRequest {
     pub run_id: String,
     pub base_revision: u64,
@@ -834,6 +870,7 @@ enum PlayerAuthorityCommandKind {
     Gameplay,
     SystemSpaceStation,
     OrbitalContract,
+    OperationsSetting,
     PauseLifecycle {
         target_paused: bool,
         settled_deadline_ms: u64,
@@ -846,7 +883,10 @@ impl PlayerAuthorityCommandKind {
     }
 
     fn is_rust_prevalidated(self) -> bool {
-        matches!(self, Self::SystemSpaceStation | Self::OrbitalContract)
+        matches!(
+            self,
+            Self::SystemSpaceStation | Self::OrbitalContract | Self::OperationsSetting
+        )
     }
 }
 
@@ -2214,6 +2254,114 @@ impl CoreRegistry {
         )
     }
 
+    pub fn commit_player_authority_operations_setting_command(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitPlayerAuthorityOperationsSettingCommandRequest,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityCommandResult> {
+        self.commit_player_authority_operations_setting_command_impl(
+            store,
+            session_id,
+            request,
+            #[cfg(test)]
+            PlayerAuthorityCommandFault::None,
+        )
+    }
+
+    fn commit_player_authority_operations_setting_command_impl(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitPlayerAuthorityOperationsSettingCommandRequest,
+        #[cfg(test)] fault: PlayerAuthorityCommandFault,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityCommandResult> {
+        validate_session_id(session_id)?;
+        if request.base_revision >= MAX_SAFE_INTEGER {
+            bail!("native operations setting command base revision is exhausted")
+        }
+        let semantic_request = OperationsSettingCommandRequest {
+            command_id: request.command_id.clone(),
+            session_id: session_id.to_owned(),
+            run_id: request.run_id.clone(),
+            expected_revision: request.base_revision,
+            expected_registry_fingerprint: request.expected_registry_fingerprint.clone(),
+            intent: request.intent.clone(),
+        };
+        if serde_json::to_vec(&semantic_request)?.len()
+            > MAX_OPERATIONS_SETTING_INTENT_REQUEST_BYTES
+        {
+            bail!("native operations setting intent request exceeds its bounded limit")
+        }
+        if derive_operations_setting_command_id(&semantic_request)? != request.command_id {
+            bail!("native operations setting command ID conflicts with its semantic intent")
+        }
+        self.reconcile_uncertain_checkpoint_publication(store, session_id)?;
+        let lease = store.require_exact_realtime_lease()?;
+        if lease.pending_command.is_none()
+            && lease.acknowledged.last_player_command_id.as_deref()
+                == Some(request.command_id.as_str())
+        {
+            return self.replay_acknowledged_system_space_station_command(
+                store,
+                session_id,
+                &request.run_id,
+                &request.command_id,
+                request.base_revision,
+            );
+        }
+        let command = if let Some(pending) = lease.pending_command.as_ref() {
+            if pending.command_id != request.command_id
+                || pending.base_revision != request.base_revision
+            {
+                bail!("native operations setting intent conflicts with the pending command")
+            }
+            decode_player_authority_command_payload(&pending.command)?
+        } else {
+            let authority = OperationsSettingAuthority {
+                session_id: session_id.to_owned(),
+                run_id: request.run_id.clone(),
+            };
+            let prepared = prepare_operations_setting_command(
+                self.session(session_id)?,
+                &authority,
+                semantic_request,
+            )
+            .map_err(PlayerAuthorityOperationsSettingPreStageRejected::from_error)?;
+            if prepared.command_id() != request.command_id
+                || prepared.expected_revision() != request.base_revision
+            {
+                bail!("native operations setting prepared command identity changed")
+            }
+            let mut proof = self.session(session_id)?.clone();
+            let applied = prepared
+                .apply(&mut proof, &authority)
+                .map_err(PlayerAuthorityOperationsSettingPreStageRejected::from_error)?;
+            if applied.previous_revision != request.base_revision
+                || applied.revision != request.base_revision + 1
+                || !applied.changed_entity_ids.is_empty()
+                || !applied.changed_belt_ids.is_empty()
+                || applied.topology_dirty
+            {
+                bail!("native operations setting prepared command proof changed")
+            }
+            prepared.patch().clone()
+        };
+        self.commit_player_authority_command_internal(
+            store,
+            session_id,
+            CoreCommitPlayerAuthorityCommandRequest {
+                run_id: request.run_id,
+                command_id: request.command_id,
+                base_revision: request.base_revision,
+                command,
+            },
+            PlayerAuthorityCommandKind::OperationsSetting,
+            #[cfg(test)]
+            fault,
+        )
+    }
+
     fn replay_acknowledged_system_space_station_command(
         &self,
         store: &SaveStore,
@@ -2760,6 +2908,9 @@ impl CoreRegistry {
             None if pending.command_id.starts_with("orbital-contract-v1-") => {
                 PlayerAuthorityCommandKind::OrbitalContract
             }
+            None if pending.command_id.starts_with("operations-setting-v1-") => {
+                PlayerAuthorityCommandKind::OperationsSetting
+            }
             None => PlayerAuthorityCommandKind::Gameplay,
         };
         let committed = self.commit_player_authority_command_internal(
@@ -2842,7 +2993,8 @@ impl CoreRegistry {
         match kind {
             PlayerAuthorityCommandKind::Gameplay
             | PlayerAuthorityCommandKind::SystemSpaceStation
-            | PlayerAuthorityCommandKind::OrbitalContract => {
+            | PlayerAuthorityCommandKind::OrbitalContract
+            | PlayerAuthorityCommandKind::OperationsSetting => {
                 if player_authority_pause_target(&command_value).is_some() {
                     bail!("native player-authority pause transition requires the lifecycle path")
                 }
@@ -2866,6 +3018,7 @@ impl CoreRegistry {
             PlayerAuthorityCommandKind::Gameplay
             | PlayerAuthorityCommandKind::SystemSpaceStation
             | PlayerAuthorityCommandKind::OrbitalContract
+            | PlayerAuthorityCommandKind::OperationsSetting
             | PlayerAuthorityCommandKind::PauseLifecycle {
                 target_paused: true,
                 ..
@@ -2878,13 +3031,15 @@ impl CoreRegistry {
         let expected_target_paused = match kind {
             PlayerAuthorityCommandKind::Gameplay
             | PlayerAuthorityCommandKind::SystemSpaceStation
-            | PlayerAuthorityCommandKind::OrbitalContract => false,
+            | PlayerAuthorityCommandKind::OrbitalContract
+            | PlayerAuthorityCommandKind::OperationsSetting => false,
             PlayerAuthorityCommandKind::PauseLifecycle { target_paused, .. } => target_paused,
         };
         let expected_source_paused = match kind {
             PlayerAuthorityCommandKind::Gameplay
             | PlayerAuthorityCommandKind::SystemSpaceStation
-            | PlayerAuthorityCommandKind::OrbitalContract => false,
+            | PlayerAuthorityCommandKind::OrbitalContract
+            | PlayerAuthorityCommandKind::OperationsSetting => false,
             PlayerAuthorityCommandKind::PauseLifecycle { target_paused, .. } => !target_paused,
         };
         let duplicate_lifecycle_ack = kind.is_pause_lifecycle()
@@ -3015,6 +3170,9 @@ impl CoreRegistry {
                 PlayerAuthorityCommandKind::OrbitalContract => {
                     preflight.apply_command(&request.command)?
                 }
+                PlayerAuthorityCommandKind::OperationsSetting => {
+                    preflight.apply_command(&request.command)?
+                }
                 PlayerAuthorityCommandKind::PauseLifecycle { .. } => {
                     preflight.apply_player_authority_pause_transition(&request.command)?
                 }
@@ -3039,13 +3197,15 @@ impl CoreRegistry {
         let staged = match kind {
             PlayerAuthorityCommandKind::Gameplay
             | PlayerAuthorityCommandKind::SystemSpaceStation
-            | PlayerAuthorityCommandKind::OrbitalContract => store.stage_player_authority_command(
-                &authority_session_id,
-                &request.run_id,
-                &request.command_id,
-                request.base_revision,
-                command_value,
-            )?,
+            | PlayerAuthorityCommandKind::OrbitalContract
+            | PlayerAuthorityCommandKind::OperationsSetting => store
+                .stage_player_authority_command(
+                    &authority_session_id,
+                    &request.run_id,
+                    &request.command_id,
+                    request.base_revision,
+                    command_value,
+                )?,
             PlayerAuthorityCommandKind::PauseLifecycle {
                 target_paused,
                 settled_deadline_ms,
@@ -3196,7 +3356,8 @@ impl CoreRegistry {
         let lease = match kind {
             PlayerAuthorityCommandKind::Gameplay
             | PlayerAuthorityCommandKind::SystemSpaceStation
-            | PlayerAuthorityCommandKind::OrbitalContract => store
+            | PlayerAuthorityCommandKind::OrbitalContract
+            | PlayerAuthorityCommandKind::OperationsSetting => store
                 .acknowledge_player_authority_command(
                     &authority_session_id,
                     &request.run_id,
@@ -4005,6 +4166,28 @@ impl CoreRegistry {
             expected_registry_fingerprint,
         )?;
         self.session(session_id)?.campaign_workspace_projection(
+            session_id,
+            run_id,
+            expected_revision,
+            expected_registry_fingerprint,
+        )
+    }
+
+    pub fn operations_workspace_projection(
+        &self,
+        store: &SaveStore,
+        session_id: &str,
+        run_id: &str,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+    ) -> anyhow::Result<Value> {
+        self.require_player_authority_projection_lease(
+            store,
+            session_id,
+            run_id,
+            expected_registry_fingerprint,
+        )?;
+        self.session(session_id)?.operations_workspace_projection(
             session_id,
             run_id,
             expected_revision,
@@ -6786,6 +6969,26 @@ mod tests {
         )
     }
 
+    fn player_authority_operations_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["contentPacks"] = json!([]);
+        envelope["state"]["settings"]["technologyLayout"] = json!("standard");
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        player_authority_fixture_from_parts(
+            serde_json::to_vec(&envelope).unwrap(),
+            player_authority_catalog(),
+        )
+    }
+
     fn player_authority_orbital_contract_request(
         session_id: &str,
         base_revision: u64,
@@ -6830,6 +7033,28 @@ mod tests {
             base_revision,
             expected_registry_fingerprint: semantic.expected_registry_fingerprint,
             expected_system_id: semantic.expected_system_id,
+            intent,
+        }
+    }
+
+    fn player_authority_operations_setting_request(
+        session_id: &str,
+        base_revision: u64,
+        intent: OperationsSettingIntent,
+    ) -> CoreCommitPlayerAuthorityOperationsSettingCommandRequest {
+        let semantic = OperationsSettingCommandRequest {
+            command_id: "placeholder".to_owned(),
+            session_id: session_id.to_owned(),
+            run_id: "player-authority-run".to_owned(),
+            expected_revision: base_revision,
+            expected_registry_fingerprint: EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned(),
+            intent: intent.clone(),
+        };
+        CoreCommitPlayerAuthorityOperationsSettingCommandRequest {
+            run_id: semantic.run_id.clone(),
+            command_id: derive_operations_setting_command_id(&semantic).unwrap(),
+            base_revision,
+            expected_registry_fingerprint: semantic.expected_registry_fingerprint,
             intent,
         }
     }
@@ -17938,6 +18163,175 @@ mod tests {
         let after = registry.status(&session_id).unwrap();
         assert_eq!(after.revision, before.revision);
         assert_eq!(after.canonical_sha256, before.canonical_sha256);
+    }
+
+    #[test]
+    fn operations_projection_and_all_seven_leaf_settings_use_the_durable_fifo() {
+        let (root, mut store, mut registry, session_id, _) = player_authority_operations_fixture();
+        let before = registry.status(&session_id).unwrap();
+        let projection = registry
+            .operations_workspace_projection(
+                &store,
+                &session_id,
+                "player-authority-run",
+                before.revision,
+                EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+            )
+            .unwrap();
+        assert_eq!(projection["projectionType"], "operations-workspace-v1");
+        assert_eq!(projection["revision"], before.revision);
+        assert_eq!(projection["truncated"], false);
+        assert!(serde_json::to_vec(&projection).unwrap().len() <= 512 * 1024);
+
+        let intents = [
+            OperationsSettingIntent::SetSimulationSpeed { value: 2 },
+            OperationsSettingIntent::SetTechnologyLayout {
+                value: "compact".to_owned(),
+            },
+            OperationsSettingIntent::SetDefaultBeltRouteMode {
+                value: "upper".to_owned(),
+            },
+            OperationsSettingIntent::SetProductionBufferLimit { value: 2_000 },
+            OperationsSettingIntent::SetLogisticsBufferLimit { value: 3_000 },
+            OperationsSettingIntent::SetBeltBufferLimit { value: 4_000 },
+            OperationsSettingIntent::SetProliferatorBufferLimit { value: 5 },
+        ];
+        let mut revision = before.revision;
+        for intent in intents {
+            let request =
+                player_authority_operations_setting_request(&session_id, revision, intent);
+            let committed = registry
+                .commit_player_authority_operations_setting_command(
+                    &mut store,
+                    &session_id,
+                    request.clone(),
+                )
+                .unwrap();
+            assert_eq!(committed.base_revision, revision);
+            assert_eq!(committed.revision, revision + 1);
+            assert!(committed.changed_entity_ids.is_empty());
+            assert!(committed.changed_belt_ids.is_empty());
+            assert!(!committed.topology_dirty);
+            let duplicate = registry
+                .commit_player_authority_operations_setting_command(
+                    &mut store,
+                    &session_id,
+                    request,
+                )
+                .unwrap();
+            assert_duplicate_receipt_matches(&duplicate, &committed, "operations-setting");
+            revision = committed.revision;
+        }
+        let state = export_test_state(
+            root.path(),
+            &registry,
+            &store,
+            &session_id,
+            "operations-seven-leaves",
+        );
+        assert_eq!(state["settings"]["simulationSpeed"], 2);
+        assert_eq!(state["settings"]["technologyLayout"], "compact");
+        assert_eq!(state["settings"]["defaultBeltRouteMode"], "upper");
+        assert_eq!(state["settings"]["productionBufferLimit"], 2_000);
+        assert_eq!(state["settings"]["logisticsBufferLimit"], 3_000);
+        assert_eq!(state["settings"]["beltBufferLimit"], 4_000);
+        assert_eq!(state["settings"]["proliferatorBufferLimit"], 5);
+    }
+
+    #[test]
+    fn operations_setting_recovers_exactly_once_after_every_durable_boundary() {
+        let (clean_root, mut clean_store, mut clean_registry, clean_session, _) =
+            player_authority_operations_fixture();
+        let clean_base = clean_registry.status(&clean_session).unwrap().revision;
+        let clean_request = player_authority_operations_setting_request(
+            &clean_session,
+            clean_base,
+            OperationsSettingIntent::SetSimulationSpeed { value: 2 },
+        );
+        let clean = clean_registry
+            .commit_player_authority_operations_setting_command(
+                &mut clean_store,
+                &clean_session,
+                clean_request.clone(),
+            )
+            .unwrap();
+        let clean_state = export_test_state(
+            clean_root.path(),
+            &clean_registry,
+            &clean_store,
+            &clean_session,
+            "operations-clean",
+        );
+
+        for fault in [
+            PlayerAuthorityCommandFault::AfterStage,
+            PlayerAuthorityCommandFault::AfterWal,
+            PlayerAuthorityCommandFault::AfterCheckpoint,
+            PlayerAuthorityCommandFault::AfterReceipt,
+            PlayerAuthorityCommandFault::AfterLeaseAcknowledge,
+        ] {
+            let (root, mut store, mut registry, session_id, _) =
+                player_authority_operations_fixture();
+            let base = registry.status(&session_id).unwrap().revision;
+            let request = player_authority_operations_setting_request(
+                &session_id,
+                base,
+                OperationsSettingIntent::SetSimulationSpeed { value: 2 },
+            );
+            assert_eq!(request.command_id, clean_request.command_id, "{fault:?}");
+            let error = registry
+                .commit_player_authority_operations_setting_command_impl(
+                    &mut store,
+                    &session_id,
+                    request.clone(),
+                    fault,
+                )
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("lost response"), "{fault:?}");
+
+            drop(registry);
+            drop(store);
+            let mut reopened_store = SaveStore::open(root.path()).unwrap();
+            let mut reopened = resumable_player_authority_registry_for_test();
+            let startup = reopened
+                .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"))
+                .unwrap_or_else(|| panic!("{fault:?}: startup receipt missing"));
+            assert_eq!(
+                startup.command_id.as_deref(),
+                Some(request.command_id.as_str()),
+                "{fault:?}"
+            );
+            assert_eq!(startup.revision, clean.revision, "{fault:?}");
+            assert!(startup.changed_entity_ids.is_empty(), "{fault:?}");
+            assert!(startup.changed_belt_ids.is_empty(), "{fault:?}");
+            assert!(!startup.topology_dirty, "{fault:?}");
+            assert!(
+                reopened_store
+                    .require_exact_realtime_lease()
+                    .unwrap()
+                    .pending_command
+                    .is_none(),
+                "{fault:?}",
+            );
+
+            let replay = reopened
+                .commit_player_authority_operations_setting_command(
+                    &mut reopened_store,
+                    &startup.session_id,
+                    request,
+                )
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"));
+            assert_duplicate_receipt_matches(&replay, &clean, &format!("{fault:?}"));
+            let replayed_state = export_test_state(
+                root.path(),
+                &reopened,
+                &reopened_store,
+                &startup.session_id,
+                &format!("operations-{fault:?}"),
+            );
+            assert_eq!(replayed_state, clean_state, "{fault:?}");
+        }
     }
 
     #[test]

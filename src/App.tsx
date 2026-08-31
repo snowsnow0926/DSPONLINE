@@ -313,6 +313,10 @@ import {
   type DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult,
   type DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest,
   type DesktopNativeCoreOrbitalContractWorkspaceProjectionResult,
+  type DesktopNativeCoreOperationsAlertRow,
+  type DesktopNativeCoreOperationsWorkspaceProjectionRequest,
+  type DesktopNativeCoreOperationsWorkspaceProjectionResult,
+  type DesktopNativeOperationsSettingIntentRequest,
   type DesktopNativeOrbitalContractIntent,
   type DesktopNativeSystemSpaceStationIntent,
   type DesktopNativePlayerAuthorityHandoffRequest,
@@ -342,7 +346,7 @@ import { createSecondUnipolarVeinPackage, previewSecondUnipolarVein } from "./ga
 import { trackAnalyticsEvent } from "./game/analytics";
 import { isSpaceStationFeatureEnabled } from "./game/spaceStationFeature";
 import { CLOUD_AUTO_SYNC_INTERVAL_MS, CloudApiError, compareCloudSaveSummary, fetchCloudPublicStatus, hasCloudAuthentication, markCloudSaveSynchronized, readCloudAutoSyncStatus, refreshCloudSaveMetadata, resumeCloudSession, summarizeCloudPayload, uploadCloudSave, writeCloudAutoSyncStatus } from "./game/cloud";
-import type { BeltConnection, BeltInputPortIndex, BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CanvasViewport, CargoStackSize, ConstructionAutomationTargetId, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, FactoryEntity, GalacticDispatchThrottle, GalacticExportPriority, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProductionHistorySample, ProliferatorMode, ProliferatorTier, RecipeFocusMode, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
+import type { BeltConnection, BeltInputPortIndex, BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CanvasViewport, CargoStackSize, ConstructionAutomationTargetId, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, FactoryEntity, FontScale, GalacticDispatchThrottle, GalacticExportPriority, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProductionHistorySample, ProliferatorMode, ProliferatorTier, RecipeFocusMode, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
 import type { SimulationCheckpointStateChunk, SimulationChunkedSaveWriteAck, SimulationChunkedSaveWriteRequest, SimulationWorkerRequest, SimulationWorkerResponse } from "./game/simulation.worker";
 import { PureIdleMacroClient, PureIdleMacroClientError, type PureIdleMacroFinalEnvelopeResult, type PureIdleMacroProgress } from "./game/pureIdleMacroClient";
 import type { AuthoritativeSaveEnvelopeTransfer } from "./game/authoritativeSaveSerializationProtocol";
@@ -889,7 +893,7 @@ import {
   setCanvasPointerEdgeVelocity,
   stopCanvasPointerMotion as stopCanvasPointerMotionSession,
 } from "./hooks/canvasPointerMotion";
-import { readBlueprintAllowOverlapPreference, readCanvasDetailPreference, readCanvasInteractionDetailPreference, readCanvasOverlapPreference, readConnectExpandAllPreference, readConnectionHitArea, readConnectionPointSize, readDefaultBeltLanesPreference, readFactoryAlertsPreference, readFullRealtimeSimulationPreference, readLargeSaveAutosaveThrottlePreference, readMemoryAutoPauseEnabledPreference, readMemoryAutoPauseThresholdPreference, readShowItemHoverPreference, readShowRunLogPreference, readThemePreference, readAllowEditsDuringSavePreference, writeBlueprintAllowOverlapPreference, writeCanvasDetailPreference, writeCanvasInteractionDetailPreference, writeCanvasOverlapPreference, writeConnectExpandAllPreference, writeConnectionHitArea, writeConnectionPointSize, writeDefaultBeltLanesPreference, writeFactoryAlertsPreference, writeFullRealtimeSimulationPreference, writeLargeSaveAutosaveThrottlePreference, writeMemoryAutoPauseEnabledPreference, writeMemoryAutoPauseThresholdPreference, writeShowItemHoverPreference, writeShowRunLogPreference, writeThemePreference, writeAllowEditsDuringSavePreference, type ConnectionHitArea, type ConnectionPointSize } from "./game/uiPreferences";
+import { readBlueprintAllowOverlapPreference, readCanvasDetailPreference, readCanvasInteractionDetailPreference, readCanvasOverlapPreference, readConnectExpandAllPreference, readConnectionHitArea, readConnectionPointSize, readDefaultBeltLanesPreference, readFactoryAlertsPreference, readFontScalePreference, readFullRealtimeSimulationPreference, readLargeSaveAutosaveThrottlePreference, readMemoryAutoPauseEnabledPreference, readMemoryAutoPauseThresholdPreference, readShowItemHoverPreference, readShowRunLogPreference, readThemePreference, readAllowEditsDuringSavePreference, writeBlueprintAllowOverlapPreference, writeCanvasDetailPreference, writeCanvasInteractionDetailPreference, writeCanvasOverlapPreference, writeConnectExpandAllPreference, writeConnectionHitArea, writeConnectionPointSize, writeDefaultBeltLanesPreference, writeFactoryAlertsPreference, writeFontScalePreference, writeFullRealtimeSimulationPreference, writeLargeSaveAutosaveThrottlePreference, writeMemoryAutoPauseEnabledPreference, writeMemoryAutoPauseThresholdPreference, writeShowItemHoverPreference, writeShowRunLogPreference, writeThemePreference, writeAllowEditsDuringSavePreference, type ConnectionHitArea, type ConnectionPointSize } from "./game/uiPreferences";
 
 type InspectorTab = "inspect" | "fabricate";
 
@@ -1576,6 +1580,7 @@ const DysonPlannerWorkspace = lazy(() => importWithRecovery(() => import("./comp
 const NativeDysonPlannerWorkspace = lazy(() => importWithRecovery(() => import("./components/DysonPlannerWorkspace"), "原生戴森规划模块").then((module) => ({ default: module.NativeDysonPlannerWorkspace })));
 const OfflineReportWorkspace = lazy(() => importWithRecovery(() => import("./components/OfflineReportWorkspace"), "离线报告模块").then((module) => ({ default: module.OfflineReportWorkspace })));
 const OperationsWorkspace = lazy(() => importWithRecovery(() => import("./components/OperationsWorkspace"), "运营中心模块").then((module) => ({ default: module.OperationsWorkspace })));
+const NativeOperationsWorkspace = lazy(() => importWithRecovery(() => import("./components/NativeOperationsWorkspace"), "原生运营中心模块").then((module) => ({ default: module.NativeOperationsWorkspace })));
 const TechnologyWorkspace = lazy(() => importWithRecovery(() => import("./components/TechnologyWorkspace"), "科技树模块").then((module) => ({ default: module.TechnologyWorkspace })));
 const CampaignWorkspace = lazy(() => importWithRecovery(() => import("./components/CampaignWorkspace"), "主线任务模块").then((module) => ({ default: module.CampaignWorkspace })));
 const GalaxyWorkspace = lazy(() => importWithRecovery(() => import("./components/GalaxyWorkspace"), "银河工作区模块").then((module) => ({ default: module.GalaxyWorkspace })));
@@ -1933,7 +1938,7 @@ function minerPlacementHint(buildingId: BuildingId): string {
 
 export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, onReleaseNativeRendererState }: { initialLoad: LoadedGame; onReturnToMenu: () => void; onOpenReleaseNotes: () => void; onReleaseNativeRendererState: (releasedLoad: LoadedGame) => void }) {
   usePlayerPresence();
-  const { isEnglish } = useAppLocale();
+  const { isEnglish, locale: appLocale, setLocale: setAppLocale } = useAppLocale();
   const gameDialog = useGameDialog();
   const compactLayout = useCompactLayout();
   const coarsePointer = useCoarsePointer();
@@ -1975,6 +1980,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     return subscribeLocalSaveStorageStatus(refresh);
   }, [game.mode]);
   const [themeMode, setThemeMode] = useState(() => readThemePreference() ?? loaded.state.settings.theme);
+  const [nativeFontScale, setNativeFontScale] = useState<FontScale>(() => readFontScalePreference() ?? loaded.state.settings.fontScale);
   const [connectionPointSize, setConnectionPointSize] = useState<ConnectionPointSize>(readConnectionPointSize);
   useEffect(() => { writeConnectionPointSize(connectionPointSize); }, [connectionPointSize]);
   const [connectionHitArea, setConnectionHitArea] = useState<ConnectionHitArea>(readConnectionHitArea);
@@ -2691,6 +2697,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativePlayerAuthorityMacroStatus !== null;
   const nativePlayerAuthorityOwnsRuntime = nativePlayerAuthorityBootstrapPending ||
     nativePlayerAuthorityRuntimeDetected || nativeAuthorityHandoffQuiescing;
+  const effectiveUiFontScale = nativePlayerAuthorityOwnsRuntime ? nativeFontScale : game.settings.fontScale;
   const panelGame = useThrottledRuntimeShellGame(
     game,
     !nativePlayerAuthorityOwnsRuntime && (
@@ -3012,6 +3019,27 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   ) => Promise<DesktopNativeCoreCampaignWorkspaceProjectionResult>) | null>(() => {
     const readProjection = desktopBridge?.getNativeCoreCampaignWorkspaceProjection;
     return typeof readProjection === "function" ? readProjection : null;
+  }, [desktopBridge]);
+  const nativeOperationsIdentity = useMemo<DesktopNativeCoreOperationsWorkspaceProjectionRequest | null>(() => {
+    const frame = nativePlayerAuthorityActiveFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null ? Object.freeze({
+      sessionId: frame.sessionId,
+      runId: frame.runId,
+      expectedRevision: frame.revision,
+      expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
+    }) : null;
+  }, [nativePlayerAuthorityActiveFrame, nativePlayerAuthorityOwnsRuntime, recipeWorkspaceRegistryFingerprint]);
+  const nativeOperationsFetchProjection = useMemo<((
+    request: DesktopNativeCoreOperationsWorkspaceProjectionRequest,
+  ) => Promise<DesktopNativeCoreOperationsWorkspaceProjectionResult>) | null>(() => {
+    const readProjection = desktopBridge?.getNativeCoreOperationsWorkspaceProjection;
+    return typeof readProjection === "function" ? readProjection : null;
+  }, [desktopBridge]);
+  const nativeOperationsCommitSetting = useMemo<((
+    request: DesktopNativeOperationsSettingIntentRequest,
+  ) => Promise<unknown>) | null>(() => {
+    const commitIntent = desktopBridge?.commitNativeOperationsSettingIntent;
+    return typeof commitIntent === "function" ? commitIntent : null;
   }, [desktopBridge]);
   const nativeGalaxyIdentity = useMemo<DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest | null>(() => {
     const frame = nativePlayerAuthorityActiveFrame;
@@ -4723,7 +4751,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [abortCanvasGestureLifecycle, flowStore]);
   const lowEndMobile = useLowEndMobile();
   const nextMobileShell = mobileUiPreference === "next";
-  const canvasMinimumZoom = nextMobileShell && game.settings.fontScale >= 2 ? 0.35 : 0.25;
+  const canvasMinimumZoom = nextMobileShell && effectiveUiFontScale >= 2 ? 0.35 : 0.25;
   const resolvedProductionRefreshIntervalMs = resolveProductionRefreshInterval(productionRefreshPreference, automaticRefreshState);
   // Automatic mode keeps work-cycle animation smooth through the visual clock,
   // so a very large authority state does not need to reconcile its 27k/49k
@@ -5225,16 +5253,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   useEffect(() => {
     const bridge = getDesktopBridge();
     const root = document.documentElement;
-    root.dataset.uiFontScale = String(Math.round(game.settings.fontScale * 100));
+    root.dataset.uiFontScale = String(Math.round(effectiveUiFontScale * 100));
     if (bridge && typeof bridge.setFontScale === "function") {
       root.dataset.nativeUiScale = "true";
       root.style.removeProperty("--ui-font-scale");
-      void bridge.setFontScale(game.settings.fontScale).catch(() => undefined);
+      void bridge.setFontScale(effectiveUiFontScale).catch(() => undefined);
       return;
     }
     delete root.dataset.nativeUiScale;
-    root.style.setProperty("--ui-font-scale", String(game.settings.fontScale));
-  }, [game.settings.fontScale]);
+    root.style.setProperty("--ui-font-scale", String(effectiveUiFontScale));
+  }, [effectiveUiFontScale]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Control") {
@@ -12861,7 +12889,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       // remains a local presentation preference; no inventory, metrics or
       // persisted camera value comes from the stale JavaScript mirror.
       const destinationViewport = { ...projectedDestinationViewport };
-      const reducedMotion = gameRef.current.settings.reducedMotion;
+      const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
       commitNativeProjectedCommand(
         frame.revision,
         (baseRevision) => {
@@ -12982,6 +13010,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     if (settings.soundEnabled === true) playTone("confirm", true);
   }, [commitGame, playTone, rejectLegacyFactoryInteractionWhileNative]);
 
+  const updateNativeThemePreference = useCallback((theme: "dark" | "light" | "system") => {
+    setThemeMode(theme);
+    writeThemePreference(theme);
+  }, []);
+  const updateNativeFontScalePreference = useCallback((scale: FontScale) => {
+    setNativeFontScale(scale);
+    writeFontScalePreference(scale);
+  }, []);
+
   const updateRunLogPreference = useCallback((enabled: boolean) => {
     setShowRunLog(enabled);
     writeShowRunLogPreference(enabled);
@@ -13054,7 +13091,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
 
   const openCommandWorkspace = useCallback(async (workspace: CommandWorkspace) => {
     if (workspace === "resources" && rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
-    if (workspace === "operations" && rejectLegacyFactoryInteractionWhileNative("旧版运营中心")) return;
     closeAllWorkspaces();
     const authoritySyncId = authorityWorkspaceSyncIdRef.current + 1;
     authorityWorkspaceSyncIdRef.current = authoritySyncId;
@@ -13353,7 +13389,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       x: total.x + entity.position.x + 128,
       y: total.y + entity.position.y + 90,
     }), { x: 0, y: 0 });
-    const duration = gameRef.current.settings.reducedMotion ? 0 : 260;
+    const duration = nativeFrame
+      ? window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? 0 : 260
+      : gameRef.current.settings.reducedMotion ? 0 : 260;
     setCenter(center.x / selected.length, center.y / selected.length, {
       zoom: selected.length === 1 ? 1.05 : selected.length <= 3 ? 0.85 : 0.65,
       duration,
@@ -13713,6 +13751,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setCampaignFocusTechId(null);
     focusEntityIds([alert.entityId]);
     setNotice(`已定位：${alert.title} · ${alert.reason}`);
+    playTone("alert");
+  }, [ensureFactoryPlanetVisible, focusEntityIds, playTone]);
+
+  const selectNativeOperationsAlert = useCallback((alert: DesktopNativeCoreOperationsAlertRow) => {
+    if (!ensureFactoryPlanetVisible(alert.planetId as PlanetId)) return;
+    setSelectedEntityIds([alert.entityId]);
+    setSelectedBeltId(null);
+    setSelectedBeltIds([]);
+    setInspectorTab("inspect");
+    setMobilePanel("inspector");
+    setOperationsOpen(false);
+    focusEntityIds([alert.entityId]);
+    setNotice(`已定位：${alert.label}`);
     playTone("alert");
   }, [ensureFactoryPlanetVisible, focusEntityIds, playTone]);
 
@@ -15184,7 +15235,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const canvasFlowStaticPresentationCandidate = !connectionDraft && draggedEntityIds.length === 0 && (
     canvasPresentationDetailStage === "compact" || (
       canvasDetailPreference !== "full" && canvasVisibleNodeCount === 0 && fullDetailCanvasNodeIds.size === 0 &&
-      !(nextMobileShell && game.settings.fontScale >= 2)
+      !(nextMobileShell && effectiveUiFontScale >= 2)
     )
   );
   const canvasRuntimeDetailsDeferred = canvasFlowStaticPresentationCandidate && canvasVisibleNodeCount === 0 &&
@@ -15338,7 +15389,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     lineFindMode,
     lineFindTrace?.entityId ?? "",
     nextMobileShell,
-    game.settings.fontScale,
+    effectiveUiFontScale,
     extremeVisualsActive,
     nativePlayerAuthorityOwnsRuntime,
     nativeOrdinaryBeltConnectionEnabled,
@@ -15384,7 +15435,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             width: previous?.measured?.width,
             height: previous?.measured?.height,
           }, activeConnectionViewportBounds.enter);
-          const preserveMobileConstructionCenterDetail = nextMobileShell && game.settings.fontScale >= 2 && entity.buildingId === "construction_center";
+          const preserveMobileConstructionCenterDetail = nextMobileShell && effectiveUiFontScale >= 2 && entity.buildingId === "construction_center";
           const topologyStable = Boolean(previous && previous.type === entity.kind &&
             previous.position.x === entity.position.x && previous.position.y === entity.position.y &&
             previous.data.entity.buildingId === entity.buildingId && previous.data.entity.resourceId === entity.resourceId);
@@ -15859,7 +15910,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasNodeSemanticRevisionToken, canvasPresentationDetailStage, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, factoryCanvasRows.nodePresentationByEntityId, factoryCanvasRows.revision, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, game.settings.fontScale, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nativePlayerAuthorityOwnsRuntime, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
+  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasNodeSemanticRevisionToken, canvasPresentationDetailStage, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, effectiveUiFontScale, factoryCanvasRows.nodePresentationByEntityId, factoryCanvasRows.revision, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nativePlayerAuthorityOwnsRuntime, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
 
   useLayoutEffect(() => {
     const startedAt = canvasNodeCommitStartedAtRef.current;
@@ -22083,6 +22134,36 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onSelectSwarmOrbit={(systemId, orbitId) => commitGame((current) => setActiveDysonSwarmOrbit(current, systemId, orbitId))}
             onSwarmOrbitChange={(systemId, orbitId, changes) => commitGame((current) => setDysonSwarmOrbit(current, systemId, orbitId, changes))}
             onRemoveSwarmOrbit={(systemId, orbitId) => commitGame((current) => removeDysonSwarmOrbit(current, systemId, orbitId))}
+          />
+        ) : null}
+        {operationsOpen && nativePlayerAuthorityOwnsRuntime ? (
+          <NativeOperationsWorkspace
+            open
+            identity={nativeOperationsIdentity}
+            fetchProjection={nativeOperationsFetchProjection}
+            commitSetting={nativeOperationsCommitSetting}
+            theme={themeMode}
+            fontScale={nativeFontScale}
+            factoryAlertsEnabled={factoryAlertsEnabled}
+            canvasDetailPreference={canvasDetailPreference}
+            connectionPointSize={connectionPointSize}
+            connectionHitArea={connectionHitArea}
+            defaultBeltLanes={defaultBeltLanes}
+            locale={appLocale}
+            onThemeChange={updateNativeThemePreference}
+            onFontScaleChange={updateNativeFontScalePreference}
+            onFactoryAlertsEnabledChange={updateFactoryAlertsEnabled}
+            onCanvasDetailPreferenceChange={setCanvasDetailPreference}
+            onConnectionPointSizeChange={setConnectionPointSize}
+            onConnectionHitAreaChange={setConnectionHitArea}
+            onDefaultBeltLanesChange={updateDefaultBeltLanes}
+            onLocaleChange={setAppLocale}
+            onManualCheckpoint={manualSave}
+            onExportV47={downloadSave}
+            onAlertSelect={selectNativeOperationsAlert}
+            onOpenTutorial={() => { setTutorialSectionId(undefined); setTutorialOpen(true); }}
+            onOpenReleaseNotes={onOpenReleaseNotes}
+            onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setOperationsOpen(false)}
           />
         ) : null}
         {operationsOpen && !nativePlayerAuthorityOwnsRuntime ? (

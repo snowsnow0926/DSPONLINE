@@ -39,6 +39,7 @@ mod local_logistics;
 mod logistics_buffers;
 mod manual_mining;
 mod material_delivery;
+pub mod operations_workspace;
 pub mod orbital_contract_command;
 mod orbital_station;
 mod ordinary_production;

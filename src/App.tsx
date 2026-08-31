@@ -306,6 +306,11 @@ import { compressSaveTextToGzipBlob } from "./game/saveFileCodec";
 import { alignToDevicePixel } from "./game/displayPixels";
 import {
   getDesktopBridge,
+  type DesktopNativeCampaignLocator,
+  type DesktopNativeCoreCampaignWorkspaceProjectionRequest,
+  type DesktopNativeCoreCampaignWorkspaceProjectionResult,
+  type DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest,
+  type DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult,
   type DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest,
   type DesktopNativeCoreOrbitalContractWorkspaceProjectionResult,
   type DesktopNativeOrbitalContractIntent,
@@ -1574,6 +1579,8 @@ const OperationsWorkspace = lazy(() => importWithRecovery(() => import("./compon
 const TechnologyWorkspace = lazy(() => importWithRecovery(() => import("./components/TechnologyWorkspace"), "科技树模块").then((module) => ({ default: module.TechnologyWorkspace })));
 const CampaignWorkspace = lazy(() => importWithRecovery(() => import("./components/CampaignWorkspace"), "主线任务模块").then((module) => ({ default: module.CampaignWorkspace })));
 const GalaxyWorkspace = lazy(() => importWithRecovery(() => import("./components/GalaxyWorkspace"), "银河工作区模块").then((module) => ({ default: module.GalaxyWorkspace })));
+const NativeCampaignWorkspace = lazy(() => importWithRecovery(() => import("./components/NativeCampaignWorkspace"), "原生主线任务模块").then((module) => ({ default: module.NativeCampaignWorkspace })));
+const NativeGalaxyWorkspace = lazy(() => importWithRecovery(() => import("./components/NativeGalaxyWorkspace"), "原生银河账户模块").then((module) => ({ default: module.NativeGalaxyWorkspace })));
 const ConstructionCenterWorkspace = lazy(() => importWithRecovery(() => import("./components/ConstructionCenterWorkspace"), "建筑制造中心模块").then((module) => ({ default: module.ConstructionCenterWorkspace })));
 const SystemSpaceStationWorkspace = lazy(() => importWithRecovery(() => import("./components/SystemSpaceStationWorkspace"), "空间站模块").then((module) => ({ default: module.SystemSpaceStationWorkspace })));
 const NativeSystemSpaceStationWorkspace = lazy(() => importWithRecovery(() => import("./components/NativeSystemSpaceStationWorkspace"), "原生空间站模块").then((module) => ({ default: module.NativeSystemSpaceStationWorkspace })));
@@ -2989,6 +2996,36 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     request: DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest,
   ) => Promise<DesktopNativeCoreOrbitalContractWorkspaceProjectionResult>) | null>(() => {
     const readProjection = desktopBridge?.getNativeCoreOrbitalContractWorkspaceProjection;
+    return typeof readProjection === "function" ? readProjection : null;
+  }, [desktopBridge]);
+  const nativeCampaignIdentity = useMemo<DesktopNativeCoreCampaignWorkspaceProjectionRequest | null>(() => {
+    const frame = nativePlayerAuthorityActiveFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null ? Object.freeze({
+      sessionId: frame.sessionId,
+      runId: frame.runId,
+      expectedRevision: frame.revision,
+      expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
+    }) : null;
+  }, [nativePlayerAuthorityActiveFrame, nativePlayerAuthorityOwnsRuntime, recipeWorkspaceRegistryFingerprint]);
+  const nativeCampaignFetchProjection = useMemo<((
+    request: DesktopNativeCoreCampaignWorkspaceProjectionRequest,
+  ) => Promise<DesktopNativeCoreCampaignWorkspaceProjectionResult>) | null>(() => {
+    const readProjection = desktopBridge?.getNativeCoreCampaignWorkspaceProjection;
+    return typeof readProjection === "function" ? readProjection : null;
+  }, [desktopBridge]);
+  const nativeGalaxyIdentity = useMemo<DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest | null>(() => {
+    const frame = nativePlayerAuthorityActiveFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null ? Object.freeze({
+      sessionId: frame.sessionId,
+      runId: frame.runId,
+      expectedRevision: frame.revision,
+      expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
+    }) : null;
+  }, [nativePlayerAuthorityActiveFrame, nativePlayerAuthorityOwnsRuntime, recipeWorkspaceRegistryFingerprint]);
+  const nativeGalaxyFetchProjection = useMemo<((
+    request: DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest,
+  ) => Promise<DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult>) | null>(() => {
+    const readProjection = desktopBridge?.getNativeCoreGalaxyAccountWorkspaceProjection;
     return typeof readProjection === "function" ? readProjection : null;
   }, [desktopBridge]);
   const nativeFactoryInventoryIdentity = useMemo<NativeFactoryInventoryIdentity | null>(() => {
@@ -11947,6 +11984,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
 
   useEffect(() => {
     const syncAccount = () => {
+      // The renderer GameState is stale by construction while Rust owns the
+      // player. Account-domain writes must never derive from that mirror.
+      if (nativePlayerAuthorityOwnsRuntimeRef.current) return;
       const current = accountStateRef.current;
       const next = recordAccountProgress(current, gameRef.current);
       if (next === current) return;
@@ -12968,6 +13008,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, []);
 
   const createGalaxyAccount = useCallback((displayName: string) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const next = createLocalAccount(accountStateRef.current, displayName);
+      accountStateRef.current = next;
+      setAccountState(next);
+      playTone("confirm");
+      return;
+    }
     const synced = recordAccountProgress(accountStateRef.current, gameRef.current);
     saveAccountState(synced);
     const next = baselineAccountProgress(createLocalAccount(synced, displayName), gameRef.current);
@@ -12979,6 +13026,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const switchGalaxyAccount = useCallback((accountId: string) => {
     const current = accountStateRef.current;
     if (current.activeAccountId === accountId) return;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const next = switchLocalAccount(current, accountId);
+      accountStateRef.current = next;
+      setAccountState(next);
+      return;
+    }
     const synced = recordAccountProgress(current, gameRef.current);
     saveAccountState(synced);
     const next = baselineAccountProgress(switchLocalAccount(synced, accountId), gameRef.current);
@@ -12989,8 +13042,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const openCommandWorkspace = useCallback(async (workspace: CommandWorkspace) => {
     if (workspace === "resources" && rejectLegacyFactoryInteractionWhileNative("托盘与手持物")) return;
     if (workspace === "operations" && rejectLegacyFactoryInteractionWhileNative("旧版运营中心")) return;
-    if (workspace === "campaign" && rejectLegacyFactoryInteractionWhileNative("旧版主线任务")) return;
-    if (workspace === "galaxy" && rejectLegacyFactoryInteractionWhileNative("旧版银河账户页")) return;
     closeAllWorkspaces();
     const authoritySyncId = authorityWorkspaceSyncIdRef.current + 1;
     authorityWorkspaceSyncIdRef.current = authoritySyncId;
@@ -13666,7 +13717,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [ensureFactoryPlanetVisible, focusEntityIds]);
 
   const openCampaign = useCallback(() => {
-    if (rejectLegacyFactoryInteractionWhileNative("旧版主线任务")) return;
     closeAllWorkspaces();
     setCampaignOpen(true);
     setMobilePanel(null);
@@ -13678,7 +13728,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setSelectedBeltIds([]);
     setNotice(null);
     mobileNavigation.openWorkspace("campaign");
-  }, [closeAllWorkspaces, mobileNavigation.openWorkspace, rejectLegacyFactoryInteractionWhileNative]);
+  }, [closeAllWorkspaces, mobileNavigation.openWorkspace]);
 
   const navigateFromCampaign = useCallback((navigation: CampaignNavigation, taskId?: CampaignTaskId) => {
     if (taskId) {
@@ -13754,6 +13804,55 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setMobilePanel("inspector");
     setNotice(`施工托盘已切换到${getBuilding(navigation.buildingId).name}`);
   }, [closeAllWorkspaces, ensureFactoryPlanetVisible, focusEntityIds, openCommandWorkspace]);
+
+  const navigateFromNativeCampaign = useCallback((locator: DesktopNativeCampaignLocator, taskId: string) => {
+    // A native locator is presentation-only. It never selects a campaign task
+    // and never derives an entity, inventory or belt from the stale Web game.
+    setHighlightedTaskId(taskId as CampaignTaskId);
+    closeAllWorkspaces();
+    setCampaignFocusItemId(null);
+    setCampaignFocusTechId(null);
+    setMobilePanel(null);
+    if (locator.kind === "item") {
+      if (Object.prototype.hasOwnProperty.call(ITEMS, locator.targetId)) {
+        setCampaignFocusItemId(locator.targetId as ItemId);
+        setRecipesOpen(true);
+        setNotice("已打开原生生产资料目标");
+      } else {
+        setNotice("任务目标目录已变化；未打开任何旧版游戏数据");
+      }
+      return;
+    }
+    if (locator.kind === "technology") {
+      if (getTechnology(locator.targetId as never)) {
+        setCampaignFocusTechId(locator.targetId as never);
+        setTechnologyOpen(true);
+        setNotice("已定位原生科研目标");
+      } else {
+        setNotice("科技目标目录已变化；未打开任何旧版游戏数据");
+      }
+      return;
+    }
+    if (locator.kind === "planet" || locator.targetId.startsWith("star-map:")) {
+      setStarMapOpen(true);
+      setNotice("已打开原生星图；请在权威目录中选择目标");
+      return;
+    }
+    if (locator.kind === "entity") {
+      setCommandPaletteOpen(true);
+      setNotice(`已打开原生命令面板；建筑目录目标：${locator.targetId}`);
+      return;
+    }
+    if (locator.targetId.startsWith("dyson:")) {
+      void openCommandWorkspace("dyson");
+      return;
+    }
+    if (locator.targetId === "galaxy") {
+      void openCommandWorkspace("galaxy");
+      return;
+    }
+    setNotice("该只读任务没有可用的原生界面定位目标");
+  }, [closeAllWorkspaces, openCommandWorkspace]);
 
   const runOnboardingAction = useCallback((stepId: OnboardingActionId) => {
     closeAllWorkspaces();
@@ -21518,7 +21617,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             }}
           />
         ) : null}
-        {galaxyOpen && !nativePlayerAuthorityOwnsRuntime ? (
+        {galaxyOpen ? nativePlayerAuthorityOwnsRuntime ? (
+          <NativeGalaxyWorkspace
+            open
+            accountState={accountState}
+            identity={nativeGalaxyIdentity}
+            fetchProjection={nativeGalaxyFetchProjection}
+            focusTab={galaxyFocusTab}
+            onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setGalaxyOpen(false)}
+            onUpdateProfile={updateGalaxyProfile}
+            onUpdateCloudBinding={updateGalaxyCloudBinding}
+            onCreateAccount={createGalaxyAccount}
+            onSwitchAccount={switchGalaxyAccount}
+          />
+        ) : (
           <GalaxyWorkspace
             open
             accountState={accountState}
@@ -21752,7 +21864,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           onRemoveCanvasBookmark={(bookmarkId) => commitGame((current) => removeCanvasBookmark(current, bookmarkId))}
         />) : null}
         {recipesOpen ? <RecipeWorkspace open readOnly={nativePlayerAuthorityOwnsRuntime && (!nativeRecipeFocusReadModel || nativePlayerAuthorityCommandPending)} readModel={recipeWorkspaceReadModel} onReadRequest={updateRecipeWorkspaceSelector} mobile={nextMobileShell} mobileSubview={mobileWorkspaceSubview} onMobileOpenDetail={mobileNavigation.openWorkspaceSubview} onMobileReplaceDetail={(subview) => mobileNavigation.replaceWorkspaceSubview(subview)} focusItemId={campaignFocusItemId} onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setRecipesOpen(false)} onFocus={onRecipeFocusChange} onLocateProductionLine={locateRecipeWorkspaceProduction} /> : null}
-        {campaignOpen && !nativePlayerAuthorityOwnsRuntime ? (
+        {campaignOpen ? nativePlayerAuthorityOwnsRuntime ? (
+          <NativeCampaignWorkspace
+            open
+            identity={nativeCampaignIdentity}
+            fetchProjection={nativeCampaignFetchProjection}
+            onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setCampaignOpen(false)}
+            onNavigate={navigateFromNativeCampaign}
+          />
+        ) : (
           <CampaignWorkspace
             open
             game={game}

@@ -382,6 +382,10 @@ export interface DesktopBridge {
   commitNativeSystemSpaceStationIntent?: (request: DesktopNativeSystemSpaceStationIntentRequest) => Promise<DesktopNativeCoreCommandResult>;
   /** Bounded Rust-owned orbital contract board; never exposes a GameState or inventory map. */
   getNativeCoreOrbitalContractWorkspaceProjection?: (request: DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest) => Promise<DesktopNativeCoreOrbitalContractWorkspaceProjectionResult>;
+  /** Fixed-catalog campaign progress only; navigation locators cannot mutate the game. */
+  getNativeCoreCampaignWorkspaceProjection?: (request: DesktopNativeCoreCampaignWorkspaceProjectionRequest) => Promise<DesktopNativeCoreCampaignWorkspaceProjectionResult>;
+  /** Game-only Galaxy summary; renderer-owned account data stays outside this projection. */
+  getNativeCoreGalaxyAccountWorkspaceProjection?: (request: DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest) => Promise<DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult>;
   /** Intent-only durable contract mutation; reward/material totals stay Rust-owned. */
   commitNativeOrbitalContractIntent?: (request: DesktopNativeOrbitalContractIntentRequest) => Promise<DesktopNativeCoreCommandResult>;
   /** Current Windows thin-UI host only; native authority never falls back to a renderer entity scan. */
@@ -2876,6 +2880,117 @@ export interface DesktopNativeCoreOrbitalContractWorkspaceProjectionResult {
     projectionBytes: 262144;
   };
   unsupported: ["cargo-terminal-binding", "decorations", "profile", "construction"];
+}
+
+export interface DesktopNativeCoreAuthorityWorkspaceProjectionRequest extends DesktopNativeCoreSessionRequest {
+  runId: string;
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+}
+
+export type DesktopNativeCoreCampaignWorkspaceProjectionRequest =
+  DesktopNativeCoreAuthorityWorkspaceProjectionRequest;
+
+export type DesktopNativeCampaignLocator = {
+  kind: "item" | "technology" | "entity" | "planet" | "workspace";
+  targetId: string;
+};
+
+export interface DesktopNativeCoreCampaignTaskRow {
+  id: string;
+  track: "main" | "side";
+  status: "locked" | "available" | "active" | "complete";
+  progress: {
+    current: number;
+    target: number;
+  };
+  locator: DesktopNativeCampaignLocator | null;
+}
+
+export interface DesktopNativeCoreCampaignChapterRow {
+  id: string;
+  completedCount: number;
+  totalCount: number;
+  complete: boolean;
+  tasks: DesktopNativeCoreCampaignTaskRow[];
+}
+
+export interface DesktopNativeCoreCampaignWorkspaceProjectionResult {
+  schemaVersion: 1;
+  projectionType: "campaign-workspace-v1";
+  source: "native-core";
+  stateVersion: 47;
+  sessionId: string;
+  runId: string;
+  revision: number;
+  registryFingerprint: string;
+  truncated: false;
+  limits: {
+    chapters: 16;
+    tasks: 64;
+    payloadBytes: 262144;
+  };
+  counts: {
+    chapters: number;
+    tasks: number;
+    completedTasks: number;
+  };
+  activeChapterId: string | null;
+  activeTaskId: string | null;
+  chapters: DesktopNativeCoreCampaignChapterRow[];
+}
+
+export type DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest =
+  DesktopNativeCoreAuthorityWorkspaceProjectionRequest;
+
+export interface DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult {
+  schemaVersion: 1;
+  projectionType: "galaxy-account-workspace-v1";
+  source: "native-core";
+  stateVersion: 47;
+  sessionId: string;
+  runId: string;
+  revision: number;
+  registryFingerprint: string;
+  truncated: false;
+  limits: {
+    payloadBytes: 65536;
+    decimalDigits: 256;
+  };
+  game: {
+    mode: "normal" | "speedrun";
+    elapsedSeconds: string;
+    difficulty: string;
+  };
+  production: {
+    totalProduced: string;
+    universeMatrixProduced: string;
+    generationKw: string;
+    throughputPerMinute: string;
+  };
+  progress: {
+    campaignCompleted: number;
+    campaignTotal: number;
+    researchCompleted: number;
+    exploredSystems: number;
+    colonizedPlanets: number;
+    galacticScore: string;
+  };
+  dyson: {
+    powerKw: string;
+    structurePoints: string;
+    rocketsLaunched: string;
+    sailsLaunched: string;
+  };
+  cloudCompatibility: {
+    gameStateVersion: 47;
+    envelopeVersion: 2;
+    cloudSchemaVersion: 8;
+    exportSupported: true;
+    restoreIntoActiveAuthority: false;
+    importIntoActiveAuthority: false;
+    overwriteActiveAuthority: false;
+  };
 }
 
 export interface DesktopNativeCoreCommandPaletteEntitySearchRequest extends DesktopNativeCoreSessionRequest {

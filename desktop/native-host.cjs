@@ -50,6 +50,10 @@ const NATIVE_SYSTEM_SPACE_STATION_WORKSPACE_CAPABILITY =
   "native-core-system-space-station-workspace-projection-v1";
 const NATIVE_ORBITAL_CONTRACT_WORKSPACE_CAPABILITY =
   "native-core-orbital-contract-workspace-projection-v1";
+const NATIVE_CAMPAIGN_WORKSPACE_CAPABILITY =
+  "native-core-campaign-workspace-projection-v1";
+const NATIVE_GALAXY_ACCOUNT_WORKSPACE_CAPABILITY =
+  "native-core-galaxy-account-workspace-projection-v1";
 const NATIVE_BLUEPRINT_CAPTURE_CONTEXT_CAPABILITY =
   "native-core-blueprint-capture-context-v1";
 const NATIVE_BLUEPRINT_IMPORT_CONTEXT_CAPABILITY =
@@ -1927,6 +1931,66 @@ class NativeCoreSessionRegistry {
     return this.requestOwned(ownerId, request.sessionId, hostRequest);
   }
 
+  campaignWorkspaceProjection(ownerId, request) {
+    const session = this.assertOwner(ownerId, request?.sessionId);
+    exactObjectKeys(request, [
+      "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint",
+    ], "native campaign workspace projection request");
+    if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID || session.slot !== "normal-main" ||
+      !validLogicalId(request.runId, 128) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256)) {
+      throw new TypeError("native campaign workspace projection request is invalid");
+    }
+    if (!this.client.hello?.capabilities?.includes(NATIVE_CAMPAIGN_WORKSPACE_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide the campaign workspace projection",
+        "NATIVE_CORE_CAPABILITY_MISSING",
+      );
+    }
+    const hostRequest = {
+      operation: "coreCampaignWorkspaceProjection",
+      sessionId: request.sessionId,
+      runId: request.runId,
+      expectedRevision: request.expectedRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+    };
+    if (Buffer.byteLength(JSON.stringify(hostRequest), "utf8") > MAX_STELLAR_PROJECTION_REQUEST_BYTES) {
+      throw new RangeError("native campaign workspace request exceeds the bounded IPC limit");
+    }
+    return this.requestOwned(ownerId, request.sessionId, hostRequest);
+  }
+
+  galaxyAccountWorkspaceProjection(ownerId, request) {
+    const session = this.assertOwner(ownerId, request?.sessionId);
+    exactObjectKeys(request, [
+      "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint",
+    ], "native galaxy account workspace projection request");
+    if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID || session.slot !== "normal-main" ||
+      !validLogicalId(request.runId, 128) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256)) {
+      throw new TypeError("native galaxy account workspace projection request is invalid");
+    }
+    if (!this.client.hello?.capabilities?.includes(NATIVE_GALAXY_ACCOUNT_WORKSPACE_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide the galaxy account workspace projection",
+        "NATIVE_CORE_CAPABILITY_MISSING",
+      );
+    }
+    const hostRequest = {
+      operation: "coreGalaxyAccountWorkspaceProjection",
+      sessionId: request.sessionId,
+      runId: request.runId,
+      expectedRevision: request.expectedRevision,
+      expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+    };
+    if (Buffer.byteLength(JSON.stringify(hostRequest), "utf8") > MAX_STELLAR_PROJECTION_REQUEST_BYTES) {
+      throw new RangeError("native galaxy account workspace request exceeds the bounded IPC limit");
+    }
+    return this.requestOwned(ownerId, request.sessionId, hostRequest);
+  }
+
   commandPaletteEntitySearchProjection(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     const allowedKeys = new Set([
@@ -2628,6 +2692,8 @@ module.exports = {
   NATIVE_CONSTRUCTION_INVENTORY_CAPABILITY,
   NATIVE_BLUEPRINT_WORKSPACE_CAPABILITY,
   NATIVE_ORBITAL_CONTRACT_WORKSPACE_CAPABILITY,
+  NATIVE_CAMPAIGN_WORKSPACE_CAPABILITY,
+  NATIVE_GALAXY_ACCOUNT_WORKSPACE_CAPABILITY,
   NATIVE_SYSTEM_SPACE_STATION_WORKSPACE_CAPABILITY,
   NATIVE_BLUEPRINT_CAPTURE_CONTEXT_CAPABILITY,
   NATIVE_BLUEPRINT_IMPORT_CONTEXT_CAPABILITY,

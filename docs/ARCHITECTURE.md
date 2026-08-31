@@ -1,5 +1,11 @@
 # 系统架构
 
+> **Windows Rust Campaign / Galaxy 玩家壳纵切（2026-09-01，开发候选，未发布）**：native ownership 下的 Campaign 与 Galaxy 入口不再消失。Campaign 只接收 `campaign-workspace-v1`：固定任务目录、最多 16 章/64 任务、256 KiB，字段仅含任务状态、完成数、进度和 item/technology/entity/planet/workspace UI locator。每次打开仍会在 Rust 中执行一次 `O(entities + belts)` 的只读 factory metrics 扫描；它降低 renderer 驻留与 IPC 数据量，但当前不能称为低成本或事件驱动任务查询。locator 只改变界面路由，不选择任务、不改游戏。
+>
+> Galaxy 将 renderer 本地 `accountState` 与 `galaxy-account-workspace-v1` Rust 游戏摘要并排展示而不合并：64 KiB、256 位十进制、只含模式/运行时间、生产、进度、戴森和 v47/envelope v2/cloud v8 兼容摘要。账户创建、切换、资料和登录绑定仍是账户域操作；Rust authority 活动时从旧 renderer GameState 记账的定时器停止。恢复、导入和覆盖当前主档没有按钮或回调，必须经过独立持久化边界。
+>
+> 两个投影均绑定 `sessionId/runId/revision/registryFingerprint`；Host 用活动 exact-realtime lease 二次证明，main projection broker 在异步读前后再次核对。旧 run 同 revision ABA、stale revision/registry、未知字段、重复任务、计数漂移、payload 超限或 `truncated=true` 都使整页失败关闭，不拼接 Web GameState。Web/PWA fallback 原样保留。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、固定进度口径及 `authorityEligible=false` 均不改变。
+
 > **Windows Rust 恒星系空间站可达写面与明确拒绝边界（2026-09-01，开发候选，未发布）**：原生星图的已发现内置恒星系现在直接提供“管理本系空间站”入口；native/legacy 星图都复用同一打开动作，原生权威模式只渲染有界 `system-space-station-workspace-v1`，renderer 不读取完整 `GameState` 来提交空间站写入。七类操作——开工、托盘交付、模块目标、单站/本系批量升级、模式切换和二次确认的输出口修改——只形成最小 intent。每个 intent 同时绑定投影的 session、run、revision、registry fingerprint 与 system ID；这些字段进入命令摘要和 Host 请求，Rust 再从实体所属行星推导恒星系并拒绝跨系实体、跨系批量或过期投影。这样旧窗口、重新导入后的同 revision 以及跨存档 ABA 都不能把一次点击绑定到新权威会话。
 >
 > Rust 只有在 `prepare_system_space_station_command` 或隔离副本的 apply 失败、且尚未创建 durable pending command 时，才以专用 typed error 标记“明确未写入”。Host 只通过 Rust error type 映射该 code，main runtime 又必须同时看到该精确 code 和当前 active entry 的 `kind=system-space-station` 才会丢弃本操作及依赖它 revision 的排队操作、保持 checkpoint/revision 不变并恢复时钟。普通命令伪造同 code、响应丢失、协议畸形以及 AfterStage/WAL/checkpoint/receipt/lease-ACK 五个故障边界仍保持 uncertain，并且只允许原字节幂等重试。当前仍有一个非阻塞 P2：preload 方法恒定存在，混装旧 Host 时按钮可能先显示可用、随后由真实 capability 门拒绝；匹配构建不受影响。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不改变。

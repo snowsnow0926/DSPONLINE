@@ -144,6 +144,28 @@ function fixture(initialSnapshot = {}) {
         registryFingerprint: request.expectedRegistryFingerprint,
       };
     },
+    async campaignWorkspaceProjection(ownerId, request) {
+      calls.push(["campaign-workspace-v1", ownerId, request]);
+      return {
+        projectionType: "campaign-workspace-v1",
+        schemaVersion: 1,
+        sessionId: request.sessionId,
+        runId: request.runId,
+        revision: request.expectedRevision,
+        registryFingerprint: request.expectedRegistryFingerprint,
+      };
+    },
+    async galaxyAccountWorkspaceProjection(ownerId, request) {
+      calls.push(["galaxy-account-workspace-v1", ownerId, request]);
+      return {
+        projectionType: "galaxy-account-workspace-v1",
+        schemaVersion: 1,
+        sessionId: request.sessionId,
+        runId: request.runId,
+        revision: request.expectedRevision,
+        registryFingerprint: request.expectedRegistryFingerprint,
+      };
+    },
   };
   const broker = new NativePlayerAuthorityProjectionBroker({
     runtime: { snapshot: () => ({ ...snapshot }) },
@@ -164,8 +186,8 @@ function fixture(initialSnapshot = {}) {
 
 test("active same-session same-revision reads use only the main owner identity", async () => {
   const value = fixture();
-  for (const projectionType of ["viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "blueprint-workspace-v1", "blueprint-capture-context-v1", "blueprint-import-context-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "command-palette-entity-search-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1", "system-space-station-workspace-v1", "orbital-contract-workspace-v1"]) {
-    const request = projectionType === "orbital-contract-workspace-v1"
+  for (const projectionType of ["viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "blueprint-workspace-v1", "blueprint-capture-context-v1", "blueprint-import-context-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "command-palette-entity-search-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1", "system-space-station-workspace-v1", "orbital-contract-workspace-v1", "campaign-workspace-v1", "galaxy-account-workspace-v1"]) {
+    const request = ["orbital-contract-workspace-v1", "campaign-workspace-v1", "galaxy-account-workspace-v1"].includes(projectionType)
       ? {
           sessionId: "core-main-1",
           runId: "run-1",
@@ -205,6 +227,8 @@ test("active same-session same-revision reads use only the main owner identity",
     ["dyson-workspace-v1", "main-player-authority"],
     ["system-space-station-workspace-v1", "main-player-authority"],
     ["orbital-contract-workspace-v1", "main-player-authority"],
+    ["campaign-workspace-v1", "main-player-authority"],
+    ["galaxy-account-workspace-v1", "main-player-authority"],
   ]);
 });
 
@@ -279,6 +303,38 @@ test("orbital projection rejects stale active runs before and after an asynchron
     mismatchedResult.broker.read(23, "orbital-contract-workspace-v1", request),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RESULT_MISMATCH",
   );
+});
+
+test("campaign and Galaxy exact-lineage reads reject same-revision old runs before and after read", async () => {
+  const request = {
+    sessionId: "core-main-1",
+    runId: "run-1",
+    expectedRevision: 17,
+    expectedRegistryFingerprint: "7df8cf3a",
+  };
+  for (const projectionType of ["campaign-workspace-v1", "galaxy-account-workspace-v1"]) {
+    const stale = fixture({ runId: "run-2", revision: 17 });
+    await assert.rejects(stale.broker.read(23, projectionType, request),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RUN_MISMATCH");
+
+    const changed = fixture();
+    const method = projectionType === "campaign-workspace-v1"
+      ? "campaignWorkspaceProjection"
+      : "galaxyAccountWorkspaceProjection";
+    changed.registry[method] = async (_ownerId, input) => {
+      changed.setSnapshot({ runId: "run-2", revision: 17 });
+      return {
+        projectionType,
+        schemaVersion: 1,
+        sessionId: input.sessionId,
+        runId: input.runId,
+        revision: input.expectedRevision,
+        registryFingerprint: input.expectedRegistryFingerprint,
+      };
+    };
+    await assert.rejects(changed.broker.read(23, projectionType, request),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RUN_MISMATCH");
+  }
 });
 
 test("untrusted renderer, unsupported projections, wrong sessions, and old revisions fail closed", async () => {
@@ -367,9 +423,12 @@ test("main routes matching authority reads and keeps identity-bearing control ou
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "stellar-quantum-v1", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "dyson-workspace-v1", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?"system-space-station-workspace-v1",[\s\S]*?request/);
+  assert.match(main, /nativePlayerAuthorityProjectionBroker\.read\([\s\S]*?"campaign-workspace-v1",[\s\S]*?request/);
+  assert.match(main, /nativePlayerAuthorityProjectionBroker\.read\([\s\S]*?"galaxy-account-workspace-v1",[\s\S]*?request/);
   assert.match(preload, /getNativePlayerAuthorityState/);
   assert.match(preload, /onNativePlayerAuthorityState/);
   assert.doesNotMatch(preload, /activateNativePlayerAuthority|commitNativePlayerAuthority|retryNativePlayerAuthority/);
-  assert.doesNotMatch(preload, /macroSessionId|operationId|runId|main-player-authority/);
+  assert.match(preload, /normalizeAuthorityWorkspacePreloadRequest[\s\S]*?"sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint"/);
+  assert.doesNotMatch(preload, /macroSessionId|operationId|main-player-authority/);
   assert.doesNotMatch(broker, /\.preparePlayerAuthority|\.activatePlayerAuthority|\.commitPlayerAuthorityTick|\.applyCommand|\.advance\(/);
 });

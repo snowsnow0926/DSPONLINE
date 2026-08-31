@@ -1,5 +1,11 @@
 # 测试与发布基线
 
+> **Windows Campaign / Galaxy 薄 UI 门禁（2026-09-01，开发候选）**：Core 合成夹具必须证明 Campaign 固定目录/进度与 Galaxy 饱和十进制/去重已知计数有界、只读、源 canonical hash 不变；Host 必须证明活动 exact lease 的 session/run/revision/registry 四重绑定和旧 run 同 revision ABA 拒绝。Desktop boundary 必须覆盖 `truncated=true`、重复 task ID、counts 不一致、stale run/revision/registry、超 256 位十进制、unsafe count、difficulty 超限、额外 GameState/库存字段和活动 authority restore/import/overwrite=true 全部拒绝。
+>
+> 组件与 App 必须证明 native authority 下 Campaign/Galaxy 路由可达，只挂载 Native workspace；Web workspace 仅作为非 native fallback。失败投影整页关闭，不显示任务或账户操作；Galaxy props 与组件不能接收 GameState、主档恢复/导入/覆盖/上传 writer，按钮也不得提供这些动作。账户创建/切换在 native ownership 下不得调用 `recordAccountProgress` 或 `baselineAccountProgress`。build/startup budget、完整 native/Vitest/E2E/24 小时/多硬件/签名门禁仍须另跑，focused 数字不得冒充发布通过。
+>
+> 本纵切冻结前 fresh focused：Core `3/3`、Host exact lease `1/1`、Host bin `3/3`、Node `62 passed / 6 skipped / 0 failed`、Vitest `12/12`；typecheck、`cargo fmt --check`、workspace all-target/all-feature `clippy -D warnings`、production build、startup budget 与 `git diff --check` 通过。6 个 Node skip 都明确因为本工作树尚未构建 release native Host，不是静默忽略失败。首轮 renderer channel 清单仍为新增前的 62 而报 `1 fail`，补入两个 exact IPC 后以 64 个双侧集合相等闭合；Rust fmt 首轮发现新增代码机械排版差异，执行 formatter 后复验通过。组合全量仍由根工作树统一执行。
+
 > **Windows 恒星系空间站 Rust 写面与 definite-rejection 当前组合门禁（2026-09-01，开发候选）**：合并提交链为 `fa484c2`（可达入口及 session/run/revision/registry/system 围栏）、`35ea4e2`（Rust durable-stage 前 typed rejection）、`5bcaed0`（合并夹具身份）和 `b92f1e6`（标准 Rust 格式化）。当前组合 fresh：TypeScript typecheck 通过；Node runtime/Host/intent `74/74`；Rust Core 空间站 `13/13`；Host 空间站 `6/6`；Host typed response `1/1`；UI/store/App 定向 `34/34`；Host all-target clippy 与 `git diff --check` 通过。格式门首轮只报告测试夹具机械排版差异，执行 `cargo fmt` 后已闭合，不能删成一次通过。独立复审未发现 P0/P1；EPIPE、普通命令同 code、pending replay 和五个 durable fault boundary 均保持 uncertain/recoverable。
 >
 > 上述数字只证明当前空间站组合切片，不复用为完整 Rust/Vitest/native/E2E 或发布门禁。混装旧 Host 时 preload 方法存在但 Host capability 缺失会使 UI 先展示再拒绝，这是 P2；匹配构建正常。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 不变；没有生成包、签名、连接生产、部署或处理真实玩家存档。

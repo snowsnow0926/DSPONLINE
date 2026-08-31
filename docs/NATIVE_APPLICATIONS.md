@@ -1,5 +1,9 @@
 # 原生应用构建与更新
 
+> **Campaign / Galaxy 原生玩家壳边界（2026-09-01，开发候选）**：当前 Windows Host 新增 `native-core-campaign-workspace-projection-v1` 与 `native-core-galaxy-account-workspace-projection-v1` capability。preload 只接受 exact-key `{sessionId,runId,expectedRevision,expectedRegistryFingerprint}`；main 只把请求路由到当前 normal-main 玩家权威 broker，不允许回落到 renderer shadow 会话。返回分别受 256 KiB 与 64 KiB 硬预算，renderer boundary 拒绝截断、额外键、重复 ID、计数漂移和 lineage 漂移。
+>
+> 原生 Campaign 页只读固定目录标签与 Rust 进度，不接收 GameState；导航只发 UI locator。原生 Galaxy 页只接收 Rust 游戏摘要和单独的本地账户状态，可创建/切换身份、编辑资料并登录/退出云账号；恢复、导入、覆盖当前主档在 active authority 下显式不可用且没有写入口。Campaign 投影目前打开时仍做 `O(E+B)` Rust 扫描，预算收紧不等于查询计算免费。该切片不生成安装包、不改变签名/更新通道，也不放开 `authorityEligible`。
+
 > **轨道合同原生权威边界（2026-09-01，开发候选）**：Windows authority route 现在以 `orbital-contract-workspace-v1` 提供最多 4 个 offer、3 个 accepted、8 个 completed history、每合同 6 条 requirement 和 256 KiB 的有界投影。main projection broker 对 renderer 的 exact-key 请求内部附加 confirmed wall clock，Host 再用当前 exact-realtime lease 证明 session/run/registry；renderer bridge 与 TypeScript 请求类型均没有时间字段，也拿不到量子网络正文、奖励公式或完整 GameState。
 >
 > mutation broker 只接受 accept、deliver-quantum、claim、abandon 和 feature 五类语义。时钟在首次排队时采样并进入 SHA-256 command identity；FIFO 的 unknown-response retry 保留完全相同的请求、clock 和 command ID。跨上海午夜的旧 offer 会在 Rust 同步 clone 后 definite reject，源状态不变；pending 结束后 UI 强制重读同 revision 的新 main-clock projection，不会用一次“rollover-only 成功”掩盖拒绝。原生合同页不调用 legacy station writers，Web/PWA fallback 不变。

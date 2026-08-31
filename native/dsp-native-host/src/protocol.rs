@@ -499,6 +499,18 @@ pub enum ControlRequest {
         expected_registry_fingerprint: String,
         confirmed_wall_clock_ms: u64,
     },
+    CoreCampaignWorkspaceProjection {
+        session_id: String,
+        run_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+    },
+    CoreGalaxyAccountWorkspaceProjection {
+        session_id: String,
+        run_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+    },
     CoreApplyCommand {
         session_id: String,
         command: SimulationCommandPatch,

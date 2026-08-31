@@ -39,7 +39,14 @@ const PROJECTION_METHODS = Object.freeze({
   "dyson-workspace-v1": "dysonWorkspaceProjection",
   "system-space-station-workspace-v1": "systemSpaceStationWorkspaceProjection",
   "orbital-contract-workspace-v1": "orbitalContractWorkspaceProjection",
+  "campaign-workspace-v1": "campaignWorkspaceProjection",
+  "galaxy-account-workspace-v1": "galaxyAccountWorkspaceProjection",
 });
+const EXACT_LINEAGE_WORKSPACE_PROJECTIONS = new Set([
+  "orbital-contract-workspace-v1",
+  "campaign-workspace-v1",
+  "galaxy-account-workspace-v1",
+]);
 
 class NativePlayerAuthorityProjectionBrokerError extends Error {
   constructor(message, code) {
@@ -140,9 +147,9 @@ class NativePlayerAuthorityProjectionBroker {
     const method = PROJECTION_METHODS[projectionType];
     if (!method || !isRecord(request) || !validLogicalId(request.sessionId) ||
         !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
-        projectionType === "orbital-contract-workspace-v1" && !hasExactKeys(request, [
+        EXACT_LINEAGE_WORKSPACE_PROJECTIONS.has(projectionType) && !hasExactKeys(request, [
           "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint",
-        ]) || projectionType === "orbital-contract-workspace-v1" &&
+        ]) || EXACT_LINEAGE_WORKSPACE_PROJECTIONS.has(projectionType) &&
           (!validLogicalId(request.runId) ||
            !validLogicalId(request.expectedRegistryFingerprint, 256))) {
       throw brokerError(
@@ -182,11 +189,11 @@ class NativePlayerAuthorityProjectionBroker {
         "NATIVE_PLAYER_AUTHORITY_PROJECTION_RESULT_MISMATCH",
       );
     }
-    if (projectionType === "orbital-contract-workspace-v1" &&
+    if (EXACT_LINEAGE_WORKSPACE_PROJECTIONS.has(projectionType) &&
         (result.sessionId !== request.sessionId || result.runId !== request.runId ||
          result.registryFingerprint !== request.expectedRegistryFingerprint)) {
       throw brokerError(
-        "native orbital-contract projection result lineage is not current",
+        "native workspace projection result lineage is not current",
         "NATIVE_PLAYER_AUTHORITY_PROJECTION_RESULT_MISMATCH",
       );
     }

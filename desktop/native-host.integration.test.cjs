@@ -386,6 +386,7 @@ test("Rust host opens a verified v47 checkpoint as an owner-bound native shadow"
   assert.ok(hello.capabilities.includes("native-core-factory-inventory-v1"));
   assert.ok(hello.capabilities.includes("native-core-construction-inventory-v1"));
   assert.ok(hello.capabilities.includes("native-core-blueprint-enqueue-context-v1"));
+  assert.ok(hello.capabilities.includes("native-core-blueprint-direct-deploy-context-v1"));
   assert.ok(hello.capabilities.includes("native-core-construction-placement-context-v1"));
   assert.ok(hello.capabilities.includes("native-core-construction-removal-context-v1"));
   assert.ok(hello.capabilities.includes("native-core-construction-stack-context-v1"));

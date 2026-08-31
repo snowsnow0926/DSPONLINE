@@ -21,6 +21,7 @@ import { useEffect, useRef, useState } from "react";
 import { canonicalizeNativeBlueprintName } from "../game/nativeBlueprintRenameIntentCommands";
 import {
   NATIVE_BLUEPRINT_PAGE_ROWS,
+  selectNativeBlueprintDirectDeploySelectionBinding,
   selectNativeBlueprintEnqueueSelectionBinding,
   selectNativeBlueprintRecipeOverrideBinding,
   selectNativeConstructionQueueDeployBinding,
@@ -28,6 +29,7 @@ import {
 } from "../game/nativeBlueprintWorkspaceStore";
 import type {
   NativeBlueprintDeleteBinding,
+  NativeBlueprintDirectDeploySelectionBinding,
   NativeBlueprintEnqueueSelectionBinding,
   NativeBlueprintMirror,
   NativeBlueprintRecipeOverrideBinding,
@@ -63,6 +65,9 @@ import type {
 import type {
   NativeBlueprintEnqueuePendingCommand,
 } from "../game/nativeBlueprintEnqueueCommandReconciliation";
+import type {
+  NativeBlueprintDirectDeployPendingCommand,
+} from "../game/nativeBlueprintDirectDeployCommandReconciliation";
 import {
   nativeBlueprintRenameEditorTargetState,
   type NativeBlueprintRenamePendingIdentity,
@@ -103,6 +108,7 @@ export interface NativeBlueprintWorkspaceProps {
   ) => boolean;
   onSubmitQueueDeployIntent: (binding: NativeConstructionQueueDeployBinding) => boolean;
   onBeginQueuePlacement: (binding: NativeBlueprintEnqueueSelectionBinding) => boolean;
+  onBeginDirectPlacement: (binding: NativeBlueprintDirectDeploySelectionBinding) => boolean;
   pendingIdentity: NativeBlueprintRenamePendingIdentity | null;
   transformPending: NativeBlueprintTransformPendingCommand | null;
   recipeOverridePending: NativeBlueprintRecipeOverridePendingCommand | null;
@@ -111,6 +117,7 @@ export interface NativeBlueprintWorkspaceProps {
   queueFundPending: NativeConstructionQueueFundPendingCommand | null;
   queueDeployPending: NativeConstructionQueueDeployPendingCommand | null;
   enqueuePending: NativeBlueprintEnqueuePendingCommand | null;
+  directDeployPending: NativeBlueprintDirectDeployPendingCommand | null;
   resolution: NativeBlueprintRenameResolution | null;
   onConsumeRenameResolution: (submissionId: number) => void;
   commandPending: boolean;
@@ -298,6 +305,7 @@ export function NativeBlueprintWorkspace({
   onSubmitQueueFundIntent,
   onSubmitQueueDeployIntent,
   onBeginQueuePlacement,
+  onBeginDirectPlacement,
   pendingIdentity,
   transformPending,
   recipeOverridePending,
@@ -306,6 +314,7 @@ export function NativeBlueprintWorkspace({
   queueFundPending,
   queueDeployPending,
   enqueuePending,
+  directDeployPending,
   resolution,
   onConsumeRenameResolution,
   commandPending,
@@ -324,6 +333,7 @@ export function NativeBlueprintWorkspace({
   const renameSubmittedRef = useRef(false);
   const readyFrame = nativeFrameIsComplete(frame, status) ? frame : null;
   const enqueueSelectionBinding = selectNativeBlueprintEnqueueSelectionBinding(readyFrame);
+  const directDeploySelectionBinding = selectNativeBlueprintDirectDeploySelectionBinding(readyFrame);
   const readStatus = readyFrame
     ? "ready"
     : status === "loading" || status === "empty" ? status : "unavailable";
@@ -377,7 +387,7 @@ export function NativeBlueprintWorkspace({
   const interactionLocked = commandPending || pendingIdentity !== null ||
     transformPending !== null || recipeOverridePending !== null || deletePending !== null ||
     queueCancelPending !== null || queueFundPending !== null || enqueuePending !== null ||
-    queueDeployPending !== null ||
+    queueDeployPending !== null || directDeployPending !== null ||
     renameEditor !== null;
   const editorTargetState = renameEditor?.conflict === "lineage"
     ? "lineage-conflict"
@@ -386,7 +396,8 @@ export function NativeBlueprintWorkspace({
   const editorConflict = editorTargetState === "lineage-conflict" || editorTargetState === "row-conflict";
   const editorLocked = Boolean(
     editorAccepted || pendingIdentity || transformPending || recipeOverridePending || deletePending ||
-    queueCancelPending || queueFundPending || queueDeployPending || enqueuePending || editorConflict
+    queueCancelPending || queueFundPending || queueDeployPending || enqueuePending ||
+    directDeployPending || editorConflict
   );
   const canonicalDraft = renameEditor ? canonicalizeNativeBlueprintName(renameEditor.draft) : null;
   const editorCanSubmit = Boolean(renameEditor && editorTargetState === "ready" &&
@@ -455,6 +466,15 @@ export function NativeBlueprintWorkspace({
           ? `施工部署已耐久提交；等待不早于 revision ${queueDeployPending.receipt?.revision} 的精确队列缺席证明`
           : "施工部署回执或成员投影无法证明；当前 lineage 保持锁定"
     : null;
+  const directDeployPendingCopy = directDeployPending
+    ? directDeployPending.phase === "dispatching"
+      ? "蓝图直接部署正在等待 main-owned durable ACK"
+      : directDeployPending.phase === "reconciling"
+        ? "蓝图直接部署结果不确定；仅进行六次有界只读对账，绝不自动重发"
+        : directDeployPending.phase === "awaiting-topology"
+          ? `蓝图直接部署已耐久提交；等待不早于 revision ${directDeployPending.receipt?.revision} 的原生工厂拓扑`
+          : "蓝图直接部署回执或拓扑身份无法证明；当前 lineage 保持锁定"
+    : null;
   const pendingCopy = pendingIdentity
     ? pendingIdentity.phase === "awaiting-ack"
       ? "重命名正在等待 main-owned durable ACK"
@@ -464,7 +484,8 @@ export function NativeBlueprintWorkspace({
           ? "重命名结果无法确认；保持锁定并仅等待权威对账，绝不自动重发"
           : "重命名身份或投影发生冲突；保持锁定并停止猜测"
     : transformPendingCopy ?? recipeOverridePendingCopy ?? deletePendingCopy ??
-      queueCancelPendingCopy ?? queueFundPendingCopy ?? queueDeployPendingCopy ?? enqueuePendingCopy ?? (commandPending
+      queueCancelPendingCopy ?? queueFundPendingCopy ?? queueDeployPendingCopy ?? enqueuePendingCopy ??
+      directDeployPendingCopy ?? (commandPending
       ? "另一条原生命令正在等待 durable ACK"
       : "页面按存储顺序显示；名称、方向、配方、入队与删除由 Rust 权威提交。");
   const editorCopy = renameEditor
@@ -687,6 +708,18 @@ export function NativeBlueprintWorkspace({
               aria-label={`加入待建施工${summary.name}`}
               data-native-blueprint-action="begin-enqueue-placement"
             ><MapPin size={14} />加入待建施工</button> : null}
+            {selected ? <button
+              type="button"
+              disabled={interactionLocked || directDeploySelectionBinding === null}
+              onClick={() => {
+                if (directDeploySelectionBinding) onBeginDirectPlacement(directDeploySelectionBinding);
+              }}
+              title={directDeploySelectionBinding
+                ? `在原生画布选择${summary.name}的直接部署位置`
+                : `${summary.name}不是已证明可直接部署的 ordinary 蓝图`}
+              aria-label={`直接部署${summary.name}`}
+              data-native-blueprint-action="begin-direct-deploy-placement"
+            ><Hammer size={14} />直接部署</button> : null}
             {selected ? <button
               className="danger"
               type="button"

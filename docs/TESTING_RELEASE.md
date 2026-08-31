@@ -1,5 +1,13 @@
 # 测试与发布基线
 
+> **Windows Rust ordinary 蓝图直接部署门禁（2026-08-31，开发候选）**：context 门禁必须证明 `blueprint-direct-deploy-context-v1` 精确绑定 session/run/current revision、registry fingerprint、蓝图 ID/行 revision、有限落点与 Rust 当前活动陆地行星，并限制为有界支持原因。durable marker 只能是 `{kind:"direct-deploy",blueprintId,blueprintRevision,position:{x,y},revision}`；夹带 planet、蓝图正文、材料/余额、实体、线路、ID、`nextId` 或额外字段必须在写入前拒绝。
+>
+> Core 门禁必须覆盖内置 ordinary 单实体与多实体/线路成功、live blueprint 读取、全额施工需求和精确安全整数扣料、实体先于线路的确定 ID、recipe/spray/Dyson orbit/storage/fuel/power/belt 规范配置，以及候选内部、live entity、其他施工订单三类 exact overlap。缺料只能整笔失败，不得部分扣料或隐式创建 queue-only 订单；MOD/命名空间目录、非陆地活动行星、resource anchor、external port、特殊建筑、锁定科技、旧行 revision、损坏 inventory/catalog、allocator 碰撞/耗尽、伪造 marker 和晚期编译冲突均须保持源 revision/hash/inventory/queue/topology 不变。
+>
+> Host 门禁必须证明 live 与 generic cold-WAL reopen 的完整状态/canonical hash 一致，WAL 只含语义 marker 而不泄漏展开后的材料或拓扑；`AfterStage/AfterWal/AfterCheckpoint/AfterReceipt/AfterLeaseAcknowledge` 五个 durable fault boundary 恢复后不得重复扣料或建造。回执必须严格为连续 `R+1`、空 entity/belt dirty IDs、`topologyDirty=true`。renderer 每个事务只能调用一次 mutation；unknown transport 只能按 `0/100/250/500/1000/2000 ms` 做六次只读 receipt reconciliation，随后等待同 lineage/registry、不早于 ACK 的原生权威拓扑，任何路径都不得 resend 或自动改成 enqueue。
+>
+> 本切片实际专项结果：Rust Core `809/809`、Host `193/193`、focused Vitest `100/100`、Node `37/37`、renderer boundary `41/41`、重建 Release Host 后真实 Host integration `5/5`。失败史不得删除：focused Vitest 首轮因一条夹具缺少 direct-deploy 新字段为 `98/99`；真实 Host integration 首轮使用尚未重建、缺少新 context capability 的旧 Host，结果为 `4/5`，重建后才通过 `5/5`。当前源码随后新跑完整 Vitest `2,743` 通过、`28` 条件跳过、`0` 失败（347 文件通过、13 文件条件跳过，410.11 秒），完整 `test:native` `489/1/0`，production build 2,077 modules 且 startup/menu gzip 分别为 `180,401/257,771 B`、forbidden module `0`，完整 Chromium `433/27/0`（6.7 分钟），durable E2E `7/7`（47.0 秒）。打包、24 小时、多硬件、Defender/磁盘、安装/覆盖升级、签名、部署和灰度未声称通过。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 不变，`authorityEligible=false`。
+
 > **Windows Rust ordinary 队列部署门禁（2026-08-31，开发候选）**：Core 必须拒绝 marker 夹带蓝图、库存、实体、线路、allocator 或 renderer 派生 ID；合法 marker 只能是 `{kind:"deploy",id,revision}`。ready 条件必须覆盖完整 construction reservation 恰好等于 catalog 推导需求、fleet reservation 为零、持久 `row.planetId` 与活动行星解耦，以及缺失/超额/孤儿/小数/溢出 reservation、非 pending、`allowExactOverlap`、非空 placed map、未知 optional 字段、MOD/特殊域和损坏目录的失败关闭。
 >
 > 提交门禁必须以 `O(实体 + 队列 + 蓝图)` 重新扫描同星球 live entity 与其他订单的精确位置，覆盖内部/外部 overlap、`nextId` 碰撞和耗尽。规范编译测试必须覆盖实体先于 belt 的确定 ID、recipe override、spray、Dyson orbit、storage/fuel、power grid/priority/generation priority，以及 belt tier/lanes/默认 priority `1`/stack/monitor/route；同一 storage 或 fuel 目标接入冲突物料必须拒绝。成功只删除目标行，保留共享 version、清理无人引用 version，并随行消费 reservation；失败前后源 revision/hash/queue/inventory/topology 必须不变，普通精确模拟结果不得改变。

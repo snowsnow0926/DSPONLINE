@@ -1096,6 +1096,17 @@ function nativeBlueprintEnqueueContextResultContext(request) {
   };
 }
 
+function nativeBlueprintDirectDeployContextResultContext(request) {
+  return {
+    sessionId: request?.sessionId,
+    expectedRevision: request?.expectedRevision,
+    expectedRegistryFingerprint: request?.expectedRegistryFingerprint,
+    blueprintId: request?.blueprintId,
+    blueprintRevision: request?.blueprintRevision,
+    position: request?.position,
+  };
+}
+
 function nativeConstructionPlacementContextResultContext(request) {
   return {
     sessionId: request?.sessionId,
@@ -1936,6 +1947,24 @@ ipcMain.handle("desktop:native-core-blueprint-enqueue-context", async (event, re
   });
 });
 
+ipcMain.handle("desktop:native-core-blueprint-direct-deploy-context", async (event, request) => {
+  return runRendererNativeOperation("coreBlueprintDirectDeployContext", {
+    fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+    message: "原生蓝图直接部署上下文请求失败，请重试",
+    resultContext: nativeBlueprintDirectDeployContextResultContext(request),
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      return await nativePlayerAuthorityProjectionBroker.read(
+        ownerId,
+        "blueprint-direct-deploy-context-v1",
+        request,
+      );
+    }
+    return await nativeCoreSessions.blueprintDirectDeployContext(ownerId, request);
+  });
+});
+
 ipcMain.handle("desktop:native-core-construction-placement-context", async (event, request) => {
   return runRendererNativeOperation("coreConstructionPlacementContext", {
     fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
@@ -2196,7 +2225,7 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
     if (!request || typeof request !== "object" ||
       !validNativeLogicalId(request.sessionId, 128) ||
       !Number.isSafeInteger(request.sequence) || request.sequence < 1 ||
-      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "blueprint-workspace-v1", "blueprint-enqueue-context-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType) ||
+      !["viewport-v1", "viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "blueprint-workspace-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1"].includes(request.projectionType) ||
       !request.payload || typeof request.payload !== "object" ||
       Object.prototype.hasOwnProperty.call(request.payload, "sessionId")) {
       throw new Error("原生投影二进制请求无效");
@@ -2223,6 +2252,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
       rawResult = await nativeCoreSessions.blueprintWorkspaceProjection(ownerId, normalizedRequest);
     } else if (request.projectionType === "blueprint-enqueue-context-v1") {
       rawResult = await nativeCoreSessions.blueprintEnqueueContext(ownerId, normalizedRequest);
+    } else if (request.projectionType === "blueprint-direct-deploy-context-v1") {
+      rawResult = await nativeCoreSessions.blueprintDirectDeployContext(ownerId, normalizedRequest);
     } else if (request.projectionType === "construction-placement-context-v1") {
       rawResult = await nativeCoreSessions.constructionPlacementContext(ownerId, normalizedRequest);
     } else if (request.projectionType === "construction-belt-placement-context-v1") {
@@ -2269,6 +2300,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                   ? "coreBlueprintWorkspaceProjection"
                 : request.projectionType === "blueprint-enqueue-context-v1"
                   ? "coreBlueprintEnqueueContext"
+                : request.projectionType === "blueprint-direct-deploy-context-v1"
+                  ? "coreBlueprintDirectDeployContext"
                 : request.projectionType === "construction-placement-context-v1"
                   ? "coreConstructionPlacementContext"
                 : request.projectionType === "construction-belt-placement-context-v1"
@@ -2313,6 +2346,8 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
                   ? nativeBlueprintWorkspaceResultContext(normalizedRequest)
                 : request.projectionType === "blueprint-enqueue-context-v1"
                   ? nativeBlueprintEnqueueContextResultContext(normalizedRequest)
+                : request.projectionType === "blueprint-direct-deploy-context-v1"
+                  ? nativeBlueprintDirectDeployContextResultContext(normalizedRequest)
                 : request.projectionType === "construction-placement-context-v1"
                   ? nativeConstructionPlacementContextResultContext(normalizedRequest)
                 : request.projectionType === "construction-belt-placement-context-v1"

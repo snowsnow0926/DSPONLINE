@@ -24,6 +24,7 @@ use crate::{
 };
 
 const BLUEPRINT_ENQUEUE_CONTEXT_PROJECTION: &str = "blueprint-enqueue-context-v1";
+const BLUEPRINT_DIRECT_DEPLOY_CONTEXT_PROJECTION: &str = "blueprint-direct-deploy-context-v1";
 const MAX_PROJECTION_BYTES: usize = 1_048_576;
 const MAX_SOURCE_ROWS: usize = 4_096;
 const MAX_QUEUE_ORDERS: usize = 100;
@@ -70,11 +71,20 @@ struct FundIntent {
 }
 
 #[derive(Debug, Clone)]
+struct DirectDeployIntent {
+    blueprint_id: String,
+    blueprint_revision: u64,
+    x: f64,
+    y: f64,
+}
+
+#[derive(Debug, Clone)]
 enum ConstructionQueueIntent {
     Cancel(String),
     Enqueue(EnqueueIntent),
     Fund(FundIntent),
     Deploy(String),
+    DirectDeploy(DirectDeployIntent),
 }
 
 #[derive(Debug, Clone)]
@@ -135,17 +145,55 @@ struct ConstructionQueueDeployPlan {
     added_belts: Vec<AddedRecord>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExactInventoryDebit {
+    id: String,
+    amount_before: u64,
+    amount_after: u64,
+}
+
+enum DirectConstructionPreparation {
+    Ready(Vec<ExactInventoryDebit>),
+    Insufficient,
+    CatalogIncomplete,
+}
+
+#[derive(Debug, Clone)]
+struct ConstructionQueueDirectDeployPlan {
+    next_id: u64,
+    next_id_after: u64,
+    construction_debits: Vec<ExactInventoryDebit>,
+    added_entities: Vec<AddedRecord>,
+    added_belts: Vec<AddedRecord>,
+}
+
 #[derive(Debug, Clone)]
 enum ConstructionQueuePlan {
     Cancel(ConstructionQueueCancelPlan),
     Enqueue(ConstructionQueueEnqueuePlan),
     Fund(ConstructionQueueFundPlan),
     Deploy(Box<ConstructionQueueDeployPlan>),
+    DirectDeploy(Box<ConstructionQueueDirectDeployPlan>),
 }
 
 enum EnqueuePreparation {
     Supported(Box<PreparedEnqueue>),
     Unsupported(&'static str),
+}
+
+enum DirectDeployPreparation<'a> {
+    Supported(Box<PreparedDirectDeploy<'a>>),
+    Unsupported(&'static str),
+}
+
+struct PreparedDirectDeploy<'a> {
+    definition: &'a Map<String, Value>,
+    active_planet_id: String,
+    origin: (f64, f64),
+    rotation: u64,
+    mirror: String,
+    next_id: u64,
+    construction_debits: Vec<ExactInventoryDebit>,
 }
 
 pub(crate) struct ConstructionQueueExpansion {
@@ -164,12 +212,41 @@ impl ConstructionQueueExpansion {
             ConstructionQueuePlan::Enqueue(plan) => apply_enqueue_plan(base, plan),
             ConstructionQueuePlan::Fund(plan) => apply_fund_plan(base, plan),
             ConstructionQueuePlan::Deploy(plan) => apply_deploy_plan(base, plan),
+            ConstructionQueuePlan::DirectDeploy(plan) => apply_direct_deploy_plan(base, plan),
         }
     }
 
     pub(crate) fn is_deploy(&self) -> bool {
-        matches!(self.plan, ConstructionQueuePlan::Deploy(_))
+        matches!(
+            self.plan,
+            ConstructionQueuePlan::Deploy(_) | ConstructionQueuePlan::DirectDeploy(_)
+        )
     }
+}
+
+fn apply_direct_deploy_plan(
+    base: &mut Map<String, Value>,
+    plan: &ConstructionQueueDirectDeployPlan,
+) -> anyhow::Result<()> {
+    if safe_integer(base.get("nextId"), "next ID")? != plan.next_id {
+        bail!("native direct blueprint deploy allocator is no longer current")
+    }
+    let construction = base
+        .get_mut("construction")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            anyhow!("native direct blueprint deploy construction inventory is invalid")
+        })?;
+    for debit in &plan.construction_debits {
+        let current =
+            exact_safe_inventory_integer(construction.get(&debit.id), "construction inventory")?;
+        if current != debit.amount_before {
+            bail!("native direct blueprint deploy construction inventory is no longer current")
+        }
+        construction.insert(debit.id.clone(), Value::from(debit.amount_after));
+    }
+    base.insert("nextId".to_owned(), Value::from(plan.next_id_after));
+    Ok(())
 }
 
 fn apply_deploy_plan(
@@ -481,6 +558,38 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<Constructi
                 .ok_or_else(|| anyhow!("native construction queue deploy ID is invalid"))?;
             Ok(ConstructionQueueIntent::Deploy(id.to_owned()))
         }
+        Some("direct-deploy") => {
+            if command.base_revision == MAX_JAVASCRIPT_SAFE_INTEGER || intent.len() != 5 {
+                bail!("native direct blueprint deploy intent shape is invalid")
+            }
+            let blueprint_id = intent
+                .get("blueprintId")
+                .and_then(Value::as_str)
+                .filter(|id| valid_opaque_text(id))
+                .ok_or_else(|| anyhow!("native direct blueprint deploy blueprint ID is invalid"))?;
+            let blueprint_revision = intent
+                .get("blueprintRevision")
+                .and_then(Value::as_u64)
+                .filter(|revision| *revision > 0 && *revision <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                .ok_or_else(|| {
+                    anyhow!("native direct blueprint deploy blueprint revision is invalid")
+                })?;
+            let position = intent
+                .get("position")
+                .and_then(Value::as_object)
+                .filter(|position| {
+                    position.len() == 2 && position.contains_key("x") && position.contains_key("y")
+                })
+                .ok_or_else(|| anyhow!("native direct blueprint deploy position is invalid"))?;
+            let x = finite_number(position.get("x"), "direct deploy x position")?;
+            let y = finite_number(position.get("y"), "direct deploy y position")?;
+            Ok(ConstructionQueueIntent::DirectDeploy(DirectDeployIntent {
+                blueprint_id: blueprint_id.to_owned(),
+                blueprint_revision,
+                x,
+                y,
+            }))
+        }
         _ => bail!("native construction queue intent kind is invalid"),
     }
 }
@@ -490,6 +599,32 @@ fn safe_integer(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
         .and_then(Value::as_u64)
         .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
         .ok_or_else(|| anyhow!("native construction queue {label} is not a safe integer"))
+}
+
+fn exact_safe_inventory_integer(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
+    let Some(value) = value else {
+        return Ok(0);
+    };
+    if let Some(amount) = value.as_u64() {
+        if amount <= MAX_JAVASCRIPT_SAFE_INTEGER {
+            return Ok(amount);
+        }
+        bail!("native direct blueprint deploy {label} is not a safe integer")
+    }
+    if value.as_i64().is_some() {
+        bail!("native direct blueprint deploy {label} is not a safe integer")
+    }
+    let amount = value.as_f64().filter(|amount| {
+        amount.is_finite()
+            && *amount >= 0.0
+            && amount.fract() == 0.0
+            // 2^53 is the first non-safe JavaScript integer. Comparing with
+            // that exact power of two avoids rounding MAX_SAFE up to 2^53.
+            && *amount < 9_007_199_254_740_992.0
+    });
+    amount
+        .map(|amount| amount as u64)
+        .ok_or_else(|| anyhow!("native direct blueprint deploy {label} is not a safe integer"))
 }
 
 fn positive_integer(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
@@ -812,6 +947,106 @@ fn resolve_queue_definition<'a>(
         bail!("native construction queue persisted blueprint revision is inconsistent")
     }
     Ok(definition)
+}
+
+struct DeploymentDirectories<'a> {
+    blueprints: Vec<&'a Map<String, Value>>,
+    versions: Vec<&'a Map<String, Value>>,
+    queue: Vec<&'a Map<String, Value>>,
+    blueprint_indices: HashMap<String, usize>,
+    version_indices: HashMap<String, usize>,
+}
+
+fn validated_deployment_directories(
+    state: &CoreState,
+) -> anyhow::Result<DeploymentDirectories<'_>> {
+    let base = state.base_value();
+    let blueprint_values = base
+        .get("blueprints")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native construction queue blueprint directory is invalid"))?;
+    let version_values: &[Value] = match base.get("blueprintVersions") {
+        None | Some(Value::Null) => &[],
+        Some(Value::Array(values)) => values.as_slice(),
+        _ => bail!("native construction queue blueprint versions are invalid"),
+    };
+    let queue_values = base
+        .get("constructionQueue")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native construction queue directory is invalid"))?;
+    let blueprints = validate_blueprint_directory(blueprint_values)?;
+    let versions = validate_version_directory(version_values)?;
+    let queue = validate_queue_directory(queue_values)?;
+    let blueprint_indices = blueprints
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            (
+                row.get("id")
+                    .and_then(Value::as_str)
+                    .expect("blueprint ID was validated")
+                    .to_owned(),
+                index,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let version_indices = versions
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            (
+                row.get("id")
+                    .and_then(Value::as_str)
+                    .expect("version ID was validated")
+                    .to_owned(),
+                index,
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    for version in &versions {
+        let owner = version
+            .get("blueprintId")
+            .and_then(Value::as_str)
+            .expect("version owner was validated");
+        let revision = positive_integer(version.get("revision"), "version revision")?;
+        let definition = version
+            .get("definition")
+            .and_then(Value::as_object)
+            .expect("version definition was validated");
+        if definition.get("id").and_then(Value::as_str) != Some(owner)
+            || blueprint_revision(definition)? != revision
+        {
+            bail!("native construction queue immutable version identity is invalid")
+        }
+    }
+    for row in &queue {
+        let planet_id = row
+            .get("planetId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("native construction queue persisted planet is invalid"))?;
+        if !state
+            .catalog
+            .planets
+            .iter()
+            .any(|planet| planet.id == planet_id)
+        {
+            bail!("native construction queue persisted planet is not in the catalog")
+        }
+        resolve_queue_definition(
+            row,
+            &blueprints,
+            &blueprint_indices,
+            &versions,
+            &version_indices,
+        )?;
+    }
+    Ok(DeploymentDirectories {
+        blueprints,
+        versions,
+        queue,
+        blueprint_indices,
+        version_indices,
+    })
 }
 
 fn prepare_enqueue(
@@ -1828,21 +2063,20 @@ pub(crate) fn queue_entry_deploy_ready(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn validate_deploy_overlap(
+fn deploy_has_no_exact_overlap(
     state: &CoreState,
-    target_id: &str,
-    target: &Map<String, Value>,
+    excluded_queue_id: Option<&str>,
+    planet_id: &str,
+    origin: (f64, f64),
+    rotation: u64,
+    mirror: &str,
     definition: &Map<String, Value>,
     blueprints: &[&Map<String, Value>],
     blueprint_indices: &HashMap<String, usize>,
     versions: &[&Map<String, Value>],
     version_indices: &HashMap<String, usize>,
     queue: &[&Map<String, Value>],
-) -> anyhow::Result<()> {
-    let planet_id = target
-        .get("planetId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("native construction queue persisted planet is invalid"))?;
+) -> anyhow::Result<bool> {
     let mut occupied = HashSet::new();
     for index in 0..state.entity_index.len() {
         let entity = state.parse_entity(index)?;
@@ -1862,7 +2096,7 @@ fn validate_deploy_overlap(
         )?);
     }
     for row in queue {
-        if row.get("id").and_then(Value::as_str) == Some(target_id)
+        if row.get("id").and_then(Value::as_str) == excluded_queue_id
             || row.get("planetId").and_then(Value::as_str) != Some(planet_id)
             || queue_status(row)? == "waiting-fleet"
         {
@@ -1883,33 +2117,26 @@ fn validate_deploy_overlap(
             blueprint_mirror(row)?,
         )?;
     }
-    let position = queue_position(target)?;
-    let rotation = blueprint_rotation(target)?;
-    let mirror = blueprint_mirror(target)?;
     let mut candidate = HashSet::new();
     for (x, y) in definition_offsets(definition)? {
         let offset = transformed_offset(x, y, rotation, mirror);
-        let key = rounded_position_key(position.0 + offset.0, position.1 + offset.1)?;
+        let key = rounded_position_key(origin.0 + offset.0, origin.1 + offset.1)?;
         if occupied.contains(&key) || !candidate.insert(key) {
-            bail!("native construction queue deploy has an exact position overlap")
+            return Ok(false);
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 fn compile_deploy_records(
     state: &CoreState,
-    row: &Map<String, Value>,
     definition: &Map<String, Value>,
+    planet_id: &str,
+    origin: (f64, f64),
+    rotation: u64,
+    mirror: &str,
     next_id: u64,
 ) -> anyhow::Result<(Vec<AddedRecord>, Vec<AddedRecord>, u64)> {
-    let planet_id = row
-        .get("planetId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow!("native construction queue deploy planet is invalid"))?;
-    let origin = queue_position(row)?;
-    let rotation = blueprint_rotation(row)?;
-    let mirror = blueprint_mirror(row)?;
     let entity_values = definition
         .get("entities")
         .and_then(Value::as_array)
@@ -2204,124 +2431,314 @@ fn compile_deploy_records(
     Ok((added_entities, belts, next_id_after))
 }
 
+fn validate_exact_construction_inventory(
+    base: &Map<String, Value>,
+) -> anyhow::Result<&Map<String, Value>> {
+    let inventory = base
+        .get("construction")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            anyhow!("native direct blueprint deploy construction inventory is invalid")
+        })?;
+    for (id, amount) in inventory {
+        if !valid_opaque_text(id) {
+            bail!("native direct blueprint deploy construction inventory ID is invalid")
+        }
+        exact_safe_inventory_integer(Some(amount), "construction inventory")?;
+    }
+    Ok(inventory)
+}
+
+fn direct_requirements_catalog_complete(
+    state: &CoreState,
+    definition: &Map<String, Value>,
+) -> anyhow::Result<bool> {
+    let entities = definition
+        .get("entities")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native direct blueprint deploy entities are invalid"))?;
+    for value in entities {
+        let entity = value
+            .as_object()
+            .ok_or_else(|| anyhow!("native direct blueprint deploy entity is invalid"))?;
+        let building_id = entity
+            .get("buildingId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("native direct blueprint deploy building ID is invalid"))?;
+        if !state.catalog.constructions.contains_key(building_id) {
+            return Ok(false);
+        }
+        if optional_bool(entity.get("sprayCoaterInstalled"), "spray coater installed")?
+            == Some(true)
+            && !state.catalog.constructions.contains_key("spray_coater")
+        {
+            return Ok(false);
+        }
+    }
+    let belts = definition
+        .get("belts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native direct blueprint deploy belts are invalid"))?;
+    for value in belts {
+        let belt = value
+            .as_object()
+            .ok_or_else(|| anyhow!("native direct blueprint deploy belt is invalid"))?;
+        let tier = positive_integer(belt.get("tier"), "blueprint belt tier")?;
+        let tier = u8::try_from(tier)
+            .map_err(|_| anyhow!("native direct blueprint deploy belt tier is invalid"))?;
+        if crate::command::builtin_belt_construction_id(state, tier).is_err() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn direct_construction_debits(
+    state: &CoreState,
+    definition: &Map<String, Value>,
+) -> anyhow::Result<DirectConstructionPreparation> {
+    let inventory = validate_exact_construction_inventory(state.base_value())?;
+    if !direct_requirements_catalog_complete(state, definition)? {
+        return Ok(DirectConstructionPreparation::CatalogIncomplete);
+    }
+    let requirements = construction_requirements(state, definition)?;
+    let mut debits = Vec::with_capacity(requirements.len());
+    for (id, required) in requirements {
+        let current = exact_safe_inventory_integer(inventory.get(&id), "construction inventory")?;
+        if current < required {
+            return Ok(DirectConstructionPreparation::Insufficient);
+        }
+        debits.push(ExactInventoryDebit {
+            id,
+            amount_before: current,
+            amount_after: current - required,
+        });
+    }
+    Ok(DirectConstructionPreparation::Ready(debits))
+}
+
+fn direct_allocator_available(
+    state: &CoreState,
+    definition: &Map<String, Value>,
+    next_id: u64,
+    queue: &[&Map<String, Value>],
+) -> anyhow::Result<bool> {
+    let entity_count = definition
+        .get("entities")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native direct blueprint deploy entities are invalid"))?
+        .len();
+    let belt_count = definition
+        .get("belts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native direct blueprint deploy belts are invalid"))?
+        .len();
+    let record_count = entity_count
+        .checked_add(belt_count)
+        .ok_or_else(|| anyhow!("native direct blueprint deploy record count overflows"))?;
+    if next_id
+        .checked_add(record_count as u64)
+        .is_none_or(|value| value > MAX_JAVASCRIPT_SAFE_INTEGER)
+    {
+        return Ok(false);
+    }
+    let queue_ids = queue
+        .iter()
+        .filter_map(|row| row.get("id").and_then(Value::as_str))
+        .collect::<HashSet<_>>();
+    for ordinal in 0..entity_count {
+        let id = format!("entity_{}", next_id + ordinal as u64);
+        if state.entity_index.contains_key(&id)
+            || state.belt_index.contains_key(&id)
+            || queue_ids.contains(id.as_str())
+        {
+            return Ok(false);
+        }
+    }
+    for ordinal in 0..belt_count {
+        let id = format!("belt_{}", next_id + entity_count as u64 + ordinal as u64);
+        if state.entity_index.contains_key(&id)
+            || state.belt_index.contains_key(&id)
+            || queue_ids.contains(id.as_str())
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn prepare_direct_deploy<'a>(
+    state: &'a CoreState,
+    intent: &DirectDeployIntent,
+) -> anyhow::Result<DirectDeployPreparation<'a>> {
+    let directories = validated_deployment_directories(state)?;
+    let active_planet_id = active_planet_id(state)?.to_owned();
+    let active_planet = state
+        .catalog
+        .planets
+        .iter()
+        .find(|planet| planet.id == active_planet_id)
+        .expect("active planet membership was validated");
+    if active_planet.kind != "terrestrial" {
+        return Ok(DirectDeployPreparation::Unsupported(
+            "unsupported-active-planet",
+        ));
+    }
+    if state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+        || state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    {
+        return Ok(DirectDeployPreparation::Unsupported(
+            "unsupported-blueprint-domain",
+        ));
+    }
+    let Some(target_index) = directories
+        .blueprint_indices
+        .get(intent.blueprint_id.as_str())
+        .copied()
+    else {
+        return Ok(DirectDeployPreparation::Unsupported("version-conflict"));
+    };
+    let definition = directories.blueprints[target_index];
+    if blueprint_revision(definition)? != intent.blueprint_revision {
+        return Ok(DirectDeployPreparation::Unsupported("version-conflict"));
+    }
+    if !queue_only_definition_supported_on_planet(state, definition, &active_planet_id)? {
+        return Ok(DirectDeployPreparation::Unsupported(
+            "unsupported-blueprint-domain",
+        ));
+    }
+    if !deploy_definition_semantics_supported(state, definition, &active_planet_id)? {
+        return Ok(DirectDeployPreparation::Unsupported("catalog-incomplete"));
+    }
+    let rotation = blueprint_rotation(definition)?;
+    let mirror = blueprint_mirror(definition)?.to_owned();
+    let origin = (intent.x, intent.y);
+    if !deploy_has_no_exact_overlap(
+        state,
+        None,
+        &active_planet_id,
+        origin,
+        rotation,
+        &mirror,
+        definition,
+        &directories.blueprints,
+        &directories.blueprint_indices,
+        &directories.versions,
+        &directories.version_indices,
+        &directories.queue,
+    )? {
+        return Ok(DirectDeployPreparation::Unsupported("position-overlap"));
+    }
+    let construction_debits = match direct_construction_debits(state, definition)? {
+        DirectConstructionPreparation::Ready(debits) => debits,
+        DirectConstructionPreparation::Insufficient => {
+            return Ok(DirectDeployPreparation::Unsupported(
+                "insufficient-construction-materials",
+            ));
+        }
+        DirectConstructionPreparation::CatalogIncomplete => {
+            return Ok(DirectDeployPreparation::Unsupported("catalog-incomplete"));
+        }
+    };
+    let next_id = safe_integer(state.base_value().get("nextId"), "next ID")?;
+    if !direct_allocator_available(state, definition, next_id, &directories.queue)? {
+        return Ok(DirectDeployPreparation::Unsupported("next-id-exhausted"));
+    }
+    Ok(DirectDeployPreparation::Supported(Box::new(
+        PreparedDirectDeploy {
+            definition,
+            active_planet_id,
+            origin,
+            rotation,
+            mirror,
+            next_id,
+            construction_debits,
+        },
+    )))
+}
+
+fn validated_direct_deploy_plan(
+    state: &CoreState,
+    intent: DirectDeployIntent,
+) -> anyhow::Result<ConstructionQueueDirectDeployPlan> {
+    let prepared = match prepare_direct_deploy(state, &intent)? {
+        DirectDeployPreparation::Supported(prepared) => prepared,
+        DirectDeployPreparation::Unsupported(reason) => {
+            bail!("native direct blueprint deploy is unsupported: {reason}")
+        }
+    };
+    let (added_entities, added_belts, next_id_after) = compile_deploy_records(
+        state,
+        prepared.definition,
+        &prepared.active_planet_id,
+        prepared.origin,
+        prepared.rotation,
+        &prepared.mirror,
+        prepared.next_id,
+    )?;
+    Ok(ConstructionQueueDirectDeployPlan {
+        next_id: prepared.next_id,
+        next_id_after,
+        construction_debits: prepared.construction_debits,
+        added_entities,
+        added_belts,
+    })
+}
+
 fn validated_deploy_plan(
     state: &CoreState,
     target_id: String,
 ) -> anyhow::Result<ConstructionQueueDeployPlan> {
     let base = state.base_value();
-    let blueprint_values = base
-        .get("blueprints")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("native construction queue blueprint directory is invalid"))?;
-    let empty_version_values = Vec::new();
-    let version_values = match base.get("blueprintVersions") {
-        None | Some(Value::Null) => &empty_version_values,
-        Some(Value::Array(values)) => values,
-        _ => bail!("native construction queue blueprint versions are invalid"),
-    };
-    let queue_values = base
-        .get("constructionQueue")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("native construction queue directory is invalid"))?;
-    let blueprints = validate_blueprint_directory(blueprint_values)?;
-    let versions = validate_version_directory(version_values)?;
-    let queue = validate_queue_directory(queue_values)?;
-    let blueprint_indices = blueprints
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            (
-                row.get("id").and_then(Value::as_str).unwrap().to_owned(),
-                index,
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    let version_indices = versions
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            (
-                row.get("id").and_then(Value::as_str).unwrap().to_owned(),
-                index,
-            )
-        })
-        .collect::<HashMap<_, _>>();
-    for version in &versions {
-        let owner = version.get("blueprintId").and_then(Value::as_str).unwrap();
-        let revision = positive_integer(version.get("revision"), "version revision")?;
-        let definition = version
-            .get("definition")
-            .and_then(Value::as_object)
-            .unwrap();
-        if definition.get("id").and_then(Value::as_str) != Some(owner)
-            || blueprint_revision(definition)? != revision
-        {
-            bail!("native construction queue immutable version identity is invalid")
-        }
-    }
-    for candidate in &queue {
-        let planet_id = candidate
-            .get("planetId")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("native construction queue persisted planet is invalid"))?;
-        if !state
-            .catalog
-            .planets
-            .iter()
-            .any(|planet| planet.id == planet_id)
-        {
-            bail!("native construction queue persisted planet is not in the catalog")
-        }
-        resolve_queue_definition(
-            candidate,
-            &blueprints,
-            &blueprint_indices,
-            &versions,
-            &version_indices,
-        )?;
-    }
-    let (index, row) = queue
+    let directories = validated_deployment_directories(state)?;
+    let (index, row) = directories
+        .queue
         .iter()
         .enumerate()
         .find(|(_, row)| row.get("id").and_then(Value::as_str) == Some(target_id.as_str()))
         .ok_or_else(|| anyhow!("native construction queue deploy target is missing"))?;
     let definition = resolve_queue_definition(
         row,
-        &blueprints,
-        &blueprint_indices,
-        &versions,
-        &version_indices,
+        &directories.blueprints,
+        &directories.blueprint_indices,
+        &directories.versions,
+        &directories.version_indices,
     )?;
     if !queue_entry_deploy_ready(state, row, definition)? {
         bail!("native construction queue deploy target is not ready")
     }
-    validate_deploy_overlap(
+    let planet_id = row
+        .get("planetId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("native construction queue deploy planet is invalid"))?;
+    let origin = queue_position(row)?;
+    let rotation = blueprint_rotation(row)?;
+    let mirror = blueprint_mirror(row)?;
+    if !deploy_has_no_exact_overlap(
         state,
-        &target_id,
-        row,
+        Some(&target_id),
+        planet_id,
+        origin,
+        rotation,
+        mirror,
         definition,
-        &blueprints,
-        &blueprint_indices,
-        &versions,
-        &version_indices,
-        &queue,
-    )?;
+        &directories.blueprints,
+        &directories.blueprint_indices,
+        &directories.versions,
+        &directories.version_indices,
+        &directories.queue,
+    )? {
+        bail!("native construction queue deploy has an exact position overlap")
+    }
     let next_id = safe_integer(base.get("nextId"), "next ID")?;
-    let (added_entities, added_belts, next_id_after) =
-        compile_deploy_records(state, row, definition, next_id)?;
-    let queue_ids = queue
-        .iter()
-        .filter_map(|row| row.get("id").and_then(Value::as_str))
-        .collect::<HashSet<_>>();
-    if added_entities
-        .iter()
-        .chain(&added_belts)
-        .filter_map(|addition| addition.value.get("id").and_then(Value::as_str))
-        .any(|id| queue_ids.contains(id))
-    {
+    if !direct_allocator_available(state, definition, next_id, &directories.queue)? {
         bail!("native construction queue deploy generated ID collides with a queue ID")
     }
-    let retained_version_ids = queue
+    let (added_entities, added_belts, next_id_after) = compile_deploy_records(
+        state, definition, planet_id, origin, rotation, mirror, next_id,
+    )?;
+    let retained_version_ids = directories
+        .queue
         .iter()
         .enumerate()
         .filter(|(candidate_index, _)| *candidate_index != index)
@@ -2356,6 +2773,11 @@ fn validated_plan(
         ConstructionQueueIntent::Deploy(id) => validated_deploy_plan(state, id)
             .map(Box::new)
             .map(ConstructionQueuePlan::Deploy),
+        ConstructionQueueIntent::DirectDeploy(intent) => {
+            validated_direct_deploy_plan(state, intent)
+                .map(Box::new)
+                .map(ConstructionQueuePlan::DirectDeploy)
+        }
     }
 }
 
@@ -2377,6 +2799,9 @@ pub(crate) fn expand_intent(
     let plan = validated_plan(state, command)?;
     let (added_entities, added_belts) = match &plan {
         ConstructionQueuePlan::Deploy(plan) => {
+            (plan.added_entities.clone(), plan.added_belts.clone())
+        }
+        ConstructionQueuePlan::DirectDeploy(plan) => {
             (plan.added_entities.clone(), plan.added_belts.clone())
         }
         _ => (Vec::new(), Vec::new()),
@@ -2450,6 +2875,70 @@ impl CoreState {
         });
         if serde_json::to_vec(&value)?.len() > MAX_PROJECTION_BYTES {
             bail!("native blueprint enqueue context exceeds the byte limit")
+        }
+        Ok(value)
+    }
+
+    /// Bounded, same-revision proof for one ordinary live-blueprint direct
+    /// placement. The result intentionally omits blueprint bodies, material
+    /// amounts, allocator values and generated record IDs.
+    pub fn blueprint_direct_deploy_context_projection(
+        &self,
+        expected_revision: u64,
+        expected_registry_fingerprint: &str,
+        blueprint_id: &str,
+        blueprint_revision: u64,
+        x: f64,
+        y: f64,
+    ) -> anyhow::Result<Value> {
+        if expected_revision != self.revision
+            || expected_revision >= MAX_JAVASCRIPT_SAFE_INTEGER
+            || expected_registry_fingerprint != self.catalog.snapshot.registry_fingerprint
+            || !valid_opaque_text(blueprint_id)
+            || blueprint_revision == 0
+            || blueprint_revision > MAX_JAVASCRIPT_SAFE_INTEGER
+            || !x.is_finite()
+            || !y.is_finite()
+        {
+            bail!("native blueprint direct deploy context request is invalid")
+        }
+        let intent = DirectDeployIntent {
+            blueprint_id: blueprint_id.to_owned(),
+            blueprint_revision,
+            x,
+            y,
+        };
+        let active_planet_id = active_planet_id(self)?.to_owned();
+        let preparation = prepare_direct_deploy(self, &intent)?;
+        let (supported, reason) = match preparation {
+            DirectDeployPreparation::Supported(_) => (true, Value::Null),
+            DirectDeployPreparation::Unsupported(reason) => (false, Value::from(reason)),
+        };
+        let value = json!({
+            "schemaVersion": 1,
+            "projectionType": BLUEPRINT_DIRECT_DEPLOY_CONTEXT_PROJECTION,
+            "source": "native-core",
+            "revision": self.revision,
+            "stateVersion": self.identity.state_version,
+            "registryFingerprint": self.catalog.snapshot.registry_fingerprint,
+            "request": {
+                "expectedRevision": expected_revision,
+                "expectedRegistryFingerprint": expected_registry_fingerprint,
+                "blueprintId": blueprint_id,
+                "blueprintRevision": blueprint_revision,
+                "position": { "x": x, "y": y },
+            },
+            "activePlanetId": active_planet_id,
+            "support": {
+                "supported": supported,
+                "reason": reason,
+            },
+            "limits": {
+                "projectionBytes": MAX_PROJECTION_BYTES,
+            },
+        });
+        if serde_json::to_vec(&value)?.len() > MAX_PROJECTION_BYTES {
+            bail!("native blueprint direct deploy context exceeds the byte limit")
         }
         Ok(value)
     }

@@ -459,6 +459,7 @@ import {
 import {
   NativeBlueprintWorkspaceStore,
   createNativePlayerAuthorityBlueprintWorkspaceSource,
+  nativeBlueprintDirectDeploySelectionBindingMatchesFrame,
   nativeBlueprintEnqueueSelectionBindingMatchesFrame,
   nativeBlueprintRecipeOverrideBindingMatchesFrame,
   nativeConstructionQueueCancelBindingMatchesFrame,
@@ -468,6 +469,7 @@ import {
   selectNativeBlueprintTransformBinding,
   selectNativeBlueprintWorkspaceFrame,
   type NativeBlueprintDeleteBinding,
+  type NativeBlueprintDirectDeploySelectionBinding,
   type NativeBlueprintEnqueueSelectionBinding,
   type NativeBlueprintMirror,
   type NativeBlueprintRecipeOverrideBinding,
@@ -492,6 +494,11 @@ import {
   type NativeBlueprintRenameSubmitOutcome,
 } from "./game/nativeBlueprintRenameWorkflow";
 import { useNativeBlueprintDeleteCommandTransaction } from "./game/useNativeBlueprintDeleteCommandTransaction";
+import {
+  readVerifiedNativeBlueprintDirectDeployContext,
+  type NativeBlueprintDirectDeploySupportReason,
+} from "./game/nativeBlueprintDirectDeployContext";
+import { useNativeBlueprintDirectDeployCommandTransaction } from "./game/useNativeBlueprintDirectDeployCommandTransaction";
 import {
   readVerifiedNativeBlueprintEnqueueContext,
   type NativeBlueprintEnqueueSupportReason,
@@ -1240,6 +1247,20 @@ function nativeBlueprintEnqueueBlockedMessage(reason: NativeBlueprintEnqueueSupp
   }
 }
 
+function nativeBlueprintDirectDeployBlockedMessage(
+  reason: NativeBlueprintDirectDeploySupportReason,
+): string {
+  switch (reason) {
+    case "next-id-exhausted": return "建筑或线路 ID 已达到安全上限；请导出备份并联系存档救援";
+    case "unsupported-blueprint-domain": return "这份蓝图包含特殊建筑、资源锚点、外部端口或尚未证明的模组语义，当前不能直接部署";
+    case "unsupported-active-planet": return "当前行星不支持这份 ordinary 蓝图；本次直接部署未执行";
+    case "insufficient-construction-materials": return "Rust 施工库存不足；可以改用“加入待建施工”后再补充材料";
+    case "position-overlap": return "这个落点与现有建筑重叠；存档未改变，请选择其他空白位置";
+    case "version-conflict": return "蓝图行 revision 或不可变版本发生冲突；存档未改变，请重新选择蓝图";
+    case "catalog-incomplete": return "Rust 内容目录无法完整证明这份蓝图；为保护材料，本次直接部署已拒绝";
+  }
+}
+
 function nativeRemovalBlockedMessage(reason: NativeConstructionRemovalSupportReason): string {
   switch (reason) {
     case "entity-not-found": return "这栋建筑已经不存在；本次回收未执行";
@@ -1933,6 +1954,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     position: Readonly<{ x: number; y: number }>,
     screenPoint: Readonly<{ x: number; y: number }>,
   ) => void>(() => undefined);
+  const [nativeBlueprintDirectDeployPlacement, setNativeBlueprintDirectDeployPlacement] =
+    useState<NativeBlueprintDirectDeploySelectionBinding | null>(null);
+  const nativeBlueprintDirectDeployPlacementRef =
+    useRef<NativeBlueprintDirectDeploySelectionBinding | null>(null);
+  const nativeBlueprintDirectDeployGenerationRef = useRef(0);
+  const [nativeBlueprintDirectDeployContextPending, setNativeBlueprintDirectDeployContextPending] =
+    useState(false);
+  const nativeBlueprintDirectDeployContextPendingRef = useRef(false);
+  const nativeBlueprintDirectDeployCanvasSubmitRef = useRef<(
+    position: Readonly<{ x: number; y: number }>,
+    screenPoint: Readonly<{ x: number; y: number }>,
+  ) => void>(() => undefined);
   const [nativeRemovalContextPending, setNativeRemovalContextPending] = useState(false);
   const nativeRemovalContextPendingRef = useRef(false);
   const nativeRemovalRequestGenerationRef = useRef(0);
@@ -2181,12 +2214,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   runtimeUiNeedsImmediateGameRef.current = game.paused || operationsOpen || mobilePanel !== null ||
     selectedEntityIds.length > 0 || selectedBeltId !== null || selectedBeltIds.length > 0 ||
     placement !== null || nativePlacementBuildingId !== null || nativeBlueprintEnqueuePlacement !== null ||
+    nativeBlueprintDirectDeployPlacement !== null ||
     blueprintPlacementId !== null || connectionDraft !== null;
   // An open dock can consume the existing trailing summary. Only an active
   // entity/belt interaction must observe every large record projection.
   runtimeUiRequiresEveryProjectionRef.current = selectedEntityIds.length > 0 || selectedBeltId !== null ||
     selectedBeltIds.length > 0 || placement !== null || nativePlacementBuildingId !== null ||
-    nativeBlueprintEnqueuePlacement !== null ||
+    nativeBlueprintEnqueuePlacement !== null || nativeBlueprintDirectDeployPlacement !== null ||
     blueprintPlacementId !== null || connectionDraft !== null;
   const pendingRuntimeGamePublicationRef = useRef<GameState | null>(null);
   const pendingRuntimeGamePublicationTimerRef = useRef<number | null>(null);
@@ -2566,6 +2600,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       operationsOpen || mobilePanel !== null ||
       selectedEntityIds.length > 0 || selectedBeltId !== null || selectedBeltIds.length > 0 ||
       placement !== null || nativePlacementBuildingId !== null || nativeBlueprintEnqueuePlacement !== null ||
+      nativeBlueprintDirectDeployPlacement !== null ||
       blueprintPlacementId !== null || connectionDraft !== null
     ),
     !nativePlayerAuthorityOwnsRuntime,
@@ -2999,11 +3034,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativePlayerAuthorityCommandPending,
     nativePlayerAuthorityOwnsRuntime,
   ]);
-  const nativePlacementLabel = useMemo(() => nativeBlueprintEnqueuePlacement
-    ? "蓝图待建施工"
+  const nativePlacementLabel = useMemo(() => nativeBlueprintDirectDeployPlacement
+    ? "蓝图直接部署"
+    : nativeBlueprintEnqueuePlacement
+      ? "蓝图待建施工"
     : nativePlacementBuildingId
       ? getConstructionDefinition(nativePlacementBuildingId)?.name ?? nativePlacementBuildingId
-      : null, [nativeBlueprintEnqueuePlacement, nativePlacementBuildingId]);
+      : null, [nativeBlueprintDirectDeployPlacement, nativeBlueprintEnqueuePlacement, nativePlacementBuildingId]);
   const nativeStellarWorkspaceStoreRef = useRef<NativeStellarWorkspaceStore | null>(null);
   if (nativeStellarWorkspaceStoreRef.current === null) {
     nativeStellarWorkspaceStoreRef.current = new NativeStellarWorkspaceStore();
@@ -4545,13 +4582,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     getEffectiveSimulationMultiplier(game),
     game.settings.simulationSpeed,
   );
-  const activeMobileCanvasMode: MobileCanvasMode = placement || nativePlacementBuildingId || nativeBlueprintEnqueuePlacement
+  const activeMobileCanvasMode: MobileCanvasMode = placement || nativePlacementBuildingId ||
+      nativeBlueprintEnqueuePlacement || nativeBlueprintDirectDeployPlacement
     ? "place"
     : connectionDraft || clickConnectionPreview
       ? "connect"
       : mobileCanvasMode;
   const canvasPointerCargo = nativePlayerAuthorityOwnsRuntime ? null : game.cargo;
-  const pointerOverlayActive = Boolean(placement || nativePlacementBuildingId || nativeBlueprintEnqueuePlacement || blueprintPlacementId || connectionDraft || clickConnectionPreview || canvasPointerCargo || connectionHint);
+  const pointerOverlayActive = Boolean(placement || nativePlacementBuildingId ||
+    nativeBlueprintEnqueuePlacement || nativeBlueprintDirectDeployPlacement || blueprintPlacementId ||
+    connectionDraft || clickConnectionPreview || canvasPointerCargo || connectionHint);
   const closeAllWorkspaces = useCallback(() => {
     authorityWorkspaceSyncIdRef.current += 1;
     setAuthorityWorkspaceSync(null);
@@ -5057,6 +5097,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         setNativeBlueprintEnqueueContextPending(false);
         setNativeBlueprintEnqueuePlacement(null);
       }
+      if (nativeBlueprintDirectDeployPlacement) {
+        nativeBlueprintDirectDeployPlacementRef.current = null;
+        nativeBlueprintDirectDeployGenerationRef.current += 1;
+        nativeBlueprintDirectDeployContextPendingRef.current = false;
+        setNativeBlueprintDirectDeployContextPending(false);
+        setNativeBlueprintDirectDeployPlacement(null);
+      }
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("keyup", onKey);
@@ -5066,7 +5113,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       window.removeEventListener("keyup", onKey);
       window.removeEventListener("blur", onBlur);
     };
-  }, [nativeBlueprintEnqueuePlacement, nativePlacementBuildingId, placement]);
+  }, [nativeBlueprintDirectDeployPlacement, nativeBlueprintEnqueuePlacement, nativePlacementBuildingId, placement]);
   useEffect(() => {
     if (!loaded.recovery || loaded.recovery.source === "primary") return;
     setNotice(loaded.recovery.issues[0] ?? "已从备用存档恢复");
@@ -9213,6 +9260,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setNativeBlueprintEnqueuePlacement(null);
   }, []);
 
+  const cancelNativeBlueprintDirectDeployPlacement = useCallback((): void => {
+    nativeBlueprintDirectDeployPlacementRef.current = null;
+    nativeBlueprintDirectDeployGenerationRef.current += 1;
+    nativeBlueprintDirectDeployContextPendingRef.current = false;
+    setNativeBlueprintDirectDeployContextPending(false);
+    setNativeBlueprintDirectDeployPlacement(null);
+  }, []);
+
   const selectNativeBuildingPlacement = useCallback((buildingId: string | null): void => {
     if (!nativePlayerAuthorityOwnsRuntimeRef.current) return;
     if (buildingId !== null) {
@@ -9227,6 +9282,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       generation: nativePlacementIntentRef.current.generation + 1,
     };
     cancelNativeBlueprintEnqueuePlacement();
+    cancelNativeBlueprintDirectDeployPlacement();
     nativeBeltPlacementRequestGenerationRef.current += 1;
     nativeBeltPlacementTierRef.current = null;
     setNativeBeltPlacementTier(null);
@@ -9263,7 +9319,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setSelectedBeltIds([]);
     setFocusedBeltNetworkId(null);
     if (buildingId) setNotice("请在空白画布选择落点；Rust 会按当前 revision 重新检查后再建造");
-  }, [cancelNativeBlueprintEnqueuePlacement, flowStore, nativeConstructionInventoryFrame, updateConnectionDraft]);
+  }, [cancelNativeBlueprintDirectDeployPlacement, cancelNativeBlueprintEnqueuePlacement, flowStore, nativeConstructionInventoryFrame, updateConnectionDraft]);
 
   const selectNativeBeltPlacement = useCallback((tier: BeltTier | null): void => {
     if (!nativePlayerAuthorityOwnsRuntimeRef.current) return;
@@ -9280,6 +9336,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       generation: nativePlacementIntentRef.current.generation + 1,
     };
     cancelNativeBlueprintEnqueuePlacement();
+    cancelNativeBlueprintDirectDeployPlacement();
     setNativePlacementBuildingId(null);
     nativePlacementContextPendingRef.current = false;
     setNativePlacementContextPending(false);
@@ -9316,7 +9373,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     } else {
       setConnectionHint(null);
     }
-  }, [cancelNativeBlueprintEnqueuePlacement, flowStore, nativeConstructionInventoryFrame, updateConnectionDraft]);
+  }, [cancelNativeBlueprintDirectDeployPlacement, cancelNativeBlueprintEnqueuePlacement, flowStore, nativeConstructionInventoryFrame, updateConnectionDraft]);
 
   const placeNativeOrdinaryBuildingAt = useCallback(async (
     buildingId: string,
@@ -9398,6 +9455,15 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativePlayerAuthorityOwnsRuntime,
   ]);
   useEffect(() => {
+    cancelNativeBlueprintDirectDeployPlacement();
+  }, [
+    cancelNativeBlueprintDirectDeployPlacement,
+    nativeFactoryProjectionPlanetId,
+    nativePlayerAuthorityActiveFrame?.runId,
+    nativePlayerAuthorityActiveFrame?.sessionId,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
     if (!nativePlayerAuthorityOwnsRuntime) return;
     setBlueprintPlacementId(null);
     setBlueprintAllowOverlap(false);
@@ -9405,6 +9471,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativePlayerAuthorityActiveFrame?.runId,
     nativePlayerAuthorityActiveFrame?.sessionId,
     nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    if (nativeBlueprintDirectDeployPlacement &&
+        (nativePlacementBuildingId || nativeBlueprintEnqueuePlacement || blueprintPlacementId ||
+          selectionMode || deleteMode || regionMode || connectionDraft)) {
+      cancelNativeBlueprintDirectDeployPlacement();
+    }
+  }, [
+    blueprintPlacementId,
+    cancelNativeBlueprintDirectDeployPlacement,
+    connectionDraft,
+    deleteMode,
+    nativeBlueprintDirectDeployPlacement,
+    nativeBlueprintEnqueuePlacement,
+    nativePlacementBuildingId,
+    regionMode,
+    selectionMode,
   ]);
   useEffect(() => {
     nativeRemovalRequestGenerationRef.current += 1;
@@ -11804,6 +11887,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         setPlacement(null);
         cancelNativeBuildingPlacement();
         cancelNativeBlueprintEnqueuePlacement();
+        cancelNativeBlueprintDirectDeployPlacement();
         setTechnologyOpen(false);
         setStatisticsOpen(false);
         setRecipesOpen(false);
@@ -11864,7 +11948,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [cancelNativeBlueprintEnqueuePlacement, cancelNativeBuildingPlacement, closeCommandPalette, commandPaletteOpen, commitGame, flowStore, mobileNavigation.overlay, mobileNavigation.requestBack, mobileNavigation.route.kind, nextMobileShell, openCommandPalette, playTone, redoGame, rejectLegacyFactoryInteractionWhileNative, togglePause, undoGame]);
+  }, [cancelNativeBlueprintDirectDeployPlacement, cancelNativeBlueprintEnqueuePlacement, cancelNativeBuildingPlacement, closeCommandPalette, commandPaletteOpen, commitGame, flowStore, mobileNavigation.overlay, mobileNavigation.requestBack, mobileNavigation.route.kind, nextMobileShell, openCommandPalette, playTone, redoGame, rejectLegacyFactoryInteractionWhileNative, togglePause, undoGame]);
 
   const onMiningStop = useCallback(() => {
     if (miningTimerRef.current != null) window.clearInterval(miningTimerRef.current);
@@ -14249,7 +14333,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [getViewport, setViewport]);
 
   const beginPlacementPointerMotion = useCallback((event: React.PointerEvent<HTMLElement>) => {
-    if ((!placement && !nativePlacementBuildingId && !nativeBlueprintEnqueuePlacement && !blueprintPlacementId) ||
+    if ((!placement && !nativePlacementBuildingId && !nativeBlueprintEnqueuePlacement &&
+        !nativeBlueprintDirectDeployPlacement && !blueprintPlacementId) ||
         event.button !== 0 || !event.isPrimary) return;
     canvasPointerMotionRef.current = beginCanvasPointerMotion(
       canvasPointerMotionRef.current,
@@ -14257,7 +14342,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       event.clientX,
       event.clientY,
     );
-  }, [blueprintPlacementId, nativeBlueprintEnqueuePlacement, nativePlacementBuildingId, placement]);
+  }, [blueprintPlacementId, nativeBlueprintDirectDeployPlacement, nativeBlueprintEnqueuePlacement, nativePlacementBuildingId, placement]);
 
   const movePlacementPointerMotion = useCallback((event: React.PointerEvent<HTMLElement>) => {
     const previousMotion = canvasPointerMotionRef.current;
@@ -14301,7 +14386,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
 
   useEffect(() => {
     stopCanvasPointerMotion();
-  }, [blueprintPlacementId, nativeBlueprintEnqueuePlacement, nativePlacementBuildingId, placement, stopCanvasPointerMotion]);
+  }, [blueprintPlacementId, nativeBlueprintDirectDeployPlacement, nativeBlueprintEnqueuePlacement, nativePlacementBuildingId, placement, stopCanvasPointerMotion]);
 
   useEffect(() => {
     const stopWhenHidden = () => {
@@ -14759,6 +14844,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const stableOnStackActivate = useStableEventCallback(activateCanvasStack);
   const nativeOrdinaryBeltConnectionEnabled = nativePlayerAuthorityOwnsRuntime &&
     nativeBeltPlacementTier !== null && !nativePlacementBuildingId && !nativeBlueprintEnqueuePlacement &&
+    !nativeBlueprintDirectDeployPlacement &&
     !nativeFactoryRouteUnsafe && !nativeFactoryProjectionPending &&
     !nativeBeltPlacementContextPending && !nativePlayerAuthorityCommandPending &&
     Boolean(nativeFactoryInventoryIdentity) &&
@@ -16611,9 +16697,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
 
   const onNodeClick: NodeMouseHandler<FactoryFlowNode> = useCallback((event, node) => {
     if (blueprintPlacementId) return;
-    if (nativePlayerAuthorityOwnsRuntimeRef.current && (nativePlacementBuildingId || nativeBlueprintEnqueuePlacementRef.current)) {
-      setNotice(nativeBlueprintEnqueuePlacementRef.current
-        ? "待建蓝图只能放在画布空白处；Rust 会重新检查建筑与施工队列占位"
+    if (nativePlayerAuthorityOwnsRuntimeRef.current && (nativePlacementBuildingId ||
+        nativeBlueprintEnqueuePlacementRef.current || nativeBlueprintDirectDeployPlacementRef.current)) {
+      setNotice(nativeBlueprintDirectDeployPlacementRef.current
+        ? "直接部署蓝图只能放在画布空白处；Rust 会重新检查现有建筑与线路重叠"
+        : nativeBlueprintEnqueuePlacementRef.current
+          ? "待建蓝图只能放在画布空白处；Rust 会重新检查建筑与施工队列占位"
         : "普通建筑只能放在画布空白处；Rust 不会用落点覆盖现有建筑");
       return;
     }
@@ -16681,7 +16770,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [activeEntityById, blueprintPlacementId, completeClickConnectionAtPoint, expandEntityGroup, mobileCanvasMode, mobileContinuousPlacement, mobileNavigation.openSheet, nativePlacementBuildingId, nextMobileShell, openCommandWorkspace, placement, placementCount, rejectLegacyFactoryInteractionWhileNative, selectionMode]);
 
   const onNodeDoubleClick: NodeMouseHandler<FactoryFlowNode> = useCallback((_event, node) => {
-    if (placement || nativePlacementBuildingId || nativeBlueprintEnqueuePlacementRef.current || blueprintPlacementId || !gameRef.current.settings.allowDoubleClickZoom) return;
+    if (placement || nativePlacementBuildingId || nativeBlueprintEnqueuePlacementRef.current ||
+        nativeBlueprintDirectDeployPlacementRef.current || blueprintPlacementId ||
+        !gameRef.current.settings.allowDoubleClickZoom) return;
     setSelectedEntityIds([node.id]);
     setSelectedBeltId(null);
     setSelectedBeltIds([]);
@@ -16897,6 +16988,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, []);
 
   const onPaneClick = useCallback((event: React.MouseEvent) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current && nativeBlueprintDirectDeployPlacementRef.current) {
+      const position = snapFlowPosition(screenToFlowPosition({ x: event.clientX, y: event.clientY }));
+      nativeBlueprintDirectDeployCanvasSubmitRef.current(
+        position,
+        { x: event.clientX, y: event.clientY },
+      );
+      return;
+    }
     if (nativePlayerAuthorityOwnsRuntimeRef.current && nativeBlueprintEnqueuePlacementRef.current) {
       const position = snapFlowPosition(screenToFlowPosition({ x: event.clientX, y: event.clientY }));
       nativeBlueprintEnqueueCanvasSubmitRef.current(
@@ -17296,6 +17395,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         revision: nativePlayerAuthorityActiveFrame.revision,
       })
     : null, [nativePlayerAuthorityActiveFrame]);
+  const nativeBlueprintDirectDeployTopologyObservation = useMemo(() => {
+    const canvas = nativeAuthoritativeFactoryCanvasFrame;
+    const identity = nativeFactoryInventoryIdentity;
+    if (!canvas || !identity || canvas.source !== "native-authoritative" ||
+        canvas.sessionId !== identity.sessionId || canvas.runId !== identity.runId ||
+        canvas.revision !== identity.revision) return null;
+    return Object.freeze({
+      source: "native-authoritative" as const,
+      sessionId: canvas.sessionId,
+      runId: canvas.runId,
+      revision: canvas.revision,
+      registryFingerprint: identity.registryFingerprint,
+      activePlanetId: canvas.planetId,
+    });
+  }, [nativeAuthoritativeFactoryCanvasFrame, nativeFactoryInventoryIdentity]);
   const {
     pending: nativeEntityRecipePending,
     commit: commitNativeEntityRecipeCommand,
@@ -17472,6 +17586,138 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     return commitNativeConstructionQueueDeployCommand(binding);
   }, [commitNativeConstructionQueueDeployCommand, nativeBlueprintWorkspaceFrame]);
   const {
+    pending: nativeBlueprintDirectDeployPending,
+    commit: commitNativeBlueprintDirectDeployCommand,
+  } = useNativeBlueprintDirectDeployCommandTransaction({
+    authority: nativeEntityRecipeAuthorityObservation,
+    topology: nativeBlueprintDirectDeployTopologyObservation,
+    authorityOwnedRef: nativePlayerAuthorityOwnsRuntimeRef,
+    commandInFlightRef: nativePlayerAuthorityCommandInFlightRef,
+    commandSourceRef: nativePlayerAuthorityCommandBindingRef,
+    setCommandPending: setNativePlayerAuthorityCommandPending,
+    rejectPlayerStateEdit: rejectPlayerStateEditDuringPrimarySave,
+    refreshAuthority: () => nativePlayerAuthorityClockRef.current?.refresh(),
+    setNotice,
+  });
+  const beginNativeBlueprintDirectDeployPlacement = useCallback((
+    binding: NativeBlueprintDirectDeploySelectionBinding,
+  ): boolean => {
+    if (!blueprintsOpenRef.current || nativeBlueprintRenamePendingIdentityRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current ||
+        !nativeBlueprintDirectDeploySelectionBindingMatchesFrame(
+          binding,
+          nativeBlueprintWorkspaceFrame,
+        )) {
+      setNotice("蓝图工作区、ordinary 选中行或权威 lineage 已漂移；直接部署定位未开始");
+      return false;
+    }
+    cancelNativeBlueprintEnqueuePlacement();
+    nativeBlueprintDirectDeployGenerationRef.current += 1;
+    nativeBlueprintDirectDeployPlacementRef.current = binding;
+    setNativeBlueprintDirectDeployPlacement(binding);
+    nativeBlueprintDirectDeployContextPendingRef.current = false;
+    setNativeBlueprintDirectDeployContextPending(false);
+    cancelNativeBuildingPlacement();
+    nativeBeltPlacementRequestGenerationRef.current += 1;
+    nativeBeltPlacementTierRef.current = null;
+    setNativeBeltPlacementTier(null);
+    nativeBeltPlacementContextPendingRef.current = false;
+    setNativeBeltPlacementContextPending(false);
+    setPlacement(null);
+    setBlueprintPlacementId(null);
+    flowStore.getState().cancelConnection();
+    flowStore.setState({ connectionClickStartHandle: null });
+    clickConnectionPreviewRef.current = null;
+    clickConnectionSucceededRef.current = false;
+    connectionDraftRef.current = null;
+    batchConnectionModeRef.current = false;
+    batchConnectionsRef.current = [];
+    setClickConnectionPreview(null);
+    setClickConnectionTone("pending");
+    setClickConnectionSnapPoint(null);
+    updateConnectionDraft(null);
+    setConnectionHint(null);
+    setBatchConnectionMode(false);
+    setBatchConnections([]);
+    setSelectionMode(false);
+    setDeleteMode(false);
+    setRegionMode(false);
+    setRegionDraft(null);
+    selectedEntityIdsRef.current = [];
+    selectedBeltIdRef.current = null;
+    selectedBeltIdsRef.current = [];
+    setSelectedEntityIds([]);
+    setSelectedBeltId(null);
+    setSelectedBeltIds([]);
+    setFocusedBeltNetworkId(null);
+    setBlueprintsOpen(false);
+    setNotice(`请在空白画布选择${binding.blueprintName}的直接部署位置；Rust 会在落点时核对材料、重叠和最新 revision`);
+    return true;
+  }, [
+    cancelNativeBlueprintEnqueuePlacement,
+    cancelNativeBuildingPlacement,
+    flowStore,
+    nativeBlueprintWorkspaceFrame,
+    updateConnectionDraft,
+  ]);
+  const submitNativeBlueprintDirectDeployAt = useCallback(async (
+    position: Readonly<{ x: number; y: number }>,
+    screenPoint: Readonly<{ x: number; y: number }>,
+  ): Promise<void> => {
+    const selection = nativeBlueprintDirectDeployPlacementRef.current;
+    const identity = nativeFactoryInventoryIdentity;
+    if (!selection || !identity || nativeBlueprintDirectDeployContextPendingRef.current ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次蓝图直接部署落点未提交");
+      return;
+    }
+    const generation = nativeBlueprintDirectDeployGenerationRef.current;
+    nativeBlueprintDirectDeployContextPendingRef.current = true;
+    setNativeBlueprintDirectDeployContextPending(true);
+    const context = await readVerifiedNativeBlueprintDirectDeployContext(
+      desktopBridge,
+      identity,
+      selection,
+      position,
+    );
+    if (nativeBlueprintDirectDeployGenerationRef.current !== generation ||
+        nativeBlueprintDirectDeployPlacementRef.current !== selection) return;
+    nativeBlueprintDirectDeployContextPendingRef.current = false;
+    setNativeBlueprintDirectDeployContextPending(false);
+    if (!context) {
+      setNotice("没有取得同一 revision/registry/落点的 Rust 蓝图直接部署凭证；存档未改变，请重新落点");
+      return;
+    }
+    if (!context.support.supported) {
+      cancelNativeBlueprintDirectDeployPlacement();
+      setNotice(nativeBlueprintDirectDeployBlockedMessage(
+        context.support.reason ?? "unsupported-blueprint-domain",
+      ));
+      return;
+    }
+    if (context.activePlanetId !== nativeFactoryProjectionPlanetId) {
+      cancelNativeBlueprintDirectDeployPlacement();
+      setNotice("蓝图直接部署凭证所属行星已变化；存档未改变，请等待画布刷新");
+      return;
+    }
+    const accepted = commitNativeBlueprintDirectDeployCommand(context);
+    if (!accepted) return;
+    cancelNativeBlueprintDirectDeployPlacement();
+    playTone("place");
+    spawnInteractionBurst(screenPoint.x, screenPoint.y, "已提交直接部署", "positive");
+  }, [
+    cancelNativeBlueprintDirectDeployPlacement,
+    commitNativeBlueprintDirectDeployCommand,
+    desktopBridge,
+    nativeFactoryInventoryIdentity,
+    nativeFactoryProjectionPlanetId,
+    playTone,
+    spawnInteractionBurst,
+  ]);
+  nativeBlueprintDirectDeployCanvasSubmitRef.current = (position, screenPoint) => {
+    void submitNativeBlueprintDirectDeployAt(position, screenPoint);
+  };
+  const {
     pending: nativeBlueprintEnqueuePending,
     commit: commitNativeBlueprintEnqueueCommand,
   } = useNativeBlueprintEnqueueCommandTransaction({
@@ -17494,6 +17740,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       setNotice("蓝图工作区、选中行或权威 lineage 已漂移；待建定位未开始");
       return false;
     }
+    cancelNativeBlueprintDirectDeployPlacement();
     nativeBlueprintEnqueueGenerationRef.current += 1;
     nativeBlueprintEnqueuePlacementRef.current = binding;
     setNativeBlueprintEnqueuePlacement(binding);
@@ -17537,6 +17784,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     return true;
   }, [
     cancelNativeBuildingPlacement,
+    cancelNativeBlueprintDirectDeployPlacement,
     flowStore,
     nativeBlueprintWorkspaceFrame,
     updateConnectionDraft,
@@ -19155,7 +19403,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   ] as const;
   const canvasFlowStaticPresentation = canvasFlowStaticPresentationCandidate;
   const canvasFlowFullyDeferred = canvasFlowStaticPresentation && canvasVisibleNodeCount === 0 &&
-    reactFlowBelts.length === 0 && !placement && !nativePlacementBuildingId && !nativeBlueprintEnqueuePlacement && !blueprintPlacementId && !selectionMode && !deleteMode &&
+    reactFlowBelts.length === 0 && !placement && !nativePlacementBuildingId &&
+    !nativeBlueprintEnqueuePlacement && !nativeBlueprintDirectDeployPlacement &&
+    !blueprintPlacementId && !selectionMode && !deleteMode &&
     !regionMode && !lineFindMode;
   const flowElementVirtualizationActive = (denseViewportCullingActive || shouldVirtualizeCanvas(activePlanetEntityCount, activePlanetBelts.length)) &&
     !(connectionDraft && connectExpandAll);
@@ -19213,7 +19463,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   return (
     <ItemReferenceActionsProvider actions={itemReferenceActions} enabled={showItemHover}>
     <main
-      className={`game-shell${placement || nativePlacementBuildingId || nativeBlueprintEnqueuePlacement || blueprintPlacementId ? " game-shell--placing" : ""}${selectionMode ? " game-shell--selecting" : ""}${deleteMode ? " game-shell--deleting" : ""}${regionMode ? " game-shell--regioning" : ""}${mobilePanel ? ` mobile-panel--${mobilePanel} mobile-panel-stage--${mobilePanelStage}` : ""}${leftSidebarCollapsed ? " sidebar-left-collapsed" : ""}${rightSidebarCollapsed ? " sidebar-right-collapsed" : ""}${pureIdleActive ? " game-shell--pure-idle" : ""}`}
+      className={`game-shell${placement || nativePlacementBuildingId || nativeBlueprintEnqueuePlacement || nativeBlueprintDirectDeployPlacement || blueprintPlacementId ? " game-shell--placing" : ""}${selectionMode ? " game-shell--selecting" : ""}${deleteMode ? " game-shell--deleting" : ""}${regionMode ? " game-shell--regioning" : ""}${mobilePanel ? ` mobile-panel--${mobilePanel} mobile-panel-stage--${mobilePanelStage}` : ""}${leftSidebarCollapsed ? " sidebar-left-collapsed" : ""}${rightSidebarCollapsed ? " sidebar-right-collapsed" : ""}${pureIdleActive ? " game-shell--pure-idle" : ""}`}
       onContextMenuCapture={(event) => {
         const target = event.target as HTMLElement | null;
         if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
@@ -19725,7 +19975,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               // A pressed primary pointer is panning the viewport. Re-running
               // Canvas belt hit-testing for every drag sample cannot produce a
               // useful hover target and competes directly with the pan frame.
-              if (canvasBatchRendererEnabled && event.pointerType !== "touch" && event.buttons === 0 && !placement && !nativePlacementBuildingId && !nativeBlueprintEnqueuePlacement && !blueprintPlacementId && !connectionDraft) {
+              if (canvasBatchRendererEnabled && event.pointerType !== "touch" && event.buttons === 0 &&
+                  !placement && !nativePlacementBuildingId && !nativeBlueprintEnqueuePlacement &&
+                  !nativeBlueprintDirectDeployPlacement && !blueprintPlacementId && !connectionDraft) {
                 const target = event.target instanceof Element ? event.target : null;
                 if (!target?.closest(".react-flow__node, .react-flow__edge, .react-flow__controls, .react-flow__minimap, .canvas-selection-tools, .planet-navigator")) {
                   const flowPoint = screenToFlowPosition({ x: event.clientX, y: event.clientY });
@@ -19774,7 +20026,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               event.stopPropagation();
               return;
             }
-            if (!placement && !nativePlacementBuildingId && !nativeBlueprintEnqueuePlacement && !blueprintPlacementId) return;
+            if (!placement && !nativePlacementBuildingId && !nativeBlueprintEnqueuePlacement &&
+                !nativeBlueprintDirectDeployPlacement && !blueprintPlacementId) return;
             const target = event.target instanceof Element ? event.target : null;
             if (!target?.closest(".react-flow") || target.closest(".react-flow__node, .react-flow__controls, .react-flow__minimap, .canvas-selection-tools, .canvas-placement-options, .planet-navigator")) return;
             event.preventDefault();
@@ -19783,7 +20036,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           }}
           onDoubleClick={(event) => {
             if (nativeFactoryProjectionPending) return;
-            if (game.settings.allowDoubleClickZoom && !regionMode && event.target instanceof Element && event.target.classList.contains("react-flow__pane") && !placement && !nativePlacementBuildingId && !nativeBlueprintEnqueuePlacement && !blueprintPlacementId) {
+            if (game.settings.allowDoubleClickZoom && !regionMode && event.target instanceof Element &&
+                event.target.classList.contains("react-flow__pane") && !placement &&
+                !nativePlacementBuildingId && !nativeBlueprintEnqueuePlacement &&
+                !nativeBlueprintDirectDeployPlacement && !blueprintPlacementId) {
               void fitView({ padding: 0.18, minZoom: canvasMinimumZoom, duration: game.settings.reducedMotion ? 0 : 260 });
             }
           }}
@@ -19828,9 +20084,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onNodeDrag={onNodeDrag}
             onNodeDragStop={handleFactoryNodeDragStop}
             onEdgeClick={(_event, edge) => {
-              if (nativePlayerAuthorityOwnsRuntimeRef.current && (nativePlacementBuildingId || nativeBlueprintEnqueuePlacementRef.current)) {
-                setNotice(nativeBlueprintEnqueuePlacementRef.current
-                  ? "待建蓝图只能放在画布空白处；Rust 不会把落点附着到运输线上"
+              if (nativePlayerAuthorityOwnsRuntimeRef.current && (nativePlacementBuildingId ||
+                  nativeBlueprintEnqueuePlacementRef.current || nativeBlueprintDirectDeployPlacementRef.current)) {
+                setNotice(nativeBlueprintDirectDeployPlacementRef.current
+                  ? "直接部署蓝图只能放在画布空白处；Rust 不会把落点附着到运输线上"
+                  : nativeBlueprintEnqueuePlacementRef.current
+                    ? "待建蓝图只能放在画布空白处；Rust 不会把落点附着到运输线上"
                   : "普通建筑只能放在画布空白处；Rust 不会把落点附着到运输线上");
                 return;
               }
@@ -19849,7 +20108,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onEdgeMouseEnter={(_event, edge) => setHoveredBeltId(edge.id)}
             onEdgeMouseLeave={(_event, edge) => setHoveredBeltId((current) => current === edge.id ? null : current)}
             onEdgeDoubleClick={(_event, edge) => {
-              if (nativePlayerAuthorityOwnsRuntimeRef.current && (nativePlacementBuildingId || nativeBlueprintEnqueuePlacementRef.current)) return;
+              if (nativePlayerAuthorityOwnsRuntimeRef.current && (nativePlacementBuildingId ||
+                  nativeBlueprintEnqueuePlacementRef.current || nativeBlueprintDirectDeployPlacementRef.current)) return;
               setFocusedBeltNetworkId((current) => current === edge.id ? null : edge.id);
               setHighlightedTaskId(null);
               const snapshot = analyzeBeltNetwork(gameRef.current, edge.id);
@@ -20520,7 +20780,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           nativeBlueprintDeletePending !== null ||
           nativeConstructionQueueCancelPending !== null || nativeConstructionQueueFundPending !== null ||
           nativeConstructionQueueDeployPending !== null ||
-          nativeBlueprintEnqueuePending !== null)}
+          nativeBlueprintEnqueuePending !== null || nativeBlueprintDirectDeployPending !== null)}
         status={nativeBlueprintWorkspaceSnapshot.status}
         frame={nativeBlueprintWorkspaceFrame}
         latestIdentity={nativeFactoryInventoryIdentity}
@@ -20531,7 +20791,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               nativeBlueprintRecipeOverridePending || nativeBlueprintDeletePending ||
               nativeConstructionQueueCancelPending || nativeConstructionQueueFundPending ||
               nativeConstructionQueueDeployPending ||
-              nativeBlueprintEnqueuePending ||
+              nativeBlueprintEnqueuePending || nativeBlueprintDirectDeployPending ||
               nativePlayerAuthorityCommandPending) return;
           setNativeBlueprintSelectedId(null);
           setNativeBlueprintLibraryCursor(cursor);
@@ -20541,7 +20801,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               nativeBlueprintRecipeOverridePending || nativeBlueprintDeletePending ||
               nativeConstructionQueueCancelPending || nativeConstructionQueueFundPending ||
               nativeConstructionQueueDeployPending ||
-              nativeBlueprintEnqueuePending ||
+              nativeBlueprintEnqueuePending || nativeBlueprintDirectDeployPending ||
               nativePlayerAuthorityCommandPending) return;
           setNativeBlueprintQueueCursor(cursor);
         }}
@@ -20553,6 +20813,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         onSubmitQueueFundIntent={submitNativeConstructionQueueFundIntent}
         onSubmitQueueDeployIntent={submitNativeConstructionQueueDeployIntent}
         onBeginQueuePlacement={beginNativeBlueprintEnqueuePlacement}
+        onBeginDirectPlacement={beginNativeBlueprintDirectDeployPlacement}
         pendingIdentity={nativeBlueprintRenamePendingIdentity}
         transformPending={nativeBlueprintTransformPending}
         recipeOverridePending={nativeBlueprintRecipeOverridePending}
@@ -20561,9 +20822,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         queueFundPending={nativeConstructionQueueFundPending}
         queueDeployPending={nativeConstructionQueueDeployPending}
         enqueuePending={nativeBlueprintEnqueuePending}
+        directDeployPending={nativeBlueprintDirectDeployPending}
         resolution={nativeBlueprintRenameResolution}
         onConsumeRenameResolution={consumeNativeBlueprintRenameResolution}
-        commandPending={nativePlayerAuthorityCommandPending || nativeBlueprintEnqueueContextPending}
+        commandPending={nativePlayerAuthorityCommandPending || nativeBlueprintEnqueueContextPending ||
+          nativeBlueprintDirectDeployContextPending}
       />
       {!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&
         !nativeBlueprintTransformPending &&
@@ -20573,6 +20836,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         !nativeConstructionQueueFundPending &&
         !nativeConstructionQueueDeployPending &&
         !nativeBlueprintEnqueuePending &&
+        !nativeBlueprintDirectDeployPending &&
         !nativeBlueprintRenameResolution ? <BlueprintWorkspace
         open={blueprintsOpen}
         game={game}

@@ -1,5 +1,13 @@
 # 玩法与系统基线
 
+> **Windows Rust ordinary 蓝图直接部署（2026-08-31，开发候选，未发布）**：玩家在原生蓝图工作区选择已证明的 ordinary 蓝图并点击“直接部署”后，先进入画布定位；落点时才读取绑定当前 revision、registry fingerprint、蓝图 ID/行 revision、有限坐标和活动陆地行星的 `blueprint-direct-deploy-context-v1`。renderer 最终只提交 `{kind:"direct-deploy",blueprintId,blueprintRevision,position:{x,y},revision}`；行星、蓝图正文、施工需求、余额、实体/线路正文、生成 ID 和 allocator 都不能由界面填写。
+>
+> 直接部署是一条独立的全额事务，不是 queue-only 的快捷入口。Rust 从当前 live blueprint 与内置 catalog 重新计算建筑堆叠、喷涂模块和 belt tier/lanes 的全部施工需求；只有权威 `construction` 能一次付清时才原子扣料并建造。缺料、MOD/命名空间内容、非陆地活动行星、resource anchor、external port、特殊建筑、锁定科技、目录漂移、ID 耗尽或任何损坏状态都会保持原状态，绝不会部分扣料、部分建造或隐式创建 `pending-materials` 订单。既有施工队列与 immutable versions 不因直接部署而改变。
+>
+> Rust 在提交时重新验证候选内部、活动行星现有实体和既有施工订单的精确重叠，并从当前 `nextId` 按“全部实体在前、全部线路在后”的顺序确定性分配 ID。成功实体与线路保留合法的 recipe override、spray、Dyson orbit、storage/fuel/power grid/priority/generation priority，以及 belt tier/lanes/priority/stack/monitor/route；整个事务只增加一次 authority revision。失败会丢弃候选，不修改库存、队列、拓扑、revision 或规范哈希。
+>
+> 每次定位最多发送一次 mutation；未知结果只执行六次有界、只读 durable receipt 对账，绝不重发或回退到排队。`R+1` 回执必须为空 entity/belt dirty IDs 且 `topologyDirty=true`，之后还要等待同 lineage/registry、不早于 ACK 的原生权威拓扑。live、cold WAL 和五个 Host durable fault boundary 都使用同一最小 marker。专项结果为 Core `809/809`、Host `193/193`、focused Vitest `100/100`、Node `37/37`、renderer boundary `41/41`、重建 Host 后真实 integration `5/5`；此前 `98/99` 的缺字段夹具和旧 Host 导致的 `4/5` 失败仍作为诊断史保留。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 不变；未签名、未部署、未发布。
+
 > **Windows Rust ordinary 待建施工部署（2026-08-31，开发候选，未发布）**：原生施工队列只对 Rust 投影为 `actionable=true` 的内置 ordinary `pending-materials` 行显示“开始建造”。renderer 只提交 `{kind:"deploy",id,revision}`，不提交蓝图正文、库存、实体、线路、ID 或 `nextId`；Rust 从不可变版本或合法 live definition、持久 `row.planetId` 和当前 catalog 重新验证完整目录、精确施工预留、零 fleet 预留、科技、配方、喷涂、电力、燃料、仓储和线路语义。玩家此时切换活动行星不会改变订单的目标行星。
 >
 > 提交时 Rust 以 `O(实体 + 队列 + 蓝图)` 重新检查目标位置与现有实体及其他订单的精确重叠，并从当前 `nextId` 按“全部实体在前、全部线路在后”确定性分配 ID。成功候选生成规范实体与线路，删除目标订单并随行消费 reservation，只清理由其他订单不再引用的 immutable version，更新 `nextId` 且 authority revision 只增加一次。任何晚期校验、插入、持久化或恢复失败都会丢弃克隆候选，不会半部署、退款、修改源哈希或留下半条线路。

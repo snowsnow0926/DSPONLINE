@@ -12,6 +12,7 @@ import type {
 } from "../desktop";
 import type {
   NativeBlueprintDeleteBinding,
+  NativeBlueprintDirectDeploySelectionBinding,
   NativeBlueprintEnqueueSelectionBinding,
   NativeBlueprintMirror,
   NativeBlueprintRecipeOverrideBinding,
@@ -32,6 +33,7 @@ import type { NativeConstructionQueueCancelPendingCommand } from "../game/native
 import type { NativeConstructionQueueFundPendingCommand } from "../game/nativeConstructionQueueFundCommandReconciliation";
 import type { NativeConstructionQueueDeployPendingCommand } from "../game/nativeConstructionQueueDeployCommandReconciliation";
 import type { NativeBlueprintEnqueuePendingCommand } from "../game/nativeBlueprintEnqueueCommandReconciliation";
+import type { NativeBlueprintDirectDeployPendingCommand } from "../game/nativeBlueprintDirectDeployCommandReconciliation";
 import type {
   NativeBlueprintRenamePendingIdentity,
   NativeBlueprintRenameResolution,
@@ -200,6 +202,7 @@ describe("NativeBlueprintWorkspace", () => {
       ) => boolean;
       onSubmitQueueDeployIntent?: (binding: NativeConstructionQueueDeployBinding) => boolean;
       onBeginQueuePlacement?: (binding: NativeBlueprintEnqueueSelectionBinding) => boolean;
+      onBeginDirectPlacement?: (binding: NativeBlueprintDirectDeploySelectionBinding) => boolean;
       pendingIdentity?: NativeBlueprintRenamePendingIdentity | null;
       transformPending?: NativeBlueprintTransformPendingCommand | null;
       recipeOverridePending?: NativeBlueprintRecipeOverridePendingCommand | null;
@@ -208,6 +211,7 @@ describe("NativeBlueprintWorkspace", () => {
       queueFundPending?: NativeConstructionQueueFundPendingCommand | null;
       queueDeployPending?: NativeConstructionQueueDeployPendingCommand | null;
       enqueuePending?: NativeBlueprintEnqueuePendingCommand | null;
+      directDeployPending?: NativeBlueprintDirectDeployPendingCommand | null;
       latestIdentity?: NativeBlueprintWorkspaceIdentity | null;
       resolution?: NativeBlueprintRenameResolution | null;
       onConsumeRenameResolution?: (submissionId: number) => void;
@@ -242,6 +246,8 @@ describe("NativeBlueprintWorkspace", () => {
       vi.fn<(binding: NativeConstructionQueueDeployBinding) => boolean>().mockReturnValue(true);
     const onBeginQueuePlacement = callbacks.onBeginQueuePlacement ??
       vi.fn<(binding: NativeBlueprintEnqueueSelectionBinding) => boolean>().mockReturnValue(true);
+    const onBeginDirectPlacement = callbacks.onBeginDirectPlacement ??
+      vi.fn<(binding: NativeBlueprintDirectDeploySelectionBinding) => boolean>().mockReturnValue(true);
     const onConsumeRenameResolution = callbacks.onConsumeRenameResolution ?? vi.fn<(submissionId: number) => void>();
     const latestIdentity = callbacks.latestIdentity === undefined && value
       ? {
@@ -268,6 +274,7 @@ describe("NativeBlueprintWorkspace", () => {
       onSubmitQueueFundIntent={onSubmitQueueFundIntent}
       onSubmitQueueDeployIntent={onSubmitQueueDeployIntent}
       onBeginQueuePlacement={onBeginQueuePlacement}
+      onBeginDirectPlacement={onBeginDirectPlacement}
       pendingIdentity={callbacks.pendingIdentity ?? null}
       transformPending={callbacks.transformPending ?? null}
       recipeOverridePending={callbacks.recipeOverridePending ?? null}
@@ -276,6 +283,7 @@ describe("NativeBlueprintWorkspace", () => {
       queueFundPending={callbacks.queueFundPending ?? null}
       queueDeployPending={callbacks.queueDeployPending ?? null}
       enqueuePending={callbacks.enqueuePending ?? null}
+      directDeployPending={callbacks.directDeployPending ?? null}
       resolution={callbacks.resolution ?? null}
       onConsumeRenameResolution={onConsumeRenameResolution}
       commandPending={callbacks.commandPending ?? false}
@@ -291,6 +299,7 @@ describe("NativeBlueprintWorkspace", () => {
       onSubmitQueueCancelIntent,
       onSubmitQueueDeployIntent,
       onBeginQueuePlacement,
+      onBeginDirectPlacement,
       onConsumeRenameResolution,
     };
   }
@@ -370,6 +379,69 @@ describe("NativeBlueprintWorkspace", () => {
     expect(host.querySelector("[data-native-blueprint-belt-key='belt-z']")).not.toBeNull();
     expect(host.querySelector("[data-native-blueprint-anchor-key='anchor-z']")).not.toBeNull();
     expect(host.querySelector("[data-native-blueprint-port-key='port-z']")).not.toBeNull();
+  });
+
+  it("starts direct placement only for the exact selected ordinary row and locks every action while pending", () => {
+    const ordinarySummary = summaries[1];
+    const ordinaryDetail: DesktopNativeCoreBlueprintDetail = {
+      summary: ordinarySummary,
+      status: "supported",
+      unsupportedReason: null,
+      entities: [{
+        key: "assembler-a",
+        buildingId: "assembler",
+        buildingLabel: "制造台",
+        offset: { x: 0, y: 0 },
+        machineCount: 1,
+        recipeId: null,
+        operationEnabledOnDeploy: null,
+      }],
+      belts: [],
+      resourceAnchors: [],
+      externalPorts: [],
+      recipeOverrideGroups: [],
+    };
+    const ordinaryFrame = {
+      ...frame(),
+      selectedBlueprintId: ordinarySummary.id,
+      detail: ordinaryDetail,
+    };
+    const onBeginDirectPlacement = vi.fn<(
+      binding: NativeBlueprintDirectDeploySelectionBinding,
+    ) => boolean>().mockReturnValue(true);
+    renderWorkspace(ordinaryFrame, "ready", { onBeginDirectPlacement });
+    const direct = host.querySelector<HTMLButtonElement>(
+      "[data-native-blueprint-action='begin-direct-deploy-placement']",
+    )!;
+    expect(direct.disabled).toBe(false);
+    act(() => direct.click());
+    expect(onBeginDirectPlacement).toHaveBeenCalledWith({
+      sessionId: "session-a",
+      runId: "run-a",
+      registryFingerprint: "registry-a",
+      blueprintId: "builtin-second",
+      blueprintName: "内建蓝图 B",
+      currentRowRevision: 2,
+    });
+
+    const directDeployPending = Object.freeze({
+      token: 1,
+      phase: "awaiting-topology",
+      receipt: { previousRevision: 47, revision: 48 },
+    }) as unknown as NativeBlueprintDirectDeployPendingCommand;
+    renderWorkspace(ordinaryFrame, "ready", { directDeployPending });
+    expect(host.querySelector<HTMLButtonElement>(
+      "[data-native-blueprint-action='begin-direct-deploy-placement']",
+    )?.disabled).toBe(true);
+    expect(host.querySelector<HTMLButtonElement>(
+      "[data-native-blueprint-action='begin-enqueue-placement']",
+    )?.disabled).toBe(true);
+    expect(host.textContent).toContain("等待不早于 revision 48 的原生工厂拓扑");
+
+    renderWorkspace(frame(), "ready", { onBeginDirectPlacement });
+    expect(host.querySelector<HTMLButtonElement>(
+      "[data-native-blueprint-action='begin-direct-deploy-placement']",
+    )?.disabled).toBe(true);
   });
 
   it("submits one Rust-derived recipe target from the exact selected detail group and locks while pending", () => {
@@ -892,6 +964,7 @@ describe("NativeBlueprintWorkspace", () => {
     expect(source).toMatch(/onSubmitQueueCancelIntent/);
     expect(source).toMatch(/onSubmitQueueDeployIntent/);
     expect(source).toMatch(/onBeginQueuePlacement/);
+    expect(source).toMatch(/onBeginDirectPlacement/);
     expect(source).not.toMatch(/onBlur=|onKeyDown=/);
 
     renderWorkspace(frame());
@@ -904,7 +977,7 @@ describe("NativeBlueprintWorkspace", () => {
     expect(actions).toEqual(new Set([
       "close", "tab-library", "tab-queue", "select",
       "begin-rename", "cancel-rename", "submit-rename",
-      "rotate-transform", "mirror-transform", "begin-enqueue-placement", "delete-blueprint",
+      "rotate-transform", "mirror-transform", "begin-enqueue-placement", "begin-direct-deploy-placement", "delete-blueprint",
       "deploy-queue", "cancel-queue", "page-library-prev", "page-library-next", "page-queue-prev", "page-queue-next",
     ]));
   });

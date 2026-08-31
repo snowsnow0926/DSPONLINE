@@ -1,5 +1,13 @@
 # DSP极简网络项目现状
 
+> **Windows Rust ordinary 蓝图直接部署（2026-08-31，开发候选，未发布）**：原生蓝图工作区新增“直接部署”，但按钮只进入画布定位；实际点击时 renderer 以当前 session/run/revision、registry fingerprint、蓝图 ID/行 revision 和有限坐标请求 `blueprint-direct-deploy-context-v1`。Rust 在同 revision 返回绑定活动陆地行星与支持结论的有界 context；随后唯一允许的 durable marker 为 `{kind:"direct-deploy",blueprintId,blueprintRevision,position:{x,y},revision}`，不包含 planet、蓝图正文、材料表、余额、实体/线路正文、生成 ID 或 `nextId`。
+>
+> Rust 会从当前 live blueprint、内置 catalog、完成科技和权威 `construction` 重新推导完整 ordinary 需求，并在一次事务中全额扣料、按当前 `nextId` 先实体后线路确定性分配 ID、生成规范拓扑并只递增一次 authority revision。它不创建 `constructionQueue` 行、不创建 immutable queue version，也没有“材料不足或语义不支持时自动入队”的隐式回退；缺料、MOD/命名空间目录、非陆地活动行星、特殊建筑、resource anchor、external port、目录/行 revision 漂移、allocator 碰撞或耗尽均原子失败，库存、队列、拓扑、revision 和规范哈希保持不变。
+>
+> 提交前同时检查候选内部、活动行星现有实体及既有施工订单的精确位置重叠；成功仍保留已证明的 recipe override、spray、Dyson orbit、storage/fuel/power 与 belt 配置。一次玩家操作最多 dispatch 一次 mutation；响应不确定时只按 `0/100/250/500/1000/2000 ms` 查询 durable receipt，绝不重发或改走 queue-only。连续 `R+1`、空 entity/belt dirty IDs、`topologyDirty=true` 的回执之后，还要等待同 lineage/registry 且不早于 ACK 的原生权威拓扑再解锁。live、generic cold-WAL reopen 与 `AfterStage/AfterWal/AfterCheckpoint/AfterReceipt/AfterLeaseAcknowledge` 五个 Host 故障边界复用同一 marker，恢复不得重复扣料或建造。
+>
+> 本切片专项结果为 Rust Core `809/809`、Host `193/193`、focused Vitest `100/100`、Node `37/37`、renderer boundary `41/41`，以及重建 Release Host 后的真实 Host integration `5/5`。失败历史保留：focused Vitest 首轮因一条夹具缺少新增字段为 `98/99`；真实 Host integration 首轮因磁盘上的旧 Host 尚无 direct-deploy context capability 为 `4/5`，重建后才得到 `5/5`。当前源码随后新跑完整 Vitest `2,743/28/0`（347 文件通过、13 文件条件跳过）、Windows native/desktop `489/1/0`、production build 2,077 modules（startup gzip `180,401 B`、menu `257,771 B`、forbidden module `0`）、完整 Chromium `433/27/0` 和 durable E2E `7/7`。24 小时、多硬件、安装、签名和灰度仍是独立未通过门禁。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 均不变，`authorityEligible=false`；本工作树未签名、未部署、未发布、未连接生产，也未读取或修改真实玩家存档。
+
 > **Windows Rust ordinary 施工队列部署闭环（2026-08-31，开发候选，未发布）**：在 queue-only 入队和权威领料之后，材料齐全的内置 ordinary 订单现在可以由 Rust 一次性部署。renderer 只发 `{kind:"deploy",id,revision}`；蓝图、目标行星、reservation、catalog 语义、重叠、allocator、实体和线路结果都由 Rust 从当前 v47 权威状态重新派生。活动行星切换不改变持久订单目标。
 >
 > 成功事务按 `nextId` 先实体后线路分配稳定 ID，写入规范 recipe/spray/power/fuel/storage/belt 配置，删除目标订单、消费其 reservation、清理仅在无人引用时才可删除的 immutable version，并只递增一次 revision。失败丢弃克隆候选，不修改源 revision/hash/queue/inventory/topology。live、generic replay、冷 WAL 和五个 Host 故障边界复用同一最小 marker；重启后的相同 command ID 只返回 duplicate，不会重复建造。

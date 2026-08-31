@@ -75,6 +75,20 @@ export interface NativeBlueprintEnqueueSelectionBinding {
   readonly currentRowRevision: number;
 }
 
+/**
+ * Position-independent selected ordinary blueprint row for direct deployment.
+ * It is deliberately distinct from enqueue selection so the two click-time
+ * context protocols cannot be interchanged accidentally.
+ */
+export interface NativeBlueprintDirectDeploySelectionBinding {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly registryFingerprint: string;
+  readonly blueprintId: string;
+  readonly blueprintName: string;
+  readonly currentRowRevision: number;
+}
+
 /** Exact selected-row compare-and-delete binding for one library entry. */
 export interface NativeBlueprintDeleteBinding {
   readonly sessionId: string;
@@ -635,6 +649,48 @@ export function selectNativeBlueprintEnqueueSelectionBinding(
     currentRowRevision: row.revision,
   });
   return nativeBlueprintEnqueueSelectionBindingMatchesFrame(binding, frame) ? binding : null;
+}
+
+export function nativeBlueprintDirectDeploySelectionBindingMatchesFrame(
+  binding: NativeBlueprintDirectDeploySelectionBinding,
+  frame: NativeBlueprintWorkspaceFrame | null,
+): boolean {
+  if (!frame || frame.sessionId !== binding.sessionId || frame.runId !== binding.runId ||
+      frame.registryFingerprint !== binding.registryFingerprint ||
+      !validOpaqueText(binding.blueprintId, 512) ||
+      !validOpaqueText(binding.blueprintName, 256) ||
+      !Number.isSafeInteger(binding.currentRowRevision) || binding.currentRowRevision < 1 ||
+      binding.currentRowRevision > Number.MAX_SAFE_INTEGER ||
+      frame.selectedBlueprintId !== binding.blueprintId ||
+      frame.detail?.status !== "supported" ||
+      frame.detail.summary.id !== binding.blueprintId ||
+      frame.detail.summary.counts.entities < 1 ||
+      frame.detail.summary.counts.resourceAnchors !== 0 ||
+      frame.detail.summary.counts.externalPorts !== 0) return false;
+  const row = frame.libraryById.get(binding.blueprintId);
+  return row?.name === binding.blueprintName &&
+    row.revision === binding.currentRowRevision &&
+    frame.detail.summary.name === binding.blueprintName &&
+    frame.detail.summary.revision === binding.currentRowRevision;
+}
+
+export function selectNativeBlueprintDirectDeploySelectionBinding(
+  frame: NativeBlueprintWorkspaceFrame | null,
+): NativeBlueprintDirectDeploySelectionBinding | null {
+  if (!frame || frame.selectedBlueprintId === null || frame.detail?.status !== "supported") {
+    return null;
+  }
+  const row = frame.libraryById.get(frame.selectedBlueprintId);
+  if (!row) return null;
+  const binding: NativeBlueprintDirectDeploySelectionBinding = Object.freeze({
+    sessionId: frame.sessionId,
+    runId: frame.runId,
+    registryFingerprint: frame.registryFingerprint,
+    blueprintId: row.id,
+    blueprintName: row.name,
+    currentRowRevision: row.revision,
+  });
+  return nativeBlueprintDirectDeploySelectionBindingMatchesFrame(binding, frame) ? binding : null;
 }
 
 export function nativeBlueprintDeleteBindingMatchesFrame(

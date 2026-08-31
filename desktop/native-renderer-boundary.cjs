@@ -484,6 +484,37 @@ function normalizeBlueprintEnqueueContext(value, label) {
   };
 }
 
+function normalizeBlueprintDirectDeployContext(value, label) {
+  const source = exactObject(
+    value,
+    [
+      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "blueprintId",
+      "blueprintRevision", "position",
+    ],
+    label,
+  );
+  const positionSource = exactObject(source.position, ["x", "y"], `${label} position`);
+  return {
+    sessionId: logicalId(source.sessionId, `${label} session`, 128),
+    expectedRevision: safeInteger(source.expectedRevision, `${label} expected revision`),
+    expectedRegistryFingerprint: logicalId(
+      source.expectedRegistryFingerprint,
+      `${label} expected registry fingerprint`,
+      256,
+    ),
+    blueprintId: blueprintOpaqueText(source.blueprintId, `${label} blueprint ID`, 512),
+    blueprintRevision: safeInteger(
+      source.blueprintRevision,
+      `${label} blueprint revision`,
+      1,
+    ),
+    position: {
+      x: finiteNumber(positionSource.x, `${label} position.x`, -Number.MAX_VALUE),
+      y: finiteNumber(positionSource.y, `${label} position.y`, -Number.MAX_VALUE),
+    },
+  };
+}
+
 function normalizeConstructionPlacementContext(value, label) {
   const source = exactObject(
     value,
@@ -3162,6 +3193,139 @@ function normalizeCoreBlueprintEnqueueContext(value, context) {
     activePlanetId,
     support: { supported, reason },
     expectedQueueId,
+    limits: { projectionBytes: MAX_NATIVE_PROJECTION_BYTES },
+  };
+}
+
+function normalizeCoreBlueprintDirectDeployContext(value, context) {
+  const source = exactObject(value, [
+    "schemaVersion", "projectionType", "source", "revision", "stateVersion",
+    "registryFingerprint", "request", "activePlanetId", "support", "limits",
+  ], "native blueprint direct deploy context");
+  if (source.schemaVersion !== 1 ||
+      source.projectionType !== "blueprint-direct-deploy-context-v1" ||
+      source.source !== "native-core" || source.stateVersion !== 47) {
+    throw protocolError("native blueprint direct deploy context identity");
+  }
+  requireProjectionByteBudget(source, "native blueprint direct deploy context");
+  const projectionContext = normalizeBlueprintDirectDeployContext(
+    context,
+    "native blueprint direct deploy request context",
+  );
+  const revision = safeInteger(source.revision, "native blueprint direct deploy revision");
+  const registryFingerprint = logicalId(
+    source.registryFingerprint,
+    "native blueprint direct deploy registry fingerprint",
+    256,
+  );
+  if (revision !== projectionContext.expectedRevision ||
+      registryFingerprint !== projectionContext.expectedRegistryFingerprint) {
+    throw protocolError("native blueprint direct deploy revision binding");
+  }
+  const requestSource = exactObject(
+    source.request,
+    [
+      "expectedRevision", "expectedRegistryFingerprint", "blueprintId", "blueprintRevision",
+      "position",
+    ],
+    "native blueprint direct deploy request echo",
+  );
+  const requestPosition = exactObject(
+    requestSource.position,
+    ["x", "y"],
+    "native blueprint direct deploy echoed position",
+  );
+  const echoed = {
+    expectedRevision: safeInteger(
+      requestSource.expectedRevision,
+      "native blueprint direct deploy echoed revision",
+    ),
+    expectedRegistryFingerprint: logicalId(
+      requestSource.expectedRegistryFingerprint,
+      "native blueprint direct deploy echoed registry fingerprint",
+      256,
+    ),
+    blueprintId: blueprintOpaqueText(
+      requestSource.blueprintId,
+      "native blueprint direct deploy echoed blueprint ID",
+      512,
+    ),
+    blueprintRevision: safeInteger(
+      requestSource.blueprintRevision,
+      "native blueprint direct deploy echoed blueprint revision",
+      1,
+    ),
+    position: {
+      x: finiteNumber(
+        requestPosition.x,
+        "native blueprint direct deploy echoed position.x",
+        -Number.MAX_VALUE,
+      ),
+      y: finiteNumber(
+        requestPosition.y,
+        "native blueprint direct deploy echoed position.y",
+        -Number.MAX_VALUE,
+      ),
+    },
+  };
+  if (echoed.expectedRevision !== projectionContext.expectedRevision ||
+      echoed.expectedRegistryFingerprint !== projectionContext.expectedRegistryFingerprint ||
+      echoed.blueprintId !== projectionContext.blueprintId ||
+      echoed.blueprintRevision !== projectionContext.blueprintRevision ||
+      echoed.position.x !== projectionContext.position.x ||
+      echoed.position.y !== projectionContext.position.y) {
+    throw protocolError("native blueprint direct deploy request binding");
+  }
+  const activePlanetId = blueprintOpaqueText(
+    source.activePlanetId,
+    "native blueprint direct deploy active planet",
+    512,
+  );
+  const supportSource = exactObject(
+    source.support,
+    ["supported", "reason"],
+    "native blueprint direct deploy support",
+  );
+  const supported = boolean(
+    supportSource.supported,
+    "native blueprint direct deploy support flag",
+  );
+  const reason = supportSource.reason === null
+    ? null
+    : oneOf(
+        supportSource.reason,
+        [
+          "next-id-exhausted",
+          "unsupported-blueprint-domain",
+          "unsupported-active-planet",
+          "insufficient-construction-materials",
+          "position-overlap",
+          "version-conflict",
+          "catalog-incomplete",
+        ],
+        "native blueprint direct deploy support reason",
+      );
+  if (supported !== (reason === null)) {
+    throw protocolError("native blueprint direct deploy support binding");
+  }
+  const limitsSource = exactObject(
+    source.limits,
+    ["projectionBytes"],
+    "native blueprint direct deploy limits",
+  );
+  if (limitsSource.projectionBytes !== MAX_NATIVE_PROJECTION_BYTES) {
+    throw protocolError("native blueprint direct deploy limits");
+  }
+  return {
+    schemaVersion: 1,
+    projectionType: "blueprint-direct-deploy-context-v1",
+    source: "native-core",
+    revision,
+    stateVersion: 47,
+    registryFingerprint,
+    request: echoed,
+    activePlanetId,
+    support: { supported, reason },
     limits: { projectionBytes: MAX_NATIVE_PROJECTION_BYTES },
   };
 }
@@ -7284,6 +7448,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreConstructionInventoryProjection: normalizeCoreConstructionInventoryProjection,
   coreBlueprintWorkspaceProjection: normalizeCoreBlueprintWorkspaceProjection,
   coreBlueprintEnqueueContext: normalizeCoreBlueprintEnqueueContext,
+  coreBlueprintDirectDeployContext: normalizeCoreBlueprintDirectDeployContext,
   coreConstructionPlacementContext: normalizeCoreConstructionPlacementContext,
   coreConstructionBeltPlacementContext: normalizeCoreConstructionBeltPlacementContext,
   coreConstructionBeltLaneContext: normalizeCoreConstructionBeltLaneContext,

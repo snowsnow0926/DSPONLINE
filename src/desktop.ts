@@ -340,6 +340,8 @@ export interface DesktopBridge {
   getNativeCoreBlueprintWorkspace?: (request: DesktopNativeCoreBlueprintWorkspaceRequest) => Promise<DesktopNativeCoreBlueprintWorkspaceResult>;
   /** Click-time Rust proof for queueing one exact blueprint row at a renderer-supplied finite position. */
   getNativeCoreBlueprintEnqueueContext?: (request: DesktopNativeCoreBlueprintEnqueueContextRequest) => Promise<DesktopNativeCoreBlueprintEnqueueContextResult>;
+  /** Click-time Rust proof for directly deploying one exact ordinary blueprint row. */
+  getNativeCoreBlueprintDirectDeployContext?: (request: DesktopNativeCoreBlueprintDirectDeployContextRequest) => Promise<DesktopNativeCoreBlueprintDirectDeployContextResult>;
   /** Same-revision Rust-derived ordinary single-building template; the renderer may add only a finite position. */
   getNativeCoreConstructionPlacementContext?: (request: DesktopNativeCoreConstructionPlacementContextRequest) => Promise<DesktopNativeCoreConstructionPlacementContextResult>;
   /** Same-revision Rust-derived exact single ordinary-belt template and construction debit. */
@@ -1248,6 +1250,41 @@ export interface DesktopNativeCoreBlueprintEnqueueContextResult {
     reason: DesktopNativeCoreBlueprintEnqueueUnsupportedReason | null;
   };
   expectedQueueId: string | null;
+  limits: {
+    projectionBytes: 1048576;
+  };
+}
+
+export interface DesktopNativeCoreBlueprintDirectDeployContextRequest extends DesktopNativeCoreSessionRequest {
+  expectedRevision: number;
+  expectedRegistryFingerprint: string;
+  blueprintId: string;
+  blueprintRevision: number;
+  position: { x: number; y: number };
+}
+
+export type DesktopNativeCoreBlueprintDirectDeployUnsupportedReason =
+  | "next-id-exhausted"
+  | "unsupported-blueprint-domain"
+  | "unsupported-active-planet"
+  | "insufficient-construction-materials"
+  | "position-overlap"
+  | "version-conflict"
+  | "catalog-incomplete";
+
+export interface DesktopNativeCoreBlueprintDirectDeployContextResult {
+  schemaVersion: 1;
+  projectionType: "blueprint-direct-deploy-context-v1";
+  source: "native-core";
+  revision: number;
+  stateVersion: 47;
+  registryFingerprint: string;
+  request: Omit<DesktopNativeCoreBlueprintDirectDeployContextRequest, "sessionId">;
+  activePlanetId: string;
+  support: {
+    supported: boolean;
+    reason: DesktopNativeCoreBlueprintDirectDeployUnsupportedReason | null;
+  };
   limits: {
     projectionBytes: 1048576;
   };
@@ -2527,6 +2564,11 @@ export type DesktopNativeCoreProjectionTransferRequest =
     }
   | {
       sessionId: string;
+      projectionType: "blueprint-direct-deploy-context-v1";
+      payload: Omit<DesktopNativeCoreBlueprintDirectDeployContextRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
       projectionType: "construction-placement-context-v1";
       payload: Omit<DesktopNativeCoreConstructionPlacementContextRequest, "sessionId">;
     }
@@ -2606,7 +2648,7 @@ export interface DesktopNativeCoreProjectionTransferHeader {
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "blueprint-workspace-v1" | "blueprint-enqueue-context-v1" | "construction-placement-context-v1" | "construction-belt-placement-context-v1" | "construction-belt-lane-context-v1" | "construction-belt-removal-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "blueprint-workspace-v1" | "blueprint-enqueue-context-v1" | "blueprint-direct-deploy-context-v1" | "construction-placement-context-v1" | "construction-belt-placement-context-v1" | "construction-belt-lane-context-v1" | "construction-belt-removal-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1";
   payloadLength: number;
   sha256: string;
 }

@@ -82,6 +82,13 @@ pub struct CoreRecoverPlayerAuthorityMacroAdvanceControlRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreBlueprintDirectDeployContextPosition {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(
     rename_all = "camelCase",
     rename_all_fields = "camelCase",
@@ -239,6 +246,14 @@ pub enum ControlRequest {
         expected_registry_fingerprint: String,
         blueprint_id: String,
         blueprint_revision: u64,
+    },
+    CoreBlueprintDirectDeployContext {
+        session_id: String,
+        expected_revision: u64,
+        expected_registry_fingerprint: String,
+        blueprint_id: String,
+        blueprint_revision: u64,
+        position: CoreBlueprintDirectDeployContextPosition,
     },
     CoreConstructionPlacementContext {
         session_id: String,
@@ -1101,6 +1116,52 @@ mod tests {
             }
             _ => panic!("blueprint enqueue context decoded as the wrong variant"),
         }
+    }
+
+    #[test]
+    fn blueprint_direct_deploy_context_protocol_preserves_exact_identity_and_position() {
+        let request = serde_json::from_value::<ControlRequest>(json!({
+            "operation": "coreBlueprintDirectDeployContext",
+            "sessionId": "core-blueprint-direct-deploy",
+            "expectedRevision": 47,
+            "expectedRegistryFingerprint": "builtin:test",
+            "blueprintId": "蓝图-β",
+            "blueprintRevision": 9,
+            "position": { "x": 12.25, "y": -34.5 }
+        }))
+        .unwrap();
+        match request {
+            ControlRequest::CoreBlueprintDirectDeployContext {
+                session_id,
+                expected_revision,
+                expected_registry_fingerprint,
+                blueprint_id,
+                blueprint_revision,
+                position,
+            } => {
+                assert_eq!(session_id, "core-blueprint-direct-deploy");
+                assert_eq!(expected_revision, 47);
+                assert_eq!(expected_registry_fingerprint, "builtin:test");
+                assert_eq!(blueprint_id, "蓝图-β");
+                assert_eq!(blueprint_revision, 9);
+                assert_eq!(position.x, 12.25);
+                assert_eq!(position.y, -34.5);
+            }
+            _ => panic!("blueprint direct deploy context decoded as the wrong variant"),
+        }
+
+        assert!(
+            serde_json::from_value::<ControlRequest>(json!({
+                "operation": "coreBlueprintDirectDeployContext",
+                "sessionId": "core-blueprint-direct-deploy",
+                "expectedRevision": 47,
+                "expectedRegistryFingerprint": "builtin:test",
+                "blueprintId": "蓝图-β",
+                "blueprintRevision": 9,
+                "position": { "x": 12.25, "y": -34.5, "z": 1 }
+            }))
+            .is_err()
+        );
     }
 
     #[test]

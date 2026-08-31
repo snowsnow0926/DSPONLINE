@@ -22,6 +22,8 @@ import {
   type DesktopNativeCoreBlueprintWorkspaceResult,
   type DesktopNativeCoreBlueprintEnqueueContextRequest,
   type DesktopNativeCoreBlueprintEnqueueContextResult,
+  type DesktopNativeCoreBlueprintDirectDeployContextRequest,
+  type DesktopNativeCoreBlueprintDirectDeployContextResult,
   type DesktopNativeCoreConstructionPlacementContextRequest,
   type DesktopNativeCoreConstructionPlacementContextResult,
   type DesktopNativeCoreConstructionBeltPlacementContextRequest,
@@ -71,6 +73,7 @@ type NativeCoreTransferProjection =
   | DesktopNativeCoreConstructionInventoryResult
   | DesktopNativeCoreBlueprintWorkspaceResult
   | DesktopNativeCoreBlueprintEnqueueContextResult
+  | DesktopNativeCoreBlueprintDirectDeployContextResult
   | DesktopNativeCoreConstructionPlacementContextResult
   | DesktopNativeCoreConstructionBeltPlacementContextResult
   | DesktopNativeCoreConstructionBeltLaneContextResult
@@ -134,6 +137,7 @@ export interface WindowsNativeCoreShadow {
   constructionInventoryProjection?(request: Omit<DesktopNativeCoreConstructionInventoryRequest, "sessionId">): Promise<DesktopNativeCoreConstructionInventoryResult>;
   blueprintWorkspaceProjection?(request: Omit<DesktopNativeCoreBlueprintWorkspaceRequest, "sessionId">): Promise<DesktopNativeCoreBlueprintWorkspaceResult>;
   blueprintEnqueueContext?(request: Omit<DesktopNativeCoreBlueprintEnqueueContextRequest, "sessionId">): Promise<DesktopNativeCoreBlueprintEnqueueContextResult>;
+  blueprintDirectDeployContext?(request: Omit<DesktopNativeCoreBlueprintDirectDeployContextRequest, "sessionId">): Promise<DesktopNativeCoreBlueprintDirectDeployContextResult>;
   constructionPlacementContext?(request: Omit<DesktopNativeCoreConstructionPlacementContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionPlacementContextResult>;
   constructionBeltPlacementContext?(request: Omit<DesktopNativeCoreConstructionBeltPlacementContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionBeltPlacementContextResult>;
   constructionBeltLaneContext?(request: Omit<DesktopNativeCoreConstructionBeltLaneContextRequest, "sessionId">): Promise<DesktopNativeCoreConstructionBeltLaneContextResult>;
@@ -475,6 +479,32 @@ class DesktopNativeCoreShadow implements WindowsNativeCoreShadow {
       throw new Error("Windows 原生蓝图入队上下文不可用");
     }
     return desktop.getNativeCoreBlueprintEnqueueContext({ sessionId: this.sessionId, ...request });
+  }
+
+  async blueprintDirectDeployContext(
+    request: Omit<DesktopNativeCoreBlueprintDirectDeployContextRequest, "sessionId">,
+  ): Promise<DesktopNativeCoreBlueprintDirectDeployContextResult> {
+    if (this.closed) throw new Error("Windows 原生核心影子会话已关闭");
+    const desktop = getDesktopBridge();
+    if (!desktop) throw new Error("Windows 原生核心桥接已断开");
+    if (desktop.requestNativeCoreProjectionTransfer) {
+      const transfer = await desktop.requestNativeCoreProjectionTransfer({
+        sessionId: this.sessionId,
+        projectionType: "blueprint-direct-deploy-context-v1",
+        payload: request,
+      });
+      return decodeNativeCoreProjectionTransfer<DesktopNativeCoreBlueprintDirectDeployContextResult>(transfer, {
+        sessionId: this.sessionId,
+        projectionType: "blueprint-direct-deploy-context-v1",
+      });
+    }
+    if (typeof desktop.getNativeCoreBlueprintDirectDeployContext !== "function") {
+      throw new Error("Windows 原生蓝图直接部署上下文不可用");
+    }
+    return desktop.getNativeCoreBlueprintDirectDeployContext({
+      sessionId: this.sessionId,
+      ...request,
+    });
   }
 
   async constructionPlacementContext(

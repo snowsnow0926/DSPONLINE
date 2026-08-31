@@ -142,11 +142,15 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/getNativeCoreSystemSpaceStationWorkspaceProjection/);
     expect(app).toMatch(/orbitalStationOpen && isSpaceStationFeatureEnabled\(\) && !nativePlayerAuthorityOwnsRuntime/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime && game\.mode === "normal" && isSpaceStationFeatureEnabled\(\) \? <div className="canvas-global-navigation/);
-    for (const workspace of ["galaxyOpen", "campaignOpen", "operationsOpen"]) {
-      expect(app).toContain(`${workspace} && !nativePlayerAuthorityOwnsRuntime`);
-    }
-    for (const label of ["旧版运营中心", "旧版主线任务", "旧版银河账户页"]) {
-      expect(app).toContain(`rejectLegacyFactoryInteractionWhileNative("${label}")`);
+    expect(app).toMatch(/galaxyOpen \? nativePlayerAuthorityOwnsRuntime \? \([\s\S]*?<NativeGalaxyWorkspace[\s\S]*?: \([\s\S]*?<GalaxyWorkspace/);
+    expect(app).toMatch(/campaignOpen \? nativePlayerAuthorityOwnsRuntime \? \([\s\S]*?<NativeCampaignWorkspace[\s\S]*?: \([\s\S]*?<CampaignWorkspace/);
+    expect(app).toMatch(/operationsOpen && nativePlayerAuthorityOwnsRuntime \? \([\s\S]*?<NativeOperationsWorkspace/);
+    expect(app).toMatch(/operationsOpen && !nativePlayerAuthorityOwnsRuntime \? \([\s\S]*?<OperationsWorkspace/);
+    const nativeGalaxy = app.slice(app.indexOf("<NativeGalaxyWorkspace"), app.indexOf("<GalaxyWorkspace"));
+    const nativeCampaign = app.slice(app.indexOf("<NativeCampaignWorkspace"), app.indexOf("<CampaignWorkspace"));
+    const nativeOperations = app.slice(app.indexOf("<NativeOperationsWorkspace"), app.indexOf("<OperationsWorkspace"));
+    for (const nativeWorkspace of [nativeGalaxy, nativeCampaign, nativeOperations]) {
+      expect(nativeWorkspace).not.toMatch(/\bgame=\{game\}/);
     }
   });
 

@@ -1,5 +1,13 @@
 # DSP极简网络项目现状
 
+> **Windows 量子物流形状证据与施工队列取消退款（2026-08-31，开发候选，未发布）**：提交 `188f406` 增加 opt-in `quantum-oactive-shape-v1`，在同一个 `coreAdvance` 响应内返回一条与 request/session hash、base/measured revision 和 purpose 绑定的聚合记录；它覆盖 selected/total owner、网络解析、dirty/dense 写回、零归一化、排序比较和有界 fanout。普通路径不构造证据，既有 comparator 不变。本轮没有正式固定输入 `2 + 6` A/B，也没有新的速度收益宣称。
+>
+> 提交 `4ea78d5` 让 Windows 薄 UI 可直接打开原生蓝图工作区，并由 Rust 权威取消施工队列订单和完整退款。renderer 只提交 `{kind:"cancel",id,revision}`；Rust 从 v47 当前状态计算 `reservedConstruction → construction`、`reservedFleet → portableFleet`，原子删除订单并清理无人引用的 blueprint version，不回滚已放置建筑、实体或线路。WAL 不保存退款正文或下标，未知结果只做六次有界只读 reconciliation，绝不重发或乐观改写。
+>
+> 取消确认使用 Rust 对完整队列的同 revision stable-ID membership proof，不依赖当前 32 行分页或队列总数变化。两轮独立审计发现的跨页误确认/额外订单完成误锁，以及 proof 读取时 revision R→R+1 的异步竞态均已修复；旧 revision 的 proof、`null` 和异常会被取代并在新 revision 重读，当前 revision 的无效证明仍失败关闭。最终复审未发现 P0/P1。当前按钮尚无第二层确认对话框，这是 UX 边界，不影响事务原子性。
+>
+> 新切片聚焦门禁为：TypeScript 通过；Vitest `8` 文件 `67/67`；desktop/Host Node `4` 文件 `61/61`；Rust Core 蓝图 `8/8`、取消退款 `4/4`；Host protocol `22/22`、cold-WAL/故障边界 `2/2`；workspace check、strict clippy、fmt 与 diff check 均通过。加入这两个切片后的完整 Vitest/native/server/build/E2E 尚未从零重跑，因此 24.13 的全量数字不冒充当前 HEAD 结果。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均未改变；未连接生产、未部署、未签名、未读取或修改真实玩家存档。固定进度仍为 `Rust 83% / 薄 UI 96% / O(active) 96% / 并行 72% / 综合开发 88% / 发布成熟度 60%`。
+
 > **Windows response-bound profiler 与蓝图全生命周期权威（2026-08-31，开发候选，未发布）**：本地物流调度 profiler 的结构证据现在由 Rust 线程局部、有界采集器在同一个 `coreAdvance` 响应帧内原子返回；每条记录精确绑定 request/session SHA、base/measured revision 和 purpose，必须恰好出现一次。普通计时使用未插桩 `dispatch`，结构测量使用独立同检查点 `dispatch_profiled`，两边 canonical/domain/revision 必须一致；stderr 只保留诊断用途，迟到、重复或截断日志都不能改变响应绑定证据。只有 `stageShare × parallelizableRatio >= 3.5%` 才允许进入后续产品候选；本轮没有执行正式固定输入 `2 + 6` A/B，因此没有新增速度收益结论。
 >
 > Rust 权威蓝图工作区已覆盖 rename、rotation/mirror target-state 和 delete。删除只接受 `{kind:"delete",id,revision}`，校验完整 v47 蓝图目录、唯一 ID、目标 revision 与安全整数边界后，在一次事务副本中直接移除私有已验证下标；通用 patch 仍禁止 renderer/raw command 按数组下标删除。删除不会退款或修改 `blueprintVersions`、`constructionQueue`、施工库存、实体、线路和 allocator；已排队施工继续使用不可变版本。Core-only 下标不进 WAL，live、generic replay、五个 Host 故障边界、重复请求和冷恢复均由同一个语义 marker 得到相同状态，live/cold receipt 都强制 `topologyDirty=true`。原先删除时额外构造并再次复制整份蓝图库的两次深拷贝已消除，只保留所有原子命令共有的一次事务状态副本。

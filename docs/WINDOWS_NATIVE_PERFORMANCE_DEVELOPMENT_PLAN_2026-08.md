@@ -1848,3 +1848,17 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版�
 冻结组合源码的新鲜验证为：Rust Core 串行 `767/767`（`198.57s`）、Host 串行 `181/181`（`18.59s`），合计 `948/948`；完整 Vitest `327` 文件通过、`13` 文件条件跳过，`2,563` 项通过、`29` 项跳过、`0` 失败（`231.56s`）；Windows native/desktop Node `483` 通过、`1` 个权限条件跳过、`0` 失败；Server `384/2/0` 加 station `4/0/0`；完整 Chromium E2E `433/27/0`（`6.9m`）。蓝图聚焦为 Vitest `80/80`、Core `19/19`、Host `7/7`，另有两次独立只读审查未发现 P0/P1。TypeScript、workspace check、strict clippy、Rust fmt、diff check 与 production build/startup budget 均通过；build 处理 `2,057` modules，startup 总 gzip `180,347 B`、JavaScript `86,817 B`、CSS `93,530 B`、最大启动 JavaScript `58,974 B`、menu `257,721 B`、forbidden module `0`。
 
 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 版本 1.2.3 与 `authorityEligible=false` 均未改变。本切片未连接生产、未部署、未签名，未读取或修改真实玩家存档；完整 E2E 的 27 个跳过项仍是显式可选真实存档、durable 故障注入或生产预览基准，不能冒充已通过。后续优先级仍是扩大 Rust 玩家可见写面，随后才依据合法固定输入 profile gate 选择值得做的原生并行阶段；24 小时、多硬件、安装/覆盖升级、磁盘满/Defender、签名与灰度继续属于发布门禁。
+
+### 24.14 量子物流形状证据与施工队列取消退款（2026-08-31，开发候选）
+
+本切片在提交 `188f406` 和 `4ea78d5` 中分别关闭两个小而独立的边界：为量子物流剩余 `O(active)` 热点建立响应绑定的结构证据；让玩家从 Windows 薄 UI 打开蓝图工作区，并由 Rust 权威取消一条施工队列订单、完整返还仍被该订单占用的施工物料。它们没有完成全部量子物流、蓝图部署或全领域原生并行，固定进度口径继续保持 `Rust 唯一权威约 83% / 完整薄 UI 约 96% / 真正 O(active) 物流约 96% / 全领域确定性原生并行约 72% / 四项目标能力加权综合约 88% / 可放心发布成熟度约 60%`。
+
+1. 新的 opt-in purpose `quantum-oactive-shape-v1` 把 selected/total owner、网络解析 selected/total、dirty/total/dense write、签名、零归一化、线性/全量排序、比较次数和有界逐物料 fanout 作为一条聚合 record 放进同一个 `coreAdvance` 响应。证据绑定 request/session hash、base/measured revision 与 purpose；`1/5/60` 秒一次 advance 都必须恰好一条记录。普通非 profile 路径不构造 payload，既有 comparator 与确定性提交顺序不变。本轮没有执行正式固定输入 `2 + 6` A/B，也没有速度收益结论；这些计数只用于决定下一处值得优化的量子热段。
+2. 原生蓝图入口已加入顶栏与 overflow 菜单。施工队列行提供“取消并返还”，但 renderer 只发送 `{kind:"cancel",id,revision}`；退款物料、目标下标、蓝图版本和库存结果都由 Rust 从当前 v47 权威状态重新验证并计算。`reservedConstruction` 返回 `construction`，`reservedFleet` 返回 `portableFleet`，整数 floor、非负夹紧和 JavaScript safe-integer 溢出行为与旧 Web 规则一致。队列行与不再被任何订单引用的 blueprint version 在同一事务中删除；已放置建筑、实体和线路不回滚。当前按钮没有第二层确认对话框，这是仍保留的 UX 边界，不改变退款和提交的原子性。
+3. WAL 只保存三字段 marker，不保存退款正文或私有下标。live、generic replay、冷 WAL、重复 request ID 与五个 durable fault boundary 使用同一语义展开；候选失败不修改源状态。回执固定为空 entity/belt ID 且 `topologyDirty=true`，迫使界面重新读取有界工作区；GameState v47、公开 envelope/cloud/SQLite schema 与 canonical hash 规则均未增加字段。
+4. UI 没有 optimistic queue splice。传输结果不确定时固定执行六次只读对账（`0/100/250/500/1000/2000 ms`），绝不重发 mutation。提交确认不再依赖当前 32 行分页或“总数恰减一”，而是请求 Rust 在同 revision 校验完整蓝图/版本/队列目录后，对目标 stable ID 给出全队列存在/缺席证明；因此目标跨页以及 ACK 后其他订单同时完成都不会误确认或永久误锁。
+5. 两轮独立复审先后发现并关闭两个 P1。第一项是仅看当前页会把移动到第 33 行以后的目标误当缺席，且总数多减会误锁；现在由完整队列 membership proof 取代。第二项是 proof 读取期间每秒 tick 可把 revision R 推进到 R+1；现在 flight 同时绑定 token/revision/目标/source，旧 R 的 proof、`null` 或异常只会被丢弃，新 revision 会重新只读查询，当前 revision 的畸形结果仍失败关闭。两种 deferred 竞态回归都证明写命令始终只有一次。最终快速复审未发现剩余 P0/P1。
+
+当前组合源码只完成了与本切片成比例的聚焦验证：TypeScript 通过；Vitest `8` 文件 `67/67`；Windows desktop/Host 边界 `4` 文件 `61/61`；Rust Core 蓝图投影 `8/8`、取消/退款 `4/4`；Host protocol 过滤运行 `22/22`、取消 cold-WAL/故障边界 `2/2`；workspace check、strict clippy、Rust fmt 和 diff check 均通过。量子 profile 独立提交另有 collector `2/2`、full oracle `1/1`、零归一化 `1/1`、失败写回 `1/1`、Host duration matrix `1/1` 与 desktop Host `25/25`。这些数字是专项，不能与 24.13 的冻结全量相加；加入两项新切片后的完整 Vitest、完整 native、Server、production build、完整 E2E 与耐久 E2E 仍须在下一次组合冻结后从零重跑。
+
+本切片没有连接生产、部署、签名或读取/修改真实玩家存档。`authorityEligible=false`、GameState v47、envelope v2、cloud schema v8、SQLite layout v3 与 package 1.2.3 全部保持不变。接下来仍优先关闭剩余玩家可达 Rust 写面和量子解析/写回/零归一化热点；全领域并行只有在结构证据超过门槛且真实固定输入 A/B 通过后才进入产品代码。

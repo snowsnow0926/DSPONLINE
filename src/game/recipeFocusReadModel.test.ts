@@ -125,7 +125,7 @@ describe("recipe focus thin read model", () => {
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? null : createWebRecipeFocusReadModel\(game\)/);
     expect(app).toMatch(/<RecipeFocusPanel\s+model=\{recipeFocusReadModel\}/);
     expect(app).toMatch(/<RecipeFocusPanel\s+model=\{recipeFocusReadModel\}[\s\S]*?readOnly=\{nativePlayerAuthorityOwnsRuntime &&[\s\S]*?!nativeRecipeFocusReadModel[\s\S]*?nativePlayerAuthorityCommandPending/);
-    expect(app).toMatch(/<RecipeWorkspace open readOnly=\{nativePlayerAuthorityOwnsRuntime && \(!nativeRecipeFocusReadModel \|\| nativePlayerAuthorityCommandPending\)\}/);
+    expect(app).toMatch(/<RecipeWorkspace[\s\S]{0,300}?open readOnly=\{nativePlayerAuthorityOwnsRuntime && \(!nativeRecipeFocusReadModel \|\| nativePlayerAuthorityCommandPending \|\| nativeRecipeWorkspaceReadStatus !== "ready"\)\}/);
     expect(app).toMatch(/const onRecipeFocusChange = useCallback[\s\S]*?createNativeProjectedRecipeFocusItemCommand/);
     expect(app).toMatch(/onModeChange=\{onRecipeFocusModeChange\}/);
     expect(app).toMatch(/onPositionChange=\{onRecipeFocusPositionChange\}/);

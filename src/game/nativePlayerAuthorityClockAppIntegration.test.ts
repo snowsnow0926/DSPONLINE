@@ -88,25 +88,27 @@ describe("main-owned authority clock App wiring", () => {
     const factoryProjection = refreshEffects.indexOf("createNativePlayerAuthorityProjectionSource(");
     expect(pausedReturn).toBeGreaterThanOrEqual(0);
     expect(factoryProjection).toBeGreaterThan(pausedReturn);
-    for (const sourceName of [
-      "createNativePlayerAuthorityTechnologyProjectionSource(",
-      "createNativePlayerAuthorityRecipeWorkspaceProjectionSource(",
-      "createNativePlayerAuthorityCommandPaletteEntitySearchSource(",
-    ]) {
-      const sourceIndex = refreshEffects.indexOf(sourceName);
-      expect(sourceIndex).toBeGreaterThanOrEqual(0);
-      expect(refreshEffects.lastIndexOf("!nativePlayerAuthorityActiveFrame", sourceIndex))
-        .toBeGreaterThanOrEqual(0);
-    }
+    expect(app).toMatch(/nativeThinWorkspaceAuthorityFrames = useMemo\([\s\S]*?selectNativePlayerAuthorityWorkspaceFrames/);
+    expect(app).toMatch(/nativeTechnologyWorkspaceReadIdentity = useMemo<NativeTechnologyWorkspaceIdentity \| null>[\s\S]*?nativeThinWorkspaceAuthorityFrames\.readFrame/);
+    expect(app).toMatch(/nativeTechnologyWorkspaceSource = useMemo\(\(\) => nativeTechnologyWorkspaceReadIdentity[\s\S]*?\? createNativePlayerAuthorityTechnologyProjectionSource/);
+    expect(refreshEffects).toMatch(/if \(!nativeTechnologyWorkspaceReadIdentity \|\| !nativeTechnologyWorkspaceSource\) return/);
+    expect(app).toMatch(/nativeRecipeWorkspaceReadIdentity = useMemo<NativeRecipeWorkspaceIdentity \| null>[\s\S]*?nativeThinWorkspaceAuthorityFrames\.readFrame/);
+    expect(app).toMatch(/nativeRecipeWorkspaceSource = useMemo\(\(\) => nativeRecipeWorkspaceReadIdentity[\s\S]*?\? createNativePlayerAuthorityRecipeWorkspaceProjectionSource/);
+    expect(refreshEffects).toMatch(/if \(!nativeRecipeWorkspaceReadIdentity \|\| !nativeRecipeWorkspaceSource\) return/);
+    expect(app).toMatch(/nativeCommandPaletteEntitySearchReadIdentity = useMemo<NativeCommandPaletteEntitySearchIdentity \| null>[\s\S]*?nativeThinWorkspaceAuthorityFrames\.readFrame/);
+    expect(app).toMatch(/nativeCommandPaletteEntitySearchSource = useMemo\([\s\S]*?nativeCommandPaletteEntitySearchReadIdentity[\s\S]*?\? createNativePlayerAuthorityCommandPaletteEntitySearchSource/);
+    expect(refreshEffects).toMatch(/if \(!nativeCommandPaletteEntitySearchReadIdentity \|\| !nativeCommandPaletteEntitySearchSource\) return/);
     const stellarBinding = app.slice(
       app.indexOf("const nativeStellarProjectionIdentity"),
       app.indexOf("const nativeStarMapWorkspaceReadModel"),
     );
-    expect(stellarBinding).toMatch(/nativePlayerAuthorityActiveFrame\?\.sessionId[\s\S]*?: null/);
-    expect(stellarBinding).toMatch(/nativeStellarProjectionIdentity[\s\S]*?createNativePlayerAuthorityStellarProjectionSource[\s\S]*?: null/);
-    expect(stellarBinding).toMatch(/nativeStellarProjectionIdentity[\s\S]*?createNativePlayerAuthorityStarMapCatalogSource[\s\S]*?: null/);
-    expect(refreshEffects).toMatch(/!nativeStellarProjectionIdentity \|\|[\s\S]*?!nativeStellarProjectionSource\) return/);
-    expect(refreshEffects).toMatch(/!nativeStellarProjectionIdentity \|\|[\s\S]*?!nativeStarMapCatalogSource\)[\s\S]*?nativeStarMapCatalogStore\.clear\(\)/);
+    expect(stellarBinding).toMatch(/nativeStellarProjectionIdentity[\s\S]*?nativeThinWorkspaceAuthorityFrames\.displayFrame/);
+    expect(stellarBinding).toMatch(/nativeStellarProjectionReadIdentity[\s\S]*?nativeThinWorkspaceAuthorityFrames\.readFrame/);
+    expect(stellarBinding).toMatch(/nativeStellarProjectionSource = useMemo\(\(\) => nativeStellarProjectionReadIdentity[\s\S]*?createNativePlayerAuthorityStellarProjectionSource[\s\S]*?: null/);
+    expect(stellarBinding).toMatch(/nativeStarMapCatalogSource = useMemo\(\(\) => nativeStellarProjectionReadIdentity[\s\S]*?createNativePlayerAuthorityStarMapCatalogSource[\s\S]*?: null/);
+    expect(refreshEffects).toMatch(/!starMapOpen \|\| !nativePlayerAuthorityBoundFrame \|\| !nativeStellarProjectionIdentity\)[\s\S]*?nativeStarMapCatalogStore\.clear\(\)/);
+    expect(refreshEffects).toMatch(/if \(!nativeStellarProjectionReadIdentity \|\| !nativeStarMapCatalogSource\) return/);
+    expect(refreshEffects).toMatch(/!nativeStellarProjectionReadIdentity \|\| !nativeStellarProjectionSource\) return/);
 
     const simulationLoop = app.slice(
       app.indexOf("let previous = performance.now();"),

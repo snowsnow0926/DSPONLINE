@@ -2190,3 +2190,12 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 5. 第一版只省 JSON/catalog probe，16,385 sources × 9 steps 的整段 A/B 仅约快 0.4%，因此没有合入。闭合 display patch/settlement 后，五次 indexed/flat-full 分别为 `1,115,235/1,520,441`、`1,121,843/1,495,976`、`1,404,874/1,787,710`、`1,174,693/1,736,010`、`1,149,744/1,608,502 µs`，稳定改善约 21%～32%，无跨零。expensive probes 为 `16,393 / 147,465`，两边 compact replay 均为 `147,465`。这只是合成电力子阶段证据，不外推完整模拟秒或真实玩家存档。
 6. focused `power_probe_` 首轮为 `11 passed / 0 failed / 1 ignored`，低→高→低负载专项 `1/1`；Rust fmt 与 dsp-native-core all-target/all-feature strict clippy `-D warnings` 通过。独立只读复审判定 `P0=0 / P1=0 / P2=2 / GO`：两个 P2 分别是缺少“candidate cache 已变异后再失败”的自动回归，以及峰值内存少计 full/dense 的两份 `Vec<usize>` 与 candidate profile allocation。`83d7521` 随即增加 post-`Arc::make_mut` 失败注入，逐项证明源 revision、完整 bytes、canonical hash、runtime Arc 和 scan history 不变；同时补齐保守内存 lower-bound。修复后 focused 为 `12 passed / 0 failed / 1 ignored`，strict clippy 与 fmt 继续通过。ignored 项是显式手工性能基准，不计作功能通过；最终组合 Core 全量仍待冻结后执行。
 7. 本切片没有新增持久字段，不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、Host/renderer 协议、package 1.2.3 或 `authorityEligible=false`；未读取真实玩家存档，未连接生产，未部署、打包或签名。
+
+### 24.40 Windows 高并行 pure-idle 测试进程稳定化（2026-09-01，测试基础设施）
+
+`5c1b20c` 关闭 24.37 记录的默认并行 Core `STATUS_ACCESS_VIOLATION / STATUS_HEAP_CORRUPTION` 已定位来源，但不把测试进程修复冒充产品性能优化。调查确认默认 28 个 libtest thread 会在一个 Windows 进程内同时运行几十个大型 `pure-idle-macro-v10` 合成结算；每个用例又建立自己的确定性 Rayon runtime，异常落点会随机表现为蓝图/BTree/JSON 等无关受害者。相关产品代码没有 `unsafe`、`static mut` 或环境变量写入，Windows 玩家 authority 本身也不会在同一 session 并行提交多份 pure-idle 候选。
+
+1. 先后否定了两类表面修复。共享双分片池在默认栈下仍于约 1.4 秒触发 `0xC0000374`；8 MiB 栈曾有两轮通过但第三轮再次 heap corruption；16 MiB 首轮也立即失败。因此不能把扩大栈或复用线程池作为可靠结论，也没有把这些复杂度提交到产品或测试 runtime。
+2. 最小修复只在 `cfg(test)` 下为 `advance_bounded_with_runtime(..., macro_v10=true)` 的完整 settlement baseline、三窗口/证书、候选提交与返回生命周期持有一个进程内 MutexGuard。普通 exact (`macro_v10=false`) 不经过门禁，release/production build 完全没有该字段、锁或分支；`deterministic_runtime.rs` 保持逐字不变。
+3. 原始 per-call `for_test` 建池行为加最小门禁后，无环境变量、28 test threads 的 macro v10 过滤集连续三轮均为 `65/65`、0 失败、0 崩溃，耗时 `61.89 / 61.58 / 61.56` 秒；完整 `pure_idle::tests` 为 `110 passed / 1 ignored / 0 failed`（61.97 秒）。单文件 rustfmt 与 diff check 通过。
+4. 当前证据只证明此前可复现的 pure-idle 高并行测试放大器已被最小隔离。最终组合源码仍需在其他 Rust 纵切冻结后统一运行默认并行完整 Core、发布要求的串行完整 Core、workspace strict clippy 与 fmt；这些结果没有在并发写入中的移动源码上伪造。

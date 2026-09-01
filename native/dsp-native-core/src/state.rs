@@ -796,7 +796,12 @@ impl DomainCoverage {
             galactic_exports: true,
             speedrun_clock_and_milestones: true,
             exact_segmented_offline: true,
-            pure_idle_macro: false,
+            // MacroV10 and OfflineMacroV1 now share the same bounded exact
+            // prefix, closed material ledger, deterministic segmentation and
+            // fail-closed tail policy. This flag is a development coverage
+            // fact only; `authority_eligible` remains an independent release
+            // gate that still requires the external Gate C evidence.
+            pure_idle_macro: true,
             mining: true,
             production: true,
             research: true,
@@ -806,7 +811,7 @@ impl DomainCoverage {
             dyson: true,
             construction: true,
             space_station: true,
-            offline_and_time_warp: false,
+            offline_and_time_warp: true,
             content_packs: true,
             authority_eligible: false,
         }

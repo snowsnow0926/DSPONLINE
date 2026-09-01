@@ -22,7 +22,7 @@
   "main": "desktop/main.cjs",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 4318",
-    "build": "tsc -b && vite build && npm run budget:startup && npm run verify:native-thin-ui-boundary",
+    "build": "tsc -b && vite build && npm run budget:startup && npm run verify:native-thin-ui-boundary && npm run verify:native-coverage",
     "build:web": "cross-env VITE_APP_PLATFORM=web npm run build",
     "preview": "vite preview --host 127.0.0.1 --port 4318",
     "test": "vitest run",
@@ -58,6 +58,8 @@
     "typecheck": "tsc -b --pretty false",
     "budget:startup": "node scripts/verify-startup-budget.mjs",
     "verify:native-thin-ui-boundary": "node scripts/verify-native-thin-ui-boundary.mjs",
+    "native:coverage:generate": "node scripts/native-coverage-manifest.mjs --write",
+    "verify:native-coverage": "node scripts/native-coverage-manifest.mjs --verify",
     "release:manifest": "node deploy/create-release-manifest.mjs",
     "release:verify": "node deploy/create-release-manifest.mjs --verify",
     "download:page": "node scripts/create-download-site.mjs",

@@ -2116,3 +2116,14 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 3. 新的 flat-full 对照不调用稀疏选择器：它把 power 索引替换为全部实体，并强制堵塞分类走完整实体目录；共享分类函数在每行重新验证资格。4,097 行合成目录中，旧的两个额外诊断遍历共探测 `8,194` 行，新路径探测 `1` 条电源行和 `64` 条生产候选，共 `65` 行。1/2/4/8 worker 下，稀疏路径与强制 full oracle 的完整 JSON bytes 和 canonical SHA-256 均一致，源状态 bytes/hash 不变。
 4. 当前源码的 production-history 聚焦套件为 `25/25`，新增 flat-full 对照单测为 `1/1`；Rust fmt、workspace all-target strict clippy 和 diff check 通过。这里没有执行或复用最终完整 Vitest、Host、Server、E2E、24 小时、多硬件、安装、签名或灰度门禁；组合源码冻结后仍须全部重跑。
 5. 本切片不增加持久字段，不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、canonical 规则或 `authorityEligible=false`；未连接生产、未部署、未签名，也未读取或修改真实玩家存档。
+
+### 24.34 两类空间站薄 UI 跨 revision 稳定挂载（2026-09-01，开发候选）
+
+本纵切让恒星系空间站和轨道合同在同一个 authority session/run/registry/scope 内等待下一 revision 时继续显示上一份完整验证的有界 Rust 投影。它优化的是 renderer DOM、输入草稿和分页稳定性，不把旧投影提升为当前权威，也不改变任何游戏结算。
+
+1. 恒星系空间站 store 现在区分“scope 身份”和“精确 revision 身份”。普通 revision 前进可暂存同 system、同分页 selector、revision 不晚于当前权威的上一帧；run、registry、system 切换以及管理员恢复式 revision 回退都立即拒绝旧帧。新请求失败仍清空缓存并进入 unavailable，不会永久展示旧数据。
+2. hook 的四路分页 cursor 只在 session/run/registry/system 真正切换时复位，普通每秒 revision 不再跳回第一页。组件在 React effect 开始新请求之前就把旧 revision 识别为 loading，因此全部施工、交付、模块、升级、模式、输出口和分页按钮锁定；只有精确当前 revision 的完整投影才重新开放命令。
+3. 空间站内容块放在 loading 提示之前保持稳定 React 位置。专项实际保留同一个 overview DOM 节点和第 65 行分页，随后单调替换为 revision 42；旧 run 的迟到响应继续由 AbortSignal、token 和 request key 三重隔离。
+4. 轨道合同只在 session/run/registry 相同且缓存 revision 不晚于当前 authority 时显示旧帧；普通 revision 期间合同列表和量子交付草稿保持挂载，但接受、交付、领取、放弃和展示按钮全部锁定。run 切换的同步 render 已直接隐藏旧合同，不等待 effect 或 IPC 返回，因而没有一帧跨存档内容泄漏。
+5. 当前组合 focused 为 4 files、`27/27`，包含 store、两类组件和 App 接线；typecheck 与 diff check 通过。这里未执行最终完整 Vitest、production build、Chromium E2E、安装、24 小时、多硬件、签名或灰度，组合源码冻结后仍须重新运行。
+6. 本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host 协议、canonical 规则或 `authorityEligible=false`；未连接生产、未部署、未签名，也未读取或修改真实玩家存档。

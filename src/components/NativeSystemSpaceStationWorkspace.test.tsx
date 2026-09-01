@@ -353,6 +353,58 @@ describe("NativeSystemSpaceStationWorkspace", () => {
     expect(host.textContent).not.toContain("施工材料 0");
   });
 
+  it("keeps the verified DOM and page cursors read-only across a normal revision refresh", async () => {
+    let finishNext!: () => void;
+    const fetchProjection = vi.fn((request: NativeSystemSpaceStationWorkspaceProjectionRequest) => {
+      if (request.expectedRevision === 41) return Promise.resolve(projection(request));
+      return new Promise<NativeSystemSpaceStationWorkspaceProjection>((resolve) => {
+        finishNext = () => resolve(projection(request));
+      });
+    });
+    renderWorkspace({ fetchProjection });
+    await settle();
+    act(() => host.querySelector<HTMLButtonElement>(
+      "[data-native-system-station-page='requirement:next']",
+    )!.click());
+    await settle();
+    expect(host.textContent).toContain("施工材料 64");
+    const overview = host.querySelector("[data-native-system-space-station-overview]");
+    expect(overview).not.toBeNull();
+
+    const nextIdentity = { ...IDENTITY, revision: 42 };
+    act(() => root.render(<NativeSystemSpaceStationWorkspace
+      open
+      identity={nextIdentity}
+      fetchProjection={fetchProjection}
+      onClose={vi.fn()}
+      onSetModuleCount={vi.fn(() => true)}
+      onUpgradeStation={vi.fn(() => true)}
+      onUpgradeAllStations={vi.fn(() => true)}
+      onRequestMode={vi.fn(() => true)}
+      onSetOutput={vi.fn(() => true)}
+    />));
+    await settle();
+
+    expect(fetchProjection.mock.calls.at(-1)?.[0]).toMatchObject({
+      expectedRevision: 42,
+      requirementCursor: 64,
+    });
+    expect(host.querySelector("[data-native-system-space-station-overview]")).toBe(overview);
+    expect(host.textContent).toContain("施工材料 64");
+    expect(host.querySelector("[data-native-system-space-station='workspace-v1']")
+      ?.getAttribute("data-native-system-space-station-status")).toBe("loading");
+    expect(Array.from(host.querySelectorAll<HTMLButtonElement>(
+      "[data-native-system-station-command], [data-native-system-station-output-submit], [data-native-system-station-pagination] button",
+    )).every((button) => button.disabled)).toBe(true);
+
+    finishNext();
+    await settle();
+    expect(host.textContent).toContain("太阳联合工程区 r42");
+    expect(host.textContent).toContain("施工材料 64");
+    expect(host.querySelector("[data-native-system-space-station='workspace-v1']")
+      ?.getAttribute("data-native-system-space-station-status")).toBe("ready");
+  });
+
   it("shows a fail-closed error and retries from the same lineage", async () => {
     const fetchProjection = vi.fn()
       .mockRejectedValueOnce(new Error("host unavailable"))

@@ -262,9 +262,15 @@ function exactIdentity(
   left: NativeSystemSpaceStationWorkspaceIdentity,
   right: NativeSystemSpaceStationWorkspaceIdentity,
 ): boolean {
+  return sameIdentityScope(left, right) && left.revision === right.revision;
+}
+
+function sameIdentityScope(
+  left: NativeSystemSpaceStationWorkspaceIdentity,
+  right: NativeSystemSpaceStationWorkspaceIdentity,
+): boolean {
   return left.sessionId === right.sessionId && left.runId === right.runId &&
-    left.revision === right.revision && left.registryFingerprint === right.registryFingerprint &&
-    left.systemId === right.systemId;
+    left.registryFingerprint === right.registryFingerprint && left.systemId === right.systemId;
 }
 
 function identityKey(identity: NativeSystemSpaceStationWorkspaceIdentity): string {
@@ -511,8 +517,11 @@ export function selectNativeSystemSpaceStationWorkspaceFrame(
   identity: NativeSystemSpaceStationWorkspaceIdentity,
   selector: NativeSystemSpaceStationWorkspaceSelector,
 ): NativeSystemSpaceStationWorkspaceFrame | null {
-  return snapshot.status === "ready" && snapshot.frame && exactIdentity(snapshot.frame, identity) &&
-    sameSelector(snapshot.frame.selector, selector) ? snapshot.frame : null;
+  const frame = snapshot.frame;
+  if (!frame || !sameSelector(frame.selector, selector)) return null;
+  if (snapshot.status === "ready" && exactIdentity(frame, identity)) return frame;
+  return (snapshot.status === "ready" || snapshot.status === "loading") && sameIdentityScope(frame, identity) &&
+    frame.revision <= identity.revision ? frame : null;
 }
 
 export class NativeSystemSpaceStationWorkspaceStore {
@@ -557,7 +566,10 @@ export class NativeSystemSpaceStationWorkspaceStore {
     this.flight?.controller.abort();
     const token = ++this.token;
     this.currentKey = key;
-    const previous = this.snapshot.frame && exactIdentity(this.snapshot.frame, identity) ? this.snapshot.frame : null;
+    const previous = this.snapshot.frame && sameIdentityScope(this.snapshot.frame, identity) &&
+        this.snapshot.frame.revision <= identity.revision && sameSelector(this.snapshot.frame.selector, selector)
+      ? this.snapshot.frame
+      : null;
     const frozenSelector = Object.freeze({ ...selector });
     this.publish(Object.freeze({
       status: "loading" as const,

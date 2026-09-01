@@ -152,6 +152,61 @@ describe("NativeSystemSpaceStationWorkspaceStore", () => {
     expect(fetchProjection).toHaveBeenCalledWith(request(SYSTEM_STATION_IDENTITY, selector), expect.any(AbortSignal));
   });
 
+  it("keeps the last verified page set read-only while a newer revision is loading", async () => {
+    const selector = {
+      requirementCursor: 1, requirementLimit: 1,
+      inventoryCursor: 1, inventoryLimit: 1,
+      trayCursor: 2, trayLimit: 1,
+      stationCursor: 1, stationLimit: 1,
+    };
+    const store = new NativeSystemSpaceStationWorkspaceStore();
+    const source = createNativeSystemSpaceStationWorkspaceSource(
+      async (input) => systemStationProjection(input),
+      SYSTEM_STATION_IDENTITY,
+    )!;
+    await expect(store.refresh(source, SYSTEM_STATION_IDENTITY, selector)).resolves.toBe("committed");
+
+    const nextIdentity = { ...SYSTEM_STATION_IDENTITY, revision: 42 };
+    let resolveNext!: () => void;
+    const nextSource = createNativeSystemSpaceStationWorkspaceSource(
+      (input) => new Promise((resolve) => {
+        resolveNext = () => resolve(systemStationProjection(input));
+      }),
+      nextIdentity,
+    )!;
+    const pending = store.refresh(nextSource, nextIdentity, selector);
+    expect(store.getSnapshot()).toMatchObject({ status: "loading", requestedRevision: 42 });
+    const cached = selectNativeSystemSpaceStationWorkspaceFrame(store.getSnapshot(), nextIdentity, selector);
+    expect(cached).toMatchObject({ revision: 41, systemId: "helios" });
+    expect(cached?.projection.sharedInventory.rows[0]?.itemId).toBe("iron_ingot");
+
+    resolveNext();
+    await expect(pending).resolves.toBe("committed");
+    expect(selectNativeSystemSpaceStationWorkspaceFrame(store.getSnapshot(), nextIdentity, selector))
+      .toMatchObject({ revision: 42, systemId: "helios" });
+  });
+
+  it("never exposes a cached frame across run, registry, system, or revision rollback", async () => {
+    const store = new NativeSystemSpaceStationWorkspaceStore();
+    const source = createNativeSystemSpaceStationWorkspaceSource(
+      async (input) => systemStationProjection(input),
+      SYSTEM_STATION_IDENTITY,
+    )!;
+    await store.refresh(source, SYSTEM_STATION_IDENTITY);
+    for (const identity of [
+      { ...SYSTEM_STATION_IDENTITY, runId: "other-run", revision: 42 },
+      { ...SYSTEM_STATION_IDENTITY, registryFingerprint: "other-registry", revision: 42 },
+      { ...SYSTEM_STATION_IDENTITY, systemId: "other-system", revision: 42 },
+      { ...SYSTEM_STATION_IDENTITY, revision: 40 },
+    ]) {
+      expect(selectNativeSystemSpaceStationWorkspaceFrame(
+        { ...store.getSnapshot(), status: "loading", requestedRevision: identity.revision },
+        identity,
+        DEFAULT_NATIVE_SYSTEM_SPACE_STATION_SELECTOR,
+      )).toBeNull();
+    }
+  });
+
   it("fails closed for response lineage, echoed selector, schema, and decimal drift", async () => {
     const mutations = [
       (value: NativeSystemSpaceStationWorkspaceProjection) => ({ ...value, runId: "forged-run" }),

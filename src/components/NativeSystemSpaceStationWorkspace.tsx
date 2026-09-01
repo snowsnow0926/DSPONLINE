@@ -192,7 +192,10 @@ export function NativeSystemSpaceStationWorkspace({
     onClose();
   };
   const title = projection?.system.displayName ?? identity?.systemId ?? "系统空间站";
-  const loading = snapshot.status === "loading";
+  const loading = snapshot.status === "loading" || Boolean(
+    frame && identity && frame.revision < identity.revision,
+  );
+  const displayStatus = loading ? "loading" : snapshot.status;
   const unavailable = snapshot.status === "unavailable" || !identity || !fetchProjection ||
     snapshot.status === "empty" && open;
   const commandsEnabled = Boolean(projection && identity && frame &&
@@ -205,7 +208,7 @@ export function NativeSystemSpaceStationWorkspace({
     ariaLabel={`${title}原生空间站`}
     onRequestClose={handleClose}
     data-native-system-space-station="workspace-v1"
-    data-native-system-space-station-status={snapshot.status}
+    data-native-system-space-station-status={displayStatus}
   >
     <header className="system-space-station-header">
       <div className="system-space-station-title">
@@ -217,10 +220,6 @@ export function NativeSystemSpaceStationWorkspace({
     </header>
 
     <div className="system-space-station-scroll">
-      {loading ? <section className="system-space-station-card" role="status" data-native-system-space-station-loading>
-        <header><RefreshCw size={17} /><strong>正在读取 Rust 权威空间站分页</strong><span>只有同一 session、run、revision 与目录指纹的完整响应才会显示。</span></header>
-      </section> : null}
-
       {unavailable && !loading ? <section className="system-space-station-card" role="alert" data-native-system-space-station-error>
         <header><CircleOff size={17} /><strong>原生空间站投影暂不可用</strong><span>界面已安全停在空状态，不会回退读取 JavaScript GameState 或旧缓存。</span></header>
         <div><button type="button" onClick={workspace.retry}><RefreshCw size={14} />重新读取</button></div>
@@ -411,6 +410,9 @@ export function NativeSystemSpaceStationWorkspace({
           </div>}
         </section>
       </> : null}
+      {loading ? <section className="system-space-station-card" role="status" data-native-system-space-station-loading>
+        <header><RefreshCw size={17} /><strong>正在读取 Rust 权威空间站分页</strong><span>只有同一 session、run、revision 与目录指纹的完整响应才会显示。</span></header>
+      </section> : null}
     </div>
 
     <footer className="system-space-station-footer">

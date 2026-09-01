@@ -3,7 +3,10 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DesktopNativeCoreOrbitalContractWorkspaceProjectionResult } from "../desktop";
+import type {
+  DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest,
+  DesktopNativeCoreOrbitalContractWorkspaceProjectionResult,
+} from "../desktop";
 import { addStationInteger, STATION_MAX_INTEGER_DIGITS } from "../game/stationMath";
 import { GameDialogProvider } from "./GameDialogProvider";
 import { NativeOrbitalContractWorkspace } from "./NativeOrbitalContractWorkspace";
@@ -118,12 +121,12 @@ describe("NativeOrbitalContractWorkspace", () => {
   });
 
   it("re-reads a same-revision projection when a rejected command leaves the FIFO", async () => {
-    const identity = {
+    const identity: DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest = {
       sessionId: "core-main-1",
       runId: "run-1",
       expectedRevision: 7,
       expectedRegistryFingerprint: "7df8cf3a",
-    } as const;
+    };
     let current = projection;
     const fetchProjection = vi.fn(async () => current);
     const render = (pending: boolean) => root.render(
@@ -153,6 +156,92 @@ describe("NativeOrbitalContractWorkspace", () => {
     });
     expect(fetchProjection).toHaveBeenCalledTimes(2);
     expect(host.textContent).toContain("任务日 101");
+  });
+
+  it("keeps a verified revision mounted read-only while the next revision loads", async () => {
+    const identity = {
+      sessionId: "core-main-1",
+      runId: "run-1",
+      expectedRevision: 7,
+      expectedRegistryFingerprint: "7df8cf3a",
+    } as const;
+    let finishNext!: () => void;
+    const fetchProjection = vi.fn((request: DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest) => request.expectedRevision === 7
+      ? Promise.resolve(projection)
+      : new Promise<DesktopNativeCoreOrbitalContractWorkspaceProjectionResult>((resolve) => {
+        finishNext = () => resolve({ ...projection, revision: 8, taskDay: 101 });
+      }));
+    const render = (nextIdentity: DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest) => root.render(
+      <GameDialogProvider><NativeOrbitalContractWorkspace
+        open
+        identity={nextIdentity}
+        fetchProjection={fetchProjection}
+        onClose={() => undefined}
+        onIntent={() => true}
+      /></GameDialogProvider>,
+    );
+    await act(async () => {
+      render(identity);
+      await Promise.resolve();
+    });
+    const input = host.querySelector<HTMLInputElement>('input[aria-label="processor量子交付数量"]')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "10");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(input.value).toBe("10");
+
+    await act(async () => {
+      render({ ...identity, expectedRevision: 8 });
+      await Promise.resolve();
+    });
+    expect(host.querySelector('input[aria-label="processor量子交付数量"]')).toBe(input);
+    expect(input.value).toBe("10");
+    expect(host.querySelector("[data-native-orbital-contract='workspace-v1']")
+      ?.getAttribute("data-native-orbital-contract-status")).toBe("loading");
+    expect(Array.from(host.querySelectorAll<HTMLButtonElement>("button"))
+      .filter((button) => ["接受合同", "量子交付", "领取完成奖励", "放弃并部分结算"].some(
+        (label) => button.textContent?.includes(label),
+      )).every((button) => button.disabled)).toBe(true);
+
+    await act(async () => {
+      finishNext();
+      await Promise.resolve();
+    });
+    expect(host.textContent).toContain("任务日 101");
+    expect(host.querySelector("[data-native-orbital-contract='workspace-v1']")
+      ?.getAttribute("data-native-orbital-contract-status")).toBe("ready");
+  });
+
+  it("never renders an old contract projection across a run change", async () => {
+    const firstIdentity = {
+      sessionId: "core-main-1",
+      runId: "run-1",
+      expectedRevision: 7,
+      expectedRegistryFingerprint: "7df8cf3a",
+    } as const;
+    const firstFetch = vi.fn(async () => projection);
+    await act(async () => {
+      root.render(<GameDialogProvider><NativeOrbitalContractWorkspace
+        open identity={firstIdentity} fetchProjection={firstFetch}
+        onClose={() => undefined} onIntent={() => true}
+      /></GameDialogProvider>);
+      await Promise.resolve();
+    });
+    expect(host.textContent).toContain("进行中合同");
+
+    const nextIdentity = { ...firstIdentity, runId: "run-2", expectedRevision: 8 };
+    await act(async () => {
+      root.render(<GameDialogProvider><NativeOrbitalContractWorkspace
+        open identity={nextIdentity} fetchProjection={() => new Promise(() => undefined)}
+        onClose={() => undefined} onIntent={() => true}
+      /></GameDialogProvider>);
+      await Promise.resolve();
+    });
+    expect(host.textContent).not.toContain("进行中合同");
+    expect(host.textContent).not.toContain("由 Rust 生成的有界合同");
+    expect(host.querySelector("[data-native-orbital-contract='workspace-v1']")
+      ?.getAttribute("data-native-orbital-contract-status")).toBe("loading");
   });
 
   it("shares the Web/Rust 256-digit station-ledger saturation vector", () => {

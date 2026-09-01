@@ -36,6 +36,15 @@ function deliveryMaximum(row: DesktopNativeCoreOrbitalContractRow, itemId: strin
   return (available < remaining ? available : remaining).toString();
 }
 
+function projectionMatchesIdentityScope(
+  projection: DesktopNativeCoreOrbitalContractWorkspaceProjectionResult,
+  identity: DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest,
+): boolean {
+  return projection.sessionId === identity.sessionId && projection.runId === identity.runId &&
+    projection.registryFingerprint === identity.expectedRegistryFingerprint &&
+    projection.revision <= identity.expectedRevision;
+}
+
 /**
  * Native authority route: this component receives only the bounded Rust
  * contract projection and emits one semantic intent. It deliberately has no
@@ -87,11 +96,17 @@ export function NativeOrbitalContractWorkspace({
     return () => { active = false; };
   }, [fetchProjection, identity, open, pending, reload]);
 
+  const visibleProjection = projection && identity && projectionMatchesIdentityScope(projection, identity)
+    ? projection
+    : null;
   const commandEnabled = Boolean(
-    projection && identity && commandsAvailable && !pending && status === "ready" &&
-    projection.revision === identity.expectedRevision,
+    visibleProjection && identity && commandsAvailable && !pending && status === "ready" &&
+    visibleProjection.revision === identity.expectedRevision,
   );
-  const acceptedIds = useMemo(() => new Set(projection?.accepted.map((row) => row.id) ?? []), [projection]);
+  const acceptedIds = useMemo(
+    () => new Set(visibleProjection?.accepted.map((row) => row.id) ?? []),
+    [visibleProjection],
+  );
   const send = (intent: DesktopNativeOrbitalContractIntent, notice: string) => {
     if (!commandEnabled) return false;
     return onIntent(intent, notice);
@@ -108,10 +123,10 @@ export function NativeOrbitalContractWorkspace({
     <header className="orbital-station-header">
       <div><i><Satellite size={22} /></i><span><small>Rust 权威 · GameState v47 · revision {identity?.expectedRevision ?? "—"}</small><strong>轨道空间站合同</strong></span></div>
       <dl>
-        <div><dt>任务日</dt><dd>{projection?.taskDay ?? "—"}</dd></div>
-        <div><dt>已完成</dt><dd>{projection?.completedContracts ?? "—"}</dd></div>
-        <div><dt>轨道徽记</dt><dd><Coins size={13} />{projection ? quantity(projection.orbitalMarks) : "—"}</dd></div>
-        <div><dt>声望</dt><dd><Trophy size={13} />{projection ? quantity(projection.stationReputation) : "—"}</dd></div>
+        <div><dt>任务日</dt><dd>{visibleProjection?.taskDay ?? "—"}</dd></div>
+        <div><dt>已完成</dt><dd>{visibleProjection?.completedContracts ?? "—"}</dd></div>
+        <div><dt>轨道徽记</dt><dd><Coins size={13} />{visibleProjection ? quantity(visibleProjection.orbitalMarks) : "—"}</dd></div>
+        <div><dt>声望</dt><dd><Trophy size={13} />{visibleProjection ? quantity(visibleProjection.stationReputation) : "—"}</dd></div>
       </dl>
       <button type="button" onClick={onClose} aria-label="关闭轨道合同"><X size={18} /></button>
     </header>
@@ -129,19 +144,19 @@ export function NativeOrbitalContractWorkspace({
         <p>不会回退读取 renderer GameState，也不会调用旧版合同写入函数。</p>
         <button type="button" onClick={() => setReload((value) => value + 1)}><RefreshCw size={14} />重试</button>
       </section> : null}
-      {projection ? <section className="orbital-station-panel station-contract-panel">
-        <header className="station-section-heading"><div><small>任务日 {projection.taskDay}</small><strong>每日出口合同</strong></div><span>{projection.accepted.length}/3 已接受</span></header>
+      {visibleProjection ? <section className="orbital-station-panel station-contract-panel">
+        <header className="station-section-heading"><div><small>任务日 {visibleProjection.taskDay}</small><strong>每日出口合同</strong></div><span>{visibleProjection.accepted.length}/3 已接受</span></header>
         <div className="station-contract-grid">
-          {projection.offers.map((contract) => <article className={contract.special ? "special" : ""} key={contract.id}>
+          {visibleProjection.offers.map((contract) => <article className={contract.special ? "special" : ""} key={contract.id}>
             <header><span>{contract.special ? "特别合同" : contract.difficulty}</span><strong>{contract.title}</strong></header>
             <p>{contract.summary}</p>
             <ul>{contract.requirements.map((requirement, index) => <li key={`${requirement.itemId}:${index}`}><span>{requirement.itemId}</span><strong>{quantity(requirement.amount)}</strong><small>{requirement.channel === "quantum" ? "仅量子" : "量子手动交付可用"}</small></li>)}</ul>
-            <footer><span><Coins size={13} />{quantity(contract.rewardMarks)}</span><span><Trophy size={13} />{quantity(contract.rewardReputation)}</span><button type="button" disabled={!commandEnabled || projection.accepted.length >= 3} onClick={() => send({ type: "accept", contractId: contract.id }, "轨道合同已由 Rust 接受")}>接受合同</button></footer>
+            <footer><span><Coins size={13} />{quantity(contract.rewardMarks)}</span><span><Trophy size={13} />{quantity(contract.rewardReputation)}</span><button type="button" disabled={!commandEnabled || visibleProjection.accepted.length >= 3} onClick={() => send({ type: "accept", contractId: contract.id }, "轨道合同已由 Rust 接受")}>接受合同</button></footer>
           </article>)}
         </div>
 
         <section className="station-accepted-contracts"><header><strong>进行中的合同</strong><small>物资扣除、进度与奖励均由 Rust 重算</small></header>
-          {projection.accepted.length ? projection.accepted.map((contract) => <article key={contract.id}>
+          {visibleProjection.accepted.length ? visibleProjection.accepted.map((contract) => <article key={contract.id}>
             <header><div><span>{contract.difficulty} · 截止任务日 {contract.expiresAtTaskDay}</span><strong>{contract.title}</strong></div><b>{Math.floor(contract.completionBasisPoints / 100)}%</b></header>
             {contract.requirements.map((requirement, index) => {
               const draftKey = `${contract.id}:${requirement.itemId}`;
@@ -158,7 +173,7 @@ export function NativeOrbitalContractWorkspace({
           </article>) : <p>尚未接受合同。</p>}
         </section>
 
-        <section className="station-showcase-history"><header><strong>已完成出口合同</strong><small>{projection.completedContracts} 份</small></header>{projection.completedHistory.map((contract) => <button className={projection.featuredContractId === contract.id ? "active" : ""} type="button" disabled={!commandEnabled || acceptedIds.has(contract.id)} key={contract.id} onClick={() => send({ type: "feature", contractId: projection.featuredContractId === contract.id ? null : contract.id }, "展示合同已由 Rust 更新")}><Trophy size={14} /><span>{contract.title}</span><small>{contract.difficulty}</small></button>)}</section>
+        <section className="station-showcase-history"><header><strong>已完成出口合同</strong><small>{visibleProjection.completedContracts} 份</small></header>{visibleProjection.completedHistory.map((contract) => <button className={visibleProjection.featuredContractId === contract.id ? "active" : ""} type="button" disabled={!commandEnabled || acceptedIds.has(contract.id)} key={contract.id} onClick={() => send({ type: "feature", contractId: visibleProjection.featuredContractId === contract.id ? null : contract.id }, "展示合同已由 Rust 更新")}><Trophy size={14} /><span>{contract.title}</span><small>{contract.difficulty}</small></button>)}</section>
       </section> : null}
     </main>
   </WorkspaceFrame>;

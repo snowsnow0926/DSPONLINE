@@ -32,7 +32,6 @@ function identityToken(identity: NativeSystemSpaceStationWorkspaceIdentity | nul
   return identity ? [
     identity.sessionId,
     identity.runId,
-    identity.revision,
     identity.registryFingerprint,
     identity.systemId,
   ].join("\u0000") : "";

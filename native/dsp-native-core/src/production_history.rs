@@ -1478,8 +1478,10 @@ impl CoreState {
             // planet/grid into usize::MAX and could make an unrelated custom
             // grid appear powered. Borrowed string pairs avoid allocations
             // without changing identity or the missing-field defaults.
-            let power_source_probes =
-                runtime.indexed_map(entities, |index, value| -> Option<(u32, String)> {
+            let power_source_probes = runtime.indexed_map(
+                &self.factory_topology.power_source_indices,
+                |_, &index| -> Option<(u32, String)> {
+                    let value = entities.get(index)?;
                     let kind = self
                         .symbols
                         .resolve(self.entities.kinds[index])
@@ -1503,7 +1505,8 @@ impl CoreState {
                         .and_then(Value::as_str)
                         .unwrap_or("grid-a");
                     Some((self.entities.planets[index], grid_id.to_owned()))
-                });
+                },
+            );
             let mut power_source_grids = HashMap::<u32, HashSet<String>>::with_capacity(
                 self.factory_topology.power_source_indices.len(),
             );
@@ -1531,7 +1534,7 @@ impl CoreState {
                 .get("water_pump")
                 .map(|building| building.output_capacity)
                 .unwrap_or(0.0);
-            let blocked_probes = runtime.indexed_map(entities, |index, value| {
+            let inspect_blocked = |index: usize, value: &Value| {
                 let entity = value.as_object()?;
                 let kind = self
                     .symbols
@@ -1738,7 +1741,16 @@ impl CoreState {
                     }
                 };
                 Some((count, is_blocked))
-            });
+            };
+            let blocked_probes = if rate_index_dense || rate_index_invalid {
+                runtime.indexed_map(entities, |index, value| inspect_blocked(index, value))
+            } else {
+                runtime.indexed_map(rate_indices, |_, &index| {
+                    entities
+                        .get(index)
+                        .and_then(|value| inspect_blocked(index, value))
+                })
+            };
             // Float additions intentionally remain in persisted entity order;
             // workers only perform independent read-only classification.
             let mut blocked = 0.0;
@@ -2166,6 +2178,29 @@ mod tests {
         (state, base, entities)
     }
 
+    fn sparse_refresh_diagnostics_fixture() -> (CoreState, Map<String, Value>, Vec<Value>) {
+        let (_, base, mut entities, _) = history_parallel_fixture();
+        for (index, entity) in entities.iter_mut().enumerate().skip(65) {
+            *entity = json!({
+                "id": format!("storage-{index:05}"),
+                "kind": "storage",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "storage_mk1",
+                "machineCount": 0,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "routingCursor": 0
+            });
+        }
+        let state = history_fixture_state(&base, &entities);
+        (state, base, entities)
+    }
+
     fn history_sample(elapsed_seconds: f64, rate: f64, duration: f64) -> Value {
         serde_json::json!({
             "elapsedSeconds": elapsed_seconds,
@@ -2285,6 +2320,84 @@ mod tests {
         for candidate in &encoded[1..] {
             assert_eq!(candidate, &encoded[0]);
         }
+    }
+
+    #[test]
+    fn sparse_refresh_diagnostics_match_forced_full_scan_bytes_and_hashes() {
+        let (indexed_state, base, entities) = sparse_refresh_diagnostics_fixture();
+        assert_eq!(indexed_state.factory_topology.power_source_indices.len(), 1);
+        assert_eq!(
+            indexed_state
+                .factory_topology
+                .production_history_rate_indices
+                .len(),
+            64
+        );
+        assert!(
+            !indexed_state
+                .factory_topology
+                .production_history_rate_full_scan_required
+        );
+
+        let mut full_scan_state = indexed_state.clone();
+        let full_scan_topology = std::sync::Arc::make_mut(&mut full_scan_state.factory_topology);
+        full_scan_topology.power_source_indices = (0..entities.len()).collect();
+        full_scan_topology.production_history_rate_indices.clear();
+        full_scan_topology.production_history_rate_full_scan_required = true;
+
+        let source_bytes = serde_json::to_vec(&base).unwrap();
+        let source_hash = crate::canonical::canonical_sha256(&Value::Object(base.clone()));
+        for workers in [1, 2, 4, 8] {
+            let runtime = DeterministicRuntime::for_test(workers);
+            let mut indexed = base.clone();
+            indexed_state
+                .record_production_history_with_records_and_runtime(
+                    &mut indexed,
+                    &entities,
+                    Some(PreparedBeltFlow::Exact(
+                        crate::belts::BeltFlowAggregate::default(),
+                    )),
+                    &runtime,
+                )
+                .unwrap();
+            let mut oracle = base.clone();
+            full_scan_state
+                .record_production_history_with_records_and_runtime(
+                    &mut oracle,
+                    &entities,
+                    Some(PreparedBeltFlow::Exact(
+                        crate::belts::BeltFlowAggregate::default(),
+                    )),
+                    &runtime,
+                )
+                .unwrap();
+
+            assert_eq!(
+                serde_json::to_vec(&indexed).unwrap(),
+                serde_json::to_vec(&oracle).unwrap(),
+                "indexed diagnostics changed persisted bytes at {workers} workers"
+            );
+            assert_eq!(
+                crate::canonical::canonical_sha256(&Value::Object(indexed)),
+                crate::canonical::canonical_sha256(&Value::Object(oracle)),
+                "indexed diagnostics changed canonical hash at {workers} workers"
+            );
+            assert_eq!(serde_json::to_vec(&base).unwrap(), source_bytes);
+            assert_eq!(
+                crate::canonical::canonical_sha256(&Value::Object(base.clone())),
+                source_hash
+            );
+        }
+        eprintln!(
+            "production-history-refresh-diagnostics-synthetic\tentities={}\tindexed-power-probes={}\tindexed-blocked-probes={}\tlegacy-diagnostic-probes={}",
+            entities.len(),
+            indexed_state.factory_topology.power_source_indices.len(),
+            indexed_state
+                .factory_topology
+                .production_history_rate_indices
+                .len(),
+            entities.len() * 2,
+        );
     }
 
     #[test]

@@ -2106,3 +2106,13 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 4. 建筑制造中心和戴森规划在同 session/scope 且旧 revision 不大于当前 authority revision 时，可继续挂载最近一份**完整验证过的只读投影**等待新页。DOM、搜索/草稿、焦点和 IME 不再被普通模拟 revision 每秒卸载；run/活动行星、registry/恒星系或投影可用性变化会同步移除旧 frame。缓存期间全部 Rust 权威按钮、Enter、失焦和选择命令锁死，App 命令处理器仍只接受当前精确 frame，不会拿旧 frame 提交，也不会回退读取 renderer GameState。
 5. 制造中心相关组件/App focused 为 `19/19`，戴森组件/store/命令/App focused 为 `23/23`，两轮 TypeScript 均通过。本节数字仍不是源码冻结的完整 Vitest、native、server、build 或 E2E；这些组合门禁必须在剩余功能合并后重新从零执行。
 6. 本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；不连接生产、不部署、不签名，也不读取或修改真实玩家存档。
+
+### 24.33 生产统计刷新边界复用稳定拓扑（2026-09-01，开发候选）
+
+本纵切消除每个 10 秒生产统计刷新边界上两次可证明多余的全实体诊断遍历。刷新仍须为库存快照和历史速率按持久顺序读取全部实体；本节没有把这个必要主遍历伪称为 `O(active)`，只把紧随其后的电源网发现和堵塞建筑分类改为复用冷启动已经完整建立的稳定拓扑索引。
+
+1. 电源网探测只访问 `power_source_indices` 中的内置 power 行和 `ray_receiver/ray_power` 行；每行仍从原存档对象读取精确 `powerGridId` 字符串，并再次验证 kind/building/recipe，因而不会把未知 MOD 网格折叠成同一个紧凑 ID，也不会改变缺失字段默认值。
+2. 堵塞分类复用按持久实体行号稳定排序的 `production_history_rate_indices`。稀疏目录只访问 machine/vein 候选；索引达到精确 75%、构建期已经释放稠密索引、或索引有效性无法证明时，仍走历史全扫描。分类函数、浮点累加顺序、research/power/resource/输出堵塞规则均未复制或改写。
+3. 新的 flat-full 对照不调用稀疏选择器：它把 power 索引替换为全部实体，并强制堵塞分类走完整实体目录；共享分类函数在每行重新验证资格。4,097 行合成目录中，旧的两个额外诊断遍历共探测 `8,194` 行，新路径探测 `1` 条电源行和 `64` 条生产候选，共 `65` 行。1/2/4/8 worker 下，稀疏路径与强制 full oracle 的完整 JSON bytes 和 canonical SHA-256 均一致，源状态 bytes/hash 不变。
+4. 当前源码的 production-history 聚焦套件为 `25/25`，新增 flat-full 对照单测为 `1/1`；Rust fmt、workspace all-target strict clippy 和 diff check 通过。这里没有执行或复用最终完整 Vitest、Host、Server、E2E、24 小时、多硬件、安装、签名或灰度门禁；组合源码冻结后仍须全部重跑。
+5. 本切片不增加持久字段，不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、canonical 规则或 `authorityEligible=false`；未连接生产、未部署、未签名，也未读取或修改真实玩家存档。

@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Number, Value};
@@ -32,6 +34,19 @@ const TERMINAL_SAIL_ITEM_ID: &str = "solar_sail";
 const SETTLEMENT_ENTITY_ROWS_PER_CHUNK: usize = 256;
 const MAX_BOUNDED_HANDCRAFT_TAIL_BATCHES: i128 = 4_096;
 const HANDCRAFT_PROGRESS_EPSILON: f64 = 0.0001;
+
+/// The product authority runs one pure-idle settlement at a time. The Rust
+/// test harness normally overlaps dozens of large synthetic macro settlements,
+/// multiplying deep JSON/Rayon frames in one Windows process. Keep that
+/// artificial overlap out of test builds while leaving exact-mode tests and
+/// every production build untouched.
+#[cfg(test)]
+fn macro_v10_test_guard() -> MutexGuard<'static, ()> {
+    static GATE: OnceLock<Mutex<()>> = OnceLock::new();
+    GATE.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
 
 type MaterialTotals = BTreeMap<String, i128>;
 type OrbitMaterialTotals = BTreeMap<String, MaterialTotals>;
@@ -7725,6 +7740,9 @@ fn advance_bounded_with_runtime(
     macro_v10: bool,
     deterministic_runtime: &DeterministicRuntime,
 ) -> anyhow::Result<CoreAdvanceResult> {
+    #[cfg(test)]
+    let _macro_v10_test_guard = macro_v10.then(macro_v10_test_guard);
+
     if request.base_revision != state.revision {
         bail!("native pure-idle advance base revision is not current");
     }

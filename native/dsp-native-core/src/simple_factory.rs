@@ -657,6 +657,8 @@ enum PowerProbeMode {
     FlatFull,
     #[cfg(test)]
     IndexedFailAfterCollect,
+    #[cfg(test)]
+    IndexedFailAfterRuntimeMutation,
 }
 
 /// Session-only writer-closed cache for power-source probes.
@@ -758,8 +760,21 @@ impl PowerProbeRuntime {
             .saturating_add(
                 sources.saturating_mul(std::mem::size_of::<Option<PowerSourceProbe>>() as u64),
             )
+            // A cold/dense candidate simultaneously owns the persisted-order
+            // source-slot selection and the derived settlement entity rows.
+            .saturating_add(
+                sources
+                    .saturating_mul(std::mem::size_of::<usize>() as u64)
+                    .saturating_mul(2),
+            )
             .saturating_add(dynamic.saturating_mul(std::mem::size_of::<usize>() as u64))
-            .saturating_add(profile_rows.saturating_mul(std::mem::size_of::<[u64; 3]>() as u64))
+            // Arc::make_mut keeps the committed signature alive while the
+            // candidate builds its replacement.
+            .saturating_add(
+                profile_rows
+                    .saturating_mul(std::mem::size_of::<[u64; 3]>() as u64)
+                    .saturating_mul(2),
+            )
     }
 
     fn select(
@@ -1902,6 +1917,10 @@ fn collect_power_sources_with_runtime(
             selection.scan,
             mode,
         );
+        #[cfg(test)]
+        if mode == PowerProbeMode::IndexedFailAfterRuntimeMutation {
+            bail!("injected failure after power probe runtime mutation");
+        }
         return Ok(PreparedPowerSources {
             scan: selection.scan,
             settlement_entity_indices,
@@ -1958,6 +1977,10 @@ fn collect_power_sources_with_runtime(
         bail!("native sparse power probe replay diverged");
     }
     std::sync::Arc::make_mut(power_probe_runtime).commit_sparse(selection.scan);
+    #[cfg(test)]
+    if mode == PowerProbeMode::IndexedFailAfterRuntimeMutation {
+        bail!("injected failure after power probe runtime mutation");
+    }
     Ok(PreparedPowerSources {
         scan: selection.scan,
         settlement_entity_indices,
@@ -13047,28 +13070,84 @@ pub(crate) mod tests {
         let source_hash = state.canonical_sha256().unwrap();
         let source_revision = state.revision;
 
-        let error = match prepare_advance_with_power_probe_test_options(
+        for (mode, expected_error) in [
+            (
+                PowerProbeMode::IndexedFailAfterCollect,
+                "injected failure after power probe candidate collection",
+            ),
+            (
+                PowerProbeMode::IndexedFailAfterRuntimeMutation,
+                "injected failure after power probe runtime mutation",
+            ),
+        ] {
+            let error = match prepare_advance_with_power_probe_test_options(
+                &state,
+                1.0,
+                1.0,
+                false,
+                &DeterministicRuntime::for_test(4),
+                mode,
+                Some(1.0),
+            ) {
+                Ok(_) => panic!("injected power probe failure unexpectedly committed"),
+                Err(error) => error,
+            };
+            assert!(format!("{error:#}").contains(expected_error));
+            assert_eq!(state.revision, source_revision);
+            assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+            assert_eq!(
+                serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+                source_bytes
+            );
+            let retained = state.prepared_power_probe_runtime().unwrap();
+            assert!(std::sync::Arc::ptr_eq(&source_runtime, &retained));
+            assert_eq!(retained.scan_history_for_test(), source_history);
+        }
+    }
+
+    #[test]
+    fn power_probe_memory_estimate_includes_candidate_peak_buffers() {
+        let state = power_probe_oactive_fixture(1_024, 3);
+        let prepared = prepare_advance_with_power_probe_test_options(
             &state,
             1.0,
             1.0,
             false,
             &DeterministicRuntime::for_test(4),
-            PowerProbeMode::IndexedFailAfterCollect,
+            PowerProbeMode::Indexed,
             Some(1.0),
-        ) {
-            Ok(_) => panic!("injected power probe failure unexpectedly committed"),
-            Err(error) => error,
-        };
-        assert!(format!("{error:#}").contains("injected failure after power probe"));
-        assert_eq!(state.revision, source_revision);
-        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
-        assert_eq!(
-            serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
-            source_bytes
-        );
-        let retained = state.prepared_power_probe_runtime().unwrap();
-        assert!(std::sync::Arc::ptr_eq(&source_runtime, &retained));
-        assert_eq!(retained.scan_history_for_test(), source_history);
+        )
+        .unwrap();
+        let runtime = prepared.power_probe_runtime;
+        let sources = runtime.source_count as u64;
+        let dynamic = runtime.dynamic_source_slots.capacity() as u64;
+        let profile_rows = runtime
+            .profile_signature
+            .as_ref()
+            .map(Vec::capacity)
+            .unwrap_or(0) as u64;
+        let conservative_candidate_lower_bound = (std::mem::size_of::<PowerProbeRuntime>() as u64)
+            .saturating_mul(2)
+            .saturating_add(
+                sources
+                    .saturating_mul(std::mem::size_of::<Option<StaticRenewablePowerProbe>>() as u64)
+                    .saturating_mul(2),
+            )
+            .saturating_add(
+                sources.saturating_mul(std::mem::size_of::<Option<PowerSourceProbe>>() as u64),
+            )
+            .saturating_add(
+                sources
+                    .saturating_mul(std::mem::size_of::<usize>() as u64)
+                    .saturating_mul(2),
+            )
+            .saturating_add(dynamic.saturating_mul(std::mem::size_of::<usize>() as u64))
+            .saturating_add(
+                profile_rows
+                    .saturating_mul(std::mem::size_of::<[u64; 3]>() as u64)
+                    .saturating_mul(2),
+            );
+        assert!(runtime.estimated_bytes() >= conservative_candidate_lower_bound);
     }
 
     #[test]

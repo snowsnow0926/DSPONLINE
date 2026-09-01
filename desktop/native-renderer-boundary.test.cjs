@@ -795,6 +795,14 @@ test("Electron invoke rejection is reconstructed from only a published suffix", 
   });
   assert.equal(macroBusy.code, "NATIVE_PLAYER_AUTHORITY_MACRO_BUSY");
 
+  const macroClockInvalid = createRendererNativeRejection(new Error(
+    "Error invoking remote method（NATIVE_PLAYER_AUTHORITY_MACRO_CLOCK_INVALID）",
+  ), {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
+    message: "Windows 原生纯挂机主时钟无效",
+  });
+  assert.equal(macroClockInvalid.code, "NATIVE_PLAYER_AUTHORITY_MACRO_CLOCK_INVALID");
+
   const macroUncertain = createRendererNativeRejection(new Error(
     "Error invoking remote method（NATIVE_PLAYER_AUTHORITY_MACRO_UNCERTAIN）",
   ), {

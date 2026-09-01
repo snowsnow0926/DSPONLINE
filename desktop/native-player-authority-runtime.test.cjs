@@ -359,6 +359,7 @@ function fixture(overrides = {}) {
     checkpoint,
     calls,
     timers,
+    now() { return now; },
     setNow(value) { now = value; },
   };
 }
@@ -882,13 +883,15 @@ test("macro broker treats persistence BUSY as a definite no-op and remains retry
   ];
   const broker = new NativePlayerAuthorityMacroBroker({
     runtime: value.runtime,
+    now: value.now,
     createId: () => issued.shift(),
   });
 
+  value.setNow(11_000);
   const activeGate = deferred();
   const activeBoundary = value.runtime.withSettledPersistenceBoundary(() => activeGate.promise);
   await assert.rejects(
-    broker.start({ expectedRevision: 7, simulationMilliseconds: 30_000, wallMilliseconds: 5_000 }),
+    broker.start({ expectedRevision: 7, effectiveMultiplier: 6 }),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
   );
   assert.equal(value.calls.filter(([operation]) => operation === "macro-advance").length, 0);
@@ -896,28 +899,27 @@ test("macro broker treats persistence BUSY as a definite no-op and remains retry
     broker.recover(),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_RECOVERY_UNAVAILABLE",
   );
-  value.setNow(11_000);
   activeGate.resolve("active-released");
   assert.equal(await activeBoundary, "active-released");
   await value.runtime.settleDue();
   assert.equal(value.runtime.snapshot().revision, 8);
 
   await assert.rejects(
-    broker.start({ expectedRevision: 7, simulationMilliseconds: 30_000, wallMilliseconds: 5_000 }),
+    broker.start({ expectedRevision: 7, effectiveMultiplier: 6 }),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_START_REBASE_REQUIRED",
   );
   assert.equal(value.calls.filter(([operation]) => operation === "macro-advance").length, 0);
 
-  const started = await broker.start({
-    expectedRevision: 8, simulationMilliseconds: 30_000, wallMilliseconds: 5_000,
-  });
+  value.setNow(12_000);
+  const started = await broker.start({ expectedRevision: 8, effectiveMultiplier: 6 });
   assert.equal(started.state, "macro-active");
   assert.equal(started.revision, 10);
 
+  value.setNow(13_000);
   const macroGate = deferred();
   const macroBoundary = value.runtime.withStartupReconciliationBoundary(() => macroGate.promise);
   await assert.rejects(
-    broker.advance({ simulationMilliseconds: 30_000, wallMilliseconds: 5_000 }),
+    broker.advance(),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY",
   );
   await assert.rejects(
@@ -930,7 +932,8 @@ test("macro broker treats persistence BUSY as a definite no-op and remains retry
   macroGate.resolve("macro-released");
   assert.equal(await macroBoundary, "macro-released");
 
-  const advanced = await broker.advance({ simulationMilliseconds: 30_000, wallMilliseconds: 5_000 });
+  value.setNow(16_000);
+  const advanced = await broker.advance();
   assert.equal(advanced.revision, 12);
   assert.deepEqual(await broker.finish(), { schemaVersion: 1, state: "finished", revision: 12 });
   assert.equal(value.calls.filter(([operation]) => operation === "macro-advance").length, 2);
@@ -973,6 +976,7 @@ test("macro start observes an exact tick gate as BUSY and starts once the newer 
   let issued = 0;
   const broker = new NativePlayerAuthorityMacroBroker({
     runtime: value.runtime,
+    now: value.now,
     createId: () => {
       issued += 1;
       return "epoch-after-tick";
@@ -985,7 +989,7 @@ test("macro start observes an exact tick gate as BUSY and starts once the newer 
   assert.equal(value.runtime.snapshot().inFlight, true);
   assert.equal(value.runtime.snapshot().currentOperation, "tick");
   await assert.rejects(
-    broker.start({ expectedRevision: 7, simulationMilliseconds: 15_000, wallMilliseconds: 1_000 }),
+    broker.start({ expectedRevision: 7, effectiveMultiplier: 15 }),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_BUSY",
   );
   assert.equal(issued, 0);
@@ -1001,10 +1005,10 @@ test("macro start observes an exact tick gate as BUSY and starts once the newer 
   });
   await ticking;
   assert.equal(value.runtime.snapshot().revision, 8);
+  value.setNow(12_000);
   const started = await broker.start({
     expectedRevision: 8,
-    simulationMilliseconds: 15_000,
-    wallMilliseconds: 1_000,
+    effectiveMultiplier: 15,
   });
   assert.equal(started.state, "macro-active");
   assert.equal(started.previousRevision, 8);
@@ -2101,12 +2105,13 @@ test("real runtime finish recovery survives an overdue exact tick starting befor
     const ids = ["session-race", "operation-race"];
     const broker = new NativePlayerAuthorityMacroBroker({
       runtime: value.runtime,
+      now: value.now,
       createId: () => ids.shift(),
     });
+    value.setNow(14_000);
     await broker.start({
       expectedRevision: 7,
-      simulationMilliseconds: 60_000,
-      wallMilliseconds: 4_000,
+      effectiveMultiplier: 15,
     });
     value.setNow(30_000);
 

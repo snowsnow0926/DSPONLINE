@@ -779,9 +779,11 @@ async function initializeNativeHost() {
     // activate/tick. The internal challenge below can cut over only after the
     // Rust coverage gate and the public-primary browser fence both succeed.
     const playerAuthorityOwnerId = "main-player-authority";
+    const samplePlayerAuthorityWallClock = createMonotonicOrbitalContractClock();
     nativePlayerAuthorityRuntime = new NativePlayerAuthorityRuntime({
       registry: nativeCoreSessions,
       ownerId: playerAuthorityOwnerId,
+      now: samplePlayerAuthorityWallClock,
       onTransition: publishNativePlayerAuthorityState,
     });
     nativePlayerAuthorityStateBroker = new NativePlayerAuthorityStateBroker({
@@ -796,7 +798,6 @@ async function initializeNativeHost() {
     if (playerAuthorityStartupRecovery) {
       nativePlayerAuthorityRuntime.resumeFromStartupRecovery(playerAuthorityStartupRecovery);
     }
-    const sampleOrbitalContractWallClock = createMonotonicOrbitalContractClock();
     nativePlayerAuthorityCommandBroker = new NativePlayerAuthorityCommandBroker({
       runtime: nativePlayerAuthorityRuntime,
       onCommittedCommand: (receipt) =>
@@ -815,7 +816,7 @@ async function initializeNativeHost() {
     nativePlayerAuthorityOrbitalContractBroker =
       new NativePlayerAuthorityOrbitalContractBroker({
         runtime: nativePlayerAuthorityRuntime,
-        now: sampleOrbitalContractWallClock,
+        now: samplePlayerAuthorityWallClock,
         isTrustedRendererOwner: (ownerId) => Boolean(
           mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
         ),
@@ -827,14 +828,24 @@ async function initializeNativeHost() {
           mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
         ),
       });
-    // Main-process-owned. The renderer IPC/preload surface supplies only
-    // bounded integer millisecond budgets plus the start revision it observed;
-    // session/operation IDs, the current authoritative revision, durable retry
-    // and finish identity stay in main/Rust.
+    // Main-process-owned. The renderer supplies only one optimistic start
+    // revision plus its same-revision multiplier observation, followed by
+    // parameter-free continue/finish intents. This broker derives every wall
+    // and simulation budget from the same monotonic main clock used by the
+    // durable exact scheduler; identities and retry state stay in main/Rust.
     nativePlayerAuthorityMacroBroker = new NativePlayerAuthorityMacroBroker({
       runtime: nativePlayerAuthorityRuntime,
+      now: samplePlayerAuthorityWallClock,
       ...(playerAuthorityStartupRecovery?.recoveredMacroOperationId
         ? { recoveredOperationId: playerAuthorityStartupRecovery.recoveredMacroOperationId }
+        : {}),
+      ...(playerAuthorityStartupRecovery?.macroSessionId
+        ? {
+            recoveredSimulationMilliseconds:
+              playerAuthorityStartupRecovery.macroSimulationMilliseconds,
+            recoveredWallMilliseconds:
+              playerAuthorityStartupRecovery.macroWallMilliseconds,
+          }
         : {}),
       ...(playerAuthorityStartupRecovery?.pendingMacroCleanupSessionId
         ? {
@@ -849,7 +860,7 @@ async function initializeNativeHost() {
       runtime: nativePlayerAuthorityRuntime,
       registry: nativeCoreSessions,
       ownerId: playerAuthorityOwnerId,
-      now: sampleOrbitalContractWallClock,
+      now: samplePlayerAuthorityWallClock,
       isTrustedRendererOwner: (ownerId) => Boolean(
         mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents.id === ownerId,
       ),

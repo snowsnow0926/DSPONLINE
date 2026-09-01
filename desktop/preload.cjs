@@ -416,7 +416,7 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   checkpointNativePlayerAuthority: () => invokeNative("desktop:native-player-authority-checkpoint", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_CHECKPOINT_FAILED", message: "Windows 原生权威检查点验证失败，请重试" }),
   exportNativePlayerAuthorityV47: (request) => invokeNative("desktop:native-player-authority-export-v47", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_EXPORT_FAILED", message: "Windows 原生权威 v47 存档导出失败" }, request),
   startNativePlayerAuthorityMacro: (request) => invokeNative("desktop:native-player-authority-macro-start", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算启动失败" }, request),
-  advanceNativePlayerAuthorityMacro: (request) => invokeNative("desktop:native-player-authority-macro-advance", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算推进失败" }, request),
+  advanceNativePlayerAuthorityMacro: () => invokeNative("desktop:native-player-authority-macro-advance", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算推进失败" }, {}),
   finishNativePlayerAuthorityMacro: () => invokeNative("desktop:native-player-authority-macro-finish", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算结束失败" }, {}),
   recoverNativePlayerAuthorityMacro: () => invokeNative("desktop:native-player-authority-macro-recover", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算恢复失败" }, {}),
   getRuntimeDiagnostics: () => ipcRenderer.invoke("desktop:runtime-diagnostics"),

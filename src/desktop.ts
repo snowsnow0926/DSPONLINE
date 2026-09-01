@@ -255,15 +255,10 @@ export type DesktopNativePlayerAuthorityHandoffResult =
       readonly workerInFlightCoreOperations: 0;
     };
 
-export interface DesktopNativePlayerAuthorityMacroBudgetRequest {
-  readonly simulationMilliseconds: number;
-  readonly wallMilliseconds: number;
-}
-
-export interface DesktopNativePlayerAuthorityMacroStartRequest
-  extends DesktopNativePlayerAuthorityMacroBudgetRequest {
-  /** Optimistic fence only; main still owns every session/run/operation identity. */
+export interface DesktopNativePlayerAuthorityMacroStartRequest {
+  /** Optimistic fences only; main derives time budgets and owns every durable identity. */
   readonly expectedRevision: number;
+  readonly effectiveMultiplier: number;
 }
 
 /** Identity-free receipt; all durable macro IDs remain inside main/Rust. */
@@ -304,13 +299,12 @@ export interface DesktopBridge {
   exportNativePlayerAuthorityV47?: (
     request: DesktopNativePlayerAuthorityExportRequest,
   ) => Promise<DesktopNativePlayerAuthorityExportResult>;
-  /** Revision-fenced budget; session/run/operation IDs cannot be supplied by the renderer. */
+  /** Revision/multiplier observation only; main derives all elapsed-time budgets. */
   startNativePlayerAuthorityMacro?: (
     request: DesktopNativePlayerAuthorityMacroStartRequest,
   ) => Promise<DesktopNativePlayerAuthorityMacroReceipt>;
-  advanceNativePlayerAuthorityMacro?: (
-    request: DesktopNativePlayerAuthorityMacroBudgetRequest,
-  ) => Promise<DesktopNativePlayerAuthorityMacroReceipt>;
+  /** Parameter-free intent; main samples its monotonic clock at acceptance. */
+  advanceNativePlayerAuthorityMacro?: () => Promise<DesktopNativePlayerAuthorityMacroReceipt>;
   finishNativePlayerAuthorityMacro?: () => Promise<DesktopNativePlayerAuthorityMacroReceipt>;
   recoverNativePlayerAuthorityMacro?: () => Promise<DesktopNativePlayerAuthorityMacroReceipt>;
   getRuntimeDiagnostics: () => Promise<DesktopRuntimeDiagnostics>;

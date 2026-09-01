@@ -3,11 +3,12 @@
 /*
  * Main-process-only control surface for productive PureIdleMacroV10 windows.
  *
- * Callers provide bounded integer millisecond budgets and, for start only,
- * the revision they observed. Session, lease, run and operation identities
- * never cross the renderer boundary: this broker derives the current
- * authority identity and creates non-reusable macro/operation IDs inside
- * Electron's main process.
+ * Callers provide only the revision and effective multiplier they observed at
+ * start, then parameter-free continue/finish intents. Wall time, simulation
+ * budgets, session, lease, run and operation identities never cross the
+ * renderer boundary: this broker samples the main-owned monotonic clock,
+ * derives one bounded budget from the durable lease deadline, and creates
+ * non-reusable macro/operation IDs inside Electron's main process.
  * The runtime remains the only lifecycle state machine and the Rust Host
  * remains the only durable stage/WAL/checkpoint/ACK authority.
  */
@@ -49,25 +50,18 @@ function isPersistenceBoundaryBusy(error) {
   return error?.code === "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_BUSY";
 }
 
-function normalizeBudgetRequest(value) {
-  if (!exactKeys(value, ["simulationMilliseconds", "wallMilliseconds"]) ||
-      !Number.isSafeInteger(value.simulationMilliseconds) || value.simulationMilliseconds < 1 ||
-      value.simulationMilliseconds > MAX_MACRO_BUDGET_MILLISECONDS ||
-      !Number.isSafeInteger(value.wallMilliseconds) || value.wallMilliseconds < 1 ||
-      value.wallMilliseconds > MAX_MACRO_BUDGET_MILLISECONDS) {
+function normalizeEffectiveMultiplier(value) {
+  if (!Number.isSafeInteger(value) || value < 2 || value > MAX_MACRO_BUDGET_MILLISECONDS) {
     throw brokerError(
-      "native player-authority macro budget is invalid",
+      "native player-authority macro multiplier is invalid",
       "NATIVE_PLAYER_AUTHORITY_MACRO_REQUEST_INVALID",
     );
   }
-  return Object.freeze({
-    simulationMilliseconds: value.simulationMilliseconds,
-    wallMilliseconds: value.wallMilliseconds,
-  });
+  return value;
 }
 
 function normalizeStartRequest(value) {
-  if (!exactKeys(value, ["expectedRevision", "simulationMilliseconds", "wallMilliseconds"]) ||
+  if (!exactKeys(value, ["expectedRevision", "effectiveMultiplier"]) ||
       !Number.isSafeInteger(value.expectedRevision) || value.expectedRevision < 0) {
     throw brokerError(
       "native player-authority macro start request is invalid",
@@ -76,11 +70,58 @@ function normalizeStartRequest(value) {
   }
   return Object.freeze({
     expectedRevision: value.expectedRevision,
-    budgets: normalizeBudgetRequest({
-      simulationMilliseconds: value.simulationMilliseconds,
-      wallMilliseconds: value.wallMilliseconds,
-    }),
+    effectiveMultiplier: normalizeEffectiveMultiplier(value.effectiveMultiplier),
   });
+}
+
+function settledThroughMilliseconds(snapshot) {
+  if (!Number.isSafeInteger(snapshot?.nextDeadlineMs) || snapshot.nextDeadlineMs < 1_000) {
+    throw brokerError(
+      "native player-authority macro durable deadline is invalid",
+      "NATIVE_PLAYER_AUTHORITY_MACRO_UNAVAILABLE",
+    );
+  }
+  return snapshot.nextDeadlineMs - 1_000;
+}
+
+function deriveMainOwnedBudget(snapshot, effectiveMultiplier, now) {
+  const settledThroughMs = settledThroughMilliseconds(snapshot);
+  let sampledAtMs;
+  try {
+    sampledAtMs = now();
+  } catch (cause) {
+    throw brokerError(
+      "native player-authority macro main clock failed",
+      "NATIVE_PLAYER_AUTHORITY_MACRO_CLOCK_INVALID",
+      cause,
+    );
+  }
+  if (!Number.isSafeInteger(sampledAtMs) || sampledAtMs < 0) {
+    throw brokerError(
+      "native player-authority macro main clock is invalid",
+      "NATIVE_PLAYER_AUTHORITY_MACRO_CLOCK_INVALID",
+    );
+  }
+  const availableWallMilliseconds = sampledAtMs - settledThroughMs;
+  const maximumWallMilliseconds = Math.floor(
+    MAX_MACRO_BUDGET_MILLISECONDS / effectiveMultiplier,
+  );
+  if (availableWallMilliseconds < 1 || maximumWallMilliseconds < 1) {
+    throw brokerError(
+      "native player-authority macro has no main-confirmed wall time to settle",
+      "NATIVE_PLAYER_AUTHORITY_MACRO_BUSY",
+    );
+  }
+  const wallMilliseconds = Math.min(availableWallMilliseconds, maximumWallMilliseconds);
+  const simulationMilliseconds = wallMilliseconds * effectiveMultiplier;
+  if (!Number.isSafeInteger(simulationMilliseconds) || simulationMilliseconds < 1 ||
+      simulationMilliseconds > MAX_MACRO_BUDGET_MILLISECONDS) {
+    throw brokerError(
+      "native player-authority macro main-owned budget is invalid",
+      "NATIVE_PLAYER_AUTHORITY_MACRO_CLOCK_INVALID",
+    );
+  }
+  return Object.freeze({ simulationMilliseconds, wallMilliseconds });
 }
 
 function requireNoRequest(value, label) {
@@ -168,7 +209,8 @@ class NativePlayerAuthorityMacroBroker {
         typeof options.runtime.commitMacroAdvance !== "function" ||
         typeof options.runtime.finishMacroSession !== "function" ||
         typeof options.runtime.retryUncertain !== "function" ||
-        options.createId !== undefined && typeof options.createId !== "function") {
+        options.createId !== undefined && typeof options.createId !== "function" ||
+        options.now !== undefined && typeof options.now !== "function") {
       throw new TypeError("native player-authority macro broker options are invalid");
     }
     const hasCleanupSession = options.pendingMacroCleanupSessionId !== undefined;
@@ -183,8 +225,14 @@ class NativePlayerAuthorityMacroBroker {
         !validLogicalId(options.recoveredOperationId)) {
       throw new TypeError("native player-authority recovered macro operation ID is invalid");
     }
+    const hasRecoveredSimulationBudget = options.recoveredSimulationMilliseconds !== undefined;
+    const hasRecoveredWallBudget = options.recoveredWallMilliseconds !== undefined;
+    if (hasRecoveredSimulationBudget !== hasRecoveredWallBudget) {
+      throw new TypeError("native player-authority recovered macro budget is partial");
+    }
     this.runtime = options.runtime;
     this.createId = options.createId ?? (() => randomUUID());
+    this.now = options.now ?? Date.now;
     // One random process-local epoch plus a monotonic safe-integer sequence
     // makes every generated identity unique without retaining one string per
     // one-second macro advance. Only identities recovered from the durable
@@ -198,14 +246,28 @@ class NativePlayerAuthorityMacroBroker {
     this.lastRecovered = null;
     const snapshot = this.runtime.snapshot();
     this.activeMacroSessionId = null;
+    this.activeMultiplier = null;
     if (snapshot?.phase === "macro-active") {
       requireAuthorityIdentity(snapshot, ["macro-active"], "startup recovery");
       if (!validLogicalId(snapshot.macroSessionId) || !validLogicalId(snapshot.macroAlgorithmVersion)) {
         throw new TypeError("native player-authority recovered macro session is invalid");
       }
       this.activeMacroSessionId = snapshot.macroSessionId;
+      if (!hasRecoveredSimulationBudget || !hasRecoveredWallBudget ||
+          !Number.isSafeInteger(options.recoveredSimulationMilliseconds) ||
+          !Number.isSafeInteger(options.recoveredWallMilliseconds) ||
+          options.recoveredWallMilliseconds < 1 ||
+          options.recoveredSimulationMilliseconds < 1 ||
+          options.recoveredSimulationMilliseconds % options.recoveredWallMilliseconds !== 0) {
+        throw new TypeError("native player-authority recovered macro budget is invalid");
+      }
+      this.activeMultiplier = normalizeEffectiveMultiplier(
+        options.recoveredSimulationMilliseconds / options.recoveredWallMilliseconds,
+      );
     } else if (options.recoveredOperationId !== undefined) {
       throw new TypeError("native player-authority recovered macro operation has no active session");
+    } else if (hasRecoveredSimulationBudget) {
+      throw new TypeError("native player-authority recovered macro budget has no active session");
     }
     if (this.activeMacroSessionId) this.startupReservedIds.add(this.activeMacroSessionId);
     if (options.recoveredOperationId !== undefined) {
@@ -299,34 +361,50 @@ class NativePlayerAuthorityMacroBroker {
         "NATIVE_PLAYER_AUTHORITY_MACRO_SESSION_CONFLICT",
       );
     }
+    const budgets = deriveMainOwnedBudget(before, request.effectiveMultiplier, this.now);
     const macroSessionId = this.issueId("macro-session");
     const operationId = this.issueId("macro-operation");
-    return this.commitAdvance(identity, macroSessionId, operationId, request.budgets);
+    return this.commitAdvance(
+      identity,
+      macroSessionId,
+      operationId,
+      budgets,
+      request.effectiveMultiplier,
+    );
   }
 
   async advance(rawRequest) {
     this.assertAvailable();
-    const budgets = normalizeBudgetRequest(rawRequest);
+    requireNoRequest(rawRequest, "advance");
     const before = this.runtime.snapshot();
     const identity = requireAuthorityIdentity(before, ["macro-active"], "advance");
     if (!this.activeMacroSessionId || before.macroSessionId !== this.activeMacroSessionId ||
-        !validLogicalId(before.macroAlgorithmVersion) || this.pending !== null) {
+        !validLogicalId(before.macroAlgorithmVersion) || this.pending !== null ||
+        !Number.isSafeInteger(this.activeMultiplier)) {
       throw brokerError(
         "native player-authority macro session identity is stale",
         "NATIVE_PLAYER_AUTHORITY_MACRO_SESSION_CONFLICT",
       );
     }
+    const budgets = deriveMainOwnedBudget(before, this.activeMultiplier, this.now);
     const operationId = this.issueId("macro-operation");
-    return this.commitAdvance(identity, this.activeMacroSessionId, operationId, budgets);
+    return this.commitAdvance(
+      identity,
+      this.activeMacroSessionId,
+      operationId,
+      budgets,
+      this.activeMultiplier,
+    );
   }
 
-  async commitAdvance(identity, macroSessionId, operationId, budgets) {
+  async commitAdvance(identity, macroSessionId, operationId, budgets, effectiveMultiplier) {
     this.pending = Object.freeze({
       kind: "advance",
       identity,
       macroSessionId,
       operationId,
       budgets,
+      effectiveMultiplier,
     });
     this.inFlight = true;
     try {
@@ -344,6 +422,7 @@ class NativePlayerAuthorityMacroBroker {
         false,
       );
       this.activeMacroSessionId = macroSessionId;
+      this.activeMultiplier = effectiveMultiplier;
       this.pending = null;
       this.lastRecovered = null;
       return receipt;
@@ -396,6 +475,7 @@ class NativePlayerAuthorityMacroBroker {
       requireFinishedLineage(this.runtime.snapshot(), identity, "finish receipt", true);
       const macroSessionId = this.activeMacroSessionId;
       this.activeMacroSessionId = null;
+      this.activeMultiplier = null;
       this.pending = null;
       // Keep an idempotent replay receipt in main until the renderer's durable
       // time-warp-disable command is observed. The first caller still receives
@@ -556,6 +636,7 @@ class NativePlayerAuthorityMacroBroker {
           true,
         );
         this.activeMacroSessionId = pending.macroSessionId;
+        this.activeMultiplier = pending.effectiveMultiplier;
         this.lastRecovered = Object.freeze({
           receipt,
           sessionId: pending.identity.sessionId,
@@ -574,6 +655,7 @@ class NativePlayerAuthorityMacroBroker {
         true,
       );
       this.activeMacroSessionId = null;
+      this.activeMultiplier = null;
       const receipt = Object.freeze({
         schemaVersion: 1,
         state: "finished",

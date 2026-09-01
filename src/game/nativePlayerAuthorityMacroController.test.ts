@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   DesktopBridge,
   DesktopNativePlayerAuthorityClockState,
-  DesktopNativePlayerAuthorityMacroBudgetRequest,
   DesktopNativePlayerAuthorityMacroReceipt,
   DesktopNativePlayerAuthorityMacroStartRequest,
   DesktopNativePlayerAuthorityMacroState,
@@ -21,6 +20,11 @@ import {
   type NativePlayerAuthorityMacroControllerBinding,
   type NativePlayerAuthorityMacroControllerOptions,
 } from "./nativePlayerAuthorityMacroController";
+
+interface MacroBudget {
+  readonly simulationMilliseconds: number;
+  readonly wallMilliseconds: number;
+}
 
 type MacroBridgeMethod =
   | "startNativePlayerAuthorityMacro"
@@ -152,7 +156,7 @@ function macroState(
 
 function activeMacroReceipt(
   revision: number,
-  budget: DesktopNativePlayerAuthorityMacroBudgetRequest,
+  budget: MacroBudget,
   recovered = false,
 ): DesktopNativePlayerAuthorityMacroReceipt {
   return {
@@ -195,8 +199,14 @@ function startupRecoveryReceipt(revision: number): DesktopNativePlayerAuthorityM
 
 function macroBridge(overrides: Partial<MacroBridge> = {}): MacroBridge {
   return {
-    startNativePlayerAuthorityMacro: vi.fn(async (budget) => activeMacroReceipt(11, budget)),
-    advanceNativePlayerAuthorityMacro: vi.fn(async (budget) => activeMacroReceipt(12, budget)),
+    startNativePlayerAuthorityMacro: vi.fn(async () => activeMacroReceipt(11, {
+      simulationMilliseconds: 15_000,
+      wallMilliseconds: 1_000,
+    })),
+    advanceNativePlayerAuthorityMacro: vi.fn(async () => activeMacroReceipt(12, {
+      simulationMilliseconds: 15_000,
+      wallMilliseconds: 1_000,
+    })),
     finishNativePlayerAuthorityMacro: vi.fn(async () => finishedMacroReceipt(13)),
     recoverNativePlayerAuthorityMacro: vi.fn(async () => startupRecoveryReceipt(30)),
     ...overrides,
@@ -303,8 +313,8 @@ describe("native player authority macro controller", () => {
 
   it("enables a disabled controller, waits for a newer powered frame, and starts only with elapsed wall time", async () => {
     const clock = clockHarness(10_000);
-    const start = vi.fn(async (budget: DesktopNativePlayerAuthorityMacroStartRequest) =>
-      activeMacroReceipt(13, budget));
+    const start = vi.fn(async (_request: DesktopNativePlayerAuthorityMacroStartRequest) =>
+      activeMacroReceipt(13, { simulationMilliseconds: 1_875, wallMilliseconds: 125 }));
     const bridge = macroBridge({ startNativePlayerAuthorityMacro: start });
     const applyEnable = vi.fn(async () => commandReceipt(10));
     const controller = controllerWithClock(bridge, clock);
@@ -343,8 +353,7 @@ describe("native player authority macro controller", () => {
     expect(start).toHaveBeenCalledTimes(1);
     expect(start).toHaveBeenCalledWith({
       expectedRevision: 12,
-      simulationMilliseconds: 1_875,
-      wallMilliseconds: 125,
+      effectiveMultiplier: 15,
     });
 
     await flushPromises();
@@ -490,8 +499,10 @@ describe("native player authority macro controller", () => {
   it("advances an active macro on each elapsed periodic wall-time window", async () => {
     const clock = clockHarness(10_000);
     const status = macroState({ nextDeadlineMs: 11_000 });
-    const advance = vi.fn(async (budget: DesktopNativePlayerAuthorityMacroBudgetRequest) =>
-      activeMacroReceipt(31, budget));
+    const advance = vi.fn(async () => activeMacroReceipt(31, {
+      simulationMilliseconds: 15_000,
+      wallMilliseconds: 1_000,
+    }));
     const bridge = macroBridge({ advanceNativePlayerAuthorityMacro: advance });
     const controller = controllerWithClock(bridge, clock);
 
@@ -501,10 +512,7 @@ describe("native player authority macro controller", () => {
 
     clock.runNext(11_000);
     expect(advance).toHaveBeenCalledTimes(1);
-    expect(advance).toHaveBeenCalledWith({
-      simulationMilliseconds: 15_000,
-      wallMilliseconds: 1_000,
-    });
+    expect(advance).toHaveBeenCalledWith();
 
     await flushPromises();
     expect(controller.getSnapshot().phase).toBe("active");
@@ -528,10 +536,7 @@ describe("native player authority macro controller", () => {
     controller.bind(binding({ activeFrame: null, macroStatus: status, commandSource: null }));
     await flushPromises();
     expect(controller.requestStop()).toBe(true);
-    expect(advance).toHaveBeenCalledWith({
-      simulationMilliseconds: 8_250,
-      wallMilliseconds: 550,
-    });
+    expect(advance).toHaveBeenCalledWith();
     expect(finish).not.toHaveBeenCalled();
 
     advanceResult.resolve(activeMacroReceipt(31, {
@@ -589,8 +594,8 @@ describe("native player authority macro controller", () => {
     const clock = clockHarness(100);
     const advanceResult = deferred<DesktopNativePlayerAuthorityMacroReceipt>();
     const recoveryResult = deferred<DesktopNativePlayerAuthorityMacroReceipt>();
-    const start = vi.fn(async (budget: DesktopNativePlayerAuthorityMacroStartRequest) =>
-      activeMacroReceipt(11, budget));
+    const start = vi.fn(async (_request: DesktopNativePlayerAuthorityMacroStartRequest) =>
+      activeMacroReceipt(11, { simulationMilliseconds: 1_500, wallMilliseconds: 100 }));
     const advance = vi.fn(() => advanceResult.promise);
     const recover = vi.fn(() => recoveryResult.promise);
     const bridge = macroBridge({
@@ -609,17 +614,13 @@ describe("native player authority macro controller", () => {
     await flushPromises();
     expect(start).toHaveBeenCalledWith({
       expectedRevision: 10,
-      simulationMilliseconds: 1_500,
-      wallMilliseconds: 100,
+      effectiveMultiplier: 15,
     });
     expect(clock.pending().map((timer) => timer.delayMs)).toStrictEqual([1_000]);
 
     clock.runNext(1_100);
     expect(advance).toHaveBeenCalledTimes(1);
-    expect(advance).toHaveBeenCalledWith({
-      simulationMilliseconds: 15_000,
-      wallMilliseconds: 1_000,
-    });
+    expect(advance).toHaveBeenCalledWith();
 
     const uncertainStatus = macroState({
       phase: "macro-uncertain",
@@ -773,8 +774,8 @@ describe("native player authority macro controller", () => {
 
   it("reconstructs a durable enabled-before-start intent after reload and keeps paused Stop available", async () => {
     const poweredClock = clockHarness(1_000);
-    const start = vi.fn(async (budget: DesktopNativePlayerAuthorityMacroStartRequest) =>
-      activeMacroReceipt(12, budget));
+    const start = vi.fn(async (_request: DesktopNativePlayerAuthorityMacroStartRequest) =>
+      activeMacroReceipt(12, { simulationMilliseconds: 15_000, wallMilliseconds: 1_000 }));
     const powered = controllerWithClock(
       macroBridge({ startNativePlayerAuthorityMacro: start }),
       poweredClock,
@@ -788,8 +789,7 @@ describe("native player authority macro controller", () => {
     await flushPromises();
     expect(start).toHaveBeenCalledWith({
       expectedRevision: 11,
-      simulationMilliseconds: 15_000,
-      wallMilliseconds: 1_000,
+      effectiveMultiplier: 15,
     });
     expect(powered.getSnapshot()).toMatchObject({ phase: "active", requested: true });
 
@@ -951,8 +951,8 @@ describe("native player authority macro controller", () => {
       code: "NATIVE_PLAYER_AUTHORITY_COMMAND_TRANSPORT_UNCERTAIN",
     });
     const applyEnable = vi.fn(async () => { throw transport; });
-    const start = vi.fn(async (budget: DesktopNativePlayerAuthorityMacroStartRequest) =>
-      activeMacroReceipt(12, budget));
+    const start = vi.fn(async (_request: DesktopNativePlayerAuthorityMacroStartRequest) =>
+      activeMacroReceipt(12, { simulationMilliseconds: 15_000, wallMilliseconds: 1_000 }));
     const controller = controllerWithClock(
       macroBridge({ startNativePlayerAuthorityMacro: start }),
       clock,
@@ -1197,17 +1197,17 @@ describe("native player authority macro controller", () => {
       code: "NATIVE_PLAYER_AUTHORITY_MACRO_START_REBASE_REQUIRED",
     });
     let startAttempts = 0;
-    const start = vi.fn(async (budget: DesktopNativePlayerAuthorityMacroStartRequest) => {
+    const start = vi.fn(async (_request: DesktopNativePlayerAuthorityMacroStartRequest) => {
       startAttempts += 1;
       if (startAttempts === 1) throw busy();
       if (startAttempts === 2) throw rebase();
-      return activeMacroReceipt(13, budget);
+      return activeMacroReceipt(13, { simulationMilliseconds: 2_250, wallMilliseconds: 150 });
     });
     let advanceAttempts = 0;
-    const advance = vi.fn(async (budget: DesktopNativePlayerAuthorityMacroBudgetRequest) => {
+    const advance = vi.fn(async () => {
       advanceAttempts += 1;
       if (advanceAttempts === 1) throw busy();
-      return activeMacroReceipt(14, budget);
+      return activeMacroReceipt(14, { simulationMilliseconds: 15_000, wallMilliseconds: 1_000 });
     });
     let finishAttempts = 0;
     const finish = vi.fn(async () => {
@@ -1250,13 +1250,11 @@ describe("native player authority macro controller", () => {
     await flushPromises();
     expect(start).toHaveBeenNthCalledWith(1, {
       expectedRevision: 10,
-      simulationMilliseconds: 1_500,
-      wallMilliseconds: 100,
+      effectiveMultiplier: 15,
     });
     expect(start).toHaveBeenNthCalledWith(2, {
       expectedRevision: 11,
-      simulationMilliseconds: 2_250,
-      wallMilliseconds: 150,
+      effectiveMultiplier: 15,
     });
     expect(controller.getSnapshot()).toMatchObject({
       phase: "starting",
@@ -1274,8 +1272,7 @@ describe("native player authority macro controller", () => {
     await flushPromises();
     expect(start).toHaveBeenNthCalledWith(3, {
       expectedRevision: 12,
-      simulationMilliseconds: 2_250,
-      wallMilliseconds: 150,
+      effectiveMultiplier: 15,
     });
     expect(controller.getSnapshot()).toMatchObject({
       phase: "active",
@@ -1306,14 +1303,8 @@ describe("native player authority macro controller", () => {
     expect(clock.pending().map((timer) => timer.delayMs)).toStrictEqual([50]);
     clock.runNext(3_150);
     await flushPromises();
-    expect(advance).toHaveBeenNthCalledWith(1, {
-      simulationMilliseconds: 15_000,
-      wallMilliseconds: 1_000,
-    });
-    expect(advance).toHaveBeenNthCalledWith(2, {
-      simulationMilliseconds: 15_000,
-      wallMilliseconds: 1_000,
-    });
+    expect(advance).toHaveBeenNthCalledWith(1);
+    expect(advance).toHaveBeenNthCalledWith(2);
     expect(controller.getSnapshot()).toMatchObject({
       phase: "finishing",
       settledThroughMs: 3_150,
@@ -1345,10 +1336,10 @@ describe("native player authority macro controller", () => {
       code: "NATIVE_PLAYER_AUTHORITY_MACRO_BUSY",
     });
     let attempts = 0;
-    const start = vi.fn(async (budget: DesktopNativePlayerAuthorityMacroStartRequest) => {
+    const start = vi.fn(async (_request: DesktopNativePlayerAuthorityMacroStartRequest) => {
       attempts += 1;
       if (attempts === 1) throw busy;
-      return activeMacroReceipt(12, budget);
+      return activeMacroReceipt(12, { simulationMilliseconds: 3_750, wallMilliseconds: 250 });
     });
     const controller = controllerWithClock(
       macroBridge({ startNativePlayerAuthorityMacro: start }),
@@ -1387,8 +1378,7 @@ describe("native player authority macro controller", () => {
     expect(start).toHaveBeenCalledTimes(2);
     expect(start).toHaveBeenLastCalledWith({
       expectedRevision: 11,
-      simulationMilliseconds: 3_750,
-      wallMilliseconds: 250,
+      effectiveMultiplier: 15,
     });
     expect(controller.getSnapshot()).toMatchObject({
       phase: "active",
@@ -1485,7 +1475,7 @@ describe("native player authority macro controller", () => {
 
     const invalidReceiptBridge = macroBridge({
       startNativePlayerAuthorityMacro: vi.fn(async () => activeMacroReceipt(11, {
-        simulationMilliseconds: 15_000,
+        simulationMilliseconds: 14_000,
         wallMilliseconds: 1_000,
       })),
     });

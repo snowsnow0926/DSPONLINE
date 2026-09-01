@@ -1,5 +1,11 @@
 # DSP极简网络项目现状
 
+> **Windows 纯挂机时间预算主进程权威纵切（2026-09-01，开发候选，未发布）**：原生纯挂机不再接受 renderer 提交的 simulation/wall 时间。UI 只在启动时提交当前 revision 与倍率，后续为无参数推进；Electron main 以 durable `nextDeadlineMs` 和同一单调时钟计算真实可结算墙钟，封顶 30 天，并独占 macro session/operation ID、active multiplier 与 uncertain/startup recovery 的原预算。伪造预算、额外字段、时钟回退和不完整恢复均失败关闭。
+>
+> 当前新鲜专项为 Node `121/121`、controller Vitest `21/21`、native/desktop `551 passed / 1 symlink privilege skip / 0 failed`；typecheck 与 production build 通过，3 天 1 Hz 合成序列完成 `259,200` 次无漂移推进。完整 fast Vitest 首轮为 `2933/29/48`，48 个失败全部位于既有 Rust/JavaScript 精确差分矩阵；重建 Host 后仍可复现。诊断证明下一 P0 不是旧二进制或本次 IPC 修改，而是 Rust 单次长 Exact 与连续 1 秒公开调用在 research/power/construction/logistics 等领域的边界语义尚未完全一致。诊断 oracle 改动已撤销，不能用放宽测试冒充通过。
+>
+> 下一大块直接建立并修复全领域 `1 × 60s == 60 × 1s` 红测矩阵，随后再接 productive pure-idle/offline/time-warp。固定能力口径暂保持 `Rust 85% / 薄 UI 97% / O(active) 97% / 并行 74% / 综合开发 89% / 发布成熟度 60%`；GameState v47、envelope v2、cloud v8、SQLite v3、package 1.2.3 与 `authorityEligible=false` 均不变。未读取玩家存档，未连接生产，未部署、打包或签名。
+
 > **Windows 银河出口/终局管理 Rust 权威纵切（2026-09-01，开发候选，未发布）**：原生 Galaxy 页现已显示四项固定出口工程、256 位累计账本和出口建筑运行汇总，并可从 exact revision 提交自动调度、节流、项目开关/优先级及手动交付；同 revision 建筑检查器可暂停/启动超大型银河出口建筑。renderer 只提交短意图和手动请求上限，Rust 从当前权威库存、项目等级和储备重新推导实际扣料、进度、信用、评分与升级，实体建筑模式不会误走 legacy 网络扣料。
 >
 > WAL 不保存实际扣料实体 ID、库存结果、奖励或累计值；`AfterWal` 冷恢复与无故障提交的 revision、公开 v47 和 canonical SHA-256 一致，相同 command ID 不会重复消耗。薄 UI 保留旧投影只读显示但锁死写入，手动物料交付强制二次确认，任何 lineage、revision、目录或固定项目/物料绑定漂移都失败关闭。

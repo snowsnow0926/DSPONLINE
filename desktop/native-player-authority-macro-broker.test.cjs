@@ -51,8 +51,7 @@ function hostAdvanceRequest(overrides = {}) {
 function macroStartRequest(overrides = {}) {
   return {
     expectedRevision: 7,
-    simulationMilliseconds: 60_000,
-    wallMilliseconds: 4_000,
+    effectiveMultiplier: 15,
     ...overrides,
   };
 }
@@ -78,6 +77,7 @@ function authoritySnapshot(overrides = {}) {
 
 function runtimeFixture(options = {}) {
   let current = options.snapshot ?? authoritySnapshot();
+  let nowMs = options.nowMs ?? 14_000;
   let pending = null;
   let advanceAttempts = 0;
   let finishAttempts = 0;
@@ -86,6 +86,7 @@ function runtimeFixture(options = {}) {
     current = authoritySnapshot({
       phase: "macro-active",
       revision: request.baseRevision + (options.revisionDelta ?? 2),
+      nextDeadlineMs: current.nextDeadlineMs + request.wallMilliseconds,
       macroSessionId: request.macroSessionId,
       macroAlgorithmVersion: "native-pure-idle-macro-v10",
       ...(options.advanceReceiptOverrides ?? {}),
@@ -135,9 +136,16 @@ function runtimeFixture(options = {}) {
   const ids = [...(options.ids ?? ["session-a", "operation-a", "operation-b", "operation-c"])];
   const broker = new NativePlayerAuthorityMacroBroker({
     runtime,
+    now: options.now ?? (() => nowMs),
     createId: options.createId ?? (() => ids.shift()),
     ...(options.recoveredOperationId
       ? { recoveredOperationId: options.recoveredOperationId }
+      : {}),
+    ...(current.phase === "macro-active"
+      ? {
+          recoveredSimulationMilliseconds: options.recoveredSimulationMilliseconds ?? 15_000,
+          recoveredWallMilliseconds: options.recoveredWallMilliseconds ?? 1_000,
+        }
       : {}),
     ...(options.pendingMacroCleanupSessionId
       ? {
@@ -151,6 +159,7 @@ function runtimeFixture(options = {}) {
     calls,
     runtime,
     setSnapshot(value) { current = value; },
+    setNow(value) { nowMs = value; },
   };
 }
 
@@ -325,8 +334,8 @@ test("startup recovery accepts one complete macro identity and rejects a partial
   }), (error) => error.code === "NATIVE_CORE_PLAYER_AUTHORITY_STARTUP_RECOVERY_INVALID");
 });
 
-test("main-owned broker starts, advances and finishes without exposing authority identities", async () => {
-  const { broker, calls } = runtimeFixture();
+test("main-owned broker derives elapsed budgets and never exposes authority identities", async () => {
+  const { broker, calls, setNow } = runtimeFixture();
   const first = await broker.start(macroStartRequest());
   assert.deepEqual(first, {
     schemaVersion: 1,
@@ -338,7 +347,8 @@ test("main-owned broker starts, advances and finishes without exposing authority
     algorithmVersion: "native-pure-idle-macro-v10",
     recovered: false,
   });
-  const second = await broker.advance({ simulationMilliseconds: 30_000, wallMilliseconds: 2_000 });
+  setNow(16_000);
+  const second = await broker.advance();
   assert.equal(second.previousRevision, 9);
   assert.equal(second.revision, 11);
   const finished = await broker.finish();
@@ -385,7 +395,7 @@ test("start rejects a stale observed revision before issuing identities or mutat
   assert.equal(calls.length, 0);
 });
 
-test("inclusive one-millisecond and thirty-day bounds remain valid and one operation stays single-flight", async () => {
+test("Host bounds stay inclusive while main-owned derivation is capped and single-flight", async () => {
   const { registry, calls } = registryFixture();
   await registry.commitPlayerAuthorityMacroAdvance("main-player-authority", hostAdvanceRequest({
     simulationMilliseconds: 1,
@@ -396,20 +406,88 @@ test("inclusive one-millisecond and thirty-day bounds remain valid and one opera
 
   let release;
   const gate = new Promise((resolve) => { release = resolve; });
-  const value = runtimeFixture({ beforeAdvanceComplete: () => gate });
-  const first = value.broker.start(macroStartRequest({
-    simulationMilliseconds: MAX_MACRO_BUDGET_MILLISECONDS,
-    wallMilliseconds: 1,
-  }));
+  const maximumWallMilliseconds = Math.floor(MAX_MACRO_BUDGET_MILLISECONDS / 2);
+  const value = runtimeFixture({
+    beforeAdvanceComplete: () => gate,
+    nowMs: 10_000 + maximumWallMilliseconds,
+  });
+  const first = value.broker.start(macroStartRequest({ effectiveMultiplier: 2 }));
   await assert.rejects(
-    value.broker.start(macroStartRequest({ simulationMilliseconds: 1, wallMilliseconds: 1 })),
+    value.broker.start(macroStartRequest({ effectiveMultiplier: 2 })),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_BUSY",
   );
   release();
   const settled = await first;
   assert.equal(settled.simulationMilliseconds, MAX_MACRO_BUDGET_MILLISECONDS);
-  assert.equal(settled.wallMilliseconds, 1);
+  assert.equal(settled.wallMilliseconds, maximumWallMilliseconds);
   assert.equal(value.calls.filter(([kind]) => kind === "advance").length, 1);
+});
+
+test("renderer cannot manufacture elapsed macro time and invalid main clocks fail before Host mutation", async () => {
+  let issued = 0;
+  const value = runtimeFixture({
+    nowMs: 10_000,
+    createId: () => {
+      issued += 1;
+      return "main-clock-only";
+    },
+  });
+  for (const nowMs of [10_000, 9_999]) {
+    value.setNow(nowMs);
+    await assert.rejects(
+      value.broker.start(macroStartRequest()),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_BUSY",
+    );
+  }
+  value.setNow(Number.NaN);
+  await assert.rejects(
+    value.broker.start(macroStartRequest()),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_CLOCK_INVALID",
+  );
+  assert.equal(issued, 0);
+  assert.equal(value.calls.length, 0);
+
+  value.setNow(10_001);
+  const started = await value.broker.start(macroStartRequest());
+  assert.equal(started.wallMilliseconds, 1);
+  assert.equal(started.simulationMilliseconds, 15);
+  value.setNow(10_002);
+  await assert.rejects(
+    value.broker.advance({ wallMilliseconds: MAX_MACRO_BUDGET_MILLISECONDS }),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_REQUEST_INVALID",
+  );
+  assert.equal(value.calls.filter(([kind]) => kind === "advance").length, 1);
+  const advanced = await value.broker.advance();
+  assert.equal(advanced.wallMilliseconds, 1);
+  assert.equal(advanced.simulationMilliseconds, 15);
+});
+
+test("startup macro adoption requires one complete durable budget ratio", () => {
+  const value = runtimeFixture({
+    snapshot: authoritySnapshot({
+      phase: "macro-active",
+      revision: 9,
+      macroSessionId: "macro-session-recovered",
+      macroAlgorithmVersion: "native-pure-idle-macro-v10",
+    }),
+  });
+  assert.throws(() => new NativePlayerAuthorityMacroBroker({
+    runtime: value.runtime,
+  }), /recovered macro budget is invalid/i);
+  assert.throws(() => new NativePlayerAuthorityMacroBroker({
+    runtime: value.runtime,
+    recoveredSimulationMilliseconds: 15_000,
+  }), /recovered macro budget is partial/i);
+  assert.throws(() => new NativePlayerAuthorityMacroBroker({
+    runtime: value.runtime,
+    recoveredSimulationMilliseconds: 1_001,
+    recoveredWallMilliseconds: 1_000,
+  }), /recovered macro budget is invalid/i);
+  assert.throws(() => new NativePlayerAuthorityMacroBroker({
+    runtime: value.runtime,
+    recoveredSimulationMilliseconds: 1_000,
+    recoveredWallMilliseconds: 1_000,
+  }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_REQUEST_INVALID");
 });
 
 test("broker rejects forged identity fields, invalid epochs and stale receipts before publishing", async (t) => {
@@ -417,15 +495,14 @@ test("broker rejects forged identity fields, invalid epochs and stale receipts b
     const { broker, calls } = runtimeFixture();
     await assert.rejects(broker.start({
       expectedRevision: 7,
-      simulationMilliseconds: 1_000,
-      wallMilliseconds: 1_000,
+      effectiveMultiplier: 15,
       sessionId: "renderer-forged",
     }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_REQUEST_INVALID");
     assert.equal(calls.length, 0);
   });
   await t.test("forged finish identity", async () => {
     const { broker, calls } = runtimeFixture();
-    await broker.start(macroStartRequest({ simulationMilliseconds: 1_000, wallMilliseconds: 1_000 }));
+    await broker.start(macroStartRequest());
     await assert.rejects(
       broker.finish({ macroSessionId: "renderer-forged" }),
       (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_REQUEST_INVALID",
@@ -434,14 +511,15 @@ test("broker rejects forged identity fields, invalid epochs and stale receipts b
   });
   await t.test("one constant epoch still yields distinct operation IDs", async () => {
     let epochCalls = 0;
-    const { broker, calls } = runtimeFixture({
+    const { broker, calls, setNow } = runtimeFixture({
       createId: () => {
         epochCalls += 1;
         return "same";
       },
     });
-    await broker.start(macroStartRequest({ simulationMilliseconds: 1_000, wallMilliseconds: 1_000 }));
-    await broker.advance({ simulationMilliseconds: 1_000, wallMilliseconds: 1_000 });
+    await broker.start(macroStartRequest());
+    setNow(18_000);
+    await broker.advance();
     assert.equal(epochCalls, 1);
     assert.deepEqual(
       calls.filter(([kind]) => kind === "advance").map(([, request]) => request.operationId),
@@ -451,7 +529,7 @@ test("broker rejects forged identity fields, invalid epochs and stale receipts b
   await t.test("overlong identity epoch", async () => {
     const { broker, calls } = runtimeFixture({ createId: () => "x".repeat(128) });
     await assert.rejects(
-      broker.start(macroStartRequest({ simulationMilliseconds: 1_000, wallMilliseconds: 1_000 })),
+      broker.start(macroStartRequest()),
       (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_ID_INVALID",
     );
     assert.equal(calls.length, 0);
@@ -461,16 +539,21 @@ test("broker rejects forged identity fields, invalid epochs and stale receipts b
       advanceReceiptOverrides: { sessionId: "core-stale" },
     });
     await assert.rejects(
-      broker.start(macroStartRequest({ simulationMilliseconds: 1_000, wallMilliseconds: 1_000 })),
+      broker.start(macroStartRequest()),
       (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_RECEIPT_INVALID",
     );
   });
-  await t.test("out-of-range budget", async () => {
+  await t.test("renderer-supplied budget and out-of-range multiplier", async () => {
     const { broker, calls } = runtimeFixture();
     await assert.rejects(broker.start(macroStartRequest({
-      simulationMilliseconds: MAX_MACRO_BUDGET_MILLISECONDS + 1,
-      wallMilliseconds: 1,
+      effectiveMultiplier: MAX_MACRO_BUDGET_MILLISECONDS + 1,
     })), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_REQUEST_INVALID");
+    await assert.rejects(broker.start({
+      expectedRevision: 7,
+      effectiveMultiplier: 15,
+      simulationMilliseconds: 1,
+      wallMilliseconds: 1,
+    }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_MACRO_REQUEST_INVALID");
     assert.equal(calls.length, 0);
   });
 });
@@ -489,7 +572,8 @@ test("uncertain advance and finish recover the exact main-generated identity", a
   assert.equal(advanceCalls.length, 1);
   const pendingRecovery = advance.calls.find(([kind]) => kind === "recover")[1];
   assert.deepEqual(pendingRecovery.request, advanceCalls[0][1]);
-  await advance.broker.advance({ simulationMilliseconds: 30_000, wallMilliseconds: 2_000 });
+  advance.setNow(16_000);
+  await advance.broker.advance();
   const laterStartup = await advance.broker.recover();
   assert.equal(laterStartup.revision, 11);
   assert.equal(Object.hasOwn(laterStartup, "previousRevision"), false);
@@ -652,6 +736,7 @@ test("cached recovery receipts never cross authority lineage or macro identity",
 test("macro identity allocation stays bounded across three days of one-hertz advances", async () => {
   const advanceCount = 3 * 24 * 60 * 60;
   let current = authoritySnapshot();
+  let nowMs = 10_001;
   let committedAdvances = 0;
   let epochCalls = 0;
   const runtime = {
@@ -680,15 +765,17 @@ test("macro identity allocation stays bounded across three days of one-hertz adv
   };
   const broker = new NativePlayerAuthorityMacroBroker({
     runtime,
+    now: () => nowMs,
     createId: () => {
       epochCalls += 1;
       return "long-run-epoch";
     },
   });
 
-  await broker.start(macroStartRequest({ simulationMilliseconds: 1, wallMilliseconds: 1 }));
+  await broker.start(macroStartRequest({ effectiveMultiplier: 2 }));
   for (let index = 0; index < advanceCount; index += 1) {
-    await broker.advance({ simulationMilliseconds: 1, wallMilliseconds: 1 });
+    nowMs += 1;
+    await broker.advance();
   }
 
   assert.equal(committedAdvances, advanceCount + 1);
@@ -826,7 +913,7 @@ test("renderer macro receipts expose only bounded progress and never durable ide
   }
 });
 
-test("desktop exposes only a start revision fence and budgets while main owns every identity", () => {
+test("desktop exposes only a start revision and multiplier observation while main owns clock, budgets and identities", () => {
   const main = readFileSync("desktop/main.cjs", "utf8");
   const preload = readFileSync("desktop/preload.cjs", "utf8");
   assert.match(main, /new NativePlayerAuthorityMacroBroker\(\{[\s\S]*?runtime:\s*nativePlayerAuthorityRuntime/);
@@ -838,6 +925,7 @@ test("desktop exposes only a start revision fence and budgets while main owns ev
   assert.match(main, /desktop:native-player-authority-macro-recover"[\s\S]*?nativePlayerAuthorityMacroBroker\.recover\(request\)/);
   assert.doesNotMatch(main, /nativeCoreSessions\.(?:commitPlayerAuthorityMacroAdvance|finishPlayerAuthorityMacroSession|recoverPlayerAuthorityMacroAdvance)/);
   assert.match(preload, /startNativePlayerAuthorityMacro:[\s\S]*?desktop:native-player-authority-macro-start/);
+  assert.match(preload, /advanceNativePlayerAuthorityMacro:\s*\(\)[\s\S]*?desktop:native-player-authority-macro-advance[\s\S]*?\{\}/);
   assert.match(preload, /finishNativePlayerAuthorityMacro:\s*\(\)[\s\S]*?desktop:native-player-authority-macro-finish[\s\S]*?\{\}/);
   const macroPreloadSurface = preload.match(
     /^\s*(?:start|advance|finish|recover)NativePlayerAuthorityMacro:.*$/gm,
@@ -845,6 +933,6 @@ test("desktop exposes only a start revision fence and budgets while main owns ev
   assert.equal(macroPreloadSurface.length, 4);
   assert.doesNotMatch(
     macroPreloadSurface.join("\n"),
-    /macroSessionId|operationId|runId|main-player-authority/,
+    /macroSessionId|operationId|runId|main-player-authority|simulationMilliseconds|wallMilliseconds/,
   );
 });

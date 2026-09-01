@@ -46,7 +46,6 @@ type PendingMacroTransientRetry = Readonly<
     }
   | {
       kind: "advance";
-      budget: MacroBudget;
       phase: "starting" | "advancing" | "stopping";
       code: typeof PERSISTENCE_BUSY_ERROR_CODE;
     }
@@ -167,6 +166,18 @@ function multiplierFromMacroStatus(status: DesktopNativePlayerAuthorityMacroStat
       simulation! < 1 || simulation! % wall! !== 0) return null;
   const multiplier = simulation! / wall!;
   return Number.isSafeInteger(multiplier) && multiplier > 1 ? multiplier : null;
+}
+
+function receiptBudget(
+  receipt: DesktopNativePlayerAuthorityMacroReceipt,
+  multiplier: number,
+): MacroBudget | null {
+  const simulation = receipt.simulationMilliseconds;
+  const wall = receipt.wallMilliseconds;
+  if (!Number.isSafeInteger(simulation) || !Number.isSafeInteger(wall) || simulation! < 1 ||
+      wall! < 1 || simulation! > MAX_MACRO_BUDGET_MILLISECONDS ||
+      wall! > MAX_MACRO_BUDGET_MILLISECONDS || simulation !== wall! * multiplier) return null;
+  return Object.freeze({ simulationMilliseconds: simulation!, wallMilliseconds: wall! });
 }
 
 function settledThroughFromDeadline(nextDeadlineMs: number): number | null {
@@ -631,7 +642,7 @@ export class NativePlayerAuthorityMacroController {
   }
 
   private recoverOnce(pending: PendingMacroRecovery): void {
-    const key = `${pending.kind}:${pending.baseRevision}:${pending.budget?.wallMilliseconds ?? "none"}`;
+    const key = `${pending.kind}:${pending.baseRevision}:${pending.budget?.wallMilliseconds ?? "main-clock"}`;
     if (this.operationInFlight || this.recoveryKey === key) return;
     this.recoveryKey = key;
     const generation = this.generation;
@@ -704,11 +715,11 @@ export class NativePlayerAuthorityMacroController {
         return;
       }
     } else {
-      const budget = pending.budget;
+      const budget = pending.multiplier === null ? null : receiptBudget(receipt, pending.multiplier);
       if (!budget || !receipt.recovered || receipt.previousRevision !== pending.baseRevision ||
           receipt.revision <= pending.baseRevision ||
-          receipt.simulationMilliseconds !== budget.simulationMilliseconds ||
-          receipt.wallMilliseconds !== budget.wallMilliseconds) {
+          pending.budget && (budget.simulationMilliseconds !== pending.budget.simulationMilliseconds ||
+            budget.wallMilliseconds !== pending.budget.wallMilliseconds)) {
         this.fail("faulted", "NATIVE_PLAYER_AUTHORITY_MACRO_RECOVERY_INVALID");
         return;
       }
@@ -729,7 +740,7 @@ export class NativePlayerAuthorityMacroController {
       const retry = this.pendingTransientRetry;
       this.pendingTransientRetry = null;
       if (retry.kind === "start") this.retryStartFromLatestFrame(retry);
-      else if (retry.kind === "advance") this.commitAdvanceBudget(false, retry.budget);
+      else if (retry.kind === "advance") this.commitAdvance(false);
       else if (retry.kind === "finish") this.finish();
       else if (this.pendingRecovery) {
         this.recoveryKey = null;
@@ -816,34 +827,25 @@ export class NativePlayerAuthorityMacroController {
     this.commitAdvance(true);
   }
 
-  private budget(minimumWallMilliseconds: number): MacroBudget | null {
+  private hasMainClockWork(minimumWallMilliseconds: number): boolean {
     const multiplier = this.snapshotValue.effectiveMultiplier;
     const settled = this.snapshotValue.settledThroughMs;
     const now = this.now();
     if (!Number.isSafeInteger(multiplier) || multiplier! < 2 || settled === null ||
-        !Number.isFinite(now)) return null;
+        !Number.isFinite(now)) return false;
     const available = Math.floor(now - settled);
     const maximumWall = Math.floor(MAX_MACRO_BUDGET_MILLISECONDS / multiplier!);
-    if (available < minimumWallMilliseconds || maximumWall < 1) return null;
-    const wallMilliseconds = Math.min(available, maximumWall);
-    const simulationMilliseconds = wallMilliseconds * multiplier!;
-    if (!Number.isSafeInteger(simulationMilliseconds) || simulationMilliseconds < 1) return null;
-    return { simulationMilliseconds, wallMilliseconds };
+    return available >= minimumWallMilliseconds && maximumWall >= 1;
   }
 
   private commitAdvance(start: boolean): void {
-    const budget = this.budget(1);
-    if (!budget) {
+    if (!this.hasMainClockWork(1)) {
       const settled = this.snapshotValue.settledThroughMs;
       if (start) this.publish("waiting-powered-frame", true,
         this.snapshotValue.effectiveMultiplier, settled, null);
       this.arm(settled === null ? PERIODIC_WINDOW_MILLISECONDS : Math.max(1, settled + 1 - this.now()));
       return;
     }
-    this.commitAdvanceBudget(start, budget);
-  }
-
-  private commitAdvanceBudget(start: boolean, budget: MacroBudget): void {
     const baseRevision = this.macroRevision;
     if (baseRevision === null) {
       this.fail("faulted", "NATIVE_PLAYER_AUTHORITY_MACRO_REVISION_INVALID");
@@ -855,13 +857,17 @@ export class NativePlayerAuthorityMacroController {
       !this.stopRequested, this.snapshotValue.effectiveMultiplier,
       this.snapshotValue.settledThroughMs, null);
     const operation = start
-      ? this.bridge.startNativePlayerAuthorityMacro({ ...budget, expectedRevision: baseRevision })
-      : this.bridge.advanceNativePlayerAuthorityMacro(budget);
+      ? this.bridge.startNativePlayerAuthorityMacro({
+          expectedRevision: baseRevision,
+          effectiveMultiplier: this.snapshotValue.effectiveMultiplier!,
+        })
+      : this.bridge.advanceNativePlayerAuthorityMacro();
     void operation.then((receipt) => {
       if (generation !== this.generation) return;
-      if (receipt.state !== "macro-active" || receipt.recovered ||
-          receipt.simulationMilliseconds !== budget.simulationMilliseconds ||
-          receipt.wallMilliseconds !== budget.wallMilliseconds ||
+      const budget = this.snapshotValue.effectiveMultiplier === null
+        ? null
+        : receiptBudget(receipt, this.snapshotValue.effectiveMultiplier);
+      if (receipt.state !== "macro-active" || receipt.recovered || !budget ||
           receipt.previousRevision !== baseRevision || receipt.revision <= baseRevision) {
         this.fail("faulted", "NATIVE_PLAYER_AUTHORITY_MACRO_RECEIPT_INVALID");
         return;
@@ -882,14 +888,13 @@ export class NativePlayerAuthorityMacroController {
       if (!start && code === PERSISTENCE_BUSY_ERROR_CODE) {
         this.queueTransientRetry(Object.freeze({
           kind: "advance",
-          budget: Object.freeze({ ...budget }),
           phase: this.stopRequested ? "stopping" : "advancing",
           code,
         }));
         return;
       }
       this.transientRetryAttempt = 0;
-      this.recoverAfterUncertain(error, budget);
+      this.recoverAfterUncertain(error);
     }).finally(() => {
       if (generation !== this.generation) return;
       this.operationInFlight = false;
@@ -901,7 +906,7 @@ export class NativePlayerAuthorityMacroController {
     });
   }
 
-  private recoverAfterUncertain(error: unknown, budget: MacroBudget): void {
+  private recoverAfterUncertain(error: unknown): void {
     const code = errorCode(error);
     if (!code.includes("UNCERTAIN")) {
       this.failForError(error, "macro");
@@ -917,7 +922,7 @@ export class NativePlayerAuthorityMacroController {
       baseRevision: this.macroRevision,
       multiplier: this.snapshotValue.effectiveMultiplier,
       settledThroughMs: this.snapshotValue.settledThroughMs,
-      budget: Object.freeze({ ...budget }),
+      budget: null,
     });
     this.publish("recovering", !this.stopRequested, this.snapshotValue.effectiveMultiplier,
       this.snapshotValue.settledThroughMs, `macro:${code}`);

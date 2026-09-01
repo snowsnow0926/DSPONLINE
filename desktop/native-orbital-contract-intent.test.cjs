@@ -234,5 +234,6 @@ test("main preload and native route expose intent/projection only", () => {
   assert.match(preload, /getNativeCoreOrbitalContractWorkspaceProjection/);
   assert.doesNotMatch(preload, /commitPlayerAuthorityOrbitalContractCommand/);
   assert.doesNotMatch(component, /acceptStationContract|claimStationContract|abandonStationContract|deliverOrbitalQuantumInventory/);
-  assert.equal((main.match(/now: sampleOrbitalContractWallClock/g) ?? []).length, 2);
+  assert.equal((main.match(/now: samplePlayerAuthorityWallClock/g) ?? []).length, 4);
+  assert.doesNotMatch(main, /sampleOrbitalContractWallClock/);
 });

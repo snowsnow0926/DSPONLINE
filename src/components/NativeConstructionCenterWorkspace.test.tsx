@@ -139,10 +139,12 @@ describe("NativeConstructionCenterWorkspace", () => {
       onSubmitTargetStockIntent: vi.fn<(submission: NativeConstructionCenterTargetStockSubmission) => void>(),
     },
     open = true,
+    latestIdentity: NativeConstructionCenterFrameIdentity | null | undefined = undefined,
   ) {
     act(() => root.render(<NativeConstructionCenterWorkspace
       open={open}
       frame={value}
+      latestIdentity={latestIdentity}
       readStatus={readStatus}
       pendingIdentity={pendingIdentity}
       onClose={callbacks.onClose}
@@ -442,6 +444,67 @@ describe("NativeConstructionCenterWorkspace", () => {
     expect(host.querySelector("[data-native-construction-target-id='logistics_drone']")).not.toBeNull();
     act(() => host.querySelector<HTMLButtonElement>(".construction-center-categories button:nth-child(5)")!.click());
     expect(host.querySelector("[data-native-construction-target-id]")).toBeNull();
+  });
+
+  it("keeps the verified same-scope workspace and local drafts mounted while a newer revision loads", () => {
+    const callbacks = render(frame());
+    const search = host.querySelector<HTMLInputElement>("[aria-label='搜索原生自动制造目标']")!;
+    setInput(search, "");
+    const targetDraft = host.querySelector<HTMLInputElement>("[aria-label='风力涡轮机目标库存']")!;
+    const batchDraft = host.querySelector<HTMLInputElement>("[aria-label='全部已解锁建筑目标数量']")!;
+    expect(targetDraft).toBeInstanceOf(HTMLInputElement);
+    expect(batchDraft).toBeInstanceOf(HTMLInputElement);
+    setInput(targetDraft, "77");
+    setInput(batchDraft, "123");
+    setInput(search, "风力");
+    act(() => search.focus());
+
+    const revision20: NativeConstructionCenterFrameIdentity = {
+      sessionId: "session-a",
+      runId: "run-a",
+      revision: 20,
+      activePlanetId: "home",
+    };
+    render(null, "loading", null, callbacks, true, revision20);
+
+    expect(host.querySelector<HTMLInputElement>("[aria-label='搜索原生自动制造目标']")).toBe(search);
+    expect(document.activeElement).toBe(search);
+    expect(search.value).toBe("风力");
+    expect(host.querySelector<HTMLInputElement>("[aria-label='风力涡轮机目标库存']")).toBe(targetDraft);
+    expect(targetDraft.value).toBe("77");
+    expect(targetDraft.disabled).toBe(false);
+    expect(host.querySelector<HTMLInputElement>("[aria-label='全部已解锁建筑目标数量']")).toBe(batchDraft);
+    expect(batchDraft.value).toBe("123");
+    expect(batchDraft.disabled).toBe(false);
+    expect(host.textContent).toContain("正在读取 Rust revision 20");
+    expect(host.textContent).toContain("revision 19；全部权威写入已锁定");
+    expect([...host.querySelectorAll<HTMLInputElement>(".construction-center-toggle input")].every((control) => control.disabled)).toBe(true);
+    expect(host.querySelector<HTMLButtonElement>("[aria-label='增加风力涡轮机目标库存']")?.disabled).toBe(true);
+    expect(host.querySelector<HTMLSelectElement>("[aria-label='风力涡轮机常用目标库存']")?.disabled).toBe(true);
+    act(() => {
+      targetDraft.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      targetDraft.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+    expect(callbacks.onSubmitTargetStockIntent).not.toHaveBeenCalled();
+    expect(targetDraft.value).toBe("77");
+
+    render({ ...frame(), revision: 20 }, "ready", null, callbacks, true, revision20);
+    expect(host.querySelector<HTMLInputElement>("[aria-label='搜索原生自动制造目标']")).toBe(search);
+    expect(document.activeElement).toBe(search);
+    expect(search.value).toBe("风力");
+    expect(targetDraft.value).toBe("77");
+    expect(batchDraft.value).toBe("123");
+    expect(host.querySelector("[data-native-authority-revision='20']")).not.toBeNull();
+    expect(host.querySelector<HTMLButtonElement>("[aria-label='增加风力涡轮机目标库存']")?.disabled).toBe(false);
+
+    render(null, "loading", null, callbacks, true, { ...revision20, runId: "run-b", revision: 1 });
+    expect(host.querySelector("[data-native-construction-target-id]")).toBeNull();
+    expect(host.textContent).toContain("等待同版本原生投影");
+
+    render({ ...frame(), revision: 20 }, "ready", null, callbacks, true, revision20);
+    render(null, "unavailable", null, callbacks, true, revision20);
+    expect(host.querySelector("[data-native-construction-target-id]")).toBeNull();
+    expect(host.textContent).toContain("目录不受支持，已安全关闭展示与写入");
   });
 
   it("fails closed without a complete built-in frame and has no legacy state dependency", () => {

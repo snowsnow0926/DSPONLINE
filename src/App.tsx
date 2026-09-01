@@ -3717,6 +3717,17 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     () => selectNativeConstructionCenterWorkspaceFrame(nativeAuthoritativeFactoryWorkspaceFrame),
     [nativeAuthoritativeFactoryWorkspaceFrame],
   );
+  const nativeConstructionCenterLatestIdentity = useMemo<NativeConstructionCenterFrameIdentity | null>(
+    () => nativeFactoryInventoryIdentity && nativeFactoryProjectionPlanetId
+      ? Object.freeze({
+        sessionId: nativeFactoryInventoryIdentity.sessionId,
+        runId: nativeFactoryInventoryIdentity.runId,
+        revision: nativeFactoryInventoryIdentity.revision,
+        activePlanetId: nativeFactoryProjectionPlanetId,
+      })
+      : null,
+    [nativeFactoryInventoryIdentity, nativeFactoryProjectionPlanetId],
+  );
   const nativeConstructionCenterReadStatus = nativeConstructionCenterWorkspaceFrame
     ? "ready" as const
     : nativeFactoryThinViewSnapshot.status === "ready" || nativeFactoryThinViewSnapshot.status === "unavailable"
@@ -21652,6 +21663,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           <NativeConstructionCenterWorkspace
             open
             frame={nativeConstructionCenterWorkspaceFrame}
+            latestIdentity={nativeConstructionCenterLatestIdentity}
             readStatus={nativeConstructionCenterReadStatus}
             pendingIdentity={nativeConstructionCenterUiPendingIdentity}
             onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setConstructionCenterOpen(false)}

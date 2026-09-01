@@ -59,11 +59,12 @@ function statusLabel(status: "game-paused" | "automation-paused" | "working" | "
   }[status];
 }
 
-function NativeConstructionTargetControl({ target, stockLimit, frameKey, locked, onInteraction, onRequest }: {
+function NativeConstructionTargetControl({ target, stockLimit, frameKey, locked, draftDisabled, onInteraction, onRequest }: {
   target: NativeConstructionCenterTargetReadModel;
   stockLimit: number;
   frameKey: string;
   locked: boolean;
+  draftDisabled: boolean;
   onInteraction: () => void;
   onRequest: (target: number) => void;
 }) {
@@ -72,7 +73,8 @@ function NativeConstructionTargetControl({ target, stockLimit, frameKey, locked,
   const skipNextBlurRef = useRef(false);
   const step = Math.max(1, target.outputAmount);
   const presets = nativeConstructionCenterTargetPresets(stockLimit);
-  const disabled = locked || !target.unlocked;
+  const disabled = draftDisabled || !target.unlocked;
+  const commandDisabled = locked || disabled;
 
   useEffect(() => {
     skipNextBlurRef.current = false;
@@ -80,7 +82,8 @@ function NativeConstructionTargetControl({ target, stockLimit, frameKey, locked,
     setError(null);
   }, [disabled, frameKey, stockLimit, target.target, target.targetId]);
 
-  const request = (value: number): "same" | "requested" => {
+  const request = (value: number): "locked" | "same" | "requested" => {
+    if (locked) return "locked";
     setDraft(String(target.target));
     setError(null);
     if (value === target.target) return "same";
@@ -89,7 +92,7 @@ function NativeConstructionTargetControl({ target, stockLimit, frameKey, locked,
     onRequest(value);
     return "requested";
   };
-  const commitDraft = (): "invalid" | "same" | "requested" => {
+  const commitDraft = (): "invalid" | "locked" | "same" | "requested" => {
     const parsed = parseNativeConstructionCenterTargetDraft(draft, stockLimit);
     if (!parsed.ok) {
       setError(parsed.message);
@@ -103,7 +106,7 @@ function NativeConstructionTargetControl({ target, stockLimit, frameKey, locked,
     <div className="construction-center-target__stepper">
       <button
         type="button"
-        disabled={disabled || target.target <= 0}
+        disabled={commandDisabled || target.target <= 0}
         onClick={() => request(Math.max(0, target.target - step))}
         aria-label={`减少${target.name}目标库存`}
       ><Minus size={13} /></button>
@@ -122,6 +125,7 @@ function NativeConstructionTargetControl({ target, stockLimit, frameKey, locked,
           setError(null);
         }}
         onBlur={() => {
+          if (locked) return;
           if (skipNextBlurRef.current) {
             skipNextBlurRef.current = false;
             return;
@@ -131,6 +135,7 @@ function NativeConstructionTargetControl({ target, stockLimit, frameKey, locked,
         onKeyDown={(event) => {
           if (event.key === "Enter") {
             event.preventDefault();
+            if (locked) return;
             const result = commitDraft();
             if (result === "requested") skipNextBlurRef.current = true;
             if (result !== "invalid") event.currentTarget.blur();
@@ -146,14 +151,14 @@ function NativeConstructionTargetControl({ target, stockLimit, frameKey, locked,
       />
       <button
         type="button"
-        disabled={disabled || target.target >= stockLimit}
+        disabled={commandDisabled || target.target >= stockLimit}
         onClick={() => request(Math.min(stockLimit, target.target + step))}
         aria-label={`增加${target.name}目标库存`}
       ><Plus size={13} /></button>
     </div>
     <select
       value={presets.includes(target.target) ? String(target.target) : ""}
-      disabled={disabled}
+      disabled={commandDisabled}
       onChange={(event) => {
         if (event.target.value !== "") request(Number(event.target.value));
       }}
@@ -171,6 +176,7 @@ function NativeConstructionTargetControl({ target, stockLimit, frameKey, locked,
 export function NativeConstructionCenterWorkspace({
   open,
   frame,
+  latestIdentity,
   readStatus,
   pendingIdentity,
   onClose,
@@ -181,6 +187,7 @@ export function NativeConstructionCenterWorkspace({
 }: {
   open: boolean;
   frame: NativeConstructionCenterWorkspaceFrame | null;
+  latestIdentity?: NativeConstructionCenterFrameIdentity | null;
   readStatus: NativeConstructionCenterReadStatus;
   pendingIdentity: NativeConstructionCenterPendingIdentity | null;
   onClose: () => void;
@@ -195,12 +202,25 @@ export function NativeConstructionCenterWorkspace({
   const [batchDraft, setBatchDraft] = useState("100");
   const [batchConfirmation, setBatchConfirmation] = useState<NativeConstructionCenterBatchBuildingTargetStockConfirmation | null>(null);
   const [interactionError, setInteractionError] = useState<string | null>(null);
-  const workspace = frame?.workspace ?? null;
+  const resolvedLatestIdentity = latestIdentity === undefined
+    ? frame ? nativeConstructionCenterFrameIdentity(frame) : null
+    : latestIdentity;
+  const [cachedFrame, setCachedFrame] = useState<NativeConstructionCenterWorkspaceFrame | null>(frame);
+  const cachedFrameMatchesScope = Boolean(readStatus === "loading" && cachedFrame && resolvedLatestIdentity &&
+    cachedFrame.sessionId === resolvedLatestIdentity.sessionId &&
+    cachedFrame.runId === resolvedLatestIdentity.runId &&
+    cachedFrame.activePlanetId === resolvedLatestIdentity.activePlanetId &&
+    cachedFrame.revision <= resolvedLatestIdentity.revision);
+  const displayFrame = frame ?? (cachedFrameMatchesScope ? cachedFrame : null);
+  const workspace = displayFrame?.workspace ?? null;
   const term = query.trim().toLocaleLowerCase("zh-CN");
   const frameIdentity = frame ? nativeConstructionCenterFrameIdentity(frame) : null;
   const frameIdentityKey = nativeConstructionCenterIdentityKey(frameIdentity);
+  const displayScopeKey = displayFrame
+    ? `${displayFrame.sessionId}\0${displayFrame.runId}\0${displayFrame.activePlanetId}`
+    : "missing";
   const pendingKey = nativeConstructionCenterPendingKey(pendingIdentity);
-  const writeLocked = pendingIdentity !== null || workspace?.writeAvailable !== true;
+  const writeLocked = frame === null || pendingIdentity !== null || workspace?.writeAvailable !== true;
   const targets = useMemo(() => workspace?.targets.rows.filter((target) => {
     if (category !== "all" && target.category !== category) return false;
     if (!term) return true;
@@ -209,6 +229,21 @@ export function NativeConstructionCenterWorkspace({
       .toLocaleLowerCase("zh-CN")
       .includes(term);
   }) ?? [], [category, term, workspace]);
+
+  useEffect(() => {
+    if (frame) {
+      setCachedFrame(frame);
+      return;
+    }
+    if (readStatus !== "loading" || !resolvedLatestIdentity) setCachedFrame(null);
+    else setCachedFrame((current) => current &&
+      current.sessionId === resolvedLatestIdentity.sessionId &&
+      current.runId === resolvedLatestIdentity.runId &&
+      current.activePlanetId === resolvedLatestIdentity.activePlanetId &&
+      current.revision <= resolvedLatestIdentity.revision
+      ? current
+      : null);
+  }, [frame, readStatus, resolvedLatestIdentity?.activePlanetId, resolvedLatestIdentity?.revision, resolvedLatestIdentity?.runId, resolvedLatestIdentity?.sessionId]);
 
   useEffect(() => {
     setConfirmation(null);
@@ -221,10 +256,10 @@ export function NativeConstructionCenterWorkspace({
     setBatchDraft(String(typeof stockLimit === "number" && Number.isSafeInteger(stockLimit) && stockLimit > 0
       ? Math.min(100, stockLimit)
       : 100));
-  }, [frameIdentityKey, open, pendingKey, workspace?.stockLimit]);
+  }, [displayScopeKey, open, pendingKey, workspace?.stockLimit]);
 
   if (!open) return null;
-  if (!workspace || !frame || !frameIdentity) {
+  if (!workspace || !displayFrame) {
     return <WorkspaceFrame className="construction-center-workspace" ariaLabel="建筑制造中心" onRequestClose={onClose}>
       <header className="construction-center-header">
         <div><i><Factory size={20} /></i><span><small>Windows 原生权威工作区</small><strong>建筑制造中心</strong></span></div>
@@ -241,6 +276,10 @@ export function NativeConstructionCenterWorkspace({
     setConfirmation(null);
     setBatchConfirmation(null);
     setInteractionError(null);
+    if (!frame) {
+      setInteractionError("正在绑定最新 Rust revision；写入未提交");
+      return;
+    }
     const evaluated = evaluateNativeConstructionCenterTargetStock(frame, pendingIdentity, targetId, value);
     if (evaluated.status === "rejected") {
       setInteractionError(evaluated.message);
@@ -251,7 +290,7 @@ export function NativeConstructionCenterWorkspace({
     }
   };
   const confirmTargetDecrease = () => {
-    if (!confirmation) return;
+    if (!confirmation || !frame) return;
     const submission = confirmNativeConstructionCenterTargetStock(frame, pendingIdentity, confirmation);
     setConfirmation(null);
     if (!submission) {
@@ -264,6 +303,10 @@ export function NativeConstructionCenterWorkspace({
     setConfirmation(null);
     setBatchConfirmation(null);
     setInteractionError(null);
+    if (!frame) {
+      setInteractionError("正在绑定最新 Rust revision；写入未提交");
+      return;
+    }
     const evaluated = evaluateNativeConstructionCenterBatchBuildingTargetStock(frame, pendingIdentity, value);
     if (evaluated.status === "rejected") {
       setInteractionError(evaluated.message);
@@ -284,7 +327,7 @@ export function NativeConstructionCenterWorkspace({
     requestBatchBuildingTargetStock(parsed.value);
   };
   const confirmBatchBuildingTargetStock = () => {
-    if (!batchConfirmation) return;
+    if (!batchConfirmation || !frame) return;
     const submission = confirmNativeConstructionCenterBatchBuildingTargetStock(frame, pendingIdentity, batchConfirmation);
     setBatchConfirmation(null);
     if (!submission) {
@@ -298,10 +341,10 @@ export function NativeConstructionCenterWorkspace({
   return <WorkspaceFrame className="construction-center-workspace" ariaLabel="建筑制造中心" onRequestClose={onClose}>
     <header
       className="construction-center-header"
-      data-native-authority-session={frame.sessionId}
-      data-native-authority-run={frame.runId}
-      data-native-authority-revision={frame.revision}
-      data-native-authority-planet={frame.activePlanetId}
+      data-native-authority-session={displayFrame.sessionId}
+      data-native-authority-run={displayFrame.runId}
+      data-native-authority-revision={displayFrame.revision}
+      data-native-authority-planet={displayFrame.activePlanetId}
     >
       <div><i><Factory size={20} /></i><span><small>Windows 原生权威工作区</small><strong>建筑制造中心</strong></span></div>
       <dl>
@@ -314,9 +357,14 @@ export function NativeConstructionCenterWorkspace({
       <button type="button" onClick={onClose} title="关闭建筑制造中心" aria-label="关闭建筑制造中心"><X size={18} /></button>
     </header>
 
+    {!frame && resolvedLatestIdentity && displayFrame.revision !== resolvedLatestIdentity.revision
+      ? <div className="construction-center-status" role="status"><span><strong>正在读取 Rust revision {resolvedLatestIdentity.revision}</strong></span><em>当前保持显示已验证的 revision {displayFrame.revision}；全部权威写入已锁定。</em></div>
+      : null}
+
     <div className="construction-center-toolbar">
       <label className="construction-center-toggle" title={writeLocked ? "等待原生命令与新 revision 投影" : undefined}>
         <input type="checkbox" checked={workspace.enabled} disabled={writeLocked} onChange={(event) => {
+          if (!frameIdentity) return;
           setConfirmation(null);
           setBatchConfirmation(null);
           onSubmitEnabledIntent(frameIdentity, event.target.checked);
@@ -325,6 +373,7 @@ export function NativeConstructionCenterWorkspace({
       </label>
       <label className="construction-center-toggle" title={writeLocked ? "等待原生命令与新 revision 投影" : undefined}>
         <input type="checkbox" checked={workspace.quantumSourceEnabled} disabled={writeLocked || !workspace.quantumNetworkEnabled} onChange={(event) => {
+          if (!frameIdentity) return;
           setConfirmation(null);
           setBatchConfirmation(null);
           onSubmitQuantumSupplyIntent(frameIdentity, event.target.checked);
@@ -371,7 +420,7 @@ export function NativeConstructionCenterWorkspace({
           min={1}
           max={workspace.stockLimit}
           value={batchDraft}
-          disabled={writeLocked}
+          disabled={pendingIdentity !== null || workspace.writeAvailable !== true}
           onChange={(event) => {
             setBatchConfirmation(null);
             setBatchDraft(event.target.value);
@@ -469,8 +518,9 @@ export function NativeConstructionCenterWorkspace({
           <NativeConstructionTargetControl
             target={target}
             stockLimit={workspace.stockLimit}
-            frameKey={frameIdentityKey}
+            frameKey={displayScopeKey}
             locked={writeLocked}
+            draftDisabled={pendingIdentity !== null || workspace.writeAvailable !== true}
             onInteraction={() => {
               setConfirmation(null);
               setBatchConfirmation(null);

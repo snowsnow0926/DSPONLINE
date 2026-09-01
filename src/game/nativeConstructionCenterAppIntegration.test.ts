@@ -13,12 +13,14 @@ describe("native construction-center App boundary", () => {
   it("opens a player-visible native branch with only identity-bound intent callbacks", () => {
     expect(app).toMatch(/import \{ NativeConstructionCenterWorkspace \} from "\.\/components\/NativeConstructionCenterWorkspace"/);
     expect(app).toMatch(/selectNativeConstructionCenterWorkspaceFrame\(nativeAuthoritativeFactoryWorkspaceFrame\)/);
+    expect(app).toMatch(/nativeConstructionCenterLatestIdentity[\s\S]*?nativeFactoryInventoryIdentity[\s\S]*?nativeFactoryProjectionPlanetId/);
     expect(app).toMatch(/constructionCenterVisible=\{nativePlayerAuthorityOwnsRuntime \|\| game\.entities\.some/);
     expect(panels).toMatch(/const showConstructionCenter = constructionCenterVisible \?\?/);
     expect(panels).toMatch(/\{showConstructionCenter \? <button[\s\S]*?onClick=\{onOpenConstructionCenter\}/);
     expect(app).toMatch(/if \(!nativePlayerAuthorityOwnsRuntime && rejectLegacyFactoryInteractionWhileNative\("建筑制造中心"\)\) return/);
 
     const nativeTag = app.slice(app.indexOf("<NativeConstructionCenterWorkspace"), app.indexOf("/>", app.indexOf("<NativeConstructionCenterWorkspace")) + 2);
+    expect(nativeTag).toMatch(/latestIdentity=\{nativeConstructionCenterLatestIdentity\}/);
     expect(nativeTag).toMatch(/frame=\{nativeConstructionCenterWorkspaceFrame\}/);
     expect(nativeTag).toMatch(/readStatus=\{nativeConstructionCenterReadStatus\}/);
     expect(nativeTag).toMatch(/pendingIdentity=\{nativeConstructionCenterUiPendingIdentity\}/);

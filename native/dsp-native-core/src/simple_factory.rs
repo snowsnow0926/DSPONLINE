@@ -7864,6 +7864,10 @@ pub(crate) struct PreparedFactoryAdvance {
     /// `Some` is the writer-closed persisted-order set for Campaign metrics;
     /// `None` means a topology transition requires lazy flat reconstruction.
     pub campaign_metric_writer_indices: Option<Vec<usize>>,
+    /// Disposable private statistics tiers advanced alongside every public
+    /// one-second history sample. The sealed candidate is installed only by
+    /// the same successful state commit as its final public base.
+    pub production_history_tiers: Option<crate::production_history::TieredProductionHistory>,
 }
 
 pub(crate) fn prepare_advance(
@@ -7894,6 +7898,44 @@ fn should_record_internal_exact_seconds(
         && (total - total.round()).abs() <= EPSILON
         && step_size <= 1.0 + EPSILON
         && history_clock_aligned
+}
+
+fn synchronize_active_planet_tray(base: &mut Map<String, Value>) -> anyhow::Result<()> {
+    if let (Some(active_planet), Some(tray)) = (
+        base.get("activePlanetId")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        base.get("tray").cloned(),
+    ) {
+        base.get_mut("planetTrays")
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow!("native active planet trays are missing"))?
+            .insert(active_planet, tray);
+    }
+    Ok(())
+}
+
+fn finalize_public_factory_boundary_before_history(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+) -> anyhow::Result<()> {
+    settle_completed_research_boundaries(state, base, entities)?;
+    if let Some(time_warp) = base.get_mut("timeWarp").and_then(Value::as_object_mut) {
+        set_number(time_warp, "pendingSimulationSeconds", 0.0)?;
+        set_number(time_warp, "pendingWallSeconds", 0.0)?;
+    }
+    let universe_matrix = number_at(base.get("totalProduced"), &["universe_matrix"]);
+    if base.get("mode").and_then(Value::as_str) == Some("normal")
+        && universe_matrix >= 1.0
+        && let Some(station) = base
+            .get_mut("orbitalStation")
+            .and_then(Value::as_object_mut)
+        && station.get("status").and_then(Value::as_str) == Some("locked")
+    {
+        station.insert("status".to_owned(), Value::from("eligible"));
+    }
+    Ok(())
 }
 
 fn prepare_advance_with_runtime(
@@ -8079,17 +8121,7 @@ fn prepare_advance_with_runtime_options(
         &belt_routes,
         state.prepared_belt_activity(),
     )?;
-    if let (Some(active_planet), Some(tray)) = (
-        base.get("activePlanetId")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        base.get("tray").cloned(),
-    ) {
-        base.get_mut("planetTrays")
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| anyhow!("native active planet trays are missing"))?
-            .insert(active_planet, tray);
-    }
+    synchronize_active_planet_tray(&mut base)?;
     settle_completed_research_boundaries(state, &mut base, &mut entities)?;
     profile_mark!("research-boundaries-before");
     let total = simulation_seconds;
@@ -8131,6 +8163,8 @@ fn prepare_advance_with_runtime_options(
     // separate admission decision rather than a silent semantic rewrite.
     let record_internal_exact_seconds =
         should_record_internal_exact_seconds(&base, total, step_size);
+    let mut production_history_tiers =
+        record_internal_exact_seconds.then(|| state.production_history_tiers_candidate());
     let mut remaining = total;
     let mut remaining_wall = wall_seconds.max(0.0);
     let wall_per_simulation_second = if total > EPSILON {
@@ -8245,17 +8279,43 @@ fn prepare_advance_with_runtime_options(
             }
             crate::speedrun::advance_clock(state, &mut base, wall_step)?;
         }
-        if record_internal_exact_seconds {
+        let remaining_after_step = (remaining - step).max(0.0);
+        let history_boundary_due = finite_number(base.get("elapsedSeconds"))
+            - finite_number(base.get("historyRecordedAt"))
+            >= 1.0 - EPSILON;
+        if record_internal_exact_seconds && remaining_after_step > EPSILON && history_boundary_due {
+            finalize_public_factory_boundary_before_history(state, &mut base, &mut entities)?;
             let flow_requirement = crate::production_history::belt_flow_requirement(&base)?;
             let prepared_belt_flow = belt_runtime.prepared_flow(flow_requirement)?;
-            state.record_production_history_for_exact_step(
+            let history_record = state.record_production_history_for_exact_step(
                 &mut base,
                 &entities,
                 prepared_belt_flow,
                 deterministic_runtime,
             )?;
+            if let crate::production_history::InternalExactHistoryRecord::Recorded(
+                campaign_metrics,
+            ) = history_record
+            {
+                production_history_tiers
+                    .as_mut()
+                    .expect("exact history tier candidate must exist")
+                    .refresh_after_internal_sample(&base);
+                crate::campaign::synchronize_with_factory_metrics(
+                    state,
+                    &mut base,
+                    &entities,
+                    campaign_metrics,
+                )?;
+                crate::campaign::synchronize_orbital_station_eligibility(&mut base)?;
+                crate::speedrun::evaluate(state, &mut base)?;
+                // A segmented public call copies the active tray back into
+                // its planet slot before beginning the next simulation
+                // second. Preserve that call-boundary normalization here.
+                synchronize_active_planet_tray(&mut base)?;
+            }
         }
-        remaining = (remaining - step).max(0.0);
+        remaining = remaining_after_step;
         remaining_wall = (remaining_wall - wall_step).max(0.0);
     }
     if total <= EPSILON && remaining_wall > EPSILON {
@@ -8291,22 +8351,8 @@ fn prepare_advance_with_runtime_options(
     let (belt_commit, belt_flow, belt_scheduler) =
         belt_runtime.into_patches(state, belt_flow_requirement)?;
     profile_mark!("belt-runtime-write-back");
-    settle_completed_research_boundaries(state, &mut base, &mut entities)?;
+    finalize_public_factory_boundary_before_history(state, &mut base, &mut entities)?;
     profile_mark!("research-boundaries-after");
-    if let Some(time_warp) = base.get_mut("timeWarp").and_then(Value::as_object_mut) {
-        set_number(time_warp, "pendingSimulationSeconds", 0.0)?;
-        set_number(time_warp, "pendingWallSeconds", 0.0)?;
-    }
-    let universe_matrix = number_at(base.get("totalProduced"), &["universe_matrix"]);
-    if base.get("mode").and_then(Value::as_str) == Some("normal")
-        && universe_matrix >= 1.0
-        && let Some(station) = base
-            .get_mut("orbitalStation")
-            .and_then(Value::as_object_mut)
-        && station.get("status").and_then(Value::as_str) == Some("locked")
-    {
-        station.insert("status".to_owned(), Value::from("eligible"));
-    }
     if let Some(mut structured_profile) = quantum_oactive_profile.finish() {
         let binding = crate::profile_evidence::current_profile_operation_binding()
             .filter(|binding| {
@@ -8357,6 +8403,7 @@ fn prepare_advance_with_runtime_options(
         interstellar_peer_directory,
         interstellar_route_activity,
         campaign_metric_writer_indices,
+        production_history_tiers,
     })
 }
 
@@ -8364,8 +8411,8 @@ fn prepare_advance_with_runtime_options(
 pub(crate) mod tests {
     use super::*;
     use crate::catalog::{
-        BeltDefinition, CatalogSnapshot, ConstructionDefinition, ItemAmount, ItemDefinition,
-        PlanetDefinition, ProliferatorDefinition, RecipeDefinition, RuntimeCatalog,
+        BeltDefinition, BuildingDefinition, CatalogSnapshot, ConstructionDefinition, ItemAmount,
+        ItemDefinition, PlanetDefinition, ProliferatorDefinition, RecipeDefinition, RuntimeCatalog,
         TechnologyDefinition,
     };
     use crate::command::{PathSegment, RecordPatch, SimulationCommandPatch, ValuePatch};
@@ -8759,6 +8806,27 @@ pub(crate) mod tests {
         belts: &[Value],
         registry_fingerprint: &str,
     ) -> CoreState {
+        fixture_state_from_base_belts_with_catalog(
+            base,
+            entities,
+            belts,
+            registry_fingerprint,
+            fixture_catalog_with_registry(registry_fingerprint),
+        )
+    }
+
+    fn fixture_state_from_base_belts_with_catalog(
+        base: Value,
+        entities: &[Value],
+        belts: &[Value],
+        registry_fingerprint: &str,
+        catalog: RuntimeCatalog,
+    ) -> CoreState {
+        let state_mode = base
+            .get("mode")
+            .and_then(Value::as_str)
+            .unwrap_or("normal")
+            .to_owned();
         let entity_count = entities.len();
         let belt_count = belts.len();
         let base = serde_json::to_vec(&base).unwrap();
@@ -8784,7 +8852,7 @@ pub(crate) mod tests {
         let manifest = serde_json::to_vec(&json!({
             "formatVersion": 1,
             "envelopeFormatVersion": 2,
-            "mode": "normal",
+            "mode": state_mode,
             "slot": "main",
             "stateVersion": 47,
             "savedAt": 1,
@@ -8817,17 +8885,17 @@ pub(crate) mod tests {
         ]);
         CoreState::from_internal_records(
             CoreCheckpointIdentity {
-                slot: "normal-main".to_owned(),
+                slot: format!("{}-main", state_mode),
                 generation: 1,
                 root_hash: "a".repeat(64),
                 revision: 7,
                 state_version: 47,
-                mode: "normal".to_owned(),
+                mode: state_mode,
                 registry_fingerprint: registry_fingerprint.to_owned(),
                 base_primary_checksum: "12345678".to_owned(),
             },
             &records,
-            fixture_catalog_with_registry(registry_fingerprint),
+            catalog,
         )
         .unwrap()
     }
@@ -9996,6 +10064,86 @@ pub(crate) mod tests {
         state.install_prepared_interstellar_route_activity(interstellar_route_activity);
     }
 
+    fn commit_and_install_exact_factory_test_state(
+        state: &mut CoreState,
+        mut prepared: PreparedFactoryAdvance,
+    ) {
+        let belt_routes = prepared.belt_routes.clone();
+        let belt_activity = prepared.belt_activity.clone();
+        let logistics_buffer_runtime = prepared.logistics_buffer_runtime.clone();
+        let material_delivery_runtime = prepared.material_delivery_runtime.clone();
+        let ordinary_production_runtime = prepared.ordinary_production_runtime.clone();
+        let planet_metrics_runtime = prepared.planet_metrics_runtime.clone();
+        let power_probe_runtime = prepared.power_probe_runtime.clone();
+        let local_peer_directory = prepared.local_peer_directory.clone();
+        let quantum_logistics_directory = prepared.quantum_logistics_directory.clone();
+        let construction_runtime = prepared.construction_runtime.clone();
+        let station_mode_transition_runtime = prepared.station_mode_transition_runtime.clone();
+        let quantum_transition_runtime = prepared.quantum_transition_runtime.clone();
+        let interstellar_peer_directory = prepared.interstellar_peer_directory.clone();
+        let interstellar_route_activity = prepared.interstellar_route_activity.clone();
+        let next_revision = state.revision + 1;
+        let campaign_metric_writer_indices = prepared.campaign_metric_writer_indices.take();
+        let campaign_projection_update =
+            state.campaign_projection_runtime.prepare_simulation_update(
+                state,
+                &prepared.entities,
+                campaign_metric_writer_indices.as_deref(),
+                next_revision,
+            );
+        let cached_campaign_factory_metrics =
+            crate::campaign::factory_metrics_needed(&prepared.base)
+                .then(|| campaign_projection_update.factory_metrics(state))
+                .flatten();
+        let sampled_campaign_factory_metrics = state
+            .record_production_history_with_campaign_metrics(
+                &mut prepared.base,
+                &prepared.entities,
+                Some(prepared.belt_flow),
+                cached_campaign_factory_metrics.as_ref(),
+            )
+            .unwrap();
+        if let Some(production_history_tiers) = prepared.production_history_tiers.as_mut() {
+            production_history_tiers.refresh_after_internal_sample(&prepared.base);
+        }
+        crate::campaign::synchronize_with_factory_metrics(
+            state,
+            &mut prepared.base,
+            &prepared.entities,
+            cached_campaign_factory_metrics.or(sampled_campaign_factory_metrics),
+        )
+        .unwrap();
+        crate::campaign::synchronize_orbital_station_eligibility(&mut prepared.base).unwrap();
+        crate::speedrun::evaluate(state, &mut prepared.base).unwrap();
+        state
+            .commit_simulated_state_with_campaign_projection_update_and_history(
+                prepared.base,
+                prepared.entities,
+                prepared.belt_commit,
+                next_revision,
+                false,
+                crate::state::PreparedSimulationRuntimeUpdates {
+                    campaign_projection: campaign_projection_update,
+                    production_history_tiers: prepared.production_history_tiers,
+                },
+            )
+            .unwrap();
+        state.install_prepared_belt_routes(belt_routes);
+        state.install_prepared_belt_activity(belt_activity);
+        state.install_prepared_logistics_buffer_runtime(logistics_buffer_runtime);
+        state.install_prepared_material_delivery_runtime(material_delivery_runtime);
+        state.install_prepared_ordinary_production_runtime(ordinary_production_runtime);
+        state.install_prepared_planet_metrics_runtime(planet_metrics_runtime);
+        state.install_prepared_power_probe_runtime(power_probe_runtime);
+        state.install_prepared_local_peer_directory(local_peer_directory);
+        state.install_prepared_quantum_logistics_directory(quantum_logistics_directory);
+        state.install_prepared_construction_runtime(construction_runtime);
+        state.install_prepared_station_mode_transition_runtime(station_mode_transition_runtime);
+        state.install_prepared_quantum_transition_runtime(quantum_transition_runtime);
+        state.install_prepared_interstellar_peer_directory(interstellar_peer_directory);
+        state.install_prepared_interstellar_route_activity(interstellar_route_activity);
+    }
+
     fn advance_material_delivery_test_state(
         state: &mut CoreState,
         seconds: f64,
@@ -10033,7 +10181,11 @@ pub(crate) mod tests {
                 include_diagnostics: false,
             })
             .unwrap();
-        assert!(result.supported, "exact {seconds}s advance was unsupported");
+        assert!(
+            result.supported,
+            "exact {seconds}s advance was unsupported: {:?}",
+            result.reason
+        );
     }
 
     fn production_history_segmentation_fixture() -> CoreState {
@@ -10046,6 +10198,252 @@ pub(crate) mod tests {
         state.base_value_mut()["campaign"]["rewardedTaskIds"] =
             json!(["smelt_iron", "side_storage", "side_stable_power"]);
         state
+    }
+
+    fn campaign_reward_consumption_segmentation_fixture() -> CoreState {
+        const REGISTRY_FINGERPRINT: &str = "campaign-reward-segmentation";
+        let source = construction_isolation_fixture();
+        let mut entities = source.parse_entities_parallel().unwrap();
+        entities
+            .iter_mut()
+            .find(|entity| entity["id"] == "wind")
+            .unwrap()["machineCount"] = Value::from(2);
+        let mut base = construction_isolation_base();
+        base["construction"] = json!({ "thermal_power_plant": 0 });
+        base["constructionAutomation"]["targetStock"] = json!({ "thermal_power_plant": 2 });
+        base["research"]["completedTechIds"] = json!(["proliferator_1", "construction_capacity_2"]);
+        base["campaign"] = json!({
+            "completedTaskIds": [],
+            "rewardedTaskIds": [],
+            "activeTaskId": "mine_first_ore",
+            "activeChapterId": "foundation"
+        });
+        let mut snapshot = fixture_catalog_with_registry(REGISTRY_FINGERPRINT).snapshot;
+        snapshot.constructions.push(ConstructionDefinition {
+            id: "thermal_power_plant".to_owned(),
+            output_amount: 1.0,
+            automation_order: 1,
+            required_tech_id: None,
+            costs: vec![ItemAmount {
+                item_id: "iron_ore".to_owned(),
+                amount: 1.0,
+            }],
+        });
+        let catalog = RuntimeCatalog::validate(snapshot, REGISTRY_FINGERPRINT).unwrap();
+        fixture_state_from_base_belts_with_catalog(
+            base,
+            &entities,
+            &[],
+            REGISTRY_FINGERPRINT,
+            catalog,
+        )
+    }
+
+    fn orbital_unlock_segmentation_fixture() -> CoreState {
+        const REGISTRY_FINGERPRINT: &str = "orbital-unlock-segmentation";
+        let mut base = construction_isolation_base();
+        base["campaign"]["completedTaskIds"] =
+            json!(["smelt_iron", "side_storage", "side_stable_power"]);
+        base["campaign"]["rewardedTaskIds"] =
+            json!(["smelt_iron", "side_storage", "side_stable_power"]);
+        base.as_object_mut().unwrap().insert(
+            "orbitalStation".to_owned(),
+            json!({
+                "status": "locked",
+                "construction": {
+                    "stageRequirements": [{
+                        "stageId": "core",
+                        "costs": [{ "itemId": "iron_ore", "amount": "1000000000" }],
+                        "delivered": { "iron_ore": "0" },
+                        "fleetCosts": {},
+                        "deliveredFleet": {}
+                    }]
+                },
+                "contractBoard": {
+                    "taskDay": 0,
+                    "lastConfirmedWallClockMs": 0,
+                    "offers": [],
+                    "accepted": [],
+                    "history": [],
+                    "settledIds": []
+                },
+                "totals": { "exportedByItem": {} }
+            }),
+        );
+        let mut snapshot = fixture_catalog_with_registry(REGISTRY_FINGERPRINT).snapshot;
+        snapshot.buildings.push(BuildingDefinition {
+            id: "orbital_cargo_terminal".to_owned(),
+            kind: "storage".to_owned(),
+            speed: 1.0,
+            input_capacity: 1_000_000.0,
+            output_capacity: 0.0,
+            power_demand_kw: 1.0,
+            power_generation_kw: 0.0,
+            power_charge_kw: 0.0,
+            energy_capacity_mj: 0.0,
+            fuel_item_ids: Vec::new(),
+            fuel_efficiency: 1.0,
+            family: None,
+            accepts: None,
+        });
+        snapshot.recipes.push(fixture_recipe(
+            "universe_unlock_fixture",
+            "arc_smelter",
+            None,
+            vec![ItemAmount {
+                item_id: "iron_ore".to_owned(),
+                amount: 1.0,
+            }],
+            vec![ItemAmount {
+                item_id: "universe_matrix".to_owned(),
+                amount: 1.0,
+            }],
+        ));
+        let catalog = RuntimeCatalog::validate(snapshot, REGISTRY_FINGERPRINT).unwrap();
+        let entities = vec![
+            json!({
+                "id": "orbital-unlock-wind",
+                "kind": "power",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "wind_turbine",
+                "machineCount": 10,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            }),
+            json!({
+                "id": "universe-unlock-producer",
+                "kind": "machine",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "arc_smelter",
+                "recipeId": "universe_unlock_fixture",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": { "iron_ore": 10 },
+                "outputs": { "universe_matrix": 0 },
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "proliferatorBonusProgress": {}
+            }),
+            json!({
+                "id": "orbital-unlock-terminal",
+                "kind": "storage",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "orbital_cargo_terminal",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": { "iron_ore": 100 },
+                "outputs": {},
+                "powerFactor": 1,
+                "orbitalCargoProgress": 0,
+                "routingCursor": 0,
+                "orbitalCargoTotalUploaded": "0",
+                "orbitalCargoBinding": { "kind": "construction" },
+                "orbitalCargoPortItems": ["iron_ore", null, null, null],
+                "utilization": 0,
+                "productionRate": 0
+            }),
+        ];
+        fixture_state_from_base_belts_with_catalog(
+            base,
+            &entities,
+            &[],
+            REGISTRY_FINGERPRINT,
+            catalog,
+        )
+    }
+
+    fn campaign_item_reward_wakes_construction_fixture() -> CoreState {
+        const REGISTRY_FINGERPRINT: &str = "campaign-item-construction-wake";
+        let source = construction_isolation_fixture();
+        let mut entities = source.parse_entities_parallel().unwrap();
+        entities
+            .iter_mut()
+            .find(|entity| entity["id"] == "wind")
+            .unwrap()["machineCount"] = Value::from(2);
+        let smelter = entities
+            .iter_mut()
+            .find(|entity| entity["id"] == "smelter")
+            .unwrap();
+        smelter["sprayCoaterInstalled"] = Value::from(true);
+        smelter["proliferatorTier"] = Value::from(1);
+        smelter["proliferatorMode"] = Value::from("normal");
+        let mut base = construction_isolation_base();
+        base["tray"]["proliferator_mk1"] = Value::from(0);
+        base["planetTrays"]["home"]["proliferator_mk1"] = Value::from(0);
+        base["construction"] = json!({ "spray_reward_building": 0 });
+        base["constructionAutomation"]["targetStock"] = json!({ "spray_reward_building": 1 });
+        base["campaign"] = json!({
+            "completedTaskIds": ["side_stable_power"],
+            "rewardedTaskIds": ["side_stable_power"],
+            "activeTaskId": "mine_first_ore",
+            "activeChapterId": "foundation"
+        });
+        let mut snapshot = fixture_catalog_with_registry(REGISTRY_FINGERPRINT).snapshot;
+        snapshot.constructions.push(ConstructionDefinition {
+            id: "spray_reward_building".to_owned(),
+            output_amount: 1.0,
+            automation_order: 1,
+            required_tech_id: None,
+            costs: vec![ItemAmount {
+                item_id: "proliferator_mk1".to_owned(),
+                amount: 1.0,
+            }],
+        });
+        let catalog = RuntimeCatalog::validate(snapshot, REGISTRY_FINGERPRINT).unwrap();
+        fixture_state_from_base_belts_with_catalog(
+            base,
+            &entities,
+            &[],
+            REGISTRY_FINGERPRINT,
+            catalog,
+        )
+    }
+
+    fn speedrun_research_boundary_fixture() -> CoreState {
+        let source = research_boundary_fixture(32, 1.0, 99_999.0);
+        let entities = source.parse_entities_parallel().unwrap();
+        let mut base = Value::Object(source.base_value().clone());
+        base["mode"] = Value::from("speedrun");
+        base.as_object_mut().unwrap().insert(
+            "speedrun".to_owned(),
+            json!({
+                "enabled": true,
+                "mode": "speedrun",
+                "rulesetVersion": "speedrun-v1",
+                "seasonId": "season_01",
+                "startedAt": 1,
+                "elapsedActiveSeconds": 0,
+                "baseline": {
+                    "completedTechIds": ["mining_speed_1"],
+                    "rocketsLaunched": 0,
+                    "whiteMatrixProduced": 0
+                },
+                "milestones": {
+                    "all_technologies": { "completed": false },
+                    "dyson_rockets_10000": { "completed": false },
+                    "white_matrix_1m": { "completed": false }
+                },
+                "eligible": true,
+                "factoryId": "speedrun-boundary-fixture-0001"
+            }),
+        );
+        fixture_state_from_base_belts_with_catalog(
+            base,
+            &entities,
+            &[],
+            crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+            source.catalog.as_ref().clone(),
+        )
     }
 
     fn reload_exact_history_checkpoint(state: &CoreState) -> CoreState {
@@ -10157,8 +10555,20 @@ pub(crate) mod tests {
         for seconds in [2_u64, 5, 30] {
             let mut batched = production_history_segmentation_fixture();
             let mut segmented = batched.clone();
+            let source_revision = batched.revision;
+            assert!(batched.exact_history_clock().unwrap().history_clock_aligned);
 
             advance_exact_public_seconds(&mut batched, seconds as f64);
+            assert_eq!(
+                batched.revision,
+                source_revision + 1,
+                "one successful multi-second Core advance owns one revision"
+            );
+            let batch_clock = batched.exact_history_clock().unwrap();
+            assert_eq!(batch_clock.revision, batched.revision);
+            assert_eq!(batch_clock.elapsed_seconds, seconds as f64);
+            assert_eq!(batch_clock.history_recorded_at, seconds as f64);
+            assert!(batch_clock.history_clock_aligned);
             for _ in 0..seconds {
                 advance_exact_public_seconds(&mut segmented, 1.0);
             }
@@ -10194,6 +10604,231 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn exact_batch_campaign_reward_is_available_to_the_next_construction_second() {
+        let mut batched = campaign_reward_consumption_segmentation_fixture();
+        let mut segmented = batched.clone();
+
+        advance_exact_public_seconds(&mut batched, 2.0);
+        advance_exact_public_seconds(&mut segmented, 1.0);
+        assert_eq!(admission_reason(&segmented).unwrap(), None);
+        assert_eq!(
+            segmented.base_value()["construction"]["thermal_power_plant"],
+            json!(2.0),
+            "the first construction pass plus Campaign reward must reach target stock"
+        );
+        assert_eq!(
+            segmented.base_value()["constructionAutomation"]["totalCrafted"],
+            json!(1.0),
+            "only one thermal plant is crafted before Campaign grants the second"
+        );
+        advance_exact_public_seconds(&mut segmented, 1.0);
+
+        assert_eq!(
+            segmented.base_value()["construction"]["thermal_power_plant"],
+            json!(2.0),
+            "the second pass must observe target stock already satisfied"
+        );
+        assert_eq!(
+            segmented.base_value()["constructionAutomation"]["totalCrafted"],
+            json!(1.0)
+        );
+        assert_eq!(
+            batched.base_value()["planetTrays"],
+            segmented.base_value()["planetTrays"],
+            "Campaign reward segmentation must not change persisted planet trays"
+        );
+        assert_public_exact_state_equal_except_revision(
+            &batched,
+            &segmented,
+            1,
+            "2s campaign reward-to-construction boundary",
+        );
+    }
+
+    #[test]
+    fn exact_batch_replays_research_and_orbital_public_call_boundaries() {
+        let mut source = research_boundary_fixture(32, 1.0, 99_999.0);
+        source
+            .base_value_mut()
+            .insert("orbitalStation".to_owned(), json!({ "status": "locked" }));
+        source.base_value_mut()["totalProduced"]["universe_matrix"] = Value::from(1);
+        let mut batched = source.clone();
+        let mut segmented = source;
+
+        advance_exact_public_seconds(&mut batched, 2.0);
+        advance_exact_public_seconds(&mut segmented, 1.0);
+        assert_eq!(admission_reason(&segmented).unwrap(), None);
+        assert!(
+            segmented.base_value()["research"]["completedTechIds"]
+                .as_array()
+                .is_some_and(|ids| ids.iter().any(|id| id == "research_speed_1"))
+        );
+        assert_eq!(
+            segmented.base_value()["orbitalStation"]["status"],
+            "eligible"
+        );
+        advance_exact_public_seconds(&mut segmented, 1.0);
+
+        assert_public_exact_state_equal_except_revision(
+            &batched,
+            &segmented,
+            1,
+            "2s research completion and orbital eligibility call boundaries",
+        );
+    }
+
+    #[test]
+    fn exact_batch_uses_first_second_matrix_unlock_for_second_second_orbital_upload() {
+        let source = orbital_unlock_segmentation_fixture();
+        let mut batched = source.clone();
+        let mut segmented = source;
+
+        advance_exact_public_seconds(&mut batched, 2.0);
+        advance_exact_public_seconds(&mut segmented, 1.0);
+        assert_eq!(admission_reason(&segmented).unwrap(), None);
+        assert!(
+            finite_number(segmented.base_value()["totalProduced"].get("universe_matrix")) >= 1.0
+        );
+        assert_eq!(
+            segmented.base_value()["orbitalStation"]["status"],
+            "eligible"
+        );
+        let terminal_after_first = segmented
+            .parse_entities_parallel()
+            .unwrap()
+            .into_iter()
+            .find(|entity| entity["id"] == "orbital-unlock-terminal")
+            .unwrap();
+        assert_eq!(terminal_after_first["orbitalCargoTotalUploaded"], "0");
+
+        advance_exact_public_seconds(&mut segmented, 1.0);
+        let terminal_after_second = segmented
+            .parse_entities_parallel()
+            .unwrap()
+            .into_iter()
+            .find(|entity| entity["id"] == "orbital-unlock-terminal")
+            .unwrap();
+        assert_ne!(
+            terminal_after_second["orbitalCargoTotalUploaded"],
+            "0",
+            "terminal={terminal_after_second:?} station={:?}",
+            segmented.base_value()["orbitalStation"]
+        );
+        assert_ne!(
+            segmented.base_value()["orbitalStation"]["construction"]["stageRequirements"][0]["delivered"]
+                ["iron_ore"],
+            "0"
+        );
+        assert_public_exact_state_equal_except_revision(
+            &batched,
+            &segmented,
+            1,
+            "first-second matrix unlock must authorize second-second orbital cargo",
+        );
+    }
+
+    #[test]
+    fn exact_batch_does_not_settle_campaign_on_fractional_activity_substeps() {
+        let mut source = campaign_reward_consumption_segmentation_fixture();
+        source.base_value_mut()["endgame"]["constructionActivity"] = json!({
+            "activityId": "fractional-boundary-fixture",
+            "activityClockMs": 0,
+            "startsAtMs": 500,
+            "endsAtMs": 1500
+        });
+        let mut batched = source.clone();
+        let mut segmented = source;
+
+        advance_exact_public_seconds(&mut batched, 2.0);
+        advance_exact_public_seconds(&mut segmented, 1.0);
+        advance_exact_public_seconds(&mut segmented, 1.0);
+
+        assert_eq!(
+            segmented.base_value()["construction"]["thermal_power_plant"],
+            json!(2.0)
+        );
+        assert_eq!(
+            segmented.base_value()["constructionAutomation"]["totalCrafted"],
+            json!(1.0)
+        );
+        assert_public_exact_state_equal_except_revision(
+            &batched,
+            &segmented,
+            1,
+            "2s exact activity split must settle only recorded one-second boundaries",
+        );
+    }
+
+    #[test]
+    fn exact_batch_campaign_item_reward_wakes_sleeping_construction_next_second() {
+        let source = campaign_item_reward_wakes_construction_fixture();
+        let mut batched = source.clone();
+        let mut segmented = source;
+
+        advance_exact_public_seconds(&mut batched, 2.0);
+        advance_exact_public_seconds(&mut segmented, 1.0);
+        assert_eq!(
+            segmented.base_value()["construction"]["spray_reward_building"],
+            json!(0)
+        );
+        assert_eq!(
+            segmented.base_value()["tray"]["proliferator_mk1"],
+            json!(10.0)
+        );
+        advance_exact_public_seconds(&mut segmented, 1.0);
+        assert_eq!(
+            segmented.base_value()["construction"]["spray_reward_building"],
+            json!(0)
+        );
+        assert_eq!(
+            segmented.base_value()["tray"]["proliferator_mk1"],
+            json!(9.0)
+        );
+        assert_eq!(
+            segmented.base_value()["constructionAutomation"]["jobs"]["construction-center"]["constructionId"],
+            "spray_reward_building",
+            "the rewarded item must wake the sleeping construction row and fund its job"
+        );
+        assert_public_exact_state_equal_except_revision(
+            &batched,
+            &segmented,
+            1,
+            "Campaign item reward must wake construction for the next exact second",
+        );
+    }
+
+    #[test]
+    fn exact_batch_freezes_first_second_speedrun_milestone_time() {
+        let source = speedrun_research_boundary_fixture();
+        let mut batched = source.clone();
+        let mut segmented = source;
+
+        advance_exact_public_seconds(&mut batched, 2.0);
+        advance_exact_public_seconds(&mut segmented, 1.0);
+        assert_eq!(admission_reason(&segmented).unwrap(), None);
+        assert_eq!(
+            segmented.base_value()["speedrun"]["milestones"]["all_technologies"]["completedAtSeconds"],
+            json!(1.0)
+        );
+        advance_exact_public_seconds(&mut segmented, 1.0);
+        assert_eq!(
+            segmented.base_value()["speedrun"]["elapsedActiveSeconds"],
+            json!(2.0)
+        );
+        assert_eq!(
+            segmented.base_value()["speedrun"]["milestones"]["all_technologies"]["completedAtSeconds"],
+            json!(1.0),
+            "a completed goal keeps its first-boundary time while the run clock continues"
+        );
+        assert_public_exact_state_equal_except_revision(
+            &batched,
+            &segmented,
+            1,
+            "speedrun milestone completion at the first exact boundary",
+        );
     }
 
     #[test]
@@ -10319,7 +10954,7 @@ pub(crate) mod tests {
             &DeterministicRuntime::for_test(worker_count),
         )
         .unwrap();
-        commit_and_install_factory_test_state(&mut state, prepared);
+        commit_and_install_exact_factory_test_state(&mut state, prepared);
         state
     }
 
@@ -10357,6 +10992,12 @@ pub(crate) mod tests {
     #[test]
     fn exact_multi_second_history_candidate_failure_keeps_source_atomic() {
         let mut state = production_history_segmentation_fixture();
+        advance_exact_public_seconds(&mut state, 1.0);
+        let source_belt_routes = state.prepared_belt_routes().unwrap();
+        let source_ordinary_runtime = state.prepared_ordinary_production_runtime().unwrap();
+        let source_planet_runtime = state.prepared_planet_metrics_runtime().unwrap();
+        let source_power_runtime = state.prepared_power_probe_runtime().unwrap();
+        let source_construction_runtime = state.prepared_construction_runtime().unwrap();
         state.base_value_mut().remove("campaign");
         let source_revision = state.revision;
         let source_public = serde_json::to_vec(&state.materialize().unwrap()).unwrap();
@@ -10384,6 +11025,26 @@ pub(crate) mod tests {
         assert_eq!(state.domain_sha256().unwrap(), source_domain);
         assert_eq!(synthetic_conservation_sha256(&state), source_conservation);
         assert_eq!(state.production_history_sidecar(), source_sidecar);
+        assert!(std::sync::Arc::ptr_eq(
+            &state.prepared_belt_routes().unwrap(),
+            &source_belt_routes
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &state.prepared_ordinary_production_runtime().unwrap(),
+            &source_ordinary_runtime
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &state.prepared_planet_metrics_runtime().unwrap(),
+            &source_planet_runtime
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &state.prepared_power_probe_runtime().unwrap(),
+            &source_power_runtime
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &state.prepared_construction_runtime().unwrap(),
+            &source_construction_runtime
+        ));
     }
 
     fn assert_material_delivery_state_equal_except_revision(

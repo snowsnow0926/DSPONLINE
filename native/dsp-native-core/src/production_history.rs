@@ -867,6 +867,11 @@ pub(crate) struct TieredProductionHistory {
     dirty: bool,
 }
 
+pub(crate) enum InternalExactHistoryRecord {
+    NotDue,
+    Recorded(Option<crate::campaign::CampaignFactoryMetrics>),
+}
+
 impl TieredProductionHistory {
     pub(crate) fn from_base(base: &Map<String, Value>) -> Self {
         let Ok((source, history)) = tiered_history_source(base) else {
@@ -926,6 +931,14 @@ impl TieredProductionHistory {
             }
         }
         *self = Self::from_base(base);
+    }
+
+    pub(crate) fn validate_current(&self, base: &Map<String, Value>) -> anyhow::Result<()> {
+        let (source, _) = tiered_history_source(base)?;
+        if !self.available || self.dirty || self.source != Some(source) {
+            bail!("native production history candidate is not bound to its final public source")
+        }
+        Ok(())
     }
 
     pub(crate) fn invalidate(&mut self) {
@@ -1080,26 +1093,31 @@ impl CoreState {
     }
 
     /// Records one public history boundary from a disposable exact-simulation
-    /// candidate. Campaign synchronization remains an outer commit concern;
-    /// supplying an already-prepared sentinel preserves the same sparse
-    /// history scan selected by a one-second public advance without repeating
-    /// the separate campaign aggregate on every internal second.
+    /// candidate and returns the campaign metrics collected by the same
+    /// persisted-order scan. A multi-second exact candidate must run campaign
+    /// settlement at each public one-second boundary, just like segmented
+    /// calls, so deferring this aggregate to the outer commit is not safe.
     pub(crate) fn record_production_history_for_exact_step(
         &self,
         base: &mut Map<String, Value>,
         entities: &[Value],
         prepared_belt_flow: PreparedBeltFlow,
         runtime: &DeterministicRuntime,
-    ) -> anyhow::Result<()> {
-        let campaign_metrics_prepared = crate::campaign::CampaignFactoryMetrics::default();
-        self.record_production_history_with_records_and_runtime(
+    ) -> anyhow::Result<InternalExactHistoryRecord> {
+        let recorded_before = finite_number(base.get("historyRecordedAt")).unwrap_or(0.0);
+        let campaign_metrics = self.record_production_history_with_records_and_runtime(
             base,
             entities,
             Some(prepared_belt_flow),
-            Some(&campaign_metrics_prepared),
+            None,
             runtime,
-        )
-        .map(|_| ())
+        )?;
+        let recorded_after = finite_number(base.get("historyRecordedAt")).unwrap_or(0.0);
+        Ok(if recorded_after > recorded_before + EPSILON {
+            InternalExactHistoryRecord::Recorded(campaign_metrics)
+        } else {
+            InternalExactHistoryRecord::NotDue
+        })
     }
 
     fn record_production_history_with_records_and_runtime(
@@ -3237,6 +3255,79 @@ mod tests {
             7_200.0
         );
         assert_eq!(serde_json::to_vec(&base).unwrap(), public_before);
+    }
+
+    #[test]
+    fn tiered_history_candidate_keeps_seeded_cold_hours_across_exact_batch_samples() {
+        let mut base = Map::from_iter([
+            ("version".to_owned(), Value::from(47)),
+            ("elapsedSeconds".to_owned(), Value::from(0)),
+            ("historyRecordedAt".to_owned(), Value::from(0)),
+            ("productionHistory".to_owned(), Value::Array(Vec::new())),
+        ]);
+        let mut seeded = TieredProductionHistory::from_base(&base);
+        for second in 1..=7_200 {
+            let history = base
+                .get_mut("productionHistory")
+                .and_then(Value::as_array_mut)
+                .unwrap();
+            history.push(history_sample(f64::from(second), 60.0, 1.0));
+            compact_history(history).unwrap();
+            base.insert("elapsedSeconds".to_owned(), Value::from(second));
+            base.insert("historyRecordedAt".to_owned(), Value::from(second));
+            seeded.refresh_after_internal_sample(&base);
+        }
+        assert_eq!(
+            covered_seconds(seeded.samples_if_current(&base).unwrap()),
+            7_200.0
+        );
+        assert!(covered_seconds(base["productionHistory"].as_array().unwrap()) < 4_000.0);
+
+        let mut batched_base = base.clone();
+        let mut batched = seeded.clone();
+        for second in 7_201..=7_205 {
+            let history = batched_base
+                .get_mut("productionHistory")
+                .and_then(Value::as_array_mut)
+                .unwrap();
+            history.push(history_sample(f64::from(second), 60.0, 1.0));
+            compact_history(history).unwrap();
+            batched_base.insert("elapsedSeconds".to_owned(), Value::from(second));
+            batched_base.insert("historyRecordedAt".to_owned(), Value::from(second));
+            batched.refresh_after_internal_sample(&batched_base);
+        }
+
+        let mut segmented_base = base;
+        let mut segmented = seeded;
+        for second in 7_201..=7_205 {
+            let history = segmented_base
+                .get_mut("productionHistory")
+                .and_then(Value::as_array_mut)
+                .unwrap();
+            history.push(history_sample(f64::from(second), 60.0, 1.0));
+            compact_history(history).unwrap();
+            segmented_base.insert("elapsedSeconds".to_owned(), Value::from(second));
+            segmented_base.insert("historyRecordedAt".to_owned(), Value::from(second));
+            segmented.refresh_after_internal_sample(&segmented_base);
+        }
+
+        batched.validate_current(&batched_base).unwrap();
+        segmented.validate_current(&segmented_base).unwrap();
+        assert_eq!(batched_base, segmented_base);
+        assert_eq!(
+            batched.sidecar_value(&batched_base),
+            segmented.sidecar_value(&segmented_base),
+            "one candidate refreshed per recorded second must preserve the same seeded cold sidecar as segmented commits"
+        );
+        assert_eq!(
+            covered_seconds(batched.samples_if_current(&batched_base).unwrap()),
+            7_205.0
+        );
+        let rebuilt = TieredProductionHistory::from_base(&batched_base);
+        assert!(
+            covered_seconds(rebuilt.samples_if_current(&batched_base).unwrap()) < 4_000.0,
+            "rebuilding only from final public history would have lost the seeded cold hours"
+        );
     }
 
     #[test]

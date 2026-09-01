@@ -402,6 +402,9 @@ impl CoreState {
                     Some(prepared.belt_flow),
                     cached_campaign_factory_metrics.as_ref(),
                 )?;
+            if let Some(production_history_tiers) = prepared.production_history_tiers.as_mut() {
+                production_history_tiers.refresh_after_internal_sample(&prepared.base);
+            }
             profile_mark!("production-history");
             crate::campaign::synchronize_with_factory_metrics(
                 self,
@@ -414,13 +417,16 @@ impl CoreState {
             crate::speedrun::evaluate(self, &mut prepared.base)?;
             profile_mark!("speedrun");
             let belt_scheduler = prepared.belt_scheduler.clone();
-            let summary = self.commit_simulated_state_with_campaign_projection_update(
+            let summary = self.commit_simulated_state_with_campaign_projection_update_and_history(
                 prepared.base,
                 prepared.entities,
                 prepared.belt_commit,
                 next_revision,
                 request.include_diagnostics,
-                campaign_projection_update,
+                crate::state::PreparedSimulationRuntimeUpdates {
+                    campaign_projection: campaign_projection_update,
+                    production_history_tiers: prepared.production_history_tiers,
+                },
             )?;
             self.install_prepared_belt_routes(belt_routes);
             self.install_prepared_belt_activity(belt_activity);

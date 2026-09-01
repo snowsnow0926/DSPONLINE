@@ -831,6 +831,18 @@ pub struct CoreStateSummary {
     pub coverage: DomainCoverage,
 }
 
+/// Small, allocation-free clock proof used by a native Host before it admits
+/// an integer multi-second Exact request. It is runtime API only and does not
+/// add any field to GameState, checkpoints, envelopes, or cloud schemas.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreExactHistoryClock {
+    pub revision: u64,
+    pub elapsed_seconds: f64,
+    pub history_recorded_at: f64,
+    pub history_clock_aligned: bool,
+}
+
 struct CanonicalDigestBundle {
     canonical_sha256: String,
     canonical_components: BTreeMap<String, String>,
@@ -2650,6 +2662,11 @@ pub struct CoreState {
     /// the factory; committed simulation revisions patch only changed rows.
     /// It is disposable and excluded from every persistent/canonical surface.
     pub(crate) campaign_projection_runtime: crate::campaign::CampaignProjectionRuntime,
+}
+
+pub(crate) struct PreparedSimulationRuntimeUpdates {
+    pub campaign_projection: crate::campaign::PreparedCampaignProjectionUpdate,
+    pub production_history_tiers: Option<crate::production_history::TieredProductionHistory>,
 }
 
 #[derive(Debug, Clone)]
@@ -4628,6 +4645,27 @@ impl CoreState {
         &self.base
     }
 
+    pub fn exact_history_clock(&self) -> anyhow::Result<CoreExactHistoryClock> {
+        let read = |key: &str| {
+            self.base
+                .get(key)
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .ok_or_else(|| anyhow!("native exact history clock field is invalid: {key}"))
+        };
+        let elapsed_seconds = read("elapsedSeconds")?;
+        let history_recorded_at = read("historyRecordedAt")?;
+        if history_recorded_at > elapsed_seconds + 0.0001 {
+            bail!("native exact history clock regressed before its sample cursor");
+        }
+        Ok(CoreExactHistoryClock {
+            revision: self.revision,
+            elapsed_seconds,
+            history_recorded_at,
+            history_clock_aligned: (elapsed_seconds - history_recorded_at).abs() <= 0.0001,
+        })
+    }
+
     /// Read-only validated catalog payload for Host diagnostics/export. The
     /// authoritative `Arc<RuntimeCatalog>` remains private so callers cannot
     /// mutate derived maps behind topology and projection seals.
@@ -4642,6 +4680,12 @@ impl CoreState {
     pub(crate) fn refresh_production_history_tiers(&mut self) {
         self.production_history_tiers
             .refresh_after_internal_sample(&self.base);
+    }
+
+    pub(crate) fn production_history_tiers_candidate(
+        &self,
+    ) -> crate::production_history::TieredProductionHistory {
+        (*self.production_history_tiers).clone()
     }
 
     pub(crate) fn rebuild_production_history_tiers(&mut self) {
@@ -4874,6 +4918,33 @@ impl CoreState {
         populate_summary_cache: bool,
         campaign_projection_update: crate::campaign::PreparedCampaignProjectionUpdate,
     ) -> anyhow::Result<Option<CoreStateSummary>> {
+        self.commit_simulated_state_with_campaign_projection_update_and_history(
+            base,
+            entities,
+            belt_commit,
+            next_revision,
+            populate_summary_cache,
+            PreparedSimulationRuntimeUpdates {
+                campaign_projection: campaign_projection_update,
+                production_history_tiers: None,
+            },
+        )
+    }
+
+    pub(crate) fn commit_simulated_state_with_campaign_projection_update_and_history(
+        &mut self,
+        base: Map<String, Value>,
+        entities: Vec<Value>,
+        belt_commit: crate::belts::BeltCommitBatch,
+        next_revision: u64,
+        populate_summary_cache: bool,
+        runtime_updates: PreparedSimulationRuntimeUpdates,
+    ) -> anyhow::Result<Option<CoreStateSummary>> {
+        let PreparedSimulationRuntimeUpdates {
+            campaign_projection: campaign_projection_update,
+            production_history_tiers,
+        } = runtime_updates;
+        let production_history_tiers_prepared = production_history_tiers.is_some();
         let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
         let mut profile_checkpoint = std::time::Instant::now();
         macro_rules! profile_mark {
@@ -4960,6 +5031,9 @@ impl CoreState {
             }
         }
         candidate.base = base;
+        if let Some(production_history_tiers) = production_history_tiers.as_ref() {
+            production_history_tiers.validate_current(&candidate.base)?;
+        }
         if writeback_diagnostics.changed_rows != 0 {
             candidate.entity_raw = entity_writeback.into();
         }
@@ -4969,6 +5043,9 @@ impl CoreState {
         }
         if let Some(belt_dynamics) = belt_dynamics {
             candidate.belt_dynamics = belt_dynamics.into();
+        }
+        if let Some(production_history_tiers) = production_history_tiers {
+            candidate.production_history_tiers = production_history_tiers.into();
         }
         candidate.revision = next_revision;
         // Operations is a disposable, hash-neutral read model. Failure to
@@ -5026,7 +5103,9 @@ impl CoreState {
                 }));
         }
         *self = candidate;
-        self.refresh_production_history_tiers();
+        if !production_history_tiers_prepared {
+            self.refresh_production_history_tiers();
+        }
         if let Some(entities) = retired_entities {
             retire_record_values(entities, Vec::new());
         }

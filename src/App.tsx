@@ -712,9 +712,11 @@ import {
   createNativeProjectedDysonActiveLayerCommand,
   createNativeProjectedDysonActiveOrbitCommand,
   createNativeProjectedDysonAddLayerCommand,
+  createNativeProjectedDysonAddNodeCommand,
   createNativeProjectedDysonAddOrbitCommand,
   createNativeProjectedDysonAutoConnectCommand,
   createNativeProjectedDysonClearShellCommand,
+  createNativeProjectedDysonConnectNodesCommand,
   createNativeProjectedDysonLayerGeometryCommand,
   createNativeProjectedDysonLaunchEnabledCommand,
   createNativeProjectedDysonLaunchModeCommand,
@@ -722,6 +724,7 @@ import {
   createNativeProjectedDysonOrbitGeometryCommand,
   createNativeProjectedDysonPlanShellCommand,
   createNativeProjectedDysonRemoveLayerCommand,
+  createNativeProjectedDysonRemoveNodeCommand,
   createNativeProjectedDysonRemoveOrbitCommand,
   type NativeProjectedDysonLayerGeometry,
   type NativeProjectedDysonOrbitGeometry,
@@ -13168,6 +13171,48 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     );
   }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
 
+  const onNativeDysonAddNode = useCallback((layerId: string, angle: number) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次节点新增未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonAddNodeCommand(frame, layerId, angle)
+        : null,
+      () => setNotice("已由 Rust 新增戴森节点"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonRemoveNode = useCallback((layerId: string, nodeId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次节点删除未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonRemoveNodeCommand(frame, layerId, nodeId)
+        : null,
+      () => setNotice("已由 Rust 删除节点及其关联框架和壳面；历史物料总量保持不变"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonConnectNodes = useCallback((layerId: string, sourceNodeId: string, targetNodeId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次节点连线未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonConnectNodesCommand(frame, layerId, sourceNodeId, targetNodeId)
+        : null,
+      () => setNotice("已由 Rust 创建戴森框架并计算结构需求"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
   const onNativeDysonAddOrbit = useCallback(() => {
     const frame = nativeDysonWorkspaceFrame;
     if (!frame) {
@@ -22733,6 +22778,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onAddLayer={onNativeDysonAddLayer}
             onLayerChange={onNativeDysonLayerChange}
             onRemoveLayer={onNativeDysonRemoveLayer}
+            onAddNode={onNativeDysonAddNode}
+            onRemoveNode={onNativeDysonRemoveNode}
+            onConnectNodes={onNativeDysonConnectNodes}
             onAddOrbit={onNativeDysonAddOrbit}
             onRemoveOrbit={onNativeDysonRemoveOrbit}
             onAutoConnect={onNativeDysonAutoConnect}

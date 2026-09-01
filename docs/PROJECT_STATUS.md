@@ -1,10 +1,10 @@
 # DSP极简网络项目现状
 
-> **Windows 戴森壳层/轨道生命周期 Rust 权威纵切（2026-09-01，开发候选，未发布）**：原生戴森薄 UI 现已开放空白层、八节点标准层、壳层轨道几何、删除层、太阳帆轨道新增/删除，以及此前的闭合框架、规划/清除壳面。renderer 只发送绑定当前 session/run/revision/registry/system 的小语义 intent；Rust 从权威科技、目录、`nextId`、节点与物料账本生成或修改目录，不接收 renderer 提供的结构数组、轨道数组、完成量、容量或物料计数。
+> **Windows 戴森节点编辑 Rust 权威纵切（2026-09-01，开发候选，未发布）**：原生戴森薄 UI 现在除壳层/轨道生命周期与框架/壳面规划外，还可直接在轨道图新增节点、选择两点创建框架、删除节点并级联清理关联框架和壳面。renderer 只发送绑定当前 session/run/revision/registry/system 的角度或节点 ID 小意图；稳定 ID、框架结构需求、目录重派生与级联结果全部由 Rust 从权威状态确定，不接收 renderer 提供的节点/框架/壳面数组、完成量、容量、`nextId` 或物料计数。
 >
-> 删除壳层保留 `structurePoints/shellSails` 历史总量；删除太阳帆轨道至少保留一条，并把在轨帆、累计发射和累计过期 checked-add 到确定 fallback 后重建全局 swarm，旧 ejector target 不被暗改。第八条轨道的旧默认 54,000 m 失配在原生路径封顶为公开允许的 50,000 m。WAL 只保存意图；`AfterWal` 冷恢复与正常提交的 revision、canonical SHA-256 和公开状态一致，重复 command ID 不会二次合并物料。
+> 节点角度规范到 0.1°，每层最多 24 个且任意两点至少相隔 5°；手工连线禁止同点和重复无向边，工作量继续使用权威半径与夹角公式。删除节点不降低或增加 `structurePoints/shellSails` 历史总量。WAL 只保存 `remove-node` 等小意图；`AfterWal` 冷恢复与正常提交的 revision、canonical SHA-256 和公开状态逐字一致，重复 command ID 不会再次级联删除。
 >
-> 本轮新增 focused 为 Rust semantic `8/8`、Host 冷恢复 `1/1`、Vitest `24/24`、desktop broker `29/29`；TypeScript、production build、startup budget、Native thin-UI AST 门禁、Rust fmt、workspace strict Clippy 和 diff check通过。手工节点增删/逐节点连边与设计复制粘贴仍未迁移，完整组合门禁也尚未重跑，因此固定能力百分比暂不调整。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不变；未读取玩家存档，未连接生产，未部署、打包或签名。
+> 本轮新鲜 focused 为 Rust Dyson `30/30`（其中 plan semantic `6/6`）、Host Dyson/冷恢复 `4/4`、Vitest `27/27`、desktop broker `29/29`；TypeScript、production build（2,097 modules）、startup budget、Native thin-UI AST 门禁、Rust fmt 与 workspace strict Clippy 均通过。跨层设计复制粘贴仍未迁移，完整组合门禁也尚未重跑，因此固定能力百分比暂不调整。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不变；未读取玩家存档，未连接生产，未部署、打包或签名。
 
 > **Windows Rust 行星指标活动探针缓存（2026-09-01，开发候选，未发布）**：在完整 writer-closure 审计通过后，`simple_factory` 的 `planetMetrics` 不再每个模拟步重新解码/查询全部实体。新的 session-only runtime 保存一份按持久实体顺序排列的紧凑 probe 基线、稀疏 override 和有序 pending writer 集；冷拍、命令/拓扑失配、非空 MOD registry、opaque/畸形形状、目录证据不完整及精确 `75%` 稠密阈值仍走真实 flat-full。`productionRate`、储能/容量、燃料余热与选中燃料输入、`machineCount` 及 planet/building/topology 的产品 writer 清单和闭合方式见 [writer 审计](./NATIVE_PLANET_METRICS_WRITER_AUDIT.md)。
 >

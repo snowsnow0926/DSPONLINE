@@ -2274,3 +2274,16 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 6. WAL 仍只保存小语义 marker。新增 Host `AfterWal` 故障用例在移除含 100 帆的活动轨道后故意丢失响应；新进程冷恢复与无故障提交得到相同 revision、canonical SHA-256 和公开 v47，120 在轨帆、220 累计发射、55 累计过期完整保留，活动轨道切到 fallback，`receiverLoadKw` 保持 123。WAL 正文不含 `sailsInOrbit/totalLaunched/totalExpired/generationKw`，duplicate command ID 不会再次合并。
 7. 本切片新鲜 focused 结果为 Rust semantic Core `8/8`、Host 冷恢复 `1/1`、组件/命令/App Vitest `24/24`、desktop broker `29/29`；TypeScript、production build（2,097 modules）、startup budget、Native thin-UI AST 门禁、workspace all-target/all-feature strict Clippy、Rust fmt 与 diff check均通过。完整 Core/Host/Vitest/Server/E2E、24 小时、多硬件、安装/覆盖升级、签名与灰度仍需冻结后单独执行。
 8. 本切片不升级 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 Host/renderer 协议版本，`authorityEligible=false` 保持不变；没有读取或修改真实玩家存档，没有连接生产、部署、打包发布或签名。固定四目标百分比等节点编辑等下一块闭合后统一复审，不按新增行数临时抬高。
+
+### 24.47 戴森节点与手工框架 Rust 权威纵切（2026-09-01，开发候选）
+
+本纵切关闭 24.46 明确保留的手工节点编辑缺口：轨道画布可新增节点，依次选择两个节点可创建框架，选中节点可删除并级联清理相关设计。跨层设计复制粘贴仍未迁移，因此这里不把整个戴森编辑器写成全部完成。
+
+1. renderer 新增三种 `dysonPlans.intent`：`add-node` 只携带 `kind/systemId/layerId/angle`，`remove-node` 只再携带 `nodeId`，`connect-nodes` 只再携带两个端点 ID。命令必须来自当前 exact session/run/revision/registry/恒星系投影；loading 时可保留上一份已验证画面，但画布、节点和删除按钮全部锁死。renderer 不发送节点/框架/壳面数组、`nextId`、结构需求、完成量、容量或物料数字。
+2. 角度在 UI 边界按既有规则四舍五入至 0.1° 并归一化到 `[0,360)`；Rust 再次验证规范角度、科技、系统解锁、层 membership、每层最多 24 个节点和任意两节点最短角距至少 5°。节点 ID 从全恒星系已验证的权威 ID 集与 `nextId` 稳定分配，跨系统碰撞、溢出、缺字段、额外字段、未知/MOD 目标和畸形目录全部在 disposable candidate 中失败关闭。
+3. 手工框架要求两个不同且同层的现有节点，不允许重复无向边；Rust 以权威层半径和端点夹角派生 `ceil(radius/10000 × arc/45)`、最少 1 的结构需求并稳定分配框架 ID。UI 只把“两点选择”当交互状态，ACK 前不画乐观框架，ACK 后等待新 revision 投影。
+4. 删除节点会同时删除所有以该节点为端点的框架，以及端点或边界引用这些框架的壳面；剩余框架需求、壳面容量、完成量和吸附显示继续经过既有 `reconcile_plan` 重派生。该操作只修改设计目录，`structurePoints`、`shellSails`、全局火箭/太阳帆和其他物料来源不降低也不增加；删除已完成设计不能凭空退款或销毁玩家历史总量。
+5. Core 回归从 4 节点预置层开始，依次新增 45° 节点、建立两条手工框架、补齐闭合壳面、删除新节点，并验证稳定 ID/`nextId`、剩余 `4/3/3` 个节点/框架/壳面、无悬空引用、物料总量不变；反向重复边和距离 3° 的节点必须原子拒绝且源状态逐字不变。
+6. Host `AfterWal` 故障用例在 WAL 已同步、checkpoint/ACK 尚未完成时删除一个连接两边和两壳面的节点。日志只有 `remove-node` 与目标 ID，不含结构需求、吸附帆或 `nextId`；冷重启重放后与无故障提交具有相同 revision、canonical SHA-256 和公开 v47，重复 command ID 返回 duplicate receipt，不再次级联处理。
+7. 本轮新鲜 focused 结果为 Rust Dyson `30/30`（其中 `dyson_plan_command` `6/6`）、Host Dyson/冷恢复 `4/4`、组件/命令/App Vitest `27/27`、desktop broker `29/29`。TypeScript、production build（2,097 modules；startup gzip `180,776 B`）、startup budget、Native thin-UI AST 门禁、workspace all-target/all-feature strict Clippy 与 Rust fmt 均通过。完整 Core/Host/Vitest/Server/E2E、默认高并行稳定性、24 小时、多硬件、安装/覆盖升级、签名和灰度仍是独立门禁。
+8. 本切片不新增持久字段，不升级 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 Host/renderer 协议，`authorityEligible=false` 保持关闭；未读取或修改真实玩家存档，未连接生产，未部署、打包发布或签名。固定四目标百分比留到跨层设计复制及下一轮统一能力审计，不按新增代码行数临时抬高。

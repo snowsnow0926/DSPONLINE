@@ -227,6 +227,19 @@ test("Dyson layer and orbit lifecycle cross only as compact Rust-owned intents",
         value: { kind: "remove-orbit", systemId: "helios", orbitId: "orbit-a" },
       }],
     }),
+    command(17, {
+      topLevelChanges: [{
+        path: ["dysonPlans", "intent"],
+        operation: "set",
+        value: {
+          kind: "connect-nodes",
+          systemId: "helios",
+          layerId: "layer-a",
+          sourceNodeId: "node-a",
+          targetNodeId: "node-b",
+        },
+      }],
+    }),
   ];
   for (const expected of commands) {
     const { broker, calls } = brokerFixture({

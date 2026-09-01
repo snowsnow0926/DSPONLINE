@@ -81,6 +81,99 @@ function sameUndirectedEdge(
     leftSource === rightTarget && leftTarget === rightSource;
 }
 
+function normalizeNodeAngle(angle: number): number {
+  if (!Number.isFinite(angle)) throw new TypeError("原生戴森节点角度无效");
+  const scaled = angle * 10;
+  if (!Number.isFinite(scaled)) throw new TypeError("原生戴森节点角度超出可计算范围");
+  const rounded = Math.round(scaled) / 10;
+  const normalized = (rounded % 360 + 360) % 360;
+  return Object.is(normalized, -0) ? 0 : normalized;
+}
+
+function shortestNodeAngleDistance(left: number, right: number): number {
+  const direct = Math.abs(left - right) % 360;
+  return Math.min(direct, 360 - direct);
+}
+
+export function createNativeProjectedDysonAddNodeCommand(
+  frame: NativeDysonWorkspaceFrame,
+  layerId: string,
+  angle: number,
+): SimulationCommandPatch | null {
+  const layer = frame.layersById.get(layerId);
+  const nodes = frame.nodesByLayerId.get(layerId) ?? [];
+  const normalizedAngle = normalizeNodeAngle(angle);
+  if (!validFrame(frame) || !validOpaqueId(layerId) || !layer ||
+      frame.projection.technology?.programReady !== true ||
+      nodes.some((node) => node.layerId !== layerId || !validOpaqueId(node.nodeId))) {
+    throw new TypeError("原生戴森节点新增投影或目标无效");
+  }
+  if (nodes.length >= 24 || nodes.some((node) =>
+    shortestNodeAngleDistance(node.angle, normalizedAngle) < 5)) return null;
+  return topLevelCommand(frame, [{
+    path: ["dysonPlans", "intent"],
+    operation: "set",
+    value: {
+      kind: "add-node",
+      systemId: frame.selectedSystemId,
+      layerId,
+      angle: normalizedAngle,
+    },
+  }]);
+}
+
+export function createNativeProjectedDysonRemoveNodeCommand(
+  frame: NativeDysonWorkspaceFrame,
+  layerId: string,
+  nodeId: string,
+): SimulationCommandPatch {
+  const nodes = frame.nodesByLayerId.get(layerId) ?? [];
+  if (!validFrame(frame) || !validOpaqueId(layerId) || !validOpaqueId(nodeId) ||
+      !frame.layersById.has(layerId) || frame.projection.technology?.programReady !== true ||
+      !nodes.some((node) => node.layerId === layerId && node.nodeId === nodeId)) {
+    throw new TypeError("原生戴森节点删除投影或目标无效");
+  }
+  return topLevelCommand(frame, [{
+    path: ["dysonPlans", "intent"],
+    operation: "set",
+    value: { kind: "remove-node", systemId: frame.selectedSystemId, layerId, nodeId },
+  }]);
+}
+
+export function createNativeProjectedDysonConnectNodesCommand(
+  frame: NativeDysonWorkspaceFrame,
+  layerId: string,
+  sourceNodeId: string,
+  targetNodeId: string,
+): SimulationCommandPatch | null {
+  const nodes = frame.nodesByLayerId.get(layerId) ?? [];
+  const frames = frame.framesByLayerId.get(layerId) ?? [];
+  if (!validFrame(frame) || !validOpaqueId(layerId) || !validOpaqueId(sourceNodeId) ||
+      !validOpaqueId(targetNodeId) || !frame.layersById.has(layerId) ||
+      frame.projection.technology?.programReady !== true || sourceNodeId === targetNodeId ||
+      !nodes.some((node) => node.layerId === layerId && node.nodeId === sourceNodeId) ||
+      !nodes.some((node) => node.layerId === layerId && node.nodeId === targetNodeId)) {
+    throw new TypeError("原生戴森节点连线投影或端点无效");
+  }
+  if (frames.some((candidate) => sameUndirectedEdge(
+    candidate.sourceNodeId,
+    candidate.targetNodeId,
+    sourceNodeId,
+    targetNodeId,
+  ))) return null;
+  return topLevelCommand(frame, [{
+    path: ["dysonPlans", "intent"],
+    operation: "set",
+    value: {
+      kind: "connect-nodes",
+      systemId: frame.selectedSystemId,
+      layerId,
+      sourceNodeId,
+      targetNodeId,
+    },
+  }]);
+}
+
 function createNativeProjectedDysonPlanIntentCommand(
   frame: NativeDysonWorkspaceFrame,
   layerId: string,

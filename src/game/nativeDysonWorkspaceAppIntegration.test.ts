@@ -35,6 +35,9 @@ describe("native Dyson workspace App integration", () => {
     expect(nativeTag).toContain("onAddLayer={onNativeDysonAddLayer}");
     expect(nativeTag).toContain("onLayerChange={onNativeDysonLayerChange}");
     expect(nativeTag).toContain("onRemoveLayer={onNativeDysonRemoveLayer}");
+    expect(nativeTag).toContain("onAddNode={onNativeDysonAddNode}");
+    expect(nativeTag).toContain("onRemoveNode={onNativeDysonRemoveNode}");
+    expect(nativeTag).toContain("onConnectNodes={onNativeDysonConnectNodes}");
     expect(nativeTag).toContain("onAddOrbit={onNativeDysonAddOrbit}");
     expect(nativeTag).toContain("onRemoveOrbit={onNativeDysonRemoveOrbit}");
     expect(nativeTag).toContain("onAutoConnect={onNativeDysonAutoConnect}");
@@ -56,6 +59,9 @@ describe("native Dyson workspace App integration", () => {
     expect(handlers).toMatch(/createNativeProjectedDysonAddLayerCommand\(frame, standard\)/);
     expect(handlers).toMatch(/createNativeProjectedDysonLayerGeometryCommand\(frame, layerId, changes\)/);
     expect(handlers).toMatch(/createNativeProjectedDysonRemoveLayerCommand\(frame, layerId\)/);
+    expect(handlers).toMatch(/createNativeProjectedDysonAddNodeCommand\(frame, layerId, angle\)/);
+    expect(handlers).toMatch(/createNativeProjectedDysonRemoveNodeCommand\(frame, layerId, nodeId\)/);
+    expect(handlers).toMatch(/createNativeProjectedDysonConnectNodesCommand\(frame, layerId, sourceNodeId, targetNodeId\)/);
     expect(handlers).toMatch(/createNativeProjectedDysonAddOrbitCommand\(frame\)/);
     expect(handlers).toMatch(/createNativeProjectedDysonRemoveOrbitCommand\(frame, orbitId\)/);
     expect(handlers).toMatch(/createNativeProjectedDysonLaunchModeCommand\(frame, mode\)/);

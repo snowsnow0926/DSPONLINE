@@ -12,9 +12,11 @@ import {
   createNativeProjectedDysonActiveLayerCommand,
   createNativeProjectedDysonActiveOrbitCommand,
   createNativeProjectedDysonAddLayerCommand,
+  createNativeProjectedDysonAddNodeCommand,
   createNativeProjectedDysonAddOrbitCommand,
   createNativeProjectedDysonAutoConnectCommand,
   createNativeProjectedDysonClearShellCommand,
+  createNativeProjectedDysonConnectNodesCommand,
   createNativeProjectedDysonLayerGeometryCommand,
   createNativeProjectedDysonLaunchEnabledCommand,
   createNativeProjectedDysonLaunchModeCommand,
@@ -22,6 +24,7 @@ import {
   createNativeProjectedDysonOrbitGeometryCommand,
   createNativeProjectedDysonPlanShellCommand,
   createNativeProjectedDysonRemoveLayerCommand,
+  createNativeProjectedDysonRemoveNodeCommand,
   createNativeProjectedDysonRemoveOrbitCommand,
 } from "./nativeProjectedDysonCommands";
 
@@ -223,6 +226,67 @@ describe("native projected Dyson launch commands", () => {
       }]);
     expect(JSON.stringify(createNativeProjectedDysonRemoveOrbitCommand(current, "mod:轨道/新🚀")))
       .not.toMatch(/sailsInOrbit|totalLaunched|generationKw/);
+  });
+
+  it("emits only compact node lifecycle and endpoint intents", () => {
+    const current = designFrame();
+    expect(createNativeProjectedDysonAddNodeCommand(current, "layer:old", 405.04)?.topLevelChanges)
+      .toEqual([{
+        path: ["dysonPlans", "intent"],
+        operation: "set",
+        value: { kind: "add-node", systemId: "sol", layerId: "layer:old", angle: 45 },
+      }]);
+    expect(createNativeProjectedDysonRemoveNodeCommand(current, "layer:old", "node-2").topLevelChanges)
+      .toEqual([{
+        path: ["dysonPlans", "intent"],
+        operation: "set",
+        value: { kind: "remove-node", systemId: "sol", layerId: "layer:old", nodeId: "node-2" },
+      }]);
+    expect(createNativeProjectedDysonConnectNodesCommand(
+      current,
+      "layer:old",
+      "node-0",
+      "node-2",
+    )?.topLevelChanges).toEqual([{
+      path: ["dysonPlans", "intent"],
+      operation: "set",
+      value: {
+        kind: "connect-nodes",
+        systemId: "sol",
+        layerId: "layer:old",
+        sourceNodeId: "node-0",
+        targetNodeId: "node-2",
+      },
+    }]);
+    const encoded = JSON.stringify(createNativeProjectedDysonConnectNodesCommand(
+      current,
+      "layer:old",
+      "node-0",
+      "node-2",
+    ));
+    expect(encoded).not.toMatch(/requiredStructurePoints|completedStructurePoints|nextId|shells/);
+  });
+
+  it("suppresses duplicate or too-close node work and rejects cross-layer endpoints", () => {
+    const current = designFrame({ completeFrames: true });
+    expect(createNativeProjectedDysonAddNodeCommand(current, "layer:old", 363)).toBeNull();
+    expect(createNativeProjectedDysonConnectNodesCommand(
+      current,
+      "layer:old",
+      "node-1",
+      "node-0",
+    )).toBeNull();
+    expect(() => createNativeProjectedDysonAddNodeCommand(current, "layer:missing", 45)).toThrow(TypeError);
+    expect(() => createNativeProjectedDysonAddNodeCommand(current, "layer:old", Number.NaN)).toThrow(TypeError);
+    expect(() => createNativeProjectedDysonAddNodeCommand(current, "layer:old", Number.MAX_VALUE)).toThrow(TypeError);
+    expect(() => createNativeProjectedDysonRemoveNodeCommand(current, "layer:old", "node:missing"))
+      .toThrow(TypeError);
+    expect(() => createNativeProjectedDysonConnectNodesCommand(
+      current,
+      "layer:old",
+      "node-0",
+      "node:missing",
+    )).toThrow(TypeError);
   });
 
   it("does not enqueue completed design work and fails closed for missing technology or nodes", () => {

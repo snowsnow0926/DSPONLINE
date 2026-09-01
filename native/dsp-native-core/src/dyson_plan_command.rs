@@ -33,6 +33,9 @@ enum DysonPlanIntentKind {
     AddStandardLayer,
     SetLayerOrbit,
     RemoveLayer,
+    AddNode,
+    RemoveNode,
+    ConnectNodes,
     AutoConnect,
     PlanShell,
     ClearShell,
@@ -51,6 +54,10 @@ struct DysonPlanIntent {
     system_id: String,
     layer_id: Option<String>,
     orbit: DysonLayerOrbitChanges,
+    angle: Option<f64>,
+    node_id: Option<String>,
+    source_node_id: Option<String>,
+    target_node_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -108,6 +115,9 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<DysonPlanI
         Some("add-standard-layer") => DysonPlanIntentKind::AddStandardLayer,
         Some("set-layer-orbit") => DysonPlanIntentKind::SetLayerOrbit,
         Some("remove-layer") => DysonPlanIntentKind::RemoveLayer,
+        Some("add-node") => DysonPlanIntentKind::AddNode,
+        Some("remove-node") => DysonPlanIntentKind::RemoveNode,
+        Some("connect-nodes") => DysonPlanIntentKind::ConnectNodes,
         Some("auto-connect") => DysonPlanIntentKind::AutoConnect,
         Some("plan-shell") => DysonPlanIntentKind::PlanShell,
         Some("clear-shell") => DysonPlanIntentKind::ClearShell,
@@ -118,6 +128,15 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<DysonPlanI
             &["kind", "systemId"]
         }
         DysonPlanIntentKind::SetLayerOrbit => &["kind", "systemId", "layerId", "changes"],
+        DysonPlanIntentKind::AddNode => &["kind", "systemId", "layerId", "angle"],
+        DysonPlanIntentKind::RemoveNode => &["kind", "systemId", "layerId", "nodeId"],
+        DysonPlanIntentKind::ConnectNodes => &[
+            "kind",
+            "systemId",
+            "layerId",
+            "sourceNodeId",
+            "targetNodeId",
+        ],
         DysonPlanIntentKind::RemoveLayer
         | DysonPlanIntentKind::AutoConnect
         | DysonPlanIntentKind::PlanShell
@@ -183,11 +202,48 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<DysonPlanI
             orbit.longitude = Some(canonical_angle(Some(value), "layer longitude")?);
         }
     }
+    let angle = if kind == DysonPlanIntentKind::AddNode {
+        Some(canonical_angle(intent.get("angle"), "node angle")?)
+    } else {
+        None
+    };
+    let node_id = if kind == DysonPlanIntentKind::RemoveNode {
+        Some(
+            intent
+                .get("nodeId")
+                .and_then(Value::as_str)
+                .filter(|value| valid_opaque_id(value))
+                .ok_or_else(|| anyhow!("native player-authority Dyson node ID is invalid"))?
+                .to_owned(),
+        )
+    } else {
+        None
+    };
+    let command_node_id = |key: &str, label: &str| {
+        intent
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| valid_opaque_id(value))
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("native player-authority Dyson {label} is invalid"))
+    };
+    let (source_node_id, target_node_id) = if kind == DysonPlanIntentKind::ConnectNodes {
+        (
+            Some(command_node_id("sourceNodeId", "source node ID")?),
+            Some(command_node_id("targetNodeId", "target node ID")?),
+        )
+    } else {
+        (None, None)
+    };
     Ok(DysonPlanIntent {
         kind,
         system_id: system_id.to_owned(),
         layer_id,
         orbit,
+        angle,
+        node_id,
+        source_node_id,
+        target_node_id,
     })
 }
 
@@ -738,6 +794,146 @@ fn update_layer_orbit(
     Ok(true)
 }
 
+fn shortest_angle_distance(left: f64, right: f64) -> f64 {
+    let direct = (left - right).abs() % 360.0;
+    direct.min(360.0 - direct)
+}
+
+fn append_node(
+    layer: &mut Map<String, Value>,
+    angle: f64,
+    next_id: &mut u64,
+    all_ids: &mut HashSet<String>,
+) -> anyhow::Result<()> {
+    let nodes = layer
+        .get_mut("nodes")
+        .and_then(Value::as_array_mut)
+        .expect("Dyson nodes were validated");
+    if nodes.len() >= MAX_DYSON_NODES_PER_LAYER {
+        bail!("native player-authority Dyson node limit is exceeded")
+    }
+    if nodes.iter().filter_map(Value::as_object).any(|node| {
+        canonical_angle(node.get("angle"), "node angle")
+            .is_ok_and(|current| shortest_angle_distance(current, angle) < 5.0)
+    }) {
+        bail!("native player-authority Dyson node is too close to an existing node")
+    }
+    let id = allocate_id("dyson_node", next_id, all_ids)?;
+    nodes.push(json!({
+        "id": id,
+        "angle": angle,
+        "requiredStructurePoints": 1,
+        "completedStructurePoints": 0,
+    }));
+    Ok(())
+}
+
+fn remove_node(layer: &mut Map<String, Value>, node_id: &str) -> anyhow::Result<()> {
+    let node_exists = layer
+        .get("nodes")
+        .and_then(Value::as_array)
+        .expect("Dyson nodes were validated")
+        .iter()
+        .any(|node| node.get("id").and_then(Value::as_str) == Some(node_id));
+    if !node_exists {
+        bail!("native player-authority Dyson node target is missing")
+    }
+    let removed_frame_ids = layer
+        .get("frames")
+        .and_then(Value::as_array)
+        .expect("Dyson frames were validated")
+        .iter()
+        .filter_map(Value::as_object)
+        .filter(|frame| {
+            frame.get("sourceNodeId").and_then(Value::as_str) == Some(node_id)
+                || frame.get("targetNodeId").and_then(Value::as_str) == Some(node_id)
+        })
+        .filter_map(|frame| frame.get("id").and_then(Value::as_str).map(str::to_owned))
+        .collect::<HashSet<_>>();
+    layer
+        .get_mut("nodes")
+        .and_then(Value::as_array_mut)
+        .expect("Dyson nodes were validated")
+        .retain(|node| node.get("id").and_then(Value::as_str) != Some(node_id));
+    layer
+        .get_mut("frames")
+        .and_then(Value::as_array_mut)
+        .expect("Dyson frames were validated")
+        .retain(|frame| {
+            frame
+                .get("id")
+                .and_then(Value::as_str)
+                .is_none_or(|id| !removed_frame_ids.contains(id))
+        });
+    layer
+        .get_mut("shells")
+        .and_then(Value::as_array_mut)
+        .expect("Dyson shells were validated")
+        .retain(|shell| {
+            shell.get("sourceNodeId").and_then(Value::as_str) != Some(node_id)
+                && shell.get("targetNodeId").and_then(Value::as_str) != Some(node_id)
+                && !shell
+                    .get("boundaryFrameIds")
+                    .and_then(Value::as_array)
+                    .is_some_and(|boundaries| {
+                        boundaries.iter().any(|boundary| {
+                            boundary
+                                .as_str()
+                                .is_some_and(|id| removed_frame_ids.contains(id))
+                        })
+                    })
+        });
+    Ok(())
+}
+
+fn connect_nodes(
+    layer: &mut Map<String, Value>,
+    source_node_id: &str,
+    target_node_id: &str,
+    next_id: &mut u64,
+    all_ids: &mut HashSet<String>,
+) -> anyhow::Result<()> {
+    if source_node_id == target_node_id {
+        bail!("native player-authority Dyson frame endpoints are identical")
+    }
+    let nodes = layer
+        .get("nodes")
+        .and_then(Value::as_array)
+        .expect("Dyson nodes were validated");
+    let node_angle = |id: &str| {
+        nodes
+            .iter()
+            .find(|node| node.get("id").and_then(Value::as_str) == Some(id))
+            .and_then(Value::as_object)
+            .map(|node| canonical_angle(node.get("angle"), "node angle"))
+            .transpose()
+    };
+    let source_angle = node_angle(source_node_id)?
+        .ok_or_else(|| anyhow!("native player-authority Dyson frame source node is missing"))?;
+    let target_angle = node_angle(target_node_id)?
+        .ok_or_else(|| anyhow!("native player-authority Dyson frame target node is missing"))?;
+    let radius = positive_integer(layer.get("radius"), "layer radius")?;
+    let frames = layer
+        .get_mut("frames")
+        .and_then(Value::as_array_mut)
+        .expect("Dyson frames were validated");
+    if frame_exists(frames, source_node_id, target_node_id) {
+        bail!("native player-authority Dyson frame already exists")
+    }
+    if frames.len() >= MAX_DYSON_FRAMES_PER_LAYER {
+        bail!("native player-authority Dyson frame limit is exceeded")
+    }
+    let id = allocate_id("dyson_frame", next_id, all_ids)?;
+    frames.push(json!({
+        "id": id,
+        "sourceNodeId": source_node_id,
+        "targetNodeId": target_node_id,
+        "requiredStructurePoints": frame_requirement(radius, source_angle, target_angle),
+        "completedStructurePoints": 0,
+    }));
+    Ok(())
+}
+
 pub(crate) fn validate_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
@@ -865,6 +1061,74 @@ pub(crate) fn expand_intent(
             if removing_active {
                 candidate_plan.insert("activeLayerId".to_owned(), fallback);
             }
+            true
+        }
+        DysonPlanIntentKind::AddNode => {
+            let layer_id = intent
+                .layer_id
+                .as_deref()
+                .expect("add-node intent has a validated layer ID");
+            let (layer_index, _) = target_layer(original_plan, &nodes_by_layer, layer_id)?;
+            let layer = candidate_plan
+                .get_mut("layers")
+                .and_then(Value::as_array_mut)
+                .and_then(|layers| layers.get_mut(layer_index))
+                .and_then(Value::as_object_mut)
+                .expect("Dyson plan and target layer were validated");
+            append_node(
+                layer,
+                intent.angle.expect("add-node intent has a validated angle"),
+                &mut next_id,
+                &mut all_ids,
+            )?;
+            true
+        }
+        DysonPlanIntentKind::RemoveNode => {
+            let layer_id = intent
+                .layer_id
+                .as_deref()
+                .expect("remove-node intent has a validated layer ID");
+            let (layer_index, _) = target_layer(original_plan, &nodes_by_layer, layer_id)?;
+            let layer = candidate_plan
+                .get_mut("layers")
+                .and_then(Value::as_array_mut)
+                .and_then(|layers| layers.get_mut(layer_index))
+                .and_then(Value::as_object_mut)
+                .expect("Dyson plan and target layer were validated");
+            remove_node(
+                layer,
+                intent
+                    .node_id
+                    .as_deref()
+                    .expect("remove-node intent has a validated node ID"),
+            )?;
+            true
+        }
+        DysonPlanIntentKind::ConnectNodes => {
+            let layer_id = intent
+                .layer_id
+                .as_deref()
+                .expect("connect-nodes intent has a validated layer ID");
+            let (layer_index, _) = target_layer(original_plan, &nodes_by_layer, layer_id)?;
+            let layer = candidate_plan
+                .get_mut("layers")
+                .and_then(Value::as_array_mut)
+                .and_then(|layers| layers.get_mut(layer_index))
+                .and_then(Value::as_object_mut)
+                .expect("Dyson plan and target layer were validated");
+            connect_nodes(
+                layer,
+                intent
+                    .source_node_id
+                    .as_deref()
+                    .expect("connect-nodes intent has a validated source node ID"),
+                intent
+                    .target_node_id
+                    .as_deref()
+                    .expect("connect-nodes intent has a validated target node ID"),
+                &mut next_id,
+                &mut all_ids,
+            )?;
             true
         }
         DysonPlanIntentKind::AutoConnect => {
@@ -1295,6 +1559,103 @@ mod tests {
         assert_eq!(plan["structurePoints"].as_f64(), Some(12.0));
         assert_eq!(plan["shellSails"].as_f64(), Some(80.0));
         assert_eq!(live.base_value()["nextId"], 126);
+    }
+
+    #[test]
+    fn node_add_connect_and_cascade_remove_are_deterministic_and_material_neutral() {
+        let mut live = state();
+        let add = semantic_intent(
+            live.revision,
+            json!({
+                "kind": "add-node",
+                "systemId": "helios",
+                "layerId": "mod:layer/alpha🚀",
+                "angle": 45
+            }),
+        );
+        live.apply_command(&add).unwrap();
+        assert_eq!(layer(&live)["nodes"].as_array().unwrap().len(), 5);
+        assert_eq!(layer(&live)["nodes"][4]["id"], "dyson_node_100");
+        assert_eq!(live.base_value()["nextId"], 101);
+
+        for (source, target) in [("node-a", "dyson_node_100"), ("dyson_node_100", "node-b")] {
+            let connect = semantic_intent(
+                live.revision,
+                json!({
+                    "kind": "connect-nodes",
+                    "systemId": "helios",
+                    "layerId": "mod:layer/alpha🚀",
+                    "sourceNodeId": source,
+                    "targetNodeId": target
+                }),
+            );
+            live.apply_command(&connect).unwrap();
+        }
+        assert_eq!(layer(&live)["frames"].as_array().unwrap().len(), 2);
+        assert_eq!(layer(&live)["frames"][0]["id"], "dyson_frame_101");
+        assert_eq!(layer(&live)["frames"][1]["id"], "dyson_frame_102");
+        assert_eq!(live.base_value()["nextId"], 103);
+
+        let duplicate = semantic_intent(
+            live.revision,
+            json!({
+                "kind": "connect-nodes",
+                "systemId": "helios",
+                "layerId": "mod:layer/alpha🚀",
+                "sourceNodeId": "node-b",
+                "targetNodeId": "dyson_node_100"
+            }),
+        );
+        let before_duplicate = live.base_value().clone();
+        assert!(live.apply_command(&duplicate).is_err());
+        assert_eq!(live.base_value(), &before_duplicate);
+
+        let shell = intent(live.revision, "plan-shell");
+        live.apply_command(&shell).unwrap();
+        assert_eq!(layer(&live)["frames"].as_array().unwrap().len(), 5);
+        assert_eq!(layer(&live)["shells"].as_array().unwrap().len(), 5);
+        assert_eq!(live.base_value()["nextId"], 111);
+
+        let remove = semantic_intent(
+            live.revision,
+            json!({
+                "kind": "remove-node",
+                "systemId": "helios",
+                "layerId": "mod:layer/alpha🚀",
+                "nodeId": "dyson_node_100"
+            }),
+        );
+        live.apply_command(&remove).unwrap();
+        assert_eq!(layer(&live)["nodes"].as_array().unwrap().len(), 4);
+        assert_eq!(layer(&live)["frames"].as_array().unwrap().len(), 3);
+        assert_eq!(layer(&live)["shells"].as_array().unwrap().len(), 3);
+        assert!(
+            !serde_json::to_string(layer(&live))
+                .unwrap()
+                .contains("dyson_node_100")
+        );
+        assert_eq!(
+            live.base_value()["dysonPlans"]["helios"]["structurePoints"].as_f64(),
+            Some(12.0)
+        );
+        assert_eq!(
+            live.base_value()["dysonPlans"]["helios"]["shellSails"].as_f64(),
+            Some(80.0)
+        );
+        assert_eq!(live.base_value()["nextId"], 111);
+
+        let too_close = semantic_intent(
+            live.revision,
+            json!({
+                "kind": "add-node",
+                "systemId": "helios",
+                "layerId": "mod:layer/alpha🚀",
+                "angle": 3
+            }),
+        );
+        let before_close = live.base_value().clone();
+        assert!(live.apply_command(&too_close).is_err());
+        assert_eq!(live.base_value(), &before_close);
     }
 
     #[test]

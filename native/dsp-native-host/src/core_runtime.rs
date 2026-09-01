@@ -8023,6 +8023,22 @@ mod tests {
         command_id: &str,
         kind: &str,
     ) -> CoreCommitPlayerAuthorityCommandRequest {
+        player_authority_dyson_plan_value_intent_command(
+            base_revision,
+            command_id,
+            json!({
+                "kind": kind,
+                "systemId": "helios",
+                "layerId": "mod:layer/alpha🚀"
+            }),
+        )
+    }
+
+    fn player_authority_dyson_plan_value_intent_command(
+        base_revision: u64,
+        command_id: &str,
+        intent: Value,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
         CoreCommitPlayerAuthorityCommandRequest {
             run_id: "player-authority-run".to_owned(),
             command_id: command_id.to_owned(),
@@ -8033,11 +8049,7 @@ mod tests {
                 "topLevelChanges": [{
                     "path": ["dysonPlans", "intent"],
                     "operation": "set",
-                    "value": {
-                        "kind": kind,
-                        "systemId": "helios",
-                        "layerId": "mod:layer/alpha🚀"
-                    }
+                    "value": intent
                 }],
                 "changedEntities": [],
                 "addedEntities": [],
@@ -17089,6 +17101,147 @@ mod tests {
             &reopened_store,
             &startup.session_id,
             "dyson-plan-shell-replayed",
+        );
+        assert_eq!(replayed, live);
+    }
+
+    #[test]
+    fn dyson_node_cascade_removal_survives_wal_cold_reopen_without_replaying_material() {
+        let mut catalog = player_authority_catalog();
+        catalog["technologies"].as_array_mut().unwrap().push(json!({
+            "id": "dyson_sphere_program",
+            "costs": [{ "itemId": "iron_ore", "amount": 1 }],
+            "prerequisites": []
+        }));
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["research"]["completedTechIds"] = json!(["dyson_sphere_program"]);
+        envelope["state"]["nextId"] = Value::from(100);
+        envelope["state"]["dysonPlans"]["helios"] = json!({
+            "systemId": "helios",
+            "activeLayerId": "mod:layer/alpha🚀",
+            "structurePoints": 12,
+            "shellSails": 80,
+            "layers": [{
+                "id": "mod:layer/alpha🚀",
+                "name": "Alpha",
+                "radius": 10000,
+                "inclination": 0,
+                "longitude": 0,
+                "structureAllocationFloor": 0,
+                "shellAllocationFloor": 0,
+                "nodes": [
+                    { "id": "node-a", "angle": 0, "requiredStructurePoints": 1, "completedStructurePoints": 1 },
+                    { "id": "node-b", "angle": 120, "requiredStructurePoints": 1, "completedStructurePoints": 1 },
+                    { "id": "node-c", "angle": 240, "requiredStructurePoints": 1, "completedStructurePoints": 1 }
+                ],
+                "frames": [
+                    { "id": "frame-ab", "sourceNodeId": "node-a", "targetNodeId": "node-b", "requiredStructurePoints": 4, "completedStructurePoints": 2 },
+                    { "id": "frame-bc", "sourceNodeId": "node-b", "targetNodeId": "node-c", "requiredStructurePoints": 4, "completedStructurePoints": 2 },
+                    { "id": "frame-ca", "sourceNodeId": "node-c", "targetNodeId": "node-a", "requiredStructurePoints": 4, "completedStructurePoints": 2 }
+                ],
+                "shells": [
+                    { "id": "shell-ab", "sourceNodeId": "node-a", "targetNodeId": "node-b", "boundaryFrameIds": ["frame-ab"], "active": true, "sailCapacity": 80, "absorbedSails": 20 },
+                    { "id": "shell-bc", "sourceNodeId": "node-b", "targetNodeId": "node-c", "boundaryFrameIds": ["frame-bc"], "active": true, "sailCapacity": 80, "absorbedSails": 20 },
+                    { "id": "shell-ca", "sourceNodeId": "node-c", "targetNodeId": "node-a", "boundaryFrameIds": ["frame-ca"], "active": true, "sailCapacity": 80, "absorbedSails": 20 }
+                ]
+            }]
+        });
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let request = |revision| {
+            player_authority_dyson_plan_value_intent_command(
+                revision,
+                "dyson-node-remove-before-cold-reopen",
+                json!({
+                    "kind": "remove-node",
+                    "systemId": "helios",
+                    "layerId": "mod:layer/alpha🚀",
+                    "nodeId": "node-b"
+                }),
+            )
+        };
+
+        let (clean_root, mut clean_store, mut clean_registry, clean_session_id, clean_checkpoint) =
+            player_authority_fixture_from_parts(bytes.clone(), catalog.clone());
+        let clean = clean_registry
+            .commit_player_authority_command(
+                &mut clean_store,
+                &clean_session_id,
+                request(clean_checkpoint.revision),
+            )
+            .unwrap();
+        let live = export_test_state(
+            clean_root.path(),
+            &clean_registry,
+            &clean_store,
+            &clean_session_id,
+            "dyson-node-remove-clean",
+        );
+        let live_hash = clean.summary.canonical_sha256.clone();
+        let layer = &live["dysonPlans"]["helios"]["layers"][0];
+        assert_eq!(layer["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(layer["frames"].as_array().unwrap().len(), 1);
+        assert_eq!(layer["shells"].as_array().unwrap().len(), 1);
+        assert!(!serde_json::to_string(layer).unwrap().contains("node-b"));
+        assert_eq!(
+            live["dysonPlans"]["helios"]["structurePoints"].as_f64(),
+            Some(12.0)
+        );
+        assert_eq!(
+            live["dysonPlans"]["helios"]["shellSails"].as_f64(),
+            Some(80.0)
+        );
+        assert_eq!(live["nextId"], 100);
+
+        let (root, mut store, mut registry, session_id, checkpoint) =
+            player_authority_fixture_from_parts(bytes, catalog);
+        let error = registry
+            .commit_player_authority_command_internal(
+                &mut store,
+                &session_id,
+                request(checkpoint.revision),
+                PlayerAuthorityCommandKind::Gameplay,
+                PlayerAuthorityCommandFault::AfterWal,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("lost response"));
+        let wal = store.read_wal("normal-main", checkpoint.revision).unwrap();
+        assert_eq!(wal.len(), 1);
+        let wal_payload = serde_json::to_string(&wal).unwrap();
+        assert!(wal_payload.contains("remove-node"));
+        assert!(wal_payload.contains("node-b"));
+        assert!(!wal_payload.contains("requiredStructurePoints"));
+        assert!(!wal_payload.contains("absorbedSails"));
+        assert!(!wal_payload.contains("nextId"));
+
+        drop(registry);
+        drop(store);
+        let mut reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = resumable_player_authority_registry_for_test();
+        let startup = reopened_registry
+            .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+            .unwrap()
+            .expect("WAL-staged Dyson node command must provide a startup receipt");
+        assert_eq!(startup.revision, clean.revision);
+        assert_eq!(startup.summary.canonical_sha256, live_hash);
+        let duplicate = reopened_registry
+            .commit_player_authority_command(
+                &mut reopened_store,
+                &startup.session_id,
+                request(checkpoint.revision),
+            )
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.summary.canonical_sha256, live_hash);
+        let replayed = export_test_state(
+            root.path(),
+            &reopened_registry,
+            &reopened_store,
+            &startup.session_id,
+            "dyson-node-remove-replayed",
         );
         assert_eq!(replayed, live);
     }

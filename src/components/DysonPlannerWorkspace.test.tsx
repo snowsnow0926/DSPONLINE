@@ -331,6 +331,9 @@ function renderNative(overrides: Partial<Parameters<typeof NativeDysonPlannerWor
     onAddLayer: vi.fn(),
     onLayerChange: vi.fn(),
     onRemoveLayer: vi.fn(),
+    onAddNode: vi.fn(),
+    onRemoveNode: vi.fn(),
+    onConnectNodes: vi.fn(),
     onAddOrbit: vi.fn(),
     onRemoveOrbit: vi.fn(),
     onAutoConnect: vi.fn(),
@@ -504,6 +507,36 @@ describe("NativeDysonPlannerWorkspace", () => {
     expect(autoConnect.disabled).toBe(false);
     act(() => autoConnect.click());
     expect(onAutoConnect).toHaveBeenCalledWith("layer:main");
+  });
+
+  it("adds, selects, connects, and removes nodes through compact native callbacks", () => {
+    const onAddNode = vi.fn();
+    const onRemoveNode = vi.fn();
+    const onConnectNodes = vi.fn();
+    renderNative({ onAddNode, onRemoveNode, onConnectNodes });
+
+    const alpha = host.querySelector<SVGCircleElement>("[data-native-dyson-node-id='node:alpha']")!;
+    const beta = host.querySelector<SVGCircleElement>("[data-native-dyson-node-id='node:beta']")!;
+    act(() => alpha.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(host.querySelector("[data-native-dyson-selected-node-id='node:alpha']")).not.toBeNull();
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-dyson-action='remove-node']")!.click());
+    expect(onRemoveNode).toHaveBeenCalledWith("layer:main", "node:alpha");
+
+    act(() => alpha.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    act(() => beta.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(onConnectNodes).toHaveBeenCalledWith("layer:main", "node:alpha", "node:beta");
+
+    const canvas = host.querySelector<SVGSVGElement>("[data-native-dyson-action='add-node-canvas']")!;
+    canvas.getBoundingClientRect = vi.fn(() => ({
+      x: 0, y: 0, left: 0, top: 0, right: 600, bottom: 600, width: 600, height: 600,
+      toJSON: () => ({}),
+    }));
+    act(() => canvas.dispatchEvent(new MouseEvent("click", {
+      bubbles: true,
+      clientX: 600,
+      clientY: 300,
+    })));
+    expect(onAddNode).toHaveBeenCalledWith("layer:main", 90);
   });
 
   it("locks native projected controls while a command is pending", () => {

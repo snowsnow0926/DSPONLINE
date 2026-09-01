@@ -438,6 +438,9 @@ export function NativeDysonPlannerWorkspace({
   onAddLayer,
   onLayerChange,
   onRemoveLayer,
+  onAddNode,
+  onRemoveNode,
+  onConnectNodes,
   onAddOrbit,
   onRemoveOrbit,
   onAutoConnect,
@@ -460,6 +463,9 @@ export function NativeDysonPlannerWorkspace({
   onAddLayer: (standard: boolean) => void;
   onLayerChange: (layerId: string, changes: { radius?: number; inclination?: number; longitude?: number }) => void;
   onRemoveLayer: (layerId: string) => void;
+  onAddNode: (layerId: string, angle: number) => void;
+  onRemoveNode: (layerId: string, nodeId: string) => void;
+  onConnectNodes: (layerId: string, sourceNodeId: string, targetNodeId: string) => void;
   onAddOrbit: () => void;
   onRemoveOrbit: (orbitId: string) => void;
   onAutoConnect: (layerId: string) => void;
@@ -480,6 +486,7 @@ export function NativeDysonPlannerWorkspace({
     } : null
     : latestIdentity;
   const [cachedFrame, setCachedFrame] = useState<NativeDysonWorkspaceFrame | null>(exactFrame);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const cachedFrameMatchesScope = Boolean(status === "loading" && cachedFrame && resolvedLatestIdentity &&
     cachedFrame.sessionId === resolvedLatestIdentity.sessionId &&
     cachedFrame.runId === resolvedLatestIdentity.runId &&
@@ -517,6 +524,16 @@ export function NativeDysonPlannerWorkspace({
     status,
   ]);
 
+  useEffect(() => setSelectedNodeId(null), [
+    candidateFrame?.sessionId,
+    candidateFrame?.runId,
+    candidateFrame?.registryFingerprint,
+    selectedSystemId,
+  ]);
+  useEffect(() => setSelectedNodeId((current) =>
+    current && displayFrame?.nodes.some((node) => node.nodeId === current) ? current : null
+  ), [displayFrame]);
+
   if (!displayFrame) {
     const unavailableStatus = status === "loading" || status === "empty" ? status : "unavailable";
     return <NativeDysonUnavailable status={unavailableStatus} onClose={onClose} />;
@@ -547,6 +564,7 @@ export function NativeDysonPlannerWorkspace({
   const activeNodes = activeLayer ? frame.nodesByLayerId.get(activeLayer.layerId) ?? [] : [];
   const activeFrames = activeLayer ? frame.framesByLayerId.get(activeLayer.layerId) ?? [] : [];
   const activeShells = activeLayer ? frame.shellsByLayerId.get(activeLayer.layerId) ?? [] : [];
+  const selectedNode = activeNodes.find((node) => node.nodeId === selectedNodeId) ?? null;
   const activeRingNodes = [...activeNodes].sort((left, right) => left.angle - right.angle);
   const activeLayerNeedsFrames = activeRingNodes.length >= 3 && activeRingNodes.some((node, index) => {
     const target = activeRingNodes[(index + 1) % activeRingNodes.length];
@@ -567,6 +585,16 @@ export function NativeDysonPlannerWorkspace({
     ));
   });
   const launchModeLabel = { balanced: "均衡", swarm: "太阳帆", sphere: "火箭" } as const;
+  const addNodeFromCanvas = (event: ReactMouseEvent<SVGSVGElement>) => {
+    if (commandPending || !activeLayer || !selectedSystem.unlocked ||
+        !projection.technology.programReady || activeNodes.length >= 24) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return;
+    const x = (event.clientX - bounds.left) / bounds.width * 600 - VIEW_CENTER;
+    const y = (event.clientY - bounds.top) / bounds.height * 600 - VIEW_CENTER;
+    const angle = (Math.atan2(y, x) * 180 / Math.PI + 90 + 360) % 360;
+    onAddNode(activeLayer.layerId, angle);
+  };
 
   return (
     <WorkspaceFrame
@@ -586,7 +614,7 @@ export function NativeDysonPlannerWorkspace({
           <span>总功率 <strong><PowerValue valueKw={globalGenerationKw} /></strong></span>
         </div>
         <div className="dyson-planner-commandbar" role="toolbar" aria-label="原生戴森球规划命令">
-          <button type="button" disabled data-native-dyson-action="design" title="壳层与太阳帆轨道生命周期、轨道几何、框架闭合和壳面规划均由 Rust 权威执行；节点手工编辑仍保持锁定"><LockKeyhole size={17} /><span>权威设计</span></button>
+          <button type="button" disabled data-native-dyson-action="design" title="壳层、轨道、节点、框架与壳面设计均由 Rust 权威执行"><LockKeyhole size={17} /><span>权威设计</span></button>
           <button type="button" disabled data-native-dyson-action="save" title="原生权威检查点由运行时持久化"><Save size={17} /><span>权威保存</span></button>
           <button type="button" onClick={onClose} title="关闭戴森球规划" aria-label="关闭戴森球规划"><X size={18} /><span>关闭</span></button>
         </div>
@@ -611,7 +639,7 @@ export function NativeDysonPlannerWorkspace({
                   className={selectedSystemId === system.systemId ? "active" : ""}
                   type="button"
                   key={system.systemId}
-                  onClick={() => onSelectSystem(system.systemId)}
+                  onClick={() => { setSelectedNodeId(null); onSelectSystem(system.systemId); }}
                   title={`查看 ${name}（${system.systemId}）原生戴森投影`}
                   aria-label={`查看${name}戴森规划`}
                   data-native-dyson-system-id={system.systemId}
@@ -630,7 +658,7 @@ export function NativeDysonPlannerWorkspace({
                 type="button"
                 key={layer.layerId}
                 disabled={commandPending || activeLayer?.layerId === layer.layerId}
-                onClick={() => onSelectLayer(layer.layerId)}
+                onClick={() => { setSelectedNodeId(null); onSelectLayer(layer.layerId); }}
                 data-native-dyson-action="select-layer"
                 title={`切换到 ${nativeDysonLabel(layer.name, layer.layerId)}（${layer.layerId}）`}
               >
@@ -675,7 +703,7 @@ export function NativeDysonPlannerWorkspace({
             <span><Sun size={13} />在轨 <strong><QuantityValue value={selectedSystem.orbitSails} /></strong></span>
             <span><Gauge size={13} />理论接收 <strong>{Math.round(selectedSystem.engineering.theoreticalReceptionRate * 100)}%</strong></span>
           </div>
-          <svg className="dyson-orbit-canvas" viewBox="0 0 600 600" role="img" aria-label={`${selectedSystemName}原生戴森球轨道图`} style={{ cursor: "default" }}>
+          <svg className="dyson-orbit-canvas" viewBox="0 0 600 600" role="img" aria-label={`${selectedSystemName}原生戴森球轨道图`} onClick={addNodeFromCanvas} style={{ cursor: commandPending || !activeLayer || !projection.technology.programReady ? "default" : "crosshair" }} data-native-dyson-action="add-node-canvas">
             <circle className="dyson-star-halo" cx={VIEW_CENTER} cy={VIEW_CENTER} r={Math.max(34, Math.min(58, 38 + Math.log2(Math.max(0.1, selectedSystem.starProfile.luminosity)) * 5))} />
             <circle className="dyson-star-core" cx={VIEW_CENTER} cy={VIEW_CENTER} r={Math.max(14, Math.min(34, 22 + Math.log2(Math.max(0.1, selectedSystem.starProfile.radiusMultiplier)) * 4))} />
             {frame.orbits.map((orbit) => {
@@ -725,7 +753,33 @@ export function NativeDysonPlannerWorkspace({
                   {layerNodes.map((node) => {
                     const point = pointAt(node.angle, radius);
                     const complete = node.completedStructurePoints >= node.requiredStructurePoints;
-                    return <circle className={`dyson-orbit-node${complete ? " dyson-orbit-node--complete" : ""}`} cx={point.x} cy={point.y} r={6} key={node.nodeId} style={{ pointerEvents: "none" }} data-native-dyson-node-id={node.nodeId} />;
+                    const active = activeLayer?.layerId === layer.layerId;
+                    const selected = active && selectedNodeId === node.nodeId;
+                    return <circle
+                      className={`dyson-orbit-node${complete ? " dyson-orbit-node--complete" : ""}${selected ? " selected" : ""}`}
+                      cx={point.x}
+                      cy={point.y}
+                      r={selected ? 8 : 6}
+                      key={node.nodeId}
+                      style={{ pointerEvents: commandPending ? "none" : "auto", cursor: commandPending ? "default" : "pointer" }}
+                      data-native-dyson-node-id={node.nodeId}
+                      data-native-dyson-action="select-node"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (commandPending) return;
+                        if (!active) {
+                          setSelectedNodeId(null);
+                          onSelectLayer(layer.layerId);
+                          return;
+                        }
+                        if (selectedNodeId && selectedNodeId !== node.nodeId) {
+                          onConnectNodes(layer.layerId, selectedNodeId, node.nodeId);
+                          setSelectedNodeId(null);
+                        } else {
+                          setSelectedNodeId(selectedNodeId === node.nodeId ? null : node.nodeId);
+                        }
+                      }}
+                    />;
                   })}
                 </g>
               );
@@ -749,6 +803,23 @@ export function NativeDysonPlannerWorkspace({
                 <div><dt>结构分配下限</dt><dd><QuantityValue value={activeLayer.structureAllocationFloor} /></dd></div>
                 <div><dt>壳面分配下限</dt><dd><QuantityValue value={activeLayer.shellAllocationFloor} /></dd></div>
               </dl>
+              {selectedNode ? (
+                <div className="dyson-node-selection" data-native-dyson-selected-node-id={selectedNode.nodeId}>
+                  <span><CircleDot size={13} />已选节点</span>
+                  <strong>{selectedNode.angle.toFixed(1)}°</strong>
+                  <button
+                    type="button"
+                    disabled={commandPending}
+                    onClick={() => {
+                      onRemoveNode(activeLayer.layerId, selectedNode.nodeId);
+                      setSelectedNodeId(null);
+                    }}
+                    data-native-dyson-action="remove-node"
+                    title="由 Rust 删除节点以及关联框架和壳面"
+                    aria-label="删除已选原生戴森节点"
+                  ><Trash2 size={13} /></button>
+                </div>
+              ) : null}
               <div className="dyson-layer-actions">
                 <button type="button" disabled={commandPending || !projection.technology.programReady || !activeLayerNeedsFrames} onClick={() => onAutoConnect(activeLayer.layerId)} data-native-dyson-action="connect-frames" title="由 Rust 按节点角度闭合缺失框架"><GitBranch size={14} />闭合框架</button>
                 <button type="button" disabled={commandPending || !projection.technology.shellReady || activeRingNodes.length < 3 || !activeLayerNeedsFrames && !activeLayerNeedsShells} onClick={() => onPlanShell(activeLayer.layerId)} data-native-dyson-action="plan-shell" title="由 Rust 补齐框架并规划壳面，不修改已有物料"><Layers3 size={14} />规划壳面</button>

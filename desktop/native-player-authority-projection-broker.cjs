@@ -53,6 +53,11 @@ const STATISTICS_LINEAGE_KEYS = new Set([
   "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint",
   "minElapsedSeconds", "maxElapsedSeconds", "cursor", "limit", "planetId", "itemId",
 ]);
+const OWNER_LINEAGE_FENCED_PROJECTIONS = new Set([
+  "statistics-v1",
+  "campaign-workspace-v1",
+  "galaxy-account-workspace-v1",
+]);
 
 class NativePlayerAuthorityProjectionBrokerError extends Error {
   constructor(message, code) {
@@ -120,13 +125,13 @@ function validStatisticsLineageRequest(request) {
   ));
 }
 
-function inspectStatisticsLineage(registry, ownerId, request) {
+function inspectProjectionLineage(registry, ownerId, request) {
   let inspected;
   try {
     inspected = registry.inspectSession(ownerId, request.sessionId);
   } catch (cause) {
     throw brokerError(
-      "native statistics projection session ownership changed",
+      "native projection session ownership changed",
       "NATIVE_PLAYER_AUTHORITY_PROJECTION_LINEAGE_MISMATCH",
     );
   }
@@ -134,13 +139,13 @@ function inspectStatisticsLineage(registry, ownerId, request) {
       inspected.ownerId !== ownerId || inspected.state !== "owned" ||
       !Number.isSafeInteger(inspected.ownerEpoch) || inspected.ownerEpoch < 1) {
     throw brokerError(
-      "native statistics projection owner lineage is invalid",
+      "native projection owner lineage is invalid",
       "NATIVE_PLAYER_AUTHORITY_PROJECTION_LINEAGE_MISMATCH",
     );
   }
   if (inspected.registryFingerprint !== request.expectedRegistryFingerprint) {
     throw brokerError(
-      "native statistics projection registry does not match the active session",
+      "native projection registry does not match the active session",
       "NATIVE_PLAYER_AUTHORITY_PROJECTION_REGISTRY_MISMATCH",
     );
   }
@@ -212,8 +217,9 @@ class NativePlayerAuthorityProjectionBroker {
 
     const before = this.runtime.snapshot();
     assertAuthoritySnapshot(before, request);
-    const statisticsLineage = projectionType === "statistics-v1" && statisticsRequestHasLineage(request)
-      ? inspectStatisticsLineage(this.registry, this.ownerId, request)
+    const projectionLineage = OWNER_LINEAGE_FENCED_PROJECTIONS.has(projectionType) &&
+        (projectionType !== "statistics-v1" || statisticsRequestHasLineage(request))
+      ? inspectProjectionLineage(this.registry, this.ownerId, request)
       : null;
     let registryRequest = request;
     if (projectionType === "orbital-contract-workspace-v1") {
@@ -238,13 +244,13 @@ class NativePlayerAuthorityProjectionBroker {
     }
     const after = this.runtime.snapshot();
     assertAuthoritySnapshot(after, request);
-    if (statisticsLineage) {
-      const afterLineage = inspectStatisticsLineage(this.registry, this.ownerId, request);
-      if (afterLineage.ownerId !== statisticsLineage.ownerId ||
-          afterLineage.ownerEpoch !== statisticsLineage.ownerEpoch ||
-          afterLineage.registryFingerprint !== statisticsLineage.registryFingerprint) {
+    if (projectionLineage) {
+      const afterLineage = inspectProjectionLineage(this.registry, this.ownerId, request);
+      if (afterLineage.ownerId !== projectionLineage.ownerId ||
+          afterLineage.ownerEpoch !== projectionLineage.ownerEpoch ||
+          afterLineage.registryFingerprint !== projectionLineage.registryFingerprint) {
         throw brokerError(
-          "native statistics projection owner lineage changed during the read",
+          "native projection owner lineage changed during the read",
           "NATIVE_PLAYER_AUTHORITY_PROJECTION_LINEAGE_MISMATCH",
         );
       }

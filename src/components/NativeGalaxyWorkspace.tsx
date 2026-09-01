@@ -18,27 +18,25 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import type {
-  DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest,
-  DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult,
-} from "../desktop";
+import { useEffect, useMemo, useState } from "react";
 import { ACCOUNT_AVATARS, getActiveAccount, type AccountProfileChanges, type AccountState } from "../game/account";
 import { loginCloudAccount, logoutCloudAccount, resumeCloudSession, type CloudSession } from "../game/cloud";
+import type {
+  NativeCampaignGalaxyWorkspaceIdentity,
+  NativeCampaignGalaxyWorkspaceReadStatus,
+  NativeGalaxyWorkspaceFrame,
+} from "../game/nativeCampaignGalaxyWorkspaceStore";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 
 type NativeGalaxyTab = "overview" | "account" | "cloud";
-type NativeGalaxyStatus =
-  | { phase: "loading" }
-  | { phase: "ready"; projection: DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult }
-  | { phase: "unavailable"; message: string };
 
 export interface NativeGalaxyWorkspaceProps {
   open: boolean;
   focusTab?: "ranking" | "speedrun" | "cloud" | "account" | null;
   accountState: AccountState;
-  identity: DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest | null;
-  fetchProjection: ((request: DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest) => Promise<DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult>) | null;
+  frame: NativeGalaxyWorkspaceFrame | null;
+  latestIdentity: NativeCampaignGalaxyWorkspaceIdentity | null;
+  status: NativeCampaignGalaxyWorkspaceReadStatus;
   onClose: () => void;
   onUpdateProfile: (changes: AccountProfileChanges) => void;
   onUpdateCloudBinding: (
@@ -49,30 +47,6 @@ export interface NativeGalaxyWorkspaceProps {
   onSwitchAccount: (accountId: string) => void;
 }
 
-function identityMatches(
-  projection: DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult,
-  identity: DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest,
-): boolean {
-  return projection.sessionId === identity.sessionId && projection.runId === identity.runId &&
-    projection.revision === identity.expectedRevision &&
-    projection.registryFingerprint === identity.expectedRegistryFingerprint &&
-    projection.truncated === false;
-}
-
-function scopeMatches(
-  projection: DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult,
-  identity: DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest,
-): boolean {
-  return projection.sessionId === identity.sessionId && projection.runId === identity.runId &&
-    projection.registryFingerprint === identity.expectedRegistryFingerprint && projection.truncated === false;
-}
-
-function galaxyIdentityKey(identity: DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest | null): string {
-  return identity
-    ? `${identity.sessionId}\u0000${identity.runId}\u0000${identity.expectedRevision}\u0000${identity.expectedRegistryFingerprint}`
-    : "missing";
-}
-
 function compactDecimal(value: string): string {
   const normalized = value.replace(/^0+(?=\d)/, "");
   if (normalized.length <= 15) {
@@ -81,18 +55,13 @@ function compactDecimal(value: string): string {
   return `${normalized.slice(0, 6)[0]}.${normalized.slice(1, 6)}E${normalized.length - 1}`;
 }
 
-function projectionUnavailable(identity: NativeGalaxyWorkspaceProps["identity"], fetchProjection: NativeGalaxyWorkspaceProps["fetchProjection"]): string {
-  if (!identity) return "原生玩家权威 lineage 尚未就绪；银河页不会读取旧 Web 主档。";
-  if (!fetchProjection) return "当前 Windows Host 不支持银河账户薄投影；银河页已安全关闭。";
-  return "银河投影未通过当前 revision、run 或目录校验；银河页已安全关闭。";
-}
-
 export function NativeGalaxyWorkspace({
   open,
   focusTab,
   accountState,
-  identity,
-  fetchProjection,
+  frame: candidateFrame,
+  latestIdentity,
+  status,
   onClose,
   onUpdateProfile,
   onUpdateCloudBinding,
@@ -100,7 +69,6 @@ export function NativeGalaxyWorkspace({
   onSwitchAccount,
 }: NativeGalaxyWorkspaceProps) {
   const [tab, setTab] = useState<NativeGalaxyTab>("overview");
-  const [status, setStatus] = useState<NativeGalaxyStatus>({ phase: "loading" });
   const [nameDraft, setNameDraft] = useState("");
   const [newAccountName, setNewAccountName] = useState("");
   const [cloudSession, setCloudSession] = useState<CloudSession>({ status: "checking", user: null, cloudSave: null, mailAvailable: false, message: null });
@@ -110,9 +78,6 @@ export function NativeGalaxyWorkspace({
   const [cloudMessage, setCloudMessage] = useState<string | null>(null);
   const account = getActiveAccount(accountState);
   const accounts = Object.values(accountState.accounts).slice(0, 32);
-  const currentIdentityRef = useRef(identity);
-  currentIdentityRef.current = identity;
-  const identityKey = galaxyIdentityKey(identity);
 
   useEffect(() => {
     if (!open) return;
@@ -121,41 +86,20 @@ export function NativeGalaxyWorkspace({
     else if (focusTab) setTab("overview");
   }, [focusTab, open]);
   useEffect(() => setNameDraft(account.profile.displayName), [account.profile.displayName, account.profile.id]);
-  useEffect(() => {
-    if (!open) return;
-    if (!identity || !fetchProjection) {
-      setStatus({ phase: "unavailable", message: projectionUnavailable(identity, fetchProjection) });
-      return;
-    }
-    setStatus((current) => current.phase === "ready" && scopeMatches(current.projection, identity)
-      ? current
-      : { phase: "loading" });
-    void fetchProjection(identity).then((projection) => {
-      const currentIdentity = currentIdentityRef.current;
-      if (!identityMatches(projection, identity)) {
-        if (!currentIdentity || galaxyIdentityKey(currentIdentity) !== galaxyIdentityKey(identity)) return;
-        setStatus((current) => current.phase === "ready" && scopeMatches(current.projection, currentIdentity)
-          ? current
-          : { phase: "unavailable", message: projectionUnavailable(identity, fetchProjection) });
-        return;
-      }
-      if (!currentIdentity || !scopeMatches(projection, currentIdentity) || projection.revision > currentIdentity.expectedRevision) return;
-      setStatus((current) => current.phase === "ready" && scopeMatches(current.projection, currentIdentity) &&
-        current.projection.revision >= projection.revision
-        ? current
-        : { phase: "ready", projection });
-    }).catch(() => {
-      const currentIdentity = currentIdentityRef.current;
-      if (!currentIdentity || galaxyIdentityKey(currentIdentity) !== galaxyIdentityKey(identity)) return;
-      setStatus((current) => current.phase === "ready" && scopeMatches(current.projection, currentIdentity)
-        ? current
-        : { phase: "unavailable", message: projectionUnavailable(identity, fetchProjection) });
-    });
-  }, [fetchProjection, identityKey, open]);
-
-  const projection = status.phase === "ready" && identity && scopeMatches(status.projection, identity)
-    ? status.projection
+  const frameMatchesScope = Boolean(candidateFrame && latestIdentity &&
+    candidateFrame.sessionId === latestIdentity.sessionId &&
+    candidateFrame.runId === latestIdentity.runId &&
+    candidateFrame.registryFingerprint === latestIdentity.registryFingerprint &&
+    candidateFrame.revision <= latestIdentity.revision);
+  const frame = frameMatchesScope && candidateFrame && latestIdentity &&
+      (candidateFrame.revision === latestIdentity.revision
+        ? status === "ready"
+        : status === "loading" || status === "unavailable")
+    ? candidateFrame
     : null;
+  const projection = frame?.projection ?? null;
+  const exactFrame = Boolean(frame && latestIdentity && status === "ready" &&
+    frame.revision === latestIdentity.revision);
   useEffect(() => {
     if (!open || !projection) return;
     let active = true;
@@ -175,14 +119,17 @@ export function NativeGalaxyWorkspace({
 
   if (!open) return null;
   if (!projection) {
-    return <WorkspaceFrame className="galaxy-workspace" ariaLabel="原生银河账户" onRequestClose={onClose}>
+    return <WorkspaceFrame className="galaxy-workspace" ariaLabel="原生银河账户" onRequestClose={onClose}
+      data-native-galaxy-status={status}>
       <header className="galaxy-header">
         <div className="galaxy-title"><i><Globe2 size={20} /></i><div><span>RUST 权威</span><strong>银河网络</strong></div></div>
         <button className="galaxy-close" type="button" onClick={onClose} aria-label="关闭银河网络"><X size={18} /></button>
       </header>
-      <div className="workspace-loading" role={status.phase === "loading" ? "status" : "alert"}>
-        {status.phase === "loading" ? <i /> : <ShieldAlert size={22} />}
-        <span>{status.phase === "loading" ? "正在读取 Rust 权威银河摘要…" : status.phase === "unavailable" ? status.message : "银河投影已失效"}</span>
+      <div className="workspace-loading" role={status === "empty" || status === "loading" ? "status" : "alert"}>
+        {status === "empty" || status === "loading" ? <i /> : <ShieldAlert size={22} />}
+        <span>{status === "empty" || status === "loading"
+          ? "正在读取 Rust 权威银河摘要…"
+          : "银河投影未通过当前 revision、run 或目录校验；银河页已安全关闭。"}</span>
       </div>
     </WorkspaceFrame>;
   }
@@ -229,15 +176,20 @@ export function NativeGalaxyWorkspace({
   const cloudBoundToActiveAccount = cloudSession.status === "authenticated" &&
     cloudSession.user !== null && account.profile.cloudUserId === cloudSession.user.id;
 
-  return <WorkspaceFrame className="galaxy-workspace native-galaxy-workspace" ariaLabel="原生银河账户" onRequestClose={onClose}>
+  return <WorkspaceFrame className="galaxy-workspace native-galaxy-workspace" ariaLabel="原生银河账户" onRequestClose={onClose}
+    data-native-galaxy-status={exactFrame ? "ready" : status}
+    data-native-galaxy-revision={projection.revision}
+    data-native-galaxy-display-stale={exactFrame ? undefined : "true"}>
     <header className="galaxy-header">
       <div className="galaxy-title"><i><Globe2 size={20} /></i><div><span>RUST 权威 · REV {projection.revision}</span><strong>银河网络</strong></div></div>
       <div className="galaxy-node-state"><i /><span><strong>原生摘要已校验</strong><small>存档结构 v{projection.stateVersion}</small></span></div>
       <div className="galaxy-active-account"><span className="galaxy-avatar galaxy-avatar--small">{account.profile.avatar}</span><span><small>当前本地身份</small><strong>{account.profile.displayName}</strong></span></div>
       <button className="galaxy-close" type="button" onClick={onClose} aria-label="关闭银河网络"><X size={18} /></button>
     </header>
-    {identity && projection.revision !== identity.expectedRevision
-      ? <p role="status" className="operations-notice">正在读取 Rust revision {identity.expectedRevision}；当前保持显示已验证的 revision {projection.revision}。</p>
+    {!exactFrame && latestIdentity
+      ? <p role="status" className="operations-notice">{status === "unavailable"
+        ? `Rust revision ${latestIdentity.revision} 暂不可用`
+        : `正在读取 Rust revision ${latestIdentity.revision}`}；当前保持显示已验证的 revision {projection.revision}。</p>
       : null}
     <nav className="galaxy-tabs" aria-label="银河页面">
       <button className={tab === "overview" ? "active" : ""} type="button" onClick={() => setTab("overview")}><Activity size={14} />原生摘要</button>

@@ -307,10 +307,6 @@ import { alignToDevicePixel } from "./game/displayPixels";
 import {
   getDesktopBridge,
   type DesktopNativeCampaignLocator,
-  type DesktopNativeCoreCampaignWorkspaceProjectionRequest,
-  type DesktopNativeCoreCampaignWorkspaceProjectionResult,
-  type DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest,
-  type DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult,
   type DesktopNativeCoreOrbitalContractWorkspaceProjectionRequest,
   type DesktopNativeCoreOrbitalContractWorkspaceProjectionResult,
   type DesktopNativeCoreOperationsAlertRow,
@@ -615,6 +611,16 @@ import {
   selectNativeStatisticsWorkspaceFrame,
   type NativeStatisticsWorkspaceIdentity,
 } from "./game/nativeStatisticsWorkspaceStore";
+import {
+  NativeCampaignWorkspaceStore,
+  NativeGalaxyWorkspaceStore,
+  createNativePlayerAuthorityCampaignWorkspaceSource,
+  createNativePlayerAuthorityGalaxyWorkspaceSource,
+  selectNativeCampaignGalaxyWorkspaceAuthorityFrames,
+  selectNativeCampaignWorkspaceFrame,
+  selectNativeGalaxyWorkspaceFrame,
+  type NativeCampaignGalaxyWorkspaceIdentity,
+} from "./game/nativeCampaignGalaxyWorkspaceStore";
 import type {
   NativeSystemSpaceStationWorkspaceFetchProjection,
   NativeSystemSpaceStationWorkspaceIdentity,
@@ -2977,6 +2983,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativeStatisticsWorkspaceStore.getSnapshot,
     nativeStatisticsWorkspaceStore.getSnapshot,
   );
+  const nativeCampaignWorkspaceStoreRef = useRef<NativeCampaignWorkspaceStore | null>(null);
+  if (nativeCampaignWorkspaceStoreRef.current === null) {
+    nativeCampaignWorkspaceStoreRef.current = new NativeCampaignWorkspaceStore();
+  }
+  const nativeCampaignWorkspaceStore = nativeCampaignWorkspaceStoreRef.current;
+  const nativeCampaignWorkspaceSnapshot = useSyncExternalStore(
+    nativeCampaignWorkspaceStore.subscribe,
+    nativeCampaignWorkspaceStore.getSnapshot,
+    nativeCampaignWorkspaceStore.getSnapshot,
+  );
+  const nativeGalaxyWorkspaceStoreRef = useRef<NativeGalaxyWorkspaceStore | null>(null);
+  if (nativeGalaxyWorkspaceStoreRef.current === null) {
+    nativeGalaxyWorkspaceStoreRef.current = new NativeGalaxyWorkspaceStore();
+  }
+  const nativeGalaxyWorkspaceStore = nativeGalaxyWorkspaceStoreRef.current;
+  const nativeGalaxyWorkspaceSnapshot = useSyncExternalStore(
+    nativeGalaxyWorkspaceStore.subscribe,
+    nativeGalaxyWorkspaceStore.getSnapshot,
+    nativeGalaxyWorkspaceStore.getSnapshot,
+  );
   const recipeWorkspaceRegistryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
   const nativeStatisticsWorkspaceAuthorityFrames = useMemo(
     () => selectNativeStatisticsWorkspaceAuthorityFrames(
@@ -3079,21 +3105,58 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const readProjection = desktopBridge?.getNativeCoreOrbitalContractWorkspaceProjection;
     return typeof readProjection === "function" ? readProjection : null;
   }, [desktopBridge]);
-  const nativeCampaignIdentity = useMemo<DesktopNativeCoreCampaignWorkspaceProjectionRequest | null>(() => {
-    const frame = nativePlayerAuthorityActiveFrame;
-    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null ? Object.freeze({
-      sessionId: frame.sessionId,
-      runId: frame.runId,
-      expectedRevision: frame.revision,
-      expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
-    }) : null;
-  }, [nativePlayerAuthorityActiveFrame, nativePlayerAuthorityOwnsRuntime, recipeWorkspaceRegistryFingerprint]);
-  const nativeCampaignFetchProjection = useMemo<((
-    request: DesktopNativeCoreCampaignWorkspaceProjectionRequest,
-  ) => Promise<DesktopNativeCoreCampaignWorkspaceProjectionResult>) | null>(() => {
-    const readProjection = desktopBridge?.getNativeCoreCampaignWorkspaceProjection;
-    return typeof readProjection === "function" ? readProjection : null;
-  }, [desktopBridge]);
+  const nativeCampaignGalaxyAuthorityFrames = useMemo(
+    () => selectNativeCampaignGalaxyWorkspaceAuthorityFrames(
+      nativePlayerAuthorityClockSnapshot,
+      nativePlayerAuthoritySessionId,
+    ),
+    [nativePlayerAuthorityClockSnapshot, nativePlayerAuthoritySessionId],
+  );
+  const nativeCampaignGalaxyIdentity = useMemo<NativeCampaignGalaxyWorkspaceIdentity | null>(() => {
+    const frame = nativeCampaignGalaxyAuthorityFrames.displayFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+        })
+      : null;
+  }, [
+    nativeCampaignGalaxyAuthorityFrames,
+    nativePlayerAuthorityOwnsRuntime,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeCampaignGalaxyReadIdentity = useMemo<NativeCampaignGalaxyWorkspaceIdentity | null>(() => {
+    const frame = nativeCampaignGalaxyAuthorityFrames.readFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+        })
+      : null;
+  }, [
+    nativeCampaignGalaxyAuthorityFrames,
+    nativePlayerAuthorityOwnsRuntime,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeCampaignWorkspaceSource = useMemo(() => nativeCampaignGalaxyReadIdentity
+    ? createNativePlayerAuthorityCampaignWorkspaceSource(desktopBridge, nativeCampaignGalaxyReadIdentity)
+    : null, [desktopBridge, nativeCampaignGalaxyReadIdentity]);
+  const nativeCampaignWorkspaceFrame = useMemo(() => nativeCampaignGalaxyIdentity
+    ? selectNativeCampaignWorkspaceFrame(nativeCampaignWorkspaceSnapshot, nativeCampaignGalaxyIdentity)
+    : null, [nativeCampaignGalaxyIdentity, nativeCampaignWorkspaceSnapshot]);
+  const nativeCampaignWorkspaceReadStatus = nativeCampaignWorkspaceFrame &&
+      nativeCampaignGalaxyIdentity && nativeCampaignWorkspaceSnapshot.status === "ready" &&
+      nativeCampaignWorkspaceFrame.revision === nativeCampaignGalaxyIdentity.revision
+    ? "ready" as const
+    : nativeCampaignWorkspaceFrame
+      ? nativeCampaignWorkspaceSnapshot.status === "unavailable" ? "unavailable" as const : "loading" as const
+      : !nativeCampaignGalaxyIdentity || nativeCampaignWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : nativeCampaignWorkspaceSnapshot.status === "empty" ? "empty" as const : "loading" as const;
   const nativeOperationsIdentity = useMemo<DesktopNativeCoreOperationsWorkspaceProjectionRequest | null>(() => {
     const frame = nativePlayerAuthorityActiveFrame;
     return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null ? Object.freeze({
@@ -3115,21 +3178,21 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const commitIntent = desktopBridge?.commitNativeOperationsSettingIntent;
     return typeof commitIntent === "function" ? commitIntent : null;
   }, [desktopBridge]);
-  const nativeGalaxyIdentity = useMemo<DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest | null>(() => {
-    const frame = nativePlayerAuthorityActiveFrame;
-    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null ? Object.freeze({
-      sessionId: frame.sessionId,
-      runId: frame.runId,
-      expectedRevision: frame.revision,
-      expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
-    }) : null;
-  }, [nativePlayerAuthorityActiveFrame, nativePlayerAuthorityOwnsRuntime, recipeWorkspaceRegistryFingerprint]);
-  const nativeGalaxyFetchProjection = useMemo<((
-    request: DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest,
-  ) => Promise<DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult>) | null>(() => {
-    const readProjection = desktopBridge?.getNativeCoreGalaxyAccountWorkspaceProjection;
-    return typeof readProjection === "function" ? readProjection : null;
-  }, [desktopBridge]);
+  const nativeGalaxyWorkspaceSource = useMemo(() => nativeCampaignGalaxyReadIdentity
+    ? createNativePlayerAuthorityGalaxyWorkspaceSource(desktopBridge, nativeCampaignGalaxyReadIdentity)
+    : null, [desktopBridge, nativeCampaignGalaxyReadIdentity]);
+  const nativeGalaxyWorkspaceFrame = useMemo(() => nativeCampaignGalaxyIdentity
+    ? selectNativeGalaxyWorkspaceFrame(nativeGalaxyWorkspaceSnapshot, nativeCampaignGalaxyIdentity)
+    : null, [nativeCampaignGalaxyIdentity, nativeGalaxyWorkspaceSnapshot]);
+  const nativeGalaxyWorkspaceReadStatus = nativeGalaxyWorkspaceFrame &&
+      nativeCampaignGalaxyIdentity && nativeGalaxyWorkspaceSnapshot.status === "ready" &&
+      nativeGalaxyWorkspaceFrame.revision === nativeCampaignGalaxyIdentity.revision
+    ? "ready" as const
+    : nativeGalaxyWorkspaceFrame
+      ? nativeGalaxyWorkspaceSnapshot.status === "unavailable" ? "unavailable" as const : "loading" as const
+      : !nativeCampaignGalaxyIdentity || nativeGalaxyWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : nativeGalaxyWorkspaceSnapshot.status === "empty" ? "empty" as const : "loading" as const;
   const nativeFactoryInventoryIdentity = useMemo<NativeFactoryInventoryIdentity | null>(() => {
     const sessionId = nativePlayerAuthorityActiveFrame?.sessionId;
     const runId = nativePlayerAuthorityActiveFrame?.runId;
@@ -4363,6 +4426,42 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativeStatisticsWorkspaceSource,
     nativeStatisticsWorkspaceStore,
     statisticsOpen,
+  ]);
+  useEffect(() => {
+    if (!campaignOpen || !nativePlayerAuthorityOwnsRuntime || !nativeCampaignGalaxyIdentity) {
+      nativeCampaignWorkspaceStore.close();
+      return;
+    }
+    if (!nativeCampaignGalaxyReadIdentity || !nativeCampaignWorkspaceSource) return;
+    void nativeCampaignWorkspaceStore.refresh(
+      nativeCampaignWorkspaceSource,
+      nativeCampaignGalaxyReadIdentity,
+    ).catch(() => undefined);
+  }, [
+    campaignOpen,
+    nativeCampaignGalaxyIdentity,
+    nativeCampaignGalaxyReadIdentity,
+    nativeCampaignWorkspaceSource,
+    nativeCampaignWorkspaceStore,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
+  useEffect(() => {
+    if (!galaxyOpen || !nativePlayerAuthorityOwnsRuntime || !nativeCampaignGalaxyIdentity) {
+      nativeGalaxyWorkspaceStore.close();
+      return;
+    }
+    if (!nativeCampaignGalaxyReadIdentity || !nativeGalaxyWorkspaceSource) return;
+    void nativeGalaxyWorkspaceStore.refresh(
+      nativeGalaxyWorkspaceSource,
+      nativeCampaignGalaxyReadIdentity,
+    ).catch(() => undefined);
+  }, [
+    galaxyOpen,
+    nativeCampaignGalaxyIdentity,
+    nativeCampaignGalaxyReadIdentity,
+    nativeGalaxyWorkspaceSource,
+    nativeGalaxyWorkspaceStore,
+    nativePlayerAuthorityOwnsRuntime,
   ]);
   useEffect(() => {
     if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity ||
@@ -21791,10 +21890,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         ) : null}
         {galaxyOpen ? nativePlayerAuthorityOwnsRuntime ? (
           <NativeGalaxyWorkspace
+            key={nativeCampaignGalaxyIdentity
+              ? `${nativeCampaignGalaxyIdentity.sessionId}\u0000${nativeCampaignGalaxyIdentity.runId}\u0000${nativeCampaignGalaxyIdentity.registryFingerprint}`
+              : "native-galaxy-unbound"}
             open
             accountState={accountState}
-            identity={nativeGalaxyIdentity}
-            fetchProjection={nativeGalaxyFetchProjection}
+            frame={nativeGalaxyWorkspaceFrame}
+            latestIdentity={nativeCampaignGalaxyIdentity}
+            status={nativeGalaxyWorkspaceReadStatus}
             focusTab={galaxyFocusTab}
             onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setGalaxyOpen(false)}
             onUpdateProfile={updateGalaxyProfile}
@@ -22042,9 +22145,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         {recipesOpen ? <RecipeWorkspace open readOnly={nativePlayerAuthorityOwnsRuntime && (!nativeRecipeFocusReadModel || nativePlayerAuthorityCommandPending)} readModel={recipeWorkspaceReadModel} onReadRequest={updateRecipeWorkspaceSelector} mobile={nextMobileShell} mobileSubview={mobileWorkspaceSubview} onMobileOpenDetail={mobileNavigation.openWorkspaceSubview} onMobileReplaceDetail={(subview) => mobileNavigation.replaceWorkspaceSubview(subview)} focusItemId={campaignFocusItemId} onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setRecipesOpen(false)} onFocus={onRecipeFocusChange} onLocateProductionLine={locateRecipeWorkspaceProduction} /> : null}
         {campaignOpen ? nativePlayerAuthorityOwnsRuntime ? (
           <NativeCampaignWorkspace
+            key={nativeCampaignGalaxyIdentity
+              ? `${nativeCampaignGalaxyIdentity.sessionId}\u0000${nativeCampaignGalaxyIdentity.runId}\u0000${nativeCampaignGalaxyIdentity.registryFingerprint}`
+              : "native-campaign-unbound"}
             open
-            identity={nativeCampaignIdentity}
-            fetchProjection={nativeCampaignFetchProjection}
+            frame={nativeCampaignWorkspaceFrame}
+            latestIdentity={nativeCampaignGalaxyIdentity}
+            status={nativeCampaignWorkspaceReadStatus}
             onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setCampaignOpen(false)}
             onNavigate={navigateFromNativeCampaign}
           />

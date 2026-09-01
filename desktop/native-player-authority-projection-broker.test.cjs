@@ -381,6 +381,49 @@ test("campaign, Operations, and Galaxy exact-lineage reads reject same-revision 
   }
 });
 
+test("campaign and Galaxy reads bind registry and owner epoch across delivery", async () => {
+  const request = {
+    sessionId: "core-main-1",
+    runId: "run-1",
+    expectedRevision: 17,
+    expectedRegistryFingerprint: "7df8cf3a",
+  };
+  for (const [projectionType, method] of [
+    ["campaign-workspace-v1", "campaignWorkspaceProjection"],
+    ["galaxy-account-workspace-v1", "galaxyAccountWorkspaceProjection"],
+  ]) {
+    const wrongRegistry = fixture();
+    wrongRegistry.setSession({ registryFingerprint: "ffffffff" });
+    await assert.rejects(wrongRegistry.broker.read(23, projectionType, request),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_REGISTRY_MISMATCH");
+    assert.equal(wrongRegistry.calls.length, 0);
+
+    const result = (input) => ({
+      projectionType,
+      schemaVersion: 1,
+      sessionId: input.sessionId,
+      runId: input.runId,
+      revision: input.expectedRevision,
+      registryFingerprint: input.expectedRegistryFingerprint,
+    });
+    const registryRace = fixture();
+    registryRace.registry[method] = async (_ownerId, input) => {
+      registryRace.setSession({ registryFingerprint: "ffffffff" });
+      return result(input);
+    };
+    await assert.rejects(registryRace.broker.read(23, projectionType, request),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_REGISTRY_MISMATCH");
+
+    const handoffRace = fixture();
+    handoffRace.registry[method] = async (_ownerId, input) => {
+      handoffRace.setSession({ ownerEpoch: 3 });
+      return result(input);
+    };
+    await assert.rejects(handoffRace.broker.read(23, projectionType, request),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_LINEAGE_MISMATCH");
+  }
+});
+
 test("statistics player-authority reads reject old runs before and after an asynchronous read", async () => {
   const request = {
     sessionId: "core-main-1",

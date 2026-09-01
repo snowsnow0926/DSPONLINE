@@ -4,14 +4,17 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
-  DesktopNativeCoreCampaignWorkspaceProjectionRequest,
   DesktopNativeCoreCampaignWorkspaceProjectionResult,
-  DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest,
   DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult,
 } from "../desktop";
 import { CAMPAIGN_CHAPTERS, CAMPAIGN_TASKS } from "../game/campaign";
 import type { AccountState } from "../game/account";
 import type { CloudSession } from "../game/cloud";
+import type {
+  NativeCampaignGalaxyWorkspaceIdentity,
+  NativeCampaignWorkspaceFrame,
+  NativeGalaxyWorkspaceFrame,
+} from "../game/nativeCampaignGalaxyWorkspaceStore";
 import { NativeCampaignWorkspace } from "./NativeCampaignWorkspace";
 import { NativeGalaxyWorkspace } from "./NativeGalaxyWorkspace";
 
@@ -28,14 +31,14 @@ vi.mock("../game/cloud", async (importOriginal) => ({
   ...cloudMocks,
 }));
 
-const identity = Object.freeze({
+const identity: NativeCampaignGalaxyWorkspaceIdentity = Object.freeze({
   sessionId: "core-main",
   runId: "run-current",
-  expectedRevision: 12,
-  expectedRegistryFingerprint: "builtin:test",
+  revision: 12,
+  registryFingerprint: "builtin:test",
 });
 
-function campaignProjection(): DesktopNativeCoreCampaignWorkspaceProjectionResult {
+function campaignProjection(revision = identity.revision): DesktopNativeCoreCampaignWorkspaceProjectionResult {
   return {
     schemaVersion: 1,
     projectionType: "campaign-workspace-v1",
@@ -43,8 +46,8 @@ function campaignProjection(): DesktopNativeCoreCampaignWorkspaceProjectionResul
     stateVersion: 47,
     sessionId: identity.sessionId,
     runId: identity.runId,
-    revision: identity.expectedRevision,
-    registryFingerprint: identity.expectedRegistryFingerprint,
+    revision,
+    registryFingerprint: identity.registryFingerprint,
     truncated: false,
     limits: { chapters: 16, tasks: 64, payloadBytes: 262144 },
     counts: { chapters: CAMPAIGN_CHAPTERS.length, tasks: CAMPAIGN_TASKS.length, completedTasks: 0 },
@@ -70,7 +73,7 @@ function campaignProjection(): DesktopNativeCoreCampaignWorkspaceProjectionResul
   };
 }
 
-function galaxyProjection(): DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult {
+function galaxyProjection(revision = identity.revision): DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult {
   return {
     schemaVersion: 1,
     projectionType: "galaxy-account-workspace-v1",
@@ -78,8 +81,8 @@ function galaxyProjection(): DesktopNativeCoreGalaxyAccountWorkspaceProjectionRe
     stateVersion: 47,
     sessionId: identity.sessionId,
     runId: identity.runId,
-    revision: identity.expectedRevision,
-    registryFingerprint: identity.expectedRegistryFingerprint,
+    revision,
+    registryFingerprint: identity.registryFingerprint,
     truncated: false,
     limits: { payloadBytes: 65536, decimalDigits: 256 },
     game: { mode: "normal", elapsedSeconds: "3600", difficulty: "standard" },
@@ -88,6 +91,24 @@ function galaxyProjection(): DesktopNativeCoreGalaxyAccountWorkspaceProjectionRe
     dyson: { powerKw: "4", structurePoints: "5", rocketsLaunched: "6", sailsLaunched: "7" },
     cloudCompatibility: { gameStateVersion: 47, envelopeVersion: 2, cloudSchemaVersion: 8, exportSupported: true, restoreIntoActiveAuthority: false, importIntoActiveAuthority: false, overwriteActiveAuthority: false },
   };
+}
+
+function campaignFrame(revision = identity.revision): NativeCampaignWorkspaceFrame {
+  return Object.freeze({
+    source: "native-core",
+    ...identity,
+    revision,
+    projection: campaignProjection(revision),
+  });
+}
+
+function galaxyFrame(revision = identity.revision): NativeGalaxyWorkspaceFrame {
+  return Object.freeze({
+    source: "native-core",
+    ...identity,
+    revision,
+    projection: galaxyProjection(revision),
+  });
 }
 
 const accountState: AccountState = {
@@ -174,7 +195,7 @@ describe("native Campaign and Galaxy thin workspaces", () => {
   it("renders the complete static campaign catalog and emits only a UI locator", async () => {
     const onNavigate = vi.fn();
     await act(async () => {
-      root.render(<NativeCampaignWorkspace open identity={identity} fetchProjection={async () => campaignProjection()} onClose={() => undefined} onNavigate={onNavigate} />);
+      root.render(<NativeCampaignWorkspace open frame={campaignFrame()} latestIdentity={identity} status="ready" onClose={() => undefined} onNavigate={onNavigate} />);
       await Promise.resolve();
     });
     expect(host.textContent).toContain("采集第一份矿石");
@@ -184,55 +205,49 @@ describe("native Campaign and Galaxy thin workspaces", () => {
     expect(onNavigate).toHaveBeenCalledWith({ kind: "item", targetId: "iron_ore" }, "mine_first_ore");
   });
 
-  it("fails the entire campaign page closed on truncation or same-revision old run", async () => {
-    for (const projection of [
-      { ...campaignProjection(), truncated: true },
-      { ...campaignProjection(), runId: "run-old" },
-    ]) {
-      await act(async () => {
-        root.render(<NativeCampaignWorkspace open identity={identity} fetchProjection={async () => projection as DesktopNativeCoreCampaignWorkspaceProjectionResult} onClose={() => undefined} onNavigate={() => undefined} />);
-        await Promise.resolve();
-      });
-      expect(host.textContent).toContain("安全关闭");
-      expect(host.textContent).not.toContain("采集第一份矿石");
-    }
+  it("fails the entire campaign page closed without a verified frame", async () => {
+    await act(async () => {
+      root.render(<NativeCampaignWorkspace open frame={null} latestIdentity={identity} status="unavailable" onClose={() => undefined} onNavigate={() => undefined} />);
+      await Promise.resolve();
+    });
+    expect(host.textContent).toContain("安全关闭");
+    expect(host.textContent).not.toContain("采集第一份矿石");
   });
 
   it("removes a previously valid campaign projection as soon as its requested lineage changes", async () => {
     await act(async () => {
-      root.render(<NativeCampaignWorkspace open identity={identity} fetchProjection={async () => campaignProjection()} onClose={() => undefined} onNavigate={() => undefined} />);
+      root.render(<NativeCampaignWorkspace open frame={campaignFrame()} latestIdentity={identity} status="ready" onClose={() => undefined} onNavigate={() => undefined} />);
       await Promise.resolve();
     });
     expect(host.textContent).toContain("采集第一份矿石");
     const driftedIdentity = { ...identity, runId: "run-replaced" };
     await act(async () => {
-      root.render(<NativeCampaignWorkspace open identity={driftedIdentity} fetchProjection={() => new Promise(() => undefined)} onClose={() => undefined} onNavigate={() => undefined} />);
+      root.render(<NativeCampaignWorkspace open frame={campaignFrame()} latestIdentity={driftedIdentity} status="loading" onClose={() => undefined} onNavigate={() => undefined} />);
       await Promise.resolve();
     });
     expect(host.textContent).not.toContain("采集第一份矿石");
   });
 
   it("keeps the same focused campaign control mounted across a pending same-lineage revision", async () => {
-    const pending = deferred<DesktopNativeCoreCampaignWorkspaceProjectionResult>();
-    const fetchProjection = vi.fn((request: DesktopNativeCoreCampaignWorkspaceProjectionRequest) => request.expectedRevision === 13
-      ? pending.promise
-      : Promise.resolve(campaignProjection()));
     await act(async () => {
-      root.render(<NativeCampaignWorkspace open identity={identity} fetchProjection={fetchProjection} onClose={() => undefined} onNavigate={() => undefined} />);
+      root.render(<NativeCampaignWorkspace open frame={campaignFrame()} latestIdentity={identity} status="ready" onClose={() => undefined} onNavigate={() => undefined} />);
       await Promise.resolve();
     });
     const locate = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("定位目标"))!;
     locate.focus();
-    const nextIdentity = { ...identity, expectedRevision: 13 };
+    const nextIdentity = { ...identity, revision: 13 };
     await act(async () => {
-      root.render(<NativeCampaignWorkspace open identity={nextIdentity} fetchProjection={fetchProjection} onClose={() => undefined} onNavigate={() => undefined} />);
+      root.render(<NativeCampaignWorkspace open frame={campaignFrame()} latestIdentity={nextIdentity} status="loading" onClose={() => undefined} onNavigate={() => undefined} />);
       await Promise.resolve();
     });
     expect([...host.querySelectorAll("button")].find((button) => button.textContent?.includes("定位目标"))).toBe(locate);
     expect(document.activeElement).toBe(locate);
     expect(host.textContent).toContain("当前保持显示已验证的 revision 12");
 
-    await act(async () => pending.resolve({ ...campaignProjection(), revision: 13 }));
+    await act(async () => {
+      root.render(<NativeCampaignWorkspace open frame={campaignFrame(13)} latestIdentity={nextIdentity} status="ready" onClose={() => undefined} onNavigate={() => undefined} />);
+      await Promise.resolve();
+    });
     expect([...host.querySelectorAll("button")].find((button) => button.textContent?.includes("定位目标"))).toBe(locate);
     expect(document.activeElement).toBe(locate);
     expect(host.textContent).toContain("REV 13");
@@ -240,7 +255,7 @@ describe("native Campaign and Galaxy thin workspaces", () => {
 
   it("renders Rust game summary beside account-only controls and no main-save action", async () => {
     await act(async () => {
-      root.render(<NativeGalaxyWorkspace open accountState={accountState} identity={identity} fetchProjection={async () => galaxyProjection()} onClose={() => undefined} onUpdateProfile={() => undefined} onUpdateCloudBinding={() => true} onCreateAccount={() => undefined} onSwitchAccount={() => undefined} />);
+      root.render(<NativeGalaxyWorkspace open accountState={accountState} frame={galaxyFrame()} latestIdentity={identity} status="ready" onClose={() => undefined} onUpdateProfile={() => undefined} onUpdateCloudBinding={() => true} onCreateAccount={() => undefined} onSwitchAccount={() => undefined} />);
       await Promise.resolve();
     });
     expect(host.textContent).toContain("Rust 游戏摘要");
@@ -251,52 +266,48 @@ describe("native Campaign and Galaxy thin workspaces", () => {
     expect(host.textContent).toContain("测试工程师");
   });
 
-  it("does not expose account controls when the Galaxy lineage drifts", async () => {
+  it("keeps a verified Galaxy frame visible while the next same-lineage revision loads", async () => {
     await act(async () => {
-      root.render(<NativeGalaxyWorkspace open accountState={accountState} identity={identity} fetchProjection={async () => ({ ...galaxyProjection(), revision: 11 })} onClose={() => undefined} onUpdateProfile={() => undefined} onUpdateCloudBinding={() => true} onCreateAccount={() => undefined} onSwitchAccount={() => undefined} />);
+      root.render(<NativeGalaxyWorkspace open accountState={accountState} frame={galaxyFrame(11)} latestIdentity={identity} status="loading" onClose={() => undefined} onUpdateProfile={() => undefined} onUpdateCloudBinding={() => true} onCreateAccount={() => undefined} onSwitchAccount={() => undefined} />);
       await Promise.resolve();
     });
-    expect(host.textContent).toContain("安全关闭");
-    expect(host.textContent).not.toContain("测试工程师");
+    expect(host.textContent).toContain("当前保持显示已验证的 revision 11");
+    expect(host.textContent).toContain("测试工程师");
   });
 
   it("removes previously valid Galaxy account controls synchronously across a run replacement", async () => {
     await act(async () => {
-      root.render(<NativeGalaxyWorkspace open accountState={accountState} identity={identity} fetchProjection={async () => galaxyProjection()} onClose={() => undefined} onUpdateProfile={() => undefined} onUpdateCloudBinding={() => true} onCreateAccount={() => undefined} onSwitchAccount={() => undefined} />);
+      root.render(<NativeGalaxyWorkspace open accountState={accountState} frame={galaxyFrame()} latestIdentity={identity} status="ready" onClose={() => undefined} onUpdateProfile={() => undefined} onUpdateCloudBinding={() => true} onCreateAccount={() => undefined} onSwitchAccount={() => undefined} />);
       await Promise.resolve();
     });
     expect(host.textContent).toContain("测试工程师");
     const driftedIdentity = { ...identity, runId: "run-replaced" };
     await act(async () => {
-      root.render(<NativeGalaxyWorkspace open accountState={accountState} identity={driftedIdentity} fetchProjection={() => new Promise(() => undefined)} onClose={() => undefined} onUpdateProfile={() => undefined} onUpdateCloudBinding={() => true} onCreateAccount={() => undefined} onSwitchAccount={() => undefined} />);
+      root.render(<NativeGalaxyWorkspace open accountState={accountState} frame={galaxyFrame()} latestIdentity={driftedIdentity} status="loading" onClose={() => undefined} onUpdateProfile={() => undefined} onUpdateCloudBinding={() => true} onCreateAccount={() => undefined} onSwitchAccount={() => undefined} />);
       await Promise.resolve();
     });
     expect(host.textContent).not.toContain("测试工程师");
   });
 
   it("preserves the focused account draft while a newer same-lineage Galaxy projection is pending", async () => {
-    const pending = deferred<DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult>();
-    const fetchProjection = vi.fn((request: DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest) => request.expectedRevision === 13
-      ? pending.promise
-      : Promise.resolve(galaxyProjection()));
-    const render = (currentIdentity: DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest) => root.render(<NativeGalaxyWorkspace
-      open focusTab="account" accountState={accountState} identity={currentIdentity} fetchProjection={fetchProjection}
+    const render = (currentIdentity: NativeCampaignGalaxyWorkspaceIdentity, currentFrame: NativeGalaxyWorkspaceFrame, status: "ready" | "loading") => root.render(<NativeGalaxyWorkspace
+      open focusTab="account" accountState={accountState} frame={currentFrame} latestIdentity={currentIdentity} status={status}
       onClose={() => undefined} onUpdateProfile={() => undefined} onUpdateCloudBinding={() => true}
       onCreateAccount={() => undefined} onSwitchAccount={() => undefined}
     />);
-    await act(async () => { render(identity); await Promise.resolve(); });
+    await act(async () => { render(identity, galaxyFrame(), "ready"); await Promise.resolve(); });
     const draft = host.querySelector<HTMLInputElement>(".galaxy-name-field input")!;
     draft.focus();
     await act(async () => setInputValue(draft, "未提交的名字"));
 
-    const nextIdentity = { ...identity, expectedRevision: 13 };
-    await act(async () => { render(nextIdentity); await Promise.resolve(); });
+    const nextIdentity = { ...identity, revision: 13 };
+    await act(async () => { render(nextIdentity, galaxyFrame(), "loading"); await Promise.resolve(); });
     expect(host.querySelector<HTMLInputElement>(".galaxy-name-field input")).toBe(draft);
     expect(document.activeElement).toBe(draft);
     expect(draft.value).toBe("未提交的名字");
     expect(host.textContent).toContain("当前保持显示已验证的 revision 12");
 
-    await act(async () => pending.resolve({ ...galaxyProjection(), revision: 13 }));
+    await act(async () => { render(nextIdentity, galaxyFrame(13), "ready"); await Promise.resolve(); });
     expect(host.querySelector<HTMLInputElement>(".galaxy-name-field input")).toBe(draft);
     expect(document.activeElement).toBe(draft);
     expect(draft.value).toBe("未提交的名字");
@@ -308,14 +319,14 @@ describe("native Campaign and Galaxy thin workspaces", () => {
     cloudMocks.loginCloudAccount.mockReturnValue(pendingLogin.promise);
     let activeAccountId = accountState.activeAccountId;
     const onUpdateCloudBinding = vi.fn((expectedAccountId: string) => expectedAccountId === activeAccountId);
-    const fetchProjection = async () => galaxyProjection();
     const render = (state: AccountState) => root.render(
       <NativeGalaxyWorkspace
         open
         focusTab="cloud"
         accountState={state}
-        identity={identity}
-        fetchProjection={fetchProjection}
+        frame={galaxyFrame()}
+        latestIdentity={identity}
+        status="ready"
         onClose={() => undefined}
         onUpdateProfile={() => undefined}
         onUpdateCloudBinding={onUpdateCloudBinding}
@@ -375,14 +386,14 @@ describe("native Campaign and Galaxy thin workspaces", () => {
     };
     let activeAccountId = boundAccountState.activeAccountId;
     const onUpdateCloudBinding = vi.fn((expectedAccountId: string) => expectedAccountId === activeAccountId);
-    const fetchProjection = async () => galaxyProjection();
     const render = (state: AccountState) => root.render(
       <NativeGalaxyWorkspace
         open
         focusTab="cloud"
         accountState={state}
-        identity={identity}
-        fetchProjection={fetchProjection}
+        frame={galaxyFrame()}
+        latestIdentity={identity}
+        status="ready"
         onClose={() => undefined}
         onUpdateProfile={() => undefined}
         onUpdateCloudBinding={onUpdateCloudBinding}

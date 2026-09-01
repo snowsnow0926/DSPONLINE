@@ -8,6 +8,14 @@
 >
 > GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host/renderer 协议和 `authorityEligible=false` 均未改变；没有连接生产、部署、签名、打包或读取/修改真实玩家存档。
 
+> **Windows Operations 增量只读投影（2026-09-01，开发候选，未发布）**：Rust Operations 警报新增 lineage/revision 绑定的 session-only cache。相同 revision 重复打开为 0 实体、0 线路、0 全局依赖访问；活动行星规模直接读取 topology 聚合。普通稀疏模拟 revision 只重算 changed entity rows，警报正文最多保留 1,024 行；命令、拓扑、import/reload、目录或全局语义依赖变化统一失效并回到独立 flat-full oracle。
+>
+> cache 不进入 v47、WAL、checkpoint、导出或 canonical/domain hash。它只在完整候选成功后事务发布；projection-only malformed/MOD 数据只会丢 cache，不能再让“是否打开过 Operations”改变合法模拟提交结果。专门回归比较开/不开 cache 的 revision、完整状态字节和 canonical SHA-256；UI 随后仍对 malformed 投影严格报错。1/5/60、失败候选/命令/保存、reload/import、overflow、MOD/opaque、1/2/4/8 和内存边界均使用合成数据覆盖。
+>
+> 最终 focused 为 `14 passed / 0 failed / 1 ignored / 911 filtered`；5 万实体/5 千线路最终 release 手工基准为 flat `220,030 µs`、cold `45,792 µs`、同 revision 20 次 `27,318 µs`、单行 Operations-only 增量 `97 µs`、cache 约 `515,269 B`。它不包含完整模拟/编码/IPC/UI，不能当作真实档吞吐承诺。完整跨 revision `O(active)` 仍 No-Go：已打开 cache 的稀疏 revision 还需遍历规模较小但全局的电网/行星/戴森/施工/科研依赖来证明无高扇出变化；冷启动、稠密和 fail-closed 仍全量。
+>
+> 首轮复跑与其他 Rust 门禁并发时 rustc 因系统内存不足中断，资源释放后的 focused 与 strict clippy 通过；该基础设施中断没有冒充断言失败或首轮全绿。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 和 `authorityEligible=false` 均不变；未读取真实玩家存档，未连接生产、部署、打包或签名，Web fallback 不变。
+
 > **Windows material-delivery hub 双阶段活动队列（2026-09-01，开发候选，未发布）**：Rust `simple_factory` 对内置物资配送枢纽增加 session-only、按持久实体行排序的 wake queue。冷拍仍在历史前/后两个 drain 阶段各全扫一次；第一阶段选中的行必定带到第二阶段，只有输入已经合法归零、三个 delivery slot 可证明且目标托盘未满的 hub 才休眠。两段真实 belt changed-entity 事件分别闭合前后唤醒；托盘满、残留输入、MOD/opaque、identity/topology 漂移、精确 75% 稠密都保持常醒或回退原 full scan。
 >
 > 1,024 hub 的 `1/5/60` 秒 indexed 与 flat-full 选择对照在完整 bytes、canonical、domain 和物料守恒 SHA-256 上一致；该对照完全绕过 `MaterialDeliveryRuntime::select`，把完整 topology 行直接送入共享的旧 drain 结算体，因此是独立选择对照、不是独立结算实现。共 `2/10/120` 次 drain，indexed 冷拍两次各选 1,024，之后每阶段最多 1 行，flat-full 每次 1,024。真实 relay、producer 与 hub-as-source output belt 覆盖同拍前后两阶段及输出端唤醒；60 秒一次 advance 与 `1/10/30` 秒内部分步、以及对应 `60/6/2` 次提交在显式区分 revision 后保持全部其余状态字段一致；60 秒结果在 1/2/4/8 workers 一致。runtime 持有 topology `Arc` clone，使同长度/同容量内容编辑必经 COW 并稳定触发全扫；内存估算包含首个 `BTreeSet` 节点固定开销、全行候选及源/候选 Arc COW 双份峰值。失败候选保留源 wake 和源字节。

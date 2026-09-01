@@ -63,6 +63,7 @@ import { createNativeRendererShellState } from "./game/nativeRendererShell";
 import { OnboardingCoach } from "./components/OnboardingCoach";
 import { SpeedrunStatusPanel } from "./components/SpeedrunStatusPanel";
 import { MobileGameShell } from "./components/mobile/MobileGameShell";
+import { NativeMobileGameShell } from "./components/mobile/NativeMobileGameShell";
 import { usePerformanceMonitor } from "./hooks/usePerformanceMonitor";
 import { useStableEventCallback } from "./hooks/useStableEventCallback";
 import { MobilePlacementBar, MobileSelectionContextBar, type MobileCanvasMode } from "./components/mobile/MobileFactoryPanels";
@@ -292,6 +293,10 @@ import { planFactoryAutoLayout } from "./game/layout";
 import { createNativeFactoryAutoLayoutCommand } from "./game/nativeFactoryAutoLayoutCommands";
 import { createNativeFactoryBatchCommand } from "./game/nativeFactoryBatchCommands";
 import { createNativeFactoryBeltBatchCommand } from "./game/nativeFactoryBeltBatchCommands";
+import {
+  createNativeWorkspaceActionCommand,
+  type NativeWorkspaceActionIntent,
+} from "./game/nativeWorkspaceActionCommands";
 import { createNativeFactoryPositionCommand } from "./game/nativeFactoryPositionCommands";
 import { createProductionPlan, removeProductionPlan, setProductionPlanRecipe, updateProductionPlan } from "./game/planning";
 import { getProductionLineLocations, type ProductionLineLocation } from "./game/productionLocator";
@@ -321,6 +326,7 @@ import {
   type DesktopNativeSystemSpaceStationIntent,
   type DesktopNativePlayerAuthorityHandoffRequest,
   type DesktopNativePlayerAuthorityHandoffResult,
+  type DesktopNativePlayerAuthorityHistoryStatus,
   type DesktopNativeSaveCommitResult,
 } from "./desktop";
 import { NATIVE_APP_STATE_EVENT } from "./nativeApp";
@@ -2859,6 +2865,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const nativeManualMiningLastAttemptedFrameKeyRef = useRef<string | null>(null);
   const nativePlayerAuthorityPauseInFlightRef = useRef(false);
   const [nativePlayerAuthorityCommandPending, setNativePlayerAuthorityCommandPending] = useState(false);
+  const [nativePlayerAuthorityHistory, setNativePlayerAuthorityHistory] = useState<
+    DesktopNativePlayerAuthorityHistoryStatus | null
+  >(null);
   const [nativeConstructionCenterPendingIdentity, setNativeConstructionCenterPendingIdentity] = useState<
     NativeConstructionCenterPendingIdentity | null
   >(null);
@@ -2884,6 +2893,30 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     }
   }
   const nativePlayerAuthorityCommandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+  useEffect(() => {
+    const source = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    const readHistory = desktopBridge?.getNativePlayerAuthorityHistoryStatus;
+    if (!nativePlayerAuthorityOwnsRuntime || !source || !readHistory || nativePlayerAuthorityCommandPending) {
+      if (!nativePlayerAuthorityOwnsRuntime) setNativePlayerAuthorityHistory(null);
+      return;
+    }
+    let cancelled = false;
+    void readHistory({ sessionId: source.sessionId }).then((status) => {
+      const current = nativePlayerAuthorityCommandBindingRef.current?.source;
+      if (!cancelled && current?.sessionId === source.sessionId &&
+          current.baseRevision === status.revision) {
+        setNativePlayerAuthorityHistory(status);
+      }
+    }).catch(() => {
+      if (!cancelled) setNativePlayerAuthorityHistory(null);
+    });
+    return () => { cancelled = true; };
+  }, [
+    desktopBridge,
+    nativePlayerAuthorityActiveFrame?.revision,
+    nativePlayerAuthorityCommandPending,
+    nativePlayerAuthorityOwnsRuntime,
+  ]);
   const nativePlayerAuthorityMacroDisplay = useMemo(() => {
     const status = nativePlayerAuthorityMacroStatus;
     if (!status) return null;
@@ -3370,6 +3403,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const nativeFactoryInventoryFrame = useMemo(() => nativeFactoryInventoryIdentity
     ? selectNativeFactoryInventoryFrame(nativeFactoryInventorySnapshot, nativeFactoryInventoryIdentity)
     : null, [nativeFactoryInventoryIdentity, nativeFactoryInventorySnapshot]);
+  const nativeFactoryInventoryFrameRef = useRef(nativeFactoryInventoryFrame);
+  nativeFactoryInventoryFrameRef.current = nativeFactoryInventoryFrame;
   const nativeConstructionInventorySource = useMemo(() => nativeFactoryInventoryReadIdentity
     ? createNativePlayerAuthorityConstructionInventorySource(desktopBridge, nativeFactoryInventoryReadIdentity)
     : null, [desktopBridge, nativeFactoryInventoryReadIdentity]);
@@ -9667,6 +9702,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     return true;
   }, [invalidateFactoryAlertProjection, rejectPlayerStateEditDuringPrimarySave]);
 
+  const commitNativeWorkspaceAction = useCallback((
+    intent: NativeWorkspaceActionIntent,
+    successNotice: string,
+    projectedRevision = nativePlayerAuthorityCommandBindingRef.current?.source.baseRevision ?? -1,
+  ): boolean => commitNativeProjectedCommand(
+    projectedRevision,
+    (baseRevision) => createNativeWorkspaceActionCommand(baseRevision, intent),
+    () => setNotice(successNotice),
+  ), [commitNativeProjectedCommand]);
+
   const commitNativeSystemSpaceStationIntent = useCallback((
     intent: DesktopNativeSystemSpaceStationIntent,
     successNotice: string,
@@ -10057,6 +10102,32 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     commitNativeProjectedCommand(frame.revision, () =>
       createNativeProjectedProductionBufferLimitCommand(frame, value));
   }, [commitNativeProjectedCommand, nativeFactoryInventoryFrame]);
+
+  const discardNativeTrayItem = useCallback(async (itemId: string, amount: number): Promise<void> => {
+    const source = nativeFactoryInventoryFrame;
+    const row = source?.rowsByItemId.get(itemId);
+    if (!source || !row || !Number.isSafeInteger(amount) || amount < 1 || row.amount !== amount) {
+      setNotice("原生托盘投影已经变化；永久丢弃未提交");
+      return;
+    }
+    const label = ITEMS[itemId as ItemId]?.name ?? itemId;
+    const confirmed = await gameDialog.confirm(
+      `确认永久丢弃当前行星托盘中的全部 ${label} ×${amount.toLocaleString("zh-CN")}？该操作不会返还物资。`,
+      { danger: true, title: "确认永久丢弃", confirmLabel: "永久丢弃" },
+    );
+    if (!confirmed) return;
+    const current = nativeFactoryInventoryFrameRef.current;
+    if (!current || current.sessionId !== source.sessionId || current.runId !== source.runId ||
+        current.revision !== source.revision || current.rowsByItemId.get(itemId)?.amount !== amount) {
+      setNotice("确认期间 Rust 托盘 revision 已变化；永久丢弃已取消");
+      return;
+    }
+    commitNativeWorkspaceAction(
+      { kind: "tray-discard", itemId, amount },
+      `${label}已由 Rust 从当前行星托盘永久丢弃`,
+      source.revision,
+    );
+  }, [commitNativeWorkspaceAction, gameDialog, nativeFactoryInventoryFrame]);
 
   const cancelNativeBuildingPlacement = useCallback((): void => {
     nativePlacementIntentRef.current = {
@@ -10505,9 +10576,51 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     pendingPlanetViewportRef.current.clear();
   }, []);
 
+  const commitNativeHistory = useCallback((direction: "undo" | "redo") => {
+    const source = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    const commitHistory = desktopBridge?.commitNativePlayerAuthorityHistory;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || !source || !commitHistory ||
+        nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认命令或撤销历史不可用");
+      return false;
+    }
+    const available = direction === "undo"
+      ? nativePlayerAuthorityHistory?.canUndo
+      : nativePlayerAuthorityHistory?.canRedo;
+    if (!available || nativePlayerAuthorityHistory?.revision !== source.baseRevision) {
+      setNotice(direction === "undo" ? "当前没有可撤销的已确认操作" : "当前没有可重做的操作");
+      return false;
+    }
+    nativePlayerAuthorityCommandInFlightRef.current = true;
+    setNativePlayerAuthorityCommandPending(true);
+    const operationId = `renderer-history-${direction}-${source.baseRevision}-${crypto.randomUUID()}`;
+    void commitHistory({
+      sessionId: source.sessionId,
+      operationId,
+      baseRevision: source.baseRevision,
+      direction,
+    }).then((receipt) => {
+      setNativePlayerAuthorityHistory(receipt.history);
+      invalidateFactoryAlertProjection();
+      setNotice(direction === "undo" ? "已撤销上一步原生权威操作" : "已重做上一步原生权威操作");
+    }).catch(() => {
+      // Never retry a mutation after an unknown transport result. Pulling the
+      // authority clock/history below is read-only reconciliation.
+      setNotice("撤销结果暂时无法确认；已停止重试并读取当前权威状态");
+    }).finally(async () => {
+      try {
+        await nativePlayerAuthorityClockRef.current?.refresh();
+      } finally {
+        nativePlayerAuthorityCommandInFlightRef.current = false;
+        setNativePlayerAuthorityCommandPending(false);
+      }
+    });
+    return true;
+  }, [desktopBridge, invalidateFactoryAlertProjection, nativePlayerAuthorityHistory]);
+
   const undoGame = useCallback(() => {
     if (nativePlayerAuthorityOwnsRuntimeRef.current) {
-      setNotice("Windows 原生权威的撤销命令仍在闭合中；本次操作未应用");
+      commitNativeHistory("undo");
       return;
     }
     if (rejectPlayerStateEditDuringPrimarySave()) return;
@@ -10525,11 +10638,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     if (durableRecoveryLifecycleRef.current === "active") {
       dispatchDurableUiCommandRef.current();
     }
-  }, [invalidateFactoryAlertProjection, publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
+  }, [commitNativeHistory, invalidateFactoryAlertProjection, publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
 
   const redoGame = useCallback(() => {
     if (nativePlayerAuthorityOwnsRuntimeRef.current) {
-      setNotice("Windows 原生权威的重做命令仍在闭合中；本次操作未应用");
+      commitNativeHistory("redo");
       return;
     }
     if (rejectPlayerStateEditDuringPrimarySave()) return;
@@ -10543,7 +10656,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     if (durableRecoveryLifecycleRef.current === "active") {
       dispatchDurableUiCommandRef.current();
     }
-  }, [invalidateFactoryAlertProjection, publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
+  }, [commitNativeHistory, invalidateFactoryAlertProjection, publishRuntimeGame, rejectPlayerStateEditDuringPrimarySave]);
 
   const clearHistory = useCallback(() => {
     gameHistoryRef.current.clear();
@@ -18013,7 +18126,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
 
   const onRegionPointerDown = useCallback((event: React.PointerEvent<HTMLElement>) => {
     if (!regionMode || event.button !== 0 || placement || blueprintPlacementId || connectionDraftRef.current) return;
-    if (rejectLegacyFactoryInteractionWhileNative("生产区域编辑")) return;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current && !nativeAuthoritativeFactoryWorkspaceFrame?.workspace) {
+      setNotice("正在等待同一 revision 的 Rust 区域投影；本次拖拽未开始");
+      return;
+    }
     const target = event.target instanceof Element ? event.target : null;
     if (!target?.closest(".react-flow__pane") || target.closest(".canvas-region__label")) return;
     event.preventDefault();
@@ -18023,16 +18139,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     regionPointerRef.current = { pointerId: event.pointerId, start };
     setRegionDraft({ ...start, width: 0, height: 0 });
     setSelectedRegionId(null);
-  }, [blueprintPlacementId, placement, regionMode, rejectLegacyFactoryInteractionWhileNative, screenToFlowPosition]);
+  }, [blueprintPlacementId, nativeAuthoritativeFactoryWorkspaceFrame, placement, regionMode, screenToFlowPosition]);
 
   const onRegionResizeStart = useCallback((event: React.PointerEvent<HTMLButtonElement>, region: CanvasRegion, handle: CanvasRegionResizeHandle) => {
-    if (rejectLegacyFactoryInteractionWhileNative("生产区域编辑")) return;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current && !nativeAuthoritativeFactoryWorkspaceFrame?.workspace) {
+      setNotice("正在等待同一 revision 的 Rust 区域投影；本次调整未开始");
+      return;
+    }
     const start = snapFlowPosition(screenToFlowPosition({ x: event.clientX, y: event.clientY }));
     regionResizeRef.current = { pointerId: event.pointerId, element: event.currentTarget, region: { ...region }, handle, start };
     setRegionResizePreview({ regionId: region.id, rectangle: { x: region.x, y: region.y, width: region.width, height: region.height } });
     setRegionMode(false);
     setRegionDraft(null);
-  }, [rejectLegacyFactoryInteractionWhileNative, screenToFlowPosition]);
+  }, [nativeAuthoritativeFactoryWorkspaceFrame, screenToFlowPosition]);
 
   const onRegionPointerMove = useCallback((event: React.PointerEvent<HTMLElement>) => {
     const resize = regionResizeRef.current;
@@ -18064,8 +18183,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       const rectangle = resizeRegionRectangle(resize.region, resize.handle, resize.start, current);
       setRegionResizePreview(null);
       if (!cancelled) {
-        if (rejectLegacyFactoryInteractionWhileNative("生产区域编辑")) return;
-        commitGame((currentGame) => resizeCanvasRegion(currentGame, resize.region.id, rectangle));
+        if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+          const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+          if (!frame?.workspace || !commitNativeWorkspaceAction({
+            kind: "region-resize",
+            regionId: resize.region.id,
+            ...rectangle,
+          }, `生产区域已由 Rust 调整为 ${Math.round(rectangle.width)} × ${Math.round(rectangle.height)}`, frame.revision)) return;
+        } else {
+          commitGame((currentGame) => resizeCanvasRegion(currentGame, resize.region.id, rectangle));
+        }
         setNotice(`生产区域已调整为 ${Math.round(rectangle.width)} × ${Math.round(rectangle.height)}`);
       }
       return;
@@ -18080,18 +18207,27 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const rectangle = rectangleFromPoints(drag.start, end);
     setRegionDraft(null);
     if (cancelled) return;
-    if (rejectLegacyFactoryInteractionWhileNative("生产区域编辑")) return;
     if (rectangle.width < 40 || rectangle.height < 40) {
       setNotice("生产区域至少需要 40 × 40 画布单位");
       return;
     }
-    const regionId = `region_${gameRef.current.nextId}`;
-    commitGame((current) => addCanvasRegion(current, current.activePlanetId, rectangle));
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+      if (!frame?.workspace || !commitNativeWorkspaceAction({
+        kind: "region-add",
+        planetId: frame.workspace.activePlanetId,
+        ...rectangle,
+      }, "生产区域已由 Rust 创建，可在刷新后设置名称和颜色", frame.revision)) return;
+      setSelectedRegionId(null);
+    } else {
+      const regionId = `region_${gameRef.current.nextId}`;
+      commitGame((current) => addCanvasRegion(current, current.activePlanetId, rectangle));
+      setSelectedRegionId(regionId);
+    }
     setRegionMode(false);
-    setSelectedRegionId(regionId);
     setNotice("生产区域已创建，可设置名称、背景色和边框色");
     playTone("place");
-  }, [commitGame, playTone, rejectLegacyFactoryInteractionWhileNative, screenToFlowPosition]);
+  }, [commitGame, commitNativeWorkspaceAction, nativeAuthoritativeFactoryWorkspaceFrame, playTone, screenToFlowPosition]);
 
   const restoreCanvasEntityPositions = useCallback(() => {
     setNodes((current) => current.map((node) => {
@@ -20176,9 +20312,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   );
   const factoryCanvasRegions = useMemo(
     () => nativePlayerAuthorityOwnsRuntime
-      ? []
+      ? (nativeAuthoritativeFactoryWorkspaceFrame?.workspace?.regions.rows ?? [])
+        .filter((region) => region.planetId === factoryConfirmedActivePlanetId) as readonly CanvasRegion[]
       : canvasGame.canvasRegions.filter((region) => region.planetId === canvasGame.activePlanetId),
-    [canvasGame.activePlanetId, canvasGame.canvasRegions, nativePlayerAuthorityOwnsRuntime],
+    [canvasGame.activePlanetId, canvasGame.canvasRegions, factoryConfirmedActivePlanetId,
+      nativeAuthoritativeFactoryWorkspaceFrame, nativePlayerAuthorityOwnsRuntime],
   );
   const activePlanetRegionCount = factoryCanvasRegions.length;
 
@@ -20674,7 +20812,25 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   };
 
   const handleDeleteConstructionInventory = async (constructionId: ConstructionId): Promise<boolean> => {
-    if (rejectLegacyFactoryInteractionWhileNative("施工库存删除")) return false;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const frame = nativeConstructionInventoryFrame;
+      const amount = frame?.rowsByBuildingId.get(constructionId)?.amount ?? 0;
+      if (!frame || amount < 1) {
+        setNotice("当前 Rust 施工库存中该条目已经为 0；未执行删除");
+        return false;
+      }
+      const definition = getConstructionDefinition(constructionId);
+      const confirmed = await gameDialog.confirm(
+        `确认永久删除施工托盘中的${definition?.name ?? constructionId} ×${amount.toLocaleString("zh-CN")}？此操作不返还材料且不可恢复。Rust 会在提交时重新核对当前 revision 和真实数量。`,
+        { confirmLabel: "永久删除" },
+      );
+      if (!confirmed || !nativePlayerAuthorityOwnsRuntimeRef.current) return false;
+      return commitNativeWorkspaceAction(
+        { kind: "construction-discard", constructionId },
+        `已由 Rust 永久删除${definition?.name ?? constructionId}；画布建筑和制造目标未改变`,
+        frame.revision,
+      );
+    }
     const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const current = gameRef.current;
     const amount = Math.max(0, Math.floor(current.construction[constructionId] ?? 0));
@@ -20729,7 +20885,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   };
 
   const handleRemoveSprayCoater = async (entityId: string) => {
-    if (rejectLegacyFactoryInteractionWhileNative("喷涂模块拆卸")) return;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const revision = nativePlayerAuthorityCommandBindingRef.current?.source.baseRevision ?? -1;
+      const confirmation = isEnglish
+        ? "Remove the spray module? Rust will recalculate and return the module, buffered proliferator and remaining spray points at the current revision."
+        : "确认拆卸喷涂模块？Rust 会按当前 revision 重新计算并返还模块、缓存增产剂和剩余喷涂点数。";
+      if (!await gameDialog.confirm(confirmation, { confirmLabel: isEnglish ? "Remove" : "确认拆卸" }) ||
+          !nativePlayerAuthorityOwnsRuntimeRef.current) return;
+      if (commitNativeWorkspaceAction(
+        { kind: "spray-detach", entityId },
+        "喷涂模块已由 Rust 拆卸，全部可回收物料已按权威库存返还",
+        revision,
+      )) playTone("remove");
+      return;
+    }
     const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const refund = getSprayCoaterRemovalRefund(gameRef.current, entityId);
     const confirmation = isEnglish
@@ -21216,14 +21385,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       <div className="workspace-loading" role="status"><i /><span>正在验证工厂运行时</span></div>
     </main>;
   }
-  if (nextMobileShell && nativePlayerAuthorityOwnsRuntime) {
-    return <main className="game-shell native-mobile-shell-unavailable" data-native-authority-unavailable="mobile-shell-v1">
-      <section role="status" aria-live="polite" style={{ minHeight: "100dvh", display: "grid", placeItems: "center", padding: 24, background: "#08100e", color: "#d8f7ec", textAlign: "center" }}>
-        <div><strong>Windows 原生权威正在使用桌面薄界面</strong><p>移动端托盘、建造和手持物投影尚未闭合；为避免显示旧星球数据，当前界面已安全停用。</p><button type="button" onClick={switchToLegacyMobileUi}>切换到桌面布局</button></div>
-      </section>
-    </main>;
-  }
-
   return (
     <ItemReferenceActionsProvider actions={itemReferenceActions} enabled={showItemHover}>
     <main
@@ -21385,7 +21546,130 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         onOpenStarMap={() => { if (starMapOpen) closeAllWorkspaces(); else openCommandWorkspace("star-map"); setNotice(null); }}
       />
       </RuntimeRenderProfile>
-      {!nativePlayerAuthorityOwnsRuntime ? <MobileGameShell
+      {nativePlayerAuthorityOwnsRuntime ? <NativeMobileGameShell
+        enabled={nextMobileShell}
+        layout={compactLayout}
+        frame={nativeAuthoritativeFactoryWorkspaceFrame}
+        inventoryFrame={nativeFactoryInventoryFrame}
+        constructionFrame={nativeConstructionInventoryFrame}
+        pending={nativePlacementContextPending || nativeBeltPlacementContextPending ||
+          nativePlayerAuthorityCommandPending || !nativePlayerAuthorityCommandSource ||
+          !nativeFactoryInventoryWritesEnabled || !nativeConstructionInventoryWritesEnabled}
+        alertCount={alertCount}
+        route={mobileNavigation.route}
+        overlay={mobileNavigation.overlay}
+        tools={{
+          mode: activeMobileCanvasMode,
+          blueprintCount: nativeBlueprintWorkspaceFrame?.libraryPage.totalCount ?? 0,
+          beltCount: nativeAuthoritativeFactoryCanvasFrame?.planetTotals.belts ?? 0,
+          regionCount: activePlanetRegionCount,
+          canUndo: nativePlayerAuthorityHistory?.canUndo === true,
+          canRedo: nativePlayerAuthorityHistory?.canRedo === true,
+          canUndoAutoLayout: false,
+          minimapOpen: !minimapCollapsed,
+          batchConnectionMode,
+        }}
+        toolActions={{
+          onBrowse: () => {
+            setMobileCanvasMode("browse");
+            setSelectionMode(false);
+            setRegionMode(false);
+            setRegionDraft(null);
+            selectNativeBuildingPlacement(null);
+          },
+          onSelect: () => {
+            setMobileCanvasMode("select");
+            setSelectionMode(true);
+            setRegionMode(false);
+            setRegionDraft(null);
+            selectNativeBuildingPlacement(null);
+          },
+          onRegion: () => {
+            setMobileCanvasMode("region");
+            setRegionMode(true);
+            setRegionDraft(null);
+            setSelectionMode(false);
+            selectNativeBuildingPlacement(null);
+            setSelectedEntityIds([]);
+            setSelectedBeltIds([]);
+            setSelectedBeltId(null);
+            setNotice("在空白画布拖拽创建生产区域；松手后由 Rust 原子保存");
+          },
+          onLayout: () => {
+            setMobileCanvasMode("layout");
+            setSelectionMode(false);
+            setRegionMode(false);
+            setRegionDraft(null);
+            selectNativeBuildingPlacement(null);
+            setNotice("布局模式：拖动节点后由 Rust 在同一 revision 原子保存位置");
+          },
+          onOpenBlueprints: () => openMobileWorkspace("blueprints"),
+          onOpenNetworks: () => openMobileStatistics("networks"),
+          onBatchConnectionModeChange: (enabled) => {
+            if (!enabled) {
+              cancelBatchConnection();
+              return;
+            }
+            activateBatchConnectionMode();
+            setMobileCanvasMode("browse");
+            setNotice("连续拉线已开启；候选只保留在界面中，确认时整批交给 Rust 原子提交");
+          },
+          onAutoLayout: () => autoLayoutEntities(),
+          onUndoAutoLayout: undoAutoLayout,
+          onUndo: undoGame,
+          onRedo: redoGame,
+          onZoomIn: () => void zoomIn({ duration: game.settings.reducedMotion ? 0 : 140 }),
+          onZoomOut: () => void zoomOut({ duration: game.settings.reducedMotion ? 0 : 140 }),
+          onFitView: () => void fitView({ padding: .18, minZoom: canvasMinimumZoom, duration: game.settings.reducedMotion ? 0 : 220 }),
+          onToggleMinimap: () => setMinimapCollapsed((collapsed) => !collapsed),
+        }}
+        selectedBuildingId={nativePlacementBuildingId}
+        selectedBeltTier={nativeBeltPlacementTier}
+        beltLanes={defaultBeltLanes}
+        hasConstructionCenter={Boolean(
+          nativeAuthoritativeFactoryWorkspaceFrame?.constructionWorkspace.nativeCenterWorkspace?.centers.totalCount,
+        )}
+        onPlacementChange={selectNativeBuildingPlacement}
+        onBeltPlacementChange={selectNativeBeltPlacement}
+        onBeltLanesChange={updateDefaultBeltLanes}
+        onDeleteConstruction={(buildingId) => void handleDeleteConstructionInventory(buildingId as ConstructionId)}
+        onOpenFabricator={() => {
+          setInspectorTab("fabricate");
+          openMobileSheet("inspector");
+        }}
+        onPickTray={takeNativeTrayItem}
+        onDropCargo={returnNativeCargo}
+        onStowEntityInventory={handleDraggedItemToTray}
+        entityDepositEnabled={nativeEntityInventoryDepositEnabled}
+        onSetTrayItemLimit={setNativeTrayItemLimit}
+        onSetProductionBufferLimit={setNativeProductionBufferLimit}
+        onDiscardTrayItem={(itemId, amount) => void discardNativeTrayItem(itemId, amount)}
+        onFactory={() => {
+          if (mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay) {
+            void fitView({ padding: .18, minZoom: canvasMinimumZoom, duration: game.settings.reducedMotion ? 0 : 220 });
+          } else mobileNavigation.goFactory();
+        }}
+        onOpenHub={() => {
+          setNotice(null);
+          if (mobileNavigation.route.kind === "hub") mobileNavigation.goFactory();
+          else mobileNavigation.openHub();
+        }}
+        onOpenSheet={openMobileSheet}
+        onSheetSnap={mobileNavigation.setSheetSnap}
+        onOpenWorkspace={openMobileWorkspace}
+        onOpenOrbitalStation={() => openMobileWorkspace("orbital-station")}
+        onOpenStatistics={openMobileStatistics}
+        onOpenOperations={openMobileOperations}
+        onOpenGalaxy={openMobileGalaxy}
+        onOpenCommandPalette={openCommandPalette}
+        onBack={mobileNavigation.requestBack}
+        onTogglePause={togglePause}
+        onPlanetChange={onPlanetChange}
+        onConfirmExit={returnToMenuSafely}
+        onDismissExit={mobileNavigation.dismissExit}
+        onRequestExit={mobileNavigation.requestExit}
+        onSwitchLegacy={switchToLegacyMobileUi}
+      /> : <MobileGameShell
         enabled={nextMobileShell && !nativePlayerAuthorityOwnsRuntime}
         layout={compactLayout}
         game={game}
@@ -21590,13 +21874,18 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         onDismissExit={mobileNavigation.dismissExit}
         onRequestExit={mobileNavigation.requestExit}
         onSwitchLegacy={switchToLegacyMobileUi}
-      /> : null}
-      {nextMobileShell && !nativePlayerAuthorityOwnsRuntime && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay ? <MobilePlacementBar
+      />}
+      {nextMobileShell && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay ? <MobilePlacementBar
         mode={activeMobileCanvasMode}
-        buildingId={placement}
-        inventory={placement ? Math.floor(game.construction[placement] ?? 0) : 0}
-        placementCount={placementCount}
-        continuous={mobileContinuousPlacement}
+        buildingId={nativePlayerAuthorityOwnsRuntime ? nativePlacementBuildingId : placement}
+        inventory={nativePlayerAuthorityOwnsRuntime
+          ? nativePlacementBuildingId
+            ? nativeConstructionInventoryFrame?.rowsByBuildingId.get(nativePlacementBuildingId)?.amount ?? 0
+            : 0
+          : placement ? Math.floor(game.construction[placement] ?? 0) : 0}
+        placementCount={nativePlayerAuthorityOwnsRuntime ? 1 : placementCount}
+        continuous={nativePlayerAuthorityOwnsRuntime ? false : mobileContinuousPlacement}
+        singlePlacementOnly={nativePlayerAuthorityOwnsRuntime}
         connectionLabel={connectionHint?.label ?? (connectionDraft ? `${connectionDraft.itemId ? ITEMS[connectionDraft.itemId].name : "任意物资"}${connectionDraft.handleType === "source" ? "输出" : "输入"}：请选择匹配端口` : null)}
         selectionCount={factorySelectionToolbarReadModel.selectedCount}
         beltCount={factorySelectionToolbarReadModel.selectedBeltCount}
@@ -21613,7 +21902,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             updateConnectionDraft(null);
             setConnectionHint(null);
           }
-          setPlacement(null);
+          if (nativePlayerAuthorityOwnsRuntime) {
+            selectNativeBuildingPlacement(null);
+            selectNativeBeltPlacement(null);
+          } else setPlacement(null);
           setMobileContinuousPlacement(false);
           setMobileCanvasMode("browse");
         }}
@@ -21625,7 +21917,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         }}
         onOpenInspector={() => mobileNavigation.openSheet("inspector", "half")}
       /> : null}
-      {nextMobileShell && !nativePlayerAuthorityOwnsRuntime && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay && batchConnectionMode ? <section className={`mobile-batch-connection-actions${mobileBatchConnectionExpanded ? " is-expanded" : ""}`} aria-label="移动端连续拉线操作" aria-live="polite" data-expanded={mobileBatchConnectionExpanded ? "true" : "false"}>
+      {nextMobileShell && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay && batchConnectionMode ? <section className={`mobile-batch-connection-actions${mobileBatchConnectionExpanded ? " is-expanded" : ""}`} aria-label="移动端连续拉线操作" aria-live="polite" data-expanded={mobileBatchConnectionExpanded ? "true" : "false"}>
         {mobileBatchConnectionExpanded ? <div className="mobile-batch-connection-actions__list" id="mobile-batch-connection-candidates" aria-label="连续拉线候选列表">
           <header><span><strong>全部候选</strong><small>最新候选优先 · 只预览，不会立即扣料</small></span><button type="button" onClick={() => setMobileBatchConnectionExpanded(false)} title="收起候选列表" aria-label="收起候选列表"><ChevronDown size={18} /></button></header>
           {batchConnections.length > 0 ? <ol>{[...batchConnections].reverse().map((selection, reverseIndex) => {
@@ -21650,29 +21942,57 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         {batchConnectionFeedback ? <p className="mobile-batch-connection-actions__feedback" role="status">{batchConnectionFeedback}</p> : null}
         {batchConnectionFailures.length > 0 ? <p className="mobile-batch-connection-actions__error" role="alert">最终复核未通过：{batchConnectionFailures.map((failure) => `第 ${failure.index + 1} 条：${failure.label}`).join("；")}</p> : null}
       </section> : null}
-      {nextMobileShell && !nativePlayerAuthorityOwnsRuntime && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay && activeMobileCanvasMode === "select" ? <MobileSelectionContextBar
+      {nextMobileShell && mobileNavigation.route.kind === "factory" && !mobileNavigation.overlay && activeMobileCanvasMode === "select" ? <MobileSelectionContextBar
         model={factorySelectionToolbarReadModel}
-        canUpgrade={canUpgradeEntities(game, selectedEntityIds)}
-        canUpgradeBelts={selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}
+        canUpgrade={nativePlayerAuthorityOwnsRuntime ? selectedEntityIds.length > 0 : canUpgradeEntities(game, selectedEntityIds)}
+        canUpgradeBelts={nativePlayerAuthorityOwnsRuntime ? selectedBeltIds.length > 0 : selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}
         onFocus={() => focusEntityIds(selectedEntityIds)}
         onCopy={copySelectionAsBlueprint}
         onUpgrade={() => {
+          if (nativePlayerAuthorityOwnsRuntime) {
+            const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+            if (!frame) return;
+            commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+              createNativeFactoryBatchCommand(baseRevision, {
+                kind: "upgrade-buildings",
+                entityIds: [...selectedEntityIdsRef.current],
+              }), () => { setNotice("Rust 已原子升级移动端选区建筑"); playTone("upgrade"); });
+            return;
+          }
           commitGame((current) => upgradeEntities(current, selectedEntityIds));
           setNotice("已批量升级选区内可升级设备");
           playTone("upgrade");
         }}
         onUpgradeBelts={() => {
+          if (nativePlayerAuthorityOwnsRuntime) {
+            const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+            if (!frame) return;
+            commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+              createNativeFactoryBatchCommand(baseRevision, {
+                kind: "upgrade-belts",
+                beltIds: [...selectedBeltIdsRef.current],
+              }), () => { setNotice("Rust 已原子升级移动端选区线路"); playTone("upgrade"); });
+            return;
+          }
           commitGame((current) => selectedBeltIds.reduce((next, beltId) => upgradeBelt(next, beltId), current));
           setNotice(`已升级选区内 ${selectedBeltIds.length} 条传送带`);
           playTone("upgrade");
         }}
         onBatchIncrease={(amount) => void batchIncreaseSelected(amount)}
         onLock={() => {
+          if (nativePlayerAuthorityOwnsRuntime) {
+            commitNativeSelectionInteractionLock(true);
+            return;
+          }
           const ids = selectedEntities.filter((entity) => !entity.interactionLocked).map((entity) => entity.id);
           commitGame((current) => setEntitiesInteractionLocked(current, ids, true));
           setNotice(`已锁定 ${ids.length} 个建筑`);
         }}
         onUnlock={() => {
+          if (nativePlayerAuthorityOwnsRuntime) {
+            commitNativeSelectionInteractionLock(false);
+            return;
+          }
           const ids = selectedEntities.filter((entity) => entity.interactionLocked).map((entity) => entity.id);
           commitGame((current) => setEntitiesInteractionLocked(current, ids, false));
           setNotice(`已解锁 ${ids.length} 个建筑`);
@@ -21694,6 +22014,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           entityDepositEnabled={nativeEntityInventoryDepositEnabled}
           onSetTrayItemLimit={setNativeTrayItemLimit}
           onSetProductionBufferLimit={setNativeProductionBufferLimit}
+          onDiscardTrayItem={(itemId, amount) => void discardNativeTrayItem(itemId, amount)}
         /> : <StableResourceRail
           game={panelGame}
           onOpenCampaign={openCampaign}
@@ -22009,16 +22330,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             <StablePlanetNavigator model={factoryPlanetNavigationReadModel} onPlanetChange={onPlanetChange} />
           </div> : <StablePlanetNavigator model={factoryPlanetNavigationReadModel} onPlanetChange={onPlanetChange} />}
 
-          {!nativePlayerAuthorityOwnsRuntime ? <CanvasSelectionTools
+          <CanvasSelectionTools
             selectionMode={selectionMode}
             regionMode={regionMode}
             lineFindMode={lineFindMode}
             batchConnectionMode={batchConnectionMode}
-            blueprintCount={game.blueprints.length}
+            blueprintCount={nativePlayerAuthorityOwnsRuntime ? 0 : game.blueprints.length}
             beltCount={factoryActivePlanetNavigationRow?.beltCount ?? 0}
             regionCount={factoryCanvasRegions.length}
-            canUndo={!nativePlayerAuthorityOwnsRuntime && gameHistoryRef.current.canUndo}
-            canRedo={!nativePlayerAuthorityOwnsRuntime && gameHistoryRef.current.canRedo}
+            canUndo={nativePlayerAuthorityOwnsRuntime
+              ? nativePlayerAuthorityHistory?.canUndo === true
+              : gameHistoryRef.current.canUndo}
+            canRedo={nativePlayerAuthorityOwnsRuntime
+              ? nativePlayerAuthorityHistory?.canRedo === true
+              : gameHistoryRef.current.canRedo}
             canUndoAutoLayout={!nativePlayerAuthorityOwnsRuntime && Boolean(autoLayoutUndo && autoLayoutUndo.planetId === game.activePlanetId)}
             leftSidebarCollapsed={leftSidebarCollapsed}
             rightSidebarCollapsed={rightSidebarCollapsed}
@@ -22086,7 +22411,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             }}
             onAutoLayout={() => autoLayoutEntities()}
             onUndoAutoLayout={undoAutoLayout}
-          /> : null}
+          />
           {!nativePlayerAuthorityOwnsRuntime && blueprintPlacementId ? <section className="canvas-placement-options nodrag nopan" aria-label={isEnglish ? "Blueprint placement options" : "蓝图放置选项"}>
             <label>
               <input type="checkbox" checked={blueprintAllowOverlap} onChange={(event) => setBlueprintAllowOverlap(event.target.checked)} />
@@ -22114,9 +22439,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           </section> : null}
           {factoryCanvasRegions.find((region) => region.id === selectedRegionId) ? <CanvasRegionEditor
             region={factoryCanvasRegions.find((region) => region.id === selectedRegionId)!}
-            onChange={(changes) => commitGame((current) => updateCanvasRegion(current, selectedRegionId!, changes))}
+            onChange={(changes) => {
+              if (nativePlayerAuthorityOwnsRuntime) {
+                const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+                if (frame?.workspace) commitNativeWorkspaceAction({
+                  kind: "region-update",
+                  regionId: selectedRegionId!,
+                  ...changes,
+                }, "生产区域外观已由 Rust 保存", frame.revision);
+                return;
+              }
+              commitGame((current) => updateCanvasRegion(current, selectedRegionId!, changes));
+            }}
             onRemove={() => {
-              commitGame((current) => removeCanvasRegion(current, selectedRegionId!));
+              if (nativePlayerAuthorityOwnsRuntime) {
+                const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+                if (!frame?.workspace || !commitNativeWorkspaceAction({
+                  kind: "region-remove",
+                  regionId: selectedRegionId!,
+                }, "生产区域已由 Rust 删除", frame.revision)) return;
+              } else commitGame((current) => removeCanvasRegion(current, selectedRegionId!));
               setSelectedRegionId(null);
               setNotice("生产区域已删除");
               playTone("remove");
@@ -22300,10 +22642,56 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           timeWarpController={nativeTimeWarpControllerProjectionBinding}
           ejectorOrbitFrame={nativeEjectorOrbitFrame}
           stationConfiguration={nativeStationConfigurationProjectionBinding}
+          tab={inspectorTab}
+          onTabChange={setInspectorTab}
+          workspace={nativeAuthoritativeFactoryWorkspaceFrame?.workspace ?? null}
+          onQueueHandcraft={(recipeId, batches) => {
+            const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+            if (!frame?.workspace) return;
+            commitNativeWorkspaceAction({ kind: "handcraft-enqueue", recipeId, batches },
+              "手工制造任务已由 Rust 加入权威队列", frame.revision);
+          }}
+          onCancelHandcraft={(entryId) => {
+            const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+            if (!frame?.workspace) return;
+            commitNativeWorkspaceAction({ kind: "handcraft-cancel", entryId },
+              "手工制造任务已由 Rust 从队列取消", frame.revision);
+          }}
           pending={nativeRemovalContextPending || nativeStackContextPending || nativeBeltLaneContextPending ||
             nativePlayerAuthorityCommandPending || nativeEntityRecipePending !== null}
           onEntityLockChange={(_entityId, locked) => void commitNativeSelectionInteractionLock(locked)}
           onRemoveEntity={(entityId) => void removeNativeOrdinaryBuilding(entityId)}
+          onUpgradeEntity={(entityId) => {
+            const revision = factoryInspectorSummaryReadModel.revision;
+            if (revision === null) return;
+            commitNativeProjectedCommand(
+              revision,
+              (baseRevision) => createNativeFactoryBatchCommand(baseRevision, {
+                kind: "upgrade-buildings",
+                entityIds: [entityId],
+              }),
+              () => { setNotice("设备已由 Rust 原子升级"); playTone("upgrade"); },
+            );
+          }}
+          onRemoveSprayCoater={handleRemoveSprayCoater}
+          onQuantumAttachment={(entityId) => {
+            commitNativeWorkspaceAction(
+              { kind: "quantum-attach", entityIds: [entityId] },
+              "量子网络交接已由 Rust 建立；旧航线尾货会在安全边界结清",
+            );
+          }}
+          onOrbitalCollectorQuantumMode={(entityId, enabled) => {
+            commitNativeWorkspaceAction(
+              { kind: "collector-quantum-mode", entityIds: [entityId], enabled },
+              `轨道采集器已提交${enabled ? "量子" : "传统"}模式交接`,
+            );
+          }}
+          onOrbitalCollectorItemChange={(entityId, itemId) => {
+            commitNativeWorkspaceAction(
+              { kind: "collector-item", entityId, itemId },
+              "轨道采集物已由 Rust 更新，旧缓存和线路已安全返还",
+            );
+          }}
           onStackCountChange={(entityId, targetCount) => void changeNativeOrdinaryBuildingStack(entityId, targetCount)}
           onEntityPowerPriorityChange={changeNativeEntityPowerPriority}
           onSplitterDistributionModeChange={changeNativeSplitterDistributionMode}
@@ -22560,6 +22948,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         onPlacementChange={selectNativeBuildingPlacement}
         onBeltPlacementChange={selectNativeBeltPlacement}
         onBeltLanesChange={updateDefaultBeltLanes}
+        onOpenFabricator={() => {
+          setInspectorTab("fabricate");
+          if (nextMobileShell) openMobileSheet("inspector");
+          else setMobilePanel("inspector");
+        }}
+        onDeleteConstruction={(buildingId) => void handleDeleteConstructionInventory(buildingId as ConstructionId)}
       /> : <StableConstructionDock
         game={panelGame}
         placement={placement}
@@ -22940,6 +23334,39 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           frame={nativeStatisticsWorkspaceFrame}
           latestIdentity={nativeStatisticsWorkspaceIdentity}
           status={nativeStatisticsWorkspaceReadStatus}
+          workspace={nativeAuthoritativeFactoryWorkspaceFrame?.workspace ?? null}
+          currentViewport={{ ...viewportRef.current }}
+          workspacePending={nativePlayerAuthorityCommandPending}
+          onAddCanvasBookmark={(name, viewport) => {
+            const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+            if (!frame?.workspace) return;
+            commitNativeWorkspaceAction({
+              kind: "bookmark-add",
+              planetId: frame.workspace.activePlanetId,
+              x: viewport.x,
+              y: viewport.y,
+              zoom: viewport.zoom,
+              name,
+            }, "当前画布视角已由 Rust 加入书签", frame.revision);
+          }}
+          onRenameCanvasBookmark={(bookmarkId, name) => {
+            const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+            const trimmed = name.trim().slice(0, 28);
+            if (!frame?.workspace || !trimmed) return;
+            commitNativeWorkspaceAction({ kind: "bookmark-rename", bookmarkId, name: trimmed },
+              "画布书签名称已由 Rust 保存", frame.revision);
+          }}
+          onOpenCanvasBookmark={(bookmarkId) => {
+            const bookmark = nativeAuthoritativeFactoryWorkspaceFrame?.workspace?.bookmarks.rows
+              .find((row) => row.id === bookmarkId);
+            if (bookmark) openCanvasBookmark(bookmark as CanvasBookmark);
+          }}
+          onRemoveCanvasBookmark={(bookmarkId) => {
+            const frame = nativeAuthoritativeFactoryWorkspaceFrame;
+            if (!frame?.workspace) return;
+            commitNativeWorkspaceAction({ kind: "bookmark-remove", bookmarkId },
+              "画布书签已由 Rust 删除", frame.revision);
+          }}
           onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setStatisticsOpen(false)}
         /> : authorityWorkspaceSync === "statistics" ? <WorkspaceLoading label="正在同步权威生产历史…" /> : <StatisticsWorkspace
           open
@@ -23082,6 +23509,43 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               : undefined}
             onFocusStation={focusStellarStation}
             onOpenSystemSpaceStation={openSystemSpaceStation}
+            nativeCommandPending={nativePlayerAuthorityCommandPending}
+            onNativeExplore={(projectedRevision, systemId) => commitNativeWorkspaceAction(
+              { kind: "system-explore", systemId },
+              "恒星勘探任务已由 Rust 权威启动",
+              projectedRevision,
+            )}
+            onNativeColonize={(projectedRevision, planetId) => commitNativeWorkspaceAction(
+              { kind: "planet-colonize", planetId },
+              "行星殖民前哨已由 Rust 权威建立",
+              projectedRevision,
+            )}
+            onNativeTravel={onPlanetChange}
+            onNativePlanetMetadataChange={(projectedRevision, planetId, metadata) => commitNativeWorkspaceAction(
+              { kind: "planet-metadata", planetId, ...metadata },
+              "行星资料已保存到 Rust 权威存档",
+              projectedRevision,
+            )}
+            onNativeSystemNameChange={(projectedRevision, systemId, name) => commitNativeWorkspaceAction(
+              { kind: "system-rename", systemId, name },
+              "恒星系名称已保存到 Rust 权威存档",
+              projectedRevision,
+            )}
+            onNativeUpgradeStations={(projectedRevision, systemId) => commitNativeWorkspaceAction(
+              { kind: "station-upgrade-scope", systemId },
+              systemId ? "本恒星系物流站已由 Rust 批量升级" : "全星区物流站已由 Rust 批量升级",
+              projectedRevision,
+            )}
+            onNativeAttachQuantumStations={(projectedRevision, systemId) => commitNativeWorkspaceAction(
+              { kind: "quantum-attach-scope", systemId },
+              systemId ? "本恒星系物流站已由 Rust 批量接入量子网络" : "全星区物流站已由 Rust 批量接入量子网络",
+              projectedRevision,
+            )}
+            onNativeCollectorQuantumMode={(projectedRevision, systemId, enabled) => commitNativeWorkspaceAction(
+              { kind: "collector-quantum-scope", systemId, enabled },
+              `${systemId ? "本恒星系" : "全星区"}轨道采集器已由 Rust 批量${enabled ? "接入量子网络" : "切回传统模式"}`,
+              projectedRevision,
+            )}
           />
         ) : (
           <StarMapWorkspace

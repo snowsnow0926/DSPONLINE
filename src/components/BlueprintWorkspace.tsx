@@ -99,7 +99,7 @@ const CANVAS_REGION_RESIZE_LABELS: Record<CanvasRegionResizeHandle, string> = {
 };
 
 export function CanvasRegionLayer({ regions, draft, selectedRegionId, resizePreview, resizeHandleSize = 16, onSelect, onResizeStart }: {
-  regions: CanvasRegion[];
+  regions: readonly CanvasRegion[];
   draft: CanvasRegionRectangle | null;
   selectedRegionId: string | null;
   resizePreview?: { regionId: string; rectangle: CanvasRegionRectangle } | null;

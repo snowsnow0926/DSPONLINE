@@ -629,12 +629,30 @@ export function NativeStarMapCatalogConsole({
   query,
   onQueryChange,
   onOpenSystemSpaceStation,
+  pending = false,
+  onExplore,
+  onColonize,
+  onTravel,
+  onPlanetMetadataChange,
+  onSystemNameChange,
+  onUpgradeStations,
+  onAttachQuantumStations,
+  onCollectorQuantumMode,
 }: {
   frame: NativeStarMapCatalogFrame | null;
   status: StarMapNativeReadStatus;
   query: string;
   onQueryChange: (query: string) => void;
   onOpenSystemSpaceStation?: (systemId: StarSystemId) => void;
+  pending?: boolean;
+  onExplore?: (revision: number, systemId: StarSystemId) => boolean;
+  onColonize?: (revision: number, planetId: PlanetId) => boolean;
+  onTravel?: (planetId: PlanetId) => boolean;
+  onPlanetMetadataChange?: (revision: number, planetId: PlanetId, metadata: { customName: string; note: string; tags: string[] }) => boolean;
+  onSystemNameChange?: (revision: number, systemId: StarSystemId, name: string) => boolean;
+  onUpgradeStations?: (revision: number, systemId: StarSystemId | null) => boolean;
+  onAttachQuantumStations?: (revision: number, systemId: StarSystemId | null) => boolean;
+  onCollectorQuantumMode?: (revision: number, systemId: StarSystemId | null, enabled: boolean) => boolean;
 }) {
   const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
   if (!frame) {
@@ -661,10 +679,17 @@ export function NativeStarMapCatalogConsole({
     });
   });
   const itemLabel = (itemId: string): string => ITEMS[itemId as ItemId]?.name ?? itemId;
+  const writeActionsAvailable = Boolean(onExplore || onColonize || onTravel || onPlanetMetadataChange ||
+    onSystemNameChange || onUpgradeStations || onAttachQuantumStations || onCollectorQuantumMode);
   return <div data-native-star-map-catalog-status="ready">
     <div className="star-map-controls">
       <div className="star-map-controls__search"><label className="star-map-search"><Search size={15} /><StableTextInput draftId="star-map-search" value={query} onValueChange={onQueryChange} placeholder="搜索名称、备注、标签或资源" aria-label="搜索原生星球资料" />{query ? <button type="button" onClick={() => onQueryChange("")} aria-label="清除星图搜索"><X size={14} /></button> : null}</label><small>{normalizedQuery ? `${visibleSystems.length} 个匹配星系` : `${frame.summary.planetCount} 颗行星由 Rust 权威提供`}</small></div>
-      <div className="star-map-batch-report" id="native-star-map-command-boundary" role="status"><LockKeyhole size={13} /><strong>星图资料只读</strong><span>勘探、殖民、改名、备注和行星切换仍等待专用原生命令；不会回写旧 JavaScript 存档。</span></div>
+      <div className="star-map-batch-report" id="native-star-map-command-boundary" role="status"><LockKeyhole size={13} /><strong>{writeActionsAvailable ? "Rust 权威星图" : "星图资料只读"}</strong><span>{pending ? "正在耐久提交上一项星图操作。" : writeActionsAvailable ? "勘探、殖民、改名、备注和行星切换均直接提交到当前 Rust revision。" : "当前宿主没有提供星图耐久命令通道；不会回写旧 JavaScript 存档。"}</span></div>
+      {onUpgradeStations || onAttachQuantumStations || onCollectorQuantumMode ? <div className="star-map-bulk-actions" aria-label="Rust 原生全星区批量操作">
+        {onUpgradeStations ? <button type="button" disabled={pending} onClick={() => onUpgradeStations(frame.revision, null)}><Sparkles size={14} />升级全部物流站</button> : null}
+        {onAttachQuantumStations ? <button type="button" disabled={pending} onClick={() => onAttachQuantumStations(frame.revision, null)}><Atom size={14} />全部接入量子物流</button> : null}
+        {onCollectorQuantumMode ? <><button type="button" disabled={pending} onClick={() => onCollectorQuantumMode(frame.revision, null, true)}><Atom size={14} />全部轨采接入量子</button><button type="button" disabled={pending} onClick={() => onCollectorQuantumMode(frame.revision, null, false)}>全部轨采切回传统</button></> : null}
+      </div> : null}
       {frame.metadataTruncated ? <div className="star-map-batch-report" role="status"><AlertTriangle size={13} /><strong>部分扩展资料过长</strong><span>当前页只显示有界摘要，权威存档内容没有被修改。</span></div> : null}
     </div>
     <div className="star-map-route" aria-label="原生权威恒星系目录">
@@ -677,6 +702,15 @@ export function NativeStarMapCatalogConsole({
           <article className={`star-system-card${system.discovered ? " star-system-card--unlocked" : " star-system-card--locked"}${system.active ? " star-system-card--active" : ""}`} style={style}>
             <header><i className="star-system-orb"><Sparkles size={20} /></i><div><span>{staticSystem?.code ?? system.systemId}</span><strong>{system.displayName}</strong><small>{system.starTypeName} · {system.luminosity.toFixed(2)} L☉ · {formatDistance(system.distanceFromOriginLy)}</small></div><em>{system.active ? <><Navigation size={12} /> 当前</> : system.discovered ? <><Check size={12} /> 已发现{system.missionActive ? " · 勘探中" : ""}</> : <><LockKeyhole size={12} /> 未勘探</>}</em></header>
             <div className="star-system-space-station-actions">
+              {!system.discovered ? <button
+                className="star-system-space-station-upgrade"
+                type="button"
+                disabled={pending || !onExplore}
+                onClick={() => onExplore?.(frame.revision, system.systemId as StarSystemId)}
+              ><Telescope size={14} />开始勘探</button> : null}
+              {system.discovered && onUpgradeStations ? <button type="button" disabled={pending} onClick={() => onUpgradeStations(frame.revision, system.systemId as StarSystemId)}><Sparkles size={14} />升级本系物流站</button> : null}
+              {system.discovered && onAttachQuantumStations ? <button type="button" disabled={pending} onClick={() => onAttachQuantumStations(frame.revision, system.systemId as StarSystemId)}><Atom size={14} />接入本系量子物流</button> : null}
+              {system.discovered && onCollectorQuantumMode ? <button type="button" disabled={pending} onClick={() => onCollectorQuantumMode(frame.revision, system.systemId as StarSystemId, true)}><Atom size={14} />本系轨采接入量子</button> : null}
               <button
                 className="star-system-space-station-upgrade"
                 type="button"
@@ -685,6 +719,17 @@ export function NativeStarMapCatalogConsole({
                 data-native-system-space-station-entry={system.systemId}
               ><Factory size={14} />管理本系空间站</button>
             </div>
+            {onSystemNameChange ? <details className="stellar-metadata-manager stellar-metadata-manager--compact">
+              <summary><Pencil size={14} /><span>恒星系名称</span></summary>
+              <form onSubmit={(event) => {
+                event.preventDefault();
+                const data = new FormData(event.currentTarget);
+                onSystemNameChange?.(frame.revision, system.systemId as StarSystemId, String(data.get("name") ?? ""));
+              }}>
+                <label><span>自定义名称</span><input name="name" maxLength={STAR_SYSTEM_CUSTOM_NAME_MAX_LENGTH} defaultValue={staticSystem && system.displayName === staticSystem.name ? "" : system.displayName} disabled={pending || !onSystemNameChange} /></label>
+                <footer><button type="submit" disabled={pending || !onSystemNameChange}><Save size={13} />保存名称</button></footer>
+              </form>
+            </details> : null}
             <p>{staticSystem?.description ?? `恒星质量 ${system.massMultiplier.toFixed(2)} · 半径 ${system.radiusMultiplier.toFixed(2)}`}</p>
             <div className="star-planet-list">
               {planets.map((planet) => {
@@ -693,7 +738,7 @@ export function NativeStarMapCatalogConsole({
                   ? planet.profile.orbitalYields.rows.map((row) => `${itemLabel(row.itemId)} ${row.rate.toFixed(2)}/min`)
                   : planet.profile.resourceIds.rows.map(itemLabel);
                 const note = planet.metadata.note || `${planet.profile.specializationName} · 宜 ${PLANET_INDUSTRY_ROLE_LABELS[planet.industryRole]}`;
-                return <button type="button" key={planet.planetId} disabled aria-describedby="native-star-map-command-boundary" title="原生权威行星切换命令尚未接入" className={`${planet.active ? "active" : ""}${planet.colonized ? "" : " planet-uncolonized"}`}>
+                if (!writeActionsAvailable) return <button type="button" key={planet.planetId} disabled aria-describedby="native-star-map-command-boundary" title="当前宿主没有提供原生星图耐久命令" className={`${planet.active ? "active" : ""}${planet.colonized ? "" : " planet-uncolonized"}`}>
                   <i style={{ color: staticPlanet?.color ?? "#77a9c8" }}><Orbit size={17} /></i>
                   <span><strong>{planet.displayName}</strong><small>{planet.profile.climateName} · {OCEAN_LABELS[planet.profile.oceanType as keyof typeof OCEAN_LABELS] ?? planet.profile.oceanType}{planet.profile.tidalLocked ? " · 潮汐锁定" : ""}</small></span>
                   <em>{planet.colonized ? planet.kind === "gas-giant" ? "轨道" : `${planet.deviceCount} 设备` : "未殖民"}</em>
@@ -701,9 +746,38 @@ export function NativeStarMapCatalogConsole({
                   <small className="star-planet-profile">{note}{planet.metadata.tags.rows.length ? ` · #${planet.metadata.tags.rows.join(" #")}` : ""}</small>
                   <span className="star-planet-traits" aria-label={`${planet.displayName}工业环境`}><b title={planet.kind === "gas-giant" ? "轨道采集产率" : "有限矿脉总储量"}>{planet.kind === "gas-giant" ? "轨采" : "矿储"} <strong>{Math.round((planet.kind === "gas-giant" ? planet.profile.orbitalYieldMultiplier : planet.profile.reserveScale) * 100)}%</strong></b><b title="风力发电倍率">风 <strong>{Math.round(planet.profile.windMultiplier * 100)}%</strong></b><b title="太阳能倍率">光 <strong>{Math.round(planet.profile.solarMultiplier * system.luminosity * (planet.profile.tidalLocked ? 1.25 : 1) * 100)}%</strong></b><b title="地热发电倍率">地热 <strong>{Math.round(planet.profile.geothermalMultiplier * 100)}%</strong></b><b title="跨行星航程时间倍率">航程 <strong>{Math.round(planet.profile.travelTimeMultiplier * 100)}%</strong></b></span>
                 </button>;
+                return <article key={planet.planetId} className={`star-planet-native-row${planet.active ? " active" : ""}${planet.colonized ? "" : " planet-uncolonized"}`}>
+                  <button type="button" disabled={pending || !planet.colonized || !onTravel} aria-describedby="native-star-map-command-boundary" title={planet.colonized ? `进入${planet.displayName}` : "需要先建立殖民前哨"} onClick={() => onTravel?.(planet.planetId as PlanetId)}>
+                    <i style={{ color: staticPlanet?.color ?? "#77a9c8" }}><Orbit size={17} /></i>
+                    <span><strong>{planet.displayName}</strong><small>{planet.profile.climateName} · {OCEAN_LABELS[planet.profile.oceanType as keyof typeof OCEAN_LABELS] ?? planet.profile.oceanType}{planet.profile.tidalLocked ? " · 潮汐锁定" : ""}</small></span>
+                    <em>{planet.colonized ? planet.kind === "gas-giant" ? "轨道" : `${planet.deviceCount} 设备` : "未殖民"}</em>
+                    <p>{resources.join("、") || "无地表矿脉"}{planet.profile.rareResourceIds.rows.length > 0 ? ` · 稀有 ${planet.profile.rareResourceIds.rows.map(itemLabel).join("、")}` : ""}</p>
+                    <small className="star-planet-profile">{note}{planet.metadata.tags.rows.length ? ` · #${planet.metadata.tags.rows.join(" #")}` : ""}</small>
+                    <span className="star-planet-traits" aria-label={`${planet.displayName}工业环境`}><b title={planet.kind === "gas-giant" ? "轨道采集产率" : "有限矿脉总储量"}>{planet.kind === "gas-giant" ? "轨采" : "矿储"} <strong>{Math.round((planet.kind === "gas-giant" ? planet.profile.orbitalYieldMultiplier : planet.profile.reserveScale) * 100)}%</strong></b><b title="风力发电倍率">风 <strong>{Math.round(planet.profile.windMultiplier * 100)}%</strong></b><b title="太阳能倍率">光 <strong>{Math.round(planet.profile.solarMultiplier * system.luminosity * (planet.profile.tidalLocked ? 1.25 : 1) * 100)}%</strong></b><b title="地热发电倍率">地热 <strong>{Math.round(planet.profile.geothermalMultiplier * 100)}%</strong></b><b title="跨行星航程时间倍率">航程 <strong>{Math.round(planet.profile.travelTimeMultiplier * 100)}%</strong></b></span>
+                  </button>
+                  {!planet.colonized && planet.discovered ? <button type="button" disabled={pending || !onColonize} onClick={() => onColonize?.(frame.revision, planet.planetId as PlanetId)}><Navigation size={13} />建立殖民前哨</button> : null}
+                  {onPlanetMetadataChange ? <details className="stellar-metadata-manager stellar-metadata-manager--compact">
+                    <summary><Pencil size={13} /><span>名称、备注与标签</span></summary>
+                    <form onSubmit={(event) => {
+                      event.preventDefault();
+                      const data = new FormData(event.currentTarget);
+                      const tags = String(data.get("tags") ?? "").split(/[，,\n]/).map((tag) => tag.trim()).filter(Boolean).slice(0, PLANET_TAG_MAX_COUNT);
+                      onPlanetMetadataChange?.(frame.revision, planet.planetId as PlanetId, {
+                        customName: String(data.get("customName") ?? ""),
+                        note: String(data.get("note") ?? ""),
+                        tags,
+                      });
+                    }}>
+                      <label><span>自定义名称</span><input name="customName" maxLength={PLANET_CUSTOM_NAME_MAX_LENGTH} defaultValue={staticPlanet && planet.displayName === staticPlanet.name ? "" : planet.displayName} disabled={pending || !onPlanetMetadataChange} /></label>
+                      <label><span>备注</span><textarea name="note" maxLength={PLANET_NOTE_MAX_LENGTH} defaultValue={planet.metadata.note} disabled={pending || !onPlanetMetadataChange} /></label>
+                      <label><span>标签</span><input name="tags" defaultValue={planet.metadata.tags.rows.join("，")} disabled={pending || !onPlanetMetadataChange} /></label>
+                      <footer><button type="submit" disabled={pending || !onPlanetMetadataChange}><Save size={13} />保存资料</button></footer>
+                    </form>
+                  </details> : null}
+                </article>;
               })}
             </div>
-            {system.missionActive ? <footer className="star-system-ready star-system-surveying"><Telescope size={13} /><div><span>深度勘探 {Math.round(system.surveyProgress * 100)}%</span><i><b style={{ width: `${system.surveyProgress * 100}%` }} /></i></div></footer> : <footer className="star-system-ready">{system.discovered ? <Check size={13} /> : <LockKeyhole size={13} />}<span>{system.discovered ? "永久航标在线" : "原生勘探命令尚未接入"}</span></footer>}
+            {system.missionActive ? <footer className="star-system-ready star-system-surveying"><Telescope size={13} /><div><span>深度勘探 {Math.round(system.surveyProgress * 100)}%</span><i><b style={{ width: `${system.surveyProgress * 100}%` }} /></i></div></footer> : <footer className="star-system-ready">{system.discovered ? <Check size={13} /> : <LockKeyhole size={13} />}<span>{system.discovered ? "永久航标在线" : "等待勘探命令"}</span></footer>}
           </article>
         </div>;
       })}
@@ -732,6 +806,15 @@ export function NativeStarMapWorkspace({
   onFocusStation,
   onNativeQuantumItemCapacityChange,
   onOpenSystemSpaceStation,
+  nativeCommandPending = false,
+  onNativeExplore,
+  onNativeColonize,
+  onNativeTravel,
+  onNativePlanetMetadataChange,
+  onNativeSystemNameChange,
+  onNativeUpgradeStations,
+  onNativeAttachQuantumStations,
+  onNativeCollectorQuantumMode,
 }: {
   open: boolean;
   mapCatalogFrame: NativeStarMapCatalogFrame | null;
@@ -752,6 +835,15 @@ export function NativeStarMapWorkspace({
   onFocusStation: (entityId: string, planetId: PlanetId) => void;
   onNativeQuantumItemCapacityChange?: NativeQuantumItemCapacityAction;
   onOpenSystemSpaceStation?: (systemId: StarSystemId) => void;
+  nativeCommandPending?: boolean;
+  onNativeExplore?: (revision: number, systemId: StarSystemId) => boolean;
+  onNativeColonize?: (revision: number, planetId: PlanetId) => boolean;
+  onNativeTravel?: (planetId: PlanetId) => boolean;
+  onNativePlanetMetadataChange?: (revision: number, planetId: PlanetId, metadata: { customName: string; note: string; tags: string[] }) => boolean;
+  onNativeSystemNameChange?: (revision: number, systemId: StarSystemId, name: string) => boolean;
+  onNativeUpgradeStations?: (revision: number, systemId: StarSystemId | null) => boolean;
+  onNativeAttachQuantumStations?: (revision: number, systemId: StarSystemId | null) => boolean;
+  onNativeCollectorQuantumMode?: (revision: number, systemId: StarSystemId | null, enabled: boolean) => boolean;
 }) {
   const [view, setView] = useState<"map" | "industry" | "quantum">("map");
   const [mapQuery, setMapQuery] = useState("");
@@ -793,7 +885,7 @@ export function NativeStarMapWorkspace({
       <button type="button" role="tab" aria-selected={view === "quantum"} className={view === "quantum" ? "active" : ""} onClick={() => setView("quantum")}><Atom size={14} />量子库存</button>
     </nav>
 
-    {view === "map" ? <NativeStarMapCatalogConsole frame={mapCatalogFrame} status={mapCatalogStatus} query={mapQuery} onQueryChange={setMapQuery} onOpenSystemSpaceStation={onOpenSystemSpaceStation} />
+    {view === "map" ? <NativeStarMapCatalogConsole frame={mapCatalogFrame} status={mapCatalogStatus} query={mapQuery} onQueryChange={setMapQuery} onOpenSystemSpaceStation={onOpenSystemSpaceStation} pending={nativeCommandPending} onExplore={onNativeExplore} onColonize={onNativeColonize} onTravel={onNativeTravel} onPlanetMetadataChange={onNativePlanetMetadataChange} onSystemNameChange={onNativeSystemNameChange} onUpgradeStations={onNativeUpgradeStations} onAttachQuantumStations={onNativeAttachQuantumStations} onCollectorQuantumMode={onNativeCollectorQuantumMode} />
       : view === "industry" ? <NativeIndustryConsole readModel={readModel} status={readStatus} selector={industryReadRequest} onSelectorChange={onIndustryReadRequest} onNativeRoleChange={onNativeRoleChange} onNativeStationPriorityChange={onNativeStationPriorityChange} onNativeStationMinimumLoadChange={onNativeStationMinimumLoadChange} onNativeStationRoutePolicyChange={onNativeStationRoutePolicyChange} onNativeStationWarperBudgetChange={onNativeStationWarperBudgetChange} onNativeStationLimitsChange={onNativeStationLimitsChange} onFocusStation={onFocusStation} />
         : <NativeQuantumInventoryConsole readModel={quantumReadModel} status={quantumReadStatus} onNativeItemCapacityChange={onNativeQuantumItemCapacityChange} />}
   </WorkspaceFrame>;

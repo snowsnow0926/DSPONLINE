@@ -30,6 +30,10 @@ const MAX_CONSTRUCTION_COST_ROWS: usize = 32;
 const MAX_CONSTRUCTION_LABEL_BYTES: usize = 256;
 const PLAYER_STATION_SLOT_COUNT: usize = 5;
 const MAX_STATION_ITEM_OPTIONS: usize = 128;
+const MAX_CANVAS_REGION_ROWS: usize = 48;
+const MAX_CANVAS_BOOKMARK_ROWS: usize = 24;
+const MAX_HANDCRAFT_QUEUE_ROWS: usize = 20;
+const MAX_HANDCRAFT_RECIPE_ROWS: usize = 256;
 const MAX_STATION_ITEM_LABEL_BYTES: usize = 256;
 const MAX_PLAYER_STATION_STOCK: u64 = 100_000_000;
 const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -92,6 +96,313 @@ fn position(value: Option<&Value>) -> Value {
         "x": finite_number(object.and_then(|value| value.get("x"))),
         "y": finite_number(object.and_then(|value| value.get("y"))),
     })
+}
+
+fn workspace_safe_integer(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
+    value
+        .and_then(Value::as_u64)
+        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        .ok_or_else(|| anyhow!("native workspace read-model {label} is invalid"))
+}
+
+fn workspace_finite(value: Option<&Value>, label: &str) -> anyhow::Result<f64> {
+    value
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| anyhow!("native workspace read-model {label} is invalid"))
+}
+
+fn workspace_label(value: &str, label: &str) -> anyhow::Result<String> {
+    if value.is_empty() || value.len() > MAX_CONSTRUCTION_LABEL_BYTES || value.contains('\0') {
+        bail!("native workspace read-model {label} is invalid")
+    }
+    Ok(value.to_owned())
+}
+
+fn handcraftable_recipe(recipe_id: &str) -> bool {
+    !matches!(
+        recipe_id,
+        "plasma_refining"
+            | "xray_cracking"
+            | "reforming_refine"
+            | "ray_power"
+            | "critical_photon"
+            | "matrix_research"
+            | "solar_sail_launch"
+            | "carrier_rocket_launch"
+            | "accumulator_charge"
+            | "accumulator_discharge"
+    )
+}
+
+fn workspace_item_row(state: &CoreState, item_id: &str, amount: f64) -> anyhow::Result<Value> {
+    if !amount.is_finite() || amount <= 0.0 {
+        bail!("native workspace recipe amount is invalid")
+    }
+    let item = state
+        .catalog
+        .items
+        .get(item_id)
+        .ok_or_else(|| anyhow!("native workspace recipe item is missing"))?;
+    Ok(json!({
+        "itemId": item.id,
+        "name": workspace_label(if item.name.is_empty() { &item.id } else { &item.name }, "item name")?,
+        "amount": amount,
+    }))
+}
+
+fn native_workspace_action_read_model(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    active_planet_id: &str,
+) -> anyhow::Result<Value> {
+    let raw_regions: &[Value] = match base.get("canvasRegions") {
+        None | Some(Value::Null) => &[],
+        Some(Value::Array(rows)) => rows,
+        Some(_) => bail!("native workspace canvas regions are invalid"),
+    };
+    if raw_regions.len() > MAX_CANVAS_REGION_ROWS {
+        bail!("native workspace canvas regions exceed the persistent limit")
+    }
+    let mut region_ids = HashSet::new();
+    let mut regions = Vec::with_capacity(raw_regions.len());
+    for value in raw_regions {
+        let row = value
+            .as_object()
+            .ok_or_else(|| anyhow!("native workspace canvas region is invalid"))?;
+        let id = row
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| valid_opaque_id(id))
+            .ok_or_else(|| anyhow!("native workspace canvas region ID is invalid"))?;
+        let planet_id = row
+            .get("planetId")
+            .and_then(Value::as_str)
+            .filter(|id| valid_opaque_id(id))
+            .ok_or_else(|| anyhow!("native workspace canvas region planet is invalid"))?;
+        if !region_ids.insert(id)
+            || !state
+                .catalog
+                .planets
+                .iter()
+                .any(|planet| planet.id == planet_id)
+        {
+            bail!("native workspace canvas region identity is invalid")
+        }
+        let name = row
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("native workspace canvas region name is invalid"))?;
+        let fill = row
+            .get("fillColor")
+            .and_then(Value::as_str)
+            .filter(|color| {
+                color.len() == 7
+                    && color.starts_with('#')
+                    && color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+            })
+            .ok_or_else(|| anyhow!("native workspace canvas region fill is invalid"))?;
+        let border = row
+            .get("borderColor")
+            .and_then(Value::as_str)
+            .filter(|color| {
+                color.len() == 7
+                    && color.starts_with('#')
+                    && color.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
+            })
+            .ok_or_else(|| anyhow!("native workspace canvas region border is invalid"))?;
+        let width = workspace_finite(row.get("width"), "region width")?;
+        let height = workspace_finite(row.get("height"), "region height")?;
+        if width < 40.0 || height < 40.0 {
+            bail!("native workspace canvas region size is invalid")
+        }
+        regions.push(json!({
+            "id": id,
+            "name": workspace_label(name, "region name")?,
+            "planetId": planet_id,
+            "x": workspace_finite(row.get("x"), "region x")?,
+            "y": workspace_finite(row.get("y"), "region y")?,
+            "width": width,
+            "height": height,
+            "fillColor": fill,
+            "borderColor": border,
+        }));
+    }
+
+    let raw_bookmarks: &[Value] = match base.get("canvasBookmarks") {
+        None | Some(Value::Null) => &[],
+        Some(Value::Array(rows)) => rows,
+        Some(_) => bail!("native workspace canvas bookmarks are invalid"),
+    };
+    if raw_bookmarks.len() > MAX_CANVAS_BOOKMARK_ROWS {
+        bail!("native workspace canvas bookmarks exceed the persistent limit")
+    }
+    let mut bookmark_ids = HashSet::new();
+    let mut bookmarks = Vec::with_capacity(raw_bookmarks.len());
+    for value in raw_bookmarks {
+        let row = value
+            .as_object()
+            .ok_or_else(|| anyhow!("native workspace canvas bookmark is invalid"))?;
+        let id = row
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| valid_opaque_id(id))
+            .ok_or_else(|| anyhow!("native workspace canvas bookmark ID is invalid"))?;
+        let planet_id = row
+            .get("planetId")
+            .and_then(Value::as_str)
+            .filter(|id| valid_opaque_id(id))
+            .ok_or_else(|| anyhow!("native workspace canvas bookmark planet is invalid"))?;
+        if !bookmark_ids.insert(id)
+            || !state
+                .catalog
+                .planets
+                .iter()
+                .any(|planet| planet.id == planet_id)
+        {
+            bail!("native workspace canvas bookmark identity is invalid")
+        }
+        let viewport = row
+            .get("viewport")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native workspace canvas bookmark viewport is invalid"))?;
+        let zoom = workspace_finite(viewport.get("zoom"), "bookmark zoom")?;
+        if !(0.1..=2.5).contains(&zoom) {
+            bail!("native workspace canvas bookmark zoom is invalid")
+        }
+        bookmarks.push(json!({
+            "id": id,
+            "name": workspace_label(row.get("name").and_then(Value::as_str).unwrap_or("视角书签"), "bookmark name")?,
+            "planetId": planet_id,
+            "viewport": {
+                "x": workspace_finite(viewport.get("x"), "bookmark x")?,
+                "y": workspace_finite(viewport.get("y"), "bookmark y")?,
+                "zoom": zoom,
+            },
+            "createdAtSeconds": workspace_finite(row.get("createdAtSeconds"), "bookmark creation time")?.max(0.0),
+        }));
+    }
+
+    let raw_queue: &[Value] = match base.get("handcraftQueue") {
+        None | Some(Value::Null) => &[],
+        Some(Value::Array(rows)) => rows,
+        Some(_) => bail!("native workspace handcraft queue is invalid"),
+    };
+    if raw_queue.len() > MAX_HANDCRAFT_QUEUE_ROWS {
+        bail!("native workspace handcraft queue exceeds the persistent limit")
+    }
+    let mut queue_ids = HashSet::new();
+    let mut queue = Vec::with_capacity(raw_queue.len());
+    for value in raw_queue {
+        let row = value
+            .as_object()
+            .ok_or_else(|| anyhow!("native workspace handcraft entry is invalid"))?;
+        let entry_id = row
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| valid_opaque_id(id))
+            .ok_or_else(|| anyhow!("native workspace handcraft entry ID is invalid"))?;
+        let recipe_id = row
+            .get("recipeId")
+            .and_then(Value::as_str)
+            .filter(|id| valid_opaque_id(id))
+            .ok_or_else(|| anyhow!("native workspace handcraft recipe ID is invalid"))?;
+        let recipe = state
+            .catalog
+            .recipes
+            .get(recipe_id)
+            .filter(|recipe| handcraftable_recipe(&recipe.id) && !recipe.outputs.is_empty())
+            .ok_or_else(|| anyhow!("native workspace handcraft recipe is missing"))?;
+        let output = &recipe.outputs[0];
+        let item = state
+            .catalog
+            .items
+            .get(&output.item_id)
+            .ok_or_else(|| anyhow!("native workspace handcraft output item is missing"))?;
+        let planet_id = row
+            .get("planetId")
+            .and_then(Value::as_str)
+            .filter(|id| valid_opaque_id(id))
+            .ok_or_else(|| anyhow!("native workspace handcraft planet is invalid"))?;
+        let total = workspace_safe_integer(row.get("batchesTotal"), "handcraft batch total")?;
+        let remaining =
+            workspace_safe_integer(row.get("batchesRemaining"), "handcraft batch remaining")?;
+        let progress = workspace_finite(row.get("progress"), "handcraft progress")?;
+        if !queue_ids.insert(entry_id)
+            || total < 1
+            || remaining > total
+            || !(0.0..=1.0).contains(&progress)
+            || !state
+                .catalog
+                .planets
+                .iter()
+                .any(|planet| planet.id == planet_id)
+        {
+            bail!("native workspace handcraft entry state is invalid")
+        }
+        queue.push(json!({
+            "entryId": entry_id,
+            "recipeId": recipe.id,
+            "recipeName": workspace_label(if recipe.name.is_empty() { &recipe.id } else { &recipe.name }, "recipe name")?,
+            "outputItemId": item.id,
+            "outputItemName": workspace_label(if item.name.is_empty() { &item.id } else { &item.name }, "output item name")?,
+            "planetId": planet_id,
+            "batchesTotal": total,
+            "batchesRemaining": remaining,
+            "progress": progress,
+            "queuedAt": workspace_finite(row.get("queuedAt"), "handcraft queue time")?.max(0.0),
+        }));
+    }
+
+    let completed = base
+        .get("research")
+        .and_then(Value::as_object)
+        .and_then(|research| research.get("completedTechIds"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flat_map(|ids| ids.iter())
+        .filter_map(Value::as_str)
+        .collect::<HashSet<_>>();
+    let mut recipes = state
+        .catalog
+        .recipes
+        .values()
+        .filter(|recipe| {
+            handcraftable_recipe(&recipe.id)
+                && !recipe.inputs.is_empty()
+                && !recipe.outputs.is_empty()
+        })
+        .collect::<Vec<_>>();
+    recipes.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+    let recipe_total = recipes.len();
+    let recipe_rows = recipes.into_iter().take(MAX_HANDCRAFT_RECIPE_ROWS).map(|recipe| {
+        let building = state.catalog.buildings.get(&recipe.building_id)
+            .ok_or_else(|| anyhow!("native workspace handcraft building is missing"))?;
+        let inputs = recipe.inputs.iter().map(|entry| workspace_item_row(state, &entry.item_id, entry.amount))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let outputs = recipe.outputs.iter().map(|entry| workspace_item_row(state, &entry.item_id, entry.amount))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        Ok(json!({
+            "recipeId": recipe.id,
+            "name": workspace_label(if recipe.name.is_empty() { &recipe.id } else { &recipe.name }, "recipe name")?,
+            "buildingId": building.id,
+            "buildingName": workspace_label(&building.id, "building name")?,
+            "duration": recipe.duration,
+            "unlocked": recipe.required_tech_id.as_deref().is_none_or(|id| completed.contains(id)),
+            "requiredTechId": recipe.required_tech_id,
+            "inputs": inputs,
+            "outputs": outputs,
+        }))
+    }).collect::<anyhow::Result<Vec<_>>>()?;
+
+    Ok(json!({
+        "schema": "workspace-actions-v1",
+        "activePlanetId": active_planet_id,
+        "regions": rows_model(regions, raw_regions.len(), MAX_CANVAS_REGION_ROWS),
+        "bookmarks": rows_model(bookmarks, raw_bookmarks.len(), MAX_CANVAS_BOOKMARK_ROWS),
+        "handcraftQueue": rows_model(queue, raw_queue.len(), MAX_HANDCRAFT_QUEUE_ROWS),
+        "handcraftRecipes": rows_model(recipe_rows, recipe_total, MAX_HANDCRAFT_RECIPE_ROWS),
+    }))
 }
 
 fn required_safe_integer(value: Option<&Value>, label: &str, maximum: u64) -> anyhow::Result<u64> {
@@ -449,6 +760,32 @@ fn selected_entity_row(state: &CoreState, value: Value) -> anyhow::Result<Value>
         .filter(|id| valid_opaque_id(id))
         .unwrap_or("unknown");
     let station_configuration = station_configuration(state, object)?;
+    let building_id = object.get("buildingId").and_then(Value::as_str);
+    let building_metadata = building_id.and_then(|id| state.catalog.building_metadata.get(id));
+    let orbital_yield_item_ids = if building_id == Some("orbital_collector") {
+        let mut rows = state
+            .catalog
+            .planets
+            .iter()
+            .find(|planet| planet.id == planet_id)
+            .map(|planet| {
+                planet
+                    .orbital_yields
+                    .iter()
+                    .filter_map(|(item_id, rate)| {
+                        (rate.is_finite()
+                            && *rate > 0.0
+                            && state.catalog.items.contains_key(item_id))
+                        .then_some(item_id.clone())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        rows.sort_unstable();
+        Value::Array(rows.into_iter().map(Value::from).collect())
+    } else {
+        Value::Array(Vec::new())
+    };
     Ok(json!({
         "entityId": entity_id,
         "planetId": planet_id,
@@ -469,6 +806,13 @@ fn selected_entity_row(state: &CoreState, value: Value) -> anyhow::Result<Value>
         "inputItems": numeric_rows(object.get("inputs"), MAX_ITEM_ROWS, "itemId"),
         "outputItems": numeric_rows(object.get("outputs"), MAX_ITEM_ROWS, "itemId"),
         "stationConfiguration": station_configuration,
+        "buildingName": building_metadata.map(|metadata| metadata.name.clone()),
+        "upgradeTargetId": building_metadata.and_then(|metadata| metadata.upgrade_target_id.clone()),
+        "sprayCoaterInstalled": object.get("sprayCoaterInstalled").and_then(Value::as_bool).unwrap_or(false),
+        "quantumMode": object.get("quantumMode").and_then(Value::as_str).unwrap_or("legacy"),
+        "quantumTransitionActive": object.get("quantumTransition").is_some_and(|value| !value.is_null()),
+        "stationTier": finite_number(object.get("stationTier")),
+        "orbitalYieldItemIds": orbital_yield_item_ids,
     }))
 }
 
@@ -1339,6 +1683,7 @@ impl CoreState {
                 "destroyedByproducts": numeric_rows(automation.and_then(|value| value.get("destroyedByproducts")), MAX_ITEM_ROWS, "itemId"),
             },
         });
+        let workspace = native_workspace_action_read_model(self, base, active_planet_id)?;
         let result = json!({
             "schemaVersion": 1,
             "projectionType": READ_MODEL_SCHEMA,
@@ -1347,6 +1692,7 @@ impl CoreState {
             "planetNavigation": planet_navigation,
             "selection": selection,
             "construction": construction,
+            "workspace": workspace,
         });
         if serde_json::to_vec(&result)?.len() > MAX_PROJECTION_BYTES {
             bail!("native factory read-model projection exceeds the byte limit");

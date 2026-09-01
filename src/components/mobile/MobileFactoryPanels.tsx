@@ -498,12 +498,14 @@ export function MobileInspectorSheet({ game, snap, entity, belt, selectedCount, 
   );
 }
 
-export function MobilePlacementBar({ mode, buildingId, inventory, placementCount, continuous, connectionLabel, selectionCount, beltCount, onCountChange, onContinuousChange, onCancel, onDone, onOpenInspector }: {
+export function MobilePlacementBar({ mode, buildingId, inventory, placementCount, continuous, singlePlacementOnly = false, connectionLabel, selectionCount, beltCount, onCountChange, onContinuousChange, onCancel, onDone, onOpenInspector }: {
   mode: MobileCanvasMode;
-  buildingId: BuildingId | null;
+  /** Built-in or opaque MOD building id from the Rust construction directory. */
+  buildingId: string | null;
   inventory: number;
   placementCount: PlacementCount;
   continuous: boolean;
+  singlePlacementOnly?: boolean;
   connectionLabel?: string | null;
   selectionCount: number;
   beltCount: number;
@@ -516,7 +518,8 @@ export function MobilePlacementBar({ mode, buildingId, inventory, placementCount
   if (mode === "browse") return null;
   if (mode === "place" && buildingId) {
     const index = PLACEMENT_COUNTS.indexOf(placementCount);
-    return <div className="mobile-placement-bar" role="toolbar" aria-label="建筑放置状态"><span><i>{constructionBuildIcon(buildingId)}</i><em><small>正在放置</small><strong>{getBuilding(buildingId).name}</strong></em><b>库存 <QuantityValue value={inventory} /></b></span><div className="mobile-placement-stepper"><button type="button" disabled={index <= 0} onClick={() => onCountChange(PLACEMENT_COUNTS[Math.max(0, index - 1)])} aria-label="减少放置数量"><Minus size={18} /></button><strong>{placementCount}</strong><button type="button" disabled={index >= PLACEMENT_COUNTS.length - 1} onClick={() => onCountChange(PLACEMENT_COUNTS[Math.min(PLACEMENT_COUNTS.length - 1, index + 1)])} aria-label="增加放置数量"><Plus size={18} /></button></div><label><input type="checkbox" checked={continuous} onChange={(event) => onContinuousChange(event.target.checked)} /><span>连续</span></label><button type="button" onClick={onCancel}><X size={19} /><span>取消</span></button></div>;
+    const label = getConstructionDefinition(buildingId as ConstructionId)?.name ?? buildingId;
+    return <div className="mobile-placement-bar" role="toolbar" aria-label="建筑放置状态"><span><i>{constructionBuildIcon(buildingId as BuildingId)}</i><em><small>正在放置</small><strong>{label}</strong></em><b>库存 <QuantityValue value={inventory} /></b></span>{singlePlacementOnly ? <strong>单次 · Rust 确认</strong> : <><div className="mobile-placement-stepper"><button type="button" disabled={index <= 0} onClick={() => onCountChange(PLACEMENT_COUNTS[Math.max(0, index - 1)])} aria-label="减少放置数量"><Minus size={18} /></button><strong>{placementCount}</strong><button type="button" disabled={index >= PLACEMENT_COUNTS.length - 1} onClick={() => onCountChange(PLACEMENT_COUNTS[Math.min(PLACEMENT_COUNTS.length - 1, index + 1)])} aria-label="增加放置数量"><Plus size={18} /></button></div><label><input type="checkbox" checked={continuous} onChange={(event) => onContinuousChange(event.target.checked)} /><span>连续</span></label></>}<button type="button" onClick={onCancel}><X size={19} /><span>取消</span></button></div>;
   }
   if (mode === "connect") return <div className="mobile-mode-status mobile-mode-status--connect"><Route size={20} /><span><small>连接模式</small><strong>{connectionLabel ?? "请选择目标端口"}</strong></span><button type="button" onClick={onCancel}><X size={19} />取消</button></div>;
   if (mode === "select") return <div className="mobile-mode-status mobile-mode-status--select"><Check size={20} /><span><small>多选模式</small><strong>{selectionCount} 节点 · {beltCount} 线路</strong></span>{selectionCount + beltCount > 0 ? <button type="button" onClick={onOpenInspector}><Wrench size={18} />批量操作</button> : null}<button type="button" onClick={onDone}>完成</button></div>;

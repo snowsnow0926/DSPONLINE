@@ -1,4 +1,4 @@
-import { BarChart3, LockKeyhole, Search, ShieldCheck, TrendingUp, X } from "lucide-react";
+import { BarChart3, Bookmark, BookmarkPlus, Focus, LockKeyhole, MapPin, Search, ShieldCheck, Trash2, TrendingUp, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { ITEMS } from "../game/content";
 import type {
@@ -7,6 +7,9 @@ import type {
 } from "../game/nativeStatisticsWorkspaceStore";
 import { formatQuantityCompact, formatQuantityExact } from "../game/quantityFormat";
 import type { ItemId, ProductionHistorySample } from "../game/types";
+import type { CanvasViewport } from "../game/types";
+import type { NativeWorkspaceActionReadModel } from "../game/factoryReadModels";
+import { StableTextInput, clearStableTextDraft } from "./StableTextInput";
 import { QuantityValue } from "./QuantityValue";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 
@@ -18,6 +21,13 @@ export interface NativeStatisticsWorkspaceProps {
   latestIdentity: NativeStatisticsWorkspaceIdentity | null;
   status: NativeStatisticsWorkspaceReadStatus;
   onClose: () => void;
+  workspace?: NativeWorkspaceActionReadModel | null;
+  currentViewport?: CanvasViewport;
+  workspacePending?: boolean;
+  onAddCanvasBookmark?: (name: string, viewport: CanvasViewport) => void;
+  onRenameCanvasBookmark?: (bookmarkId: string, name: string) => void;
+  onOpenCanvasBookmark?: (bookmarkId: string) => void;
+  onRemoveCanvasBookmark?: (bookmarkId: string) => void;
 }
 
 interface NativeItemRow {
@@ -59,9 +69,17 @@ export function NativeStatisticsWorkspace({
   latestIdentity,
   status,
   onClose,
+  workspace = null,
+  currentViewport,
+  workspacePending = false,
+  onAddCanvasBookmark,
+  onRenameCanvasBookmark,
+  onOpenCanvasBookmark,
+  onRemoveCanvasBookmark,
 }: NativeStatisticsWorkspaceProps) {
   const [query, setQuery] = useState("");
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const [bookmarkName, setBookmarkName] = useState("");
   const frameMatchesScope = Boolean(candidateFrame && latestIdentity &&
     candidateFrame.sessionId === latestIdentity.sessionId &&
     candidateFrame.runId === latestIdentity.runId &&
@@ -178,6 +196,45 @@ export function NativeStatisticsWorkspace({
         <label className="statistics-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选物品或 MOD ID" aria-label="筛选原生统计物品" /></label>
         <small>{samples.length} 个有界采样 · 最新模拟时间 {latest ? latest.elapsedSeconds.toFixed(1) : "-"} 秒</small>
       </div>
+
+      {workspace && currentViewport ? <section className="network-bookmarks native-network-bookmarks" aria-label="Windows 原生画布书签">
+        <header><Bookmark size={15} /><span>画布书签</span><strong>{workspace.bookmarks.totalCount}/24</strong></header>
+        <form onSubmit={(event) => {
+          event.preventDefault();
+          if (workspacePending || !onAddCanvasBookmark) return;
+          onAddCanvasBookmark(bookmarkName, currentViewport);
+          setBookmarkName("");
+          clearStableTextDraft("native-canvas-bookmark-name");
+        }}>
+          <StableTextInput
+            draftId="native-canvas-bookmark-name"
+            name="bookmarkName"
+            value={bookmarkName}
+            onValueChange={setBookmarkName}
+            maxLength={28}
+            placeholder="当前 Rust 画布视角"
+            aria-label="原生画布书签名称"
+          />
+          <button type="submit" disabled={workspacePending || !onAddCanvasBookmark} title="保存当前画布视角" aria-label="保存当前画布视角"><BookmarkPlus size={14} /></button>
+        </form>
+        <div>{workspace.bookmarks.rows.length === 0 ? <p><MapPin size={18} /><span>尚未保存视角</span></p> : workspace.bookmarks.rows.map((bookmark) => <article key={bookmark.id}>
+          <MapPin size={13} />
+          <span>
+            <StableTextInput
+              commitOnBlur
+              draftId={`native-canvas-bookmark-name:${bookmark.id}`}
+              value={bookmark.name}
+              onValueChange={(name) => onRenameCanvasBookmark?.(bookmark.id, name)}
+              disabled={workspacePending}
+              aria-label={`${bookmark.name}名称`}
+              onBlur={() => clearStableTextDraft(`native-canvas-bookmark-name:${bookmark.id}`)}
+            />
+            <small>{bookmark.planetId} · {Math.round(bookmark.viewport.zoom * 100)}%</small>
+          </span>
+          <button type="button" onClick={() => onOpenCanvasBookmark?.(bookmark.id)} disabled={!onOpenCanvasBookmark} title={`打开${bookmark.name}`} aria-label={`打开${bookmark.name}`}><Focus size={13} /></button>
+          <button className="danger" type="button" onClick={() => onRemoveCanvasBookmark?.(bookmark.id)} disabled={workspacePending || !onRemoveCanvasBookmark} title={`删除${bookmark.name}`} aria-label={`删除${bookmark.name}`}><Trash2 size={13} /></button>
+        </article>)}</div>
+      </section> : null}
 
       {activeItemId && trend.length > 0 ? <section className="production-history-trend" aria-label="原生生产历史趋势">
         <header><div><TrendingUp size={15} /><span>{itemLabel(activeItemId)}</span></div><small>最近 {trend.length} 个压缩采样点</small></header>

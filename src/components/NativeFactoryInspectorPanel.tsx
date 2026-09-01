@@ -1,11 +1,12 @@
-import { Atom, CircuitBoard, Database, Factory, Flame, Gauge, Layers3, LockKeyhole, Minus, Orbit, Pause, Play, Plus, RotateCcw, Route, Satellite, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Atom, CircuitBoard, Database, Factory, Flame, Gauge, Hammer, Layers3, ListChecks, ListPlus, LockKeyhole, Minus, Orbit, Pause, Play, Plus, RotateCcw, Route, Satellite, Search, Trash2, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CONSTRUCTION, FUEL_ENERGY_MJ, ITEMS } from "../game/content";
 import type {
   FactoryInspectorSummaryReadModel,
   FactoryMultiSelectionSummaryReadModel,
   ItemQuantityReadModel,
   NativeStationRoutePolicyReadModel,
+  NativeWorkspaceActionReadModel,
   SelectedBeltReadModel,
   SelectedEntityReadModel,
 } from "../game/factoryReadModels";
@@ -53,8 +54,18 @@ interface NativeFactoryInspectorPanelProps {
   ejectorOrbitFrame?: NativeProjectedEjectorOrbitFrame | null;
   stationConfiguration?: NativeProjectedStationConfigurationBinding | null;
   pending: boolean;
+  tab?: "inspect" | "fabricate";
+  onTabChange?: (tab: "inspect" | "fabricate") => void;
+  workspace?: NativeWorkspaceActionReadModel | null;
+  onQueueHandcraft?: (recipeId: string, batches: number) => void;
+  onCancelHandcraft?: (entryId: string) => void;
   onEntityLockChange: (entityId: string, locked: boolean) => void;
   onRemoveEntity: (entityId: string) => void;
+  onUpgradeEntity?: (entityId: string) => void;
+  onRemoveSprayCoater?: (entityId: string) => void;
+  onQuantumAttachment?: (entityId: string) => void;
+  onOrbitalCollectorQuantumMode?: (entityId: string, enabled: boolean) => void;
+  onOrbitalCollectorItemChange?: (entityId: string, itemId: string) => void;
   onStackCountChange: (entityId: string, targetCount: number) => void;
   onEntityPowerPriorityChange: (entityId: string, targetPriority: PowerPriority) => void;
   onSplitterDistributionModeChange: (
@@ -89,6 +100,49 @@ interface NativeFactoryInspectorPanelProps {
   onBeltLaneCountChange: (beltId: string, targetLanes: number) => void;
   onBeltPriorityChange: (beltId: string, targetPriority: 0 | 1 | 2) => void;
   onRemoveBelt: (beltId: string) => void;
+}
+
+function NativeHandcraftFabricator({ workspace, pending, onQueue, onCancel }: {
+  workspace: NativeWorkspaceActionReadModel | null;
+  pending: boolean;
+  onQueue?: (recipeId: string, batches: number) => void;
+  onCancel?: (entryId: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [batches, setBatches] = useState(1);
+  const term = query.trim().toLocaleLowerCase("zh-CN");
+  const rows = useMemo(() => workspace?.handcraftRecipes.rows.filter((recipe) => !term ||
+    `${recipe.name} ${recipe.recipeId} ${recipe.buildingName} ${recipe.inputs.map((item) => item.name).join(" ")} ${recipe.outputs.map((item) => item.name).join(" ")}`
+      .toLocaleLowerCase("zh-CN").includes(term)) ?? [], [term, workspace]);
+  if (!workspace) return <section className="inspector-content native-read-only-unavailable" role="status">
+    <strong>正在读取 Rust 手工制造目录</strong><p>旧网页存档不会作为配方或队列来源。</p>
+  </section>;
+  return <section className="inspector-content fabricator-workspace native-handcraft-fabricator" data-native-handcraft="semantic-queue-v1">
+    <header className="fabricator-sticky-tools">
+      <div className="handcraft-tools">
+        <label className="handcraft-search"><Search size={13} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索物品、原料或 MOD ID" aria-label="搜索 Rust 手工配方" /></label>
+        <label className="fabricator-quantity"><span>加入批次</span><input type="number" min={1} max={1_000_000} step={1} value={batches} disabled={pending} onChange={(event) => {
+          const value = Number(event.currentTarget.value);
+          if (Number.isSafeInteger(value) && value >= 1 && value <= 1_000_000) setBatches(value);
+        }} /></label>
+      </div>
+    </header>
+    {workspace.handcraftQueue.rows.length > 0 ? <section className="handcraft-queue" aria-label="Rust 手工制造队列">
+      <header><ListChecks size={14} /><span>权威制造队列</span><strong>{workspace.handcraftQueue.totalCount}/20</strong></header>
+      <div>{workspace.handcraftQueue.rows.map((entry, index) => <article className={index === 0 ? "handcraft-queue-row handcraft-queue-row--active" : "handcraft-queue-row"} key={entry.entryId}>
+        <Hammer size={14} /><span><strong>{entry.outputItemName}</strong><small>{entry.batchesRemaining}/{entry.batchesTotal} 批 · {entry.planetId === workspace.activePlanetId ? "等待/制造中" : "等待行星"}</small><i role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(entry.progress * 100)}><b style={{ width: `${entry.progress * 100}%` }} /></i></span>
+        <button type="button" disabled={pending || !onCancel} onClick={() => onCancel?.(entry.entryId)} title="取消手工队列" aria-label={`取消${entry.outputItemName}手工队列`}><X size={13} /></button>
+      </article>)}</div>
+    </section> : null}
+    <div className="fabricator-list fabricator-list--items fabricator-list--compact">
+      {rows.map((recipe) => <article className="fabricator-row handcraft-row" key={recipe.recipeId}>
+        <header><Hammer size={15} /><div><strong>{recipe.outputs[0]?.name ?? recipe.name}</strong><span>{recipe.buildingName} · {recipe.duration}s · {recipe.recipeId}</span></div><button type="button" disabled={pending || !recipe.unlocked || !onQueue || workspace.handcraftQueue.totalCount >= 20} onClick={() => onQueue?.(recipe.recipeId, batches)} title={`加入${recipe.name}手工队列`}><ListPlus size={14} />{recipe.unlocked ? `排队 ×${batches}` : "科技锁定"}</button></header>
+        <div className="fabricator-costs">{recipe.inputs.map((item) => <span className="cost" key={item.itemId}>{item.name} ×{item.amount * batches}</span>)}</div>
+      </article>)}
+      {rows.length === 0 ? <div className="fabricator-empty">没有符合条件的 Rust 手工配方</div> : null}
+    </div>
+    {workspace.handcraftRecipes.truncated ? <p role="status">配方目录超过 256 条；请通过搜索或后续分页界面访问未显示的 MOD 配方。</p> : null}
+  </section>;
 }
 
 export type NativeStationConfigurationUiAction =
@@ -508,6 +562,11 @@ function NativeEntitySummary({
   pending,
   onEntityLockChange,
   onRemoveEntity,
+  onUpgradeEntity,
+  onRemoveSprayCoater,
+  onQuantumAttachment,
+  onOrbitalCollectorQuantumMode,
+  onOrbitalCollectorItemChange,
   onStackCountChange,
   onPowerPriorityChange,
   onSplitterDistributionModeChange,
@@ -532,6 +591,11 @@ function NativeEntitySummary({
   pending: boolean;
   onEntityLockChange: (entityId: string, locked: boolean) => void;
   onRemoveEntity: (entityId: string) => void;
+  onUpgradeEntity?: (entityId: string) => void;
+  onRemoveSprayCoater?: (entityId: string) => void;
+  onQuantumAttachment?: (entityId: string) => void;
+  onOrbitalCollectorQuantumMode?: (entityId: string, enabled: boolean) => void;
+  onOrbitalCollectorItemChange?: (entityId: string, itemId: string) => void;
   onStackCountChange: (entityId: string, targetCount: number) => void;
   onPowerPriorityChange: (entityId: string, targetPriority: PowerPriority) => void;
   onSplitterDistributionModeChange: (
@@ -1078,6 +1142,67 @@ function NativeEntitySummary({
         </label>
       </> : <p role="status">正在核对当前恒星系的同 revision 轨道页；旧网页存档不会作为备用来源。</p>}
     </section>}
+    {!entity.upgradeTargetId ? null : <section
+      className="native-inspector-safe-actions"
+      data-native-building-upgrade="semantic-batch-v1"
+    >
+      <strong>Rust 建筑升级</strong>
+      <p>只提交当前建筑 ID；目标型号、科技、堆叠数量、施工材料和旧建筑返还全部由 Rust 在当前 revision 重新核算。</p>
+      <button
+        type="button"
+        disabled={pending || entity.interactionLocked || !onUpgradeEntity}
+        onClick={() => onUpgradeEntity?.(entity.entityId)}
+      ><Layers3 size={14} />升级到 {constructionNames.get(entity.upgradeTargetId) ?? entity.upgradeTargetId}</button>
+    </section>}
+    {!entity.sprayCoaterInstalled ? null : <section
+      className="native-inspector-safe-actions"
+      data-native-spray-detach="workspace-action-v1"
+    >
+      <strong>Rust 喷涂模块</strong>
+      <p>拆卸前需要确认；模块、缓存增产剂、剩余喷涂点和关联线路退款均由 Rust 重新计算。</p>
+      <button
+        type="button"
+        className="danger"
+        disabled={pending || entity.interactionLocked || !onRemoveSprayCoater}
+        onClick={() => onRemoveSprayCoater?.(entity.entityId)}
+      ><RotateCcw size={14} />安全拆卸喷涂模块</button>
+    </section>}
+    {entity.buildingId !== "interstellar_logistics_station" ? null : <section
+      className="native-inspector-safe-actions"
+      data-native-quantum-attachment="workspace-action-v1"
+    >
+      <strong>Rust 量子物流接入</strong>
+      <p>Rust 会从全部权威航线重建尾货桥接，旧路线没有结清前不会凭空复制或丢弃货物。</p>
+      <button
+        type="button"
+        disabled={pending || entity.interactionLocked || (entity.stationTier ?? 0) < 2 ||
+          entity.quantumMode !== "legacy" || entity.quantumTransitionActive || !onQuantumAttachment}
+        onClick={() => onQuantumAttachment?.(entity.entityId)}
+      >{entity.quantumMode === "quantum" ? "已接入量子网络" : entity.quantumTransitionActive ? "尾货交接中" : "接入量子网络"}</button>
+    </section>}
+    {entity.buildingId !== "orbital_collector" ? null : <section
+      className="native-inspector-safe-actions"
+      data-native-orbital-collector="workspace-action-v1"
+    >
+      <strong>Rust 轨道采集器</strong>
+      <p>采集物和量子模式均绑定当前 revision；改物料时 Rust 会返还缓存并拆除不再兼容的线路。</p>
+      <label><span>采集物</span><select
+        aria-label="Windows 原生轨道采集物"
+        value={entity.storedItemId ?? ""}
+        disabled={pending || entity.interactionLocked || !onOrbitalCollectorItemChange ||
+          !entity.orbitalYieldItemIds?.length}
+        onChange={(event) => onOrbitalCollectorItemChange?.(entity.entityId, event.currentTarget.value)}
+      >
+        {!entity.storedItemId ? <option value="" disabled>选择采集物</option> : null}
+        {(entity.orbitalYieldItemIds ?? []).map((itemId) => <option value={itemId} key={itemId}>{itemLabel(itemId)}</option>)}
+      </select></label>
+      <button
+        type="button"
+        disabled={pending || entity.interactionLocked || entity.quantumTransitionActive ||
+          !onOrbitalCollectorQuantumMode}
+        onClick={() => onOrbitalCollectorQuantumMode?.(entity.entityId, entity.quantumMode !== "quantum")}
+      >{entity.quantumTransitionActive ? "尾货交接中" : entity.quantumMode === "quantum" ? "切回传统采集" : "接入量子采集"}</button>
+    </section>}
     <section className="native-inspector-safe-actions" data-native-construction-stack="ordinary-single-v1">
       <strong>Rust 建筑堆叠</strong>
       <p>每次只增减一栋。Rust 会用最新 revision 重新核对建筑上限和施工托盘；旧档中超过新上限的堆叠仍可安全减少。</p>
@@ -1184,8 +1309,18 @@ export function NativeFactoryInspectorPanel({
   ejectorOrbitFrame = null,
   stationConfiguration = null,
   pending,
+  tab = "inspect",
+  onTabChange,
+  workspace = null,
+  onQueueHandcraft,
+  onCancelHandcraft,
   onEntityLockChange,
   onRemoveEntity,
+  onUpgradeEntity,
+  onRemoveSprayCoater,
+  onQuantumAttachment,
+  onOrbitalCollectorQuantumMode,
+  onOrbitalCollectorItemChange,
   onStackCountChange,
   onEntityPowerPriorityChange,
   onSplitterDistributionModeChange,
@@ -1281,7 +1416,9 @@ export function NativeFactoryInspectorPanel({
     ? stationConfiguration
     : null;
   let content;
-  if (!ready) {
+  if (tab === "fabricate") {
+    content = <NativeHandcraftFabricator workspace={workspace} pending={pending} onQueue={onQueueHandcraft} onCancel={onCancelHandcraft} />;
+  } else if (!ready) {
     content = <section className="inspector-content native-read-only-unavailable" role="status"><strong>正在核对原生检查摘要</strong><p>旧 JavaScript 存档不会作为备用显示来源。</p></section>;
   } else if (selectedCount > 1) {
     const complete = !multiSelection.entityRows.truncated && !multiSelection.beltRows.truncated &&
@@ -1302,6 +1439,11 @@ export function NativeFactoryInspectorPanel({
       pending={pending}
       onEntityLockChange={onEntityLockChange}
       onRemoveEntity={onRemoveEntity}
+      onUpgradeEntity={onUpgradeEntity}
+      onRemoveSprayCoater={onRemoveSprayCoater}
+      onQuantumAttachment={onQuantumAttachment}
+      onOrbitalCollectorQuantumMode={onOrbitalCollectorQuantumMode}
+      onOrbitalCollectorItemChange={onOrbitalCollectorItemChange}
       onStackCountChange={onStackCountChange}
       onPowerPriorityChange={onEntityPowerPriorityChange}
       onSplitterDistributionModeChange={onSplitterDistributionModeChange}
@@ -1327,7 +1469,10 @@ export function NativeFactoryInspectorPanel({
     data-native-factory-inspector="bounded-v1"
     data-native-revision={ready ? inspector.revision ?? "none" : "pending"}
   >
-    <div className="panel-tabs" role="tablist" aria-label="Windows 原生检查器"><button role="tab" aria-selected="true" className="active" type="button" disabled><CircuitBoard size={15} />检查器</button></div>
+    <div className="panel-tabs" role="tablist" aria-label="Windows 原生检查器">
+      <button role="tab" aria-selected={tab === "inspect"} className={tab === "inspect" ? "active" : ""} type="button" onClick={() => onTabChange?.("inspect")}><CircuitBoard size={15} />检查器</button>
+      <button role="tab" aria-selected={tab === "fabricate"} className={tab === "fabricate" ? "active" : ""} type="button" onClick={() => onTabChange?.("fabricate")}><Hammer size={15} />基础制造</button>
+    </div>
     {content}
   </aside>;
 }

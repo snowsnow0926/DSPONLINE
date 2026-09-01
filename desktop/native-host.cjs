@@ -2364,6 +2364,49 @@ class NativeCoreSessionRegistry {
     }, 300_000);
   }
 
+  playerAuthorityHistoryStatus(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID) {
+      throw new NativeHostError(
+        "player-authority history requires the main authority owner",
+        "NATIVE_CORE_PLAYER_AUTHORITY_OWNER_REQUIRED",
+      );
+    }
+    exactObjectKeys(request, ["sessionId"], "native player-authority history status request");
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "corePlayerAuthorityHistoryStatus",
+      sessionId: request.sessionId,
+    }, 300_000);
+  }
+
+  commitPlayerAuthorityHistory(ownerId, request) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID) {
+      throw new NativeHostError(
+        "player-authority history requires the main authority owner",
+        "NATIVE_CORE_PLAYER_AUTHORITY_OWNER_REQUIRED",
+      );
+    }
+    exactObjectKeys(request, [
+      "sessionId", "runId", "operationId", "baseRevision", "direction",
+    ], "native player-authority history request");
+    if (!validLogicalId(request.runId, 128) || !validLogicalId(request.operationId, 128) ||
+      !Number.isSafeInteger(request.baseRevision) || request.baseRevision < 0 ||
+      (request.direction !== "undo" && request.direction !== "redo")) {
+      throw new TypeError("native player-authority history request is invalid");
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreCommitPlayerAuthorityHistory",
+      sessionId: request.sessionId,
+      request: {
+        runId: request.runId,
+        operationId: request.operationId,
+        baseRevision: request.baseRevision,
+        direction: request.direction,
+      },
+    }, 300_000);
+  }
+
   commitPlayerAuthoritySystemSpaceStationCommand(ownerId, request) {
     const session = this.assertOwner(ownerId, request?.sessionId);
     if (ownerId !== MAIN_PLAYER_AUTHORITY_OWNER_ID || session.slot !== "normal-main") {

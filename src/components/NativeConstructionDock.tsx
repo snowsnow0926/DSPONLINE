@@ -1,4 +1,4 @@
-import { Factory, LockKeyhole, Route } from "lucide-react";
+import { Factory, Hammer, LockKeyhole, Route, Trash2 } from "lucide-react";
 import { useMemo } from "react";
 import { BUILDINGS, CONSTRUCTION, getBeltConstructionId, getBeltTiers } from "../game/content";
 import type { NativeConstructionInventoryFrame } from "../game/nativeConstructionInventoryStore";
@@ -14,6 +14,8 @@ interface NativeConstructionDockProps {
   onPlacementChange: (buildingId: string | null) => void;
   onBeltPlacementChange: (tier: BeltTier | null) => void;
   onBeltLanesChange: (lanes: number) => void;
+  onOpenFabricator?: () => void;
+  onDeleteConstruction?: (buildingId: string) => void;
 }
 
 function beltTierForConstruction(buildingId: string): BeltTier | null {
@@ -48,6 +50,8 @@ export function NativeConstructionDock({
   onPlacementChange,
   onBeltPlacementChange,
   onBeltLanesChange,
+  onOpenFabricator,
+  onDeleteConstruction,
 }: NativeConstructionDockProps) {
   const rows = useMemo(() => frame?.rows ?? [], [frame?.rows]);
   const directory = useMemo(() => new Map<string, { readonly name: string }>(
@@ -125,6 +129,18 @@ export function NativeConstructionDock({
           </button>
         </div>;
       })}
+    </div>
+    <div className="native-construction-dock__management" aria-label="Windows 原生施工库存管理">
+      <button type="button" disabled={pending || !onOpenFabricator} onClick={onOpenFabricator}><Hammer size={13} />基础制造</button>
+      {rows.filter((row) => row.amount > 0).map((row) => <button
+        className="danger"
+        type="button"
+        key={`delete:${row.buildingId}`}
+        disabled={pending || !onDeleteConstruction}
+        onClick={() => onDeleteConstruction?.(row.buildingId)}
+        title={`永久删除${constructionLabel(directory, row.buildingId)}施工库存`}
+        aria-label={`永久删除${constructionLabel(directory, row.buildingId)}施工库存`}
+      ><Trash2 size={12} />删除 {constructionLabel(directory, row.buildingId)}</button>)}
     </div>
     <p className="native-construction-dock__notice">
       数据型建筑可单栋放置，已注册线路可单条连接；每次都会重新向 Rust 申请凭证并原子扣料。连续批量拉线和特殊物流端口使用独立原子命令。

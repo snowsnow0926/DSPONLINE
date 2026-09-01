@@ -8501,7 +8501,179 @@ impl SimulationCommandPatch {
     }
 }
 
+fn create_expected_object_patches(
+    previous: &Map<String, Value>,
+    current: &Map<String, Value>,
+    changes: &mut Vec<ValuePatch>,
+) {
+    let mut keys = previous
+        .keys()
+        .chain(current.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys.dedup();
+    for key in keys {
+        let path = vec![PathSegment::Key(key.clone())];
+        match (previous.get(&key), current.get(&key)) {
+            (Some(previous), Some(current)) => {
+                create_expected_value_patches(previous, current, path, changes)
+            }
+            (Some(_), None) => changes.push(ValuePatch {
+                path,
+                operation: "delete".to_owned(),
+                value: None,
+            }),
+            (None, Some(current)) => changes.push(ValuePatch {
+                path,
+                operation: "set".to_owned(),
+                value: Some(current.clone()),
+            }),
+            (None, None) => unreachable!("a key came from at least one object"),
+        }
+    }
+}
+
+fn create_record_transition(
+    previous_ids: &crate::state::ExactRowIds,
+    current_ids: &crate::state::ExactRowIds,
+    parse_previous: impl Fn(usize) -> anyhow::Result<Value>,
+    parse_current: impl Fn(usize) -> anyhow::Result<Value>,
+    raw_equal: impl Fn(usize, usize) -> bool,
+) -> anyhow::Result<(Vec<RecordPatch>, Vec<AddedRecord>, Vec<String>)> {
+    let previous_order = (0..previous_ids.len())
+        .map(|index| previous_ids[index].to_owned())
+        .collect::<Vec<_>>();
+    let current_order = (0..current_ids.len())
+        .map(|index| current_ids[index].to_owned())
+        .collect::<Vec<_>>();
+    let previous_index = previous_order
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+    let current_index = current_order
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.as_str(), index))
+        .collect::<BTreeMap<_, _>>();
+
+    // The generic patch format deliberately cannot reorder existing rows.
+    // A semantic command that does so is still valid, but it is not safe to
+    // put in the bounded session undo history.
+    let previous_common = previous_order
+        .iter()
+        .filter(|id| current_index.contains_key(id.as_str()))
+        .collect::<Vec<_>>();
+    let current_common = current_order
+        .iter()
+        .filter(|id| previous_index.contains_key(id.as_str()))
+        .collect::<Vec<_>>();
+    if previous_common != current_common {
+        bail!("native reversible transition reorders persistent rows")
+    }
+
+    let mut changed = Vec::new();
+    let mut removed = Vec::new();
+    for (previous_row, id) in previous_order.iter().enumerate() {
+        let Some(&current_row) = current_index.get(id.as_str()) else {
+            removed.push(id.clone());
+            continue;
+        };
+        if raw_equal(previous_row, current_row) {
+            continue;
+        }
+        let previous = parse_previous(previous_row)?;
+        let current = parse_current(current_row)?;
+        let mut changes = Vec::new();
+        create_expected_value_patches(&previous, &current, Vec::new(), &mut changes);
+        if !changes.is_empty() {
+            changed.push(RecordPatch {
+                id: id.clone(),
+                changes,
+            });
+        }
+    }
+
+    let mut added = Vec::new();
+    for (index, id) in current_order.iter().enumerate() {
+        if !previous_index.contains_key(id.as_str()) {
+            added.push(AddedRecord {
+                index,
+                value: parse_current(index)?,
+            });
+        }
+    }
+    Ok((changed, added, removed))
+}
+
 impl CoreState {
+    /// Builds a direct, bounded state delta from this state to `target`.
+    ///
+    /// This is used only by the main-owned, session-local undo journal after a
+    /// semantic player command has already been proved on a disposable clone.
+    /// It never serializes a complete GameState into history. Existing row
+    /// order must be preserved; commands whose inverse cannot be represented
+    /// by the ordinary patch protocol are intentionally not undoable.
+    pub fn reversible_transition_patch_to(
+        &self,
+        target: &CoreState,
+        base_revision: u64,
+    ) -> anyhow::Result<SimulationCommandPatch> {
+        if self.identity.registry_fingerprint != target.identity.registry_fingerprint
+            || self.identity.state_version != target.identity.state_version
+            || self.identity.mode != target.identity.mode
+        {
+            bail!("native reversible transition identity conflicts")
+        }
+
+        let mut top_level_changes = Vec::new();
+        create_expected_object_patches(
+            self.base_value(),
+            target.base_value(),
+            &mut top_level_changes,
+        );
+        let (changed_entities, added_entities, removed_entity_ids) = create_record_transition(
+            &self.entities.ids,
+            &target.entities.ids,
+            |index| self.parse_entity(index),
+            |index| target.parse_entity(index),
+            |previous, current| self.entity_raw_matches(previous, target, current),
+        )?;
+        let (changed_belts, added_belts, removed_belt_ids) = create_record_transition(
+            &self.belts.ids,
+            &target.belts.ids,
+            |index| self.parse_belt(index),
+            |index| target.parse_belt(index),
+            |previous, current| self.belt_raw_matches(previous, target, current),
+        )?;
+        let command = SimulationCommandPatch {
+            protocol_version: crate::CORE_PROTOCOL_VERSION,
+            base_revision,
+            top_level_changes,
+            changed_entities,
+            added_entities,
+            removed_entity_ids,
+            changed_belts,
+            added_belts,
+            removed_belt_ids,
+        };
+        let count = command.top_level_changes.len()
+            + command.changed_entities.len()
+            + command.added_entities.len()
+            + command.removed_entity_ids.len()
+            + command.changed_belts.len()
+            + command.added_belts.len()
+            + command.removed_belt_ids.len();
+        if count == 0 {
+            bail!("native reversible transition has no changes")
+        }
+        if count > 65_536 || serde_json::to_vec(&command)?.len() > 4 * 1024 * 1024 {
+            bail!("native reversible transition exceeds the session history budget")
+        }
+        Ok(command)
+    }
+
     /// Validates player-reachable topology/configuration commands before any
     /// durable stage. The general command engine remains available to exact
     /// simulation/replay, but a player-authority writer may only cross a
@@ -8549,6 +8721,9 @@ impl CoreState {
         }
         if crate::factory_belt_batch_command::command_contains_intent(command) {
             return crate::factory_belt_batch_command::validate_command(self, command);
+        }
+        if crate::workspace_action_command::command_contains_intent(command) {
+            return crate::workspace_action_command::validate_command(self, command);
         }
         if crate::blueprint_command::command_contains_intent(command) {
             return crate::blueprint_command::validate_command(self, command);
@@ -8848,6 +9023,13 @@ impl CoreState {
             result.topology_dirty = true;
             return Ok(result);
         }
+        if crate::workspace_action_command::command_contains_intent(command) {
+            crate::workspace_action_command::validate_resume_marker(command)?;
+            result.changed_entity_ids.clear();
+            result.changed_belt_ids.clear();
+            result.topology_dirty = true;
+            return Ok(result);
+        }
         if crate::recipe_command::command_contains_intent(command) {
             let entity_id = crate::recipe_command::validate_resume_marker(command)?;
             result.changed_entity_ids.push(entity_id);
@@ -9003,6 +9185,20 @@ impl CoreState {
             result.topology_dirty = true;
             return Ok(result);
         }
+        if crate::workspace_action_command::command_contains_intent(command) {
+            if command.protocol_version != crate::CORE_PROTOCOL_VERSION {
+                bail!("native player-authority command protocol version is unsupported")
+            }
+            if command.base_revision != self.revision {
+                bail!("native player-authority command base revision is not current")
+            }
+            let expanded = crate::workspace_action_command::expand_intent(self, command)?;
+            let mut result = self.apply_command(&expanded)?;
+            result.changed_entity_ids.clear();
+            result.changed_belt_ids.clear();
+            result.topology_dirty = true;
+            return Ok(result);
+        }
         self.validate_player_authority_command(command)?;
         if !command_contains_station_slot_mode(command)
             && !command_contains_station_slot_item(command)
@@ -9113,6 +9309,7 @@ impl CoreState {
         let expanded_factory_layout_intent;
         let expanded_factory_batch_intent;
         let expanded_factory_belt_batch_intent;
+        let expanded_workspace_action_intent;
         let mut compact_entity_recipe_receipt_id = None;
         let mut compact_special_input_port_receipt_id = None;
         let mut compact_galactic_export_receipt = None;
@@ -9122,6 +9319,7 @@ impl CoreState {
         let mut factory_layout_refresh = false;
         let mut factory_batch_refresh = false;
         let mut factory_belt_batch_refresh = false;
+        let mut workspace_action_refresh = false;
         let applied_command = if crate::factory_layout_command::command_contains_intent(command) {
             expanded_factory_layout_intent =
                 crate::factory_layout_command::expand_intent(self, command)?;
@@ -9137,6 +9335,11 @@ impl CoreState {
                 crate::factory_belt_batch_command::expand_intent(self, command)?;
             factory_belt_batch_refresh = true;
             &expanded_factory_belt_batch_intent
+        } else if crate::workspace_action_command::command_contains_intent(command) {
+            expanded_workspace_action_intent =
+                crate::workspace_action_command::expand_intent(self, command)?;
+            workspace_action_refresh = true;
+            &expanded_workspace_action_intent
         } else if command_contains_active_planet_intent(command) {
             expanded_active_planet_intent = expand_active_planet_intent(self, command)?;
             &expanded_active_planet_intent
@@ -9482,6 +9685,11 @@ impl CoreState {
             result.topology_dirty = true;
         }
         if factory_belt_batch_refresh {
+            result.changed_entity_ids.clear();
+            result.changed_belt_ids.clear();
+            result.topology_dirty = true;
+        }
+        if workspace_action_refresh {
             result.changed_entity_ids.clear();
             result.changed_belt_ids.clear();
             result.topology_dirty = true;

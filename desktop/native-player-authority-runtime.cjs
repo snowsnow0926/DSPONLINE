@@ -1087,6 +1087,101 @@ class NativePlayerAuthorityRuntime {
     return promise;
   }
 
+  historyStatus() {
+    if (this.phase !== "active" || !this.context || this.inFlight || this.commandQueue.length > 0) {
+      return Promise.reject(runtimeError(
+        "native player-authority history is unavailable while work is pending",
+        "NATIVE_PLAYER_AUTHORITY_HISTORY_UNAVAILABLE",
+      ));
+    }
+    return Promise.resolve(this.registry.playerAuthorityHistoryStatus(this.ownerId, {
+      sessionId: this.context.sessionId,
+    }));
+  }
+
+  commitHistory(rawRequest) {
+    if (this.phase !== "active" || !this.context || this.inFlight || this.commandQueue.length > 0 ||
+        this.persistenceBoundaryInFlight || this.pendingPauseAction !== null) {
+      return Promise.reject(runtimeError(
+        "native player-authority history is unavailable while work is pending",
+        "NATIVE_PLAYER_AUTHORITY_HISTORY_UNAVAILABLE",
+      ));
+    }
+    let request;
+    try {
+      if (!hasExactKeys(rawRequest, ["operationId", "baseRevision", "direction"]) ||
+          !Number.isSafeInteger(rawRequest.baseRevision) || rawRequest.baseRevision < 0 ||
+          rawRequest.baseRevision !== this.context.revision ||
+          (rawRequest.direction !== "undo" && rawRequest.direction !== "redo")) {
+        throw runtimeError(
+          "native player-authority history request is invalid",
+          "NATIVE_PLAYER_AUTHORITY_HISTORY_REQUEST_INVALID",
+        );
+      }
+      request = Object.freeze({
+        operationId: requireLogicalId(rawRequest.operationId, "operationId"),
+        baseRevision: rawRequest.baseRevision,
+        direction: rawRequest.direction,
+      });
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const context = this.context;
+    this.currentOperation = "history";
+    const operation = Promise.resolve().then(() => this.registry.commitPlayerAuthorityHistory(
+      this.ownerId,
+      {
+        sessionId: context.sessionId,
+        runId: context.runId,
+        operationId: request.operationId,
+        baseRevision: request.baseRevision,
+        direction: request.direction,
+      },
+    )).then((receipt) => {
+      const committed = receipt?.committed;
+      if (!committed || receipt.direction !== request.direction ||
+          committed.baseRevision !== request.baseRevision ||
+          committed.revision !== request.baseRevision + 1 ||
+          !committed.checkpoint || committed.checkpoint.revision !== committed.revision ||
+          !receipt.history || receipt.history.revision !== committed.revision) {
+        throw runtimeError(
+          "native player-authority history receipt is invalid",
+          "NATIVE_PLAYER_AUTHORITY_HISTORY_RECEIPT_INVALID",
+        );
+      }
+      const nextSequence = context.nextSequence + 1;
+      if (!Number.isSafeInteger(nextSequence)) {
+        throw runtimeError("native player-authority event sequence exceeds the safe integer range");
+      }
+      context.revision = committed.revision;
+      context.checkpoint = committed.checkpoint;
+      context.nextSequence = nextSequence;
+      context.lastCommand = null;
+      return Object.freeze({
+        previousRevision: request.baseRevision,
+        revision: committed.revision,
+        changedEntityIds: Object.freeze([...(committed.changedEntityIds ?? [])]),
+        changedBeltIds: Object.freeze([...(committed.changedBeltIds ?? [])]),
+        topologyDirty: committed.topologyDirty === true,
+        history: Object.freeze({ ...receipt.history }),
+      });
+    }).catch((cause) => {
+      throw cause instanceof NativePlayerAuthorityRuntimeError
+        ? cause
+        : runtimeError(
+          "native player-authority history outcome is uncertain",
+          "NATIVE_PLAYER_AUTHORITY_HISTORY_UNCERTAIN",
+          cause,
+        );
+    }).finally(() => {
+      if (this.inFlight === operation) this.inFlight = null;
+      this.currentOperation = null;
+      if (this.phase === "active") this.pump();
+    });
+    this.inFlight = operation;
+    return operation;
+  }
+
   commitSystemSpaceStationIntent(rawRequest) {
     if (this.phase !== "active" || !this.context) {
       return Promise.reject(runtimeError(

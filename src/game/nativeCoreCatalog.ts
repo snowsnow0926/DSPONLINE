@@ -4,6 +4,7 @@ import {
   FUEL_ENERGY_MJ,
   ITEMS,
   PLANET_LIST,
+  STAR_SYSTEM_LIST,
   PROLIFERATORS,
   RECIPES,
   TECHNOLOGIES,
@@ -39,6 +40,14 @@ export function createNativeCoreCatalog(
       orbitIndex: planet.orbitIndex,
       simulationOrder,
       orbitalYields: { ...planet.orbitalYields },
+    }))),
+    starSystems: byId(STAR_SYSTEM_LIST.map((system) => ({
+      id: system.id,
+      name: system.name,
+      planetIds: [...system.planetIds],
+      explorationCost: system.explorationCost.map((cost) => ({ ...cost })),
+      ...(system.requiredTechId ? { requiredTechId: system.requiredTechId } : {}),
+      ...(system.prerequisiteSystemId ? { prerequisiteSystemId: system.prerequisiteSystemId } : {}),
     }))),
     items: byId(Object.values(ITEMS).map((item) => ({
       id: item.id,

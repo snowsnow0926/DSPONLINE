@@ -4576,6 +4576,24 @@ impl CoreState {
         serde_json::from_str(&self.belt_raw[index]).context("decode native core belt")
     }
 
+    pub(crate) fn entity_raw_matches(
+        &self,
+        own_index: usize,
+        other: &CoreState,
+        other_index: usize,
+    ) -> bool {
+        self.entity_raw[own_index] == other.entity_raw[other_index]
+    }
+
+    pub(crate) fn belt_raw_matches(
+        &self,
+        own_index: usize,
+        other: &CoreState,
+        other_index: usize,
+    ) -> bool {
+        self.belt_raw[own_index] == other.belt_raw[other_index]
+    }
+
     /// Immutable persisted-order belt rows incident to one entity. Command
     /// eligibility uses this adjacency instead of scanning every belt.
     pub(crate) fn incident_belt_indices(

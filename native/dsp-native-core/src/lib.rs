@@ -68,6 +68,7 @@ mod system_space_station;
 pub mod system_space_station_command;
 mod system_space_station_workspace;
 pub mod v47_import;
+mod workspace_action_command;
 
 pub use belts::BeltSchedulerDiagnostics;
 pub use catalog::{

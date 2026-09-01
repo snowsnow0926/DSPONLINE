@@ -1,4 +1,4 @@
-import { Box, PackageOpen } from "lucide-react";
+import { Box, PackageOpen, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ITEMS, PLANETS } from "../game/content";
 import type { NativeFactoryInventoryFrame } from "../game/nativeFactoryInventoryStore";
@@ -19,6 +19,7 @@ interface NativeResourceRailProps {
   entityDepositEnabled: boolean;
   onSetTrayItemLimit: (value: number) => void;
   onSetProductionBufferLimit: (value: number) => void;
+  onDiscardTrayItem?: (itemId: string, amount: number) => void;
 }
 
 const ITEM_DIRECTORY = ITEMS as unknown as Record<string, ItemDefinition | undefined>;
@@ -56,6 +57,7 @@ export function NativeResourceRail({
   entityDepositEnabled,
   onSetTrayItemLimit,
   onSetProductionBufferLimit,
+  onDiscardTrayItem,
 }: NativeResourceRailProps) {
   const [trayLimitDraft, setTrayLimitDraft] = useState(frame ? String(frame.trayItemLimit) : "1000000");
   const [trayLimitError, setTrayLimitError] = useState<string | null>(null);
@@ -244,38 +246,47 @@ export function NativeResourceRail({
               frame.cargo.amount >= frame.pickupTargetAmount);
             const canDragToEntity = entityDepositEnabled && !disabled && Number.isSafeInteger(row.amount) && row.amount >= 1;
             const pickDisabled = mixedCargo || fullCargo;
-            return <button
-              className="tray-row"
-              type="button"
-              key={row.itemId}
-              disabled={disabled || pickDisabled && !canDragToEntity}
-              aria-disabled={disabled || pickDisabled}
-              draggable={canDragToEntity}
-              onClick={() => {
-                if (!pickDisabled) onPickTray(row.itemId);
-              }}
-              onDragStart={(event) => {
-                if (!canDragToEntity) {
-                  event.preventDefault();
-                  return;
-                }
-                event.dataTransfer.setData("application/factory-item", row.itemId);
-                event.dataTransfer.setData("application/factory-source-kind", "tray");
-                event.dataTransfer.effectAllowed = "move";
-              }}
-              title={row.overLimit
-                ? `${itemLabel(row.itemId)}超过当前自动写入上限；现有库存不会删除`
-                : canDragToEntity
-                  ? `拿取${itemLabel(row.itemId)}，或拖入普通建筑输入`
-                  : `拿取${itemLabel(row.itemId)}`}
-            >
-              <NativeItemMark itemId={row.itemId} />
-              <span>{itemLabel(row.itemId)}</span>
-              <strong><QuantityValue value={row.amount} interactive={false} /></strong>
-            </button>;
+            return <div className="native-tray-row-shell" key={row.itemId}>
+              <button
+                className="tray-row"
+                type="button"
+                disabled={disabled || pickDisabled && !canDragToEntity}
+                aria-disabled={disabled || pickDisabled}
+                draggable={canDragToEntity}
+                onClick={() => {
+                  if (!pickDisabled) onPickTray(row.itemId);
+                }}
+                onDragStart={(event) => {
+                  if (!canDragToEntity) {
+                    event.preventDefault();
+                    return;
+                  }
+                  event.dataTransfer.setData("application/factory-item", row.itemId);
+                  event.dataTransfer.setData("application/factory-source-kind", "tray");
+                  event.dataTransfer.effectAllowed = "move";
+                }}
+                title={row.overLimit
+                  ? `${itemLabel(row.itemId)}超过当前自动写入上限；现有库存不会删除`
+                  : canDragToEntity
+                    ? `拿取${itemLabel(row.itemId)}，或拖入普通建筑输入`
+                    : `拿取${itemLabel(row.itemId)}`}
+              >
+                <NativeItemMark itemId={row.itemId} />
+                <span>{itemLabel(row.itemId)}</span>
+                <strong><QuantityValue value={row.amount} interactive={false} /></strong>
+              </button>
+              {onDiscardTrayItem ? <button
+                className="native-tray-row-discard danger"
+                type="button"
+                disabled={disabled}
+                onClick={() => onDiscardTrayItem(row.itemId, row.amount)}
+                title={`永久丢弃全部${itemLabel(row.itemId)}`}
+                aria-label={`永久丢弃全部${itemLabel(row.itemId)}`}
+              ><Trash2 size={13} /></button> : null}
+            </div>;
           })}
         </div>
-        <p className="native-resource-rail__notice">可将普通建筑输入/输出拖回托盘，也可把托盘物资拖入内置普通配方建筑；站点、量子物流、建筑间直拖与永久丢弃仍保持关闭。</p>
+        <p className="native-resource-rail__notice">可将普通建筑输入/输出拖回托盘，也可把托盘物资拖入内置普通配方建筑；永久丢弃需要二次确认并由 Rust 按当前 revision 扣除。</p>
       </section>
     </>}
   </aside>;

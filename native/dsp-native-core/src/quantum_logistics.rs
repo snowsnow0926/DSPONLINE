@@ -5194,6 +5194,114 @@ fn transition_bridge(station_id: &str, route: &TransitionRoute, elapsed: f64) ->
     })
 }
 
+/// Derive a bounded player-requested quantum handoff from the current Rust
+/// authority revision.  The renderer supplies only exact entity IDs and, for
+/// collectors, the requested final mode.  Route membership and bridge cargo
+/// are rebuilt here from every authoritative station row so a stale UI cannot
+/// omit in-flight material from the transition contract.
+pub(crate) fn prepare_player_quantum_mode_changes(
+    state: &crate::state::CoreState,
+    base: &Map<String, Value>,
+    entity_ids: &[String],
+    collector_target_mode: Option<&str>,
+) -> anyhow::Result<Vec<(String, Value)>> {
+    if entity_ids.is_empty() || entity_ids.len() > 4_096 {
+        bail!("native quantum player action scope is invalid")
+    }
+    if let Some(mode) = collector_target_mode
+        && !matches!(mode, "quantum" | "legacy")
+    {
+        bail!("native quantum collector target mode is invalid")
+    }
+    let quantum_tech_completed = completed_tech(base, "quantum_logistics_network");
+    if collector_target_mode != Some("legacy") && !quantum_tech_completed {
+        bail!("native quantum player action technology is locked")
+    }
+    let elapsed = finite_number(base.get("elapsedSeconds"));
+    if !elapsed.is_finite() || elapsed < 0.0 {
+        bail!("native quantum player action elapsed time is invalid")
+    }
+    let entities = state.parse_entities_parallel()?;
+    let mut routes_by_station = HashMap::<String, Vec<TransitionRoute>>::new();
+    for (entity_index, entity) in entities.iter().enumerate() {
+        let probe = probe_transition_entity(entity_index, entity, quantum_tech_completed);
+        for (station_id, route) in probe.route_memberships {
+            routes_by_station.entry(station_id).or_default().push(route);
+        }
+    }
+
+    let mut replacements = Vec::new();
+    for entity_id in entity_ids {
+        let index = *state
+            .entity_index
+            .get(entity_id)
+            .ok_or_else(|| anyhow!("native quantum player action entity is missing"))?;
+        let source = entities
+            .get(index)
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native quantum player action entity is invalid"))?;
+        if string_at(source, "id") != Some(entity_id)
+            || source.get("interactionLocked").and_then(Value::as_bool) == Some(true)
+        {
+            continue;
+        }
+        let current_mode = string_at(source, "quantumMode").unwrap_or("legacy");
+        if source
+            .get("quantumTransition")
+            .is_some_and(|value| !value.is_null())
+        {
+            continue;
+        }
+        let target_mode = if let Some(target_mode) = collector_target_mode {
+            if string_at(source, "buildingId") != Some("orbital_collector")
+                || current_mode == target_mode
+            {
+                continue;
+            }
+            target_mode
+        } else {
+            if string_at(source, "buildingId") != Some("interstellar_logistics_station")
+                || finite_number(source.get("stationTier")).floor() < 2.0
+                || current_mode == "quantum"
+            {
+                continue;
+            }
+            "quantum"
+        };
+        let bridges = if target_mode == "quantum" {
+            routes_by_station
+                .get(entity_id)
+                .map(Vec::as_slice)
+                .unwrap_or_default()
+                .iter()
+                .map(|route| transition_bridge(entity_id, route, elapsed))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let mut candidate = Value::Object(source.clone());
+        let object = candidate
+            .as_object_mut()
+            .expect("quantum player action cloned an object");
+        object.insert("quantumMode".to_owned(), Value::from("transitioning"));
+        object.insert(
+            "quantumTransition".to_owned(),
+            serde_json::json!({
+                "targetMode": target_mode,
+                "startedAtSecond": elapsed,
+                "boundarySecond": ((elapsed / SETTLEMENT_SECONDS).floor() + 1.0) * SETTLEMENT_SECONDS,
+                "bridges": bridges,
+            }),
+        );
+        object.remove("quantumTarget");
+        replacements.push((entity_id.clone(), candidate));
+    }
+    if replacements.is_empty() {
+        bail!("native quantum player action has no eligible entities")
+    }
+    Ok(replacements)
+}
+
 fn bridge_matches(station_id: &str, bridge_id: &str, route_id: &str) -> bool {
     bridge_id == format!("quantum_bridge_{route_id}")
         || bridge_id == format!("quantum_bridge_{station_id}_{route_id}")

@@ -8,6 +8,7 @@ import {
   type FactoryTimeWarpReadModel,
   type NativeConstructionCenterQuantityRows,
   type NativeConstructionCenterWorkspaceReadModel,
+  type NativeWorkspaceActionReadModel,
   type PlanetNavigationReadModel,
   type PlanetNavigationRowReadModel,
 } from "./factoryReadModels";
@@ -24,6 +25,7 @@ export interface NativeAuthoritativeFactoryWorkspaceFrame {
   readonly constructionHeadline: FactoryConstructionHeadlineReadModel;
   readonly constructionWorkspace: FactoryConstructionWorkspaceReadModel;
   readonly planetNavigation: PlanetNavigationReadModel;
+  readonly workspace: NativeWorkspaceActionReadModel | null;
 }
 
 function validTimeWarp(value: FactoryTimeWarpReadModel | undefined, simulationSpeed: number): value is FactoryTimeWarpReadModel {
@@ -184,6 +186,59 @@ function validPlanetNavigation(model: PlanetNavigationReadModel, activePlanetId:
   return activeRows === 1;
 }
 
+function validWorkspaceActionReadModel(
+  model: NativeWorkspaceActionReadModel | undefined,
+  activePlanetId: string,
+  knownPlanetIds: ReadonlySet<string>,
+): model is NativeWorkspaceActionReadModel {
+  if (!model || model.schema !== "workspace-actions-v1" || model.activePlanetId !== activePlanetId ||
+    !isCompleteRows(model.regions, FACTORY_READ_MODEL_LIMITS.canvasRegionRows) ||
+    !isCompleteRows(model.bookmarks, FACTORY_READ_MODEL_LIMITS.canvasBookmarkRows) ||
+    !isCompleteRows(model.handcraftQueue, FACTORY_READ_MODEL_LIMITS.handcraftQueueRows) ||
+    !isBoundedRows(model.handcraftRecipes, FACTORY_READ_MODEL_LIMITS.handcraftRecipeRows)) return false;
+  const validColor = (value: unknown) => typeof value === "string" && /^#[0-9a-f]{6}$/iu.test(value);
+  const regionIds = new Set<string>();
+  for (const row of model.regions.rows) {
+    if (!isOpaqueId(row.id) || regionIds.has(row.id) || !isOpaqueId(row.planetId) || !knownPlanetIds.has(row.planetId) ||
+      typeof row.name !== "string" || row.name.length < 1 || row.name.length > 256 ||
+      ![row.x, row.y, row.width, row.height].every(Number.isFinite) || row.width < 40 || row.height < 40 ||
+      !validColor(row.fillColor) || !validColor(row.borderColor)) return false;
+    regionIds.add(row.id);
+  }
+  const bookmarkIds = new Set<string>();
+  for (const row of model.bookmarks.rows) {
+    if (!isOpaqueId(row.id) || bookmarkIds.has(row.id) || !isOpaqueId(row.planetId) || !knownPlanetIds.has(row.planetId) ||
+      typeof row.name !== "string" || row.name.length < 1 || row.name.length > 256 ||
+      !row.viewport || ![row.viewport.x, row.viewport.y, row.viewport.zoom, row.createdAtSeconds].every(Number.isFinite) ||
+      row.viewport.zoom < 0.1 || row.viewport.zoom > 2.5 || row.createdAtSeconds < 0) return false;
+    bookmarkIds.add(row.id);
+  }
+  const queueIds = new Set<string>();
+  for (const row of model.handcraftQueue.rows) {
+    if (!isOpaqueId(row.entryId) || queueIds.has(row.entryId) || !isOpaqueId(row.recipeId) ||
+      !isOpaqueId(row.outputItemId) || !knownPlanetIds.has(row.planetId) ||
+      typeof row.recipeName !== "string" || typeof row.outputItemName !== "string" ||
+      !Number.isSafeInteger(row.batchesTotal) || row.batchesTotal < 1 ||
+      !Number.isSafeInteger(row.batchesRemaining) || row.batchesRemaining < 0 || row.batchesRemaining > row.batchesTotal ||
+      !Number.isFinite(row.progress) || row.progress < 0 || row.progress > 1 ||
+      !Number.isFinite(row.queuedAt) || row.queuedAt < 0) return false;
+    queueIds.add(row.entryId);
+  }
+  const recipeIds = new Set<string>();
+  for (const row of model.handcraftRecipes.rows) {
+    if (!isOpaqueId(row.recipeId) || recipeIds.has(row.recipeId) || !isOpaqueId(row.buildingId) ||
+      typeof row.name !== "string" || row.name.length < 1 || row.name.length > 256 ||
+      typeof row.buildingName !== "string" || row.buildingName.length < 1 || row.buildingName.length > 256 ||
+      !Number.isFinite(row.duration) || row.duration <= 0 || typeof row.unlocked !== "boolean" ||
+      row.requiredTechId !== null && !isOpaqueId(row.requiredTechId) ||
+      !Array.isArray(row.inputs) || row.inputs.length < 1 || !Array.isArray(row.outputs) || row.outputs.length < 1 ||
+      [...row.inputs, ...row.outputs].some((item) => !isOpaqueId(item.itemId) || typeof item.name !== "string" ||
+        item.name.length < 1 || item.name.length > 256 || !Number.isFinite(item.amount) || item.amount <= 0)) return false;
+    recipeIds.add(row.recipeId);
+  }
+  return model.handcraftQueue.rows.every((row) => model.handcraftRecipes.truncated || recipeIds.has(row.recipeId));
+}
+
 function validConstruction(model: FactoryConstructionWorkspaceReadModel): boolean {
   if (model.schema !== FACTORY_READ_MODEL_SCHEMA ||
     !isCompleteRows(model.queue, FACTORY_READ_MODEL_LIMITS.constructionQueueRows) ||
@@ -219,6 +274,7 @@ export function selectNativeAuthoritativeFactoryWorkspaceFrame(
   const shell = factory?.shell;
   const navigation = factory?.planetNavigation;
   const construction = factory?.construction;
+  const workspace = factory?.workspace;
   if (!frame || frame.authoritySessionId !== binding.sessionId || frame.authorityRunId !== binding.runId ||
     frame.revision !== binding.expectedRevision || frame.planetId !== binding.activePlanetId ||
     !factory || factory.schemaVersion !== 1 || factory.projectionType !== "factory-read-model-v1" ||
@@ -236,6 +292,10 @@ export function selectNativeAuthoritativeFactoryWorkspaceFrame(
     })) return null;
   const activePlanet = navigation.planets.rows.find((row) => row.planetId === binding.activePlanetId);
   if (!activePlanet?.active || activePlanet.constructionQueueCount > shell.constructionQueueCount) return null;
+  const planetIds = new Set(navigation.planets.rows.map((row) => row.planetId));
+  const verifiedWorkspace = validWorkspaceActionReadModel(workspace, binding.activePlanetId, planetIds)
+    ? workspace
+    : null;
 
   return Object.freeze({
     source: "native-authoritative",
@@ -265,5 +325,6 @@ export function selectNativeAuthoritativeFactoryWorkspaceFrame(
       revision: binding.expectedRevision,
     }),
     planetNavigation: navigation,
+    workspace: verifiedWorkspace,
   });
 }

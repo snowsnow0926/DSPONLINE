@@ -860,6 +860,12 @@ fn handle_request(
         ControlRequest::CoreCommitPlayerAuthorityCommand(control) => to_value(
             cores.commit_player_authority_command(store, &control.session_id, control.request)?,
         )?,
+        ControlRequest::CorePlayerAuthorityHistoryStatus(control) => {
+            to_value(cores.player_authority_history_status(&control.session_id)?)?
+        }
+        ControlRequest::CoreCommitPlayerAuthorityHistory(control) => to_value(
+            cores.commit_player_authority_history(store, &control.session_id, control.request)?,
+        )?,
         ControlRequest::CoreCommitPlayerAuthoritySystemSpaceStationCommand(control) => {
             to_value(cores.commit_player_authority_system_space_station_command(
                 store,

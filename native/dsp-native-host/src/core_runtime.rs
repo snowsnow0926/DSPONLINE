@@ -43,6 +43,7 @@ const MAX_COMMAND_PALETTE_SEARCH_REQUEST_BYTES: usize = 32_768;
 const MAX_SYSTEM_SPACE_STATION_INTENT_REQUEST_BYTES: usize = 32_768;
 const MAX_ORBITAL_CONTRACT_INTENT_REQUEST_BYTES: usize = 32_768;
 const MAX_OPERATIONS_SETTING_INTENT_REQUEST_BYTES: usize = 16_384;
+const MAX_PLAYER_COMMAND_HISTORY_ENTRIES: usize = 64;
 
 pub const NATIVE_CORE_VIEWPORT_ENTITY_PRESENTATION_V1_CAPABILITY: &str =
     "native-core-viewport-entity-presentation-v1";
@@ -713,6 +714,22 @@ pub struct CoreCommitPlayerAuthorityCommandRequest {
     pub command: SimulationCommandPatch,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PlayerAuthorityHistoryDirection {
+    Undo,
+    Redo,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreCommitPlayerAuthorityHistoryRequest {
+    pub run_id: String,
+    pub operation_id: String,
+    pub base_revision: u64,
+    pub direction: PlayerAuthorityHistoryDirection,
+}
+
 /// Main/renderer submit only one bounded semantic intent. The Rust CORE
 /// derives and re-proves the durable SimulationCommandPatch; that patch never
 /// crosses the renderer IPC boundary.
@@ -817,6 +834,25 @@ pub struct CoreCommitPlayerAuthorityCommandResult {
     pub topology_dirty: bool,
     pub summary: CoreStateSummary,
     pub duplicate: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorePlayerAuthorityHistoryStatus {
+    pub revision: u64,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    pub undo_depth: usize,
+    pub redo_depth: usize,
+    pub truncated_reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreCommitPlayerAuthorityHistoryResult {
+    pub direction: PlayerAuthorityHistoryDirection,
+    pub history: CorePlayerAuthorityHistoryStatus,
+    pub committed: CoreCommitPlayerAuthorityCommandResult,
 }
 
 #[derive(Debug, Serialize)]
@@ -943,6 +979,8 @@ enum PlayerAuthorityCommandKind {
     SystemSpaceStation,
     OrbitalContract,
     OperationsSetting,
+    HistoryUndo,
+    HistoryRedo,
     PauseLifecycle {
         target_paused: bool,
         settled_deadline_ms: u64,
@@ -957,7 +995,21 @@ impl PlayerAuthorityCommandKind {
     fn is_rust_prevalidated(self) -> bool {
         matches!(
             self,
-            Self::SystemSpaceStation | Self::OrbitalContract | Self::OperationsSetting
+            Self::SystemSpaceStation
+                | Self::OrbitalContract
+                | Self::OperationsSetting
+                | Self::HistoryUndo
+                | Self::HistoryRedo
+        )
+    }
+
+    fn records_session_history(self) -> bool {
+        matches!(
+            self,
+            Self::Gameplay
+                | Self::SystemSpaceStation
+                | Self::OrbitalContract
+                | Self::OperationsSetting
         )
     }
 }
@@ -995,8 +1047,37 @@ pub struct CoreRegistry {
     sessions: HashMap<String, CoreState>,
     uncertain_checkpoint_transactions: HashMap<String, UncertainCoreCheckpoint>,
     player_authority_startup_recovery: Option<CorePlayerAuthorityStartupRecoveryReceipt>,
+    player_command_histories: HashMap<String, PlayerCommandHistory>,
+    pending_player_command_history: HashMap<String, PendingPlayerCommandHistory>,
     #[cfg(test)]
     player_authority_coverage_override: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PlayerCommandHistoryEntry {
+    command_id: String,
+    /// Original bounded semantic command retained for audit/diagnostics. Undo
+    /// and redo apply only the two Rust-derived direct transitions below.
+    _semantic: SimulationCommandPatch,
+    forward: SimulationCommandPatch,
+    inverse: SimulationCommandPatch,
+    source_sha256: String,
+    result_sha256: String,
+    result_revision: u64,
+    undo_revision: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PlayerCommandHistory {
+    undo: Vec<PlayerCommandHistoryEntry>,
+    redo: Vec<PlayerCommandHistoryEntry>,
+    truncated_reason: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+enum PendingPlayerCommandHistory {
+    Record(PlayerCommandHistoryEntry),
+    Truncate(String),
 }
 
 #[derive(Clone, Debug)]
@@ -1012,6 +1093,8 @@ impl Default for CoreRegistry {
             sessions: HashMap::new(),
             uncertain_checkpoint_transactions: HashMap::new(),
             player_authority_startup_recovery: None,
+            player_command_histories: HashMap::new(),
+            pending_player_command_history: HashMap::new(),
             #[cfg(test)]
             player_authority_coverage_override: false,
         }
@@ -2542,6 +2625,188 @@ impl CoreRegistry {
         )
     }
 
+    fn reconcile_player_command_history(
+        &mut self,
+        session_id: &str,
+    ) -> anyhow::Result<CorePlayerAuthorityHistoryStatus> {
+        validate_session_id(session_id)?;
+        let summary = self.status(session_id)?;
+        let history = self
+            .player_command_histories
+            .entry(session_id.to_owned())
+            .or_default();
+        let undo_matches = history.undo.last().is_some_and(|entry| {
+            entry.result_revision == summary.revision
+                && entry.result_sha256 == summary.canonical_sha256
+        });
+        let redo_matches = history.redo.last().is_some_and(|entry| {
+            entry.undo_revision == Some(summary.revision)
+                && entry.source_sha256 == summary.canonical_sha256
+        });
+        if (!history.undo.is_empty() && !undo_matches)
+            || (!history.redo.is_empty() && !redo_matches)
+        {
+            history.undo.clear();
+            history.redo.clear();
+            history.truncated_reason =
+                Some("revision changed outside the confirmed session command history".to_owned());
+        }
+        Ok(CorePlayerAuthorityHistoryStatus {
+            revision: summary.revision,
+            can_undo: history.undo.last().is_some_and(|entry| {
+                entry.result_revision == summary.revision
+                    && entry.result_sha256 == summary.canonical_sha256
+            }),
+            can_redo: history.redo.last().is_some_and(|entry| {
+                entry.undo_revision == Some(summary.revision)
+                    && entry.source_sha256 == summary.canonical_sha256
+            }),
+            undo_depth: history.undo.len(),
+            redo_depth: history.redo.len(),
+            truncated_reason: history.truncated_reason.clone(),
+        })
+    }
+
+    fn finish_pending_player_command_history(&mut self, session_id: &str, command_id: &str) {
+        let Some(pending) = self.pending_player_command_history.remove(command_id) else {
+            return;
+        };
+        let history = self
+            .player_command_histories
+            .entry(session_id.to_owned())
+            .or_default();
+        match pending {
+            PendingPlayerCommandHistory::Record(entry) => {
+                if history
+                    .undo
+                    .last()
+                    .is_some_and(|current| current.command_id == entry.command_id)
+                {
+                    return;
+                }
+                history.redo.clear();
+                history.undo.push(entry);
+                if history.undo.len() > MAX_PLAYER_COMMAND_HISTORY_ENTRIES {
+                    history.undo.remove(0);
+                }
+                history.truncated_reason = None;
+            }
+            PendingPlayerCommandHistory::Truncate(reason) => {
+                history.undo.clear();
+                history.redo.clear();
+                history.truncated_reason = Some(reason);
+            }
+        }
+    }
+
+    pub fn player_authority_history_status(
+        &mut self,
+        session_id: &str,
+    ) -> anyhow::Result<CorePlayerAuthorityHistoryStatus> {
+        self.reconcile_player_command_history(session_id)
+    }
+
+    pub fn commit_player_authority_history(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitPlayerAuthorityHistoryRequest,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityHistoryResult> {
+        if request.base_revision > MAX_SAFE_INTEGER
+            || request.operation_id.is_empty()
+            || request.operation_id.len() > 128
+            || !request
+                .operation_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            bail!("native player-authority history request is invalid")
+        }
+        let status = self.reconcile_player_command_history(session_id)?;
+        if status.revision != request.base_revision {
+            bail!("native player-authority history revision is stale")
+        }
+        let entry = {
+            let history = self
+                .player_command_histories
+                .get(session_id)
+                .ok_or_else(|| anyhow!("native player-authority history is unavailable"))?;
+            match request.direction {
+                PlayerAuthorityHistoryDirection::Undo => history.undo.last(),
+                PlayerAuthorityHistoryDirection::Redo => history.redo.last(),
+            }
+            .cloned()
+            .ok_or_else(|| anyhow!("native player-authority history direction is unavailable"))?
+        };
+        let mut command = match request.direction {
+            PlayerAuthorityHistoryDirection::Undo => entry.inverse.clone(),
+            PlayerAuthorityHistoryDirection::Redo => entry.forward.clone(),
+        };
+        command.base_revision = request.base_revision;
+        let direction_label = match request.direction {
+            PlayerAuthorityHistoryDirection::Undo => "undo",
+            PlayerAuthorityHistoryDirection::Redo => "redo",
+        };
+        let command_id = format!(
+            "history-{direction_label}-v1-{}",
+            canonical_sha256(&json!({
+                "operationId": request.operation_id,
+                "originCommandId": entry.command_id,
+                "baseRevision": request.base_revision,
+                "sourceSha256": entry.source_sha256,
+                "resultSha256": entry.result_sha256,
+            }))
+        );
+        let committed = self.commit_player_authority_command_internal(
+            store,
+            session_id,
+            CoreCommitPlayerAuthorityCommandRequest {
+                run_id: request.run_id,
+                command_id,
+                base_revision: request.base_revision,
+                command,
+            },
+            match request.direction {
+                PlayerAuthorityHistoryDirection::Undo => PlayerAuthorityCommandKind::HistoryUndo,
+                PlayerAuthorityHistoryDirection::Redo => PlayerAuthorityCommandKind::HistoryRedo,
+            },
+            #[cfg(test)]
+            PlayerAuthorityCommandFault::None,
+        )?;
+        let history = self
+            .player_command_histories
+            .get_mut(session_id)
+            .ok_or_else(|| anyhow!("native player-authority history disappeared"))?;
+        match request.direction {
+            PlayerAuthorityHistoryDirection::Undo => {
+                let mut moved = history
+                    .undo
+                    .pop()
+                    .filter(|current| current.command_id == entry.command_id)
+                    .ok_or_else(|| anyhow!("native player-authority undo history changed"))?;
+                moved.undo_revision = Some(committed.revision);
+                history.redo.push(moved);
+            }
+            PlayerAuthorityHistoryDirection::Redo => {
+                let mut moved = history
+                    .redo
+                    .pop()
+                    .filter(|current| current.command_id == entry.command_id)
+                    .ok_or_else(|| anyhow!("native player-authority redo history changed"))?;
+                moved.result_revision = committed.revision;
+                moved.undo_revision = None;
+                history.undo.push(moved);
+            }
+        }
+        history.truncated_reason = None;
+        let history = self.reconcile_player_command_history(session_id)?;
+        Ok(CoreCommitPlayerAuthorityHistoryResult {
+            direction: request.direction,
+            history,
+            committed,
+        })
+    }
+
     pub fn commit_player_authority_pause_transition(
         &mut self,
         store: &mut SaveStore,
@@ -3083,6 +3348,12 @@ impl CoreRegistry {
             None if pending.command_id.starts_with("operations-setting-v1-") => {
                 PlayerAuthorityCommandKind::OperationsSetting
             }
+            None if pending.command_id.starts_with("history-undo-v1-") => {
+                PlayerAuthorityCommandKind::HistoryUndo
+            }
+            None if pending.command_id.starts_with("history-redo-v1-") => {
+                PlayerAuthorityCommandKind::HistoryRedo
+            }
             None => PlayerAuthorityCommandKind::Gameplay,
         };
         let committed = self.commit_player_authority_command_internal(
@@ -3166,7 +3437,9 @@ impl CoreRegistry {
             PlayerAuthorityCommandKind::Gameplay
             | PlayerAuthorityCommandKind::SystemSpaceStation
             | PlayerAuthorityCommandKind::OrbitalContract
-            | PlayerAuthorityCommandKind::OperationsSetting => {
+            | PlayerAuthorityCommandKind::OperationsSetting
+            | PlayerAuthorityCommandKind::HistoryUndo
+            | PlayerAuthorityCommandKind::HistoryRedo => {
                 if player_authority_pause_target(&command_value).is_some() {
                     bail!("native player-authority pause transition requires the lifecycle path")
                 }
@@ -3191,6 +3464,8 @@ impl CoreRegistry {
             | PlayerAuthorityCommandKind::SystemSpaceStation
             | PlayerAuthorityCommandKind::OrbitalContract
             | PlayerAuthorityCommandKind::OperationsSetting
+            | PlayerAuthorityCommandKind::HistoryUndo
+            | PlayerAuthorityCommandKind::HistoryRedo
             | PlayerAuthorityCommandKind::PauseLifecycle {
                 target_paused: true,
                 ..
@@ -3204,14 +3479,18 @@ impl CoreRegistry {
             PlayerAuthorityCommandKind::Gameplay
             | PlayerAuthorityCommandKind::SystemSpaceStation
             | PlayerAuthorityCommandKind::OrbitalContract
-            | PlayerAuthorityCommandKind::OperationsSetting => false,
+            | PlayerAuthorityCommandKind::OperationsSetting
+            | PlayerAuthorityCommandKind::HistoryUndo
+            | PlayerAuthorityCommandKind::HistoryRedo => false,
             PlayerAuthorityCommandKind::PauseLifecycle { target_paused, .. } => target_paused,
         };
         let expected_source_paused = match kind {
             PlayerAuthorityCommandKind::Gameplay
             | PlayerAuthorityCommandKind::SystemSpaceStation
             | PlayerAuthorityCommandKind::OrbitalContract
-            | PlayerAuthorityCommandKind::OperationsSetting => false,
+            | PlayerAuthorityCommandKind::OperationsSetting
+            | PlayerAuthorityCommandKind::HistoryUndo
+            | PlayerAuthorityCommandKind::HistoryRedo => false,
             PlayerAuthorityCommandKind::PauseLifecycle { target_paused, .. } => !target_paused,
         };
         let duplicate_lifecycle_ack = kind.is_pause_lifecycle()
@@ -3294,6 +3573,9 @@ impl CoreRegistry {
                 bail!("native player-authority duplicate command checkpoint is no longer current");
             }
             let changes = store.read_player_authority_command_change_receipt(&initial)?;
+            if kind.records_session_history() {
+                self.finish_pending_player_command_history(session_id, &request.command_id);
+            }
             return Ok(CoreCommitPlayerAuthorityCommandResult {
                 sequence: initial.acknowledged.sequence,
                 command_id: request.command_id,
@@ -3328,10 +3610,12 @@ impl CoreRegistry {
             bail!("native player-authority command base revision is not current");
         }
 
+        let mut prepared_history = None;
         let command_changes = if initial.pending_command.is_none()
             || initial_summary.revision == request.base_revision
         {
-            let mut preflight = self.session(session_id)?.clone();
+            let source = self.session(session_id)?;
+            let mut preflight = source.clone();
             let applied = match kind {
                 PlayerAuthorityCommandKind::Gameplay => {
                     preflight.apply_player_authority_command(&request.command)?
@@ -3345,6 +3629,10 @@ impl CoreRegistry {
                 PlayerAuthorityCommandKind::OperationsSetting => {
                     preflight.apply_command(&request.command)?
                 }
+                PlayerAuthorityCommandKind::HistoryUndo
+                | PlayerAuthorityCommandKind::HistoryRedo => {
+                    preflight.apply_command(&request.command)?
+                }
                 PlayerAuthorityCommandKind::PauseLifecycle { .. } => {
                     preflight.apply_player_authority_pause_transition(&request.command)?
                 }
@@ -3353,6 +3641,32 @@ impl CoreRegistry {
                 || applied.revision != request.base_revision + 1
             {
                 bail!("native player-authority command preflight revision is invalid")
+            }
+            if kind.records_session_history() {
+                let reversible = source
+                    .reversible_transition_patch_to(&preflight, source.revision)
+                    .and_then(|forward| {
+                        preflight
+                            .reversible_transition_patch_to(source, applied.revision)
+                            .map(|inverse| (forward, inverse))
+                    });
+                prepared_history = Some(match reversible {
+                    Ok((forward, inverse)) => {
+                        PendingPlayerCommandHistory::Record(PlayerCommandHistoryEntry {
+                            command_id: request.command_id.clone(),
+                            _semantic: request.command.clone(),
+                            forward,
+                            inverse,
+                            source_sha256: initial_summary.canonical_sha256.clone(),
+                            result_sha256: preflight.canonical_sha256()?,
+                            result_revision: applied.revision,
+                            undo_revision: None,
+                        })
+                    }
+                    Err(error) => PendingPlayerCommandHistory::Truncate(format!(
+                        "confirmed command is not reversibly representable: {error}"
+                    )),
+                });
             }
             applied
         } else {
@@ -3370,14 +3684,15 @@ impl CoreRegistry {
             PlayerAuthorityCommandKind::Gameplay
             | PlayerAuthorityCommandKind::SystemSpaceStation
             | PlayerAuthorityCommandKind::OrbitalContract
-            | PlayerAuthorityCommandKind::OperationsSetting => store
-                .stage_player_authority_command(
-                    &authority_session_id,
-                    &request.run_id,
-                    &request.command_id,
-                    request.base_revision,
-                    command_value,
-                )?,
+            | PlayerAuthorityCommandKind::OperationsSetting
+            | PlayerAuthorityCommandKind::HistoryUndo
+            | PlayerAuthorityCommandKind::HistoryRedo => store.stage_player_authority_command(
+                &authority_session_id,
+                &request.run_id,
+                &request.command_id,
+                request.base_revision,
+                command_value,
+            )?,
             PlayerAuthorityCommandKind::PauseLifecycle {
                 target_paused,
                 settled_deadline_ms,
@@ -3389,6 +3704,10 @@ impl CoreRegistry {
                 settled_deadline_ms,
             )?,
         };
+        if let Some(prepared) = prepared_history {
+            self.pending_player_command_history
+                .insert(request.command_id.clone(), prepared);
+        }
         after_durable_boundary()?;
         let pending = staged
             .pending_command
@@ -3529,7 +3848,9 @@ impl CoreRegistry {
             PlayerAuthorityCommandKind::Gameplay
             | PlayerAuthorityCommandKind::SystemSpaceStation
             | PlayerAuthorityCommandKind::OrbitalContract
-            | PlayerAuthorityCommandKind::OperationsSetting => store
+            | PlayerAuthorityCommandKind::OperationsSetting
+            | PlayerAuthorityCommandKind::HistoryUndo
+            | PlayerAuthorityCommandKind::HistoryRedo => store
                 .acknowledge_player_authority_command(
                     &authority_session_id,
                     &request.run_id,
@@ -3544,7 +3865,6 @@ impl CoreRegistry {
                     checkpoint.clone(),
                 )?,
         };
-        after_durable_boundary()?;
         if lease.acknowledged.sequence != pending.sequence
             || lease.acknowledged.command_id.as_deref() != Some(pending.command_id.as_str())
             || lease.acknowledged.command_base_revision != Some(pending.base_revision)
@@ -3568,6 +3888,10 @@ impl CoreRegistry {
         {
             bail!("native player-authority pause lifecycle ACK phase differs")
         }
+        if kind.records_session_history() {
+            self.finish_pending_player_command_history(session_id, &pending.command_id);
+        }
+        after_durable_boundary()?;
         Ok(CoreCommitPlayerAuthorityCommandResult {
             sequence: pending.sequence,
             command_id: pending.command_id,
@@ -5672,6 +5996,11 @@ impl CoreRegistry {
     pub fn close(&mut self, session_id: &str) -> anyhow::Result<bool> {
         validate_session_id(session_id)?;
         self.uncertain_checkpoint_transactions.remove(session_id);
+        self.player_command_histories.remove(session_id);
+        // Pending entries are intentionally process/session-local. Closing any
+        // session is a lineage boundary, so fail closed instead of trying to
+        // infer ownership from an opaque command ID.
+        self.pending_player_command_history.clear();
         if self
             .player_authority_startup_recovery
             .as_ref()
@@ -5685,6 +6014,8 @@ impl CoreRegistry {
     pub fn close_all(&mut self) {
         self.uncertain_checkpoint_transactions.clear();
         self.player_authority_startup_recovery = None;
+        self.player_command_histories.clear();
+        self.pending_player_command_history.clear();
         self.sessions.clear();
     }
 
@@ -10233,6 +10564,94 @@ mod tests {
         assert_eq!(lease.acknowledged.revision, third.revision);
         assert!(lease.pending_tick.is_none());
         assert!(lease.pending_command.is_none());
+    }
+
+    #[test]
+    fn player_authority_session_history_undoes_redoes_and_truncates_after_a_tick() {
+        let (_root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture();
+        let original = registry
+            .projection(&session_id, &[], &["vein".to_owned()], &[])
+            .unwrap()["entities"][0]["position"]["x"]
+            .clone();
+        assert!(
+            !registry
+                .player_authority_history_status(&session_id)
+                .unwrap()
+                .can_undo
+        );
+
+        let committed = registry
+            .commit_player_authority_command(
+                &mut store,
+                &session_id,
+                player_authority_command(entry_checkpoint.revision, "history-source-1", json!(91)),
+            )
+            .unwrap();
+        let status = registry
+            .player_authority_history_status(&session_id)
+            .unwrap();
+        assert!(status.can_undo);
+        assert!(!status.can_redo);
+        assert_eq!(status.undo_depth, 1);
+
+        let undone = registry
+            .commit_player_authority_history(
+                &mut store,
+                &session_id,
+                CoreCommitPlayerAuthorityHistoryRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    operation_id: "history-undo-operation-1".to_owned(),
+                    base_revision: committed.revision,
+                    direction: PlayerAuthorityHistoryDirection::Undo,
+                },
+            )
+            .unwrap();
+        assert_eq!(undone.committed.revision, committed.revision + 1);
+        assert!(undone.history.can_redo);
+        assert_eq!(
+            registry
+                .projection(&session_id, &[], &["vein".to_owned()], &[])
+                .unwrap()["entities"][0]["position"]["x"],
+            original
+        );
+
+        let redone = registry
+            .commit_player_authority_history(
+                &mut store,
+                &session_id,
+                CoreCommitPlayerAuthorityHistoryRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    operation_id: "history-redo-operation-1".to_owned(),
+                    base_revision: undone.committed.revision,
+                    direction: PlayerAuthorityHistoryDirection::Redo,
+                },
+            )
+            .unwrap();
+        assert!(redone.history.can_undo);
+        assert_eq!(
+            registry
+                .projection(&session_id, &[], &["vein".to_owned()], &[])
+                .unwrap()["entities"][0]["position"]["x"],
+            json!(91.0)
+        );
+
+        registry
+            .commit_player_authority_tick(
+                &mut store,
+                &session_id,
+                CoreCommitPlayerAuthorityTickRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    sequence: redone.committed.sequence + 1,
+                },
+            )
+            .unwrap();
+        let truncated = registry
+            .player_authority_history_status(&session_id)
+            .unwrap();
+        assert!(!truncated.can_undo);
+        assert!(!truncated.can_redo);
+        assert!(truncated.truncated_reason.is_some());
     }
 
     #[test]

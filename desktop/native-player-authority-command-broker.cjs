@@ -167,6 +167,47 @@ class NativePlayerAuthorityCommandBroker {
     }
   }
 
+  async historyStatus(rendererOwnerId, rawRequest) {
+    if (!this.isTrustedRendererOwner(rendererOwnerId) ||
+        !exactKeys(rawRequest, ["sessionId"]) || !validLogicalId(rawRequest.sessionId) ||
+        !this.ownsSession(rawRequest.sessionId) || typeof this.runtime.historyStatus !== "function") {
+      throw brokerError(
+        "native player-authority history is unavailable",
+        "NATIVE_PLAYER_AUTHORITY_HISTORY_UNAVAILABLE",
+      );
+    }
+    return this.runtime.historyStatus();
+  }
+
+  async commitHistory(rendererOwnerId, rawRequest) {
+    if (!this.isTrustedRendererOwner(rendererOwnerId) ||
+        !exactKeys(rawRequest, ["sessionId", "operationId", "baseRevision", "direction"]) ||
+        !validLogicalId(rawRequest.sessionId) || !validLogicalId(rawRequest.operationId) ||
+        !Number.isSafeInteger(rawRequest.baseRevision) || rawRequest.baseRevision < 0 ||
+        (rawRequest.direction !== "undo" && rawRequest.direction !== "redo") ||
+        !this.ownsSession(rawRequest.sessionId) || typeof this.runtime.commitHistory !== "function") {
+      throw brokerError(
+        "native player-authority history request is invalid",
+        "NATIVE_PLAYER_AUTHORITY_HISTORY_REQUEST_INVALID",
+      );
+    }
+    const receipt = await this.runtime.commitHistory({
+      operationId: rawRequest.operationId,
+      baseRevision: rawRequest.baseRevision,
+      direction: rawRequest.direction,
+    });
+    if (receipt.previousRevision !== rawRequest.baseRevision ||
+        receipt.revision !== rawRequest.baseRevision + 1 ||
+        !Array.isArray(receipt.changedEntityIds) || !Array.isArray(receipt.changedBeltIds) ||
+        typeof receipt.topologyDirty !== "boolean" || !isRecord(receipt.history)) {
+      throw brokerError(
+        "native player-authority history receipt is invalid",
+        "NATIVE_PLAYER_AUTHORITY_HISTORY_RECEIPT_INVALID",
+      );
+    }
+    return receipt;
+  }
+
   async commit(rendererOwnerId, rawRequest) {
     if (!this.isTrustedRendererOwner(rendererOwnerId)) {
       throw brokerError(

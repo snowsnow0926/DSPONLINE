@@ -2832,6 +2832,32 @@ ipcMain.handle("desktop:native-core-reconcile-command", async (event, request) =
   });
 });
 
+ipcMain.handle("desktop:native-player-authority-history-status", async (event, request) => {
+  return runRendererNativeOperation("coreCommand", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_HISTORY_STATUS_FAILED",
+    message: "原生撤销历史读取失败",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityCommandBroker?.ownsSession(request?.sessionId)) {
+      throw new Error("原生撤销历史会话不可用");
+    }
+    return nativePlayerAuthorityCommandBroker.historyStatus(ownerId, request);
+  });
+});
+
+ipcMain.handle("desktop:native-player-authority-history-commit", async (event, request) => {
+  return runRendererNativeOperation("coreCommand", {
+    fallbackCode: "NATIVE_PLAYER_AUTHORITY_HISTORY_COMMIT_FAILED",
+    message: "原生撤销或重做提交失败",
+  }, async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityCommandBroker?.ownsSession(request?.sessionId)) {
+      throw new Error("原生撤销历史会话不可用");
+    }
+    return nativePlayerAuthorityCommandBroker.commitHistory(ownerId, request);
+  });
+});
+
 ipcMain.handle("desktop:native-player-authority-system-space-station-intent", async (event, request) => {
   return runRendererNativeOperation("coreCommand", {
     fallbackCode: "NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_FAILED",

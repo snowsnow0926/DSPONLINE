@@ -60,6 +60,7 @@ function frame(): NativeAuthoritativeFactoryWorkspaceFrame {
       automation: { enabled: true, quantumSourceEnabled: true, totalCrafted: 12, lastCraftedId: null, targets: emptyRows(), jobs: emptyRows(), destroyedByproducts: emptyRows() },
     },
     planetNavigation: { schema: "factory-read-model-v1", activePlanetId: "home", planets: emptyRows() },
+    workspace: null,
   };
 }
 

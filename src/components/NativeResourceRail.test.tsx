@@ -146,6 +146,26 @@ describe("NativeResourceRail", () => {
     expect(rows[1].title).toContain("超过当前自动写入上限");
   });
 
+  it("routes permanent discard as an exact row request without mutating the projection", () => {
+    const onDiscardTrayItem = vi.fn();
+    const source = { ...frame(), cargo: null };
+    act(() => root.render(<NativeResourceRail
+      frame={source}
+      pending={false}
+      entityDepositEnabled={false}
+      onPickTray={vi.fn()}
+      onDropCargo={vi.fn()}
+      onStowEntityInventory={vi.fn()}
+      onSetTrayItemLimit={vi.fn()}
+      onSetProductionBufferLimit={vi.fn()}
+      onDiscardTrayItem={onDiscardTrayItem}
+    />));
+    const discard = host.querySelector<HTMLButtonElement>("[aria-label='永久丢弃全部铁矿石']")!;
+    act(() => discard.click());
+    expect(onDiscardTrayItem).toHaveBeenCalledWith("iron_ore", 75);
+    expect(source.rowsByItemId.get("iron_ore")?.amount).toBe(75);
+  });
+
   it("accepts only entity input/output drags while the exact frame is ready", () => {
     const onStowEntityInventory = vi.fn();
     act(() => root.render(<NativeResourceRail

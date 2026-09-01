@@ -137,7 +137,7 @@
       "label": "轨道货运接口清空",
       "occurrences": 1,
       "lines": [
-        14348
+        14458
       ],
       "kind": "durable",
       "owner": "rust",
@@ -148,7 +148,7 @@
       "label": "轨道空间站操作",
       "occurrences": 1,
       "lines": [
-        23008
+        23651
       ],
       "kind": "durable",
       "owner": "rust",
@@ -159,22 +159,22 @@
       "label": "基础制造",
       "occurrences": 2,
       "lines": [
-        20524,
-        20576
+        20793,
+        20863
       ],
-      "kind": "intent",
-      "owner": "rust-pending",
-      "status": "pending",
-      "reason": "Handcraft enqueue and cancellation still need one native semantic command family."
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust workspace actions own bounded handcraft enqueue/cancel and derive materials from the current revision."
     },
     {
       "label": "建筑放置与扩建",
       "occurrences": 4,
       "lines": [
-        12941,
-        17891,
-        21350,
-        22391
+        13051,
+        18061,
+        21765,
+        22964
       ],
       "kind": "durable",
       "owner": "rust",
@@ -185,7 +185,7 @@
       "label": "建筑回收",
       "occurrences": 1,
       "lines": [
-        13002
+        13112
       ],
       "kind": "durable",
       "owner": "rust",
@@ -196,18 +196,18 @@
       "label": "建筑升级",
       "occurrences": 1,
       "lines": [
-        23266
+        23909
       ],
-      "kind": "intent",
-      "owner": "rust-pending",
-      "status": "pending",
-      "reason": "Single and selected upgrade targets need a Rust-derived upgrade command."
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust factory batch commands derive single and selected building upgrades, costs and stable targets."
     },
     {
       "label": "建筑拖放",
       "occurrences": 1,
       "lines": [
-        18364
+        18557
       ],
       "kind": "durable",
       "owner": "rust",
@@ -218,7 +218,7 @@
       "label": "建筑位置编辑",
       "occurrences": 1,
       "lines": [
-        21310
+        21725
       ],
       "kind": "durable",
       "owner": "rust",
@@ -229,10 +229,10 @@
       "label": "建筑物资交互",
       "occurrences": 4,
       "lines": [
-        12842,
-        12858,
-        12874,
-        12896
+        12952,
+        12968,
+        12984,
+        13006
       ],
       "kind": "durable",
       "owner": "rust",
@@ -243,20 +243,20 @@
       "label": "建筑与线路回收",
       "occurrences": 1,
       "lines": [
-        12745
+        12855
       ],
-      "kind": "intent",
-      "owner": "rust-pending",
-      "status": "pending",
-      "reason": "Combined selection removal needs one atomic semantic command."
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "One Rust factory batch transaction re-derives selected entities, incident belts and refunds atomically."
     },
     {
       "label": "建筑制造中心",
       "occurrences": 3,
       "lines": [
-        20662,
-        21207,
-        22163
+        20962,
+        21499,
+        22730
       ],
       "kind": "durable",
       "owner": "rust",
@@ -267,7 +267,7 @@
       "label": "旧版游戏规则设置",
       "occurrences": 1,
       "lines": [
-        13682
+        13792
       ],
       "kind": "deliberately-unsupported",
       "owner": "web",
@@ -278,7 +278,7 @@
       "label": "蓝图部署",
       "occurrences": 1,
       "lines": [
-        20511
+        20780
       ],
       "kind": "durable",
       "owner": "rust",
@@ -289,7 +289,7 @@
       "label": "蓝图复制",
       "occurrences": 1,
       "lines": [
-        20295
+        20564
       ],
       "kind": "durable",
       "owner": "rust",
@@ -300,7 +300,7 @@
       "label": "蓝图施工订单取消",
       "occurrences": 1,
       "lines": [
-        22516
+        23089
       ],
       "kind": "durable",
       "owner": "rust",
@@ -308,113 +308,76 @@
       "reason": "Rust queue cancellation owns refunds and version pruning."
     },
     {
-      "label": "喷涂模块拆卸",
-      "occurrences": 1,
-      "lines": [
-        20601
-      ],
-      "kind": "intent",
-      "owner": "rust-pending",
-      "status": "pending",
-      "reason": "A typed module-detach command with exact refund remains."
-    },
-    {
       "label": "批量回收",
       "occurrences": 1,
       "lines": [
-        20129
+        20362
       ],
-      "kind": "intent",
-      "owner": "rust-pending",
-      "status": "pending",
-      "reason": "Selected entity and belt removal must be atomic in Rust."
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust selection removal is one bounded atomic command with current-revision refund derivation."
     },
     {
       "label": "批量接入量子物流",
       "occurrences": 1,
       "lines": [
-        13949
+        14059
       ],
-      "kind": "intent",
-      "owner": "rust-pending",
-      "status": "pending",
-      "reason": "Rust must derive eligible entities and attachment cost from the current revision."
-    },
-    {
-      "label": "批量拉线",
-      "occurrences": 1,
-      "lines": [
-        17127
-      ],
-      "kind": "intent",
-      "owner": "rust-pending",
-      "status": "pending",
-      "reason": "Continuous geometry candidates need one bounded Rust command."
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust derives eligible entities by explicit IDs or system scope and applies one quantum transition."
     },
     {
       "label": "批量切换轨道采集器量子模式",
       "occurrences": 1,
       "lines": [
-        13978
+        14088
       ],
-      "kind": "intent",
-      "owner": "rust-pending",
-      "status": "pending",
-      "reason": "Collector eligibility and inventory accounting remain to be derived by Rust."
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust derives collector scope and settles the complete mode transition atomically."
     },
     {
       "label": "批量升级星际物流站",
       "occurrences": 1,
       "lines": [
-        13919
+        14029
       ],
-      "kind": "intent",
-      "owner": "rust-pending",
-      "status": "pending",
-      "reason": "Station upgrade costs and fleet limits need a native batch command."
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust derives the complete system scope and reuses authoritative station cost and fleet validation."
     },
     {
       "label": "批量增加建筑与线路",
       "occurrences": 1,
       "lines": [
-        20174
+        20443
       ],
-      "kind": "intent",
-      "owner": "rust-pending",
-      "status": "pending",
-      "reason": "Stack and lane changes need a selection semantic command."
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust factory batch commands derive stack/lane bounds and construction debits for the selection."
     },
     {
       "label": "生产区域编辑",
-      "occurrences": 5,
-      "lines": [
-        17959,
-        17972,
-        18010,
-        18026,
-        21297
-      ],
-      "kind": "intent",
-      "owner": "rust-pending",
-      "status": "pending",
-      "reason": "Persisted regions need typed Rust leaf commands; viewport-only state stays local."
-    },
-    {
-      "label": "施工库存删除",
       "occurrences": 1,
       "lines": [
-        20546
+        21712
       ],
-      "kind": "intent",
-      "owner": "rust-pending",
-      "status": "pending",
-      "reason": "Permanent discard requires Rust accounting and explicit confirmation."
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Persisted regions use typed Rust add/update/resize/remove leaves; device-only viewport state stays local."
     },
     {
       "label": "手动采矿",
       "occurrences": 1,
       "lines": [
-        12811
+        12921
       ],
       "kind": "durable",
       "owner": "rust",
@@ -425,25 +388,25 @@
       "label": "托盘与手持物",
       "occurrences": 8,
       "lines": [
-        12734,
-        12905,
-        12930,
-        13797,
-        21245,
-        21373,
-        21378,
-        21382
+        12844,
+        13015,
+        13040,
+        13907,
+        21537,
+        21788,
+        21793,
+        21797
       ],
-      "kind": "intent",
-      "owner": "rust-pending",
-      "status": "pending",
-      "reason": "Special tray, hand and cross-container moves are only partially covered."
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Paged native inventory projections and typed Rust pickup/drop/transfer/discard commands own persisted material movement."
     },
     {
       "label": "微型黑洞启停",
       "occurrences": 1,
       "lines": [
-        22225
+        22792
       ],
       "kind": "durable",
       "owner": "rust",
@@ -454,7 +417,7 @@
       "label": "物料配送接口设置",
       "occurrences": 1,
       "lines": [
-        14330
+        14440
       ],
       "kind": "durable",
       "owner": "rust",
@@ -465,7 +428,7 @@
       "label": "系统空间站输出口设置",
       "occurrences": 1,
       "lines": [
-        22985
+        23628
       ],
       "kind": "durable",
       "owner": "rust",
@@ -476,18 +439,18 @@
       "label": "远程轨道采集物设置",
       "occurrences": 1,
       "lines": [
-        20239
+        20508
       ],
-      "kind": "intent",
-      "owner": "rust-pending",
-      "status": "pending",
-      "reason": "Collector item assignment needs a typed native command."
+      "kind": "durable",
+      "owner": "rust",
+      "status": "implemented",
+      "reason": "Rust workspace action validates the collector, catalog item and safe return of old buffers/routes."
     },
     {
       "label": "远程物流槽位设置",
       "occurrences": 1,
       "lines": [
-        20214
+        20483
       ],
       "kind": "durable",
       "owner": "rust",
@@ -498,7 +461,7 @@
       "label": "运输线创建",
       "occurrences": 1,
       "lines": [
-        17642
+        17812
       ],
       "kind": "durable",
       "owner": "rust",

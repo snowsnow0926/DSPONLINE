@@ -46,6 +46,21 @@ pub struct PlanetDefinition {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct StarSystemDefinition {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    pub planet_ids: Vec<String>,
+    #[serde(default)]
+    pub exploration_cost: Vec<ItemAmount>,
+    #[serde(default)]
+    pub required_tech_id: Option<String>,
+    #[serde(default)]
+    pub prerequisite_system_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildingDefinition {
     pub id: String,
     pub kind: String,
@@ -159,6 +174,7 @@ pub struct RuntimeCatalog {
     pub snapshot: CatalogSnapshot,
     pub fingerprint: String,
     pub planets: Vec<PlanetDefinition>,
+    pub star_systems: HashMap<String, StarSystemDefinition>,
     pub items: HashMap<String, ItemDefinition>,
     pub buildings: HashMap<String, BuildingDefinition>,
     pub recipes: HashMap<String, RecipeDefinition>,
@@ -627,6 +643,7 @@ impl RuntimeCatalog {
             snapshot,
             fingerprint,
             planets,
+            star_systems: HashMap::new(),
             items,
             buildings,
             recipes,
@@ -645,6 +662,14 @@ impl RuntimeCatalog {
         let mut building_stack_policies = HashMap::new();
         let mut building_metadata = HashMap::new();
         let mut data_only_native_supported = true;
+        let star_system_rows = match value.get("starSystems") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(rows)) => {
+                serde_json::from_value::<Vec<StarSystemDefinition>>(Value::Array(rows.clone()))
+                    .context("decode native star-system command directory")?
+            }
+            Some(_) => bail!("native catalog star-system command directory is invalid"),
+        };
         if let Some(buildings) = value.get("buildings").and_then(Value::as_array) {
             for building in buildings {
                 let Some(object) = building.as_object() else {
@@ -914,9 +939,84 @@ impl RuntimeCatalog {
                 }
             }
         }
-        let snapshot =
-            serde_json::from_value::<CatalogSnapshot>(value).context("decode native catalog")?;
+        let snapshot = serde_json::from_value::<CatalogSnapshot>(value.clone())
+            .context("decode native catalog")?;
         let mut catalog = Self::validate(snapshot, expected_registry_fingerprint)?;
+        if !star_system_rows.is_empty() {
+            if star_system_rows.len() > MAX_CATALOG_ENTRIES {
+                bail!("native catalog star-system command directory is too large")
+            }
+            unique_ids(star_system_rows.iter().map(|system| system.id.as_str()))?;
+            let system_ids = star_system_rows
+                .iter()
+                .map(|system| system.id.as_str())
+                .collect::<HashSet<_>>();
+            let planet_ids = catalog
+                .planets
+                .iter()
+                .map(|planet| planet.id.as_str())
+                .collect::<HashSet<_>>();
+            let mut assigned_planets = HashSet::new();
+            for system in &star_system_rows {
+                if system.planet_ids.is_empty()
+                    || system.planet_ids.iter().any(|planet_id| {
+                        !planet_ids.contains(planet_id.as_str())
+                            || !assigned_planets.insert(planet_id.as_str())
+                    })
+                    || system.exploration_cost.iter().any(|amount| {
+                        !catalog.items.contains_key(&amount.item_id)
+                            || !amount.amount.is_finite()
+                            || amount.amount <= 0.0
+                    })
+                    || system
+                        .required_tech_id
+                        .as_ref()
+                        .is_some_and(|id| !catalog.technologies.contains_key(id))
+                    || system
+                        .prerequisite_system_id
+                        .as_ref()
+                        .is_some_and(|id| !system_ids.contains(id.as_str()) || id == &system.id)
+                {
+                    bail!(
+                        "native catalog star-system definition is invalid: {}",
+                        system.id
+                    )
+                }
+                if system.planet_ids.iter().any(|planet_id| {
+                    catalog
+                        .planets
+                        .iter()
+                        .find(|planet| &planet.id == planet_id)
+                        .is_none_or(|planet| planet.system_id != system.id)
+                }) {
+                    bail!(
+                        "native catalog star-system planet binding is invalid: {}",
+                        system.id
+                    )
+                }
+                let mut cursor = system.prerequisite_system_id.as_deref();
+                let mut visited = HashSet::new();
+                while let Some(id) = cursor {
+                    if !visited.insert(id) || id == system.id {
+                        bail!("native catalog star-system prerequisite graph is cyclic")
+                    }
+                    cursor = star_system_rows
+                        .iter()
+                        .find(|candidate| candidate.id == id)
+                        .and_then(|candidate| candidate.prerequisite_system_id.as_deref());
+                }
+            }
+            if assigned_planets.len() != catalog.planets.len() {
+                bail!("native catalog star-system command directory is incomplete")
+            }
+            catalog.star_systems = star_system_rows
+                .into_iter()
+                .map(|system| (system.id.clone(), system))
+                .collect();
+            // Include transient command semantics in the in-memory catalog
+            // identity without changing the public registry fingerprint.
+            catalog.fingerprint = canonical_sha256(&value);
+        }
         for (id, policy) in building_stack_policies {
             if catalog.buildings.contains_key(&id) {
                 catalog.building_stack_policies.insert(id, policy);

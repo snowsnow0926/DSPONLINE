@@ -406,6 +406,13 @@ export interface DesktopBridge {
   applyNativeCoreCommand: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandResult>;
   /** Read-only lookup after a dispatched command lost its renderer response. */
   reconcileNativeCoreCommand?: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandReconciliationResult>;
+  /** Session-only reversible command journal; it is intentionally truncated at restart/import. */
+  getNativePlayerAuthorityHistoryStatus?: (
+    request: DesktopNativePlayerAuthorityHistoryStatusRequest,
+  ) => Promise<DesktopNativePlayerAuthorityHistoryStatus>;
+  commitNativePlayerAuthorityHistory?: (
+    request: DesktopNativePlayerAuthorityHistoryCommitRequest,
+  ) => Promise<DesktopNativePlayerAuthorityHistoryCommitResult>;
   advanceNativeCore: (request: DesktopNativeCoreAdvanceRequest) => Promise<DesktopNativeCoreAdvanceResult>;
   commitNativeCoreOperation: (request: DesktopNativeCoreCommitOperationRequest) => Promise<DesktopNativeCoreCommitOperationResult>;
   checkpointNativeCore: (request: DesktopNativeCoreCheckpointRequest) => Promise<DesktopNativeCoreCheckpointResult>;
@@ -737,10 +744,22 @@ export interface DesktopNativeCorePlanetDefinition {
   orbitalYields: Record<string, number>;
 }
 
+export interface DesktopNativeCoreStarSystemDefinition {
+  id: string;
+  name: string;
+  planetIds: string[];
+  explorationCost: Array<{ itemId: string; amount: number }>;
+  requiredTechId?: string;
+  prerequisiteSystemId?: string;
+}
+
 export interface DesktopNativeCoreCatalog {
   protocolVersion: 1;
   registryFingerprint: string;
   planets: DesktopNativeCorePlanetDefinition[];
+  /** Transient command directory; it is not a GameState or cloud-schema field. */
+  /** Transient desktop semantic directory; older hosts may omit it. */
+  starSystems?: DesktopNativeCoreStarSystemDefinition[];
   items: DesktopNativeCoreItemDefinition[];
   buildings: DesktopNativeCoreBuildingDefinition[];
   recipes: DesktopNativeCoreRecipeDefinition[];
@@ -3366,6 +3385,30 @@ export interface DesktopNativeCoreCommandResult {
   changedEntityIds: string[];
   changedBeltIds: string[];
   topologyDirty: boolean;
+}
+
+export interface DesktopNativePlayerAuthorityHistoryStatusRequest {
+  readonly sessionId: string;
+}
+
+export interface DesktopNativePlayerAuthorityHistoryCommitRequest {
+  readonly sessionId: string;
+  readonly operationId: string;
+  readonly baseRevision: number;
+  readonly direction: "undo" | "redo";
+}
+
+export interface DesktopNativePlayerAuthorityHistoryStatus {
+  readonly revision: number;
+  readonly canUndo: boolean;
+  readonly canRedo: boolean;
+  readonly undoDepth: number;
+  readonly redoDepth: number;
+  readonly truncatedReason: string | null;
+}
+
+export interface DesktopNativePlayerAuthorityHistoryCommitResult extends DesktopNativeCoreCommandResult {
+  readonly history: DesktopNativePlayerAuthorityHistoryStatus;
 }
 
 export type DesktopNativeCoreCommandReconciliationResult =

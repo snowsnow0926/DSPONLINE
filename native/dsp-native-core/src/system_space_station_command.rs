@@ -438,6 +438,17 @@ fn build_patch(
     }
 }
 
+/// Expands the same built-in station-upgrade rule for a compact workspace
+/// scope marker. The caller persists the marker; cold replay re-runs this
+/// derivation against the exact source revision instead of storing a renderer
+/// selected entity list.
+pub(crate) fn expand_interstellar_upgrade_scope(
+    state: &CoreState,
+    system_id: Option<&str>,
+) -> anyhow::Result<SimulationCommandPatch> {
+    upgrade_patch(state, None, system_id)
+}
+
 fn empty_patch(state: &CoreState) -> SimulationCommandPatch {
     SimulationCommandPatch {
         protocol_version: CORE_PROTOCOL_VERSION,

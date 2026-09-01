@@ -7,7 +7,8 @@ use crate::core_runtime::{
     CoreActivatePlayerAuthorityRequest, CoreCheckpointAcknowledgeExactRealtimeRequest,
     CoreCheckpointExactRealtimeFinalizationRequest, CoreCommitOfflineSettlementRequest,
     CoreCommitOperationExactRealtimeRequest, CoreCommitOperationRequest,
-    CoreCommitPlayerAuthorityCommandRequest, CoreCommitPlayerAuthorityMacroAdvanceRequest,
+    CoreCommitPlayerAuthorityCommandRequest, CoreCommitPlayerAuthorityHistoryRequest,
+    CoreCommitPlayerAuthorityMacroAdvanceRequest,
     CoreCommitPlayerAuthorityOperationsSettingCommandRequest,
     CoreCommitPlayerAuthorityOrbitalContractCommandRequest, CoreCommitPlayerAuthorityPauseRequest,
     CoreCommitPlayerAuthoritySystemSpaceStationCommandRequest,
@@ -50,6 +51,19 @@ pub struct CoreCommitPlayerAuthorityTickControlRequest {
 pub struct CoreCommitPlayerAuthorityCommandControlRequest {
     pub session_id: String,
     pub request: CoreCommitPlayerAuthorityCommandRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CorePlayerAuthorityHistoryStatusControlRequest {
+    pub session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreCommitPlayerAuthorityHistoryControlRequest {
+    pub session_id: String,
+    pub request: CoreCommitPlayerAuthorityHistoryRequest,
 }
 
 #[derive(Debug, Deserialize)]
@@ -556,6 +570,8 @@ pub enum ControlRequest {
     CoreActivatePlayerAuthority(CoreActivatePlayerAuthorityControlRequest),
     CoreCommitPlayerAuthorityTick(CoreCommitPlayerAuthorityTickControlRequest),
     CoreCommitPlayerAuthorityCommand(CoreCommitPlayerAuthorityCommandControlRequest),
+    CorePlayerAuthorityHistoryStatus(CorePlayerAuthorityHistoryStatusControlRequest),
+    CoreCommitPlayerAuthorityHistory(CoreCommitPlayerAuthorityHistoryControlRequest),
     CoreCommitPlayerAuthoritySystemSpaceStationCommand(
         CoreCommitPlayerAuthoritySystemSpaceStationCommandControlRequest,
     ),

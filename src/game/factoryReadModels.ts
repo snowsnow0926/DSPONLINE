@@ -32,6 +32,10 @@ export const FACTORY_READ_MODEL_LIMITS = Object.freeze({
   constructionDestroyedByproductRows: 256,
   constructionCostRows: 32,
   stationItemOptions: 128,
+  canvasRegionRows: 48,
+  canvasBookmarkRows: 24,
+  handcraftQueueRows: 20,
+  handcraftRecipeRows: 256,
 } as const);
 
 export interface BoundedReadModelRows<Row> {
@@ -230,6 +234,61 @@ export interface PlanetNavigationReadModel {
   readonly planets: BoundedReadModelRows<PlanetNavigationRowReadModel>;
 }
 
+export interface NativeCanvasRegionReadModel {
+  readonly id: string;
+  readonly name: string;
+  readonly planetId: string;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly fillColor: string;
+  readonly borderColor: string;
+}
+
+export interface NativeCanvasBookmarkReadModel {
+  readonly id: string;
+  readonly name: string;
+  readonly planetId: string;
+  readonly viewport: Readonly<{ x: number; y: number; zoom: number }>;
+  readonly createdAtSeconds: number;
+}
+
+export interface NativeHandcraftQueueRowReadModel {
+  readonly entryId: string;
+  readonly recipeId: string;
+  readonly recipeName: string;
+  readonly outputItemId: string;
+  readonly outputItemName: string;
+  readonly planetId: string;
+  readonly batchesTotal: number;
+  readonly batchesRemaining: number;
+  readonly progress: number;
+  readonly queuedAt: number;
+}
+
+export interface NativeHandcraftRecipeRowReadModel {
+  readonly recipeId: string;
+  readonly name: string;
+  readonly buildingId: string;
+  readonly buildingName: string;
+  readonly duration: number;
+  readonly unlocked: boolean;
+  readonly requiredTechId: string | null;
+  readonly inputs: readonly Readonly<{ itemId: string; name: string; amount: number }>[];
+  readonly outputs: readonly Readonly<{ itemId: string; name: string; amount: number }>[];
+}
+
+/** Small mutable-workspace projection. Commands remain intent-only and Rust-owned. */
+export interface NativeWorkspaceActionReadModel {
+  readonly schema: "workspace-actions-v1";
+  readonly activePlanetId: string;
+  readonly regions: BoundedReadModelRows<NativeCanvasRegionReadModel>;
+  readonly bookmarks: BoundedReadModelRows<NativeCanvasBookmarkReadModel>;
+  readonly handcraftQueue: BoundedReadModelRows<NativeHandcraftQueueRowReadModel>;
+  readonly handcraftRecipes: BoundedReadModelRows<NativeHandcraftRecipeRowReadModel>;
+}
+
 export type NativeStationModeReadModel = "supply" | "demand" | "storage";
 export type NativeStationRoutePolicyReadModel = "direct" | "relay-preferred" | "relay-required";
 
@@ -299,6 +358,14 @@ export interface SelectedEntityReadModel {
   readonly outputItems: BoundedReadModelRows<ItemQuantityReadModel>;
   /** Null for non-stations, MOD registries and stale cross-planet selections. */
   readonly stationConfiguration: NativeStationConfigurationReadModel | null;
+  /** Optional v2 presentation/capability leaves emitted by current Rust cores. */
+  readonly buildingName?: string | null;
+  readonly upgradeTargetId?: string | null;
+  readonly sprayCoaterInstalled?: boolean;
+  readonly quantumMode?: "legacy" | "transitioning" | "quantum";
+  readonly quantumTransitionActive?: boolean;
+  readonly stationTier?: number;
+  readonly orbitalYieldItemIds?: readonly string[];
 }
 
 export interface SelectedBeltReadModel {
@@ -538,6 +605,8 @@ export interface FactoryReadModelBundle {
   readonly planetNavigation: PlanetNavigationReadModel;
   readonly selection: FactorySelectionReadModel;
   readonly construction: ConstructionSummaryReadModel;
+  /** Optional for older native cores; current player-authority cores always emit it. */
+  readonly workspace?: NativeWorkspaceActionReadModel;
 }
 
 export interface FactoryReadModelRequest {

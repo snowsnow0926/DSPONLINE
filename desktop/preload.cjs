@@ -626,6 +626,8 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   requestNativeCoreProjectionTransfer,
   applyNativeCoreCommand: (request) => invokeNative("desktop:native-core-apply-command", { fallbackCode: "NATIVE_CORE_COMMAND_FAILED", message: "原生影子命令执行失败，请重试" }, request),
   reconcileNativeCoreCommand: (request) => invokeNative("desktop:native-core-reconcile-command", { fallbackCode: "NATIVE_CORE_COMMAND_RECONCILE_FAILED", message: "原生权威命令耐久收据对账失败" }, request),
+  getNativePlayerAuthorityHistoryStatus: (request) => invokeNative("desktop:native-player-authority-history-status", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_HISTORY_STATUS_FAILED", message: "原生撤销历史读取失败" }, request),
+  commitNativePlayerAuthorityHistory: (request) => invokeNative("desktop:native-player-authority-history-commit", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_HISTORY_COMMIT_FAILED", message: "原生撤销或重做提交失败" }, request),
   commitNativeSystemSpaceStationIntent: (request) => invokeNative("desktop:native-player-authority-system-space-station-intent", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_SYSTEM_SPACE_STATION_COMMAND_FAILED", message: "原生恒星系空间站命令提交失败，请重试" }, request),
   commitNativeOrbitalContractIntent: (request) => invokeNative("desktop:native-player-authority-orbital-contract-intent", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_ORBITAL_CONTRACT_COMMAND_FAILED", message: "原生轨道合同命令提交失败，请重试" }, request),
   commitNativeOperationsSettingIntent: (request) => invokeNative("desktop:native-player-authority-operations-setting-intent", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_OPERATIONS_SETTING_COMMAND_FAILED", message: "原生运营设置提交失败，请重试" }, normalizeOperationsSettingPreloadRequest(request)),

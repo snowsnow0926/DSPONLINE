@@ -291,6 +291,7 @@ import { createCanvasNodeSemanticRevisionToken, isCanvasNodeSemanticRevisionAppl
 import { planFactoryAutoLayout } from "./game/layout";
 import { createNativeFactoryAutoLayoutCommand } from "./game/nativeFactoryAutoLayoutCommands";
 import { createNativeFactoryBatchCommand } from "./game/nativeFactoryBatchCommands";
+import { createNativeFactoryBeltBatchCommand } from "./game/nativeFactoryBeltBatchCommands";
 import { createNativeFactoryPositionCommand } from "./game/nativeFactoryPositionCommands";
 import { createProductionPlan, removeProductionPlan, setProductionPlanRecipe, updateProductionPlan } from "./game/planning";
 import { getProductionLineLocations, type ProductionLineLocation } from "./game/productionLocator";
@@ -12686,11 +12687,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         redoGame();
       } else if (!editing && batchConnectionModeRef.current && event.key === "Enter") {
         event.preventDefault();
-        if (nativePlayerAuthorityOwnsRuntimeRef.current || nativeFactoryProjectionPendingRef.current) {
-          cancelBatchConnectionRef.current();
-          setNotice("Windows 原生权威未接入批量拉线命令；遗留预览已取消，存档未改变");
-          return;
-        }
         confirmBatchConnectionRef.current();
       } else if (event.key === "Escape") {
         cancelBatchConnectionRef.current();
@@ -17027,10 +17023,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const selectedHandle = getConnectionHandleTarget(event.target);
     const modifierContinuous = event instanceof MouseEvent && (event.ctrlKey || event.shiftKey);
     if (nativePlayerAuthorityOwnsRuntimeRef.current) {
-      if (modifierContinuous) {
-        setNotice("Windows 原生模式当前只允许逐条拉线；连续批量模式没有开启");
+      if (activePreview && (batchConnectionModeRef.current || modifierContinuous) && selectedHandle &&
+          selectedHandle.handleType !== activePreview.draft.handleType) {
+        if (modifierContinuous) activateBatchConnectionMode();
         return;
       }
+      if (modifierContinuous) activateBatchConnectionMode();
       if (activePreview) return;
       const draft = beginConnectionDraft(params);
       if (!draft || !selectedHandle) return;
@@ -17052,12 +17050,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [activateBatchConnectionMode, beginConnectionDraft, startClickConnectionPreview]);
 
   const longPressBindings = useLongPress<HTMLElement>({
-    disabled: nativePlayerAuthorityOwnsRuntime || nativeFactoryRouteUnsafe,
+    disabled: nativeFactoryRouteUnsafe,
     // Simulation revisions may advance faster than the 520 ms gesture. Only a
     // route/session identity change or a genuinely unsafe transition cancels it.
     resetKey: factoryGestureRouteKey,
     getTarget: (event) => {
-      if (nativePlayerAuthorityOwnsRuntimeRef.current) return null;
       if (nativeFactoryProjectionPendingRef.current) return null;
       if (!coarsePointer || placement || blueprintPlacementId) return null;
       const handle = getConnectionHandleTarget(event.target);
@@ -17066,7 +17063,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       return element?.dataset.id ?? null;
     },
     onLongPress: (targetId) => {
-      if (nativePlayerAuthorityOwnsRuntimeRef.current) return;
       if (nativeFactoryProjectionPendingRef.current) return;
       const connectionTarget = decodeLongPressConnectionTarget(targetId);
       if (connectionTarget) {
@@ -17123,14 +17119,41 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [clearConnectionPreview]);
 
   const confirmBatchConnection = useCallback(() => {
-    if (nativePlayerAuthorityOwnsRuntimeRef.current || nativeFactoryProjectionPendingRef.current) {
-      clearConnectionPreview(false);
-      rejectLegacyFactoryInteractionWhileNative("批量拉线");
+    if (nativeFactoryProjectionPendingRef.current) {
+      setBatchConnectionFeedback("原生工厂投影正在刷新，请稍后确认");
       return;
     }
     const selections = batchConnectionsRef.current;
     if (selections.length < 1) {
       setBatchConnectionFeedback("尚未选择下游输入接口");
+      return;
+    }
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+      if (!frame || nativePlayerAuthorityCommandInFlightRef.current) {
+        setBatchConnectionFeedback("Windows 原生权威正在确认上一项操作，请稍后重试");
+        return;
+      }
+      const accepted = commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+        createNativeFactoryBeltBatchCommand(baseRevision, selections.map((selection) => ({
+          sourceId: selection.connection.source!,
+          targetId: selection.connection.target!,
+          itemId: selection.itemId,
+          tier: selection.tier,
+          lanes: defaultBeltLanesRef.current,
+        }))),
+        () => {
+          const count = selections.length;
+          const consumed = count * defaultBeltLanesRef.current;
+          clearConnectionPreview(false);
+          recordBasicOnboardingEvent("belt-connected");
+          trackAnalyticsEvent("belt_connect");
+          setNotice(`连续拉线已由 Rust 原子提交：${count} 条，消耗传送带 ${consumed}`);
+          playTone("connect");
+        },
+        () => setBatchConnectionFeedback("Rust 拒绝了整批线路；候选、库存和存档均未改变"),
+      );
+      if (accepted) setBatchConnectionFeedback("正在由 Rust 原子核对全部端点、科技与施工库存…");
       return;
     }
     const before = gameRef.current;
@@ -17172,7 +17195,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     trackAnalyticsEvent("belt_connect");
     setNotice(`连续拉线已原子提交：成功 ${result.created}，跳过 0，消耗传送带 ${consumed}`);
     playTone("connect");
-  }, [clearConnectionPreview, commitGame, playTone, rejectLegacyFactoryInteractionWhileNative]);
+  }, [clearConnectionPreview, commitGame, commitNativeProjectedCommand, playTone]);
 
   useEffect(() => { confirmBatchConnectionRef.current = confirmBatchConnection; }, [confirmBatchConnection]);
   useEffect(() => { cancelBatchConnectionRef.current = cancelBatchConnection; }, [cancelBatchConnection]);
@@ -17202,9 +17225,22 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     if (duplicate) {
       return reject("该目标接口已在预览列表中，未重复加入");
     }
+    if (batchConnectionsRef.current.length >= 1_024) return reject("连续拉线单次最多选择 1024 条线路");
     const current = gameRef.current;
     const readState = getFactoryConnectionReadState(connection.source, connection.target);
     if (!readState) return reject("原生工厂投影尚未确认当前星球，请稍后重试");
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      if (targetPortIndex !== undefined || !isValidConnection(connection)) {
+        return reject("Windows 原生批量拉线当前只接受普通输入端口");
+      }
+      const next = [...batchConnectionsRef.current, { connection, itemId, tier: draft.tier }];
+      batchConnectionsRef.current = next;
+      setBatchConnections(next);
+      setBatchConnectionFailures([]);
+      setBatchConnectionFeedback(null);
+      setConnectionHint({ label: `${ITEMS[itemId]?.name ?? itemId} · 已选 ${next.length} 个下游；继续点选，Enter 或“确认连接”提交`, tone: "ready" });
+      return true;
+    }
     const check = getBeltConnectionCheck(readState, connection.source, connection.target, itemId, draft.tier, targetPortIndex, defaultBeltLanesRef.current);
     if (!check.ok) return reject(check.label);
     if (!isValidConnection(connection)) return reject("当前端口、线路等级或并联设置不兼容");
@@ -17435,6 +17471,19 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         connectionHandleSpatialIndexRef.current,
       ) : null);
       const connection = targetHandle ? connectionFromDraft(preview.draft, targetHandle) : null;
+      const modifierContinuous = event instanceof MouseEvent && (event.ctrlKey || event.shiftKey);
+      const continuous = batchConnectionModeRef.current || modifierContinuous;
+      if (continuous) {
+        if (modifierContinuous) activateBatchConnectionMode();
+        if (clickConnectionSucceededRef.current) {
+          clickConnectionSucceededRef.current = false;
+          setClickConnectionTone("pending");
+          setClickConnectionSnapPoint(null);
+        } else if (connection) {
+          addBatchConnection(connection, preview.draft);
+        }
+        return;
+      }
       let accepted = clickConnectionSucceededRef.current;
       if (!accepted && connection && isValidConnection(connection)) {
         accepted = connectRequestRef.current(connection, preview.draft.tier);
@@ -17638,6 +17687,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
 
   const onConnect = useCallback((connection: Connection, lockedTier?: BeltTier): boolean => {
     if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      if (batchConnectionModeRef.current) {
+        const draft = connectionDraftRef.current;
+        if (!draft) return false;
+        const accepted = addBatchConnection(connection, draft);
+        clickConnectionSucceededRef.current = accepted;
+        return accepted;
+      }
       return requestNativeOrdinaryBeltPlacement(connection, lockedTier);
     }
     if (rejectLegacyFactoryInteractionWhileNative("运输线创建")) return false;
@@ -17710,7 +17766,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     spawnInteractionBurst(pointerRef.current.x, pointerRef.current.y, "运输线已建立", "positive");
     playTone("connect");
     return true;
-  }, [beltTier, beltTierMode, coarsePointer, commitGame, flowStore, getFactoryConnectionReadState, mobileNavigation.openSheet, nextMobileShell, playTone, rejectLegacyFactoryInteractionWhileNative, requestNativeOrdinaryBeltPlacement, spawnInteractionBurst]);
+  }, [addBatchConnection, beltTier, beltTierMode, coarsePointer, commitGame, flowStore, getFactoryConnectionReadState, mobileNavigation.openSheet, nextMobileShell, playTone, rejectLegacyFactoryInteractionWhileNative, requestNativeOrdinaryBeltPlacement, spawnInteractionBurst]);
 
   useEffect(() => { connectRequestRef.current = onConnect; }, [onConnect]);
 

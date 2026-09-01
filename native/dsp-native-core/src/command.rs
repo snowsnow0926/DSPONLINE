@@ -1921,7 +1921,7 @@ fn expand_energy_exchanger_mode_intent(
     }
 
     let mut removed_belt_ids = Vec::new();
-    let mut belt_refunds = BTreeMap::<&'static str, u64>::new();
+    let mut belt_refunds = BTreeMap::<String, u64>::new();
     for belt_index in 0..state.belts.ids.len() {
         let belt = state.parse_belt(belt_index)?;
         let object = belt
@@ -1944,7 +1944,7 @@ fn expand_energy_exchanger_mode_intent(
             .try_into()
             .map_err(|_| anyhow!("native player-authority incident belt tier is invalid"))?;
         let construction_id = builtin_belt_construction_id(state, tier)?;
-        let refund = belt_refunds.entry(construction_id).or_default();
+        let refund = belt_refunds.entry(construction_id.to_owned()).or_default();
         *refund = refund
             .checked_add(lanes)
             .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
@@ -1958,7 +1958,7 @@ fn expand_energy_exchanger_mode_intent(
         .and_then(Value::as_object_mut)
         .ok_or_else(|| anyhow!("native player-authority construction inventory is missing"))?;
     for (construction_id, refund) in belt_refunds {
-        let current = normalized_construction_inventory(construction.get(construction_id))?;
+        let current = normalized_construction_inventory(construction.get(&construction_id))?;
         let next = current
             .checked_add(refund)
             .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
@@ -2300,7 +2300,7 @@ fn expand_fuel_item_intent(
     }
 
     let mut removed_belt_ids = Vec::new();
-    let mut belt_refunds = BTreeMap::<&'static str, u64>::new();
+    let mut belt_refunds = BTreeMap::<String, u64>::new();
     for belt_index in 0..state.belts.ids.len() {
         let belt = state.parse_belt(belt_index)?;
         let object = belt
@@ -2323,7 +2323,7 @@ fn expand_fuel_item_intent(
             .try_into()
             .map_err(|_| anyhow!("native player-authority incident fuel belt tier is invalid"))?;
         let construction_id = builtin_belt_construction_id(state, tier)?;
-        let refund = belt_refunds.entry(construction_id).or_default();
+        let refund = belt_refunds.entry(construction_id.to_owned()).or_default();
         *refund = refund
             .checked_add(lanes)
             .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
@@ -2335,7 +2335,7 @@ fn expand_fuel_item_intent(
         .and_then(Value::as_object_mut)
         .ok_or_else(|| anyhow!("native player-authority construction inventory is missing"))?;
     for (construction_id, refund) in belt_refunds {
-        let current = normalized_construction_inventory(construction.get(construction_id))?;
+        let current = normalized_construction_inventory(construction.get(&construction_id))?;
         let next = current
             .checked_add(refund)
             .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
@@ -3923,7 +3923,7 @@ fn derive_station_slot_item_command_from_direct(
     }
 
     let mut expected_removed_belt_ids = Vec::<String>::new();
-    let mut belt_refunds = BTreeMap::<&'static str, u64>::new();
+    let mut belt_refunds = BTreeMap::<String, u64>::new();
     if let Some(previous_item_id) = previous_item_id.as_deref() {
         for belt_index in 0..state.belts.ids.len() {
             let belt = state.parse_belt(belt_index)?;
@@ -3962,7 +3962,7 @@ fn derive_station_slot_item_command_from_direct(
                     anyhow!("native player-authority station slot belt tier is invalid")
                 })?;
             let construction_id = builtin_belt_construction_id(state, tier)?;
-            let refund = belt_refunds.entry(construction_id).or_default();
+            let refund = belt_refunds.entry(construction_id.to_owned()).or_default();
             *refund = refund
                 .checked_add(lanes)
                 .filter(|amount| *amount <= MAX_JAVASCRIPT_SAFE_INTEGER)
@@ -3984,7 +3984,7 @@ fn derive_station_slot_item_command_from_direct(
             .and_then(Value::as_object_mut)
             .ok_or_else(|| anyhow!("native player-authority construction inventory is missing"))?;
         for (construction_id, refund) in belt_refunds {
-            let current = normalized_construction_inventory(construction.get(construction_id))?;
+            let current = normalized_construction_inventory(construction.get(&construction_id))?;
             let expected = current
                 .checked_add(refund)
                 .filter(|amount| *amount <= MAX_JAVASCRIPT_SAFE_INTEGER)
@@ -8205,24 +8205,13 @@ fn player_belt_value(state: &CoreState, belt_id: &str) -> anyhow::Result<Value> 
     Ok(belt)
 }
 
-pub(crate) fn builtin_belt_construction_id(
-    state: &CoreState,
-    tier: u8,
-) -> anyhow::Result<&'static str> {
-    // The current catalog snapshot carries a belt tier and speed but not the
-    // matching construction ID.  Built-in tiers are stable and can therefore
-    // prove their debit/refund.  A content pack may register an arbitrary ID
-    // for tier 4+, so inventory-affecting belt commands remain fail-closed
-    // until that ID is added to an internal catalog revision.
-    if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT {
-        bail!("native player-authority belt construction mapping is not provable")
-    }
-    let construction_id = match tier {
-        1 => "conveyor_belt_mk1",
-        2 => "conveyor_belt_mk2",
-        3 => "conveyor_belt_mk3",
-        _ => bail!("native player-authority belt tier construction is not covered"),
-    };
+pub(crate) fn builtin_belt_construction_id(state: &CoreState, tier: u8) -> anyhow::Result<&str> {
+    let construction_id = state
+        .catalog
+        .belt_construction_ids
+        .get(&tier)
+        .map(String::as_str)
+        .ok_or_else(|| anyhow!("native player-authority belt tier construction is not covered"))?;
     if !state.catalog.belt_speeds.contains_key(&tier)
         || !state.catalog.constructions.contains_key(construction_id)
     {
@@ -8376,7 +8365,7 @@ fn validate_belt_removal_command(
         bail!("native player-authority belt removal shape is invalid")
     }
     let mut belt_ids = HashSet::new();
-    let mut refunds = BTreeMap::<&'static str, u64>::new();
+    let mut refunds = BTreeMap::<String, u64>::new();
     for belt_id in &command.removed_belt_ids {
         if !belt_ids.insert(belt_id.as_str()) {
             bail!("native player-authority belt removal target is repeated")
@@ -8393,7 +8382,7 @@ fn validate_belt_removal_command(
             .try_into()
             .map_err(|_| anyhow!("native player-authority removed belt tier is invalid"))?;
         let construction_id = builtin_belt_construction_id(state, tier)?;
-        let total = refunds.entry(construction_id).or_default();
+        let total = refunds.entry(construction_id.to_owned()).or_default();
         *total = total
             .checked_add(lanes)
             .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
@@ -8408,14 +8397,14 @@ fn validate_belt_removal_command(
         .and_then(Value::as_object)
         .ok_or_else(|| anyhow!("native player-authority construction inventory is missing"))?;
     for (construction_id, refund) in refunds {
-        let previous = normalized_construction_inventory(construction.get(construction_id))?;
+        let previous = normalized_construction_inventory(construction.get(&construction_id))?;
         let expected = previous
             .checked_add(refund)
             .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
             .ok_or_else(|| anyhow!("native player-authority belt construction refund overflows"))?;
         if require_exact_set_patch(
             &command.top_level_changes,
-            &["construction", construction_id],
+            &["construction", construction_id.as_str()],
         )?
         .as_u64()
             != Some(expected)
@@ -8557,6 +8546,9 @@ impl CoreState {
         }
         if crate::factory_batch_command::command_contains_intent(command) {
             return crate::factory_batch_command::validate_command(self, command);
+        }
+        if crate::factory_belt_batch_command::command_contains_intent(command) {
+            return crate::factory_belt_batch_command::validate_command(self, command);
         }
         if crate::blueprint_command::command_contains_intent(command) {
             return crate::blueprint_command::validate_command(self, command);
@@ -8849,6 +8841,13 @@ impl CoreState {
             result.topology_dirty = true;
             return Ok(result);
         }
+        if crate::factory_belt_batch_command::command_contains_intent(command) {
+            crate::factory_belt_batch_command::validate_resume_marker(command)?;
+            result.changed_entity_ids.clear();
+            result.changed_belt_ids.clear();
+            result.topology_dirty = true;
+            return Ok(result);
+        }
         if crate::recipe_command::command_contains_intent(command) {
             let entity_id = crate::recipe_command::validate_resume_marker(command)?;
             result.changed_entity_ids.push(entity_id);
@@ -8990,6 +8989,20 @@ impl CoreState {
             result.topology_dirty = true;
             return Ok(result);
         }
+        if crate::factory_belt_batch_command::command_contains_intent(command) {
+            if command.protocol_version != crate::CORE_PROTOCOL_VERSION {
+                bail!("native player-authority command protocol version is unsupported")
+            }
+            if command.base_revision != self.revision {
+                bail!("native player-authority command base revision is not current")
+            }
+            let expanded = crate::factory_belt_batch_command::expand_intent(self, command)?;
+            let mut result = self.apply_command(&expanded)?;
+            result.changed_entity_ids.clear();
+            result.changed_belt_ids.clear();
+            result.topology_dirty = true;
+            return Ok(result);
+        }
         self.validate_player_authority_command(command)?;
         if !command_contains_station_slot_mode(command)
             && !command_contains_station_slot_item(command)
@@ -9099,6 +9112,7 @@ impl CoreState {
         let expanded_galactic_export_intent;
         let expanded_factory_layout_intent;
         let expanded_factory_batch_intent;
+        let expanded_factory_belt_batch_intent;
         let mut compact_entity_recipe_receipt_id = None;
         let mut compact_special_input_port_receipt_id = None;
         let mut compact_galactic_export_receipt = None;
@@ -9107,6 +9121,7 @@ impl CoreState {
         let mut construction_queue_intent = None;
         let mut factory_layout_refresh = false;
         let mut factory_batch_refresh = false;
+        let mut factory_belt_batch_refresh = false;
         let applied_command = if crate::factory_layout_command::command_contains_intent(command) {
             expanded_factory_layout_intent =
                 crate::factory_layout_command::expand_intent(self, command)?;
@@ -9117,6 +9132,11 @@ impl CoreState {
                 crate::factory_batch_command::expand_intent(self, command)?;
             factory_batch_refresh = true;
             &expanded_factory_batch_intent
+        } else if crate::factory_belt_batch_command::command_contains_intent(command) {
+            expanded_factory_belt_batch_intent =
+                crate::factory_belt_batch_command::expand_intent(self, command)?;
+            factory_belt_batch_refresh = true;
+            &expanded_factory_belt_batch_intent
         } else if command_contains_active_planet_intent(command) {
             expanded_active_planet_intent = expand_active_planet_intent(self, command)?;
             &expanded_active_planet_intent
@@ -9457,6 +9477,11 @@ impl CoreState {
             // every debit/refund and derived incident belt is recalculated at
             // replay.  Live and recovered receipts therefore use the same
             // bounded full-topology invalidation.
+            result.changed_entity_ids.clear();
+            result.changed_belt_ids.clear();
+            result.topology_dirty = true;
+        }
+        if factory_belt_batch_refresh {
             result.changed_entity_ids.clear();
             result.changed_belt_ids.clear();
             result.topology_dirty = true;

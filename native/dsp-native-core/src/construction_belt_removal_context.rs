@@ -22,13 +22,12 @@ fn valid_opaque_id(value: &str) -> bool {
     !value.is_empty() && value.len() <= MAX_OPAQUE_ID_BYTES && !value.chars().any(char::is_control)
 }
 
-fn builtin_construction_id(tier: u8) -> Option<&'static str> {
-    match tier {
-        1 => Some("conveyor_belt_mk1"),
-        2 => Some("conveyor_belt_mk2"),
-        3 => Some("conveyor_belt_mk3"),
-        _ => None,
-    }
+fn registered_construction_id(state: &CoreState, tier: u8) -> Option<&str> {
+    state
+        .catalog
+        .belt_construction_ids
+        .get(&tier)
+        .map(String::as_str)
 }
 
 fn endpoint_domain_is_special(building_id: &str) -> bool {
@@ -212,7 +211,7 @@ pub(crate) fn eligibility(state: &CoreState, belt_id: &str) -> anyhow::Result<El
         return Ok(result.unsupported("unsupported-belt-tier"));
     };
     result.tier = Some(tier);
-    let Some(construction_id) = builtin_construction_id(tier) else {
+    let Some(construction_id) = registered_construction_id(state, tier) else {
         return Ok(result.unsupported("unsupported-belt-tier"));
     };
     result.construction_id = Some(construction_id.to_owned());

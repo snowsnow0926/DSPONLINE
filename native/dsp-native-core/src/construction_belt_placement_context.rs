@@ -52,13 +52,12 @@ fn required_safe_integer(value: Option<&Value>, label: &str) -> anyhow::Result<u
         .ok_or_else(|| anyhow!("native ordinary belt {label} is not a required safe integer"))
 }
 
-fn builtin_construction_id(tier: u8) -> Option<&'static str> {
-    match tier {
-        1 => Some("conveyor_belt_mk1"),
-        2 => Some("conveyor_belt_mk2"),
-        3 => Some("conveyor_belt_mk3"),
-        _ => None,
-    }
+fn registered_construction_id(state: &CoreState, tier: u8) -> Option<&str> {
+    state
+        .catalog
+        .belt_construction_ids
+        .get(&tier)
+        .map(String::as_str)
 }
 
 fn endpoint_domain_is_special(building_id: &str) -> bool {
@@ -223,7 +222,7 @@ pub(crate) fn eligibility(
     if lanes == 0 || lanes > MAX_BELT_LANES {
         return Ok(result.unsupported("invalid-lanes"));
     }
-    let Some(construction_id) = builtin_construction_id(tier) else {
+    let Some(construction_id) = registered_construction_id(state, tier) else {
         return Ok(result.unsupported("unsupported-belt-tier"));
     };
     result.construction_id = Some(construction_id.to_owned());
@@ -372,6 +371,8 @@ pub(crate) fn eligibility(
             "itemId": item_id,
             "lanes": lanes,
             "tier": tier,
+            // v47 sorter tiers remain 1..=3 even when a data-only content
+            // pack registers a higher belt tier.
             "sorterTier": tier.min(3),
             "progress": 0,
             "priority": 1,

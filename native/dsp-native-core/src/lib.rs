@@ -30,6 +30,7 @@ mod dyson_plan_command;
 mod dyson_workspace;
 mod entity_raw;
 mod factory_batch_command;
+mod factory_belt_batch_command;
 mod factory_canvas_presentation;
 mod factory_inventory;
 mod factory_layout_command;

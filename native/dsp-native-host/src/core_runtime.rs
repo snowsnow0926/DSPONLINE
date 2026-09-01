@@ -8050,6 +8050,42 @@ mod tests {
         }
     }
 
+    fn player_authority_dyson_orbit_intent_command(
+        base_revision: u64,
+        command_id: &str,
+        kind: &str,
+        orbit_id: Option<&str>,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        let mut value = json!({
+            "kind": kind,
+            "systemId": "helios"
+        });
+        if let Some(orbit_id) = orbit_id {
+            value["orbitId"] = Value::from(orbit_id);
+        }
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [{
+                    "path": ["dysonEngineering", "intent"],
+                    "operation": "set",
+                    "value": value
+                }],
+                "changedEntities": [],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
     fn player_authority_blueprint_rename_intent_command(
         base_revision: u64,
         command_id: &str,
@@ -17053,6 +17089,158 @@ mod tests {
             &reopened_store,
             &startup.session_id,
             "dyson-plan-shell-replayed",
+        );
+        assert_eq!(replayed, live);
+    }
+
+    #[test]
+    fn dyson_orbit_removal_intent_survives_wal_cold_reopen_with_a_closed_material_ledger() {
+        let mut catalog = player_authority_catalog();
+        catalog["technologies"].as_array_mut().unwrap().push(json!({
+            "id": "dyson_swarm",
+            "costs": [{ "itemId": "iron_ore", "amount": 1 }],
+            "prerequisites": []
+        }));
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["research"]["completedTechIds"] = json!(["dyson_swarm"]);
+        envelope["state"]["nextId"] = Value::from(100);
+        envelope["state"]["dysonEngineering"]["activeOrbitBySystem"]["helios"] =
+            Value::from("orbit-a");
+        envelope["state"]["dysonEngineering"]["orbitsBySystem"]["helios"] = json!([
+            {
+                "id": "orbit-a",
+                "name": "A",
+                "radius": 12000,
+                "inclination": 0,
+                "longitude": 0,
+                "sailsInOrbit": 100,
+                "totalLaunched": 180,
+                "totalExpired": 50,
+                "decayProgress": 0.5,
+                "generationKw": 8800
+            },
+            {
+                "id": "orbit-b",
+                "name": "B",
+                "radius": 18000,
+                "inclination": 12,
+                "longitude": 45,
+                "sailsInOrbit": 20,
+                "totalLaunched": 40,
+                "totalExpired": 5,
+                "decayProgress": 0.25,
+                "generationKw": 1760
+            }
+        ]);
+        envelope["state"]["dysonSwarm"] = json!({
+            "sailsInOrbit": 120,
+            "totalLaunched": 220,
+            "totalExpired": 55,
+            "decayProgress": 0.75,
+            "generationKw": 10560,
+            "receiverLoadKw": 123
+        });
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let request = |revision| {
+            player_authority_dyson_orbit_intent_command(
+                revision,
+                "dyson-orbit-remove-before-cold-reopen",
+                "remove-orbit",
+                Some("orbit-a"),
+            )
+        };
+
+        let (clean_root, mut clean_store, mut clean_registry, clean_session_id, clean_checkpoint) =
+            player_authority_fixture_from_parts(bytes.clone(), catalog.clone());
+        let clean = clean_registry
+            .commit_player_authority_command(
+                &mut clean_store,
+                &clean_session_id,
+                request(clean_checkpoint.revision),
+            )
+            .unwrap();
+        let live = export_test_state(
+            clean_root.path(),
+            &clean_registry,
+            &clean_store,
+            &clean_session_id,
+            "dyson-orbit-remove-clean",
+        );
+        let live_hash = clean.summary.canonical_sha256.clone();
+        let orbits = live["dysonEngineering"]["orbitsBySystem"]["helios"]
+            .as_array()
+            .unwrap();
+        assert_eq!(orbits.len(), 1);
+        assert_eq!(orbits[0]["id"], "orbit-b");
+        assert_eq!(orbits[0]["sailsInOrbit"], 120);
+        assert_eq!(orbits[0]["totalLaunched"], 220);
+        assert_eq!(orbits[0]["totalExpired"], 55);
+        assert_eq!(
+            live["dysonEngineering"]["activeOrbitBySystem"]["helios"],
+            "orbit-b"
+        );
+        assert_eq!(live["dysonSwarm"]["sailsInOrbit"], 120);
+        assert_eq!(live["dysonSwarm"]["totalLaunched"], 220);
+        assert_eq!(live["dysonSwarm"]["totalExpired"], 55);
+        assert_eq!(live["dysonSwarm"]["receiverLoadKw"], 123);
+
+        let (root, mut store, mut registry, session_id, checkpoint) =
+            player_authority_fixture_from_parts(bytes, catalog);
+        let error = registry
+            .commit_player_authority_command_internal(
+                &mut store,
+                &session_id,
+                request(checkpoint.revision),
+                PlayerAuthorityCommandKind::Gameplay,
+                PlayerAuthorityCommandFault::AfterWal,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("lost response"));
+        let wal = store.read_wal("normal-main", checkpoint.revision).unwrap();
+        assert_eq!(wal.len(), 1);
+        let wal_payload = serde_json::to_string(&wal).unwrap();
+        assert!(wal_payload.contains("dysonEngineering"));
+        assert!(wal_payload.contains("remove-orbit"));
+        assert!(wal_payload.contains("orbit-a"));
+        assert!(!wal_payload.contains("sailsInOrbit"));
+        assert!(!wal_payload.contains("totalLaunched"));
+        assert!(!wal_payload.contains("totalExpired"));
+        assert!(!wal_payload.contains("generationKw"));
+
+        drop(registry);
+        drop(store);
+
+        let mut reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = resumable_player_authority_registry_for_test();
+        let startup = reopened_registry
+            .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+            .unwrap()
+            .expect("WAL-staged Dyson orbit command must provide a startup receipt");
+        assert_eq!(startup.revision, clean.revision);
+        assert_eq!(startup.summary.canonical_sha256, live_hash);
+        assert_eq!(
+            startup.command_id.as_deref(),
+            Some("dyson-orbit-remove-before-cold-reopen")
+        );
+        let duplicate = reopened_registry
+            .commit_player_authority_command(
+                &mut reopened_store,
+                &startup.session_id,
+                request(checkpoint.revision),
+            )
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.summary.canonical_sha256, live_hash);
+        let replayed = export_test_state(
+            root.path(),
+            &reopened_registry,
+            &reopened_store,
+            &startup.session_id,
+            "dyson-orbit-remove-replayed",
         );
         assert_eq!(replayed, live);
     }

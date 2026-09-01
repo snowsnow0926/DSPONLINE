@@ -32,10 +32,15 @@ describe("native Dyson workspace App integration", () => {
     expect(nativeTag).toContain("onLaunchModeChange={onNativeDysonLaunchModeChange}");
     expect(nativeTag).toContain("onLaunchThrottleChange={onNativeDysonLaunchThrottleChange}");
     expect(nativeTag).toContain("onLaunchEnabledChange={onNativeDysonLaunchEnabledChange}");
+    expect(nativeTag).toContain("onAddLayer={onNativeDysonAddLayer}");
+    expect(nativeTag).toContain("onLayerChange={onNativeDysonLayerChange}");
+    expect(nativeTag).toContain("onRemoveLayer={onNativeDysonRemoveLayer}");
+    expect(nativeTag).toContain("onAddOrbit={onNativeDysonAddOrbit}");
+    expect(nativeTag).toContain("onRemoveOrbit={onNativeDysonRemoveOrbit}");
     expect(nativeTag).toContain("onAutoConnect={onNativeDysonAutoConnect}");
     expect(nativeTag).toContain("onPlanShell={onNativeDysonPlanShell}");
     expect(nativeTag).toContain("onClearShell={onNativeDysonClearShell}");
-    expect(nativeTag).not.toMatch(/\bgame=|onAddLayer=|commitGame/);
+    expect(nativeTag).not.toMatch(/\bgame=|commitGame/);
     expect(app).toMatch(/nativePlayerAuthorityBoundFrame \? \([\s\S]*?<NativeDysonPlannerWorkspace[\s\S]*?: authorityWorkspaceSync === "dyson"[\s\S]*?<DysonPlannerWorkspace/);
   });
 
@@ -48,6 +53,11 @@ describe("native Dyson workspace App integration", () => {
     expect(handlers).toMatch(/createNativeProjectedDysonActiveLayerCommand\(frame, layerId\)/);
     expect(handlers).toMatch(/createNativeProjectedDysonActiveOrbitCommand\(frame, orbitId\)/);
     expect(handlers).toMatch(/createNativeProjectedDysonOrbitGeometryCommand\(frame, orbitId, changes\)/);
+    expect(handlers).toMatch(/createNativeProjectedDysonAddLayerCommand\(frame, standard\)/);
+    expect(handlers).toMatch(/createNativeProjectedDysonLayerGeometryCommand\(frame, layerId, changes\)/);
+    expect(handlers).toMatch(/createNativeProjectedDysonRemoveLayerCommand\(frame, layerId\)/);
+    expect(handlers).toMatch(/createNativeProjectedDysonAddOrbitCommand\(frame\)/);
+    expect(handlers).toMatch(/createNativeProjectedDysonRemoveOrbitCommand\(frame, orbitId\)/);
     expect(handlers).toMatch(/createNativeProjectedDysonLaunchModeCommand\(frame, mode\)/);
     expect(handlers).toMatch(/createNativeProjectedDysonLaunchThrottleCommand\(frame, throttle\)/);
     expect(handlers).toMatch(/createNativeProjectedDysonLaunchEnabledCommand\(frame, enabled\)/);

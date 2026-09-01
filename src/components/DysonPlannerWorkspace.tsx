@@ -418,8 +418,9 @@ function NativeDysonUnavailable({
 /**
  * Player-authority Dyson surface. This component intentionally consumes only
  * the complete, same-revision native projection. Its launch and orbit
- * selection callbacks are revision-bound Rust commands; structural editing
- * stays unavailable here.
+ * selection and design callbacks are revision-bound Rust commands. The
+ * renderer submits only compact lifecycle/geometry intents and never owns the
+ * material-bearing plan or orbit arrays.
  */
 export function NativeDysonPlannerWorkspace({
   frame: candidateFrame,
@@ -434,6 +435,11 @@ export function NativeDysonPlannerWorkspace({
   onLaunchModeChange,
   onLaunchThrottleChange,
   onLaunchEnabledChange,
+  onAddLayer,
+  onLayerChange,
+  onRemoveLayer,
+  onAddOrbit,
+  onRemoveOrbit,
   onAutoConnect,
   onPlanShell,
   onClearShell,
@@ -451,6 +457,11 @@ export function NativeDysonPlannerWorkspace({
   onLaunchModeChange: (mode: DysonLaunchMode) => void;
   onLaunchThrottleChange: (throttle: DysonLaunchThrottle) => void;
   onLaunchEnabledChange: (enabled: boolean) => void;
+  onAddLayer: (standard: boolean) => void;
+  onLayerChange: (layerId: string, changes: { radius?: number; inclination?: number; longitude?: number }) => void;
+  onRemoveLayer: (layerId: string) => void;
+  onAddOrbit: () => void;
+  onRemoveOrbit: (orbitId: string) => void;
   onAutoConnect: (layerId: string) => void;
   onPlanShell: (layerId: string) => void;
   onClearShell: (layerId: string) => void;
@@ -575,7 +586,7 @@ export function NativeDysonPlannerWorkspace({
           <span>总功率 <strong><PowerValue valueKw={globalGenerationKw} /></strong></span>
         </div>
         <div className="dyson-planner-commandbar" role="toolbar" aria-label="原生戴森球规划命令">
-          <button type="button" disabled data-native-dyson-action="design" title="框架闭合与壳面规划已接入 Rust；其余设计命令继续分批开放"><LockKeyhole size={17} /><span>部分设计</span></button>
+          <button type="button" disabled data-native-dyson-action="design" title="壳层与太阳帆轨道生命周期、轨道几何、框架闭合和壳面规划均由 Rust 权威执行；节点手工编辑仍保持锁定"><LockKeyhole size={17} /><span>权威设计</span></button>
           <button type="button" disabled data-native-dyson-action="save" title="原生权威检查点由运行时持久化"><Save size={17} /><span>权威保存</span></button>
           <button type="button" onClick={onClose} title="关闭戴森球规划" aria-label="关闭戴森球规划"><X size={18} /><span>关闭</span></button>
         </div>
@@ -631,8 +642,8 @@ export function NativeDysonPlannerWorkspace({
             {frame.layers.length === 0 ? <div className="dyson-layer-empty"><Orbit size={18} /><span>{projection.technology.programReady ? "尚无壳层方案" : "戴森球计划尚未解锁"}</span></div> : null}
           </div>
           <div className="dyson-layer-commands" aria-label="原生戴森壳层设计操作">
-            <button type="button" disabled data-native-dyson-action="add-layer" title="原生戴森设计命令尚未接入"><Plus size={14} />空白层</button>
-            <button type="button" disabled data-native-dyson-action="add-standard-layer" title="原生戴森设计命令尚未接入"><Layers3 size={14} />标准层</button>
+            <button type="button" disabled={commandPending || !selectedSystem.unlocked || !projection.technology.programReady || frame.layers.length >= 8} onClick={() => onAddLayer(false)} data-native-dyson-action="add-layer" title="由 Rust 创建空白壳层并分配稳定 ID"><Plus size={14} />空白层</button>
+            <button type="button" disabled={commandPending || !selectedSystem.unlocked || !projection.technology.programReady || frame.layers.length >= 8} onClick={() => onAddLayer(true)} data-native-dyson-action="add-standard-layer" title="由 Rust 一次生成八节点标准壳层"><Layers3 size={14} />标准层</button>
           </div>
           <div className="dyson-layer-heading dyson-swarm-heading"><span>太阳帆轨道</span><strong>{frame.orbits.length}/8</strong></div>
           <div className="dyson-swarm-orbit-list" aria-label="原生太阳帆轨道列表">
@@ -652,7 +663,7 @@ export function NativeDysonPlannerWorkspace({
               </button>
             ))}
           </div>
-          <button className="dyson-add-swarm-orbit" type="button" disabled data-native-dyson-action="add-orbit" title="原生太阳帆轨道命令尚未接入"><Plus size={14} />新增太阳帆轨道</button>
+          <button className="dyson-add-swarm-orbit" type="button" disabled={commandPending || !selectedSystem.unlocked || !projection.technology.swarmReady || frame.orbits.length >= 8} onClick={onAddOrbit} data-native-dyson-action="add-orbit" title="由 Rust 创建太阳帆轨道并分配稳定 ID"><Plus size={14} />新增太阳帆轨道</button>
         </aside>
 
         <section className="dyson-orbit-stage">
@@ -727,9 +738,9 @@ export function NativeDysonPlannerWorkspace({
           {activeLayer ? (
             <>
               <header><i><Orbit size={17} /></i><div><span>当前原生壳层 · Rust 权威</span><strong>{nativeDysonLabel(activeLayer.name, activeLayer.layerId)}</strong></div><em>{activeLayer.nodeCount} 节点</em></header>
-              <label className="dyson-orbit-control"><span>轨道半径 <strong>{activeLayer.radius.toLocaleString("zh-CN")} m</strong></span><input type="range" min={0} max={Math.max(1, activeLayer.radius)} value={activeLayer.radius} disabled data-native-dyson-action="layer-radius" aria-label="原生壳层轨道半径（只读）" /></label>
-              <label className="dyson-orbit-control"><span>轨道倾角 <strong>{activeLayer.inclination}°</strong></span><input type="range" min={-90} max={90} value={activeLayer.inclination} disabled data-native-dyson-action="layer-inclination" aria-label="原生壳层轨道倾角（只读）" /></label>
-              <label className="dyson-orbit-control"><span>升交点经度 <strong>{activeLayer.longitude}°</strong></span><input type="range" min={0} max={359} value={activeLayer.longitude} disabled data-native-dyson-action="layer-longitude" aria-label="原生壳层升交点经度（只读）" /></label>
+              <label className="dyson-orbit-control"><span>轨道半径 <strong>{activeLayer.radius.toLocaleString("zh-CN")} m</strong></span><input type="range" min={5000} max={50000} step={500} value={activeLayer.radius} disabled={commandPending} onChange={(event) => onLayerChange(activeLayer.layerId, { radius: Number(event.target.value) })} data-native-dyson-action="layer-radius" aria-label="调整原生壳层轨道半径" /></label>
+              <label className="dyson-orbit-control"><span>轨道倾角 <strong>{activeLayer.inclination}°</strong></span><input type="range" min={-90} max={90} step={1} value={activeLayer.inclination} disabled={commandPending} onChange={(event) => onLayerChange(activeLayer.layerId, { inclination: Number(event.target.value) })} data-native-dyson-action="layer-inclination" aria-label="调整原生壳层轨道倾角" /></label>
+              <label className="dyson-orbit-control"><span>升交点经度 <strong>{activeLayer.longitude}°</strong></span><input type="range" min={0} max={359} step={1} value={activeLayer.longitude} disabled={commandPending} onChange={(event) => onLayerChange(activeLayer.layerId, { longitude: Number(event.target.value) })} data-native-dyson-action="layer-longitude" aria-label="调整原生壳层升交点经度" /></label>
               <dl className="metric-ledger dyson-layer-ledger">
                 <div><dt>节点</dt><dd>{activeNodes.filter((node) => node.completedStructurePoints >= node.requiredStructurePoints).length}/{activeLayer.nodeCount}</dd></div>
                 <div><dt>框架</dt><dd>{activeFrames.filter((structureFrame) => structureFrame.completedStructurePoints >= structureFrame.requiredStructurePoints).length}/{activeLayer.frameCount}</dd></div>
@@ -760,7 +771,7 @@ export function NativeDysonPlannerWorkspace({
                 </dl>
                 {activeShells.length > NATIVE_DYSON_DETAIL_ROW_LIMIT ? <div className="dyson-layer-heading"><span>其余壳面由轨道图汇总</span><strong>+{activeShells.length - NATIVE_DYSON_DETAIL_ROW_LIMIT}</strong></div> : null}
               </section>
-              <button className="dyson-layer-remove" type="button" disabled data-native-dyson-action="remove-layer"><Trash2 size={14} />删除当前壳层</button>
+              <button className="dyson-layer-remove" type="button" disabled={commandPending || !projection.technology.programReady} onClick={() => onRemoveLayer(activeLayer.layerId)} data-native-dyson-action="remove-layer" title="删除设计层但保留全局结构点与壳面帆总量"><Trash2 size={14} />删除当前壳层</button>
             </>
           ) : (
             <div className="dyson-inspector-empty"><Orbit size={24} /><strong>{selectedSystemName}</strong><span>{projection.technology.programReady ? "0 个规划壳层" : "科技锁定"}</span></div>
@@ -772,7 +783,7 @@ export function NativeDysonPlannerWorkspace({
               <label className="dyson-orbit-control"><span>轨道倾角 <strong>{activeOrbit.inclination}°</strong></span><input type="range" min={-90} max={90} step={1} value={activeOrbit.inclination} disabled={commandPending} onChange={(event) => onOrbitChange(activeOrbit.orbitId, { inclination: Number(event.target.value) })} data-native-dyson-action="orbit-inclination" aria-label="调整原生太阳帆轨道倾角" /></label>
               <label className="dyson-orbit-control"><span>升交点经度 <strong>{activeOrbit.longitude}°</strong></span><input type="range" min={0} max={359} step={1} value={activeOrbit.longitude} disabled={commandPending} onChange={(event) => onOrbitChange(activeOrbit.orbitId, { longitude: Number(event.target.value) })} data-native-dyson-action="orbit-longitude" aria-label="调整原生太阳帆轨道升交点经度" /></label>
               <div className="dyson-swarm-orbit-stats"><span>发射 <QuantityValue value={activeOrbit.totalLaunched} /></span><span>衰减 <QuantityValue value={activeOrbit.totalExpired} /></span><span><PowerValue valueKw={activeOrbit.generationKw} /></span></div>
-              <button type="button" disabled data-native-dyson-action="remove-orbit"><Trash2 size={13} />删除轨道</button>
+              <button type="button" disabled={commandPending || !projection.technology.swarmReady || frame.orbits.length <= 1} onClick={() => onRemoveOrbit(activeOrbit.orbitId)} data-native-dyson-action="remove-orbit" title="由 Rust 将物料计数合并到保留轨道后删除"><Trash2 size={13} />删除轨道</button>
             </section>
           ) : null}
           <section className="dyson-launch-console" aria-label="原生戴森发射调度">

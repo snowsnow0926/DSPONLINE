@@ -328,6 +328,11 @@ function renderNative(overrides: Partial<Parameters<typeof NativeDysonPlannerWor
     onLaunchModeChange: vi.fn(),
     onLaunchThrottleChange: vi.fn(),
     onLaunchEnabledChange: vi.fn(),
+    onAddLayer: vi.fn(),
+    onLayerChange: vi.fn(),
+    onRemoveLayer: vi.fn(),
+    onAddOrbit: vi.fn(),
+    onRemoveOrbit: vi.fn(),
     onAutoConnect: vi.fn(),
     onPlanShell: vi.fn(),
     onClearShell: vi.fn(),
@@ -357,7 +362,7 @@ describe("NativeDysonPlannerWorkspace", () => {
     expect(host.querySelector("[data-native-dyson-shell-id='shell:alpha-beta']")).not.toBeNull();
   });
 
-  it("routes launch, orbit, and certified shell-plan controls through native callbacks", () => {
+  it("routes launch, orbit lifecycle, layer lifecycle, and shell-plan controls through native callbacks", () => {
     const onSelectSystem = vi.fn();
     const onSelectLayer = vi.fn();
     const onSelectOrbit = vi.fn();
@@ -365,6 +370,11 @@ describe("NativeDysonPlannerWorkspace", () => {
     const onLaunchModeChange = vi.fn();
     const onLaunchThrottleChange = vi.fn();
     const onLaunchEnabledChange = vi.fn();
+    const onAddLayer = vi.fn();
+    const onLayerChange = vi.fn();
+    const onRemoveLayer = vi.fn();
+    const onAddOrbit = vi.fn();
+    const onRemoveOrbit = vi.fn();
     const onPlanShell = vi.fn();
     const onClearShell = vi.fn();
     const onClose = vi.fn();
@@ -377,6 +387,11 @@ describe("NativeDysonPlannerWorkspace", () => {
       onLaunchModeChange,
       onLaunchThrottleChange,
       onLaunchEnabledChange,
+      onAddLayer,
+      onLayerChange,
+      onRemoveLayer,
+      onAddOrbit,
+      onRemoveOrbit,
       onPlanShell,
       onClearShell,
       onClose,
@@ -422,6 +437,32 @@ describe("NativeDysonPlannerWorkspace", () => {
     });
     expect(onOrbitChange).toHaveBeenCalledWith("orbit:primary", { radius: 30_000 });
 
+    const layerRadius = host.querySelector<HTMLInputElement>("[data-native-dyson-action='layer-radius']")!;
+    act(() => {
+      setInputValue.call(layerRadius, "35000");
+      layerRadius.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(onLayerChange).toHaveBeenCalledWith("layer:main", { radius: 35_000 });
+
+    const addLayer = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='add-layer']")!;
+    const addStandardLayer = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='add-standard-layer']")!;
+    const addOrbit = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='add-orbit']")!;
+    const removeLayer = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='remove-layer']")!;
+    const removeOrbit = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='remove-orbit']")!;
+    for (const control of [addLayer, addStandardLayer, addOrbit, removeLayer, removeOrbit]) {
+      expect(control.disabled).toBe(false);
+    }
+    act(() => addLayer.click());
+    act(() => addStandardLayer.click());
+    act(() => addOrbit.click());
+    act(() => removeLayer.click());
+    act(() => removeOrbit.click());
+    expect(onAddLayer).toHaveBeenNthCalledWith(1, false);
+    expect(onAddLayer).toHaveBeenNthCalledWith(2, true);
+    expect(onAddOrbit).toHaveBeenCalledTimes(1);
+    expect(onRemoveLayer).toHaveBeenCalledWith("layer:main");
+    expect(onRemoveOrbit).toHaveBeenCalledWith("orbit:primary");
+
     const planShell = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='plan-shell']")!;
     const clearShell = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='clear-shell']")!;
     const autoConnect = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='connect-frames']")!;
@@ -433,15 +474,8 @@ describe("NativeDysonPlannerWorkspace", () => {
     expect(onPlanShell).toHaveBeenCalledWith("layer:main");
     expect(onClearShell).toHaveBeenCalledWith("layer:main");
 
-    const remainingReadonlyControls = Array.from(host.querySelectorAll<HTMLButtonElement | HTMLInputElement>("[data-native-dyson-action]"))
-      .filter((control) => {
-        const action = control.dataset.nativeDysonAction ?? "";
-        return action !== "select-layer" && action !== "select-orbit" &&
-          action !== "connect-frames" && action !== "plan-shell" && action !== "clear-shell" &&
-          !action.startsWith("launch-") && !action.startsWith("orbit-");
-      });
-    expect(remainingReadonlyControls.length).toBeGreaterThan(5);
-    for (const control of remainingReadonlyControls) expect(control.disabled).toBe(true);
+    expect(host.querySelector<HTMLButtonElement>("[data-native-dyson-action='design']")?.disabled).toBe(true);
+    expect(host.querySelector<HTMLButtonElement>("[data-native-dyson-action='save']")?.disabled).toBe(true);
 
     act(() => host.querySelector<HTMLButtonElement>("[aria-label='关闭戴森球规划']")!.click());
     expect(onClose).toHaveBeenCalledTimes(1);
@@ -511,7 +545,7 @@ describe("NativeDysonPlannerWorkspace", () => {
     expect(host.textContent).toContain("正在读取 Rust revision 18");
     expect(host.textContent).toContain("已验证的 revision 17；全部权威写入已锁定");
     const authorityControls = host.querySelectorAll<HTMLButtonElement | HTMLInputElement>(
-      "[data-native-dyson-action^='launch-'], [data-native-dyson-action='select-layer'], [data-native-dyson-action='select-orbit'], [data-native-dyson-action^='orbit-'], [data-native-dyson-action='connect-frames'], [data-native-dyson-action='plan-shell'], [data-native-dyson-action='clear-shell']",
+      "[data-native-dyson-action^='launch-'], [data-native-dyson-action='select-layer'], [data-native-dyson-action='select-orbit'], [data-native-dyson-action^='orbit-'], [data-native-dyson-action^='layer-'], [data-native-dyson-action='add-layer'], [data-native-dyson-action='add-standard-layer'], [data-native-dyson-action='add-orbit'], [data-native-dyson-action='remove-layer'], [data-native-dyson-action='remove-orbit'], [data-native-dyson-action='connect-frames'], [data-native-dyson-action='plan-shell'], [data-native-dyson-action='clear-shell']",
     );
     expect(authorityControls.length).toBeGreaterThan(6);
     for (const control of authorityControls) expect(control.disabled).toBe(true);
@@ -561,7 +595,7 @@ describe("NativeDysonPlannerWorkspace", () => {
     const nativeBoundary = source.slice(source.indexOf("export type NativeDysonWorkspaceReadStatus"));
 
     expect(nativeBoundary).not.toMatch(/\bGameState\b|\bgame\.|getDysonEngineeringSnapshot|isTechnologyCompleted|createDysonLayerTemplate|getDysonPlanTotals|getStarSystemProfile|getStarSystem\(/);
-    expect(nativeBoundary).toMatch(/onOrbitChange/);
-    expect(nativeBoundary).not.toMatch(/onAddLayer|onSave|onAddSwarmOrbit|commitGame|publishRuntimeGame/);
+    expect(nativeBoundary).toMatch(/onOrbitChange|onAddLayer|onAddOrbit/);
+    expect(nativeBoundary).not.toMatch(/onSave|onAddSwarmOrbit|commitGame|publishRuntimeGame/);
   });
 });

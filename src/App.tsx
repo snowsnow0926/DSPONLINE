@@ -711,13 +711,19 @@ import {
 import {
   createNativeProjectedDysonActiveLayerCommand,
   createNativeProjectedDysonActiveOrbitCommand,
+  createNativeProjectedDysonAddLayerCommand,
+  createNativeProjectedDysonAddOrbitCommand,
   createNativeProjectedDysonAutoConnectCommand,
   createNativeProjectedDysonClearShellCommand,
+  createNativeProjectedDysonLayerGeometryCommand,
   createNativeProjectedDysonLaunchEnabledCommand,
   createNativeProjectedDysonLaunchModeCommand,
   createNativeProjectedDysonLaunchThrottleCommand,
   createNativeProjectedDysonOrbitGeometryCommand,
   createNativeProjectedDysonPlanShellCommand,
+  createNativeProjectedDysonRemoveLayerCommand,
+  createNativeProjectedDysonRemoveOrbitCommand,
+  type NativeProjectedDysonLayerGeometry,
   type NativeProjectedDysonOrbitGeometry,
 } from "./game/nativeProjectedDysonCommands";
 import {
@@ -13120,6 +13126,76 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     );
   }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
 
+  const onNativeDysonAddLayer = useCallback((standard: boolean) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次壳层新增未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonAddLayerCommand(frame, standard)
+        : null,
+      () => setNotice(standard ? "已由 Rust 创建标准戴森壳层" : "已由 Rust 创建空白戴森壳层"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonLayerChange = useCallback((layerId: string, changes: NativeProjectedDysonLayerGeometry) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次壳层轨道调整未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonLayerGeometryCommand(frame, layerId, changes)
+        : null,
+      () => setNotice("已由 Rust 更新戴森壳层轨道参数并重算框架需求"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonRemoveLayer = useCallback((layerId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次壳层删除未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonRemoveLayerCommand(frame, layerId)
+        : null,
+      () => setNotice("已由 Rust 删除壳层设计；历史结构点与壳面帆总量保持不变"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonAddOrbit = useCallback(() => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次太阳帆轨道新增未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonAddOrbitCommand(frame)
+        : null,
+      () => setNotice("已由 Rust 创建太阳帆轨道"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonRemoveOrbit = useCallback((orbitId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次太阳帆轨道删除未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonRemoveOrbitCommand(frame, orbitId)
+        : null,
+      () => setNotice("已由 Rust 合并在轨物料并删除太阳帆轨道"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
   const onNativeDysonLaunchModeChange = useCallback((mode: DysonLaunchMode) => {
     const frame = nativeDysonWorkspaceFrame;
     if (!frame) {
@@ -22654,6 +22730,11 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onLaunchModeChange={onNativeDysonLaunchModeChange}
             onLaunchThrottleChange={onNativeDysonLaunchThrottleChange}
             onLaunchEnabledChange={onNativeDysonLaunchEnabledChange}
+            onAddLayer={onNativeDysonAddLayer}
+            onLayerChange={onNativeDysonLayerChange}
+            onRemoveLayer={onNativeDysonRemoveLayer}
+            onAddOrbit={onNativeDysonAddOrbit}
+            onRemoveOrbit={onNativeDysonRemoveOrbit}
             onAutoConnect={onNativeDysonAutoConnect}
             onPlanShell={onNativeDysonPlanShell}
             onClearShell={onNativeDysonClearShell}

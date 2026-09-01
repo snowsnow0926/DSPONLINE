@@ -211,6 +211,43 @@ test("Dyson shell planning crosses as one compact opaque intent and invalidates 
   assert.ok(Buffer.byteLength(encoded, "utf8") < 512);
 });
 
+test("Dyson layer and orbit lifecycle cross only as compact Rust-owned intents", async () => {
+  const commands = [
+    command(17, {
+      topLevelChanges: [{
+        path: ["dysonPlans", "intent"],
+        operation: "set",
+        value: { kind: "add-standard-layer", systemId: "helios" },
+      }],
+    }),
+    command(17, {
+      topLevelChanges: [{
+        path: ["dysonEngineering", "intent"],
+        operation: "set",
+        value: { kind: "remove-orbit", systemId: "helios", orbitId: "orbit-a" },
+      }],
+    }),
+  ];
+  for (const expected of commands) {
+    const { broker, calls } = brokerFixture({
+      commit: async (request) => commandResult(request, {
+        changedEntityIds: [],
+        changedBeltIds: [],
+        topologyDirty: true,
+      }),
+    });
+    const receipt = await broker.commit(7, { sessionId: "core-1", command: expected });
+    assert.equal(receipt.topologyDirty, true);
+    assert.deepEqual(calls[0].command, expected);
+    const encoded = JSON.stringify(calls[0].command);
+    assert.equal(encoded.includes("sailsInOrbit"), false);
+    assert.equal(encoded.includes("totalLaunched"), false);
+    assert.equal(encoded.includes("requiredStructurePoints"), false);
+    assert.equal(encoded.includes("nextId"), false);
+    assert.ok(Buffer.byteLength(encoded, "utf8") < 512);
+  }
+});
+
 test("time-warp intent and ejector target cross the host without renderer-derived state", async () => {
   const timeWarpCommand = command(17, {
     topLevelChanges: [{

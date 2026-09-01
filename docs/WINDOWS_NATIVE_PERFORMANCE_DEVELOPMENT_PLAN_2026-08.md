@@ -2261,3 +2261,16 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 5. Host 故障注入停在 WAL 已同步、checkpoint/ACK 尚未完成的边界。日志断言包含 opaque 意图而不含 `required/completedStructurePoints`、`sailCapacity`、`absorbedSails` 或 `nextId`；新进程从旧 checkpoint 重放后，revision、canonical SHA-256、4 个框架、4 个壳面、`nextId=108`、结构点 12 和壳面帆 80 与无故障提交逐字一致；相同 command ID 只返回 duplicate receipt，不执行第二次。
 6. 本轮新鲜验证：Rust Core 戴森相关 `25/25`，其中新增语义命令 `4/4`；Host WAL 冷恢复 `1/1`；TypeScript 通过；组件/命令/App focused Vitest `22/22`；desktop command broker `28/28`；Core+Host all-target strict Clippy `-D warnings`、Rust fmt 和 diff check 通过。完整组合 Rust/Vitest/Server/build/E2E 尚未在本切片冻结后重跑，不能复用 24.44 的数字冒充。
 7. 固定能力百分比暂不因三个按钮上调：戴森仍缺新建/删除层、节点与轨道的完整写面，更大的跨域权威/并行缺口也未改变。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 和 `authorityEligible=false` 均保持不变；未读取玩家存档，未连接生产，未部署、未打包发布、未签名。
+
+### 24.46 戴森壳层与太阳帆轨道生命周期 Rust 权威纵切（2026-09-01，开发候选）
+
+本纵切紧接 24.45，一次开放空白层、标准层、壳层轨道几何、删除壳层，以及太阳帆轨道新增/删除。它仍不开放手工增删节点、逐节点连边或设计复制粘贴，因此不把戴森编辑器描述为全部完成。
+
+1. renderer 新增的壳层命令仍只写 `dysonPlans.intent`。新增空白/标准层只发送 `kind/systemId`；删除发送 `kind/systemId/layerId`；几何修改只额外发送最多三个规范叶值。Rust 从权威 `nextId` 生成层、8 个节点、8 个稳定环框架和科技允许时的 8 个壳面；renderer 不发送数组、名称、工作量、容量、完成量或物料计数。
+2. 标准层完全复刻既有稳定规则：半径随层序每次增加 4,000 m，奇数层倾角 18°，经度每层增加 24°，8 节点等分 45°；框架需求为 `ceil(radius/10000 × arc/45)`，壳面容量为框架需求 × 40。层几何修改由 Rust 重算全部框架需求及其第一边界对应的壳面容量，再用既有 `reconcile_plan` 重派生显示完成量。
+3. 删除层只删除设计目录并选择确定性 fallback active layer；`structurePoints` 与 `shellSails` 历史总量不降低、不增加。即使删除最后一层，历史物料仍留在该恒星系 plan，后续新建设计可重新分配，避免用删除 UI 静默改玩家收益。
+4. 太阳帆轨道使用独立 `dysonEngineering.intent`。新增轨道由 Rust 分配 ID、名称和规范轨道参数；第八条旧 JavaScript 默认公式会产生 54,000 m、超出公开 50,000 m 上限，原生路径明确封顶 50,000 m，避免创建后投影自身拒绝。删除时至少保留一条轨道，把 `sailsInOrbit/totalLaunched/totalExpired` 全部 checked-add 到持久顺序中的首个保留轨道，按当前恒星亮度和科研倍率重算该轨道功率，再从全部轨道重建全局 swarm 汇总；`receiverLoadKw` 等无关字段保持原值。旧 ejector target 不被偷偷改写，删除后指向失效轨道的发射器会按既有规则停机并要求玩家重选。
+5. Rust 在写前验证恒星系目录/解锁、`dyson_sphere_program`/`dyson_shell`/`dyson_swarm`、最多 8 层/8 轨道、safe integer、规范角度/半径、全局唯一轨道 ID、active membership、轨道物料闭环和全局 swarm 汇总。未知字段、renderer 夹带完整数组或计数、ID 碰撞、最后轨道删除、同值几何、锁定科技及汇总伪造全部在 disposable candidate 前失败关闭。
+6. WAL 仍只保存小语义 marker。新增 Host `AfterWal` 故障用例在移除含 100 帆的活动轨道后故意丢失响应；新进程冷恢复与无故障提交得到相同 revision、canonical SHA-256 和公开 v47，120 在轨帆、220 累计发射、55 累计过期完整保留，活动轨道切到 fallback，`receiverLoadKw` 保持 123。WAL 正文不含 `sailsInOrbit/totalLaunched/totalExpired/generationKw`，duplicate command ID 不会再次合并。
+7. 本切片新鲜 focused 结果为 Rust semantic Core `8/8`、Host 冷恢复 `1/1`、组件/命令/App Vitest `24/24`、desktop broker `29/29`；TypeScript、production build（2,097 modules）、startup budget、Native thin-UI AST 门禁、workspace all-target/all-feature strict Clippy、Rust fmt 与 diff check均通过。完整 Core/Host/Vitest/Server/E2E、24 小时、多硬件、安装/覆盖升级、签名与灰度仍需冻结后单独执行。
+8. 本切片不升级 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 Host/renderer 协议版本，`authorityEligible=false` 保持不变；没有读取或修改真实玩家存档，没有连接生产、部署、打包发布或签名。固定四目标百分比等节点编辑等下一块闭合后统一复审，不按新增行数临时抬高。

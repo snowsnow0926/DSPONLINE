@@ -11,13 +11,18 @@ import type { NativeDysonWorkspaceFrame } from "./nativeDysonWorkspaceStore";
 import {
   createNativeProjectedDysonActiveLayerCommand,
   createNativeProjectedDysonActiveOrbitCommand,
+  createNativeProjectedDysonAddLayerCommand,
+  createNativeProjectedDysonAddOrbitCommand,
   createNativeProjectedDysonAutoConnectCommand,
   createNativeProjectedDysonClearShellCommand,
+  createNativeProjectedDysonLayerGeometryCommand,
   createNativeProjectedDysonLaunchEnabledCommand,
   createNativeProjectedDysonLaunchModeCommand,
   createNativeProjectedDysonLaunchThrottleCommand,
   createNativeProjectedDysonOrbitGeometryCommand,
   createNativeProjectedDysonPlanShellCommand,
+  createNativeProjectedDysonRemoveLayerCommand,
+  createNativeProjectedDysonRemoveOrbitCommand,
 } from "./nativeProjectedDysonCommands";
 
 const engineering = {
@@ -31,6 +36,7 @@ function frame(): NativeDysonWorkspaceFrame {
     systemId: "sol",
     activeLayerId: "layer:old",
     activeOrbitId: "orbit:old",
+    unlocked: true,
     engineering,
   } as DesktopNativeCoreDysonSystemRow;
   const layer = (layerId: string): DesktopNativeCoreDysonLayerRow => ({
@@ -78,7 +84,12 @@ function frame(): NativeDysonWorkspaceFrame {
     revision: 44,
     registryFingerprint: "registry-a",
     selectedSystemId: "sol",
-    projection: { revision: 44, registryFingerprint: "registry-a", selectedSystemId: "sol" } as NativeDysonWorkspaceFrame["projection"],
+    projection: {
+      revision: 44,
+      registryFingerprint: "registry-a",
+      selectedSystemId: "sol",
+      technology: { programReady: true, shellReady: true, swarmReady: true },
+    } as NativeDysonWorkspaceFrame["projection"],
     systems: [system], layers, orbits, nodes: [], frames: [], shells: [],
     systemsById: new Map([["sol", system]]),
     layersById: new Map(layers.map((layer) => [layer.layerId, layer])),
@@ -163,6 +174,57 @@ describe("native projected Dyson launch commands", () => {
       }]);
   });
 
+  it("emits compact layer lifecycle and geometry intents", () => {
+    const current = frame();
+    expect(createNativeProjectedDysonAddLayerCommand(current, false)?.topLevelChanges).toEqual([{
+      path: ["dysonPlans", "intent"],
+      operation: "set",
+      value: { kind: "add-layer", systemId: "sol" },
+    }]);
+    expect(createNativeProjectedDysonAddLayerCommand(current, true)?.topLevelChanges).toEqual([{
+      path: ["dysonPlans", "intent"],
+      operation: "set",
+      value: { kind: "add-standard-layer", systemId: "sol" },
+    }]);
+    expect(createNativeProjectedDysonLayerGeometryCommand(current, "layer:old", {
+      longitude: 12.3,
+      radius: 30_000,
+    })?.topLevelChanges).toEqual([{
+      path: ["dysonPlans", "intent"],
+      operation: "set",
+      value: {
+        kind: "set-layer-orbit",
+        systemId: "sol",
+        layerId: "layer:old",
+        changes: { radius: 30_000, longitude: 12.3 },
+      },
+    }]);
+    expect(createNativeProjectedDysonRemoveLayerCommand(current, "mod:层/新🚀").topLevelChanges)
+      .toEqual([{
+        path: ["dysonPlans", "intent"],
+        operation: "set",
+        value: { kind: "remove-layer", systemId: "sol", layerId: "mod:层/新🚀" },
+      }]);
+    expect(JSON.stringify(createNativeProjectedDysonAddLayerCommand(current, true))).not.toContain("nodes");
+  });
+
+  it("emits compact material-safe solar-sail orbit lifecycle intents", () => {
+    const current = frame();
+    expect(createNativeProjectedDysonAddOrbitCommand(current)?.topLevelChanges).toEqual([{
+      path: ["dysonEngineering", "intent"],
+      operation: "set",
+      value: { kind: "add-orbit", systemId: "sol" },
+    }]);
+    expect(createNativeProjectedDysonRemoveOrbitCommand(current, "mod:轨道/新🚀")?.topLevelChanges)
+      .toEqual([{
+        path: ["dysonEngineering", "intent"],
+        operation: "set",
+        value: { kind: "remove-orbit", systemId: "sol", orbitId: "mod:轨道/新🚀" },
+      }]);
+    expect(JSON.stringify(createNativeProjectedDysonRemoveOrbitCommand(current, "mod:轨道/新🚀")))
+      .not.toMatch(/sailsInOrbit|totalLaunched|generationKw/);
+  });
+
   it("does not enqueue completed design work and fails closed for missing technology or nodes", () => {
     const completed = designFrame({ completeFrames: true, completeShells: true });
     expect(createNativeProjectedDysonAutoConnectCommand(completed, "layer:old")).toBeNull();
@@ -225,5 +287,9 @@ describe("native projected Dyson launch commands", () => {
     expect(() => createNativeProjectedDysonOrbitGeometryCommand(frame(), "orbit:old", { inclination: 90.5 })).toThrow(TypeError);
     expect(() => createNativeProjectedDysonOrbitGeometryCommand(frame(), "orbit:old", { longitude: 360 })).toThrow(TypeError);
     expect(() => createNativeProjectedDysonOrbitGeometryCommand(frame(), "orbit:old", {})).toThrow(TypeError);
+    expect(() => createNativeProjectedDysonLayerGeometryCommand(frame(), "layer:old", {})).toThrow(TypeError);
+    expect(() => createNativeProjectedDysonLayerGeometryCommand(frame(), "layer:old", { radius: 50_001 })).toThrow(TypeError);
+    expect(() => createNativeProjectedDysonRemoveLayerCommand(frame(), "layer:missing")).toThrow(TypeError);
+    expect(() => createNativeProjectedDysonRemoveOrbitCommand(frame(), "orbit:missing")).toThrow(TypeError);
   });
 });

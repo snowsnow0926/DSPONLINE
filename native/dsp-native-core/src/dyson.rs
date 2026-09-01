@@ -212,7 +212,7 @@ fn luminosity(base: &Map<String, Value>, system_id: &str) -> f64 {
         .unwrap_or(1.0)
 }
 
-fn sail_power(base: &Map<String, Value>, system_id: &str) -> f64 {
+pub(crate) fn sail_power(base: &Map<String, Value>, system_id: &str) -> f64 {
     SOLAR_SAIL_POWER_KW * power_multiplier(base) * luminosity(base, system_id)
 }
 

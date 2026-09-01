@@ -65,6 +65,12 @@ function topLevelCommand(
 
 export type NativeProjectedDysonPlanIntentKind = "auto-connect" | "plan-shell" | "clear-shell";
 
+export type NativeProjectedDysonLayerIntentKind =
+  | "add-layer"
+  | "add-standard-layer"
+  | "set-layer-orbit"
+  | "remove-layer";
+
 function sameUndirectedEdge(
   leftSource: string,
   leftTarget: string,
@@ -143,6 +149,109 @@ export function createNativeProjectedDysonClearShellCommand(
   layerId: string,
 ): SimulationCommandPatch | null {
   return createNativeProjectedDysonPlanIntentCommand(frame, layerId, "clear-shell");
+}
+
+export function createNativeProjectedDysonAddLayerCommand(
+  frame: NativeDysonWorkspaceFrame,
+  standard: boolean,
+): SimulationCommandPatch | null {
+  const system = frame.systemsById.get(frame.selectedSystemId);
+  if (!validFrame(frame) || typeof standard !== "boolean" || !system || !system.unlocked ||
+      frame.projection.technology?.programReady !== true) {
+    throw new TypeError("原生戴森壳层新增投影无效或科技尚未解锁");
+  }
+  if (frame.layers.length >= 8) return null;
+  return topLevelCommand(frame, [{
+    path: ["dysonPlans", "intent"],
+    operation: "set",
+    value: {
+      kind: standard ? "add-standard-layer" : "add-layer",
+      systemId: frame.selectedSystemId,
+    },
+  }]);
+}
+
+export interface NativeProjectedDysonLayerGeometry {
+  readonly radius?: number;
+  readonly inclination?: number;
+  readonly longitude?: number;
+}
+
+export function createNativeProjectedDysonLayerGeometryCommand(
+  frame: NativeDysonWorkspaceFrame,
+  layerId: string,
+  target: NativeProjectedDysonLayerGeometry,
+): SimulationCommandPatch | null {
+  const requestedKeys = Object.keys(target);
+  const layer = frame.layersById.get(layerId);
+  if (!validFrame(frame) || !validOpaqueId(layerId) || !layer ||
+      frame.projection.technology?.programReady !== true || requestedKeys.length === 0 ||
+      requestedKeys.length > 3 || requestedKeys.some((key) => !["radius", "inclination", "longitude"].includes(key))) {
+    throw new TypeError("原生戴森壳层轨道命令无效");
+  }
+  const changes: NativeProjectedDysonLayerGeometry = {};
+  for (const field of ["radius", "inclination", "longitude"] as const) {
+    const value = target[field];
+    if (value === undefined) continue;
+    if (!validOrbitGeometry(field, value) || !validOrbitGeometry(field, layer[field])) {
+      throw new TypeError("原生戴森壳层轨道值无效");
+    }
+    if (value !== layer[field]) Object.assign(changes, { [field]: value });
+  }
+  if (Object.keys(changes).length === 0) return null;
+  return topLevelCommand(frame, [{
+    path: ["dysonPlans", "intent"],
+    operation: "set",
+    value: { kind: "set-layer-orbit", systemId: frame.selectedSystemId, layerId, changes },
+  }]);
+}
+
+export function createNativeProjectedDysonRemoveLayerCommand(
+  frame: NativeDysonWorkspaceFrame,
+  layerId: string,
+): SimulationCommandPatch {
+  const system = frame.systemsById.get(frame.selectedSystemId);
+  if (!validFrame(frame) || !validOpaqueId(layerId) || !frame.layersById.has(layerId) ||
+      !system?.unlocked || frame.projection.technology?.programReady !== true) {
+    throw new TypeError("原生戴森壳层删除投影或目标无效");
+  }
+  return topLevelCommand(frame, [{
+    path: ["dysonPlans", "intent"],
+    operation: "set",
+    value: { kind: "remove-layer", systemId: frame.selectedSystemId, layerId },
+  }]);
+}
+
+export function createNativeProjectedDysonAddOrbitCommand(
+  frame: NativeDysonWorkspaceFrame,
+): SimulationCommandPatch | null {
+  const system = frame.systemsById.get(frame.selectedSystemId);
+  if (!validFrame(frame) || !system?.unlocked || frame.projection.technology?.swarmReady !== true) {
+    throw new TypeError("原生太阳帆轨道新增投影无效或科技尚未解锁");
+  }
+  if (frame.orbits.length >= 8) return null;
+  return topLevelCommand(frame, [{
+    path: ["dysonEngineering", "intent"],
+    operation: "set",
+    value: { kind: "add-orbit", systemId: frame.selectedSystemId },
+  }]);
+}
+
+export function createNativeProjectedDysonRemoveOrbitCommand(
+  frame: NativeDysonWorkspaceFrame,
+  orbitId: string,
+): SimulationCommandPatch | null {
+  const system = frame.systemsById.get(frame.selectedSystemId);
+  if (!validFrame(frame) || !validOpaqueId(orbitId) || !frame.orbitsById.has(orbitId) ||
+      !system?.unlocked || frame.projection.technology?.swarmReady !== true) {
+    throw new TypeError("原生太阳帆轨道删除投影或目标无效");
+  }
+  if (frame.orbits.length <= 1) return null;
+  return topLevelCommand(frame, [{
+    path: ["dysonEngineering", "intent"],
+    operation: "set",
+    value: { kind: "remove-orbit", systemId: frame.selectedSystemId, orbitId },
+  }]);
 }
 
 export function createNativeProjectedDysonLaunchModeCommand(

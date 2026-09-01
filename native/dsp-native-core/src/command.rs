@@ -8552,6 +8552,9 @@ impl CoreState {
         if crate::special_input_port_command::command_contains_intent(command) {
             return crate::special_input_port_command::validate_command(self, command);
         }
+        if crate::galactic_export_command::command_contains_intent(command) {
+            return crate::galactic_export_command::validate_command(self, command);
+        }
         if command_contains_black_hole_pause_intent(command) {
             return validate_black_hole_pause_command(self, command);
         }
@@ -8827,6 +8830,21 @@ impl CoreState {
             result.topology_dirty = true;
             return Ok(result);
         }
+        if crate::galactic_export_command::command_contains_intent(command) {
+            if let Some(entity_id) =
+                crate::galactic_export_command::validate_resume_marker(command)?
+            {
+                result.changed_entity_ids.push(entity_id);
+                result.changed_entity_ids.sort_unstable();
+                result.changed_entity_ids.dedup();
+            }
+            // Global settings and material-bearing manual dispatches both use
+            // one compact semantic WAL marker. Re-read bounded consumers after
+            // recovery instead of persisting renderer-visible derived IDs.
+            result.changed_belt_ids.clear();
+            result.topology_dirty = true;
+            return Ok(result);
+        }
         if crate::blueprint_command::command_contains_intent(command) {
             crate::blueprint_command::validate_resume_marker(command)?;
             result.topology_dirty = true;
@@ -8997,8 +9015,10 @@ impl CoreState {
         let expanded_dyson_plan_intent;
         let expanded_dyson_orbit_intent;
         let expanded_special_input_port_intent;
+        let expanded_galactic_export_intent;
         let mut compact_entity_recipe_receipt_id = None;
         let mut compact_special_input_port_receipt_id = None;
+        let mut compact_galactic_export_receipt = None;
         let mut blueprint_workspace_refresh = false;
         let mut blueprint_intent = None;
         let mut construction_queue_intent = None;
@@ -9052,6 +9072,13 @@ impl CoreState {
             expanded_special_input_port_intent =
                 crate::special_input_port_command::expand_intent(self, command)?;
             &expanded_special_input_port_intent
+        } else if crate::galactic_export_command::command_contains_intent(command) {
+            compact_galactic_export_receipt = Some(
+                crate::galactic_export_command::validate_resume_marker(command)?,
+            );
+            expanded_galactic_export_intent =
+                crate::galactic_export_command::expand_intent(self, command)?;
+            &expanded_galactic_export_intent
         } else if crate::blueprint_command::command_contains_intent(command) {
             expanded_blueprint_intent = crate::blueprint_command::expand_intent(self, command)?;
             blueprint_workspace_refresh = expanded_blueprint_intent.requires_workspace_refresh();
@@ -9265,6 +9292,17 @@ impl CoreState {
             // refresh the target row, then re-read the bounded topology.
             result.changed_entity_ids.clear();
             result.changed_entity_ids.push(entity_id);
+            result.changed_belt_ids.clear();
+            result.topology_dirty = true;
+        }
+        if let Some(entity_id) = compact_galactic_export_receipt {
+            // A manual dispatch may debit many output rows, while global
+            // settings have no record IDs at all. Keep the durable/live ACK
+            // bounded and identical: only a directly paused exporter is named.
+            result.changed_entity_ids.clear();
+            if let Some(entity_id) = entity_id {
+                result.changed_entity_ids.push(entity_id);
+            }
             result.changed_belt_ids.clear();
             result.topology_dirty = true;
         }

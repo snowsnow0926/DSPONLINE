@@ -1,5 +1,11 @@
 # DSP极简网络项目现状
 
+> **Windows 银河出口/终局管理 Rust 权威纵切（2026-09-01，开发候选，未发布）**：原生 Galaxy 页现已显示四项固定出口工程、256 位累计账本和出口建筑运行汇总，并可从 exact revision 提交自动调度、节流、项目开关/优先级及手动交付；同 revision 建筑检查器可暂停/启动超大型银河出口建筑。renderer 只提交短意图和手动请求上限，Rust 从当前权威库存、项目等级和储备重新推导实际扣料、进度、信用、评分与升级，实体建筑模式不会误走 legacy 网络扣料。
+>
+> WAL 不保存实际扣料实体 ID、库存结果、奖励或累计值；`AfterWal` 冷恢复与无故障提交的 revision、公开 v47 和 canonical SHA-256 一致，相同 command ID 不会重复消耗。薄 UI 保留旧投影只读显示但锁死写入，手动物料交付强制二次确认，任何 lineage、revision、目录或固定项目/物料绑定漂移都失败关闭。
+>
+> 当前组合新鲜门禁：Core 串行 `1024/3/0`、Host 串行 `230/0/0`；Vitest `2981/29/0`；fresh Release Host 后 native/desktop `549/1/0`；Server `389/2` 加 station `4/4`；Ops `56/6`；完整 Chromium `433/27/0`；durable WAL E2E `7/7`。production build 为 2,099 modules，startup gzip `180,774 B`，forbidden startup module `0`。首次 Vitest 的 `1` 个失败和 strict Clippy 的 `3` 个警告均已按架构合同修复并复跑；默认高并行 Core 仍会在 Windows 压力矩阵触发 allocator abort，因此该门禁继续 No-Go。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均未改变；未读取玩家存档，未连接生产，未部署、打包或签名。
+
 > **Windows 特殊物流接口 Rust 权威纵切（2026-09-01，开发候选，未发布）**：原生薄检查器现已覆盖物资配送枢纽 3 个接口与轨道货运终端 4 个上传口的安全生命周期。renderer 只提交当前实体、接口编号、模式/物品和明确确认位；Rust 从当前 revision 扫描目标实体的相邻线路，原子断线、按等级和并联数量返还传送带、把孤立缓存退回活动行星托盘或便携舰队，并重建 `deliveryItemIds` 兼容镜像。轨道终端仅在同物品不再被其他上传口使用时退款，`orbitalCargoTotalUploaded` 等已上传账本保持不变。
 >
 > WAL 只保存短语义 marker，不保存 renderer 推导的线路 ID、施工库存或缓存结果；`AfterWal` 强制中断后的冷启动与无故障提交得到相同 revision、canonical SHA-256 和公开 v47 状态，相同 command ID 不会二次退款。冷恢复回执因短 WAL 不保存已删除线路 ID，会返回空 `changedBeltIds` 并强制完整 topology 刷新；权威状态本身逐字一致。薄 UI 对破坏性修改强制二次确认，并同时显示同 revision 的微型黑洞三口累计销毁账本。

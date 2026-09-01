@@ -9,6 +9,7 @@ use crate::state::CoreState;
 
 const EPSILON: f64 = 0.0001;
 const MAX_SAFE_INTEGER: i128 = 9_007_199_254_740_991;
+const MAX_WORKSPACE_DECIMAL_DIGITS: usize = 256;
 
 #[derive(Clone, Copy)]
 struct Definition {
@@ -1625,6 +1626,190 @@ fn dispatch(
         record_delivery(endgame, definition, shipped, false)?;
     }
     Ok(shipped)
+}
+
+/// Applies one legacy-network manual dispatch against authoritative stock.
+///
+/// The semantic command layer deliberately passes only a project ID and a
+/// requested upper bound. This helper re-derives reserve, network inventory,
+/// physical withdrawals, level completion, credits and activity mirrors from
+/// the current Rust state, so neither the renderer nor the WAL can author any
+/// material-bearing result.
+pub(crate) fn dispatch_manual(
+    state: &CoreState,
+    base: &mut Map<String, Value>,
+    entities: &mut [Value],
+    project_id: &str,
+    requested: u64,
+) -> anyhow::Result<u64> {
+    let definition = DEFINITIONS
+        .iter()
+        .copied()
+        .find(|definition| definition.id == project_id)
+        .ok_or_else(|| anyhow!("native galactic export project is unknown"))?;
+    let mut endgame = base
+        .remove("endgame")
+        .and_then(|value| value.as_object().cloned())
+        .ok_or_else(|| anyhow!("native galactic endgame state is missing"))?;
+    if endgame.get("exportInputMode").and_then(Value::as_str) != Some("legacy-network") {
+        base.insert("endgame".to_owned(), Value::Object(endgame));
+        bail!("native galactic manual dispatch requires legacy network mode")
+    }
+    let shipped = dispatch(
+        state,
+        base,
+        entities,
+        &mut endgame,
+        definition,
+        requested as f64,
+    )?;
+    base.insert("endgame".to_owned(), Value::Object(endgame));
+    if !shipped.is_finite() || shipped < 0.0 || shipped > MAX_SAFE_INTEGER as f64 {
+        bail!("native galactic manual dispatch result is invalid")
+    }
+    Ok(shipped.floor() as u64)
+}
+
+fn workspace_decimal(value: f64) -> String {
+    if !value.is_finite() || value <= 0.0 {
+        return "0".to_owned();
+    }
+    if value >= 1e256 {
+        return "9".repeat(MAX_WORKSPACE_DECIMAL_DIGITS);
+    }
+    let text = format!("{:.0}", value.floor());
+    if text.len() > MAX_WORKSPACE_DECIMAL_DIGITS {
+        "9".repeat(MAX_WORKSPACE_DECIMAL_DIGITS)
+    } else {
+        text
+    }
+}
+
+fn workspace_non_negative_number(
+    object: &Map<String, Value>,
+    key: &str,
+    label: &str,
+) -> anyhow::Result<f64> {
+    object
+        .get(key)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .ok_or_else(|| anyhow!("native galactic export workspace {label} is invalid"))
+}
+
+/// Bounded, game-only management projection for the thin Galaxy workspace.
+/// It scans only the four fixed projects and exporter topology indices; it
+/// never exposes entity IDs, inventories, trays or activity batch payloads.
+pub(crate) fn workspace_projection(state: &CoreState) -> anyhow::Result<Value> {
+    let base = state.base_value();
+    let endgame = base
+        .get("endgame")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native galactic endgame state is missing"))?;
+    if admission_reason(state)?.is_some() {
+        bail!("native galactic export workspace state is unsupported")
+    }
+    let input_mode = endgame
+        .get("exportInputMode")
+        .and_then(Value::as_str)
+        .filter(|mode| matches!(*mode, "building" | "legacy-network"))
+        .ok_or_else(|| anyhow!("native galactic export workspace mode is invalid"))?;
+    let auto_dispatch = endgame
+        .get("autoDispatch")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| anyhow!("native galactic export workspace automation is invalid"))?;
+    let throttle = endgame
+        .get("dispatchThrottle")
+        .and_then(Value::as_f64)
+        .filter(|value| matches!(*value, 0.25 | 0.5 | 1.0))
+        .ok_or_else(|| anyhow!("native galactic export workspace throttle is invalid"))?;
+    let projects = endgame
+        .get("exportProjects")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native galactic export workspace projects are missing"))?;
+    let mut projected_projects = Vec::with_capacity(DEFINITIONS.len());
+    for definition in DEFINITIONS {
+        let row = projects
+            .get(definition.id)
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native galactic export workspace project is invalid"))?;
+        let enabled = row
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| anyhow!("native galactic export workspace project switch is invalid"))?;
+        let priority = row
+            .get("priority")
+            .and_then(Value::as_u64)
+            .filter(|value| matches!(*value, 1..=3))
+            .ok_or_else(|| anyhow!("native galactic export workspace priority is invalid"))?;
+        let level = workspace_non_negative_number(row, "level", "project level")?;
+        let delivered = workspace_non_negative_number(row, "delivered", "project delivery")?;
+        let total_delivered =
+            workspace_non_negative_number(row, "totalDelivered", "project total delivery")?;
+        let dispatch_progress =
+            workspace_non_negative_number(row, "dispatchProgress", "project progress")?;
+        projected_projects.push(serde_json::json!({
+            "id": definition.id,
+            "itemId": definition.item_id,
+            "enabled": enabled,
+            "priority": priority,
+            "level": workspace_decimal(level),
+            "delivered": workspace_decimal(delivered),
+            "totalDelivered": workspace_decimal(total_delivered),
+            "dispatchProgress": workspace_decimal(dispatch_progress),
+            "target": workspace_decimal(target(definition, level)),
+            "reserve": workspace_decimal((definition.reserve * (1.0 + level * 0.08)).floor()),
+        }));
+    }
+    let mut paused_exporters = 0_u64;
+    for &index in &state.factory_topology.galactic_material_exporter_indices {
+        let entity = state.parse_entity(index)?;
+        let entity = entity
+            .as_object()
+            .ok_or_else(|| anyhow!("native galactic exporter projection row is invalid"))?;
+        if entity.get("buildingId").and_then(Value::as_str) != Some("galactic_material_exporter") {
+            bail!("native galactic exporter topology is inconsistent")
+        }
+        match entity
+            .get("galacticExporterPaused")
+            .and_then(Value::as_bool)
+        {
+            Some(true) => paused_exporters = paused_exporters.saturating_add(1),
+            Some(false) => {}
+            None => bail!("native galactic exporter pause state is invalid"),
+        }
+    }
+    let exporter_total = u64::try_from(
+        state
+            .factory_topology
+            .galactic_material_exporter_indices
+            .len(),
+    )
+    .unwrap_or(u64::MAX)
+    .min(MAX_SAFE_INTEGER as u64);
+    let galactic_credits =
+        workspace_non_negative_number(endgame, "galacticCredits", "credit counter")?;
+    let galactic_score = workspace_non_negative_number(endgame, "galacticScore", "score counter")?;
+    let total_exported =
+        workspace_non_negative_number(endgame, "totalExported", "total export counter")?;
+    let exported_last_minute =
+        workspace_non_negative_number(endgame, "exportedLastMinute", "last-minute export counter")?;
+    Ok(serde_json::json!({
+        "unlocked": completed_tech(base, "universe_matrix"),
+        "inputMode": input_mode,
+        "autoDispatch": auto_dispatch,
+        "dispatchThrottle": throttle,
+        "galacticCredits": workspace_decimal(galactic_credits),
+        "galacticScore": workspace_decimal(galactic_score),
+        "totalExported": workspace_decimal(total_exported),
+        "exportedLastMinute": workspace_decimal(exported_last_minute),
+        "exporters": {
+            "total": exporter_total,
+            "paused": paused_exporters,
+            "running": exporter_total.saturating_sub(paused_exporters),
+        },
+        "projects": projected_projects,
+    }))
 }
 
 fn activity_active(endgame: &Map<String, Value>) -> bool {

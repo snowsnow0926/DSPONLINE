@@ -1,4 +1,4 @@
-import { Atom, CircuitBoard, Database, Flame, Gauge, Layers3, LockKeyhole, Minus, Orbit, Pause, Play, Plus, RotateCcw, Route, Satellite, Trash2 } from "lucide-react";
+import { Atom, CircuitBoard, Database, Factory, Flame, Gauge, Layers3, LockKeyhole, Minus, Orbit, Pause, Play, Plus, RotateCcw, Route, Satellite, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { CONSTRUCTION, FUEL_ENERGY_MJ, ITEMS } from "../game/content";
 import type {
@@ -71,6 +71,7 @@ interface NativeFactoryInspectorPanelProps {
     entityId: string,
     paused: boolean,
   ) => void;
+  onGalacticExporterPausedChange?: (entityId: string, paused: boolean) => void;
   onMaterialDeliverySlotChange?: (
     entityId: string,
     slotIndex: number,
@@ -514,6 +515,7 @@ function NativeEntitySummary({
   onFuelItemChange,
   onEntityRecipeChange,
   onBlackHolePausedChange,
+  onGalacticExporterPausedChange,
   onMaterialDeliverySlotChange,
   onOrbitalCargoPortClear,
   onTimeWarpEnabledChange,
@@ -546,6 +548,7 @@ function NativeEntitySummary({
     entityId: string,
     paused: boolean,
   ) => void;
+  onGalacticExporterPausedChange?: (entityId: string, paused: boolean) => void;
   onMaterialDeliverySlotChange?: (
     entityId: string,
     slotIndex: number,
@@ -568,6 +571,10 @@ function NativeEntitySummary({
   const fuelConfiguration = getNativeProjectedFuelItemConfiguration(configuration);
   const materialDeliveryConfiguration = getNativeProjectedMaterialDeliveryConfiguration(configuration);
   const orbitalCargoConfiguration = getNativeProjectedOrbitalCargoConfiguration(configuration);
+  const galacticExporterPaused = configuration?.entity.buildingId === "galactic_material_exporter" &&
+    typeof configuration.entity.galacticExporterPaused === "boolean"
+    ? configuration.entity.galacticExporterPaused
+    : null;
   const recipeConfiguration = getNativeProjectedEntityRecipeConfiguration(recipeBinding);
   const recipeEligible = entity.kind === "machine" &&
     isNativeProjectedOrdinaryRecipeBuilding(entity.buildingId);
@@ -953,6 +960,20 @@ function NativeEntitySummary({
       <p>相关线路和缓存会由 Rust 按最新权威状态安全返还；已经上传或送达的物资不会重复退款。</p>
       <footer><button ref={specialPortConfirmationCancelRef} type="button" onClick={() => setPendingSpecialPortChange(null)}>取消</button><button className="danger" type="button" onClick={confirmSpecialPortChange}>确认并提交</button></footer>
     </AccessibleDialog> : null}
+    {galacticExporterPaused === null ? null : <section
+      className="native-inspector-safe-actions"
+      data-native-galactic-exporter-paused="semantic-intent-v1"
+    >
+      <strong><Factory size={14} />Rust 银河出口建筑</strong>
+      <p>这里只提交暂停目标。Rust 会在最新 revision 再确认当前行星、内置目录、实体锁和原开关；输入缓存和累计出口不会由界面修改。</p>
+      <button
+        type="button"
+        disabled={pending || entity.interactionLocked || !onGalacticExporterPausedChange}
+        aria-pressed={!galacticExporterPaused}
+        onClick={() => onGalacticExporterPausedChange?.(entity.entityId, !galacticExporterPaused)}
+      >{galacticExporterPaused ? <Play size={14} /> : <Pause size={14} />}
+        {galacticExporterPaused ? "启动银河出口" : "暂停银河出口"}</button>
+    </section>}
     {blackHoleState === null ? null : <section
       className="native-inspector-safe-actions"
       data-native-black-hole-paused="micro-black-hole-v1"
@@ -1172,6 +1193,7 @@ export function NativeFactoryInspectorPanel({
   onFuelItemChange,
   onEntityRecipeChange,
   onBlackHolePausedChange,
+  onGalacticExporterPausedChange,
   onMaterialDeliverySlotChange,
   onOrbitalCargoPortClear,
   onTimeWarpEnabledChange,
@@ -1287,6 +1309,7 @@ export function NativeFactoryInspectorPanel({
       onFuelItemChange={onFuelItemChange}
       onEntityRecipeChange={onEntityRecipeChange}
       onBlackHolePausedChange={onBlackHolePausedChange}
+      onGalacticExporterPausedChange={onGalacticExporterPausedChange}
       onMaterialDeliverySlotChange={onMaterialDeliverySlotChange}
       onOrbitalCargoPortClear={onOrbitalCargoPortClear}
       onTimeWarpEnabledChange={onTimeWarpEnabledChange}

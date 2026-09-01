@@ -181,6 +181,7 @@ impl CoreState {
             unique_known_array_count(base, "exploration", "colonizedPlanetIds", |id| {
                 self.catalog.planets.iter().any(|planet| planet.id == id)
             });
+        let galactic_exports = crate::galactic_exports::workspace_projection(self)?;
 
         let value = serde_json::json!({
             "schemaVersion": 1,
@@ -221,6 +222,7 @@ impl CoreState {
                 "rocketsLaunched": decimal_256(sphere.map(|row| non_negative(row.get("totalRocketsLaunched"))).unwrap_or(0.0)),
                 "sailsLaunched": decimal_256(swarm.map(|row| non_negative(row.get("totalLaunched"))).unwrap_or(0.0)),
             },
+            "galacticExports": galactic_exports,
             "cloudCompatibility": {
                 "gameStateVersion": GAME_STATE_VERSION,
                 "envelopeVersion": ENVELOPE_VERSION,
@@ -255,7 +257,10 @@ mod tests {
 
     #[test]
     fn galaxy_projection_is_game_only_bounded_and_read_only() {
-        let state = crate::simple_factory::tests::fixture_state(&[]);
+        let state = crate::simple_factory::tests::fixture_state_from_base(
+            crate::simple_factory::tests::construction_isolation_base(),
+            &[],
+        );
         let before = state.canonical_sha256().unwrap();
         let projection = state
             .galaxy_account_workspace_projection(
@@ -271,6 +276,13 @@ mod tests {
         assert_eq!(projection["revision"], state.revision);
         assert_eq!(projection["registryFingerprint"], "machine-e3");
         assert_eq!(projection["truncated"], false);
+        assert_eq!(
+            projection["galacticExports"]["projects"]
+                .as_array()
+                .unwrap()
+                .len(),
+            4
+        );
         assert_eq!(
             projection["progress"]["campaignTotal"],
             safe_count(workspace_task_count())

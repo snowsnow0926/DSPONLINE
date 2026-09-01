@@ -77,6 +77,23 @@ function galaxyProjection() {
       galacticScore: "800",
     },
     dyson: { powerKw: "900", structurePoints: "10", rocketsLaunched: "10", sailsLaunched: "20" },
+    galacticExports: {
+      unlocked: true,
+      inputMode: "legacy-network",
+      autoDispatch: true,
+      dispatchThrottle: 1,
+      galacticCredits: "1200",
+      galacticScore: "1200",
+      totalExported: "100",
+      exportedLastMinute: "60",
+      exporters: { total: 2, paused: 1, running: 1 },
+      projects: [
+        { id: "universe_archive", itemId: "universe_matrix", enabled: true, priority: 3, level: "1", delivered: "20", totalDelivered: "1020", dispatchProgress: "0", target: "1550", reserve: "129" },
+        { id: "solar_sail_array", itemId: "solar_sail", enabled: true, priority: 2, level: "0", delivered: "30", totalDelivered: "30", dispatchProgress: "1", target: "5000", reserve: "240" },
+        { id: "carrier_rocket_fleet", itemId: "small_carrier_rocket", enabled: false, priority: 1, level: "0", delivered: "0", totalDelivered: "0", dispatchProgress: "0", target: "1000", reserve: "60" },
+        { id: "antimatter_exchange", itemId: "antimatter_fuel_rod", enabled: false, priority: 1, level: "0", delivered: "0", totalDelivered: "0", dispatchProgress: "0", target: "500", reserve: "24" },
+      ],
+    },
     cloudCompatibility: {
       gameStateVersion: 47,
       envelopeVersion: 2,
@@ -131,6 +148,17 @@ test("counts decimals and active-authority persistence compatibility are closed"
   const difficulty = galaxyProjection();
   difficulty.game.difficulty = "d".repeat(65);
   assert.throws(() => normalizeRendererNativeResult("coreGalaxyAccountWorkspaceProjection", difficulty, context), /invalid/);
+  const exportCountDrift = galaxyProjection();
+  exportCountDrift.galacticExports.exporters.running = 2;
+  assert.throws(() => normalizeRendererNativeResult("coreGalaxyAccountWorkspaceProjection", exportCountDrift, context), /count binding/);
+  const exportItemDrift = galaxyProjection();
+  exportItemDrift.galacticExports.projects[0].itemId = "small_carrier_rocket";
+  assert.throws(() => normalizeRendererNativeResult("coreGalaxyAccountWorkspaceProjection", exportItemDrift, context), /itemId binding/);
+  const duplicateExportProject = galaxyProjection();
+  duplicateExportProject.galacticExports.projects[3] = {
+    ...duplicateExportProject.galacticExports.projects[2],
+  };
+  assert.throws(() => normalizeRendererNativeResult("coreGalaxyAccountWorkspaceProjection", duplicateExportProject, context), /project binding/);
   const restore = galaxyProjection();
   restore.cloudCompatibility.restoreIntoActiveAuthority = true;
   assert.throws(() => normalizeRendererNativeResult("coreGalaxyAccountWorkspaceProjection", restore, context), /compatibility binding/);

@@ -32,6 +32,7 @@ mod entity_raw;
 mod factory_canvas_presentation;
 mod factory_inventory;
 mod factory_read_model;
+mod galactic_export_command;
 mod galactic_exports;
 mod galaxy_account_workspace;
 mod global_progress;

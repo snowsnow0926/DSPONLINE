@@ -1245,6 +1245,50 @@ describe("NativeFactoryInspectorPanel", () => {
     expect(change).toHaveBeenCalledWith("delivery-a", 0, "manual", "copper_ore");
   });
 
+  it("routes only the projected Galaxy exporter pause target", () => {
+    const change = vi.fn();
+    const exporter = projectedEntity({
+      id: "exporter-a",
+      buildingId: "galactic_material_exporter",
+      recipeId: undefined,
+      powerPriority: undefined,
+      galacticExporterPaused: true,
+    });
+    const summary = projectedSummary(exporter);
+    const render = (pending: boolean, binding = configuration(exporter)) => act(() =>
+      root.render(<NativeFactoryInspectorPanel
+        inspector={inspector({ entity: summary })}
+        multiSelection={multi({ entityRows: { rows: [summary], totalCount: 1, truncated: false } })}
+        entityConfiguration={binding}
+        pending={pending}
+        onEntityLockChange={vi.fn()}
+        onRemoveEntity={vi.fn()}
+        onStackCountChange={vi.fn()}
+        onEntityPowerPriorityChange={vi.fn()}
+        onSplitterDistributionModeChange={vi.fn()}
+        onEnergyExchangerModeChange={vi.fn()}
+        onFuelItemChange={vi.fn()}
+        onBlackHolePausedChange={vi.fn()}
+        onGalacticExporterPausedChange={change}
+        onBeltLaneCountChange={vi.fn()}
+        onBeltPriorityChange={vi.fn()}
+        onRemoveBelt={vi.fn()}
+      />));
+
+    render(false);
+    const button = host.querySelector<HTMLButtonElement>(
+      '[data-native-galactic-exporter-paused] button',
+    )!;
+    expect(button.textContent).toContain("启动银河出口");
+    act(() => button.click());
+    expect(change).toHaveBeenCalledWith("exporter-a", false);
+
+    render(true);
+    expect(host.querySelector<HTMLButtonElement>(
+      '[data-native-galactic-exporter-paused] button',
+    )?.disabled).toBe(true);
+  });
+
   it("confirms terminal port clearing and renders the black-hole destruction ledger", () => {
     const clear = vi.fn();
     const terminal = projectedEntity({

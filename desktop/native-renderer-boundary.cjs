@@ -8201,7 +8201,7 @@ function normalizeCoreGalaxyAccountWorkspaceProjection(value, context) {
   const source = exactObject(value, [
     "schemaVersion", "projectionType", "source", "stateVersion", "sessionId", "runId",
     "revision", "registryFingerprint", "truncated", "limits", "game", "production",
-    "progress", "dyson", "cloudCompatibility",
+    "progress", "dyson", "galacticExports", "cloudCompatibility",
   ], label);
   requireProjectionByteBudget(source, label);
   const identity = normalizeBoundWorkspaceIdentity(
@@ -8233,6 +8233,50 @@ function normalizeCoreGalaxyAccountWorkspaceProjection(value, context) {
   const dysonSource = exactObject(source.dyson, [
     "powerKw", "structurePoints", "rocketsLaunched", "sailsLaunched",
   ], `${label}.dyson`);
+  const exportsSource = exactObject(source.galacticExports, [
+    "unlocked", "inputMode", "autoDispatch", "dispatchThrottle", "galacticCredits",
+    "galacticScore", "totalExported", "exportedLastMinute", "exporters", "projects",
+  ], `${label}.galacticExports`);
+  const exporterCountsSource = exactObject(exportsSource.exporters, [
+    "total", "paused", "running",
+  ], `${label}.galacticExports.exporters`);
+  const exporterTotal = safeInteger(exporterCountsSource.total, `${label}.galacticExports.exporters.total`);
+  const exporterPaused = safeInteger(exporterCountsSource.paused, `${label}.galacticExports.exporters.paused`);
+  const exporterRunning = safeInteger(exporterCountsSource.running, `${label}.galacticExports.exporters.running`);
+  if (exporterPaused + exporterRunning !== exporterTotal || !Array.isArray(exportsSource.projects) ||
+      exportsSource.projects.length !== 4) {
+    throw protocolError(`${label}.galacticExports count binding`);
+  }
+  const exportCatalog = new Map([
+    ["universe_archive", "universe_matrix"],
+    ["solar_sail_array", "solar_sail"],
+    ["carrier_rocket_fleet", "small_carrier_rocket"],
+    ["antimatter_exchange", "antimatter_fuel_rod"],
+  ]);
+  const exportProjects = exportsSource.projects.map((value, index) => {
+    const rowLabel = `${label}.galacticExports.projects[${index}]`;
+    const row = exactObject(value, [
+      "id", "itemId", "enabled", "priority", "level", "delivered", "totalDelivered",
+      "dispatchProgress", "target", "reserve",
+    ], rowLabel);
+    const id = oneOf(row.id, [...exportCatalog.keys()], `${rowLabel}.id`);
+    if (exportCatalog.get(id) !== row.itemId) throw protocolError(`${rowLabel}.itemId binding`);
+    return {
+      id,
+      itemId: row.itemId,
+      enabled: boolean(row.enabled, `${rowLabel}.enabled`),
+      priority: oneOf(row.priority, [1, 2, 3], `${rowLabel}.priority`),
+      level: stellarDecimal(row.level, `${rowLabel}.level`),
+      delivered: stellarDecimal(row.delivered, `${rowLabel}.delivered`),
+      totalDelivered: stellarDecimal(row.totalDelivered, `${rowLabel}.totalDelivered`),
+      dispatchProgress: stellarDecimal(row.dispatchProgress, `${rowLabel}.dispatchProgress`),
+      target: stellarDecimal(row.target, `${rowLabel}.target`),
+      reserve: stellarDecimal(row.reserve, `${rowLabel}.reserve`),
+    };
+  });
+  if (new Set(exportProjects.map((row) => row.id)).size !== exportCatalog.size) {
+    throw protocolError(`${label}.galacticExports project binding`);
+  }
   const cloudSource = exactObject(source.cloudCompatibility, [
     "gameStateVersion", "envelopeVersion", "cloudSchemaVersion", "exportSupported",
     "restoreIntoActiveAuthority", "importIntoActiveAuthority", "overwriteActiveAuthority",
@@ -8279,6 +8323,18 @@ function normalizeCoreGalaxyAccountWorkspaceProjection(value, context) {
       structurePoints: stellarDecimal(dysonSource.structurePoints, `${label}.dyson.structurePoints`),
       rocketsLaunched: stellarDecimal(dysonSource.rocketsLaunched, `${label}.dyson.rocketsLaunched`),
       sailsLaunched: stellarDecimal(dysonSource.sailsLaunched, `${label}.dyson.sailsLaunched`),
+    },
+    galacticExports: {
+      unlocked: boolean(exportsSource.unlocked, `${label}.galacticExports.unlocked`),
+      inputMode: oneOf(exportsSource.inputMode, ["building", "legacy-network"], `${label}.galacticExports.inputMode`),
+      autoDispatch: boolean(exportsSource.autoDispatch, `${label}.galacticExports.autoDispatch`),
+      dispatchThrottle: oneOf(exportsSource.dispatchThrottle, [0.25, 0.5, 1], `${label}.galacticExports.dispatchThrottle`),
+      galacticCredits: stellarDecimal(exportsSource.galacticCredits, `${label}.galacticExports.galacticCredits`),
+      galacticScore: stellarDecimal(exportsSource.galacticScore, `${label}.galacticExports.galacticScore`),
+      totalExported: stellarDecimal(exportsSource.totalExported, `${label}.galacticExports.totalExported`),
+      exportedLastMinute: stellarDecimal(exportsSource.exportedLastMinute, `${label}.galacticExports.exportedLastMinute`),
+      exporters: { total: exporterTotal, paused: exporterPaused, running: exporterRunning },
+      projects: exportProjects,
     },
     cloudCompatibility: {
       gameStateVersion: 47,

@@ -273,6 +273,70 @@ describe("native player-authority command source", () => {
     });
   });
 
+  it("accepts Galaxy export semantic receipts without renderer-derived inventory IDs", async () => {
+    const manualDispatch: SimulationCommandPatch = {
+      protocolVersion: 1,
+      baseRevision: 10,
+      topLevelChanges: [{
+        path: ["galacticExports", "intent"],
+        operation: "set",
+        value: {
+          type: "manual-dispatch",
+          projectId: "universe_archive",
+          requestedAmount: "1000",
+        },
+      }],
+      changedEntities: [],
+      addedEntities: [],
+      removedEntityIds: [],
+      changedBelts: [],
+      addedBelts: [],
+      removedBeltIds: [],
+    };
+    const compact = receiptForPatch(manualDispatch, true);
+    await expect(sourceHarness(manualDispatch, {
+      receipt: compact,
+      topologyDirty: true,
+    }).source.applyCommand(manualDispatch)).resolves.toMatchObject({
+      changedEntityIds: [],
+      changedBeltIds: [],
+      topologyDirty: true,
+    });
+    await expect(sourceHarness(manualDispatch, {
+      receipt: { ...compact, changedEntityIds: ["renderer-guessed-stock"] },
+      topologyDirty: true,
+    }).source.applyCommand(manualDispatch)).rejects.toMatchObject({
+      code: "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+    });
+
+    const exporterPause: SimulationCommandPatch = {
+      ...manualDispatch,
+      topLevelChanges: [],
+      changedEntities: [{
+        id: "exporter-a",
+        changes: [{
+          path: ["galacticExporter", "pauseIntent"],
+          operation: "set",
+          value: { paused: true },
+        }],
+      }],
+    };
+    const exporterReceipt = receiptForPatch(exporterPause, true);
+    await expect(sourceHarness(exporterPause, {
+      receipt: exporterReceipt,
+      topologyDirty: true,
+    }).source.applyCommand(exporterPause)).resolves.toMatchObject({
+      changedEntityIds: ["exporter-a"],
+      topologyDirty: true,
+    });
+    await expect(sourceHarness(exporterPause, {
+      receipt: { ...exporterReceipt, changedEntityIds: [] },
+      topologyDirty: true,
+    }).source.applyCommand(exporterPause)).rejects.toMatchObject({
+      code: "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+    });
+  });
+
   it("accepts the exact entity-recipe marker with its compact live receipt", async () => {
     const patch = recipeIntentPatch();
     const harness = sourceHarness(patch, { receipt: recipeIntentReceipt(patch) });

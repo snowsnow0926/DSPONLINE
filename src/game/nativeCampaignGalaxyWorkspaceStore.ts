@@ -61,8 +61,19 @@ const EMPTY_AUTHORITY_FRAMES: NativeCampaignGalaxyWorkspaceAuthorityFrames = Obj
   readFrame: null,
 });
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
+const DECIMAL_256_PATTERN = /^(?:0|[1-9][0-9]{0,255})$/;
+const GALACTIC_EXPORT_ITEMS = new Map([
+  ["universe_archive", "universe_matrix"],
+  ["solar_sail_array", "solar_sail"],
+  ["carrier_rocket_fleet", "small_carrier_rocket"],
+  ["antimatter_exchange", "antimatter_fuel_rod"],
+] as const);
 const CHAPTER_BY_ID = new Map(CAMPAIGN_CHAPTERS.map((chapter) => [chapter.id, chapter]));
 const TASK_BY_ID = new Map(CAMPAIGN_TASKS.map((task) => [task.id, task]));
+
+function validDecimal256(value: unknown): value is string {
+  return typeof value === "string" && DECIMAL_256_PATTERN.test(value);
+}
 
 function validLogicalId(value: string, maximumLength = 128): boolean {
   return value.length > 0 && value.length <= maximumLength && LOGICAL_ID_PATTERN.test(value);
@@ -130,12 +141,30 @@ function validGalaxyProjection(
   projection: DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult,
   identity: NativeCampaignGalaxyWorkspaceIdentity,
 ): boolean {
+  const exports = projection.galacticExports;
+  const exporters = exports?.exporters;
+  const validProjects = Boolean(exports && Array.isArray(exports.projects) && exports.projects.length === 4 &&
+    exports.projects.every((row) => Boolean(row && typeof row === "object")) &&
+    new Set(exports.projects.map((row) => row.id)).size === 4 && exports.projects.every((row) =>
+      GALACTIC_EXPORT_ITEMS.get(row.id) === row.itemId && typeof row.enabled === "boolean" &&
+      [1, 2, 3].includes(row.priority) && [
+        row.level, row.delivered, row.totalDelivered, row.dispatchProgress, row.target, row.reserve,
+      ].every(validDecimal256)));
+  const validExports = Boolean(exports && typeof exports.unlocked === "boolean" &&
+    ["building", "legacy-network"].includes(exports.inputMode) &&
+    typeof exports.autoDispatch === "boolean" && [0.25, 0.5, 1].includes(exports.dispatchThrottle) &&
+    [exports.galacticCredits, exports.galacticScore, exports.totalExported, exports.exportedLastMinute]
+      .every(validDecimal256) && exporters &&
+    Number.isSafeInteger(exporters.total) && exporters.total >= 0 &&
+    Number.isSafeInteger(exporters.paused) && exporters.paused >= 0 &&
+    Number.isSafeInteger(exporters.running) && exporters.running >= 0 &&
+    exporters.paused + exporters.running === exporters.total && validProjects);
   return projection.schemaVersion === 1 && projection.projectionType === "galaxy-account-workspace-v1" &&
     projection.source === "native-core" && projection.stateVersion === 47 &&
     projection.truncated === false && projection.sessionId === identity.sessionId &&
     projection.runId === identity.runId && projection.revision === identity.revision &&
     projection.registryFingerprint === identity.registryFingerprint &&
-    projection.limits.payloadBytes === 65_536 && projection.limits.decimalDigits === 256 &&
+    projection.limits.payloadBytes === 65_536 && projection.limits.decimalDigits === 256 && validExports &&
     projection.cloudCompatibility.gameStateVersion === 47 &&
     projection.cloudCompatibility.envelopeVersion === 2 &&
     projection.cloudCompatibility.cloudSchemaVersion === 8 &&
@@ -170,6 +199,8 @@ function cloneCampaignProjection(
 function cloneGalaxyProjection(
   projection: DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult,
 ): DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult {
+  const projects = projection.galacticExports.projects.map((row) => Object.freeze({ ...row }));
+  Object.freeze(projects);
   return Object.freeze({
     ...projection,
     limits: Object.freeze({ ...projection.limits }),
@@ -177,6 +208,11 @@ function cloneGalaxyProjection(
     production: Object.freeze({ ...projection.production }),
     progress: Object.freeze({ ...projection.progress }),
     dyson: Object.freeze({ ...projection.dyson }),
+    galacticExports: Object.freeze({
+      ...projection.galacticExports,
+      exporters: Object.freeze({ ...projection.galacticExports.exporters }),
+      projects,
+    }),
     cloudCompatibility: Object.freeze({ ...projection.cloudCompatibility }),
   });
 }

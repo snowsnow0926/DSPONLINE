@@ -89,6 +89,17 @@ function galaxyProjection(revision = identity.revision): DesktopNativeCoreGalaxy
     production: { totalProduced: "1000000", universeMatrixProduced: "5", generationKw: "100", throughputPerMinute: "200" },
     progress: { campaignCompleted: 1, campaignTotal: CAMPAIGN_TASKS.length, researchCompleted: 2, exploredSystems: 1, colonizedPlanets: 1, galacticScore: "3" },
     dyson: { powerKw: "4", structurePoints: "5", rocketsLaunched: "6", sailsLaunched: "7" },
+    galacticExports: {
+      unlocked: true, inputMode: "legacy-network", autoDispatch: true, dispatchThrottle: 1,
+      galacticCredits: "1200", galacticScore: "1200", totalExported: "100", exportedLastMinute: "60",
+      exporters: { total: 2, paused: 1, running: 1 },
+      projects: [
+        { id: "universe_archive", itemId: "universe_matrix", enabled: true, priority: 3, level: "1", delivered: "20", totalDelivered: "1020", dispatchProgress: "0", target: "1550", reserve: "129" },
+        { id: "solar_sail_array", itemId: "solar_sail", enabled: true, priority: 2, level: "0", delivered: "30", totalDelivered: "30", dispatchProgress: "1", target: "5000", reserve: "240" },
+        { id: "carrier_rocket_fleet", itemId: "small_carrier_rocket", enabled: false, priority: 1, level: "0", delivered: "0", totalDelivered: "0", dispatchProgress: "0", target: "1000", reserve: "60" },
+        { id: "antimatter_exchange", itemId: "antimatter_fuel_rod", enabled: false, priority: 1, level: "0", delivered: "0", totalDelivered: "0", dispatchProgress: "0", target: "500", reserve: "24" },
+      ],
+    },
     cloudCompatibility: { gameStateVersion: 47, envelopeVersion: 2, cloudSchemaVersion: 8, exportSupported: true, restoreIntoActiveAuthority: false, importIntoActiveAuthority: false, overwriteActiveAuthority: false },
   };
 }
@@ -264,6 +275,52 @@ describe("native Campaign and Galaxy thin workspaces", () => {
     expect(buttons).not.toMatch(/恢复|导入|覆盖/);
     act(() => [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("本地身份"))!.click());
     expect(host.textContent).toContain("测试工程师");
+  });
+
+  it("submits only bounded Galaxy export intents and confirms material consumption", async () => {
+    const onExportIntent = vi.fn(() => true);
+    await act(async () => {
+      root.render(<NativeGalaxyWorkspace
+        open
+        accountState={accountState}
+        frame={galaxyFrame()}
+        latestIdentity={identity}
+        status="ready"
+        onClose={() => undefined}
+        onUpdateProfile={() => undefined}
+        onUpdateCloudBinding={() => true}
+        onCreateAccount={() => undefined}
+        onSwitchAccount={() => undefined}
+        onExportIntent={onExportIntent}
+      />);
+      await Promise.resolve();
+    });
+    act(() => [...host.querySelectorAll("button")]
+      .find((button) => button.textContent?.includes("银河出口"))!.click());
+    expect(host.textContent).toContain("守恒出口总账");
+
+    act(() => [...host.querySelectorAll("button")]
+      .find((button) => button.textContent === "50%")!.click());
+    expect(onExportIntent).toHaveBeenCalledWith({
+      type: "set-dispatch-throttle",
+      throttle: 0.5,
+    });
+
+    onExportIntent.mockClear();
+    const input = host.querySelector<HTMLInputElement>('[aria-label="宇宙矩阵档案手动交付数量"]')!;
+    await act(async () => setInputValue(input, "321"));
+    act(() => [...host.querySelectorAll("button")]
+      .find((button) => button.textContent === "确认手动交付")!.click());
+    expect(onExportIntent).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain("321");
+    const confirm = [...document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')]
+      .find((button) => button.textContent === "由 Rust 守恒交付")!;
+    act(() => confirm.click());
+    expect(onExportIntent).toHaveBeenCalledWith({
+      type: "manual-dispatch",
+      projectId: "universe_archive",
+      requestedAmount: "321",
+    });
   });
 
   it("keeps a verified Galaxy frame visible while the next same-lineage revision loads", async () => {

@@ -99,6 +99,23 @@ function galaxyProjection(
       galacticScore: "3",
     },
     dyson: { powerKw: "4", structurePoints: "5", rocketsLaunched: "6", sailsLaunched: "7" },
+    galacticExports: {
+      unlocked: true,
+      inputMode: "legacy-network",
+      autoDispatch: true,
+      dispatchThrottle: 1,
+      galacticCredits: "1200",
+      galacticScore: "1200",
+      totalExported: "100",
+      exportedLastMinute: "60",
+      exporters: { total: 2, paused: 1, running: 1 },
+      projects: [
+        { id: "universe_archive", itemId: "universe_matrix", enabled: true, priority: 3, level: "1", delivered: "20", totalDelivered: "1020", dispatchProgress: "0", target: "1550", reserve: "129" },
+        { id: "solar_sail_array", itemId: "solar_sail", enabled: true, priority: 2, level: "0", delivered: "30", totalDelivered: "30", dispatchProgress: "1", target: "5000", reserve: "240" },
+        { id: "carrier_rocket_fleet", itemId: "small_carrier_rocket", enabled: false, priority: 1, level: "0", delivered: "0", totalDelivered: "0", dispatchProgress: "0", target: "1000", reserve: "60" },
+        { id: "antimatter_exchange", itemId: "antimatter_fuel_rod", enabled: false, priority: 1, level: "0", delivered: "0", totalDelivered: "0", dispatchProgress: "0", target: "500", reserve: "24" },
+      ],
+    },
     cloudCompatibility: {
       gameStateVersion: 47,
       envelopeVersion: 2,
@@ -326,6 +343,17 @@ describe("native Campaign and Galaxy workspace stores", () => {
       getNativeCoreGalaxyAccountWorkspaceProjection: async () => driftedGalaxy,
     }, IDENTITY)!;
     await expect(galaxyStore.refresh(galaxySource, IDENTITY)).resolves.toBe("unavailable");
+
+    const exportDriftStore = new NativeGalaxyWorkspaceStore();
+    const exportDrift = galaxyProjection();
+    exportDrift.galacticExports.projects[0] = {
+      ...exportDrift.galacticExports.projects[0],
+      itemId: "solar_sail",
+    } as typeof exportDrift.galacticExports.projects[number];
+    const exportDriftSource = createNativePlayerAuthorityGalaxyWorkspaceSource({
+      getNativeCoreGalaxyAccountWorkspaceProjection: async () => exportDrift,
+    }, IDENTITY)!;
+    await expect(exportDriftStore.refresh(exportDriftSource, IDENTITY)).resolves.toBe("unavailable");
   });
 
   it("rejects invalid source identities before calling the desktop bridge", () => {

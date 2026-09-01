@@ -654,6 +654,11 @@ import {
   createConfirmedNativeOrbitalCargoPortClearCommand,
 } from "./game/nativeProjectedSpecialInputPortCommands";
 import {
+  createNativeProjectedGalacticExporterPauseCommand,
+  createNativeProjectedGalacticExportCommand,
+  type NativeProjectedGalacticExportIntent,
+} from "./game/nativeProjectedGalacticExportCommands";
+import {
   type NativeProjectedEntityRecipeBinding,
 } from "./game/nativeProjectedEntityRecipeCommands";
 import { useNativeEntityRecipeCommandTransaction } from "./game/useNativeEntityRecipeCommandTransaction";
@@ -13715,6 +13720,32 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     return true;
   }, []);
 
+  const submitNativeGalacticExportIntent = useCallback((
+    intent: NativeProjectedGalacticExportIntent,
+  ): boolean => {
+    const frame = nativeGalaxyWorkspaceFrame;
+    const latest = nativeCampaignGalaxyIdentity;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || !frame || !latest || !commandSource ||
+        frame.sessionId !== latest.sessionId || frame.runId !== latest.runId ||
+        frame.registryFingerprint !== latest.registryFingerprint || frame.revision !== latest.revision ||
+        commandSource.sessionId !== frame.sessionId || commandSource.runId !== frame.runId ||
+        commandSource.baseRevision !== frame.revision) {
+      setNotice("原生银河出口投影、session 或 revision 已变化；本次操作未提交");
+      return false;
+    }
+    const accepted = commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedGalacticExportCommand(frame, intent)
+        : null,
+      () => setNotice(intent.type === "manual-dispatch"
+        ? "银河物资已由 Rust 按当前库存和储备守恒交付"
+        : "银河出口设置已由 Rust 提交"),
+    );
+    if (!accepted) setNotice("Rust 没有接受这次银河出口命令；存档未改变");
+    return accepted;
+  }, [commitNativeProjectedCommand, nativeCampaignGalaxyIdentity, nativeGalaxyWorkspaceFrame]);
+
   const createGalaxyAccount = useCallback((displayName: string) => {
     if (nativePlayerAuthorityOwnsRuntimeRef.current) {
       const next = createLocalAccount(accountStateRef.current, displayName);
@@ -19760,6 +19791,38 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       setNotice("原生轨道货运接口投影未通过同 revision 完整性校验；存档未改变");
     }
   }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
+  const changeNativeGalacticExporterPaused = useCallback((
+    entityId: string,
+    paused: boolean,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次银河出口建筑启停未提交");
+      return;
+    }
+    const binding = nativeEntityConfigurationProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.id !== entityId ||
+        binding.entity.buildingId !== "galactic_material_exporter" ||
+        typeof binding.entity.galacticExporterPaused !== "boolean" ||
+        !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生银河出口建筑选择、session 或 revision 已变化；本次启停未提交");
+      return;
+    }
+    const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+      baseRevision === binding.revision
+        ? createNativeProjectedGalacticExporterPauseCommand(binding, paused)
+        : null,
+      () => setNotice(paused ? "银河物资出口建筑已由 Rust 暂停" : "银河物资出口建筑已由 Rust 启动"),
+    );
+    if (!accepted) setNotice("Rust 没有接受这次银河出口建筑命令；存档未改变");
+  }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
   const changeNativeEntityRecipe = useCallback((
     entityId: string,
     targetRecipeId: RecipeId,
@@ -21972,6 +22035,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           onFuelItemChange={changeNativeFuelItem}
           onEntityRecipeChange={changeNativeEntityRecipe}
           onBlackHolePausedChange={changeNativeBlackHolePaused}
+          onGalacticExporterPausedChange={changeNativeGalacticExporterPaused}
           onMaterialDeliverySlotChange={changeNativeMaterialDeliverySlot}
           onOrbitalCargoPortClear={clearNativeOrbitalCargoPort}
           onTimeWarpEnabledChange={changeNativeTimeWarpEnabled}
@@ -22432,6 +22496,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onUpdateCloudBinding={updateNativeGalaxyCloudBinding}
             onCreateAccount={createGalaxyAccount}
             onSwitchAccount={switchGalaxyAccount}
+            exportPending={nativePlayerAuthorityCommandPending}
+            onExportIntent={submitNativeGalacticExportIntent}
           />
         ) : (
           <GalaxyWorkspace

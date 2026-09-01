@@ -3046,6 +3046,25 @@ export interface DesktopNativeCoreCampaignWorkspaceProjectionResult {
 export type DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest =
   DesktopNativeCoreAuthorityWorkspaceProjectionRequest;
 
+export type DesktopNativeCoreGalacticExportProjectId =
+  | "universe_archive"
+  | "solar_sail_array"
+  | "carrier_rocket_fleet"
+  | "antimatter_exchange";
+
+export interface DesktopNativeCoreGalacticExportProjectRow {
+  id: DesktopNativeCoreGalacticExportProjectId;
+  itemId: "universe_matrix" | "solar_sail" | "small_carrier_rocket" | "antimatter_fuel_rod";
+  enabled: boolean;
+  priority: 1 | 2 | 3;
+  level: string;
+  delivered: string;
+  totalDelivered: string;
+  dispatchProgress: string;
+  target: string;
+  reserve: string;
+}
+
 export interface DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult {
   schemaVersion: 1;
   projectionType: "galaxy-account-workspace-v1";
@@ -3084,6 +3103,22 @@ export interface DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult {
     structurePoints: string;
     rocketsLaunched: string;
     sailsLaunched: string;
+  };
+  galacticExports: {
+    unlocked: boolean;
+    inputMode: "building" | "legacy-network";
+    autoDispatch: boolean;
+    dispatchThrottle: 0.25 | 0.5 | 1;
+    galacticCredits: string;
+    galacticScore: string;
+    totalExported: string;
+    exportedLastMinute: string;
+    exporters: {
+      total: number;
+      paused: number;
+      running: number;
+    };
+    projects: DesktopNativeCoreGalacticExportProjectRow[];
   };
   cloudCompatibility: {
     gameStateVersion: 47;

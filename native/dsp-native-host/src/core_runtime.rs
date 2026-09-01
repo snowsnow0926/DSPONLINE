@@ -17156,6 +17156,184 @@ mod tests {
     }
 
     #[test]
+    fn galactic_export_manual_dispatch_survives_wal_cold_reopen_without_double_consumption() {
+        let mut catalog = player_authority_catalog();
+        catalog["items"].as_array_mut().unwrap().extend([
+            json!({ "id": "universe_matrix", "name": "universe_matrix", "kind": "solid" }),
+            json!({ "id": "solar_sail", "name": "solar_sail", "kind": "solid" }),
+            json!({ "id": "small_carrier_rocket", "name": "small_carrier_rocket", "kind": "solid" }),
+            json!({ "id": "antimatter_fuel_rod", "name": "antimatter_fuel_rod", "kind": "solid" }),
+        ]);
+        catalog["buildings"].as_array_mut().unwrap().push(json!({
+            "id": "storage_mk1",
+            "kind": "storage",
+            "speed": 1,
+            "inputCapacity": 1_000_000,
+            "outputCapacity": 1_000_000,
+            "powerDemandKw": 0,
+            "powerGenerationKw": 0,
+            "accepts": "any"
+        }));
+        catalog["technologies"].as_array_mut().unwrap().push(json!({
+            "id": "universe_matrix",
+            "name": "universe_matrix",
+            "costs": [{ "itemId": "universe_matrix", "amount": 1 }],
+            "prerequisites": [],
+            "constructionRewards": []
+        }));
+
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["research"]["completedTechIds"] = json!(["universe_matrix"]);
+        envelope["state"]["endgame"]["exportInputMode"] = Value::from("legacy-network");
+        envelope["state"]["tray"]["universe_matrix"] = Value::from(400);
+        envelope["state"]["planetTrays"]["home"]["universe_matrix"] = Value::from(400);
+        envelope["state"]["entities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "export-stock",
+                "kind": "storage",
+                "planetId": "home",
+                "position": { "x": 7, "y": 2 },
+                "interactionLocked": false,
+                "buildingId": "storage_mk1",
+                "powerGridId": "grid-a",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": { "universe_matrix": 500 },
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            }));
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let request = |base_revision: u64| CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: "galactic-export-before-cold-reopen".to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [{
+                    "path": ["galacticExports", "intent"],
+                    "operation": "set",
+                    "value": {
+                        "type": "manual-dispatch",
+                        "projectId": "universe_archive",
+                        "requestedAmount": "1000"
+                    }
+                }],
+                "changedEntities": [],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        };
+
+        let (clean_root, mut clean_store, mut clean_registry, clean_session, clean_checkpoint) =
+            player_authority_fixture_from_parts(bytes.clone(), catalog.clone());
+        let clean = clean_registry
+            .commit_player_authority_command(
+                &mut clean_store,
+                &clean_session,
+                request(clean_checkpoint.revision),
+            )
+            .unwrap();
+        assert!(clean.changed_entity_ids.is_empty());
+        assert!(clean.changed_belt_ids.is_empty());
+        assert!(clean.topology_dirty);
+        let live = export_test_state(
+            clean_root.path(),
+            &clean_registry,
+            &clean_store,
+            &clean_session,
+            "galactic-export-live",
+        );
+        assert_eq!(live["tray"]["universe_matrix"], 120.0);
+        assert_eq!(live["planetTrays"]["home"]["universe_matrix"], 120.0);
+        assert_eq!(
+            live["endgame"]["exportProjects"]["universe_archive"]["totalDelivered"],
+            780.0
+        );
+        assert_eq!(live["endgame"]["totalExported"], 780.0);
+        assert_eq!(live["endgame"]["galacticCredits"], 9_360.0);
+        let export_stock = live["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["id"] == "export-stock")
+            .unwrap();
+        assert_eq!(export_stock["outputs"]["universe_matrix"], 0.0);
+
+        let (root, mut store, mut registry, session_id, checkpoint) =
+            player_authority_fixture_from_parts(bytes, catalog);
+        let error = registry
+            .commit_player_authority_command_internal(
+                &mut store,
+                &session_id,
+                request(checkpoint.revision),
+                PlayerAuthorityCommandKind::Gameplay,
+                PlayerAuthorityCommandFault::AfterWal,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("lost response"));
+        let wal = store.read_wal("normal-main", checkpoint.revision).unwrap();
+        assert_eq!(wal.len(), 1);
+        let wal_payload = serde_json::to_string(&wal).unwrap();
+        assert!(wal_payload.contains("manual-dispatch"));
+        assert!(wal_payload.contains("requestedAmount"));
+        assert!(!wal_payload.contains("totalDelivered"));
+        assert!(!wal_payload.contains("galacticCredits"));
+        assert!(!wal_payload.contains("export-stock"));
+        drop(registry);
+
+        let mut reopened = resumable_player_authority_registry_for_test();
+        let startup = reopened
+            .recover_player_authority_pending_command_on_startup(&mut store)
+            .unwrap()
+            .expect("WAL-staged galactic export command must provide a startup receipt");
+        assert_eq!(startup.revision, clean.revision);
+        assert_eq!(
+            startup.summary.canonical_sha256,
+            clean.summary.canonical_sha256
+        );
+        assert!(startup.changed_entity_ids.is_empty());
+        assert!(startup.changed_belt_ids.is_empty());
+        assert!(startup.topology_dirty);
+        let duplicate = reopened
+            .commit_player_authority_command(
+                &mut store,
+                &startup.session_id,
+                request(checkpoint.revision),
+            )
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(
+            duplicate.summary.canonical_sha256,
+            clean.summary.canonical_sha256
+        );
+        assert!(duplicate.changed_entity_ids.is_empty());
+        assert!(duplicate.changed_belt_ids.is_empty());
+        assert!(duplicate.topology_dirty);
+        let replayed = export_test_state(
+            root.path(),
+            &reopened,
+            &store,
+            &startup.session_id,
+            "galactic-export-replayed",
+        );
+        assert_eq!(replayed, live);
+    }
+
+    #[test]
     fn dyson_shell_plan_intent_survives_player_authority_wal_cold_reopen_without_minting_material()
     {
         let mut catalog = player_authority_catalog();

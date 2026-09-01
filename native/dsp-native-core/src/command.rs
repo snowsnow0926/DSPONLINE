@@ -19096,7 +19096,7 @@ mod tests {
     }
 
     #[test]
-    fn player_authority_factory_layout_rejects_forged_scopes_without_mutating_source() {
+    fn player_authority_factory_layout_rejects_forged_scopes_and_accepts_data_only_catalogs() {
         let mut duplicate = factory_auto_layout_command(9, &["smelter-a", "ejector-a"]);
         duplicate.top_level_changes[0].value.as_mut().unwrap()["entityIds"] =
             serde_json::json!(["smelter-a", "smelter-a"]);
@@ -19117,14 +19117,20 @@ mod tests {
         }
 
         let mut modded = player_command_state_for_registry("modded-layout");
-        let before = modded.canonical_sha256().unwrap();
-        assert!(
-            modded
-                .apply_player_authority_command(&factory_auto_layout_command(9, &[]))
-                .is_err()
+        let before_positions = (0..3)
+            .map(|index| modded.parse_entity(index).unwrap()["position"].clone())
+            .collect::<Vec<_>>();
+        let receipt = modded
+            .apply_player_authority_command(&factory_auto_layout_command(9, &[]))
+            .unwrap();
+        assert_eq!(receipt.revision, 10);
+        assert_eq!(modded.revision, 10);
+        assert_ne!(
+            (0..3)
+                .map(|index| modded.parse_entity(index).unwrap()["position"].clone())
+                .collect::<Vec<_>>(),
+            before_positions
         );
-        assert_eq!(modded.revision, 9);
-        assert_eq!(modded.canonical_sha256().unwrap(), before);
 
         let mut locked = player_command_state();
         locked
@@ -22564,7 +22570,7 @@ mod tests {
             ("vein", "unsupported-blueprint-domain"),
             ("station", "unsupported-blueprint-domain"),
             ("special", "unsupported-blueprint-domain"),
-            ("mod-registry", "unsupported-blueprint-domain"),
+            ("mod-registry", "catalog-incomplete"),
             ("gas-active", "unsupported-active-planet"),
             ("overlap", "position-overlap"),
             ("allocator", "next-id-exhausted"),
@@ -24322,7 +24328,7 @@ mod tests {
     }
 
     #[test]
-    fn player_authority_blueprint_enqueue_fails_closed_for_overlap_mod_and_allocator_edges() {
+    fn player_authority_blueprint_enqueue_rejects_edges_and_accepts_data_only_mod_content() {
         let overlap = construction_queue_enqueue_intent_command(9, "ordinary-alpha", 2, 1.0, 2.0);
         let mut state = construction_queue_enqueue_state();
         let before = state.canonical_sha256().unwrap();
@@ -24420,19 +24426,23 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            projection["support"]["reason"],
-            "unsupported-blueprint-domain"
+            projection["support"],
+            serde_json::json!({ "supported": true, "reason": null })
         );
-        assert!(
-            mod_state
-                .apply_player_authority_command(&construction_queue_enqueue_intent_command(
-                    9,
-                    "ordinary-alpha",
-                    2,
-                    20.0,
-                    30.0,
-                ))
-                .is_err()
+        let receipt = mod_state
+            .apply_player_authority_command(&construction_queue_enqueue_intent_command(
+                9,
+                "ordinary-alpha",
+                2,
+                20.0,
+                30.0,
+            ))
+            .unwrap();
+        assert_eq!(receipt.revision, 10);
+        assert_eq!(mod_state.revision, 10);
+        assert_eq!(
+            mod_state.base_value()["constructionQueue"][0]["blueprintId"],
+            "ordinary-alpha"
         );
     }
 

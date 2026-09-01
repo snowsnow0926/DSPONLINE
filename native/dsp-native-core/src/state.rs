@@ -7633,10 +7633,9 @@ mod tests {
         let error =
             CoreState::from_owned_internal_records(fixture_identity(7), records, fixture_catalog())
                 .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("checkpoint chunk is missing: entities:00000000")
+        assert_eq!(
+            format!("{error:#}"),
+            "read native core checkpoint chunk: entities:00000000: native core checkpoint record is missing: dsp-idle-network.internal.v1.chunked.v1.normal.chunk.entities%3A00000000"
         );
     }
 

@@ -42,6 +42,16 @@ pub(crate) struct LogisticsBufferScan {
     pub full_scan: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LogisticsBufferSettlement {
+    pub scan: LogisticsBufferScan,
+    /// Persisted rows normalized by this settlement. The first cold pass owns
+    /// every buffer row because it materializes the legacy zero-valued item
+    /// keys; sparse passes contain only the exact wake queue. The caller folds
+    /// these rows into the shared factory writer manifest.
+    pub written_entity_indices: Vec<usize>,
+}
+
 impl LogisticsBufferRuntime {
     pub(crate) fn build(state: &CoreState, entities: &[Value]) -> Self {
         let indices = &state.factory_topology.logistics_buffer_indices;
@@ -170,13 +180,17 @@ enum BufferSelection {
     Sparse(Vec<usize>),
 }
 
-pub(crate) fn settle(
+pub(crate) fn settle_with_writer_rows(
     state: &CoreState,
     base: &Map<String, Value>,
     entities: &mut [Value],
     runtime: &mut LogisticsBufferRuntime,
-) -> anyhow::Result<LogisticsBufferScan> {
+) -> anyhow::Result<LogisticsBufferSettlement> {
     let (selection, scan) = runtime.selection(state, entities);
+    let written_entity_indices = match &selection {
+        BufferSelection::All => state.factory_topology.logistics_buffer_indices.clone(),
+        BufferSelection::Sparse(indices) => indices.clone(),
+    };
     match &selection {
         BufferSelection::All => settle_indices(
             state,
@@ -192,7 +206,20 @@ pub(crate) fn settle(
     // retained in the source revision. The outer simulation transaction also
     // discards any partially-mutated candidate entity graph on error.
     runtime.commit_selection(&selection);
-    Ok(scan)
+    Ok(LogisticsBufferSettlement {
+        scan,
+        written_entity_indices,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn settle(
+    state: &CoreState,
+    base: &Map<String, Value>,
+    entities: &mut [Value],
+    runtime: &mut LogisticsBufferRuntime,
+) -> anyhow::Result<LogisticsBufferScan> {
+    settle_with_writer_rows(state, base, entities, runtime).map(|outcome| outcome.scan)
 }
 
 fn settle_indices(
@@ -449,20 +476,23 @@ mod tests {
     fn quiet_sparse_buffer_visits_one_of_1024_and_skips_the_rest() {
         let (state, base, mut entities) = fixture(1_024);
         let mut runtime = LogisticsBufferRuntime::build(&state, &entities);
-        let cold = settle(&state, &base, &mut entities, &mut runtime).unwrap();
-        assert_eq!(cold.selected_rows, 1_024);
-        assert!(cold.full_scan);
+        let cold = settle_with_writer_rows(&state, &base, &mut entities, &mut runtime).unwrap();
+        assert_eq!(cold.scan.selected_rows, 1_024);
+        assert!(cold.scan.full_scan);
+        assert_eq!(cold.written_entity_indices, (0..1_024).collect::<Vec<_>>());
 
-        let quiet = settle(&state, &base, &mut entities, &mut runtime).unwrap();
-        assert_eq!(quiet.selected_rows, 0);
-        assert_eq!(quiet.stable_rows_skipped, 1_024);
-        assert!(!quiet.full_scan);
+        let quiet = settle_with_writer_rows(&state, &base, &mut entities, &mut runtime).unwrap();
+        assert_eq!(quiet.scan.selected_rows, 0);
+        assert_eq!(quiet.scan.stable_rows_skipped, 1_024);
+        assert!(!quiet.scan.full_scan);
+        assert!(quiet.written_entity_indices.is_empty());
 
         set_inventory(&mut entities, 511, "inputs", 9.0);
         runtime.wake_from_changed_entities(&state, &[511]);
-        let one = settle(&state, &base, &mut entities, &mut runtime).unwrap();
-        assert_eq!(one.selected_rows, 1);
-        assert_eq!(one.stable_rows_skipped, 1_023);
+        let one = settle_with_writer_rows(&state, &base, &mut entities, &mut runtime).unwrap();
+        assert_eq!(one.scan.selected_rows, 1);
+        assert_eq!(one.scan.stable_rows_skipped, 1_023);
+        assert_eq!(one.written_entity_indices, vec![511]);
         assert_eq!(entities[511]["inputs"]["iron_ore"].as_f64(), Some(0.0));
         assert_eq!(entities[511]["outputs"]["iron_ore"].as_f64(), Some(9.0));
     }

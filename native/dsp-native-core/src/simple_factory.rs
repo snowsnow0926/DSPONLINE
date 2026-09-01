@@ -5549,11 +5549,16 @@ fn simulate_step(
     }
     profile_mark!("local-runtime-reset");
     profile_mark!("local-step-directory");
-    let logistics_buffer_scan = crate::logistics_buffers::settle(
+    let logistics_buffer_outcome = crate::logistics_buffers::settle_with_writer_rows(
         state,
         base,
         entities,
         std::sync::Arc::make_mut(logistics_buffer_runtime),
+    )?;
+    let logistics_buffer_scan = logistics_buffer_outcome.scan;
+    writer_events.record_rows(
+        FactoryWriterDomain::Inventory,
+        &logistics_buffer_outcome.written_entity_indices,
     )?;
     execution_diagnostics.observe(
         FactoryScanStage::LogisticsBuffer,
@@ -10796,6 +10801,28 @@ pub(crate) mod tests {
                 (segmented_public.get(key) != Some(value)).then_some(key.as_str())
             })
             .collect::<Vec<_>>();
+        if differing_top_level_fields.contains(&"productionHistory") {
+            let batched_history = batched_public["productionHistory"]
+                .as_array()
+                .expect("batched production history array");
+            let segmented_history = segmented_public["productionHistory"]
+                .as_array()
+                .expect("segmented production history array");
+            let first_difference = batched_history
+                .iter()
+                .zip(segmented_history)
+                .position(|(left, right)| left != right)
+                .unwrap_or_else(|| batched_history.len().min(segmented_history.len()));
+            panic!(
+                "{context}: production history first differs at sample {first_difference}; batched={:#} segmented={:#}",
+                batched_history
+                    .get(first_difference)
+                    .unwrap_or(&Value::Null),
+                segmented_history
+                    .get(first_difference)
+                    .unwrap_or(&Value::Null)
+            );
+        }
         assert!(
             differing_top_level_fields.is_empty(),
             "{context}: public v47 top-level differences: {differing_top_level_fields:?}"

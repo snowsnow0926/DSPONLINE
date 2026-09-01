@@ -2679,3 +2679,14 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 4. 其余 6 个首轮失败均为旧静态架构断言仍要求批量线路、库存删除/丢弃、移动端壳、暂停和 undo/redo 被禁用；产品功能已经在波次 B/E 迁入 Rust。断言改为验证新的 Rust batch、main-owned pause/history 和原生移动薄壳，相关 4 个文件最终 23/23。没有为通过测试重新打开旧 JavaScript 写入口。
 
 `65d798b5` 因上述真实回归不再是最终冻结 SHA。修正提交完成后，25.6 全部集中门禁从头在新 SHA 上执行；本节保留首轮失败数量和原因。
+
+### 26.5 第二次集中矩阵失败与 writer 闭环修正
+
+修正 SHA `700a24dc831f516a48c5a9a0a248642b0eb98cc1` 上，开启 `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 的完整 Vitest 已在 319.112 秒内通过：394 个文件全部通过；3,023 项通过、28 项条件跳过、0 项失败。随后 Rust workspace 全量在 Core 阶段运行 497.933 秒后停止：1,051 项通过、3 项忽略、5 项失败，因此 Host 与 binary 没有被冒充为已执行。
+
+五项失败逐项复现后分成两类，并保留如下修正依据：
+
+1. 三项旧测试仍要求带 registry fingerprint 的自动排版、声明式 MOD 蓝图入队和 MOD 捕获统一返回 `unsupported-blueprint-domain`。这与波次 B 已落地的数据型 catalog 能力冲突。测试现改为：完整数据型 catalog 必须成功，缺少目录定义仍以 `catalog-incomplete` 失败；脚本型/未知内容的 fail-closed 产品规则没有放宽。
+2. 一项是真实 writer 闭环回归。`LogisticsBufferRuntime` 冷启动会为全部 storage/splitter 物化旧版兼容的零值库存键，但共享 writer manifest 没有收到该阶段的实际访问行。1,024 行合成档中，第一次结算实际规范化 1,023 个仓库，却只上报另一个阶段的 1 行；长请求因 Campaign 全扫描看见 `iron_ingot: 0`，分段请求的稀疏库存扫描漏掉它，导致首个 `productionHistory` 样本不同。修正后 settlement 返回稳定有序的实际写入行：冷启动/稠密路径返回完整目录，休眠路径为空，稀疏路径只返回 wake queue；这些行进入统一 Inventory writer manifest，并新增 `1024 → 0 → 1` 行的回归断言。
+3. 最后一项是错误链断言仍匹配旧文案。当前分块读取器按“读取 chunk 上下文 → 缺失 record 根因”保留完整 `anyhow` 链；测试现在验证完整链和精确缺失 key，不改变损坏存档的拒绝行为。
+4. 修正后的 focused 集合为 6/6：物流写入行、60 秒单次/60 次 1 秒生产历史一致性、缺失 chunk，以及三项 MOD/排版/蓝图契约全部通过。完整矩阵仍必须在包含本节修正的新冻结 SHA 上从头运行，不能把这些 focused 结果拼成发布通过。

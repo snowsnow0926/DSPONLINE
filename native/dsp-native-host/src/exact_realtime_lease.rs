@@ -31,6 +31,7 @@ pub(crate) const MAX_PENDING_PLAYER_COMMAND_BYTES: usize = 1_750_000;
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 const EXACT_TICK_SECONDS: u64 = 1;
 const EXACT_TICK_MILLISECONDS: u64 = 1_000;
+const MAX_PLAYER_AUTHORITY_EXACT_BATCH_SECONDS: u64 = 30;
 const MACRO_SESSION_SCHEMA_VERSION: u16 = 1;
 const MACRO_ADVANCE_SCHEMA_VERSION: u16 = 1;
 const MACRO_ADVANCE_KIND: &str = "native-player-authority-pure-idle-macro-advance-v1";
@@ -593,11 +594,11 @@ impl SaveStore {
         self.write_exact_realtime_lease(&lease)
     }
 
-    /// Stages exactly the next one-second player-authority tick. Unlike the
-    /// public E1 protocol, every revision, deadline and command identity is
-    /// derived from the durable lease. The only caller precondition is the
-    /// sequence it intends to settle, which makes a lost response
-    /// distinguishable from a request for the following second.
+    /// Stages the next bounded player-authority exact batch. `sequence` is the
+    /// final settled second, while one complete batch remains one WAL entry,
+    /// Core commit and revision. Unlike the public E1 protocol, every budget,
+    /// revision, deadline and command identity is derived from the durable
+    /// lease. A lost response can therefore resume only the same batch.
     pub(crate) fn stage_player_authority_tick(
         &self,
         authority_session_id: &str,
@@ -622,19 +623,22 @@ impl SaveStore {
             }
             bail!("a different native player-authority tick is already pending")
         }
-        let expected_sequence = safe_add(
-            lease.acknowledged.sequence,
-            1,
-            "player-authority tick sequence",
-        )?;
-        if sequence != expected_sequence {
-            bail!("native player-authority tick sequence is not next")
-        }
+        let batch_seconds = sequence
+            .checked_sub(lease.acknowledged.sequence)
+            .filter(|seconds| (1..=MAX_PLAYER_AUTHORITY_EXACT_BATCH_SECONDS).contains(seconds))
+            .ok_or_else(|| {
+                anyhow!(
+                    "native player-authority exact batch must settle 1 to {MAX_PLAYER_AUTHORITY_EXACT_BATCH_SECONDS} seconds"
+                )
+            })?;
         let base_revision = lease.acknowledged.revision;
         let expected_revision = safe_add(base_revision, 1, "player-authority tick revision")?;
+        let deadline_delta_ms = batch_seconds
+            .checked_mul(EXACT_TICK_MILLISECONDS)
+            .ok_or_else(|| anyhow!("player-authority exact batch deadline is exhausted"))?;
         let settled_deadline_ms = safe_add(
             lease.acknowledged.settled_deadline_ms,
-            EXACT_TICK_MILLISECONDS,
+            deadline_delta_ms,
             "player-authority tick deadline",
         )?;
         lease.pending_tick = Some(ExactRealtimePendingTick {
@@ -642,8 +646,8 @@ impl SaveStore {
             command_id: derive_exact_tick_command_id(&lease.run_id, sequence)?,
             base_revision,
             expected_revision,
-            simulation_seconds: EXACT_TICK_SECONDS,
-            wall_seconds: EXACT_TICK_SECONDS,
+            simulation_seconds: batch_seconds,
+            wall_seconds: batch_seconds,
             settled_deadline_ms,
         });
         self.write_exact_realtime_lease(&lease)
@@ -1024,6 +1028,40 @@ impl SaveStore {
         self.write_exact_realtime_lease(&lease)
     }
 
+    /// Rebinds one already-staged exact batch after a new Host lifetime has
+    /// proven the same published checkpoint/WAL lineage. No renderer-facing
+    /// request can manufacture or resize the durable pending batch.
+    pub(crate) fn rebind_pending_player_authority_tick(
+        &self,
+        expected_lease: &ExactRealtimeLease,
+        authority_session_id: &str,
+    ) -> anyhow::Result<ExactRealtimeLease> {
+        validate_logical_id(
+            authority_session_id,
+            128,
+            "player-authority exact recovery session ID",
+        )?;
+        let mut lease = self.require_exact_realtime_lease()?;
+        if &lease != expected_lease {
+            bail!("native player-authority exact recovery lease changed")
+        }
+        if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+            || lease.phase != ExactRealtimeLeasePhase::Active
+            || !lease.startup_resume_enabled
+            || lease.pending_tick.is_none()
+            || lease.pending_command.is_some()
+            || lease.pending_advance.is_some()
+            || lease.macro_session.is_some()
+        {
+            bail!("native player-authority recovery requires one pending exact batch")
+        }
+        if lease.authority_session_id.as_deref() == Some(authority_session_id) {
+            return Ok(lease);
+        }
+        lease.authority_session_id = Some(authority_session_id.to_owned());
+        self.write_exact_realtime_lease(&lease)
+    }
+
     /// Rebinds only an already-staged macro advance after a new SaveStore
     /// lifetime has proven exclusive ownership of the same durable root.
     pub(crate) fn rebind_pending_player_authority_macro_advance(
@@ -1215,6 +1253,8 @@ impl SaveStore {
         if pending.sequence != expected_sequence
             || pending.base_revision != lease.acknowledged.revision
             || pending.expected_revision != expected_revision
+            || pending.simulation_seconds != EXACT_TICK_SECONDS
+            || pending.wall_seconds != EXACT_TICK_SECONDS
             || pending.settled_deadline_ms != expected_deadline
         {
             bail!("native exact realtime tick is not the next one-second revision")
@@ -1471,10 +1511,10 @@ impl SaveStore {
     }
 
     /// Closes one staged macro advance only after its exact multi-revision
-    /// result is the current normal-main publication. Advancing the logical
-    /// sequence by the same revision span preserves the legacy v2 invariant
-    /// `entry revision + sequence == acknowledged revision` without adding a
-    /// new mandatory field to existing lease bytes.
+    /// result is the current normal-main publication. Macro advances retain
+    /// their historical revision-sized sequence span; an earlier exact batch
+    /// may already have advanced the same v2 sequence by several seconds in a
+    /// single revision.
     pub(crate) fn acknowledge_player_authority_macro_advance(
         &self,
         authority_session_id: &str,
@@ -1821,8 +1861,9 @@ impl SaveStore {
                     if pending.command_id == command_id
                         && pending.base_revision == base_revision
                         && pending.expected_revision == revision
-                        && pending.simulation_seconds == EXACT_TICK_SECONDS
-                        && pending.wall_seconds == EXACT_TICK_SECONDS => {}
+                        && (1..=MAX_PLAYER_AUTHORITY_EXACT_BATCH_SECONDS)
+                            .contains(&pending.simulation_seconds)
+                        && pending.wall_seconds == pending.simulation_seconds => {}
                 (None, Some(pending), None)
                     if pending.command_id == command_id
                         && pending.base_revision == base_revision
@@ -2184,12 +2225,13 @@ fn validate_exact_realtime_lease(lease: &ExactRealtimeLease) -> anyhow::Result<(
     if lease.entry_proof.revision != lease.checkpoint.revision {
         bail!("native exact realtime entry proof revision differs from checkpoint")
     }
-    let acknowledged_revision = safe_add(
-        lease.checkpoint.revision,
-        lease.acknowledged.sequence,
-        "acknowledged revision",
-    )?;
-    if lease.acknowledged.revision != acknowledged_revision
+    let acknowledged_revision_span = lease
+        .acknowledged
+        .revision
+        .checked_sub(lease.checkpoint.revision)
+        .ok_or_else(|| anyhow!("native exact realtime acknowledged revision regressed"))?;
+    if acknowledged_revision_span > lease.acknowledged.sequence
+        || (acknowledged_revision_span == 0) != (lease.acknowledged.sequence == 0)
         || lease.acknowledged.proof.revision != lease.acknowledged.revision
         || lease.acknowledged.checkpoint.revision != lease.acknowledged.revision
         || (lease.acknowledged.sequence == 0) != lease.acknowledged.command_id.is_none()
@@ -2213,17 +2255,31 @@ fn validate_exact_realtime_lease(lease: &ExactRealtimeLease) -> anyhow::Result<(
     }
     if let Some(pending) = lease.pending_tick.as_ref() {
         validate_pending_tick(pending, &lease.run_id)?;
-        if pending.sequence != safe_add(lease.acknowledged.sequence, 1, "pending sequence")?
+        let batch_seconds = pending
+            .sequence
+            .checked_sub(lease.acknowledged.sequence)
+            .filter(|seconds| *seconds > 0)
+            .ok_or_else(|| anyhow!("native exact realtime pending sequence did not advance"))?;
+        let maximum_batch_seconds = match purpose {
+            ExactRealtimeLeasePurpose::Experiment => EXACT_TICK_SECONDS,
+            ExactRealtimeLeasePurpose::PlayerAuthority => MAX_PLAYER_AUTHORITY_EXACT_BATCH_SECONDS,
+        };
+        let deadline_delta_ms = batch_seconds
+            .checked_mul(EXACT_TICK_MILLISECONDS)
+            .ok_or_else(|| anyhow!("native exact realtime pending deadline is exhausted"))?;
+        if batch_seconds > maximum_batch_seconds
+            || pending.simulation_seconds != batch_seconds
+            || pending.wall_seconds != batch_seconds
             || pending.base_revision != lease.acknowledged.revision
             || pending.expected_revision != safe_add(pending.base_revision, 1, "pending revision")?
             || pending.settled_deadline_ms
                 != safe_add(
                     lease.acknowledged.settled_deadline_ms,
-                    EXACT_TICK_MILLISECONDS,
+                    deadline_delta_ms,
                     "pending deadline",
                 )?
         {
-            bail!("native exact realtime pending tick is not the next exact second")
+            bail!("native exact realtime pending tick is not the next exact batch")
         }
     }
     if let Some(pending) = lease.pending_command.as_ref() {
@@ -2260,10 +2316,17 @@ fn validate_exact_realtime_lease(lease: &ExactRealtimeLease) -> anyhow::Result<(
             bail!("native player-authority macro session is not restart recoverable")
         }
         validate_macro_session(session)?;
-        if session.started_revision < lease.checkpoint.revision
-            || session.started_revision > lease.acknowledged.revision
+        let started_revision_span = session
+            .started_revision
+            .checked_sub(lease.checkpoint.revision)
+            .ok_or_else(|| anyhow!("native player-authority macro session revision regressed"))?;
+        if session.started_revision > lease.acknowledged.revision
             || session.started_sequence > lease.acknowledged.sequence
-            || session.started_revision - lease.checkpoint.revision != session.started_sequence
+            || started_revision_span > session.started_sequence
+            || (started_revision_span == 0) != (session.started_sequence == 0)
+            || session.last_acknowledged_advance.is_none()
+                && (session.started_revision != lease.acknowledged.revision
+                    || session.started_sequence != lease.acknowledged.sequence)
         {
             bail!("native player-authority macro session entry chain is invalid")
         }
@@ -2471,8 +2534,10 @@ fn validate_pending_tick(value: &ExactRealtimePendingTick, run_id: &str) -> anyh
     validate_safe_integer(value.base_revision, 0, "pending base revision")?;
     validate_safe_integer(value.expected_revision, 1, "pending expected revision")?;
     validate_safe_integer(value.settled_deadline_ms, 0, "pending deadline")?;
-    if value.simulation_seconds != EXACT_TICK_SECONDS || value.wall_seconds != EXACT_TICK_SECONDS {
-        bail!("native exact realtime tick must settle exactly one realtime second")
+    validate_safe_integer(value.simulation_seconds, 1, "pending simulation seconds")?;
+    validate_safe_integer(value.wall_seconds, 1, "pending wall seconds")?;
+    if value.wall_seconds != value.simulation_seconds {
+        bail!("native exact realtime tick clocks differ")
     }
     Ok(())
 }
@@ -3292,6 +3357,45 @@ mod tests {
             serde_json::from_value::<ExactRealtimeLease>(value).unwrap(),
             lease
         );
+    }
+
+    #[test]
+    fn player_authority_tick_stage_uses_final_sequence_as_a_durable_exact_batch() {
+        for final_sequence in [2, 5, 30] {
+            let root = tempdir().unwrap();
+            let mut store = SaveStore::open(root.path()).unwrap();
+            let checkpoint = publish_checkpoint(&mut store, 7);
+            store
+                .prepare_player_authority_lease(
+                    "core-1".to_owned(),
+                    RUN_ID.to_owned(),
+                    FINGERPRINT.to_owned(),
+                    checkpoint,
+                    proof(7),
+                    10_000,
+                )
+                .unwrap();
+            store
+                .activate_player_authority_lease("core-1", RUN_ID, FINGERPRINT)
+                .unwrap();
+
+            let staged = store
+                .stage_player_authority_tick("core-1", RUN_ID, final_sequence)
+                .unwrap();
+            let pending = staged.pending_tick.as_ref().unwrap();
+            assert_eq!(pending.sequence, final_sequence);
+            assert_eq!(pending.base_revision, 7);
+            assert_eq!(pending.expected_revision, 8);
+            assert_eq!(pending.simulation_seconds, final_sequence);
+            assert_eq!(pending.wall_seconds, final_sequence);
+            assert_eq!(pending.settled_deadline_ms, 10_000 + final_sequence * 1_000);
+            assert_eq!(
+                store
+                    .stage_player_authority_tick("core-1", RUN_ID, final_sequence)
+                    .unwrap(),
+                staged
+            );
+        }
     }
 
     #[test]

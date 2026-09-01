@@ -1289,12 +1289,12 @@ impl CoreRegistry {
         Ok(CorePlayerAuthorityLeaseResult { lease, summary })
     }
 
-    /// Settles one and only one player-authoritative realtime second. This is
-    /// intentionally a single host operation: Rust derives and durably stages
-    /// the pending command, commits its idempotent WAL entry, publishes an
-    /// incremental checkpoint, and finally advances the lease ACK. Retrying
-    /// the same sequence after a lost response resumes from whichever durable
-    /// boundary was reached.
+    /// Settles one bounded player-authoritative exact batch. The requested
+    /// sequence is its final simulated second; Rust derives the elapsed budget
+    /// from the previous ACK and commits the complete batch as one idempotent
+    /// WAL entry, checkpoint and revision. Retrying the same final sequence
+    /// after a lost response resumes from whichever durable boundary was
+    /// reached.
     pub fn commit_player_authority_tick(
         &mut self,
         store: &mut SaveStore,
@@ -1384,7 +1384,6 @@ impl CoreRegistry {
         {
             bail!("native player-authority tick requires a running v47 normal-main session");
         }
-
         if initial.pending_command.is_some() {
             bail!("native player-authority gameplay command is pending before realtime tick");
         }
@@ -1423,6 +1422,21 @@ impl CoreRegistry {
             });
         }
 
+        let batch_seconds = initial
+            .pending_tick
+            .as_ref()
+            .map(|pending| pending.simulation_seconds)
+            .unwrap_or_else(|| {
+                request
+                    .sequence
+                    .saturating_sub(initial.acknowledged.sequence)
+            });
+        self.require_exact_history_clock_alignment(
+            session_id,
+            initial_summary.revision,
+            batch_seconds,
+        )?;
+
         let resumed = initial.pending_tick.is_some();
         if let Some(pending) = initial.pending_tick.as_ref() {
             if pending.sequence != request.sequence
@@ -1435,14 +1449,8 @@ impl CoreRegistry {
             {
                 bail!("native player-authority pending tick conflicts with the request");
             }
-        } else if request.sequence
-            != initial
-                .acknowledged
-                .sequence
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("native player-authority sequence is exhausted"))?
-        {
-            bail!("native player-authority tick sequence is not next");
+        } else if request.sequence <= initial.acknowledged.sequence {
+            bail!("native player-authority exact batch sequence did not advance");
         }
 
         let staged = store.stage_player_authority_tick(
@@ -1505,6 +1513,11 @@ impl CoreRegistry {
         if summary.revision != pending.expected_revision {
             bail!("native player-authority state differs from its durable WAL");
         }
+        self.require_exact_history_clock_alignment(
+            session_id,
+            summary.revision,
+            pending.simulation_seconds,
+        )?;
         let latest = store
             .latest_published_checkpoint_identity("normal-main")?
             .ok_or_else(|| anyhow!("normal-main published checkpoint is missing"))?;
@@ -2530,15 +2543,21 @@ impl CoreRegistry {
         {
             return Ok(None);
         }
+        let recovering_tick = lease.pending_tick.is_some();
         let recovering_command = lease.pending_command.is_some();
         let recovering_macro = lease.pending_advance.is_some();
-        if !recovering_command && !recovering_macro && !lease.startup_resume_enabled {
+        if !recovering_tick
+            && !recovering_command
+            && !recovering_macro
+            && !lease.startup_resume_enabled
+        {
             return Ok(None);
         }
-        if lease.pending_tick.is_some() {
-            bail!("native player-authority startup recovery found competing pending work")
-        }
-        if recovering_command && recovering_macro {
+        if usize::from(recovering_tick)
+            + usize::from(recovering_command)
+            + usize::from(recovering_macro)
+            > 1
+        {
             bail!("native player-authority startup recovery found multiple pending operations")
         }
         let pending_macro = lease.pending_advance.clone();
@@ -2546,7 +2565,9 @@ impl CoreRegistry {
             .latest_published_checkpoint_identity("normal-main")?
             .ok_or_else(|| anyhow!("normal-main published checkpoint is missing"))?;
         let catalog = store.read_player_authority_recovery_catalog(&lease, &published)?;
-        let preexisting_command_changes = if !recovering_command
+        let preexisting_command_changes = if !recovering_tick
+            && !recovering_command
+            && !recovering_macro
             && lease
                 .acknowledged
                 .last_player_command_id
@@ -2571,7 +2592,10 @@ impl CoreRegistry {
             self.sessions.remove(&opened.session_id);
             bail!("native core domain coverage is not player-authority eligible")
         }
-        if recovering_command {
+        if recovering_tick {
+            self.recover_player_authority_pending_tick(store, &opened.session_id)
+                .context("recover durable player-authority exact batch during host startup")?;
+        } else if recovering_command {
             self.recover_player_authority_pending_command(store, &opened.session_id)
                 .context("recover durable player-authority command during host startup")?;
         } else if recovering_macro {
@@ -2739,6 +2763,82 @@ impl CoreRegistry {
         };
         self.player_authority_startup_recovery = Some(receipt.clone());
         Ok(Some(receipt))
+    }
+
+    pub fn recover_player_authority_pending_tick(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+    ) -> anyhow::Result<CoreCommitPlayerAuthorityTickResult> {
+        validate_session_id(session_id)?;
+        self.reconcile_uncertain_checkpoint_publication(store, session_id)?;
+        let lease = store.require_exact_realtime_lease()?;
+        let pending = lease
+            .pending_tick
+            .as_ref()
+            .ok_or_else(|| anyhow!("native player-authority recovery has no pending exact batch"))?
+            .clone();
+        if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
+            || lease.phase != crate::exact_realtime_lease::ExactRealtimeLeasePhase::Active
+            || !lease.startup_resume_enabled
+            || lease.pending_command.is_some()
+            || lease.pending_advance.is_some()
+            || lease.macro_session.is_some()
+        {
+            bail!("native player-authority recovery requires one active pending exact batch")
+        }
+        let summary = self.status(session_id)?;
+        let state = self.session(session_id)?;
+        let latest = store
+            .latest_published_checkpoint_identity("normal-main")?
+            .ok_or_else(|| anyhow!("normal-main published checkpoint is missing"))?;
+        if state.identity.slot != "normal-main"
+            || state.identity.mode != "normal"
+            || state.identity.state_version != 47
+            || state.identity.registry_fingerprint != lease.registry_fingerprint
+            || summary.mode != "normal"
+            || summary.state_version != 47
+            || summary.registry_fingerprint != lease.registry_fingerprint
+            || summary.paused
+            || !matches!(summary.revision, revision if revision == pending.base_revision || revision == pending.expected_revision)
+            || latest.mode != "normal"
+            || latest.state_version != 47
+            || latest.registry_fingerprint != lease.registry_fingerprint
+            || state.identity.generation != latest.generation
+            || state.identity.root_hash != latest.root_hash
+            || state.identity.revision != latest.revision
+        {
+            bail!("native player-authority exact recovery session/publication identity conflicts")
+        }
+        self.require_exact_history_clock_alignment(
+            session_id,
+            summary.revision,
+            pending.simulation_seconds,
+        )?;
+        let publication_is_acknowledged = latest.generation
+            == lease.acknowledged.checkpoint.generation
+            && latest.root_hash == lease.acknowledged.checkpoint.root_hash
+            && latest.revision == lease.acknowledged.checkpoint.revision;
+        if !publication_is_acknowledged && latest.revision != pending.expected_revision {
+            bail!("native player-authority exact recovery publication is outside the pending batch")
+        }
+        if summary.revision == pending.base_revision
+            && (summary.canonical_sha256 != lease.acknowledged.proof.canonical_sha256
+                || summary.domain_sha256 != lease.acknowledged.proof.domain_sha256)
+        {
+            bail!("native player-authority exact recovery base proof conflicts")
+        }
+
+        let authority_session_id = store.player_authority_session_binding(session_id)?;
+        store.rebind_pending_player_authority_tick(&lease, &authority_session_id)?;
+        self.commit_player_authority_tick(
+            store,
+            session_id,
+            CoreCommitPlayerAuthorityTickRequest {
+                run_id: lease.run_id,
+                sequence: pending.sequence,
+            },
+        )
     }
 
     pub fn recover_player_authority_pending_macro_advance(
@@ -4835,6 +4935,22 @@ impl CoreRegistry {
         Ok(())
     }
 
+    fn require_exact_history_clock_alignment(
+        &self,
+        session_id: &str,
+        expected_revision: u64,
+        batch_seconds: u64,
+    ) -> anyhow::Result<()> {
+        if batch_seconds <= 1 {
+            return Ok(());
+        }
+        let clock = self.session(session_id)?.exact_history_clock()?;
+        if clock.revision != expected_revision || !clock.history_clock_aligned {
+            bail!("native player-authority exact batch history clock is not aligned")
+        }
+        Ok(())
+    }
+
     /// Atomically closes the trust gap between an exact-tick WAL commit and
     /// its authority lease ACK. The caller cannot supply a checkpoint or a
     /// proof: both are derived and re-verified inside the lifetime-locked
@@ -6851,6 +6967,22 @@ mod tests {
         player_authority_fixture_from_bytes(import_envelope())
     }
 
+    fn player_authority_exact_batch_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        String,
+        ExactRealtimeCheckpoint,
+    ) {
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["historyRecordedAt"] = envelope["state"]["elapsedSeconds"].clone();
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        player_authority_fixture_from_bytes(serde_json::to_vec(&envelope).unwrap())
+    }
+
     fn player_authority_fuel_fixture() -> (
         tempfile::TempDir,
         SaveStore,
@@ -8821,6 +8953,271 @@ mod tests {
     }
 
     #[test]
+    fn player_authority_multi_second_tick_is_one_durable_wal_revision() {
+        let (_root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_exact_batch_fixture();
+        let committed = registry
+            .commit_player_authority_tick(
+                &mut store,
+                &session_id,
+                CoreCommitPlayerAuthorityTickRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    sequence: 5,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(committed.sequence, 5);
+        assert_eq!(committed.revision, entry_checkpoint.revision + 1);
+        assert_eq!(committed.checkpoint.revision, committed.revision);
+        let lease = store.require_exact_realtime_lease().unwrap();
+        assert_eq!(lease.acknowledged.sequence, 5);
+        assert_eq!(lease.acknowledged.revision, committed.revision);
+        assert_eq!(lease.acknowledged.settled_deadline_ms, 47_000);
+        assert!(lease.pending_tick.is_none());
+    }
+
+    #[test]
+    fn player_authority_exact_batches_match_segmented_public_state() {
+        for seconds in [2_u64, 5, 30] {
+            let (batch_root, mut batch_store, mut batch_registry, batch_session, batch_entry) =
+                player_authority_exact_batch_fixture();
+            let batch = batch_registry
+                .commit_player_authority_tick(
+                    &mut batch_store,
+                    &batch_session,
+                    CoreCommitPlayerAuthorityTickRequest {
+                        run_id: "player-authority-run".to_owned(),
+                        sequence: seconds,
+                    },
+                )
+                .unwrap();
+            assert_eq!(batch.revision, batch_entry.revision + 1, "{seconds}s");
+            batch_registry
+                .export_v47(
+                    &batch_store,
+                    &batch_session,
+                    "exact-batch",
+                    42_000 + seconds * 1_000,
+                )
+                .unwrap();
+            let batch_bytes =
+                std::fs::read(batch_root.path().join("exports/exact-batch.json")).unwrap();
+            let batch_envelope: Value = serde_json::from_slice(&batch_bytes).unwrap();
+
+            let (
+                segmented_root,
+                mut segmented_store,
+                mut segmented_registry,
+                segmented_session,
+                segmented_entry,
+            ) = player_authority_exact_batch_fixture();
+            let mut segmented = None;
+            for sequence in 1..=seconds {
+                segmented = Some(
+                    segmented_registry
+                        .commit_player_authority_tick(
+                            &mut segmented_store,
+                            &segmented_session,
+                            CoreCommitPlayerAuthorityTickRequest {
+                                run_id: "player-authority-run".to_owned(),
+                                sequence,
+                            },
+                        )
+                        .unwrap(),
+                );
+            }
+            let segmented = segmented.unwrap();
+            assert_eq!(
+                segmented.revision,
+                segmented_entry.revision + seconds,
+                "{seconds}s"
+            );
+            segmented_registry
+                .export_v47(
+                    &segmented_store,
+                    &segmented_session,
+                    "exact-segmented",
+                    42_000 + seconds * 1_000,
+                )
+                .unwrap();
+            let segmented_bytes =
+                std::fs::read(segmented_root.path().join("exports/exact-segmented.json")).unwrap();
+            let segmented_envelope: Value = serde_json::from_slice(&segmented_bytes).unwrap();
+
+            if batch_envelope["state"] != segmented_envelope["state"] {
+                let differing_fields = batch_envelope["state"]
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        (segmented_envelope["state"].get(key) != Some(value))
+                            .then_some(key.as_str())
+                    })
+                    .collect::<Vec<_>>();
+                panic!("{seconds}s public state fields differ: {differing_fields:?}");
+            }
+            assert_eq!(
+                batch.summary.canonical_sha256,
+                dsp_native_core::canonical::canonical_sha256(&batch_envelope["state"]),
+                "{seconds}s batched summary/export canonical proof"
+            );
+            assert_eq!(
+                segmented.summary.canonical_sha256,
+                dsp_native_core::canonical::canonical_sha256(&segmented_envelope["state"]),
+                "{seconds}s segmented summary/export canonical proof"
+            );
+            assert_eq!(
+                batch.summary.canonical_sha256, segmented.summary.canonical_sha256,
+                "{seconds}s"
+            );
+            assert_ne!(
+                batch.summary.domain_sha256, segmented.summary.domain_sha256,
+                "the domain proof deliberately binds the different host revision counts"
+            );
+        }
+    }
+
+    #[test]
+    fn player_authority_exact_batch_rejects_unbounded_or_unaligned_work_before_stage() {
+        let (_root, mut store, mut registry, session_id, _entry_checkpoint) =
+            player_authority_exact_batch_fixture();
+        let source_summary = registry.status(&session_id).unwrap();
+        let source_lease = store.require_exact_realtime_lease().unwrap();
+        let source_checkpoint = store.recover("normal-main").unwrap().unwrap();
+        let over_limit = registry
+            .commit_player_authority_tick(
+                &mut store,
+                &session_id,
+                CoreCommitPlayerAuthorityTickRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    sequence: 31,
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{over_limit:#}").contains("1 to 30 seconds"));
+        let summary_after = registry.status(&session_id).unwrap();
+        assert_eq!(summary_after.revision, source_summary.revision);
+        assert_eq!(
+            summary_after.canonical_sha256,
+            source_summary.canonical_sha256
+        );
+        assert_eq!(summary_after.domain_sha256, source_summary.domain_sha256);
+        assert_eq!(store.require_exact_realtime_lease().unwrap(), source_lease);
+        let checkpoint_after = store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(
+            (
+                checkpoint_after.generation,
+                checkpoint_after.root_hash,
+                checkpoint_after.revision,
+            ),
+            (
+                source_checkpoint.generation,
+                source_checkpoint.root_hash,
+                source_checkpoint.revision,
+            )
+        );
+
+        let (_root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_fixture();
+        let source_summary = registry.status(&session_id).unwrap();
+        let source_lease = store.require_exact_realtime_lease().unwrap();
+        let unaligned = registry
+            .commit_player_authority_tick(
+                &mut store,
+                &session_id,
+                CoreCommitPlayerAuthorityTickRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    sequence: 5,
+                },
+            )
+            .unwrap_err();
+        assert!(format!("{unaligned:#}").contains("history clock is not aligned"));
+        let summary_after = registry.status(&session_id).unwrap();
+        assert_eq!(summary_after.revision, source_summary.revision);
+        assert_eq!(
+            summary_after.canonical_sha256,
+            source_summary.canonical_sha256
+        );
+        assert_eq!(summary_after.domain_sha256, source_summary.domain_sha256);
+        assert_eq!(store.require_exact_realtime_lease().unwrap(), source_lease);
+
+        let one_second = registry
+            .commit_player_authority_tick(
+                &mut store,
+                &session_id,
+                CoreCommitPlayerAuthorityTickRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    sequence: 1,
+                },
+            )
+            .unwrap();
+        assert_eq!(one_second.revision, entry_checkpoint.revision + 1);
+    }
+
+    #[test]
+    fn player_authority_exact_batch_can_enter_a_new_macro_session() {
+        for with_command in [false, true] {
+            let (_root, mut store, mut registry, session_id, _entry_checkpoint) =
+                player_authority_exact_batch_fixture();
+            let batch = registry
+                .commit_player_authority_tick(
+                    &mut store,
+                    &session_id,
+                    CoreCommitPlayerAuthorityTickRequest {
+                        run_id: "player-authority-run".to_owned(),
+                        sequence: 5,
+                    },
+                )
+                .unwrap();
+            let (base_revision, expected_started_sequence) = if with_command {
+                let command = registry
+                    .commit_player_authority_command(
+                        &mut store,
+                        &session_id,
+                        player_authority_command(
+                            batch.revision,
+                            "command-between-batch-and-macro",
+                            json!(7),
+                        ),
+                    )
+                    .unwrap();
+                (command.revision, 6)
+            } else {
+                (batch.revision, 5)
+            };
+            let authority_session_id = store.player_authority_session_binding(&session_id).unwrap();
+            let staged = store
+                .stage_player_authority_macro_advance(
+                    &authority_session_id,
+                    "player-authority-run",
+                    if with_command {
+                        "macro-after-batch-command"
+                    } else {
+                        "macro-after-batch"
+                    },
+                    if with_command {
+                        "macro-operation-after-batch-command"
+                    } else {
+                        "macro-operation-after-batch"
+                    },
+                    base_revision,
+                    base_revision + 2,
+                    60_000,
+                    4_000,
+                    "native-pure-idle-macro-v10:test",
+                )
+                .unwrap();
+            let session = staged.macro_session.as_ref().unwrap();
+            assert_eq!(session.started_revision, base_revision);
+            assert_eq!(session.started_sequence, expected_started_sequence);
+            let pending = staged.pending_advance.as_ref().unwrap();
+            assert_eq!(pending.sequence, expected_started_sequence + 1);
+            assert_eq!(pending.expected_sequence, expected_started_sequence + 2);
+        }
+    }
+
+    #[test]
     fn player_authority_tick_resumes_after_each_lost_response_boundary() {
         for fault in [
             PlayerAuthorityTickFault::AfterStage,
@@ -8877,6 +9274,104 @@ mod tests {
             assert!(second_retry.duplicate);
             assert_eq!(second_retry.checkpoint, recovered.checkpoint);
         }
+    }
+
+    #[test]
+    fn player_authority_multi_second_tick_recovers_on_startup_at_every_boundary() {
+        let (_clean_root, mut clean_store, mut clean_registry, clean_session, clean_checkpoint) =
+            player_authority_exact_batch_fixture();
+        let clean = clean_registry
+            .commit_player_authority_tick(
+                &mut clean_store,
+                &clean_session,
+                CoreCommitPlayerAuthorityTickRequest {
+                    run_id: "player-authority-run".to_owned(),
+                    sequence: 5,
+                },
+            )
+            .unwrap();
+
+        for fault in [
+            PlayerAuthorityTickFault::AfterStage,
+            PlayerAuthorityTickFault::AfterWal,
+            PlayerAuthorityTickFault::AfterCheckpoint,
+            PlayerAuthorityTickFault::AfterLeaseAcknowledge,
+        ] {
+            let (root, mut store, mut registry, session_id, entry_checkpoint) =
+                player_authority_exact_batch_fixture();
+            let source_summary = registry.status(&session_id).unwrap();
+            let source_checkpoint = store.recover("normal-main").unwrap().unwrap();
+            let error = registry
+                .commit_player_authority_tick_internal(
+                    &mut store,
+                    &session_id,
+                    CoreCommitPlayerAuthorityTickRequest {
+                        run_id: "player-authority-run".to_owned(),
+                        sequence: 5,
+                    },
+                    fault,
+                )
+                .unwrap_err();
+            assert!(format!("{error:#}").contains("lost response"), "{fault:?}");
+            if fault == PlayerAuthorityTickFault::AfterStage {
+                assert_eq!(
+                    registry.status(&session_id).unwrap().canonical_sha256,
+                    source_summary.canonical_sha256,
+                    "{fault:?}"
+                );
+                let checkpoint_after = store.recover("normal-main").unwrap().unwrap();
+                assert_eq!(
+                    (
+                        checkpoint_after.generation,
+                        checkpoint_after.root_hash,
+                        checkpoint_after.revision,
+                    ),
+                    (
+                        source_checkpoint.generation,
+                        source_checkpoint.root_hash,
+                        source_checkpoint.revision,
+                    ),
+                    "{fault:?}"
+                );
+            }
+            if fault == PlayerAuthorityTickFault::AfterWal {
+                let wal = store
+                    .read_wal("normal-main", entry_checkpoint.revision)
+                    .unwrap();
+                assert_eq!(wal.len(), 1, "{fault:?}");
+                let operation = decode_wal_operation(&wal[0]).unwrap();
+                assert_eq!(operation.base_revision, entry_checkpoint.revision);
+                assert_eq!(operation.result_revision, entry_checkpoint.revision + 1);
+                assert_eq!(operation.simulation_seconds.to_bits(), 5.0_f64.to_bits());
+                assert_eq!(operation.wall_seconds.to_bits(), 5.0_f64.to_bits());
+                assert_eq!(operation.advance_mode, CoreAdvanceMode::Exact);
+            }
+            drop(registry);
+            drop(store);
+
+            let mut reopened_store = SaveStore::open(root.path()).unwrap();
+            let mut reopened_registry = resumable_player_authority_registry_for_test();
+            let receipt = reopened_registry
+                .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+                .unwrap_or_else(|error| panic!("{fault:?}: {error:#}"))
+                .expect("durable exact batch must yield a startup receipt");
+            assert_eq!(receipt.acknowledged_sequence, 5, "{fault:?}");
+            assert_eq!(receipt.revision, entry_checkpoint.revision + 1, "{fault:?}");
+            assert_eq!(receipt.settled_deadline_ms, 47_000, "{fault:?}");
+            assert_eq!(
+                receipt.summary.canonical_sha256, clean.summary.canonical_sha256,
+                "{fault:?}"
+            );
+            assert_eq!(
+                receipt.summary.domain_sha256, clean.summary.domain_sha256,
+                "{fault:?}"
+            );
+            assert_eq!(receipt.checkpoint, clean.checkpoint, "{fault:?}");
+            let durable = reopened_store.require_exact_realtime_lease().unwrap();
+            assert!(durable.pending_tick.is_none(), "{fault:?}");
+            assert_eq!(durable.acknowledged.sequence, 5, "{fault:?}");
+        }
+        assert_eq!(clean.revision, clean_checkpoint.revision + 1);
     }
 
     #[test]

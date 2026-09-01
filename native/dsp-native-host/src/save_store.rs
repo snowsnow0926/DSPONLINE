@@ -895,11 +895,10 @@ impl SaveStore {
             || matches!(
                 lease.phase,
                 ExactRealtimeLeasePhase::Active | ExactRealtimeLeasePhase::Paused
-            ) && (lease.pending_command.is_some() || lease.startup_resume_enabled);
-        if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority
-            || lease.pending_tick.is_some()
-            || !resumable_phase
-        {
+            ) && (lease.pending_tick.is_some()
+                || lease.pending_command.is_some()
+                || lease.startup_resume_enabled);
+        if lease.purpose()? != ExactRealtimeLeasePurpose::PlayerAuthority || !resumable_phase {
             bail!("native player-authority recovery catalog lease purpose is invalid")
         }
         let published_is_acknowledged = published.generation
@@ -914,6 +913,10 @@ impl SaveStore {
             };
             phase_is_authorized && published.revision == pending.expected_revision
         });
+        let published_is_pending_tick = lease.pending_tick.as_ref().is_some_and(|pending| {
+            lease.phase == ExactRealtimeLeasePhase::Active
+                && published.revision == pending.expected_revision
+        });
         let published_is_pending_advance = lease.pending_advance.as_ref().is_some_and(|pending| {
             lease.phase == ExactRealtimeLeasePhase::Active
                 && published.revision == pending.expected_revision
@@ -925,6 +928,7 @@ impl SaveStore {
             || published.state_version != 47
             || published.registry_fingerprint != lease.registry_fingerprint
             || !(published_is_acknowledged
+                || published_is_pending_tick
                 || published_is_pending_command
                 || published_is_pending_advance)
         {

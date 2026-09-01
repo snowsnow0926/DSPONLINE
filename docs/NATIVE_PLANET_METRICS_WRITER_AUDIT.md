@@ -73,6 +73,15 @@ record mutation, add, or remove; projection-safe classifications are not used
 as planet-metric proof. Load/import starts cold, and WAL mutations pass through
 the same command boundary.
 
+A pause-only durable lifecycle command is the sole revision-changing exception:
+it changes only the validated top-level `paused` bit and deliberately preserves
+all prepared factory domains. The candidate runtime is therefore rebound to the
+new committed revision without changing its probes, pending set, or fallback
+classification. A post-merge audit found that omitting this rebind made the
+revision mismatch permanently sticky as `directory_fallback`; the regression
+now warms the cache, pauses, resumes, advances five internal steps, and requires
+all five scans to remain sparse.
+
 ## Proven non-writers after the metric barrier
 
 The five-second station mode transition writes only operation/mode transition

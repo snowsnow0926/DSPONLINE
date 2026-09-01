@@ -3914,6 +3914,17 @@ impl CoreState {
         self.prepared_planet_metrics_runtime = Some(runtime);
     }
 
+    /// A pause-only durable command advances the authority revision without
+    /// changing any entity, catalog, directory, or topology field consumed by
+    /// planet metrics. Preserve that proven cache while binding it to the new
+    /// committed revision; all other commands still invalidate it through
+    /// `invalidate_factory_static_admission`.
+    pub(crate) fn rebind_prepared_planet_metrics_runtime_revision(&mut self) {
+        if let Some(runtime) = &mut self.prepared_planet_metrics_runtime {
+            Arc::make_mut(runtime).bind_committed_revision(self.revision);
+        }
+    }
+
     pub(crate) fn invalidate_prepared_planet_metrics_runtime(&mut self) {
         self.prepared_planet_metrics_runtime = None;
     }

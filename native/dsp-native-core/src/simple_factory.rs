@@ -12281,6 +12281,76 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn planet_metric_warm_cache_stays_sparse_after_pause_resume_revision_transitions() {
+        let mut state = planet_metric_oactive_fixture(1_024);
+        for _ in 0..2 {
+            let result = state
+                .advance(&CoreAdvanceRequest {
+                    base_revision: state.revision,
+                    simulation_seconds: 1.0,
+                    wall_seconds: 1.0,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: false,
+                })
+                .unwrap();
+            assert!(result.supported);
+        }
+        assert!(
+            !state
+                .prepared_planet_metrics_runtime()
+                .unwrap()
+                .scan_history_for_test()
+                .last()
+                .unwrap()
+                .full_scan
+        );
+
+        let pause_command = |base_revision, paused| SimulationCommandPatch {
+            protocol_version: crate::CORE_PROTOCOL_VERSION,
+            base_revision,
+            top_level_changes: vec![ValuePatch {
+                path: vec![PathSegment::Key("paused".to_owned())],
+                operation: "set".to_owned(),
+                value: Some(Value::from(paused)),
+            }],
+            changed_entities: Vec::new(),
+            added_entities: Vec::new(),
+            removed_entity_ids: Vec::new(),
+            changed_belts: Vec::new(),
+            added_belts: Vec::new(),
+            removed_belt_ids: Vec::new(),
+        };
+        state
+            .apply_player_authority_pause_transition(&pause_command(state.revision, true))
+            .unwrap();
+        state
+            .apply_player_authority_pause_transition(&pause_command(state.revision, false))
+            .unwrap();
+        let scans_before = state
+            .prepared_planet_metrics_runtime()
+            .unwrap()
+            .scan_history_for_test()
+            .len();
+
+        let result = state
+            .advance(&CoreAdvanceRequest {
+                base_revision: state.revision,
+                simulation_seconds: 5.0,
+                wall_seconds: 5.0,
+                advance_mode: CoreAdvanceMode::Exact,
+                include_diagnostics: false,
+            })
+            .unwrap();
+        assert!(result.supported);
+        let runtime = state.prepared_planet_metrics_runtime().unwrap();
+        let resumed_scans = &runtime.scan_history_for_test()[scans_before..];
+        assert_eq!(resumed_scans.len(), 5);
+        assert!(resumed_scans.iter().all(|scan| !scan.full_scan));
+        assert!(resumed_scans.iter().all(|scan| !scan.directory_fallback));
+        assert!(resumed_scans.iter().all(|scan| scan.selected_rows <= 1));
+    }
+
+    #[test]
     fn planet_metric_outer_campaign_failure_keeps_the_source_runtime_and_state_atomic() {
         let mut state = planet_metric_oactive_fixture(1_024);
         state.base_value_mut().remove("campaign");

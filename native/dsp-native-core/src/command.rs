@@ -9199,7 +9199,9 @@ impl CoreState {
         if records_changed {
             next.rebuild_indexes()?;
         }
-        if !only_pause_changed {
+        if only_pause_changed {
+            next.rebind_prepared_planet_metrics_runtime_revision();
+        } else {
             next.invalidate_factory_static_admission();
         }
         let previous_revision = self.revision;

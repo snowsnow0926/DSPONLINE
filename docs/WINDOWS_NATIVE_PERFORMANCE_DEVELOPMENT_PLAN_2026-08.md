@@ -2287,3 +2287,16 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 6. Host `AfterWal` 故障用例在 WAL 已同步、checkpoint/ACK 尚未完成时删除一个连接两边和两壳面的节点。日志只有 `remove-node` 与目标 ID，不含结构需求、吸附帆或 `nextId`；冷重启重放后与无故障提交具有相同 revision、canonical SHA-256 和公开 v47，重复 command ID 返回 duplicate receipt，不再次级联处理。
 7. 本轮新鲜 focused 结果为 Rust Dyson `30/30`（其中 `dyson_plan_command` `6/6`）、Host Dyson/冷恢复 `4/4`、组件/命令/App Vitest `27/27`、desktop broker `29/29`。TypeScript、production build（2,097 modules；startup gzip `180,776 B`）、startup budget、Native thin-UI AST 门禁、workspace all-target/all-feature strict Clippy 与 Rust fmt 均通过。完整 Core/Host/Vitest/Server/E2E、默认高并行稳定性、24 小时、多硬件、安装/覆盖升级、签名和灰度仍是独立门禁。
 8. 本切片不新增持久字段，不升级 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 Host/renderer 协议，`authorityEligible=false` 保持关闭；未读取或修改真实玩家存档，未连接生产，未部署、打包发布或签名。固定四目标百分比留到跨层设计复制及下一轮统一能力审计，不按新增代码行数临时抬高。
+
+### 24.48 戴森设计复制/粘贴 Rust 权威纵切（2026-09-01，开发候选）
+
+本纵切关闭 24.47 保留的跨层设计复制缺口。它没有把旧 `DysonLayerTemplate` 搬进新的 IPC：renderer 的剪贴板只保留一个短来源引用，Rust 在粘贴 revision 上从权威状态读取并复制设计，因而不会把浏览器缓存的完整结构当作可信输入。
+
+1. 原生工具栏的“复制”只记录当前 exact frame 的 `sourceSystemId/sourceLayerId/显示名`；“粘贴”发送严格字段集 `kind/systemId/sourceSystemId/sourceLayerId`。clipboard 只存在组件内存中，session/run/registry 改变会清空；切换恒星系时可保留以支持跨系复制。loading、retained-old、pending、科技锁定或目标 8 层已满时粘贴锁死，ACK 前不乐观插入任何设计行。
+2. Rust 重新验证目标与来源系统都存在于当前 catalog、都已探索解锁，目标具备 `dyson_sphere_program`，来源壳面非空时还必须具备 `dyson_shell`。所有恒星系 plan 先完整验证，层/节点/框架/壳面 ID 形成全局碰撞集；来源层缺失、悬空端点/边界、重复无向边、超限目录、未知字段、夹带模板数组、目标层上限、ID/`nextId` 溢出都在 disposable candidate 内失败关闭。
+3. 新层沿用来源名称并追加“副本”、半径、倾角、经度、节点角度、框架拓扑和壳面边界。Rust 按来源持久顺序为层、全部节点、全部框架、全部壳面重新分配独立 ID；框架需求只用新层权威半径和节点夹角重新计算，壳面容量从新边界框架需求 checked-add 派生，不能从 renderer 或来源缓存照抄派生数字。
+4. 新节点和框架的 `completedStructurePoints`、新壳面的 `absorbedSails` 全部从 0 开始。目标 plan 粘贴前的 `structurePoints/shellSails` 分别写入新层 `structureAllocationFloor/shellAllocationFloor`，因此目标历史剩余不会立刻填充副本；来源与目标的历史物料总量都不变。该语义保持旧版合法复制行为，同时把模板验证和 ID/工作量推导迁到 Rust 唯一权威。
+5. Core 跨恒星系回归先从来源生成闭合框架/壳面，再粘贴到已有 7 结构点、5 壳面帆的目标；正常与重复构造结果逐字一致，新副本为 `1/4/4/4` 个层/节点/框架/壳面，全部进度为 0，allocation floor 为 `7/5`，来源和新 ID 完全不交叉，`nextId` 稳定。缺少壳科技或命令夹带 `nodes` 数组必须原子拒绝且源状态不变。
+6. Host `AfterWal` 用例把三节点/三框架/三壳面设计跨系粘贴后故意丢失响应。WAL 只有 `paste-layer` 与来源引用，不含结构需求、吸附量或 `nextId`；冷启动重放与无故障提交得到相同 revision、canonical SHA-256、独立 ID、目标历史总量及零施工进度，相同 command ID 只返回 duplicate receipt。
+7. 本轮新鲜 focused 为 Rust Dyson `31/31`（其中 `dyson_plan_command` `7/7`）、Host Dyson/冷恢复 `5/5`、组件/命令/App Vitest `28/28`、desktop broker `29/29`。TypeScript、production build（2,097 modules；startup gzip `180,780 B`）、startup budget、Native thin-UI AST 门禁、workspace all-target/all-feature strict Clippy 与 Rust fmt 均通过；完整组合 Rust/Vitest/native/server/E2E、默认高并行稳定性、24 小时、多硬件、安装/升级、签名与灰度仍是独立门禁。
+8. 本切片不新增持久字段，不升级 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 Host/renderer 协议，`authorityEligible=false` 保持关闭；未读取或修改真实玩家存档，未连接生产，未部署、打包发布或签名。戴森编辑器的既有玩家设计写面至此已具备 Rust 权威路径，但“完整薄 UI”与“Rust 唯一全游戏权威”仍取决于其他 workspace/命令域，不能由本切片代替。

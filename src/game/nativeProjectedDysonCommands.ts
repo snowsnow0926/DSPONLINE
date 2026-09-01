@@ -264,6 +264,32 @@ export function createNativeProjectedDysonAddLayerCommand(
   }]);
 }
 
+export function createNativeProjectedDysonPasteLayerCommand(
+  frame: NativeDysonWorkspaceFrame,
+  sourceSystemId: string,
+  sourceLayerId: string,
+): SimulationCommandPatch | null {
+  const targetSystem = frame.systemsById.get(frame.selectedSystemId);
+  const sourceSystem = frame.systemsById.get(sourceSystemId);
+  if (!validFrame(frame) || !validOpaqueId(sourceSystemId) || !validOpaqueId(sourceLayerId) ||
+      !targetSystem?.unlocked || !sourceSystem?.unlocked ||
+      frame.projection.technology?.programReady !== true ||
+      sourceSystemId === frame.selectedSystemId && !frame.layersById.has(sourceLayerId)) {
+    throw new TypeError("原生戴森壳层粘贴投影或来源无效");
+  }
+  if (frame.layers.length >= 8) return null;
+  return topLevelCommand(frame, [{
+    path: ["dysonPlans", "intent"],
+    operation: "set",
+    value: {
+      kind: "paste-layer",
+      systemId: frame.selectedSystemId,
+      sourceSystemId,
+      sourceLayerId,
+    },
+  }]);
+}
+
 export interface NativeProjectedDysonLayerGeometry {
   readonly radius?: number;
   readonly inclination?: number;

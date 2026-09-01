@@ -441,6 +441,7 @@ export function NativeDysonPlannerWorkspace({
   onAddNode,
   onRemoveNode,
   onConnectNodes,
+  onPasteLayer,
   onAddOrbit,
   onRemoveOrbit,
   onAutoConnect,
@@ -466,6 +467,7 @@ export function NativeDysonPlannerWorkspace({
   onAddNode: (layerId: string, angle: number) => void;
   onRemoveNode: (layerId: string, nodeId: string) => void;
   onConnectNodes: (layerId: string, sourceNodeId: string, targetNodeId: string) => void;
+  onPasteLayer: (sourceSystemId: string, sourceLayerId: string) => void;
   onAddOrbit: () => void;
   onRemoveOrbit: (orbitId: string) => void;
   onAutoConnect: (layerId: string) => void;
@@ -487,6 +489,11 @@ export function NativeDysonPlannerWorkspace({
     : latestIdentity;
   const [cachedFrame, setCachedFrame] = useState<NativeDysonWorkspaceFrame | null>(exactFrame);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [layerClipboard, setLayerClipboard] = useState<{
+    sourceSystemId: string;
+    sourceLayerId: string;
+    sourceName: string;
+  } | null>(null);
   const cachedFrameMatchesScope = Boolean(status === "loading" && cachedFrame && resolvedLatestIdentity &&
     cachedFrame.sessionId === resolvedLatestIdentity.sessionId &&
     cachedFrame.runId === resolvedLatestIdentity.runId &&
@@ -529,6 +536,11 @@ export function NativeDysonPlannerWorkspace({
     candidateFrame?.runId,
     candidateFrame?.registryFingerprint,
     selectedSystemId,
+  ]);
+  useEffect(() => setLayerClipboard(null), [
+    resolvedLatestIdentity?.sessionId,
+    resolvedLatestIdentity?.runId,
+    resolvedLatestIdentity?.registryFingerprint,
   ]);
   useEffect(() => setSelectedNodeId((current) =>
     current && displayFrame?.nodes.some((node) => node.nodeId === current) ? current : null
@@ -614,7 +626,30 @@ export function NativeDysonPlannerWorkspace({
           <span>总功率 <strong><PowerValue valueKw={globalGenerationKw} /></strong></span>
         </div>
         <div className="dyson-planner-commandbar" role="toolbar" aria-label="原生戴森球规划命令">
-          <button type="button" disabled data-native-dyson-action="design" title="壳层、轨道、节点、框架与壳面设计均由 Rust 权威执行"><LockKeyhole size={17} /><span>权威设计</span></button>
+          <button
+            type="button"
+            disabled={commandPending || !activeLayer}
+            onClick={() => activeLayer && setLayerClipboard({
+              sourceSystemId: frame.selectedSystemId,
+              sourceLayerId: activeLayer.layerId,
+              sourceName: nativeDysonLabel(activeLayer.name, activeLayer.layerId),
+            })}
+            data-native-dyson-action="copy-layer"
+            title="复制当前 Rust 权威壳层引用"
+            aria-label="复制当前原生戴森壳层"
+          ><ClipboardCopy size={17} /><span>复制</span></button>
+          <button
+            type="button"
+            disabled={commandPending || !layerClipboard || !selectedSystem.unlocked ||
+              !projection.technology.programReady || frame.layers.length >= 8}
+            onClick={() => layerClipboard && onPasteLayer(
+              layerClipboard.sourceSystemId,
+              layerClipboard.sourceLayerId,
+            )}
+            data-native-dyson-action="paste-layer"
+            title={layerClipboard ? `由 Rust 将“${layerClipboard.sourceName}”复制为当前恒星系的新壳层` : "请先复制一个壳层"}
+            aria-label="粘贴原生戴森壳层副本"
+          ><ClipboardPaste size={17} /><span>粘贴</span></button>
           <button type="button" disabled data-native-dyson-action="save" title="原生权威检查点由运行时持久化"><Save size={17} /><span>权威保存</span></button>
           <button type="button" onClick={onClose} title="关闭戴森球规划" aria-label="关闭戴森球规划"><X size={18} /><span>关闭</span></button>
         </div>

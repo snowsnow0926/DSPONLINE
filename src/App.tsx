@@ -722,6 +722,7 @@ import {
   createNativeProjectedDysonLaunchModeCommand,
   createNativeProjectedDysonLaunchThrottleCommand,
   createNativeProjectedDysonOrbitGeometryCommand,
+  createNativeProjectedDysonPasteLayerCommand,
   createNativeProjectedDysonPlanShellCommand,
   createNativeProjectedDysonRemoveLayerCommand,
   createNativeProjectedDysonRemoveNodeCommand,
@@ -13213,6 +13214,20 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     );
   }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
 
+  const onNativeDysonPasteLayer = useCallback((sourceSystemId: string, sourceLayerId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次壳层粘贴未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonPasteLayerCommand(frame, sourceSystemId, sourceLayerId)
+        : null,
+      () => setNotice("已由 Rust 复制壳层设计；新副本使用独立 ID 且施工进度从零开始"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
   const onNativeDysonAddOrbit = useCallback(() => {
     const frame = nativeDysonWorkspaceFrame;
     if (!frame) {
@@ -22781,6 +22796,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onAddNode={onNativeDysonAddNode}
             onRemoveNode={onNativeDysonRemoveNode}
             onConnectNodes={onNativeDysonConnectNodes}
+            onPasteLayer={onNativeDysonPasteLayer}
             onAddOrbit={onNativeDysonAddOrbit}
             onRemoveOrbit={onNativeDysonRemoveOrbit}
             onAutoConnect={onNativeDysonAutoConnect}

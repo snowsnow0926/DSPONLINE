@@ -22,6 +22,7 @@ import {
   createNativeProjectedDysonLaunchModeCommand,
   createNativeProjectedDysonLaunchThrottleCommand,
   createNativeProjectedDysonOrbitGeometryCommand,
+  createNativeProjectedDysonPasteLayerCommand,
   createNativeProjectedDysonPlanShellCommand,
   createNativeProjectedDysonRemoveLayerCommand,
   createNativeProjectedDysonRemoveNodeCommand,
@@ -209,6 +210,24 @@ describe("native projected Dyson launch commands", () => {
         value: { kind: "remove-layer", systemId: "sol", layerId: "mod:层/新🚀" },
       }]);
     expect(JSON.stringify(createNativeProjectedDysonAddLayerCommand(current, true))).not.toContain("nodes");
+  });
+
+  it("pastes only an authoritative source-layer reference, never a renderer template", () => {
+    const current = frame();
+    const command = createNativeProjectedDysonPasteLayerCommand(current, "sol", "mod:层/新🚀");
+    expect(command?.topLevelChanges).toEqual([{
+      path: ["dysonPlans", "intent"],
+      operation: "set",
+      value: {
+        kind: "paste-layer",
+        systemId: "sol",
+        sourceSystemId: "sol",
+        sourceLayerId: "mod:层/新🚀",
+      },
+    }]);
+    expect(JSON.stringify(command)).not.toMatch(/nodes|frames|shells|nextId|completedStructurePoints/);
+    expect(() => createNativeProjectedDysonPasteLayerCommand(current, "sol", "layer:missing"))
+      .toThrow(TypeError);
   });
 
   it("emits compact material-safe solar-sail orbit lifecycle intents", () => {

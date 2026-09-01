@@ -6,7 +6,7 @@
 //! compact intent in the WAL. Cold replay therefore produces the same plan
 //! without trusting renderer-authored structure arrays or material counters.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Value, json};
@@ -33,6 +33,7 @@ enum DysonPlanIntentKind {
     AddStandardLayer,
     SetLayerOrbit,
     RemoveLayer,
+    PasteLayer,
     AddNode,
     RemoveNode,
     ConnectNodes,
@@ -58,6 +59,8 @@ struct DysonPlanIntent {
     node_id: Option<String>,
     source_node_id: Option<String>,
     target_node_id: Option<String>,
+    source_system_id: Option<String>,
+    source_layer_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -115,6 +118,7 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<DysonPlanI
         Some("add-standard-layer") => DysonPlanIntentKind::AddStandardLayer,
         Some("set-layer-orbit") => DysonPlanIntentKind::SetLayerOrbit,
         Some("remove-layer") => DysonPlanIntentKind::RemoveLayer,
+        Some("paste-layer") => DysonPlanIntentKind::PasteLayer,
         Some("add-node") => DysonPlanIntentKind::AddNode,
         Some("remove-node") => DysonPlanIntentKind::RemoveNode,
         Some("connect-nodes") => DysonPlanIntentKind::ConnectNodes,
@@ -128,6 +132,7 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<DysonPlanI
             &["kind", "systemId"]
         }
         DysonPlanIntentKind::SetLayerOrbit => &["kind", "systemId", "layerId", "changes"],
+        DysonPlanIntentKind::PasteLayer => &["kind", "systemId", "sourceSystemId", "sourceLayerId"],
         DysonPlanIntentKind::AddNode => &["kind", "systemId", "layerId", "angle"],
         DysonPlanIntentKind::RemoveNode => &["kind", "systemId", "layerId", "nodeId"],
         DysonPlanIntentKind::ConnectNodes => &[
@@ -152,7 +157,9 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<DysonPlanI
         .ok_or_else(|| anyhow!("native player-authority Dyson plan system ID is invalid"))?;
     let layer_id = if matches!(
         kind,
-        DysonPlanIntentKind::AddLayer | DysonPlanIntentKind::AddStandardLayer
+        DysonPlanIntentKind::AddLayer
+            | DysonPlanIntentKind::AddStandardLayer
+            | DysonPlanIntentKind::PasteLayer
     ) {
         None
     } else {
@@ -235,6 +242,22 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<DysonPlanI
     } else {
         (None, None)
     };
+    let source_reference = |key: &str, label: &str| {
+        intent
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| valid_opaque_id(value))
+            .map(str::to_owned)
+            .ok_or_else(|| anyhow!("native player-authority Dyson {label} is invalid"))
+    };
+    let (source_system_id, source_layer_id) = if kind == DysonPlanIntentKind::PasteLayer {
+        (
+            Some(source_reference("sourceSystemId", "source system ID")?),
+            Some(source_reference("sourceLayerId", "source layer ID")?),
+        )
+    } else {
+        (None, None)
+    };
     Ok(DysonPlanIntent {
         kind,
         system_id: system_id.to_owned(),
@@ -244,6 +267,8 @@ fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<DysonPlanI
         node_id,
         source_node_id,
         target_node_id,
+        source_system_id,
+        source_layer_id,
     })
 }
 
@@ -690,6 +715,190 @@ fn append_layer(
     Ok(())
 }
 
+fn append_layer_copy(
+    target_plan: &mut Map<String, Value>,
+    source_layer: &Map<String, Value>,
+    next_id: &mut u64,
+    all_ids: &mut HashSet<String>,
+) -> anyhow::Result<()> {
+    let layer_count = target_plan
+        .get("layers")
+        .and_then(Value::as_array)
+        .expect("Dyson layer directory was validated")
+        .len();
+    if layer_count >= MAX_DYSON_LAYERS {
+        bail!("native player-authority Dyson layer limit is exceeded")
+    }
+    let radius = positive_integer(source_layer.get("radius"), "source layer radius")?;
+    let inclination = source_layer
+        .get("inclination")
+        .and_then(Value::as_f64)
+        .filter(|value| value.fract() == 0.0)
+        .ok_or_else(|| anyhow!("native player-authority Dyson source inclination is invalid"))?
+        as i64;
+    let longitude = canonical_angle(source_layer.get("longitude"), "source layer longitude")?;
+    let structure_floor = safe_integer(
+        target_plan.get("structurePoints"),
+        "target plan structure points",
+    )?;
+    let shell_floor = safe_integer(target_plan.get("shellSails"), "target plan shell sails")?;
+    let layer_id = allocate_id("dyson_layer", next_id, all_ids)?;
+    let source_name = source_layer
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("壳层");
+    let mut node_id_by_source = HashMap::new();
+    let mut node_angle_by_source = HashMap::new();
+    let mut nodes = Vec::new();
+    for source_node in source_layer
+        .get("nodes")
+        .and_then(Value::as_array)
+        .expect("Dyson source nodes were validated")
+        .iter()
+        .filter_map(Value::as_object)
+    {
+        let source_id = require_id(source_node.get("id"), "source node ID")?;
+        let angle = canonical_angle(source_node.get("angle"), "source node angle")?;
+        if node_angle_by_source
+            .values()
+            .any(|current| shortest_angle_distance(*current, angle) < 5.0)
+        {
+            bail!("native player-authority Dyson copied nodes are too close")
+        }
+        let id = allocate_id("dyson_node", next_id, all_ids)?;
+        node_id_by_source.insert(source_id.to_owned(), id.clone());
+        node_angle_by_source.insert(source_id.to_owned(), angle);
+        nodes.push(json!({
+            "id": id,
+            "angle": angle,
+            "requiredStructurePoints": 1,
+            "completedStructurePoints": 0,
+        }));
+    }
+    let mut frame_by_source = HashMap::new();
+    let mut frames = Vec::new();
+    for source_frame in source_layer
+        .get("frames")
+        .and_then(Value::as_array)
+        .expect("Dyson source frames were validated")
+        .iter()
+        .filter_map(Value::as_object)
+    {
+        let source_frame_id = require_id(source_frame.get("id"), "source frame ID")?;
+        let source_node_id = require_id(
+            source_frame.get("sourceNodeId"),
+            "source frame source node ID",
+        )?;
+        let target_node_id = require_id(
+            source_frame.get("targetNodeId"),
+            "source frame target node ID",
+        )?;
+        let source_angle = *node_angle_by_source.get(source_node_id).ok_or_else(|| {
+            anyhow!("native player-authority Dyson copied frame source is missing")
+        })?;
+        let target_angle = *node_angle_by_source.get(target_node_id).ok_or_else(|| {
+            anyhow!("native player-authority Dyson copied frame target is missing")
+        })?;
+        let required = frame_requirement(radius, source_angle, target_angle);
+        let copied_source_node_id = node_id_by_source
+            .get(source_node_id)
+            .ok_or_else(|| anyhow!("native player-authority Dyson copied frame source is missing"))?
+            .clone();
+        let copied_target_node_id = node_id_by_source
+            .get(target_node_id)
+            .ok_or_else(|| anyhow!("native player-authority Dyson copied frame target is missing"))?
+            .clone();
+        let id = allocate_id("dyson_frame", next_id, all_ids)?;
+        frame_by_source.insert(source_frame_id.to_owned(), (id.clone(), required));
+        frames.push(json!({
+            "id": id,
+            "sourceNodeId": copied_source_node_id,
+            "targetNodeId": copied_target_node_id,
+            "requiredStructurePoints": required,
+            "completedStructurePoints": 0,
+        }));
+    }
+    let mut shells = Vec::new();
+    for source_shell in source_layer
+        .get("shells")
+        .and_then(Value::as_array)
+        .expect("Dyson source shells were validated")
+        .iter()
+        .filter_map(Value::as_object)
+    {
+        let source_node_id = require_id(
+            source_shell.get("sourceNodeId"),
+            "source shell source node ID",
+        )?;
+        let target_node_id = require_id(
+            source_shell.get("targetNodeId"),
+            "source shell target node ID",
+        )?;
+        let mut capacity = 0_u64;
+        let mut boundary_frame_ids = Vec::new();
+        let copied_source_node_id = node_id_by_source
+            .get(source_node_id)
+            .ok_or_else(|| anyhow!("native player-authority Dyson copied shell source is missing"))?
+            .clone();
+        let copied_target_node_id = node_id_by_source
+            .get(target_node_id)
+            .ok_or_else(|| anyhow!("native player-authority Dyson copied shell target is missing"))?
+            .clone();
+        for boundary in source_shell
+            .get("boundaryFrameIds")
+            .and_then(Value::as_array)
+            .expect("Dyson source shell boundaries were validated")
+        {
+            let source_frame_id = require_id(Some(boundary), "source shell boundary ID")?;
+            let (frame_id, requirement) =
+                frame_by_source.get(source_frame_id).ok_or_else(|| {
+                    anyhow!("native player-authority Dyson copied shell boundary is missing")
+                })?;
+            capacity = capacity
+                .checked_add(
+                    requirement
+                        .checked_mul(DYSON_SHELL_CAPACITY_PER_STRUCTURE)
+                        .ok_or_else(|| {
+                            anyhow!("native player-authority Dyson copied shell capacity overflows")
+                        })?,
+                )
+                .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority Dyson copied shell capacity overflows")
+                })?;
+            boundary_frame_ids.push(frame_id.clone());
+        }
+        shells.push(json!({
+            "id": allocate_id("dyson_shell", next_id, all_ids)?,
+            "sourceNodeId": copied_source_node_id,
+            "targetNodeId": copied_target_node_id,
+            "boundaryFrameIds": boundary_frame_ids,
+            "sailCapacity": capacity,
+            "absorbedSails": 0,
+        }));
+    }
+    let layer = json!({
+        "id": layer_id,
+        "name": format!("{source_name} 副本"),
+        "radius": radius,
+        "inclination": inclination,
+        "longitude": longitude,
+        "nodes": nodes,
+        "frames": frames,
+        "shells": shells,
+        "structureAllocationFloor": structure_floor,
+        "shellAllocationFloor": shell_floor,
+    });
+    target_plan
+        .get_mut("layers")
+        .and_then(Value::as_array_mut)
+        .expect("Dyson target layer directory was validated")
+        .push(layer);
+    target_plan.insert("activeLayerId".to_owned(), Value::from(layer_id));
+    Ok(())
+}
+
 fn update_layer_orbit(
     layer: &mut Map<String, Value>,
     changes: DysonLayerOrbitChanges,
@@ -971,6 +1180,23 @@ pub(crate) fn expand_intent(
     {
         bail!("native player-authority Dyson plan system or technology is locked")
     }
+    if let Some(source_system_id) = intent.source_system_id.as_deref()
+        && (!state
+            .catalog
+            .planets
+            .iter()
+            .any(|planet| planet.system_id == source_system_id)
+            || !exploration
+                .get("unlockedSystemIds")
+                .and_then(Value::as_array)
+                .is_some_and(|systems| {
+                    systems
+                        .iter()
+                        .any(|system| system.as_str() == Some(source_system_id))
+                }))
+    {
+        bail!("native player-authority Dyson source system is unknown or locked")
+    }
     if intent.kind == DysonPlanIntentKind::PlanShell
         && !technology_is_completed(state, "dyson_shell")
     {
@@ -1000,6 +1226,39 @@ pub(crate) fn expand_intent(
             }
         }
     }
+    let source_layer = if intent.kind == DysonPlanIntentKind::PasteLayer {
+        let source_system_id = intent
+            .source_system_id
+            .as_deref()
+            .expect("paste-layer intent has a validated source system ID");
+        let source_layer_id = intent
+            .source_layer_id
+            .as_deref()
+            .expect("paste-layer intent has a validated source layer ID");
+        let layer = plans
+            .get(source_system_id)
+            .and_then(Value::as_object)
+            .and_then(|plan| plan.get("layers"))
+            .and_then(Value::as_array)
+            .and_then(|layers| {
+                layers
+                    .iter()
+                    .find(|layer| layer.get("id").and_then(Value::as_str) == Some(source_layer_id))
+            })
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow!("native player-authority Dyson source layer is missing"))?;
+        if layer
+            .get("shells")
+            .and_then(Value::as_array)
+            .is_some_and(|shells| !shells.is_empty())
+            && !technology_is_completed(state, "dyson_shell")
+        {
+            bail!("native player-authority Dyson shell technology is locked")
+        }
+        Some(layer)
+    } else {
+        None
+    };
     let mut candidate_plan = original_plan.clone();
     let mut next_id = safe_integer(state.base_value().get("nextId"), "next ID")?;
     let original_next_id = next_id;
@@ -1061,6 +1320,15 @@ pub(crate) fn expand_intent(
             if removing_active {
                 candidate_plan.insert("activeLayerId".to_owned(), fallback);
             }
+            true
+        }
+        DysonPlanIntentKind::PasteLayer => {
+            append_layer_copy(
+                &mut candidate_plan,
+                source_layer.expect("paste-layer intent has a validated source layer"),
+                &mut next_id,
+                &mut all_ids,
+            )?;
             true
         }
         DysonPlanIntentKind::AddNode => {
@@ -1656,6 +1924,117 @@ mod tests {
         let before_close = live.base_value().clone();
         assert!(live.apply_command(&too_close).is_err());
         assert_eq!(live.base_value(), &before_close);
+    }
+
+    #[test]
+    fn paste_layer_rekeys_authoritative_design_without_copying_progress_or_material() {
+        let setup = || {
+            let mut live = state();
+            let shell = intent(live.revision, "plan-shell");
+            live.apply_command(&shell).unwrap();
+            live.base_value_mut()["exploration"]["unlockedSystemIds"] = json!(["helios", "sigma"]);
+            live.base_value_mut()["dysonPlans"]["sigma"] = json!({
+                "systemId": "sigma",
+                "activeLayerId": null,
+                "structurePoints": 7,
+                "shellSails": 5,
+                "layers": []
+            });
+            live
+        };
+        let paste = |revision| {
+            semantic_intent(
+                revision,
+                json!({
+                    "kind": "paste-layer",
+                    "systemId": "sigma",
+                    "sourceSystemId": "helios",
+                    "sourceLayerId": "mod:layer/alpha🚀"
+                }),
+            )
+        };
+        let mut live = setup();
+        let mut replay = setup();
+        live.apply_command(&paste(live.revision)).unwrap();
+        replay.apply_command(&paste(replay.revision)).unwrap();
+        assert_eq!(live.base_value(), replay.base_value());
+        assert_eq!(live.base_value()["nextId"], 121);
+
+        let source = &live.base_value()["dysonPlans"]["helios"]["layers"][0];
+        let target_plan = &live.base_value()["dysonPlans"]["sigma"];
+        let copied = &target_plan["layers"][0];
+        assert_eq!(target_plan["activeLayerId"], "dyson_layer_108");
+        assert_eq!(target_plan["structurePoints"].as_f64(), Some(7.0));
+        assert_eq!(target_plan["shellSails"].as_f64(), Some(5.0));
+        assert_eq!(copied["name"], "Alpha 副本");
+        assert_eq!(copied["structureAllocationFloor"].as_f64(), Some(7.0));
+        assert_eq!(copied["shellAllocationFloor"].as_f64(), Some(5.0));
+        assert_eq!(copied["nodes"].as_array().unwrap().len(), 4);
+        assert_eq!(copied["frames"].as_array().unwrap().len(), 4);
+        assert_eq!(copied["shells"].as_array().unwrap().len(), 4);
+        assert!(
+            copied["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|node| { node["completedStructurePoints"].as_f64() == Some(0.0) })
+        );
+        assert!(
+            copied["frames"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|frame| { frame["completedStructurePoints"].as_f64() == Some(0.0) })
+        );
+        assert!(
+            copied["shells"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|shell| shell["absorbedSails"].as_f64() == Some(0.0))
+        );
+        let source_ids = serde_json::to_string(source).unwrap();
+        for copied_id in copied["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(copied["frames"].as_array().unwrap())
+            .chain(copied["shells"].as_array().unwrap())
+            .filter_map(|row| row.get("id").and_then(Value::as_str))
+        {
+            assert!(!source_ids.contains(copied_id));
+        }
+
+        let mut locked = setup();
+        locked.base_value_mut()["research"]["completedTechIds"] = json!(["dyson_sphere_program"]);
+        let before_locked = locked.base_value().clone();
+        assert!(locked.apply_command(&paste(locked.revision)).is_err());
+        assert_eq!(locked.base_value(), &before_locked);
+
+        let mut close_nodes = setup();
+        close_nodes.base_value_mut()["dysonPlans"]["helios"]["layers"][0]["nodes"][3]["angle"] =
+            Value::from(3);
+        let before_close_nodes = close_nodes.base_value().clone();
+        assert!(
+            close_nodes
+                .apply_command(&paste(close_nodes.revision))
+                .is_err()
+        );
+        assert_eq!(close_nodes.base_value(), &before_close_nodes);
+
+        let malformed = semantic_intent(
+            live.revision,
+            json!({
+                "kind": "paste-layer",
+                "systemId": "sigma",
+                "sourceSystemId": "helios",
+                "sourceLayerId": "mod:layer/alpha🚀",
+                "nodes": []
+            }),
+        );
+        let before_malformed = live.base_value().clone();
+        assert!(live.apply_command(&malformed).is_err());
+        assert_eq!(live.base_value(), &before_malformed);
     }
 
     #[test]

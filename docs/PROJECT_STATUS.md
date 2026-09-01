@@ -1,10 +1,10 @@
 # DSP极简网络项目现状
 
-> **Windows 戴森节点编辑 Rust 权威纵切（2026-09-01，开发候选，未发布）**：原生戴森薄 UI 现在除壳层/轨道生命周期与框架/壳面规划外，还可直接在轨道图新增节点、选择两点创建框架、删除节点并级联清理关联框架和壳面。renderer 只发送绑定当前 session/run/revision/registry/system 的角度或节点 ID 小意图；稳定 ID、框架结构需求、目录重派生与级联结果全部由 Rust 从权威状态确定，不接收 renderer 提供的节点/框架/壳面数组、完成量、容量、`nextId` 或物料计数。
+> **Windows 戴森设计复制/粘贴 Rust 权威纵切（2026-09-01，开发候选，未发布）**：原生戴森薄 UI 已覆盖壳层/轨道生命周期、节点增删与两点连线、框架闭合、壳面规划，以及同系或跨恒星系复制壳层设计。复制只在界面保存来源系统/层引用；粘贴只发送绑定当前 session/run/revision/registry 的 `sourceSystemId/sourceLayerId`，Rust 从权威目录重新生成层、节点、框架与壳面的全部 ID 和工作量，renderer 从不提交设计模板、进度、容量、`nextId` 或物料计数。
 >
-> 节点角度规范到 0.1°，每层最多 24 个且任意两点至少相隔 5°；手工连线禁止同点和重复无向边，工作量继续使用权威半径与夹角公式。删除节点不降低或增加 `structurePoints/shellSails` 历史总量。WAL 只保存 `remove-node` 等小意图；`AfterWal` 冷恢复与正常提交的 revision、canonical SHA-256 和公开状态逐字一致，重复 command ID 不会再次级联删除。
+> Rust 粘贴前重验来源/目标恒星系解锁、科技、来源层完整引用、全局 ID 唯一性和目标 8 层上限；新副本沿用几何与拓扑，但施工完成量/吸附量归零，并把目标现有 `structurePoints/shellSails` 记作 allocation floor，旧库存不会自动灌入副本。WAL 只保存 `paste-layer` 和来源引用；`AfterWal` 冷恢复与无故障提交的 revision、canonical SHA-256、独立 ID 和零进度状态一致，重复 command ID 不会重复复制。
 >
-> 本轮新鲜 focused 为 Rust Dyson `30/30`（其中 plan semantic `6/6`）、Host Dyson/冷恢复 `4/4`、Vitest `27/27`、desktop broker `29/29`；TypeScript、production build（2,097 modules）、startup budget、Native thin-UI AST 门禁、Rust fmt 与 workspace strict Clippy 均通过。跨层设计复制粘贴仍未迁移，完整组合门禁也尚未重跑，因此固定能力百分比暂不调整。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不变；未读取玩家存档，未连接生产，未部署、打包或签名。
+> 本轮新鲜 focused 为 Rust Dyson `31/31`（其中 plan semantic `7/7`）、Host Dyson/冷恢复 `5/5`、Vitest `28/28`、desktop broker `29/29`；TypeScript、production build（2,097 modules）、startup budget、Native thin-UI AST 门禁、Rust fmt 与 workspace strict Clippy 均通过。完整组合门禁尚未重跑，固定能力百分比留给统一源码审计，不按按钮或代码行数临时调整。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不变；未读取玩家存档，未连接生产，未部署、打包或签名。
 
 > **Windows Rust 行星指标活动探针缓存（2026-09-01，开发候选，未发布）**：在完整 writer-closure 审计通过后，`simple_factory` 的 `planetMetrics` 不再每个模拟步重新解码/查询全部实体。新的 session-only runtime 保存一份按持久实体顺序排列的紧凑 probe 基线、稀疏 override 和有序 pending writer 集；冷拍、命令/拓扑失配、非空 MOD registry、opaque/畸形形状、目录证据不完整及精确 `75%` 稠密阈值仍走真实 flat-full。`productionRate`、储能/容量、燃料余热与选中燃料输入、`machineCount` 及 planet/building/topology 的产品 writer 清单和闭合方式见 [writer 审计](./NATIVE_PLANET_METRICS_WRITER_AUDIT.md)。
 >

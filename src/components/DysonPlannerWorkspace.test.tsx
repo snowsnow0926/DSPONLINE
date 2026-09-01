@@ -334,6 +334,7 @@ function renderNative(overrides: Partial<Parameters<typeof NativeDysonPlannerWor
     onAddNode: vi.fn(),
     onRemoveNode: vi.fn(),
     onConnectNodes: vi.fn(),
+    onPasteLayer: vi.fn(),
     onAddOrbit: vi.fn(),
     onRemoveOrbit: vi.fn(),
     onAutoConnect: vi.fn(),
@@ -378,6 +379,7 @@ describe("NativeDysonPlannerWorkspace", () => {
     const onRemoveLayer = vi.fn();
     const onAddOrbit = vi.fn();
     const onRemoveOrbit = vi.fn();
+    const onPasteLayer = vi.fn();
     const onPlanShell = vi.fn();
     const onClearShell = vi.fn();
     const onClose = vi.fn();
@@ -395,6 +397,7 @@ describe("NativeDysonPlannerWorkspace", () => {
       onRemoveLayer,
       onAddOrbit,
       onRemoveOrbit,
+      onPasteLayer,
       onPlanShell,
       onClearShell,
       onClose,
@@ -477,7 +480,14 @@ describe("NativeDysonPlannerWorkspace", () => {
     expect(onPlanShell).toHaveBeenCalledWith("layer:main");
     expect(onClearShell).toHaveBeenCalledWith("layer:main");
 
-    expect(host.querySelector<HTMLButtonElement>("[data-native-dyson-action='design']")?.disabled).toBe(true);
+    const copyLayer = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='copy-layer']")!;
+    const pasteLayer = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='paste-layer']")!;
+    expect(copyLayer.disabled).toBe(false);
+    expect(pasteLayer.disabled).toBe(true);
+    act(() => copyLayer.click());
+    expect(pasteLayer.disabled).toBe(false);
+    act(() => pasteLayer.click());
+    expect(onPasteLayer).toHaveBeenCalledWith("helios", "layer:main");
     expect(host.querySelector<HTMLButtonElement>("[data-native-dyson-action='save']")?.disabled).toBe(true);
 
     act(() => host.querySelector<HTMLButtonElement>("[aria-label='关闭戴森球规划']")!.click());
@@ -543,7 +553,7 @@ describe("NativeDysonPlannerWorkspace", () => {
     renderNative({ pending: true });
 
     const projectedControls = host.querySelectorAll<HTMLButtonElement | HTMLInputElement>(
-      "[data-native-dyson-action^='launch-'], [data-native-dyson-action='select-layer'], [data-native-dyson-action='select-orbit'], [data-native-dyson-action^='orbit-'], [data-native-dyson-action='connect-frames'], [data-native-dyson-action='plan-shell'], [data-native-dyson-action='clear-shell']",
+      "[data-native-dyson-action^='launch-'], [data-native-dyson-action='select-layer'], [data-native-dyson-action='select-orbit'], [data-native-dyson-action^='orbit-'], [data-native-dyson-action='copy-layer'], [data-native-dyson-action='paste-layer'], [data-native-dyson-action='connect-frames'], [data-native-dyson-action='plan-shell'], [data-native-dyson-action='clear-shell']",
     );
     expect(projectedControls.length).toBeGreaterThan(6);
     for (const control of projectedControls) expect(control.disabled).toBe(true);

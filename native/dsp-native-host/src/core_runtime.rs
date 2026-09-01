@@ -17247,6 +17247,185 @@ mod tests {
     }
 
     #[test]
+    fn dyson_layer_paste_survives_wal_cold_reopen_with_new_ids_and_zero_progress() {
+        let mut catalog = player_authority_catalog();
+        catalog["planets"].as_array_mut().unwrap().push(json!({
+            "id": "sigma-home",
+            "systemId": "sigma",
+            "kind": "terrestrial",
+            "orbitIndex": 1
+        }));
+        catalog["technologies"].as_array_mut().unwrap().extend([
+            json!({
+                "id": "dyson_sphere_program",
+                "costs": [{ "itemId": "iron_ore", "amount": 1 }],
+                "prerequisites": []
+            }),
+            json!({
+                "id": "dyson_shell",
+                "costs": [{ "itemId": "iron_ore", "amount": 1 }],
+                "prerequisites": ["dyson_sphere_program"]
+            }),
+        ]);
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["research"]["completedTechIds"] =
+            json!(["dyson_sphere_program", "dyson_shell"]);
+        envelope["state"]["exploration"]["unlockedSystemIds"] = json!(["helios", "sigma"]);
+        envelope["state"]["nextId"] = Value::from(100);
+        envelope["state"]["dysonPlans"]["helios"] = json!({
+            "systemId": "helios",
+            "activeLayerId": "mod:layer/alpha🚀",
+            "structurePoints": 12,
+            "shellSails": 80,
+            "layers": [{
+                "id": "mod:layer/alpha🚀",
+                "name": "Alpha",
+                "radius": 10000,
+                "inclination": 0,
+                "longitude": 0,
+                "structureAllocationFloor": 0,
+                "shellAllocationFloor": 0,
+                "nodes": [
+                    { "id": "node-a", "angle": 0, "requiredStructurePoints": 1, "completedStructurePoints": 1 },
+                    { "id": "node-b", "angle": 120, "requiredStructurePoints": 1, "completedStructurePoints": 1 },
+                    { "id": "node-c", "angle": 240, "requiredStructurePoints": 1, "completedStructurePoints": 1 }
+                ],
+                "frames": [
+                    { "id": "frame-ab", "sourceNodeId": "node-a", "targetNodeId": "node-b", "requiredStructurePoints": 4, "completedStructurePoints": 4 },
+                    { "id": "frame-bc", "sourceNodeId": "node-b", "targetNodeId": "node-c", "requiredStructurePoints": 4, "completedStructurePoints": 4 },
+                    { "id": "frame-ca", "sourceNodeId": "node-c", "targetNodeId": "node-a", "requiredStructurePoints": 4, "completedStructurePoints": 1 }
+                ],
+                "shells": [
+                    { "id": "shell-ab", "sourceNodeId": "node-a", "targetNodeId": "node-b", "boundaryFrameIds": ["frame-ab"], "active": true, "sailCapacity": 160, "absorbedSails": 40 },
+                    { "id": "shell-bc", "sourceNodeId": "node-b", "targetNodeId": "node-c", "boundaryFrameIds": ["frame-bc"], "active": true, "sailCapacity": 160, "absorbedSails": 20 },
+                    { "id": "shell-ca", "sourceNodeId": "node-c", "targetNodeId": "node-a", "boundaryFrameIds": ["frame-ca"], "active": true, "sailCapacity": 160, "absorbedSails": 20 }
+                ]
+            }]
+        });
+        envelope["state"]["dysonPlans"]["sigma"] = json!({
+            "systemId": "sigma",
+            "activeLayerId": null,
+            "structurePoints": 7,
+            "shellSails": 5,
+            "layers": []
+        });
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let request = |revision| {
+            player_authority_dyson_plan_value_intent_command(
+                revision,
+                "dyson-layer-paste-before-cold-reopen",
+                json!({
+                    "kind": "paste-layer",
+                    "systemId": "sigma",
+                    "sourceSystemId": "helios",
+                    "sourceLayerId": "mod:layer/alpha🚀"
+                }),
+            )
+        };
+
+        let (clean_root, mut clean_store, mut clean_registry, clean_session_id, clean_checkpoint) =
+            player_authority_fixture_from_parts(bytes.clone(), catalog.clone());
+        let clean = clean_registry
+            .commit_player_authority_command(
+                &mut clean_store,
+                &clean_session_id,
+                request(clean_checkpoint.revision),
+            )
+            .unwrap();
+        let live = export_test_state(
+            clean_root.path(),
+            &clean_registry,
+            &clean_store,
+            &clean_session_id,
+            "dyson-layer-paste-clean",
+        );
+        let live_hash = clean.summary.canonical_sha256.clone();
+        let target_plan = &live["dysonPlans"]["sigma"];
+        let copied = &target_plan["layers"][0];
+        assert_eq!(target_plan["activeLayerId"], "dyson_layer_100");
+        assert_eq!(target_plan["structurePoints"].as_f64(), Some(7.0));
+        assert_eq!(target_plan["shellSails"].as_f64(), Some(5.0));
+        assert_eq!(copied["nodes"].as_array().unwrap().len(), 3);
+        assert_eq!(copied["frames"].as_array().unwrap().len(), 3);
+        assert_eq!(copied["shells"].as_array().unwrap().len(), 3);
+        assert!(
+            copied["nodes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|node| { node["completedStructurePoints"].as_f64() == Some(0.0) })
+        );
+        assert!(
+            copied["frames"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|frame| { frame["completedStructurePoints"].as_f64() == Some(0.0) })
+        );
+        assert!(
+            copied["shells"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|shell| shell["absorbedSails"].as_f64() == Some(0.0))
+        );
+        assert_eq!(live["nextId"], 110);
+
+        let (root, mut store, mut registry, session_id, checkpoint) =
+            player_authority_fixture_from_parts(bytes, catalog);
+        let error = registry
+            .commit_player_authority_command_internal(
+                &mut store,
+                &session_id,
+                request(checkpoint.revision),
+                PlayerAuthorityCommandKind::Gameplay,
+                PlayerAuthorityCommandFault::AfterWal,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("lost response"));
+        let wal = store.read_wal("normal-main", checkpoint.revision).unwrap();
+        assert_eq!(wal.len(), 1);
+        let wal_payload = serde_json::to_string(&wal).unwrap();
+        assert!(wal_payload.contains("paste-layer"));
+        assert!(wal_payload.contains("mod:layer/alpha🚀"));
+        assert!(!wal_payload.contains("requiredStructurePoints"));
+        assert!(!wal_payload.contains("absorbedSails"));
+        assert!(!wal_payload.contains("nextId"));
+
+        drop(registry);
+        drop(store);
+        let mut reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = resumable_player_authority_registry_for_test();
+        let startup = reopened_registry
+            .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+            .unwrap()
+            .expect("WAL-staged Dyson paste command must provide a startup receipt");
+        assert_eq!(startup.revision, clean.revision);
+        assert_eq!(startup.summary.canonical_sha256, live_hash);
+        let duplicate = reopened_registry
+            .commit_player_authority_command(
+                &mut reopened_store,
+                &startup.session_id,
+                request(checkpoint.revision),
+            )
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.summary.canonical_sha256, live_hash);
+        let replayed = export_test_state(
+            root.path(),
+            &reopened_registry,
+            &reopened_store,
+            &startup.session_id,
+            "dyson-layer-paste-replayed",
+        );
+        assert_eq!(replayed, live);
+    }
+
+    #[test]
     fn dyson_orbit_removal_intent_survives_wal_cold_reopen_with_a_closed_material_ledger() {
         let mut catalog = player_authority_catalog();
         catalog["technologies"].as_array_mut().unwrap().push(json!({

@@ -347,6 +347,126 @@ describe("pure idle macro session", () => {
     expect(state.totalProduced.iron_ore).toBe(10);
   });
 
+  it("accepts active rocket and sail launches backed by owned launch stock", () => {
+    const state = pureIdleState();
+    state.tray.solar_sail = 20;
+    state.tray.small_carrier_rocket = 12;
+    const contract = {
+      calibrationSeconds: 1,
+      calibrationWallSeconds: 1,
+      deltas: [
+        { path: ["tray", "solar_sail"], kind: "number", delta: -7, integer: true },
+        { path: ["dysonSwarm", "totalLaunched"], kind: "number", delta: 7, integer: true },
+        { path: ["tray", "small_carrier_rocket"], kind: "number", delta: -5, integer: true },
+        { path: ["dysonSphere", "totalRocketsLaunched"], kind: "number", delta: 5, integer: true },
+      ],
+    } as PureIdleAffineContract;
+
+    const result = applyPureIdleAffineContract(state, contract, 1, 1);
+
+    expect(result).toMatchObject({ ok: true });
+    expect(state.tray).toMatchObject({ solar_sail: 13, small_carrier_rocket: 7 });
+    expect(state.dysonSwarm.totalLaunched).toBe(7);
+    expect(state.dysonSphere.totalRocketsLaunched).toBe(5);
+  });
+
+  it("accepts Galactic activity export without counting its delivery mirrors twice", () => {
+    const state = pureIdleState();
+    state.tray.universe_matrix = 20;
+    state.endgame.constructionActivity.pendingBatches.universe_matrix = {
+      id: "activity:participant:universe_matrix:0",
+      itemId: "universe_matrix",
+      amount: 4,
+      sequence: 0,
+      firstDeliveredAtMs: 1,
+      lastDeliveredAtMs: 1,
+    };
+    const contract = {
+      calibrationSeconds: 1,
+      calibrationWallSeconds: 1,
+      deltas: [
+        { path: ["tray", "universe_matrix"], kind: "number", delta: -6, integer: true },
+        { path: ["endgame", "exportProjects", "universe_archive", "totalDelivered"], kind: "number", delta: 6, integer: true },
+        { path: ["endgame", "constructionActivity", "personalDelivered", "universe_matrix"], kind: "number", delta: 6, integer: true },
+        { path: ["endgame", "constructionActivity", "pendingBatches", "universe_matrix", "amount"], kind: "number", delta: 6, integer: true },
+      ],
+    } as PureIdleAffineContract;
+
+    const result = applyPureIdleAffineContract(state, contract, 1, 1);
+
+    expect(result).toMatchObject({ ok: true });
+    expect(state.endgame.exportProjects.universe_archive.totalDelivered).toBe(6);
+    expect(state.endgame.constructionActivity.personalDelivered.universe_matrix).toBe(6);
+    expect(state.endgame.constructionActivity.pendingBatches.universe_matrix?.amount).toBe(10);
+  });
+
+  it("accepts a pending activity batch ACK without treating the outbox as lost stock", () => {
+    const state = pureIdleState();
+    state.endgame.constructionActivity.pendingBatches.universe_matrix = {
+      id: "activity:participant:universe_matrix:0",
+      itemId: "universe_matrix",
+      amount: 4,
+      sequence: 0,
+      firstDeliveredAtMs: 1,
+      lastDeliveredAtMs: 1,
+    };
+    const contract = {
+      calibrationSeconds: 1,
+      calibrationWallSeconds: 1,
+      deltas: [
+        { path: ["endgame", "constructionActivity", "pendingBatches", "universe_matrix", "amount"], kind: "number", delta: -4, integer: true },
+      ],
+    } as PureIdleAffineContract;
+
+    const result = applyPureIdleAffineContract(state, contract, 1, 1);
+
+    expect(result).toMatchObject({ ok: true });
+    expect(state.endgame.constructionActivity.pendingBatches.universe_matrix?.amount).toBe(0);
+  });
+
+  it("ignores activity-only mirrors when no physical export sink changes", () => {
+    const state = pureIdleState();
+    state.endgame.constructionActivity.pendingBatches.universe_matrix = {
+      id: "activity:participant:universe_matrix:0",
+      itemId: "universe_matrix",
+      amount: 3,
+      sequence: 0,
+      firstDeliveredAtMs: 1,
+      lastDeliveredAtMs: 1,
+    };
+    const contract = {
+      calibrationSeconds: 1,
+      calibrationWallSeconds: 1,
+      deltas: [
+        { path: ["endgame", "constructionActivity", "personalDelivered", "universe_matrix"], kind: "number", delta: 5, integer: true },
+        { path: ["endgame", "constructionActivity", "pendingBatches", "universe_matrix", "amount"], kind: "number", delta: 5, integer: true },
+      ],
+    } as PureIdleAffineContract;
+
+    expect(applyPureIdleAffineContract(state, contract, 1, 1)).toMatchObject({ ok: true });
+  });
+
+  it("rejects each physical sink growing without production or owned source stock", () => {
+    const sinkPaths = [
+      ["dysonSwarm", "totalLaunched"],
+      ["dysonSphere", "totalRocketsLaunched"],
+      ["endgame", "exportProjects", "universe_archive", "totalDelivered"],
+    ];
+    for (const path of sinkPaths) {
+      const state = pureIdleState();
+      const contract = {
+        calibrationSeconds: 1,
+        calibrationWallSeconds: 1,
+        deltas: [{ path, kind: "number", delta: 1, integer: true }],
+      } as PureIdleAffineContract;
+
+      const result = applyPureIdleAffineContract(state, contract, 1, 1);
+
+      expect(result.ok, JSON.stringify(path)).toBe(false);
+      expect(result.failure).toContain("物资守恒失败");
+    }
+  });
+
   it("uses a zero-calibration conservative session after repeated Worker failures", () => {
     const source = pureIdleState();
     source.settings.simulationSpeed = 4;

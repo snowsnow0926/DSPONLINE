@@ -1,4 +1,5 @@
 import { getRecipe, ITEMS } from "./content";
+import { GALACTIC_EXPORT_DEFINITIONS } from "./endgame";
 import {
   advanceSimulationSession,
   completeSimulationAdvanceSession,
@@ -1201,10 +1202,24 @@ function captureAggregateItemStores(state: GameState): Map<string, bigint> {
     totals.set(state.cargo.itemId, (totals.get(state.cargo.itemId) ?? 0n) + BigInt(state.cargo.amount));
   }
   addAggregateStore(totals, state.quantumLogisticsNetwork.inventory, seen);
-  for (const batch of Object.values(state.endgame.constructionActivity.pendingBatches)) {
-    if (batch && Number.isSafeInteger(batch.amount) && batch.amount >= 0) {
-      totals.set(batch.itemId, (totals.get(batch.itemId) ?? 0n) + BigInt(batch.amount));
-    }
+  return totals;
+}
+
+/**
+ * Aggregate only monotonic counters that represent a physical item sink.
+ * Activity delivery and pending-batch fields mirror Galactic exports and must
+ * not be counted again as consumption or ownership.
+ */
+function captureKnownItemConsumption(state: GameState): Map<string, bigint> {
+  const totals = new Map<string, bigint>();
+  const add = (itemId: ItemId, raw: number): void => {
+    if (!Number.isSafeInteger(raw) || raw < 0) return;
+    totals.set(itemId, (totals.get(itemId) ?? 0n) + BigInt(raw));
+  };
+  add("solar_sail", state.dysonSwarm.totalLaunched);
+  add("small_carrier_rocket", state.dysonSphere.totalRocketsLaunched);
+  for (const definition of GALACTIC_EXPORT_DEFINITIONS) {
+    add(definition.itemId, state.endgame.exportProjects[definition.id].totalDelivered);
   }
   return totals;
 }
@@ -1212,6 +1227,7 @@ function captureAggregateItemStores(state: GameState): Map<string, bigint> {
 interface AggregateConservationBaseline {
   totals: Map<string, bigint>;
   totalProduced: Map<string, bigint>;
+  knownConsumption: Map<string, bigint>;
 }
 
 function captureAggregateConservationBaseline(state: GameState): AggregateConservationBaseline {
@@ -1219,18 +1235,33 @@ function captureAggregateConservationBaseline(state: GameState): AggregateConser
   for (const [itemId, raw] of Object.entries(state.totalProduced)) {
     if (Number.isSafeInteger(raw) && raw >= 0) totalProduced.set(itemId, BigInt(raw));
   }
-  return { totals: captureAggregateItemStores(state), totalProduced };
+  return {
+    totals: captureAggregateItemStores(state),
+    totalProduced,
+    knownConsumption: captureKnownItemConsumption(state),
+  };
 }
 
 function validateAggregateConservation(before: AggregateConservationBaseline, after: GameState): string | null {
   const afterTotals = captureAggregateItemStores(after);
-  const itemIds = new Set([...before.totals.keys(), ...afterTotals.keys(), ...before.totalProduced.keys(), ...Object.keys(after.totalProduced)]);
+  const afterConsumption = captureKnownItemConsumption(after);
+  const itemIds = new Set([
+    ...before.totals.keys(),
+    ...afterTotals.keys(),
+    ...before.totalProduced.keys(),
+    ...Object.keys(after.totalProduced),
+    ...before.knownConsumption.keys(),
+    ...afterConsumption.keys(),
+  ]);
   for (const itemId of itemIds) {
     const stockDelta = (afterTotals.get(itemId) ?? 0n) - (before.totals.get(itemId) ?? 0n);
     const producedDelta = BigInt(Math.max(0, Math.floor(finiteNumber(after.totalProduced[itemId as ItemId])))) -
       (before.totalProduced.get(itemId) ?? 0n);
-    if (stockDelta > producedDelta) {
-      return `物资守恒失败：${itemId} 库存净增 ${stockDelta.toString()} 超过累计生产增量 ${producedDelta.toString()}`;
+    const consumptionDelta = (afterConsumption.get(itemId) ?? 0n) - (before.knownConsumption.get(itemId) ?? 0n);
+    if (consumptionDelta < 0n) return `物资守恒失败：${itemId} 累计物理消耗发生回退`;
+    const attributedDelta = stockDelta + consumptionDelta;
+    if (attributedDelta > producedDelta) {
+      return `物资守恒失败：${itemId} 库存净变化 ${stockDelta.toString()} 与物理消耗 ${consumptionDelta.toString()} 之和超过累计生产增量 ${producedDelta.toString()}`;
     }
   }
   return null;

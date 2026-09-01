@@ -3465,6 +3465,138 @@ mod tests {
         })
     }
 
+    fn raw_local_peer_exists(
+        entities: &[Value],
+        station_indices: &[usize],
+        station_index: usize,
+        item_id: &str,
+    ) -> anyhow::Result<bool> {
+        let station = entities[station_index]
+            .as_object()
+            .expect("local congestion oracle station");
+        let planet_id = string_at(station, "planetId").unwrap_or_default();
+        for &peer_index in station_indices {
+            if peer_index == station_index {
+                continue;
+            }
+            let Some(peer) = entities.get(peer_index).and_then(Value::as_object) else {
+                continue;
+            };
+            if string_at(peer, "planetId").unwrap_or_default() != planet_id {
+                continue;
+            }
+            if slots(peer)?.iter().any(|slot| {
+                slot.item_id.as_deref() == Some(item_id) && slot.local_mode == LocalMode::Supply
+            }) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn flat_full_congestion_oracle(
+        state: &CoreState,
+        source: &[Value],
+    ) -> anyhow::Result<Vec<Value>> {
+        // The expected path deliberately avoids LocalPeerDirectory peer
+        // buckets, its active selector, the active StationRouteLedger builder,
+        // and DeterministicRuntime. Only the dedicated full-ledger oracle is
+        // shared so route ownership is decoded from every persisted row.
+        let station_indices = state.factory_topology.station_indices.as_ref();
+        let oracle_directory = prepare_step_directory(source, station_indices)?;
+        let ledger = StationRouteLedger::build_full_oracle(state, source, &oracle_directory);
+        let mut expected = source.to_vec();
+        for &station_index in station_indices {
+            let Some(station) = source.get(station_index).and_then(Value::as_object) else {
+                continue;
+            };
+            if !matches!(
+                string_at(station, "buildingId"),
+                Some("planetary_logistics_station" | "interstellar_logistics_station")
+            ) {
+                continue;
+            }
+            let mut waiting = 0.0;
+            for slot in slots(station)? {
+                let Some(item_id) = slot.item_id.as_deref() else {
+                    continue;
+                };
+                if slot.local_mode == LocalMode::Demand
+                    && raw_local_peer_exists(source, station_indices, station_index, item_id)?
+                {
+                    waiting += 1.0;
+                }
+            }
+            let installed = drone_capacity(station);
+            let busy = ledger.local_busy_floor(station_index);
+            let fleet_load = if installed > 0.0 {
+                busy / installed
+            } else if waiting > 0.0 {
+                1.0
+            } else {
+                0.0
+            };
+            let congestion = fleet_load
+                .max(if waiting > 0.0 && busy == 0.0 {
+                    0.35
+                } else {
+                    0.0
+                })
+                .clamp(0.0, 1.0);
+            let target = expected[station_index]
+                .as_object_mut()
+                .expect("local congestion oracle target");
+            set_number(target, "stationCongestion", rounded(congestion, 3))?;
+            set_number(
+                target,
+                "stationProgress",
+                ledger.active_local_progress(station_index),
+            )?;
+        }
+        Ok(expected)
+    }
+
+    fn congestion_authority_fingerprint(state: &CoreState) -> (Vec<u8>, String, String, String) {
+        let materialized = state.materialize().unwrap();
+        let object = materialized.as_object().unwrap();
+        let mut material = Map::new();
+        for key in [
+            "tray",
+            "planetTrays",
+            "quantumInventory",
+            "totalProduced",
+            "galacticExports",
+            "constructionQueue",
+            "entities",
+            "belts",
+        ] {
+            if let Some(value) = object.get(key) {
+                material.insert(key.to_owned(), value.clone());
+            }
+        }
+        (
+            serde_json::to_vec(&materialized).unwrap(),
+            state.canonical_sha256().unwrap(),
+            state.domain_sha256().unwrap(),
+            crate::canonical::canonical_sha256(&Value::Object(material)),
+        )
+    }
+
+    fn assert_congestion_authority_equal(actual: &[Value], expected: &[Value], label: &str) {
+        assert_eq!(
+            serde_json::to_vec(actual).unwrap(),
+            serde_json::to_vec(expected).unwrap(),
+            "entity bytes diverged: {label}"
+        );
+        let actual = route_fixture_state(actual);
+        let expected = route_fixture_state(expected);
+        assert_eq!(
+            congestion_authority_fingerprint(&actual),
+            congestion_authority_fingerprint(&expected),
+            "canonical/domain/material authority diverged: {label}"
+        );
+    }
+
     fn route_station(index: usize, mode: &str) -> Value {
         let mut station = local_station(&format!("station/{index:05}/Ω"), mode);
         let station = station.as_object_mut().expect("route fixture station");
@@ -3531,7 +3663,9 @@ mod tests {
 
     #[test]
     fn sparse_congestion_calibrates_once_then_matches_full_oracle_at_1_5_60_steps() {
-        const COUNT: usize = 1_024;
+        // Keep the independent serial O(S²) peer oracle bounded; the separate
+        // large sparse-selector A/B owns the scale/performance assertion.
+        const COUNT: usize = 128;
         let source = (0..COUNT)
             .map(|index| {
                 route_station(
@@ -3558,17 +3692,7 @@ mod tests {
             let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
 
             for step in 0..steps {
-                // This oracle always plans every station row and never calls
-                // the activity selector under test.
-                let full_updates = plan_congestion_updates(
-                    &DeterministicRuntime::for_test(4),
-                    &entities,
-                    &directory,
-                    &ledger,
-                )
-                .unwrap();
-                let mut expected = entities.clone();
-                apply_congestion_updates(&mut expected, full_updates).unwrap();
+                let expected = flat_full_congestion_oracle(&state, &entities).unwrap();
                 let scan =
                     update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
                 assert_eq!(scan.total_station_rows, COUNT, "steps={steps} step={step}");
@@ -3580,10 +3704,10 @@ mod tests {
                     assert_eq!(scan.selected_station_rows, 2);
                     assert!(!scan.dense_fallback);
                 }
-                assert_eq!(
-                    serde_json::to_vec(&entities).unwrap(),
-                    serde_json::to_vec(&expected).unwrap(),
-                    "steps={steps} step={step}"
+                assert_congestion_authority_equal(
+                    &entities,
+                    &expected,
+                    &format!("steps={steps} step={step}"),
                 );
             }
             assert_eq!(entities[7]["stationCongestion"], Value::from(0.35));
@@ -3623,7 +3747,47 @@ mod tests {
         assert_eq!(entities[113]["stationProgress"], Value::from(0.0));
     }
 
-    fn local_congestion_replay_bytes(worker_count: usize, segments: &[usize]) -> Vec<u8> {
+    #[test]
+    fn rebuilt_local_directory_applies_real_peer_topology_change_against_flat_oracle() {
+        const COUNT: usize = 128;
+        let mut entities = (0..COUNT)
+            .map(|index| route_station(index, if index == 0 { "supply" } else { "demand" }))
+            .collect::<Vec<_>>();
+        let state = route_fixture_state(&entities);
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
+        assert_eq!(entities[7]["stationCongestion"], Value::from(0.35));
+
+        entities[0]["stationSlots"][0]["localMode"] = Value::from("storage");
+        let rebuilt_state = route_fixture_state(&entities);
+        let rebuilt_activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut rebuilt_directory =
+            prepare_step_directory(&entities, &rebuilt_state.factory_topology.station_indices)
+                .unwrap();
+        let rebuilt_ledger = StationRouteLedger::build(
+            &rebuilt_state,
+            &entities,
+            &rebuilt_directory,
+            &rebuilt_activity,
+        );
+        let expected = flat_full_congestion_oracle(&rebuilt_state, &entities).unwrap();
+        let scan = update_congestion(
+            &rebuilt_state,
+            &mut entities,
+            &mut rebuilt_directory,
+            &rebuilt_ledger,
+        )
+        .unwrap();
+        assert_eq!(scan.selected_station_rows, COUNT);
+        assert!(scan.dense_fallback);
+        assert_eq!(entities[7]["stationCongestion"], Value::from(0.0));
+        assert_congestion_authority_equal(&entities, &expected, "rebuilt local peer topology");
+    }
+
+    fn local_congestion_replay_bytes(worker_count: usize, steps: usize) -> Vec<u8> {
         const COUNT: usize = 1_024;
         let mut entities = (0..COUNT)
             .map(|index| {
@@ -3647,20 +3811,18 @@ mod tests {
             prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
         let runtime = DeterministicRuntime::for_test(worker_count);
         let mut scans = Vec::new();
-        for &segment in segments {
-            for _ in 0..segment {
-                let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
-                scans.push(
-                    update_congestion_with_runtime(
-                        &runtime,
-                        &state,
-                        &mut entities,
-                        &mut directory,
-                        &ledger,
-                    )
-                    .unwrap(),
-                );
-            }
+        for _ in 0..steps {
+            let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+            scans.push(
+                update_congestion_with_runtime(
+                    &runtime,
+                    &state,
+                    &mut entities,
+                    &mut directory,
+                    &ledger,
+                )
+                .unwrap(),
+            );
         }
         serde_json::to_vec(&json!({
             "entities": entities,
@@ -3679,18 +3841,13 @@ mod tests {
     }
 
     #[test]
-    fn local_congestion_is_exact_for_1_2_4_8_workers_and_segmented_60_steps() {
-        let expected = local_congestion_replay_bytes(1, &[60]);
+    fn local_congestion_is_exact_for_1_2_4_8_workers_across_60_internal_steps() {
+        let expected = local_congestion_replay_bytes(1, 60);
         for worker_count in [1, 2, 4, 8] {
             assert_eq!(
-                local_congestion_replay_bytes(worker_count, &[60]),
+                local_congestion_replay_bytes(worker_count, 60),
                 expected,
-                "single segment worker_count={worker_count}"
-            );
-            assert_eq!(
-                local_congestion_replay_bytes(worker_count, &[1, 4, 5, 10, 40]),
-                expected,
-                "segmented worker_count={worker_count}"
+                "worker_count={worker_count}"
             );
         }
     }
@@ -3720,11 +3877,20 @@ mod tests {
             &opaque_directory,
             &opaque_activity,
         );
+        let opaque_expected = flat_full_congestion_oracle(&opaque_state, &opaque_entities).unwrap();
         let (opaque_indices, opaque_scan) =
             select_congestion_station_indices(&opaque_directory, &opaque_ledger);
         assert_eq!(opaque_indices, (0..COUNT).collect::<Vec<_>>());
         assert!(opaque_scan.directory_fallback);
         assert!(!opaque_scan.dense_fallback);
+        update_congestion(
+            &opaque_state,
+            &mut opaque_entities,
+            &mut opaque_directory,
+            &opaque_ledger,
+        )
+        .unwrap();
+        assert_congestion_authority_equal(&opaque_entities, &opaque_expected, "opaque MOD route");
 
         let mut dense_entities = (0..COUNT)
             .map(|index| route_station(index, if index == 0 { "supply" } else { "demand" }))
@@ -3747,11 +3913,20 @@ mod tests {
             &dense_directory,
             &dense_activity,
         );
+        let dense_expected = flat_full_congestion_oracle(&dense_state, &dense_entities).unwrap();
         let (dense_indices, dense_scan) =
             select_congestion_station_indices(&dense_directory, &dense_ledger);
         assert_eq!(dense_indices, (0..COUNT).collect::<Vec<_>>());
         assert!(!dense_scan.directory_fallback);
         assert!(dense_scan.dense_fallback);
+        update_congestion(
+            &dense_state,
+            &mut dense_entities,
+            &mut dense_directory,
+            &dense_ledger,
+        )
+        .unwrap();
+        assert_congestion_authority_equal(&dense_entities, &dense_expected, "75% dense fallback");
     }
 
     fn local_route(
@@ -4486,21 +4661,42 @@ mod tests {
 
     #[test]
     fn local_congestion_parallel_failure_keeps_source_atomic() {
-        let (entities, mut directory, ledger) = local_congestion_matrix(PARALLEL_MIN_ITEMS + 11);
-        Arc::make_mut(&mut directory.station_slots).remove(&7);
-        Arc::make_mut(&mut directory.station_slots).remove(&(PARALLEL_MIN_ITEMS + 3));
+        let entities = (0..(PARALLEL_MIN_ITEMS + 11))
+            .map(|index| route_station(index, if index == 0 { "supply" } else { "demand" }))
+            .collect::<Vec<_>>();
+        let state = route_fixture_state(&entities);
+        let source_hash = state.canonical_sha256().unwrap();
+        let source_domain = state.domain_sha256().unwrap();
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
         let source = serde_json::to_vec(&entities).unwrap();
 
         for worker_count in [1, 2, 4, 8] {
-            let error = plan_congestion_updates(
+            let mut candidate_entities = entities.clone();
+            let mut candidate_directory = directory.clone();
+            Arc::make_mut(&mut candidate_directory.station_slots).remove(&7);
+            Arc::make_mut(&mut candidate_directory.station_slots).remove(&(PARALLEL_MIN_ITEMS + 3));
+            let source_pending = candidate_directory
+                .local_congestion_reset_station_indices()
+                .to_vec();
+            let error = update_congestion_with_runtime(
                 &DeterministicRuntime::for_test(worker_count),
-                &entities,
-                &directory,
+                &state,
+                &mut candidate_entities,
+                &mut candidate_directory,
                 &ledger,
             )
-            .expect_err("missing station slots must reject the whole probe batch");
+            .expect_err("production updater must reject the whole probe batch");
             assert_eq!(error.to_string(), "native local station slots are missing");
-            assert_eq!(serde_json::to_vec(&entities).unwrap(), source);
+            assert_eq!(serde_json::to_vec(&candidate_entities).unwrap(), source);
+            assert_eq!(
+                candidate_directory.local_congestion_reset_station_indices(),
+                source_pending
+            );
+            assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+            assert_eq!(state.domain_sha256().unwrap(), source_domain);
         }
     }
 

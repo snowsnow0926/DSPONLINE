@@ -1,5 +1,11 @@
 # DSP极简网络项目现状
 
+> **Windows 特殊物流接口 Rust 权威纵切（2026-09-01，开发候选，未发布）**：原生薄检查器现已覆盖物资配送枢纽 3 个接口与轨道货运终端 4 个上传口的安全生命周期。renderer 只提交当前实体、接口编号、模式/物品和明确确认位；Rust 从当前 revision 扫描目标实体的相邻线路，原子断线、按等级和并联数量返还传送带、把孤立缓存退回活动行星托盘或便携舰队，并重建 `deliveryItemIds` 兼容镜像。轨道终端仅在同物品不再被其他上传口使用时退款，`orbitalCargoTotalUploaded` 等已上传账本保持不变。
+>
+> WAL 只保存短语义 marker，不保存 renderer 推导的线路 ID、施工库存或缓存结果；`AfterWal` 强制中断后的冷启动与无故障提交得到相同 revision、canonical SHA-256 和公开 v47 状态，相同 command ID 不会二次退款。冷恢复回执因短 WAL 不保存已删除线路 ID，会返回空 `changedBeltIds` 并强制完整 topology 刷新；权威状态本身逐字一致。薄 UI 对破坏性修改强制二次确认，并同时显示同 revision 的微型黑洞三口累计销毁账本。
+>
+> 本切片新鲜验证为 Rust Core `3/3`、Host WAL 冷恢复 `1/1`、组件/命令/App/command-source Vitest `43/43`、desktop command broker `30/30`；TypeScript、production build（2,098 modules；startup gzip `180,778 B`）、startup budget、Native thin-UI AST 门禁、Rust fmt 与 workspace all-target/all-feature strict Clippy 均通过。strict Clippy 首轮只发现一处可省略显式 lifetime，机械修复后复跑通过；该首轮失败没有被隐藏。`npm run test:changed` 的 Windows 包装器因直接调用 `npm` 而未启动 Vitest，等价的明确 Vitest 命令已单独运行并得到上述 `43/43`，此工具链问题不冒充产品测试通过。完整组合 Rust/Vitest/native/server/E2E、默认高并行稳定性、24 小时、多硬件、安装/升级、签名和灰度仍是独立门禁。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均未改变；未读取玩家存档，未连接生产，未部署、打包或签名。
+
 > **Windows 戴森设计复制/粘贴 Rust 权威纵切（2026-09-01，开发候选，未发布）**：原生戴森薄 UI 已覆盖壳层/轨道生命周期、节点增删与两点连线、框架闭合、壳面规划，以及同系或跨恒星系复制壳层设计。复制只在界面保存来源系统/层引用；粘贴只发送绑定当前 session/run/revision/registry 的 `sourceSystemId/sourceLayerId`，Rust 从权威目录重新生成层、节点、框架与壳面的全部 ID 和工作量，renderer 从不提交设计模板、进度、容量、`nextId` 或物料计数。
 >
 > Rust 粘贴前重验来源/目标恒星系解锁、科技、来源层完整引用、全局 ID 唯一性和目标 8 层上限；新副本沿用几何与拓扑，但施工完成量/吸附量归零，并把目标现有 `structurePoints/shellSails` 记作 allocation floor，旧库存不会自动灌入副本。WAL 只保存 `paste-layer` 和来源引用；`AfterWal` 冷恢复与无故障提交的 revision、canonical SHA-256、独立 ID 和零进度状态一致，重复 command ID 不会重复复制。

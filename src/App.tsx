@@ -342,7 +342,7 @@ import { createSecondUnipolarVeinPackage, previewSecondUnipolarVein } from "./ga
 import { trackAnalyticsEvent } from "./game/analytics";
 import { isSpaceStationFeatureEnabled } from "./game/spaceStationFeature";
 import { CLOUD_AUTO_SYNC_INTERVAL_MS, CloudApiError, compareCloudSaveSummary, fetchCloudPublicStatus, hasCloudAuthentication, markCloudSaveSynchronized, readCloudAutoSyncStatus, refreshCloudSaveMetadata, resumeCloudSession, summarizeCloudPayload, uploadCloudSave, writeCloudAutoSyncStatus } from "./game/cloud";
-import type { BeltConnection, BeltInputPortIndex, BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CanvasViewport, CargoStackSize, ConstructionAutomationTargetId, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, FactoryEntity, FontScale, GalacticDispatchThrottle, GalacticExportPriority, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProductionHistorySample, ProliferatorMode, ProliferatorTier, RecipeFocusMode, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
+import type { BeltConnection, BeltInputPortIndex, BeltRouteMode, BeltTier, BuildingId, CampaignTaskId, CanvasBookmark, CanvasRegion, CanvasViewport, CargoStackSize, ConstructionAutomationTargetId, ConstructionId, DraggedItemSourceKind, DysonLaunchMode, DysonLaunchThrottle, EnergyMode, FactoryEntity, FontScale, GalacticDispatchThrottle, GalacticExportPriority, GalacticExportProjectId, GameSettings, GameState, InfiniteResearchId, ItemId, LogisticsPriority, MaterialDeliverySlotMode, PlacementCount, PlanetId, PlanetIndustryRole, PowerGridId, PowerPriority, ProductionHistorySample, ProliferatorMode, ProliferatorTier, RecipeFocusMode, RecipeId, StarSystemId, StationLogisticsMode, StationLogisticsScope, StationMinimumLoad, StationSlotTemplate } from "./game/types";
 import type { SimulationCheckpointStateChunk, SimulationChunkedSaveWriteAck, SimulationChunkedSaveWriteRequest, SimulationWorkerRequest, SimulationWorkerResponse } from "./game/simulation.worker";
 import { PureIdleMacroClient, PureIdleMacroClientError, type PureIdleMacroFinalEnvelopeResult, type PureIdleMacroProgress } from "./game/pureIdleMacroClient";
 import type { AuthoritativeSaveEnvelopeTransfer } from "./game/authoritativeSaveSerializationProtocol";
@@ -649,6 +649,10 @@ import {
   type NativeProjectedEntityConfigurationBinding,
   type NativeProjectedSplitterDistributionMode,
 } from "./game/nativeProjectedEntityConfigurationCommands";
+import {
+  createConfirmedNativeMaterialDeliverySlotCommand,
+  createConfirmedNativeOrbitalCargoPortClearCommand,
+} from "./game/nativeProjectedSpecialInputPortCommands";
 import {
   type NativeProjectedEntityRecipeBinding,
 } from "./game/nativeProjectedEntityRecipeCommands";
@@ -19688,6 +19692,74 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     );
     if (!accepted) setNotice("Rust 没有接受这次燃料类型命令；存档未改变");
   }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
+  const changeNativeMaterialDeliverySlot = useCallback((
+    entityId: string,
+    slotIndex: number,
+    mode: MaterialDeliverySlotMode,
+    itemId: ItemId | null,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次配送接口修改未提交");
+      return;
+    }
+    const binding = nativeEntityConfigurationProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.id !== entityId || !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生配送枢纽选择、session 或 revision 已变化；本次接口修改未提交");
+      return;
+    }
+    try {
+      const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+        baseRevision === binding.revision
+          ? createConfirmedNativeMaterialDeliverySlotCommand(binding, slotIndex, mode, itemId)
+          : null,
+        () => setNotice(`已由 Rust 更新物资配送接口 ${slotIndex + 1}`),
+      );
+      if (!accepted) setNotice("Rust 没有接受这次配送接口命令；存档未改变");
+    } catch {
+      setNotice("原生配送接口投影未通过同 revision 完整性校验；存档未改变");
+    }
+  }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
+  const clearNativeOrbitalCargoPort = useCallback((
+    entityId: string,
+    portIndex: number,
+  ): void => {
+    if (!nativePlayerAuthorityOwnsRuntimeRef.current || nativePlayerAuthorityCommandInFlightRef.current) {
+      setNotice("Windows 原生权威正在确认上一项操作；本次轨道货运接口清空未提交");
+      return;
+    }
+    const binding = nativeEntityConfigurationProjectionBinding;
+    const routeIdentity = nativeFactoryProjectionIdentityRef.current;
+    const commandSource = nativePlayerAuthorityCommandBindingRef.current?.source ?? null;
+    if (!binding || binding.entity.id !== entityId || !routeIdentity || !commandSource ||
+        binding.sessionId !== routeIdentity.sessionId || binding.runId !== routeIdentity.runId ||
+        binding.revision !== routeIdentity.revision || binding.activePlanetId !== routeIdentity.planetId ||
+        commandSource.sessionId !== binding.sessionId || commandSource.runId !== binding.runId ||
+        commandSource.baseRevision !== binding.revision || selectedEntityIdsRef.current.length !== 1 ||
+        selectedEntityIdsRef.current[0] !== entityId || selectedBeltIdsRef.current.length !== 0 ||
+        selectedBeltIdRef.current !== null) {
+      setNotice("原生轨道货运终端选择、session 或 revision 已变化；本次接口清空未提交");
+      return;
+    }
+    try {
+      const accepted = commitNativeProjectedCommand(binding.revision, (baseRevision) =>
+        baseRevision === binding.revision
+          ? createConfirmedNativeOrbitalCargoPortClearCommand(binding, portIndex)
+          : null,
+        () => setNotice(`已由 Rust 安全清空轨道货运接口 ${portIndex + 1}`),
+      );
+      if (!accepted) setNotice("Rust 没有接受这次轨道货运接口命令；存档未改变");
+    } catch {
+      setNotice("原生轨道货运接口投影未通过同 revision 完整性校验；存档未改变");
+    }
+  }, [commitNativeProjectedCommand, nativeEntityConfigurationProjectionBinding]);
   const changeNativeEntityRecipe = useCallback((
     entityId: string,
     targetRecipeId: RecipeId,
@@ -21900,6 +21972,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           onFuelItemChange={changeNativeFuelItem}
           onEntityRecipeChange={changeNativeEntityRecipe}
           onBlackHolePausedChange={changeNativeBlackHolePaused}
+          onMaterialDeliverySlotChange={changeNativeMaterialDeliverySlot}
+          onOrbitalCargoPortClear={clearNativeOrbitalCargoPort}
           onTimeWarpEnabledChange={changeNativeTimeWarpEnabled}
           onTimeWarpRequestedMultiplierChange={changeNativeTimeWarpRequestedMultiplier}
           onEjectorOrbitChange={changeNativeEjectorOrbit}

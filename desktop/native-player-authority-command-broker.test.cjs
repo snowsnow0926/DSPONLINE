@@ -139,6 +139,57 @@ test("black-hole intent crosses the host as a minimal durable command with a set
   });
 });
 
+test("special input port intents cross the host without renderer-authored refunds or belt IDs", async () => {
+  const commands = [
+    command(17, {
+      changedEntities: [{
+        id: "delivery-a",
+        changes: [{
+          path: ["materialDeliverySlot", "intent"],
+          operation: "set",
+          value: { slotIndex: 1, mode: "manual", itemId: "iron_ore", confirmed: true },
+        }],
+      }],
+    }),
+    command(17, {
+      changedEntities: [{
+        id: "terminal-a",
+        changes: [{
+          path: ["orbitalCargoPort", "clearIntent"],
+          operation: "set",
+          value: { portIndex: 2, confirmed: true },
+        }],
+      }],
+    }),
+  ];
+  const observed = [];
+  const { broker, calls } = brokerFixture({
+    onCommittedCommand(value) { observed.push(value); },
+    commit: async (request) => commandResult(request, {
+      changedEntityIds: [request.command.changedEntities[0].id],
+      changedBeltIds: [],
+      topologyDirty: true,
+    }),
+  });
+
+  const delivery = await broker.commit(7, { sessionId: "core-1", command: commands[0] });
+  assert.deepEqual(delivery.changedEntityIds, ["delivery-a"]);
+  assert.equal(delivery.topologyDirty, true);
+  const terminal = await broker.commit(7, { sessionId: "core-1", command: commands[1] });
+  assert.deepEqual(terminal.changedEntityIds, ["terminal-a"]);
+  assert.equal(terminal.topologyDirty, true);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls.map((call) => call.command), commands);
+  for (const call of calls) {
+    const serialized = JSON.stringify(call.command);
+    assert.equal(serialized.includes("removedBeltIds\":[\""), false);
+    assert.equal(serialized.includes("construction"), false);
+    assert.equal(serialized.includes("tray"), false);
+    assert.equal(serialized.includes("inputs"), false);
+  }
+  assert.deepEqual(observed.map((entry) => entry.command), commands);
+});
+
 test("blueprint rename crosses as one opaque semantic marker and returns topology invalidation", async () => {
   const renameCommand = command(17, {
     topLevelChanges: [{

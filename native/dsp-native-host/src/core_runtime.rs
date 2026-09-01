@@ -16957,6 +16957,205 @@ mod tests {
     }
 
     #[test]
+    fn material_delivery_intent_survives_wal_cold_reopen_without_renderer_authored_refunds() {
+        let mut catalog = player_authority_catalog();
+        catalog["buildings"].as_array_mut().unwrap().extend([
+            json!({
+                "id": "material_delivery_hub",
+                "kind": "storage",
+                "speed": 1,
+                "inputCapacity": 900,
+                "outputCapacity": 0,
+                "powerDemandKw": 0,
+                "powerGenerationKw": 0,
+                "accepts": "any"
+            }),
+            json!({
+                "id": "orbital_cargo_terminal",
+                "kind": "storage",
+                "speed": 1,
+                "inputCapacity": 1_000_000,
+                "outputCapacity": 0,
+                "powerDemandKw": 0,
+                "powerGenerationKw": 0,
+                "accepts": "any"
+            }),
+        ]);
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["tray"]["iron_ore"] = Value::from(2);
+        envelope["state"]["entities"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "id": "delivery-a",
+                "kind": "storage",
+                "planetId": "home",
+                "position": { "x": 7, "y": 2 },
+                "interactionLocked": false,
+                "buildingId": "material_delivery_hub",
+                "powerGridId": "grid-a",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": { "iron_ore": 6.7 },
+                "outputs": {},
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "deliverySlots": [
+                    { "itemId": "iron_ore", "mode": "manual" },
+                    { "itemId": null, "mode": "auto" },
+                    { "itemId": null, "mode": "disabled" }
+                ],
+                "deliveryItemIds": ["iron_ore"]
+            }));
+        envelope["state"]["belts"] = json!([{
+            "id": "delivery-input-belt",
+            "planetId": "home",
+            "source": "vein",
+            "target": "delivery-a",
+            "targetPortIndex": 0,
+            "itemId": "iron_ore",
+            "lanes": 2,
+            "tier": 1,
+            "sorterTier": 1,
+            "progress": 0,
+            "priority": 1,
+            "stackSize": 1,
+            "monitorEnabled": false,
+            "routeMode": "auto",
+            "lastFlow": 0
+        }]);
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let request = |base_revision: u64| CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: "material-delivery-before-cold-reopen".to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [],
+                "changedEntities": [{
+                    "id": "delivery-a",
+                    "changes": [{
+                        "path": ["materialDeliverySlot", "intent"],
+                        "operation": "set",
+                        "value": {
+                            "slotIndex": 0,
+                            "mode": "disabled",
+                            "itemId": null,
+                            "confirmed": true
+                        }
+                    }]
+                }],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        };
+
+        let (clean_root, mut clean_store, mut clean_registry, clean_session, clean_checkpoint) =
+            player_authority_fixture_from_parts(bytes.clone(), catalog.clone());
+        let clean = clean_registry
+            .commit_player_authority_command(
+                &mut clean_store,
+                &clean_session,
+                request(clean_checkpoint.revision),
+            )
+            .unwrap();
+        assert_eq!(clean.changed_entity_ids, ["delivery-a"]);
+        assert!(clean.changed_belt_ids.is_empty());
+        assert!(clean.topology_dirty);
+        let live = export_test_state(
+            clean_root.path(),
+            &clean_registry,
+            &clean_store,
+            &clean_session,
+            "material-delivery-live",
+        );
+        assert_eq!(live["tray"]["iron_ore"], 8);
+        assert_eq!(live["construction"]["conveyor_belt_mk1"], 6);
+        assert!(live["belts"].as_array().unwrap().is_empty());
+        let delivery = live["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["id"] == "delivery-a")
+            .unwrap();
+        assert_eq!(
+            delivery["deliverySlots"][0],
+            json!({ "itemId": null, "mode": "disabled" })
+        );
+        assert_eq!(delivery["deliveryItemIds"], json!([]));
+        assert_eq!(delivery["inputs"], json!({}));
+
+        let (root, mut store, mut registry, session_id, checkpoint) =
+            player_authority_fixture_from_parts(bytes, catalog);
+        let error = registry
+            .commit_player_authority_command_internal(
+                &mut store,
+                &session_id,
+                request(checkpoint.revision),
+                PlayerAuthorityCommandKind::Gameplay,
+                PlayerAuthorityCommandFault::AfterWal,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("lost response"));
+        let wal = store.read_wal("normal-main", checkpoint.revision).unwrap();
+        assert_eq!(wal.len(), 1);
+        let wal_payload = serde_json::to_string(&wal).unwrap();
+        assert!(wal_payload.contains("materialDeliverySlot"));
+        assert!(!wal_payload.contains("deliverySlots"));
+        assert!(!wal_payload.contains("delivery-input-belt"));
+        assert!(!wal_payload.contains("conveyor_belt_mk1"));
+        drop(registry);
+
+        let mut reopened = resumable_player_authority_registry_for_test();
+        let startup = reopened
+            .recover_player_authority_pending_command_on_startup(&mut store)
+            .unwrap()
+            .expect("WAL-staged material delivery command must provide a startup receipt");
+        assert_eq!(startup.revision, clean.revision);
+        assert_eq!(
+            startup.summary.canonical_sha256,
+            clean.summary.canonical_sha256
+        );
+        assert_eq!(startup.changed_entity_ids, clean.changed_entity_ids);
+        assert!(startup.changed_belt_ids.is_empty());
+        assert!(startup.topology_dirty);
+        let duplicate = reopened
+            .commit_player_authority_command(
+                &mut store,
+                &startup.session_id,
+                request(checkpoint.revision),
+            )
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(
+            duplicate.summary.canonical_sha256,
+            clean.summary.canonical_sha256
+        );
+        assert_eq!(duplicate.changed_entity_ids, startup.changed_entity_ids);
+        assert!(duplicate.changed_belt_ids.is_empty());
+        assert!(duplicate.topology_dirty);
+        let replayed = export_test_state(
+            root.path(),
+            &reopened,
+            &store,
+            &startup.session_id,
+            "material-delivery-replayed",
+        );
+        assert_eq!(replayed, live);
+    }
+
+    #[test]
     fn dyson_shell_plan_intent_survives_player_authority_wal_cold_reopen_without_minting_material()
     {
         let mut catalog = player_authority_catalog();

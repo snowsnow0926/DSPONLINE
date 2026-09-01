@@ -2300,3 +2300,16 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 6. Host `AfterWal` 用例把三节点/三框架/三壳面设计跨系粘贴后故意丢失响应。WAL 只有 `paste-layer` 与来源引用，不含结构需求、吸附量或 `nextId`；冷启动重放与无故障提交得到相同 revision、canonical SHA-256、独立 ID、目标历史总量及零施工进度，相同 command ID 只返回 duplicate receipt。
 7. 本轮新鲜 focused 为 Rust Dyson `31/31`（其中 `dyson_plan_command` `7/7`）、Host Dyson/冷恢复 `5/5`、组件/命令/App Vitest `28/28`、desktop broker `29/29`。TypeScript、production build（2,097 modules；startup gzip `180,780 B`）、startup budget、Native thin-UI AST 门禁、workspace all-target/all-feature strict Clippy 与 Rust fmt 均通过；完整组合 Rust/Vitest/native/server/E2E、默认高并行稳定性、24 小时、多硬件、安装/升级、签名与灰度仍是独立门禁。
 8. 本切片不新增持久字段，不升级 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 Host/renderer 协议，`authorityEligible=false` 保持关闭；未读取或修改真实玩家存档，未连接生产，未部署、打包发布或签名。戴森编辑器的既有玩家设计写面至此已具备 Rust 权威路径，但“完整薄 UI”与“Rust 唯一全游戏权威”仍取决于其他 workspace/命令域，不能由本切片代替。
+
+### 24.49 特殊物流接口生命周期 Rust 权威纵切（2026-09-01，开发候选）
+
+本纵切一次关闭物资配送枢纽与轨道货运终端在原生薄检查器中的写面缺口，并把微型黑洞销毁账本补进同 revision 只读界面。目标是让一个按钮从 renderer 最小意图贯穿 Rust 守恒、Host WAL、冷启动恢复和 durable ACK，而不是仅把旧 JavaScript 修改函数重新接回桌面壳。
+
+1. 物资配送枢纽命令严格只有一个 `changedEntities` marker：`materialDeliverySlot.intent = { slotIndex, mode, itemId, confirmed: true }`；轨道货运终端严格只有 `orbitalCargoPort.clearIntent = { portIndex, confirmed: true }`。renderer 不提交线路 ID、退款数量、施工库存、实体 `inputs`、`deliveryItemIds` 或上传账本，额外字段、未确认、跨行星、锁定/MOD/未知物品、畸形 3/4 口目录和 no-op 全部失败关闭。
+2. Rust 只遍历目标实体的 incident belt 索引，按目标接口筛选输入线路。每条线路重新验证 ID、目标口、等级、并联数量和内置传送带目录；删除后按实际等级/并联数 checked-add 到施工库存。最多扫描 16,384 条相邻线路，展开 patch 最多 65,536 项，不对几十万条全局线路做 renderer 侧搜索。
+3. 配送枢纽写入规范 3 槽状态，并按持久槽位顺序去重重建 `deliveryItemIds`。变更后不再被任一槽使用的缓存会按旧游戏取整规则退回活动行星托盘；物流无人机/运输船回便携舰队。轨道终端清空一个端口后，如果相同物品仍绑定在其他口则保留共享缓存；最后一个绑定清除时才退款。`orbitalCargoBinding/progress/totalUploaded` 及无关库存保持不变，杜绝“清接口顺便重复领取已上传物资”。
+4. 破坏性界面动作先出现 `AccessibleDialog`，确认内容绑定 session/run/revision/entity/port；pending 或身份漂移时对话框关闭且不提交。App 再次核对原生 authority、命令 FIFO、活动行星、单实体选择和 command source revision，随后只把短 marker 交给 main-owned broker。界面等待 durable ACK 和新投影，不乐观修改接口、线路或库存。
+5. 语义 marker 由同一 Rust expansion 同时服务正常提交和 WAL 重放。Host `AfterWal` 用例在日志同步、checkpoint/ACK 尚未完成时强制丢失响应；新进程从旧检查点恢复后，与无故障执行得到相同 revision、canonical SHA-256、完整公开 v47、托盘退款、施工退款、接口状态和线路集合。相同 command ID 只返回 duplicate。短 WAL 不保存已删除线路 ID，因此冷恢复回执保守返回空 `changedBeltIds` 并设置 `topologyDirty=true`，状态守恒与 UI 刷新都不依赖猜测旧 ID。
+6. 微型黑洞控制仍沿用原有 Rust pause intent；本轮只在同 revision 薄检查器公开三个端口的 `currentItemId/totalDestroyed` 只读账本。十进制大数通过 `QuantityValue` 展示，不转成不安全 JavaScript number；任一端口索引、十进制串或物品目录畸形时整块账本失败关闭，不从 legacy GameState 补读。
+7. 本轮新鲜 focused 结果：Rust Core `3/3`、Host WAL 冷恢复 `1/1`、组件/命令/App/command-source Vitest `43/43`、desktop broker `30/30`。TypeScript 通过；production build 为 2,098 modules，startup gzip `180,778 B`；startup budget 与 Native thin-UI AST 门禁通过。workspace all-target/all-feature strict Clippy 首轮因新增函数的一处显式 lifetime 报错，删除多余 lifetime 后复跑通过；Rust fmt 和 diff check 通过。`npm run test:changed` 的 Windows 包装器因直接 `execFileSync("npm")` 而未启动 Vitest，等价的明确 Vitest 命令已独立得到上述 `43/43`；完整组合 Rust/Vitest/native/server/E2E 尚未在该切片冻结后重跑，不复用 24.44 或其他提交的数字冒充。
+8. 这次关闭的是“特殊物流接口的玩家写面”，不是全部物流 `O(active)` 或全游戏 Rust 权威完成声明。固定四目标百分比留给下一次统一源码审计，不以按钮数或新增行数临时上调。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host/renderer 协议和 `authorityEligible=false` 均不变；未读取或修改真实玩家存档，未连接生产，未部署、打包发布或签名。

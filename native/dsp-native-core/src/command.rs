@@ -8549,6 +8549,9 @@ impl CoreState {
         if crate::dyson_orbit_command::command_contains_intent(command) {
             return crate::dyson_orbit_command::validate_command(self, command);
         }
+        if crate::special_input_port_command::command_contains_intent(command) {
+            return crate::special_input_port_command::validate_command(self, command);
+        }
         if command_contains_black_hole_pause_intent(command) {
             return validate_black_hole_pause_command(self, command);
         }
@@ -8812,6 +8815,18 @@ impl CoreState {
             result.topology_dirty = true;
             return Ok(result);
         }
+        if crate::special_input_port_command::command_contains_intent(command) {
+            let entity_id = crate::special_input_port_command::validate_resume_marker(command)?;
+            result.changed_entity_ids.push(entity_id);
+            result.changed_entity_ids.sort_unstable();
+            result.changed_entity_ids.dedup();
+            // Incident belt IDs are intentionally not copied into the compact
+            // semantic WAL marker. A cold recovery therefore invalidates the
+            // complete topology while preserving the exact authoritative
+            // state hash and all inventory refunds.
+            result.topology_dirty = true;
+            return Ok(result);
+        }
         if crate::blueprint_command::command_contains_intent(command) {
             crate::blueprint_command::validate_resume_marker(command)?;
             result.topology_dirty = true;
@@ -8981,7 +8996,9 @@ impl CoreState {
         let expanded_entity_recipe_intent;
         let expanded_dyson_plan_intent;
         let expanded_dyson_orbit_intent;
+        let expanded_special_input_port_intent;
         let mut compact_entity_recipe_receipt_id = None;
+        let mut compact_special_input_port_receipt_id = None;
         let mut blueprint_workspace_refresh = false;
         let mut blueprint_intent = None;
         let mut construction_queue_intent = None;
@@ -9028,6 +9045,13 @@ impl CoreState {
         } else if crate::dyson_orbit_command::command_contains_intent(command) {
             expanded_dyson_orbit_intent = crate::dyson_orbit_command::expand_intent(self, command)?;
             &expanded_dyson_orbit_intent
+        } else if crate::special_input_port_command::command_contains_intent(command) {
+            compact_special_input_port_receipt_id = Some(
+                crate::special_input_port_command::validate_resume_marker(command)?,
+            );
+            expanded_special_input_port_intent =
+                crate::special_input_port_command::expand_intent(self, command)?;
+            &expanded_special_input_port_intent
         } else if crate::blueprint_command::command_contains_intent(command) {
             expanded_blueprint_intent = crate::blueprint_command::expand_intent(self, command)?;
             blueprint_workspace_refresh = expanded_blueprint_intent.requires_workspace_refresh();
@@ -9230,6 +9254,15 @@ impl CoreState {
             // than the authoritative topology, so expose the same compact
             // invalidation for live apply and cold resume: refresh the changed
             // entity directly and re-read the complete topology.
+            result.changed_entity_ids.clear();
+            result.changed_entity_ids.push(entity_id);
+            result.changed_belt_ids.clear();
+            result.topology_dirty = true;
+        }
+        if let Some(entity_id) = compact_special_input_port_receipt_id {
+            // The semantic marker intentionally omits incident belt IDs and
+            // all derived refunds. Keep live ACK and cold-resume ACK identical:
+            // refresh the target row, then re-read the bounded topology.
             result.changed_entity_ids.clear();
             result.changed_entity_ids.push(entity_id);
             result.changed_belt_ids.clear();

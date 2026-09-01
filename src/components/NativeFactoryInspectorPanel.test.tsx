@@ -1197,4 +1197,111 @@ describe("NativeFactoryInspectorPanel", () => {
       target: null,
     });
   });
+
+  it("requires explicit confirmation before submitting one material-delivery semantic intent", () => {
+    const change = vi.fn();
+    const projected = projectedEntity({
+      id: "delivery-a",
+      kind: "storage",
+      buildingId: "material_delivery_hub",
+      recipeId: undefined,
+      powerPriority: undefined,
+      inputs: { iron_ore: 7 },
+      deliverySlots: [
+        { itemId: "iron_ore", mode: "manual" },
+        { itemId: null, mode: "auto" },
+        { itemId: null, mode: "disabled" },
+      ],
+    });
+    const summary = projectedSummary(projected);
+    act(() => root.render(<NativeFactoryInspectorPanel
+      inspector={inspector({ entity: summary })}
+      multiSelection={multi({ entityRows: { rows: [summary], totalCount: 1, truncated: false } })}
+      entityConfiguration={configuration(projected)}
+      pending={false}
+      onEntityLockChange={vi.fn()}
+      onRemoveEntity={vi.fn()}
+      onStackCountChange={vi.fn()}
+      onEntityPowerPriorityChange={vi.fn()}
+      onSplitterDistributionModeChange={vi.fn()}
+      onEnergyExchangerModeChange={vi.fn()}
+      onFuelItemChange={vi.fn()}
+      onBlackHolePausedChange={vi.fn()}
+      onMaterialDeliverySlotChange={change}
+      onBeltLaneCountChange={vi.fn()}
+      onBeltPriorityChange={vi.fn()}
+      onRemoveBelt={vi.fn()}
+    />));
+    const select = host.querySelector<HTMLSelectElement>('[aria-label="Windows 原生配送接口 1 物资"]')!;
+    act(() => {
+      select.value = "copper_ore";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(change).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain("铜矿");
+    const confirm = [...document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')]
+      .find((button) => button.textContent === "确认并提交")!;
+    act(() => confirm.click());
+    expect(change).toHaveBeenCalledWith("delivery-a", 0, "manual", "copper_ore");
+  });
+
+  it("confirms terminal port clearing and renders the black-hole destruction ledger", () => {
+    const clear = vi.fn();
+    const terminal = projectedEntity({
+      id: "terminal-a",
+      kind: "storage",
+      buildingId: "orbital_cargo_terminal",
+      recipeId: undefined,
+      powerPriority: undefined,
+      inputs: { iron_ore: 11 },
+      orbitalCargoPortItems: ["iron_ore", null, "copper_ore", null],
+    });
+    const terminalSummary = projectedSummary(terminal);
+    const render = (projected: FactoryEntity, summary: SelectedEntityReadModel) => act(() =>
+      root.render(<NativeFactoryInspectorPanel
+        inspector={inspector({ entity: summary })}
+        multiSelection={multi({ entityRows: { rows: [summary], totalCount: 1, truncated: false } })}
+        entityConfiguration={configuration(projected)}
+        pending={false}
+        onEntityLockChange={vi.fn()}
+        onRemoveEntity={vi.fn()}
+        onStackCountChange={vi.fn()}
+        onEntityPowerPriorityChange={vi.fn()}
+        onSplitterDistributionModeChange={vi.fn()}
+        onEnergyExchangerModeChange={vi.fn()}
+        onFuelItemChange={vi.fn()}
+        onBlackHolePausedChange={vi.fn()}
+        onOrbitalCargoPortClear={clear}
+        onBeltLaneCountChange={vi.fn()}
+        onBeltPriorityChange={vi.fn()}
+        onRemoveBelt={vi.fn()}
+      />));
+    render(terminal, terminalSummary);
+    const clearButton = [...host.querySelectorAll<HTMLButtonElement>('[data-native-orbital-cargo-ports] button')][0];
+    act(() => clearButton.click());
+    expect(clear).not.toHaveBeenCalled();
+    const confirm = [...document.querySelectorAll<HTMLButtonElement>('[role="alertdialog"] button')]
+      .find((button) => button.textContent === "确认并提交")!;
+    act(() => confirm.click());
+    expect(clear).toHaveBeenCalledWith("terminal-a", 0);
+
+    const blackHole = projectedEntity({
+      id: "black-hole-a",
+      buildingId: "micro_black_hole_connector",
+      recipeId: undefined,
+      powerPriority: undefined,
+      blackHolePaused: false,
+      blackHoleActivationConfirmed: true,
+      blackHolePorts: [
+        { index: 0, currentItemId: "iron_ore", totalDestroyed: "12345678901234567890" },
+        { index: 1, totalDestroyed: "0" },
+        { index: 2, currentItemId: "copper_ore", totalDestroyed: "42" },
+      ],
+    });
+    render(blackHole, projectedSummary(blackHole));
+    expect(host.querySelector('[aria-label="微型黑洞累计销毁账本"]')?.textContent)
+      .toContain("铁矿");
+    expect(host.querySelector('[aria-label="微型黑洞累计销毁账本"]')?.textContent)
+      .toContain("42");
+  });
 });

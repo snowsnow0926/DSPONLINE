@@ -54,6 +54,7 @@ mod recipe_workspace;
 pub mod replay;
 mod simple_factory;
 pub mod simulation;
+mod special_input_port_command;
 mod speedrun;
 pub mod state;
 mod station_contracts;

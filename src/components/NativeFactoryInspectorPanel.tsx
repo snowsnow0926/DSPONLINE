@@ -1,4 +1,4 @@
-import { Atom, CircuitBoard, Flame, Gauge, Layers3, LockKeyhole, Minus, Orbit, Pause, Play, Plus, Route, Trash2 } from "lucide-react";
+import { Atom, CircuitBoard, Database, Flame, Gauge, Layers3, LockKeyhole, Minus, Orbit, Pause, Play, Plus, RotateCcw, Route, Satellite, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { CONSTRUCTION, FUEL_ENERGY_MJ, ITEMS } from "../game/content";
 import type {
@@ -20,6 +20,10 @@ import {
   type NativeProjectedSplitterDistributionMode,
 } from "../game/nativeProjectedEntityConfigurationCommands";
 import {
+  getNativeProjectedMaterialDeliveryConfiguration,
+  getNativeProjectedOrbitalCargoConfiguration,
+} from "../game/nativeProjectedSpecialInputPortCommands";
+import {
   getNativeProjectedEntityRecipeConfiguration,
   isNativeProjectedOrdinaryRecipeBuilding,
   type NativeProjectedEntityRecipeBinding,
@@ -35,7 +39,7 @@ import type {
 } from "../game/nativeProjectedStationConfigurationCommands";
 import type { NativeStationFleetKind } from "../game/nativeStationInventoryIntentCommands";
 import type { NativeStationSlotMode, NativeStationSlotScope } from "../game/nativeStationSlotIntentCommands";
-import type { ItemId, LogisticsPriority, PowerPriority, RecipeId, StationMinimumLoad } from "../game/types";
+import type { ItemId, LogisticsPriority, MaterialDeliverySlotMode, PowerPriority, RecipeId, StationMinimumLoad } from "../game/types";
 import { AccessibleDialog } from "./AccessibleDialog";
 import { PowerValue } from "./PowerValue";
 import { QuantityValue } from "./QuantityValue";
@@ -67,6 +71,13 @@ interface NativeFactoryInspectorPanelProps {
     entityId: string,
     paused: boolean,
   ) => void;
+  onMaterialDeliverySlotChange?: (
+    entityId: string,
+    slotIndex: number,
+    mode: MaterialDeliverySlotMode,
+    itemId: ItemId | null,
+  ) => void;
+  onOrbitalCargoPortClear?: (entityId: string, portIndex: number) => void;
   onTimeWarpEnabledChange?: (entityId: string, enabled: boolean) => void;
   onTimeWarpRequestedMultiplierChange?: (entityId: string, requestedMultiplier: number) => void;
   onEjectorOrbitChange?: (entityId: string, orbitId: string) => void;
@@ -152,6 +163,28 @@ interface PendingNativeEntityRecipeChange {
   readonly currentRecipeId: RecipeId | null;
   readonly targetRecipeId: RecipeId;
 }
+
+type PendingNativeSpecialInputPortChange = Readonly<
+  | {
+      kind: "material-delivery";
+      sessionId: string;
+      runId: string;
+      revision: number;
+      entityId: string;
+      slotIndex: number;
+      mode: MaterialDeliverySlotMode;
+      itemId: ItemId | null;
+    }
+  | {
+      kind: "orbital-cargo-clear";
+      sessionId: string;
+      runId: string;
+      revision: number;
+      entityId: string;
+      portIndex: number;
+      itemId: ItemId;
+    }
+>;
 
 function NativeStationConfiguration({
   entity,
@@ -481,6 +514,8 @@ function NativeEntitySummary({
   onFuelItemChange,
   onEntityRecipeChange,
   onBlackHolePausedChange,
+  onMaterialDeliverySlotChange,
+  onOrbitalCargoPortClear,
   onTimeWarpEnabledChange,
   onTimeWarpRequestedMultiplierChange,
   onEjectorOrbitChange,
@@ -511,6 +546,13 @@ function NativeEntitySummary({
     entityId: string,
     paused: boolean,
   ) => void;
+  onMaterialDeliverySlotChange?: (
+    entityId: string,
+    slotIndex: number,
+    mode: MaterialDeliverySlotMode,
+    itemId: ItemId | null,
+  ) => void;
+  onOrbitalCargoPortClear?: (entityId: string, portIndex: number) => void;
   onTimeWarpEnabledChange?: (entityId: string, enabled: boolean) => void;
   onTimeWarpRequestedMultiplierChange?: (entityId: string, requestedMultiplier: number) => void;
   onEjectorOrbitChange?: (entityId: string, orbitId: string) => void;
@@ -524,10 +566,14 @@ function NativeEntitySummary({
   const energyExchangerMode = getNativeProjectedEnergyExchangerMode(configuration);
   const energyExchangerSwitchable = canNativeProjectedEnergyExchangerModeChange(configuration);
   const fuelConfiguration = getNativeProjectedFuelItemConfiguration(configuration);
+  const materialDeliveryConfiguration = getNativeProjectedMaterialDeliveryConfiguration(configuration);
+  const orbitalCargoConfiguration = getNativeProjectedOrbitalCargoConfiguration(configuration);
   const recipeConfiguration = getNativeProjectedEntityRecipeConfiguration(recipeBinding);
   const recipeEligible = entity.kind === "machine" &&
     isNativeProjectedOrdinaryRecipeBuilding(entity.buildingId);
   const [pendingRecipeChange, setPendingRecipeChange] = useState<PendingNativeEntityRecipeChange | null>(null);
+  const [pendingSpecialPortChange, setPendingSpecialPortChange] = useState<PendingNativeSpecialInputPortChange | null>(null);
+  const specialPortConfirmationCancelRef = useRef<HTMLButtonElement | null>(null);
   const recipeConfirmationCancelRef = useRef<HTMLButtonElement | null>(null);
   const recipeConfirmationSubmittingRef = useRef(false);
   useEffect(() => {
@@ -550,6 +596,18 @@ function NativeEntitySummary({
     recipeBinding?.revision,
     recipeBinding?.runId,
     recipeBinding?.sessionId,
+  ]);
+  useEffect(() => {
+    setPendingSpecialPortChange(null);
+  }, [
+    configuration?.entity.deliverySlots,
+    configuration?.entity.id,
+    configuration?.entity.interactionLocked,
+    configuration?.entity.orbitalCargoPortItems,
+    configuration?.revision,
+    configuration?.runId,
+    configuration?.sessionId,
+    pending,
   ]);
   const recipeWritable = Boolean(recipeBinding && recipeConfiguration && onEntityRecipeChange && !pending);
   const recipeConfirmationIsCurrent = Boolean(recipeBinding && recipeConfiguration && pendingRecipeChange &&
@@ -586,6 +644,35 @@ function NativeEntitySummary({
       activationConfirmed: configuration.entity.blackHoleActivationConfirmed,
     }
     : null;
+  const blackHolePorts = blackHoleState && Array.isArray(configuration?.entity.blackHolePorts) &&
+    configuration.entity.blackHolePorts.length === 3 && configuration.entity.blackHolePorts.every((port, index) =>
+      port.index === index && typeof port.totalDestroyed === "string" && /^\d+$/.test(port.totalDestroyed) &&
+      (port.currentItemId === undefined || Object.hasOwn(ITEMS, port.currentItemId)))
+    ? configuration.entity.blackHolePorts
+    : null;
+  const specialPortConfirmationIsCurrent = Boolean(configuration && pendingSpecialPortChange && !pending &&
+    configuration.sessionId === pendingSpecialPortChange.sessionId &&
+    configuration.runId === pendingSpecialPortChange.runId &&
+    configuration.revision === pendingSpecialPortChange.revision &&
+    configuration.entity.id === pendingSpecialPortChange.entityId);
+  const confirmSpecialPortChange = () => {
+    if (!specialPortConfirmationIsCurrent || !pendingSpecialPortChange) {
+      setPendingSpecialPortChange(null);
+      return;
+    }
+    const change = pendingSpecialPortChange;
+    setPendingSpecialPortChange(null);
+    if (change.kind === "material-delivery") {
+      onMaterialDeliverySlotChange?.(
+        change.entityId,
+        change.slotIndex,
+        change.mode,
+        change.itemId,
+      );
+    } else {
+      onOrbitalCargoPortClear?.(change.entityId, change.portIndex);
+    }
+  };
   const timeWarpState = getNativeProjectedTimeWarpControllerState(timeWarpController);
   const ejectorTargetId = ejectorOrbitFrame?.entity.targetDysonOrbitId ?? null;
   const toggleBlackHole = () => {
@@ -767,6 +854,105 @@ function NativeEntitySummary({
         </select>
       </label>
     </section>}
+    {materialDeliveryConfiguration === null ? null : <section
+      className="native-inspector-safe-actions"
+      data-native-material-delivery="semantic-intent-v1"
+    >
+      <strong><Database size={14} />Rust 物资配送接口</strong>
+      <p>接口改动会先二次确认；Rust 再从当前 revision 计算断线、传送带返还、缓存回托盘和兼容镜像，界面不提交这些结果。</p>
+      <div className="delivery-hub-slots" aria-label="Windows 原生物资配送接口">
+        {materialDeliveryConfiguration.slots.map((slot, slotIndex) => <article
+          className={`delivery-hub-slot delivery-hub-slot--${slot.mode}`}
+          key={slotIndex}
+        >
+          <header><strong>接口 {slotIndex + 1}</strong><small>{slot.mode === "manual"
+            ? "指定物资" : slot.mode === "disabled" ? "已清空" : "自动识别"}</small></header>
+          <label><span>目标物资</span><select
+            aria-label={`Windows 原生配送接口 ${slotIndex + 1} 物资`}
+            disabled={pending || !onMaterialDeliverySlotChange}
+            value={slot.itemId ?? ""}
+            onChange={(event) => {
+              const itemId = event.currentTarget.value as ItemId;
+              if (!itemId || !configuration) return;
+              setPendingSpecialPortChange({
+                kind: "material-delivery",
+                sessionId: configuration.sessionId,
+                runId: configuration.runId,
+                revision: configuration.revision,
+                entityId: entity.entityId,
+                slotIndex,
+                mode: "manual",
+                itemId,
+              });
+            }}
+          ><option value="" disabled>选择物资</option>{materialDeliveryConfiguration.itemIds.map((itemId) =>
+            <option value={itemId} key={itemId}>{itemLabel(itemId)}</option>)}</select></label>
+          <div className="delivery-hub-slot-actions">
+            {(["auto", "disabled"] as const).map((mode) => <button
+              type="button"
+              key={mode}
+              className={slot.mode === mode ? "active" : mode === "disabled" ? "danger" : ""}
+              disabled={pending || !onMaterialDeliverySlotChange || slot.mode === mode && slot.itemId === null}
+              onClick={() => configuration && setPendingSpecialPortChange({
+                kind: "material-delivery",
+                sessionId: configuration.sessionId,
+                runId: configuration.runId,
+                revision: configuration.revision,
+                entityId: entity.entityId,
+                slotIndex,
+                mode,
+                itemId: null,
+              })}
+            >{mode === "auto" ? "恢复自动" : "清空接口"}</button>)}
+          </div>
+        </article>)}
+      </div>
+    </section>}
+    {orbitalCargoConfiguration === null ? null : <section
+      className="native-inspector-safe-actions"
+      data-native-orbital-cargo-ports="semantic-intent-v1"
+    >
+      <strong><Satellite size={14} />Rust 轨道货运接口</strong>
+      <p>清空只发送接口编号。Rust 会返还该口传送带；仅当同物品不再被其他接口使用时，缓存才回到当前行星托盘。</p>
+      <div className="delivery-hub-slots" aria-label="Windows 原生轨道货运接口">
+        {orbitalCargoConfiguration.portItems.map((itemId, portIndex) => <article
+          className={`delivery-hub-slot${itemId ? " configured" : ""}`}
+          key={portIndex}
+        >
+          <header><strong>上传口 {portIndex + 1}</strong><small>{itemId ? itemLabel(itemId) : "等待线路识别"}</small></header>
+          {itemId ? <><span>缓存 <QuantityValue value={configuration?.entity.inputs[itemId] ?? 0} interactive={false} /></span><button
+            type="button"
+            className="danger"
+            disabled={pending || !onOrbitalCargoPortClear}
+            onClick={() => configuration && setPendingSpecialPortChange({
+              kind: "orbital-cargo-clear",
+              sessionId: configuration.sessionId,
+              runId: configuration.runId,
+              revision: configuration.revision,
+              entityId: entity.entityId,
+              portIndex,
+              itemId,
+            })}
+          ><RotateCcw size={13} />安全清空</button></> : null}
+        </article>)}
+      </div>
+    </section>}
+    {specialPortConfirmationIsCurrent && pendingSpecialPortChange ? <AccessibleDialog
+      open
+      title={pendingSpecialPortChange.kind === "material-delivery" ? "确认修改配送接口" : "确认清空轨道货运接口"}
+      ariaLabel="确认特殊物流接口修改"
+      role="alertdialog"
+      riskPolicy="explicit"
+      className="native-special-input-port-confirm"
+      initialFocusRef={specialPortConfirmationCancelRef}
+      onRequestClose={() => setPendingSpecialPortChange(null)}
+    >
+      <p>{pendingSpecialPortChange.kind === "material-delivery"
+        ? `接口 ${pendingSpecialPortChange.slotIndex + 1} 将改为${pendingSpecialPortChange.mode === "manual" ? `指定 ${itemLabel(pendingSpecialPortChange.itemId!)}` : pendingSpecialPortChange.mode === "auto" ? "自动识别" : "停止接收"}。`
+        : `上传口 ${pendingSpecialPortChange.portIndex + 1} 的 ${itemLabel(pendingSpecialPortChange.itemId)} 绑定将被清空。`}</p>
+      <p>相关线路和缓存会由 Rust 按最新权威状态安全返还；已经上传或送达的物资不会重复退款。</p>
+      <footer><button ref={specialPortConfirmationCancelRef} type="button" onClick={() => setPendingSpecialPortChange(null)}>取消</button><button className="danger" type="button" onClick={confirmSpecialPortChange}>确认并提交</button></footer>
+    </AccessibleDialog> : null}
     {blackHoleState === null ? null : <section
       className="native-inspector-safe-actions"
       data-native-black-hole-paused="micro-black-hole-v1"
@@ -777,6 +963,10 @@ function NativeEntitySummary({
         <div><dt>运行开关</dt><dd>{blackHoleState.paused ? "已暂停" : "销毁中"}</dd></div>
         <div><dt>启动确认</dt><dd>{blackHoleState.activationConfirmed ? "已确认" : "尚未确认"}</dd></div>
       </dl>
+      {blackHolePorts ? <div className="native-inspector-items" aria-label="微型黑洞累计销毁账本">{blackHolePorts.map((port) => <div key={port.index}>
+        <span>接口 {port.index + 1} · {port.currentItemId ? itemLabel(port.currentItemId) : "等待物资"}</span>
+        <QuantityValue value={port.totalDestroyed} interactive={false} />
+      </div>)}</div> : <p role="status">销毁账本尚未通过同 revision 完整性校验。</p>}
       <button
         type="button"
         disabled={pending || entity.interactionLocked}
@@ -982,6 +1172,8 @@ export function NativeFactoryInspectorPanel({
   onFuelItemChange,
   onEntityRecipeChange,
   onBlackHolePausedChange,
+  onMaterialDeliverySlotChange,
+  onOrbitalCargoPortClear,
   onTimeWarpEnabledChange,
   onTimeWarpRequestedMultiplierChange,
   onEjectorOrbitChange,
@@ -1095,6 +1287,8 @@ export function NativeFactoryInspectorPanel({
       onFuelItemChange={onFuelItemChange}
       onEntityRecipeChange={onEntityRecipeChange}
       onBlackHolePausedChange={onBlackHolePausedChange}
+      onMaterialDeliverySlotChange={onMaterialDeliverySlotChange}
+      onOrbitalCargoPortClear={onOrbitalCargoPortClear}
       onTimeWarpEnabledChange={onTimeWarpEnabledChange}
       onTimeWarpRequestedMultiplierChange={onTimeWarpRequestedMultiplierChange}
       onEjectorOrbitChange={onEjectorOrbitChange}

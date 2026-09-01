@@ -237,6 +237,42 @@ function stationSlotPatchFixture() {
 }
 
 describe("native player-authority command source", () => {
+  it("accepts only the compact receipt for a Rust-derived special input port transition", async () => {
+    const patch: SimulationCommandPatch = {
+      protocolVersion: 1,
+      baseRevision: 10,
+      topLevelChanges: [],
+      changedEntities: [{
+        id: "delivery-a",
+        changes: [{
+          path: ["materialDeliverySlot", "intent"],
+          operation: "set",
+          value: { slotIndex: 0, mode: "disabled", itemId: null, confirmed: true },
+        }],
+      }],
+      addedEntities: [],
+      removedEntityIds: [],
+      changedBelts: [],
+      addedBelts: [],
+      removedBeltIds: [],
+    };
+    const compact = receiptForPatch(patch, true);
+    const accepted = sourceHarness(patch, { receipt: compact, topologyDirty: true });
+    await expect(accepted.source.applyCommand(patch)).resolves.toMatchObject({
+      changedEntityIds: ["delivery-a"],
+      changedBeltIds: [],
+      topologyDirty: true,
+    });
+
+    const forgedDerivedIds = sourceHarness(patch, {
+      receipt: { ...compact, changedBeltIds: ["renderer-cannot-prove-this-belt"] },
+      topologyDirty: true,
+    });
+    await expect(forgedDerivedIds.source.applyCommand(patch)).rejects.toMatchObject({
+      code: "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+    });
+  });
+
   it("accepts the exact entity-recipe marker with its compact live receipt", async () => {
     const patch = recipeIntentPatch();
     const harness = sourceHarness(patch, { receipt: recipeIntentReceipt(patch) });

@@ -5,7 +5,9 @@ const { readFileSync } = require("node:fs");
 const test = require("node:test");
 
 const {
+  nativeProjectionHasPlayerAuthorityRun,
   NativePlayerAuthorityProjectionBroker,
+  routeNativeProjectionRead,
 } = require("./native-player-authority-projection-broker.cjs");
 
 function fixture(initialSnapshot = {}) {
@@ -794,16 +796,119 @@ test("a tick or phase transition during an asynchronous read discards the result
   }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RENDERER_UNTRUSTED");
 });
 
+test("tagged projection routing never falls through to shadow after authority ownership changes", async () => {
+  let authorityReads = 0;
+  let shadowReads = 0;
+  const authorityError = Object.assign(new Error("authority session no longer owns this id"), {
+    code: "NATIVE_PLAYER_AUTHORITY_PROJECTION_SESSION_MISMATCH",
+  });
+  const broker = {
+    ownsSession() {
+      return false;
+    },
+    async read() {
+      authorityReads += 1;
+      throw authorityError;
+    },
+  };
+  const request = {
+    sessionId: "shadow-session-1",
+    runId: "main-run-1",
+    expectedRevision: 17,
+    expectedRegistryFingerprint: "registry-1",
+  };
+
+  assert.equal(nativeProjectionHasPlayerAuthorityRun(request), true);
+  await assert.rejects(routeNativeProjectionRead({
+    broker,
+    ownerId: 23,
+    projectionType: "factory-inventory-v1",
+    request,
+    shadowRead: async () => {
+      shadowReads += 1;
+      return { source: "shadow" };
+    },
+  }), (error) => error === authorityError);
+  assert.equal(authorityReads, 1);
+  assert.equal(shadowReads, 0);
+
+  await assert.rejects(routeNativeProjectionRead({
+    broker: null,
+    ownerId: 23,
+    projectionType: "factory-inventory-v1",
+    request,
+    shadowRead: async () => {
+      shadowReads += 1;
+      return { source: "shadow" };
+    },
+  }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_UNAVAILABLE");
+  assert.equal(shadowReads, 0);
+});
+
+test("untagged legacy projection routing remains compatible with shadow sessions", async () => {
+  let authorityReads = 0;
+  let shadowReads = 0;
+  const request = {
+    sessionId: "shadow-session-1",
+    expectedRevision: 17,
+    // Registry identity predates the authority-only run tag and remains valid
+    // for renderer-owned shadow projections.
+    expectedRegistryFingerprint: "registry-1",
+  };
+  const broker = {
+    ownsSession() {
+      return false;
+    },
+    async read() {
+      authorityReads += 1;
+      return { source: "authority" };
+    },
+  };
+
+  assert.equal(nativeProjectionHasPlayerAuthorityRun(request), false);
+  const result = await routeNativeProjectionRead({
+    broker,
+    ownerId: 23,
+    projectionType: "factory-inventory-v1",
+    request,
+    shadowRead: async () => {
+      shadowReads += 1;
+      return { source: "shadow" };
+    },
+  });
+  assert.deepEqual(result, { source: "shadow" });
+  assert.equal(authorityReads, 0);
+  assert.equal(shadowReads, 1);
+});
+
 test("main routes matching authority reads and keeps identity-bearing control out of preload", () => {
   const main = readFileSync("desktop/main.cjs", "utf8");
   const preload = readFileSync("desktop/preload.cjs", "utf8");
   const broker = readFileSync("desktop/native-player-authority-projection-broker.cjs", "utf8");
+  const routedHandlers = [
+    ["desktop:native-core-factory-inventory", "factory-inventory-v1", "factoryInventoryProjection"],
+    ["desktop:native-core-construction-inventory", "construction-inventory-v1", "constructionInventoryProjection"],
+    ["desktop:native-core-blueprint-workspace", "blueprint-workspace-v1", "blueprintWorkspaceProjection"],
+    ["desktop:native-core-command-palette-entity-search", "command-palette-entity-search-v1", "commandPaletteEntitySearchProjection"],
+    ["desktop:native-core-star-map-overview-projection", "star-map-overview-v1", "starMapOverviewProjection"],
+    ["desktop:native-core-star-map-catalog-projection", "star-map-catalog-v1", "starMapCatalogProjection"],
+    ["desktop:native-core-stellar-industry-projection", "stellar-industry-v1", "stellarIndustryProjection"],
+    ["desktop:native-core-stellar-industry-v2-projection", "stellar-industry-v2", "stellarIndustryProjectionV2"],
+    ["desktop:native-core-stellar-quantum-projection", "stellar-quantum-v1", "stellarQuantumProjection"],
+  ];
 
   assert.match(main, /new NativePlayerAuthorityProjectionBroker\(\{[\s\S]*?runtime:\s*nativePlayerAuthorityRuntime[\s\S]*?registry:\s*nativeCoreSessions/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "viewport-v2", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "factory-read-model-v1", request\)/);
-  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "factory-inventory-v1", request\)/);
-  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?"construction-inventory-v1",[\s\S]*?request/);
+  for (const [channel, projectionType, shadowMethod] of routedHandlers) {
+    const start = main.indexOf(`ipcMain.handle("${channel}"`);
+    assert.notEqual(start, -1, `${channel} handler must exist`);
+    const next = main.indexOf("\nipcMain.", start + 1);
+    const handler = main.slice(start, next === -1 ? main.length : next);
+    assert.match(handler, /return await routeNativeProjectionRead\(\{/);
+    assert.ok(handler.includes(`projectionType: "${projectionType}"`));
+    assert.ok(handler.includes(`shadowRead: () => nativeCoreSessions.${shadowMethod}`));
+  }
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "statistics-v1", request\)/);
   const statisticsHandler = main.slice(
     main.indexOf('ipcMain.handle("desktop:native-core-statistics-projection"'),
@@ -815,12 +920,6 @@ test("main routes matching authority reads and keeps identity-bearing control ou
   assert.match(main, /nativeStatisticsProjectionHasPlayerAuthorityLineage[\s\S]*?Object\.hasOwn\(request, "runId"\)[\s\S]*?Object\.hasOwn\(request, "expectedRegistryFingerprint"\)/);
   assert.match(main, /nativeProjectionHasPlayerAuthorityRun\(request\) \|\|[\s\S]*?nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "technology-v1", request\)/);
   assert.match(main, /nativeProjectionHasPlayerAuthorityRun\(request\) \|\|[\s\S]*?nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "recipe-workspace-v1", request\)/);
-  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?"command-palette-entity-search-v1",[\s\S]*?request/);
-  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "star-map-overview-v1", request\)/);
-  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "star-map-catalog-v1", request\)/);
-  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "stellar-industry-v1", request\)/);
-  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "stellar-industry-v2", request\)/);
-  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "stellar-quantum-v1", request\)/);
   assert.match(main, /nativeProjectionHasPlayerAuthorityRun\(request\) \|\|[\s\S]*?nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "dyson-workspace-v1", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?"system-space-station-workspace-v1",[\s\S]*?request/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\.read\([\s\S]*?"campaign-workspace-v1",[\s\S]*?request/);

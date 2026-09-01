@@ -73,8 +73,10 @@ const {
   NativePlayerAuthorityMacroBroker,
 } = require("./native-player-authority-macro-broker.cjs");
 const {
+  nativeProjectionHasPlayerAuthorityRun,
   NativePlayerAuthorityProjectionBroker,
   NativePlayerAuthorityProjectionBrokerError,
+  routeNativeProjectionRead,
 } = require("./native-player-authority-projection-broker.cjs");
 const {
   NativePlayerAuthorityPersistenceBroker,
@@ -1252,11 +1254,6 @@ function nativeStatisticsProjectionHasPlayerAuthorityLineage(request) {
     (Object.hasOwn(request, "runId") || Object.hasOwn(request, "expectedRegistryFingerprint"));
 }
 
-function nativeProjectionHasPlayerAuthorityRun(request) {
-  return request !== null && typeof request === "object" && !Array.isArray(request) &&
-    Object.hasOwn(request, "runId");
-}
-
 function nativeTechnologyProjectionResultContext(request) {
   return {
     sessionId: request?.sessionId,
@@ -2019,10 +2016,13 @@ ipcMain.handle("desktop:native-core-factory-inventory", async (event, request) =
     resultContext: nativeFactoryInventoryResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
-    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
-      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "factory-inventory-v1", request);
-    }
-    return await nativeCoreSessions.factoryInventoryProjection(ownerId, request);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "factory-inventory-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.factoryInventoryProjection(ownerId, request),
+    });
   });
 });
 
@@ -2033,14 +2033,13 @@ ipcMain.handle("desktop:native-core-construction-inventory", async (event, reque
     resultContext: nativeConstructionInventoryResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
-    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
-      return await nativePlayerAuthorityProjectionBroker.read(
-        ownerId,
-        "construction-inventory-v1",
-        request,
-      );
-    }
-    return await nativeCoreSessions.constructionInventoryProjection(ownerId, request);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "construction-inventory-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.constructionInventoryProjection(ownerId, request),
+    });
   });
 });
 
@@ -2051,14 +2050,13 @@ ipcMain.handle("desktop:native-core-blueprint-workspace", async (event, request)
     resultContext: nativeBlueprintWorkspaceResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
-    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
-      return await nativePlayerAuthorityProjectionBroker.read(
-        ownerId,
-        "blueprint-workspace-v1",
-        request,
-      );
-    }
-    return await nativeCoreSessions.blueprintWorkspaceProjection(ownerId, request);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "blueprint-workspace-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.blueprintWorkspaceProjection(ownerId, request),
+    });
   });
 });
 
@@ -2330,10 +2328,13 @@ ipcMain.handle("desktop:native-core-star-map-overview-projection", async (event,
     resultContext: nativeStarMapOverviewProjectionResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
-    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
-      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "star-map-overview-v1", request);
-    }
-    return await nativeCoreSessions.starMapOverviewProjection(ownerId, request);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "star-map-overview-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.starMapOverviewProjection(ownerId, request),
+    });
   });
 });
 
@@ -2344,10 +2345,13 @@ ipcMain.handle("desktop:native-core-star-map-catalog-projection", async (event, 
     resultContext: nativeStarMapCatalogProjectionResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
-    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
-      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "star-map-catalog-v1", request);
-    }
-    return await nativeCoreSessions.starMapCatalogProjection(ownerId, request);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "star-map-catalog-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.starMapCatalogProjection(ownerId, request),
+    });
   });
 });
 
@@ -2358,10 +2362,13 @@ ipcMain.handle("desktop:native-core-stellar-industry-projection", async (event, 
     resultContext: nativeStellarIndustryProjectionResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
-    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
-      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "stellar-industry-v1", request);
-    }
-    return await nativeCoreSessions.stellarIndustryProjection(ownerId, request);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "stellar-industry-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.stellarIndustryProjection(ownerId, request),
+    });
   });
 });
 
@@ -2372,10 +2379,13 @@ ipcMain.handle("desktop:native-core-stellar-industry-v2-projection", async (even
     resultContext: nativeStellarIndustryV2ProjectionResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
-    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
-      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "stellar-industry-v2", request);
-    }
-    return await nativeCoreSessions.stellarIndustryProjectionV2(ownerId, request);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "stellar-industry-v2",
+      request,
+      shadowRead: () => nativeCoreSessions.stellarIndustryProjectionV2(ownerId, request),
+    });
   });
 });
 
@@ -2386,10 +2396,13 @@ ipcMain.handle("desktop:native-core-stellar-quantum-projection", async (event, r
     resultContext: nativeStellarQuantumProjectionResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
-    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
-      return await nativePlayerAuthorityProjectionBroker.read(ownerId, "stellar-quantum-v1", request);
-    }
-    return await nativeCoreSessions.stellarQuantumProjection(ownerId, request);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "stellar-quantum-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.stellarQuantumProjection(ownerId, request),
+    });
   });
 });
 
@@ -2507,14 +2520,13 @@ ipcMain.handle("desktop:native-core-command-palette-entity-search", async (event
     resultContext: nativeCommandPaletteEntitySearchResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
-    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
-      return await nativePlayerAuthorityProjectionBroker.read(
-        ownerId,
-        "command-palette-entity-search-v1",
-        request,
-      );
-    }
-    return await nativeCoreSessions.commandPaletteEntitySearchProjection(ownerId, request);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "command-palette-entity-search-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.commandPaletteEntitySearchProjection(ownerId, request),
+    });
   });
 });
 

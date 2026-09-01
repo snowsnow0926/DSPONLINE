@@ -22,7 +22,7 @@ test("construction inventory is exposed through direct and bounded transfer IPC"
   assert.match(main, /desktop:native-core-construction-inventory"[\s\S]*?runRendererNativeOperation\("coreConstructionInventoryProjection"[\s\S]*?nativeCoreSessions\.constructionInventoryProjection\(ownerId, request\)/);
   assert.match(main, /request\.projectionType === "construction-inventory-v1"[\s\S]*?nativeCoreSessions\.constructionInventoryProjection\(ownerId, normalizedRequest\)/);
   assert.match(main, /request\.projectionType === "construction-inventory-v1"[\s\S]*?"coreConstructionInventoryProjection"[\s\S]*?nativeConstructionInventoryResultContext\(normalizedRequest\)/);
-  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\([\s\S]*?"construction-inventory-v1"[\s\S]*?request/);
+  assert.match(main, /desktop:native-core-construction-inventory"[\s\S]*?routeNativeProjectionRead\(\{[\s\S]*?projectionType: "construction-inventory-v1"[\s\S]*?shadowRead: \(\) => nativeCoreSessions\.constructionInventoryProjection\(ownerId, request\)/);
 
   assert.match(preload, /getNativeCoreConstructionInventory:\s*\(request\)\s*=>\s*invokeNative\("desktop:native-core-construction-inventory"[\s\S]*?request\)/);
   assert.match(preload, /"construction-inventory-v1"[\s\S]*?NATIVE_CORE_TRANSFER_PROJECTION_TYPES\.includes\(request\.projectionType\)/);

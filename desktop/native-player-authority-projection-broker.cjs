@@ -5,7 +5,8 @@
  *
  * The broker deliberately exposes only bounded thin-UI projections.
  * It cannot open, activate, advance, mutate, checkpoint, or close a session.
- * Existing renderer-owned shadow sessions bypass this module in main.cjs.
+ * Existing renderer-owned shadow reads bypass the broker class; the routing
+ * helper below preserves that path only for requests without an authority run.
  */
 
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
@@ -113,6 +114,38 @@ function brokerError(message, code) {
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function nativeProjectionHasPlayerAuthorityRun(request) {
+  return isRecord(request) && Object.hasOwn(request, "runId");
+}
+
+/**
+ * Route a projection exactly once. A request carrying the main-owned run tag
+ * must never fall through to a renderer-owned shadow session, even when the
+ * authority broker no longer recognizes the session during an ownership
+ * transition. Untagged legacy requests retain their shadow-session behavior.
+ */
+async function routeNativeProjectionRead({
+  broker,
+  ownerId,
+  projectionType,
+  request,
+  shadowRead,
+}) {
+  if (typeof shadowRead !== "function") {
+    throw new TypeError("native projection shadow reader is invalid");
+  }
+  const routeToPlayerAuthority = nativeProjectionHasPlayerAuthorityRun(request) ||
+    broker?.ownsSession(request?.sessionId);
+  if (!routeToPlayerAuthority) return await shadowRead();
+  if (!broker) {
+    throw brokerError(
+      "native player-authority projection broker is unavailable",
+      "NATIVE_PLAYER_AUTHORITY_PROJECTION_UNAVAILABLE",
+    );
+  }
+  return await broker.read(ownerId, projectionType, request);
 }
 
 function hasExactKeys(value, keys) {
@@ -325,7 +358,9 @@ class NativePlayerAuthorityProjectionBroker {
 }
 
 module.exports = {
+  nativeProjectionHasPlayerAuthorityRun,
   NativePlayerAuthorityProjectionBroker,
   NativePlayerAuthorityProjectionBrokerError,
   PROJECTION_METHODS,
+  routeNativeProjectionRead,
 };

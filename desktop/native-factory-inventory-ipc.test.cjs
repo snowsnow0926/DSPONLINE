@@ -18,7 +18,7 @@ test("factory inventory is exposed through direct and bounded transfer IPC", () 
   assert.match(main, /desktop:native-core-factory-inventory"[\s\S]*?runRendererNativeOperation\("coreFactoryInventoryProjection"[\s\S]*?nativeCoreSessions\.factoryInventoryProjection\(ownerId, request\)/);
   assert.match(main, /request\.projectionType === "factory-inventory-v1"[\s\S]*?nativeCoreSessions\.factoryInventoryProjection\(ownerId, normalizedRequest\)/);
   assert.match(main, /request\.projectionType === "factory-inventory-v1"[\s\S]*?"coreFactoryInventoryProjection"[\s\S]*?nativeFactoryInventoryResultContext\(normalizedRequest\)/);
-  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "factory-inventory-v1", request\)/);
+  assert.match(main, /desktop:native-core-factory-inventory"[\s\S]*?routeNativeProjectionRead\(\{[\s\S]*?projectionType: "factory-inventory-v1"[\s\S]*?shadowRead: \(\) => nativeCoreSessions\.factoryInventoryProjection\(ownerId, request\)/);
 
   assert.match(preload, /getNativeCoreFactoryInventory:\s*\(request\)\s*=>\s*invokeNative\("desktop:native-core-factory-inventory"[\s\S]*?request\)/);
   assert.match(preload, /"factory-inventory-v1"[\s\S]*?NATIVE_CORE_TRANSFER_PROJECTION_TYPES\.includes\(request\.projectionType\)/);

@@ -1,5 +1,7 @@
 # DSP极简网络项目现状
 
+> **Windows 剩余工作统一重基线（2026-09-02，开发暂停复盘）**：功能提交冻结在 `ac13404c57ee14ba1eff34b76c8c02c7b24116ee`。总体能力口径继续保持 `Rust 90% / 薄 UI 98% / O(active) 97% / 并行 75% / 综合开发 93% / 发布成熟度 60%`，不会因为把剩余事项拆细而降低。剩余代码已在 [三层计划书第 25 节](./WINDOWS_NATIVE_PERFORMANCE_DEVELOPMENT_PLAN_2026-08.md#25-剩余全部工作一次性收口计划2026-09-02-重基线) 固定为 100 个“剩余工作单位”；它是剩余子计划的独立分母，不替换总体 93%。后续连续完成整张表，开发中只跑与改动直接相关的红绿测试和静态检查，全部代码冻结后再统一执行完整 Rust、Vitest、native/server、build、E2E、性能、打包与长跑矩阵。
+
 > **Windows Rust 权威工厂布局与位置写入（2026-09-02，开发候选，未发布）**：原生权威模式下，“整理当前行星/所选设备”和普通建筑拖动已经脱离 renderer 旧 `GameState` 写路径。自动布局只提交 `{kind:"apply",scope,entityIds}` 短意图，Rust 按活动行星、持久实体顺序与线路拓扑确定性生成坐标；WAL 不保存展开后的海量位置。拖动只提交绑定 exact session/run/revision 的有界位置补丁，界面立即撤销临时画布坐标，等待 durable Rust 投影回显，因此没有第二份乐观权威。
 >
 > 位置事务不再全量 `rebuild_indexes()`：实体标量列改为 `Arc<Vec<_>>` 写时复制，仅复制 X/Y、解析变化行并重建受影响行星的 viewport index；实体/线路映射、符号表、线路列和模拟静态目录继续共享。当前新鲜门禁为完整 fast Vitest `3002 passed / 29 skipped / 0 failed`、Rust workspace 串行 `1274 passed / 3 explicitly ignored / 0 failed`（Core `1034/3/0`、Host library `237/0/0`、Host binary `3/0/0`）、native/desktop `567 passed / 1 Windows symlink privilege skip / 0 failed`，以及 typecheck、strict Clippy、Rust fmt、production build、startup budget、薄 UI 边界和 diff check。首次完整 Vitest 的唯一失败是旧测试仍断言 native 拖动必须关闭，更新为新权威合同后全量通过。

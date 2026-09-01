@@ -2397,3 +2397,219 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 8. 最终完整 fast Vitest 为 376 files 通过、13 files 条件跳过，`3002 passed / 29 skipped / 0 failed`（70.13 秒）；首次全量为 `3001/29/1`，唯一失败是旧架构测试仍断言 native 拖动关闭，只更新为新 Rust 权威合同后复跑通过。完整 native/desktop 为 `567 passed / 1 Windows symlink privilege skip / 0 failed`。typecheck、workspace all-target/all-feature strict Clippy、Rust fmt、diff check 和 production build 全部通过。
 9. production build 为 2,102 modules；startup 总 gzip `180,782 B`、JavaScript `87,094 B`、CSS `93,688 B`、最大 startup JavaScript `58,974 B`、menu `258,715 B`、forbidden startup modules `0`；Native thin-UI boundary 为 13 个 App bindings / 12 个专用组件文件。本轮未执行 Chromium、durable E2E、desktop pack/install/升级、24 小时、多硬件、Defender/磁盘、签名和灰度，这些不复用旧结果。
 10. 固定能力口径更新为 `Rust 唯一权威约 90% / 完整薄 UI 约 98% / 真正 O(active) 物流约 97% / 全领域确定性原生并行约 75% / 四项目标能力加权综合约 93% / 可放心发布成熟度约 60%`。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、canonical 规则和 `authorityEligible=false` 均不变；未读取玩家存档，未连接生产，未部署、打包发布或签名。
+
+## 25. 剩余全部工作一次性收口计划（2026-09-02 重基线）
+
+> 审计基线：`ac13404c57ee14ba1eff34b76c8c02c7b24116ee`
+>
+> 工作树：`D:/GameDev/DSPidle2-windows-native-complete`
+>
+> 分支：`codex/windows-native-plan-completion`
+>
+> 状态：停止继续零散功能开发，先完成本节审计与计划冻结。本节只修改文档，不连接生产、不处理真实玩家存档、不打包、不签名、不部署。
+
+本节取代此前所有“下一小块做什么”的临时清单，成为后续唯一剩余工作计划。总体四目标能力加权进度仍为约 `93%`，不会因为把剩余工作拆细而倒退。为防止以后再出现百分比分母变化，本节另建立固定的 **100 个剩余工作单位**；后续只报告这 100 个单位完成了多少。除非用户明确新增范围，否则分母不再扩大。
+
+“一次性全部做完”在这里指一个连续开发战役：按依赖顺序完成整张剩余代码表，中途不为每个小提交重复跑完整 Rust、完整 Vitest、完整 E2E 或打包。开发期间仍必须运行与当前改动直接相关的红测、绿测、编译和格式检查，否则会把错误堆到最后；所有代码冻结后只做一次集中全量门禁。若集中门禁发现问题，只运行定位所需的定向测试，修复完成后再对新的冻结 SHA 做一次最终完整矩阵。
+
+### 25.1 审计结论与不再变化的口径
+
+当前代码已经完成大量高价值基础设施，但“计划全部完成”为 false。以下证据直接来自冻结源码，而不是旧报告推断：
+
+1. `DomainCoverage::implemented_beta_scope()` 仍将 `pure_idle_macro`、`offline_and_time_warp` 和 `authority_eligible` 设为 false；生产 Host 只有在 `authorityEligible=true` 时才允许玩家权威租约。测试 override 不能代替产品覆盖证明。
+2. `SaveDirtyPages` 当前只有 entity page、belt page 和两类 topology 标记；五个 base domain 在每次增量检查点仍全部序列化、计算 checksum/SHA 后才能比较复用。因此“实际只写脏页”已经成立，但“活动 revision 不扫描/编码清洁 base 域”尚未成立。
+3. renderer 已经消费主要 Rust 薄投影，但原生权威下仍明确关闭或隐藏一批玩家入口：移动端壳、durable undo/redo、批量升级/增加/回收、连续批量拉线、生产区域、部分特殊库存拖放、星图勘探/殖民/改名/备注、主云档写入以及部分 MOD/内容包动作。
+4. 当前投影使用最多 1 MiB 的 MessagePort 二进制块、ACK 与哈希，内存有界但仍是 clone/transfer 流水线，不是共享内存零拷贝。是否值得引入共享环形缓冲必须由 Gate C 数据决定，不能为了“原生感”先做复杂化。
+5. 稳态内置物流已经大量使用活动集合和反向唤醒，但自然稠密、拓扑重建、opaque/MOD、部分库存键解析、全局统计/指标和不完整 writer proof 仍会全扫。真正目标必须表述为：**稳定稀疏内置网络 O(active + changed)，稠密和不可证明网络确定性退化 O(all)**，不承诺数学上永不全扫。
+6. 原生多核已经覆盖解析、固定 prepare、部分探针、历史和线路准备；共享 inventory/production/Dyson 写回、线路冲突提交、完整物流 commit 和宏观结算仍有串行阶段。此前物料冲突组件并行原型只有约 0.2% 理论占比且增加复杂度，已正确拒绝，后续不得为了完成百分比无证据复活。
+7. Rust 运行时没有通用 mmap/LRU 冷页层；精确推进仍需对部分通用 JSON 记录做解析。现有 SoA、`Arc<str>`、resident indexes 和 COW 已降低常驻量，但不等于 WIN-480 完成。
+8. 24 小时、多硬件、Defender/磁盘、安装/覆盖升级、Authenticode 和灰度需要真实环境或发布权限。它们属于发布门禁，不算代码欠账，也不能由本机自动化文字替代。
+
+### 25.2 范围边界与完成定义
+
+本次连续开发范围保持以下边界：
+
+- 公开格式继续为 GameState v47、envelope v2、cloud schema v8、SQLite layout v3；没有新增持久字段就不升级版本。
+- Web/PWA/Android 保留 JavaScript 权威和兼容导入导出；Windows 原生优化不得改变它们的玩法结果。
+- 不降低生产/物流结算频率，不限制实体/线路数量，不删除 MOD 数据，不以少产、延迟、隐藏数字或自动回档换性能。
+- 不修改真实玩家存档，不连接生产服务器，不自行上传云档、切换下载页、签名或部署。
+- WIN-490 的 Tauri/Qt/纯原生外壳重写仍是条件项：只有完整薄 UI 后实测 Electron 固定开销超过全进程树 15%，且原型净收益覆盖输入法、无障碍、更新和 GPU 风险时才启动；否则它不是“未完成代码”，不计入下面 100 单位。
+
+代码开发完成必须同时满足：
+
+1. 下面 25.3 的 100 个剩余工作单位全部实现并具备定向回归；
+2. 所有仍由 native ownership 显式禁用的持久玩法操作，要么迁移为 Rust 语义命令，要么经评审确定为纯设备偏好并移出 GameState；不能靠读取旧 renderer `gameRef` 恢复按钮；
+3. 普通 Windows 原生候选具备完整 coverage candidate，但正式 `authorityEligible` 仍由 25.7 的 Gate C/长跑/多硬件发布证据控制；
+4. renderer 与 Simulation Worker 在 Rust 权威运行期间不长期持有第二份完整工厂对象图；故障回退通过同 revision durable checkpoint/v47 重新打开，而不是保留可写镜像；
+5. 最终集中测试和本机性能 Gate 全绿；外部门禁未执行时状态只能是“代码完成、发布 No-Go”，不能写成稳定版完成。
+
+### 25.3 固定 100 单位剩余代码表
+
+| 编号 | 工作包 | 单位 | 主要交付 | 完成判据 |
+| --- | --- | ---: | --- | --- |
+| BASE-500 | 自动化覆盖清单与边界守卫 | 3 | 从 Rust coverage、renderer native 禁用面、Host capability 和公开保存入口生成机器可读清单 | 新增/删除入口时测试必须同步；不存在靠手工文档遗漏的写面 |
+| AUTH-510 | 实时/纯挂机/离线/时间扭曲统一覆盖 | 15 | 同一 Rust 规则核心、闭合物料账本、可取消/恢复宏观窗口和 coverage candidate | 1×、8×、12×、15×、16×及离线分段一致；没有无来源终端结果；所有玩家可达域有证书或精确有界路径 |
+| WRITE-520 | 桌面剩余玩家写面 | 16 | durable undo/redo、批量升级/增加/回收、批量线路、区域、特殊库存和星图动作 | native ownership 下不再因缺 Rust 命令禁用这些持久玩法；失败原子且冷恢复幂等 |
+| MOBILE-530 | 完整移动/触摸薄 UI | 6 | MobileGameShell 消费 Rust 投影并提交同一语义命令 | 原生权威不再隐藏移动壳；触摸放置、选择、拉线、返回栈和旋转均无旧 GameState 写入 |
+| MOD-540 | 数据定义内容包与自定义建筑原生闭环 | 10 | 完整 catalog schema、展示、端口、配方、建筑/线路命令和 fail-closed 脚本边界 | 当前支持的数据型 MOD 可运行、显示、保存和恢复；未知脚本型扩展明确阻止晋升而不丢数据 |
+| SAVE-550 | 真正按域脏页保存与可取消合并 | 8 | base 五域 dirty generation、精确 changed systems、可取消 compaction、磁盘预算 | 清洁 base 域不序列化；ACK 前不清脏；故障保留最后 generation |
+| CLOUD-560 | 原生流式导入/导出/主云交接 | 7 | v46/v47 有界适配、流式 gzip、主进程文件/网络背压、native cloud conflict handoff | renderer 不持完整正文；取消/未知网络不自动覆盖或重传；模拟服务器往返哈希一致 |
+| ACTIVE-570 | 剩余 writer-closed 活动网络 | 10 | 残余库存键、power/global writer、material hub/MOD 目录、指标与拓扑事件总线 | 稳定稀疏内置档为 O(active+changed)，独立 flat oracle 严格一致；稠密/opaque 退化有计数 |
+| PAR-580 | 全领域确定性原生并行 | 10 | 行星/系统/连通分量事件缓冲、稳定合并、宏观结算分区、自适应线程 | 1/2/4/8/最大线程完整状态逐字一致，默认路径有端到端净收益且内存不超预算 |
+| STATS-590 | 全领域事件统计与诊断 | 5 | 生产/消耗/物流/功率/戴森/空间站事件桶和精确失效 | 采样边界不重扫全部记录；1 秒/1 分/10 分/1 小时 sidecar 可恢复且公开 v47 字节不变 |
+| PROJ-600 | 订阅式增量投影与 Gate C | 4 | 分频道订阅、背压合并、关闭即释放、IPC 占比测量；共享内存条件决策 | UI 只持当前视图/工作区；IPC+编码+安装低于帧预算 20%，否则再实现共享环形缓冲 |
+| RENDER-610 | Canvas/GPU 渲染终态 | 3 | 静态几何/动态遥测分离、OffscreenCanvas 或经证据选择的 GPU 批绘、上下文恢复 | P95/P99、长任务、DOM 数和输入延迟达标；上下文丢失不改权威状态 |
+| MEMORY-620 | 冷页、解析和分配预算 | 2 | mmap/LRU 或等价有界冷页、typed hot columns、scratch 复用、全进程计量 | 热推进不重复解析无变化 JSON；缓存有字节上限；30 分钟无持续正斜率 |
+| OWNER-630 | Rust 单所有者切换与懒回退 | 1 | 接管后释放 renderer/Worker 全状态，故障时从同 revision durable 数据重开 | 无双写、无静默回档、无第二份长期完整对象图 |
+| OBS-640 | 最终基准/故障编排器 | 0* | 复用现有脚本并补齐场景清单、JSON 报告和失败证据保留 | 作为各工作包验收代码随包完成，不单独增加百分比分母 |
+| **合计** |  | **100** |  |  |
+
+`OBS-640` 标为 0 单位并非不做，而是测试/观测成本已经分摊进每个工作包，避免完成业务代码后又突然扩大分母。
+
+#### BASE-500：机器可验证的完整性清单
+
+1. 从 `DomainCoverage`、Host hello capabilities、projection type、App native 分支和所有 `rejectLegacy...WhileNative` 调用生成一份排序稳定的 JSON/Markdown 清单。
+2. 每项必须标注 `read / intent / durable / local-preference / deliberately-unsupported`，以及 Web 和 Windows owner。
+3. CI/测试在新增 GameState writer、命令或工作区时要求清单同步；`deliberately-unsupported` 必须包含原因和数据保护行为。
+4. 清单是 AUTH-510 与 OWNER-630 的晋升输入，不能只靠人工把三个 boolean 改成 true。
+
+#### AUTH-510：统一宏观结算与覆盖候选
+
+1. 把现有 exact、`pure-idle-macro-v10`、`offline-macro-v1` 和 main-owned time-warp 预算收敛为同一阶段表；差异只能是时间来源、倍率和允许的宏观证书，不能复制规则实现。
+2. 为普通生产、科研、施工、火箭、太阳帆、银河出口、合同、手搓、有限矿和量子边界建立统一流量账本。无法证明的局部子图可以冻结，但不得让与它无依赖的闭合子图一起变成 0；不允许把一秒探针终端结果按倍率复制。
+3. 每个宏观 session 保存算法版本、source revision、预算、已消费窗口和必要私有 credit；取消、保存失败、Host 重启或 ACK 不确定只恢复原预算，不重复支付。
+4. `pure_idle_macro` 与 `offline_and_time_warp` 由覆盖清单和测试证据生成 candidate 状态。普通构建的 `authorityEligible` 仍关闭；只有 25.7 Gate C 产物可生成可晋升候选，renderer 无开关可绕过。
+5. 必测：无限/有限资源，多恒星系火箭/帆，断电/低供电/堵塞/库存耗尽，建筑制造量子供料，8×/12×/15×/16×，单段/多段/checkpoint/reload/取消/重启，以及源存档 hash 原子性。
+
+#### WRITE-520：剩余桌面写面一次收口
+
+按一个统一命令框架实现，不再为每个按钮发明独立重试机制：
+
+1. 修正当前选择工具栏总开关：原生 `selection auto-layout` 使用已完成的 Rust 短意图；升级、线路升级、批量增加、批量回收各用 Rust 重新推导价格、上限、关联线路和退款。
+2. 连续/批量拉线只在 renderer 保存几何候选，最终一次提交有界语义列表；Rust 按当前 revision 重新选择 tier、端口、材料、稳定顺序和原子失败。自动选级与特殊端口必须走目录能力，不能复用旧 draft GameState。
+3. durable undo/redo 保存“可逆语义命令 + source/result revision + precondition hash”，不保存完整 GameState。只撤销本 session 已确认操作；跨重启、跨导入或无法证明逆操作时明确截断历史。
+4. Canvas region/bookmark/持久视角等逐字段判断：设备偏好移出 GameState，本来属于存档的区域/书签使用 Rust 叶命令。位置重叠偏好由 Rust 完整活动行星索引验证，不能用截断 viewport 判断。
+5. 补齐当前明确关闭的特殊交互：站点/量子/建筑间库存拖放、永久丢弃二次确认、施工库存删除、喷涂模块拆卸、批量量子接入与采集器模式切换。
+6. 补齐星图的勘探、殖民、改名、备注和旅行；时间/随机/奖励均由 main/Rust 权威生成。
+7. 每种命令统一覆盖 old revision、ABA session/run、MOD/目录漂移、响应丢失、五个 durable fault boundary、cold WAL replay 和重复 command ID。
+
+#### MOBILE-530：移动端不再是第二套游戏
+
+1. MobileGameShell 改为消费与桌面相同的 native read models，不接收完整 `GameState`。
+2. 触摸放置、拖动、选择、连接、蓝图、检查器和工作区路由复用 WRITE-520 命令；移动层只拥有手势和导航状态。
+3. 手势期间 revision 漂移按桌面相同规则重基或取消；pointer capture、长按 timer 和 overlay 在 lineage 变化时全部释放。
+4. DOM/触摸 E2E 同时覆盖窄屏、旋转、后台恢复和系统返回键。
+
+#### MOD-540：自定义建筑的可证明原生能力
+
+1. 扩充规范 catalog snapshot，包含当前命令需要但 Rust 仍以 built-in 常量代替的 stack limit、端口、燃料、展示、解锁、配方输入输出、线路和特殊能力字段。
+2. 模拟热路径从 registry-backed typed tables 读取数据型 MOD；未知字段原样往返，注册表 fingerprint 漂移使旧投影/命令失效。
+3. 工厂节点、托盘、建筑制造、蓝图和自动布局支持数据型自定义建筑；布局按目录声明的端口/尺寸/锁定语义，而不是检测 `mod:` 前缀后整体拒绝。
+4. 任意脚本执行、原生代码注入或没有规范 schema 的扩展不在本次安全范围内：存档继续可读/导出，Windows 原生晋升失败关闭，并提示用 Web/JavaScript 权威运行。
+5. 用最小合成内容包覆盖新增、更新、禁用、缺失、ID 冲突、自定义建筑托盘显示、配方生产、线路和保存重载；不得提交真实玩家 MOD 或存档。
+
+#### SAVE-550 与 CLOUD-560：持久化闭环
+
+1. 为 Core/Logistics/Dyson/Statistics/Unknown 五个 base domain 增加独立 dirty generation；所有 writer 必须通过集中 API 标脏，debug/test 下另用最终结构 hash 审计漏标。
+2. 清洁 base 域直接复用已验证 metadata，不序列化、不重新 SHA；entity/belt page、topology 和 system IDs 继续独立。
+3. compaction 分为可取消的 scan/copy 和不可取消的短 publish；新 checkpoint 到来可取消前者，publish 与活动 transaction 互斥。回收只删除不被 active/fallback generation 引用的 chunk。
+4. 原生导入流支持 current v47 和明确兼容的 v46 适配；旧版本字段以有界迁移器逐段生成，不把完整正文交给 renderer。导出/gzip/checksum/长度/SHA 使用固定 buffer。
+5. 主云上传由 main 读取只读导出文件或有界流并实施背压；renderer 只看到进度、revision 和摘要。网络未知保留本地候选与幂等 token，等待人工重试，不自动覆盖远端。
+6. 云恢复/冲突选择先安全关闭活动 authority session，再把验证后的新档作为新 lineage 打开；失败继续保留旧 session/checkpoint，不混合两个 revision。
+7. 开发验证只使用本地 mock API/临时目录；生产云往返留给 25.7 授权门禁。
+
+#### ACTIVE-570：把剩余稀疏热点变成事件网络
+
+1. 以 writer manifest 为入口，统一实体库存、托盘、线路、站点、路线、量子、施工、电力、科研和戴森变更事件；各 runtime 只能消费已证明的 event key。
+2. 去除稳定稀疏路径对全部库存 key/route group/entity 的选择扫描；活动队列按持久 row 排序，达到 75% 或 writer 不闭合时退化旧 oracle。
+3. planet metrics 用稳定分块和补偿/定点规范消除每拍全实体标量折叠前，先证明公开 IEEE-754 字节不变；若无法保持字节，保留折叠并把它诚实列为串行成本，不用近似累计。
+4. production history、power source、global research/Dyson recipe、material-delivery 与 MOD 目录分别建立 wake/invalidate 条件；拓扑变化允许一次 O(all) 重建，稳定 revision 不允许无原因重复重建。
+5. A/B oracle 必须真正绕过 indexed selector，从 flat persistent order 独立执行；报告 selected/visited/wake/dense/fallback/skip，而不是只报最快耗时。
+
+#### PAR-580：只并行能够稳定合并的真实工作
+
+1. 先用最终大档 profile 固定串行占比，按行星、恒星系、线路连通分量或无共享库存生产网络生成私有事件缓冲。
+2. worker 只读 source snapshot；共享库存、浮点合计、公平分配和 ID allocator 在固定 barrier 按稳定键提交。工作窃取只能改变完成时间，不能改变事件顺序。
+3. 将 exact、pure-idle/offline calibration、宏观证书准备和统计事件生成接入同一进程生命周期线程池；禁止每个测试/请求建立临时 Rayon 池。
+4. 小批量、强耦合或串行比例高时自动单线程；只有端到端中位净收益、P95 不退化且全进程内存增量在预算内才启用并行阶段。
+5. 不重新实现此前 0.2% 的冲突组件原型，除非新的 profile 证明其占比至少达到合入阈值。
+
+#### STATS-590、PROJ-600 与 RENDER-610：把 Rust 结果便宜地显示出来
+
+1. 每个权威阶段产生有界统计事件，直接更新 1 秒/1 分/10 分/1 小时桶；工作区查询只分页读取桶，关闭后释放详情 cache。
+2. 投影 broker 改为显式 subscription：viewport topology、telemetry、belt geometry/flow、inventory、workspace 和 notification 分频道；中间遥测可合并，command ACK、库存和 topology 事件不可丢。
+3. 先测当前 MessagePort 的 encode + transfer + validate + install 占比。若 P95 低于总帧 20% 且内存有界，保留简单实现；超过门槛才实现版本化 shared-memory ring，并保留 bounded MessagePort fallback。
+4. 渲染层把静态几何与动态流量分离，优先使用已有 Canvas batch 的 OffscreenCanvas worker 扩展；只有 Canvas P95/P99/长任务仍不达标才引入 WebGL2/WebGPU。React/DOM 只保留交互、选中和无障碍节点。
+5. GPU/Canvas context 丢失、RDP、缩放、DPI 和多显示器恢复只重建显示缓存，不触碰 revision 或存档。
+
+#### MEMORY-620 与 OWNER-630：最终内存所有权
+
+1. 把热路径仍需解析的通用 JSON 叶逐步迁入 typed columns；不变原始字段继续 `Arc<str>` 往返，未知域不复制整图。
+2. 冷 checkpoint/chunk 使用 mmap 或等价只读分页 reader，并用显式 LRU/字节预算统计 OS page cache 与进程 Private Bytes；收益不足或增加文件锁风险时保留流式 reader，不为完成标签强上 mmap。
+3. scratch/arena/temporary vectors 设容量上限并跨步复用；候选失败后不得把峰值 buffer 留在 session cache。
+4. authority handoff 成功后销毁 renderer/Simulation Worker 完整工厂对象和 legacy undo history，只保留薄投影、设备偏好和同 revision durable proof。
+5. JavaScript 回退改为显式暂停后从当前 Rust v47/checkpoint 重新打开；不能在后台长期养一份可写 GameState，也不能在 Host 故障时跳回旧 revision。
+
+### 25.4 一次性实施顺序
+
+后续严格按以下六个大波次推进。每个波次可以包含多个小提交以便审查和回滚，但不在波次之间重复跑完整套件：
+
+| 波次 | 工作包 | 前置与目的 | 开发期允许的验证 |
+| --- | --- | --- | --- |
+| A：覆盖冻结 | BASE-500、AUTH-510 | 先定义所有权与宏观语义，避免后续 UI/并行建立在错误覆盖上 | 新增红测、模块 focused、`cargo check`、相关 typecheck |
+| B：玩家功能闭环 | WRITE-520、MOBILE-530、MOD-540 | 一次补齐所有 native 禁用的持久玩法面 | 每类命令 Core/Host/renderer 定向测试；不跑完整 Vitest/Rust |
+| C：持久化与云边界 | SAVE-550、CLOUD-560、MEMORY-620 | 让活动 revision、导入导出和冷页不制造完整副本 | 临时目录故障注入、focused save/import/cloud、内存下界测试 |
+| D：模拟热路径 | ACTIVE-570、PAR-580、STATS-590 | 在语义和 writer 已冻结后做活动化与并行 | 独立 flat oracle、1/2/4/8 focused hash、合成 profile；不跑全仓库 |
+| E：薄 UI 与单所有者 | PROJ-600、RENDER-610、OWNER-630 | 消除第二状态并把投影/渲染成本压进 Gate C | 投影/组件/MessagePort/renderer focused、短场景进程树采样 |
+| F：代码冻结 | 文档、清单、release candidate metadata | 冻结一个 SHA，停止功能修改 | fmt、diff、清单一致性；随后进入 25.6 集中测试 |
+
+任何波次发现必须改变 GameState/envelope/cloud/SQLite schema，立即停止该波次并单独评审迁移；不能顺手升级格式。任何优化若使规范状态、物料守恒或同 revision 恢复分叉，直接回退该优化而不是放宽测试。
+
+### 25.5 开发期测试政策
+
+为落实“不要每做一点就全量测试”，开发阶段使用以下固定规则：
+
+- 每个产品修改先添加或更新能失败的最小合成回归，再运行该测试；修复后只复跑同一 focused 集合。
+- Rust 跨模块修改允许运行目标 crate/模块测试和 `cargo check`；TypeScript 跨边界修改允许运行相关 Vitest 文件和 `npm run typecheck`。typecheck 可在大波次末运行，不要求每次保存都跑。
+- `cargo test --workspace`、完整 `vitest run`、`npm run test:native`、server、Playwright、production build、desktop pack 和真实长跑在 A～E 波次全部禁止例行重复。
+- 格式化可以机械执行；strict Clippy 只在 Rust 大波次结束和最终冻结执行，不为每个小函数重复。
+- 每个 focused 结果只证明对应工作包，不写成完整发布门禁；失败史、修复原因和是否只改夹具必须保留。
+
+### 25.6 最终代码冻结后的集中测试矩阵
+
+集中测试只对一个明确冻结 SHA 执行，并按下列顺序运行；后一步只有前一步通过才开始，以免浪费最长门禁时间：
+
+1. **静态与格式**：`git diff --check`、`npm run typecheck`、`cargo fmt --all -- --check`、workspace all-target/all-feature strict Clippy `-D warnings`、许可证检查和 native thin-UI boundary。
+2. **完整规则单元**：启用 `DSP_RUN_NATIVE_CORE_LONG_DIFFERENTIAL=1` 的完整 Vitest；Rust workspace 使用单 Cargo job、串行 libtest 跑 Core/Host/binary 全量。报告实际 passed/skipped/failed 和耗时，不复用 24.55 的 `3002/29/0` 或 `1274/3/0`。
+3. **桌面/服务边界**：`npm run test:native`、`npm run test:server`、`npm run test:ops`、备份/发布工具；symlink 权限 skip 单列，不能算通过。
+4. **构建**：fresh Release Host、`npm run build`、startup budget、forbidden module、bundle/菜单 gzip 和 source/Host 能力一致性。
+5. **浏览器与耐久 E2E**：完整 Chromium、durable WAL E2E、nightly Firefox/WebKit 兼容；使用 production preview 再跑保存/离线/纯挂机/云 mock 高风险场景。
+6. **确定性与故障**：1/2/4/8/最大线程，1/5/60/600 秒、8 小时/30 天，8×/12×/15×/16×，命令不同分包、Worker/Host 重启、五个 durable stage、取消、保存失败、磁盘预算和只读临时目录；全部比较完整公开 bytes、canonical/domain/守恒摘要。
+7. **性能与内存**：P50/P95/极限合成档和经授权的只读玩家档，分别测暂停、实时、纯挂机、建造、拉线、蓝图、保存、导出和 UI；记录全进程树 Private Bytes、峰值/稳态/斜率、Rust/renderer/Worker/GPU、模拟秒吞吐、IPC 占比、帧 P50/P95/P99 与 >50 ms 长任务。
+8. **Windows 制品**：`desktop:pack`、隔离 profile 启动、退出残留、文件清单/SHA、升级/卸载脚本的本地安全夹具。没有签名凭据时只生成明确 `NotSigned` 的开发候选，不冒充 release。
+9. **报告**：生成一份冻结 SHA 的 final development report、manifest、SHA256SUMS 和新老版本 A/B；首轮失败和修复后结果同时保留，不能只贴最终绿色。
+
+本机性能最低 Go 条件保持原计划：完整权威链路相对 JavaScript 至少 1.5×，IPC/编码/安装低于总帧 20%，组合峰值目标约 1.5～2.5 GB 或相对第一层再降至少 30%，30 分钟无持续正内存斜率，任何场景无静默回档和物料分叉。未达到时对应能力继续 No-Go，不通过降低玩法精度补数字。
+
+### 25.7 代码完成后仍需外部关闭的发布门禁
+
+这些门禁不占 25.3 的 100 个代码单位，但决定 `authorityEligible` 和稳定发布：
+
+1. Windows 10/11，低配/主流/高配至少三档 CPU、内存和 GPU；每档 A（JS）、B（shadow）、C（Rust 单权威）同 Build ID、同夹具、同场景。
+2. 每档 24 小时实时/纯挂机组合长跑，包含周期性建造、拉线、保存、工作区切换、前后台和 Host 重启；报告全进程树内存斜率与状态哈希。
+3. 真实 Defender 文件锁、磁盘满、只读目录、进程强杀、系统休眠/唤醒、RDP/GPU context loss、安装、覆盖升级和受支持降级导出。
+4. Authenticode 签名、installer/update feed、隔离 profile、旧版覆盖升级和卸载保留存档；凭据只由授权 Release Agent 使用。
+5. 测试账号的真实云 v47 往返和冲突恢复；不使用玩家账号或生产档，不直接操作数据库。
+6. 邀请 Beta → 5% → 25% → 100% 灰度，观察崩溃率、保存失败、恢复失败、差分和性能分布；任何异常只关闭原生能力，不回写或降级玩家 GameState。
+
+只有外部门禁全部通过，冻结构建才可以生成 `authorityEligible=true` 的正式证明。代码审计、测试 override、开发环境变量或 UI 开关均不得代替该证明。
+
+### 25.8 固定进度报告方式
+
+后续每次汇报同时给两组数字，永不混用：
+
+- **总体能力进度**：以本节建立时的 `93%` 为基线，只在 25.3 的工作包完整达到完成判据后上调；不会因拆细任务下调。
+- **剩余战役进度**：`已完成单位 / 100`。一个工作包只有代码、focused 回归和文档都闭合才计入全部单位；“写了一半”可以文字说明，但不虚报完成单位。
+- **发布成熟度**：保持独立 60% 基线，只有 25.6 的本机集中门禁和 25.7 的外部证据逐项完成才上调。代码行数、按钮数量和单项微基准不改变发布成熟度。
+
+本节计划冻结后，下一次开发从 BASE-500 和 AUTH-510 开始，连续推进至 F 波次代码冻结；在此之前不再临时插入新的“下一小块”或重复完整测试。若用户新增需求，必须明确说明它增加多少剩余单位并获得同意后才改变分母。

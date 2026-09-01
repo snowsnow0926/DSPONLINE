@@ -9,11 +9,15 @@ describe("native command palette entity-search App integration", () => {
     "utf8",
   );
 
-  it("binds native search to the active session, revision, fingerprint and selector", () => {
-    expect(app).toMatch(/selectNativeCommandPaletteEntitySearchReadModel\([\s\S]*?enabled: Boolean\(nativePlayerAuthorityActiveFrame\)[\s\S]*?expectedRevision: factoryThinViewExpectedRevision[\s\S]*?expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint[\s\S]*?selector: commandPaletteEntitySearchSelector/);
+  it("binds native search to the display/read authority frames and exact selector", () => {
+    expect(app).toMatch(/nativeCommandPaletteEntitySearchIdentity = useMemo<NativeCommandPaletteEntitySearchIdentity \| null>[\s\S]*?nativeThinWorkspaceAuthorityFrames\.displayFrame/);
+    expect(app).toMatch(/nativeCommandPaletteEntitySearchReadIdentity = useMemo<NativeCommandPaletteEntitySearchIdentity \| null>[\s\S]*?nativeThinWorkspaceAuthorityFrames\.readFrame/);
+    expect(app).toMatch(/selectNativeCommandPaletteEntitySearchFrame\([\s\S]*?nativeCommandPaletteEntitySearchIdentity,[\s\S]*?commandPaletteEntitySearchSelector/);
+    expect(app).toMatch(/selectNativeCommandPaletteEntitySearchReadModel\([\s\S]*?enabled: Boolean\(nativeCommandPaletteEntitySearchIdentity\)[\s\S]*?runId: nativeCommandPaletteEntitySearchIdentity\?\.runId[\s\S]*?expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint[\s\S]*?selector: commandPaletteEntitySearchSelector/);
     expect(app).toMatch(/createCommandPaletteEntitySearchSelector\([\s\S]*?commandPaletteEntitySearchRequest\.cursor[\s\S]*?recipeWorkspaceRegistryFingerprint[\s\S]*?\],/);
-    expect(app).toMatch(/!commandPaletteOpen \|\| !nativePlayerAuthorityBoundFrame[\s\S]*?nativeCommandPaletteEntitySearchStore\.clear\(\)/);
-    expect(app).toMatch(/nativeCommandPaletteEntitySearchStore\.refresh\([\s\S]*?factoryThinViewExpectedRevision[\s\S]*?recipeWorkspaceRegistryFingerprint[\s\S]*?commandPaletteEntitySearchSelector/);
+    expect(app).toMatch(/!commandPaletteOpen \|\| !nativeCommandPaletteEntitySearchIdentity[\s\S]*?nativeCommandPaletteEntitySearchStore\.clear\(\)/);
+    expect(app).toMatch(/if \(!nativeCommandPaletteEntitySearchReadIdentity \|\| !nativeCommandPaletteEntitySearchSource\) return;/);
+    expect(app).toMatch(/nativeCommandPaletteEntitySearchStore\.refresh\([\s\S]*?nativeCommandPaletteEntitySearchSource,[\s\S]*?nativeCommandPaletteEntitySearchReadIdentity,[\s\S]*?commandPaletteEntitySearchSelector/);
     expect(app).toMatch(/entitySearchMode=\{nativePlayerAuthorityBoundFrame \? "native" : "web"\}[\s\S]*?nativeEntitySearch=\{nativeCommandPaletteEntitySearchReadModel\}/);
   });
 

@@ -99,6 +99,7 @@ describe("accessible workspace dialogs", () => {
       schema: "command-palette-entity-search-read-model-v1" as const,
       source: "native-core" as const,
       sessionId: "authority-1",
+      runId: "run-1",
       revision: 12,
       registryFingerprint: "builtin:test",
       query: "熔炉",
@@ -137,6 +138,7 @@ describe("accessible workspace dialogs", () => {
       .find((button) => button.textContent?.includes("native-entity-1"))!);
     expect(onFocusEntity).toHaveBeenCalledWith("native-entity-1", {
       sessionId: "authority-1",
+      runId: "run-1",
       revision: 12,
       registryFingerprint: "builtin:test",
       planetId: "home",

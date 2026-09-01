@@ -9,13 +9,13 @@ describe("native factory inventory App integration", () => {
 
   it("binds every page to the exact main-owned session, run, revision, and registry", () => {
     expect(app).toMatch(/new NativeFactoryInventoryStore\(\)/);
-    expect(app).toMatch(/sessionId: nativePlayerAuthorityActiveFrame\.sessionId|const sessionId = nativePlayerAuthorityActiveFrame\?\.sessionId/);
-    expect(app).toMatch(/const runId = nativePlayerAuthorityActiveFrame\?\.runId/);
-    expect(app).toMatch(/revision: factoryThinViewExpectedRevision/);
+    expect(app).toMatch(/nativeFactoryInventoryIdentity = useMemo<NativeFactoryInventoryIdentity \| null>[\s\S]*?nativeThinWorkspaceAuthorityFrames\.displayFrame[\s\S]*?sessionId: frame\.sessionId,[\s\S]*?runId: frame\.runId,[\s\S]*?revision: frame\.revision/);
+    expect(app).toMatch(/nativeFactoryInventoryReadIdentity = useMemo<NativeFactoryInventoryIdentity \| null>[\s\S]*?nativeThinWorkspaceAuthorityFrames\.readFrame/);
     expect(app).toMatch(/registryFingerprint: recipeWorkspaceRegistryFingerprint/);
-    expect(app).toMatch(/createNativePlayerAuthorityFactoryInventorySource\(desktopBridge, nativeFactoryInventoryIdentity\)/);
-    expect(app).toMatch(/nativeFactoryInventoryStore\.refresh\([\s\S]*?nativeFactoryInventorySource,[\s\S]*?nativeFactoryInventoryIdentity/);
+    expect(app).toMatch(/createNativePlayerAuthorityFactoryInventorySource\(desktopBridge, nativeFactoryInventoryReadIdentity\)/);
+    expect(app).toMatch(/nativeFactoryInventoryStore\.refresh\([\s\S]*?nativeFactoryInventorySource,[\s\S]*?nativeFactoryInventoryReadIdentity/);
     expect(app).toMatch(/selectNativeFactoryInventoryFrame\(nativeFactoryInventorySnapshot, nativeFactoryInventoryIdentity\)/);
+    expect(app).toMatch(/if \(!nativePlayerAuthorityOwnsRuntime \|\| !nativeFactoryInventoryIdentity\) \{[\s\S]*?nativeFactoryInventoryStore\.clear\(\)[\s\S]*?if \(!nativeFactoryInventoryReadIdentity \|\| !nativeFactoryInventorySource\) return;/);
   });
 
   it("uses only projected rows and typed Rust-validated commands", () => {
@@ -45,7 +45,8 @@ describe("native factory inventory App integration", () => {
   it("makes the rail read-only while a command or projection is unsettled", () => {
     expect(app).toMatch(/nativePlayerAuthorityCommandInFlightRef\.current = true;[\s\S]*?setNativePlayerAuthorityCommandPending\(true\)/);
     expect(app).toMatch(/nativePlayerAuthorityCommandInFlightRef\.current = false;[\s\S]*?setNativePlayerAuthorityCommandPending\(false\)/);
-    expect(app).toMatch(/pending=\{nativePlayerAuthorityCommandPending \|\| !nativePlayerAuthorityCommandSource\}/);
+    expect(app).toMatch(/pending=\{nativePlayerAuthorityCommandPending \|\| !nativePlayerAuthorityCommandSource \|\|[\s\S]*?!nativeFactoryInventoryWritesEnabled\}/);
+    expect(app).toMatch(/nativeFactoryInventoryWritesEnabled = nativeInventoryLineageCurrent &&[\s\S]*?nativeFactoryInventoryFrame\?\.revision === nativeFactoryInventoryReadIdentity\?\.revision/);
     expect(app).toMatch(/nativeEntityInventoryProjectionBinding !== null[\s\S]*?!nativePlayerAuthorityCommandPending/);
     expect(rail).toMatch(/const disabled = pending \|\| !frame/);
     expect(rail).toMatch(/disabled=\{disabled \|\| pickDisabled && !canDragToEntity\}/);

@@ -196,7 +196,7 @@ describe("NativeBlueprintWorkspaceStore", () => {
 
     await expect(store.refresh(sourceValue, IDENTITY, library[34].id, 32, 0)).resolves.toBe("committed");
 
-    const frame = selectNativeBlueprintWorkspaceFrame(store.getSnapshot(), IDENTITY);
+    const frame = selectNativeBlueprintWorkspaceFrame(store.getSnapshot(), IDENTITY, library[34].id, 32, 0);
     expect(frame?.library.map((row) => row.id)).toEqual(library.slice(32).map((row) => row.id));
     expect(frame?.libraryPage).toEqual({ cursor: 32, totalCount: 35, nextCursor: null });
     expect(frame?.queue.map((row) => row.id)).toEqual(["queue-later", "queue-earlier"]);
@@ -223,7 +223,7 @@ describe("NativeBlueprintWorkspaceStore", () => {
       IDENTITY,
       null,
     )).resolves.toBe("committed");
-    const frame = selectNativeBlueprintWorkspaceFrame(store.getSnapshot(), IDENTITY);
+    const frame = selectNativeBlueprintWorkspaceFrame(store.getSnapshot(), IDENTITY, null, 0, 0);
     const binding = selectNativeConstructionQueueDeployBinding(frame, ready.id);
     expect(binding).toMatchObject({
       queueEntryId: "construction_7",
@@ -374,6 +374,68 @@ describe("NativeBlueprintWorkspaceStore", () => {
     });
   });
 
+  it("retains only a same-lineage same-selector frame read-only while R+1 settles", async () => {
+    const selected = summary("bp-stable");
+    const store = new NativeBlueprintWorkspaceStore();
+    await expect(store.refresh(fixtureSource(IDENTITY, [selected], []), IDENTITY, selected.id, 0, 0))
+      .resolves.toBe("committed");
+    const nextIdentity = { ...IDENTITY, revision: 18 };
+    const pendingLibrary = deferred<DesktopNativeCoreBlueprintWorkspaceResult | null>();
+    const nextBase = fixtureSource(nextIdentity, [selected], []);
+    const nextSource: NativeBlueprintWorkspaceSource = {
+      ...nextBase,
+      readVerifiedBlueprintPage: (section, blueprintId, cursor) => section === "library"
+        ? pendingLibrary.promise
+        : nextBase.readVerifiedBlueprintPage(section, blueprintId, cursor),
+    };
+    const pending = store.refresh(nextSource, nextIdentity, selected.id, 0, 0);
+
+    expect(selectNativeBlueprintWorkspaceFrame(
+      store.getSnapshot(),
+      nextIdentity,
+      selected.id,
+      0,
+      0,
+    )?.revision).toBe(IDENTITY.revision);
+    expect(selectNativeBlueprintWorkspaceFrame(
+      store.getSnapshot(),
+      nextIdentity,
+      null,
+      0,
+      0,
+    )).toBeNull();
+    expect(selectNativeBlueprintWorkspaceFrame(
+      store.getSnapshot(),
+      nextIdentity,
+      selected.id,
+      32,
+      0,
+    )).toBeNull();
+    for (const changedIdentity of [
+      { ...nextIdentity, runId: "authority-run-other" },
+      { ...nextIdentity, registryFingerprint: "builtin:other" },
+      { ...nextIdentity, revision: IDENTITY.revision - 1 },
+    ]) {
+      expect(selectNativeBlueprintWorkspaceFrame(
+        store.getSnapshot(),
+        changedIdentity,
+        selected.id,
+        0,
+        0,
+      )).toBeNull();
+    }
+
+    pendingLibrary.resolve(null);
+    await expect(pending).resolves.toBe("unavailable");
+    expect(selectNativeBlueprintWorkspaceFrame(
+      store.getSnapshot(),
+      nextIdentity,
+      selected.id,
+      0,
+      0,
+    )?.revision).toBe(IDENTITY.revision);
+  });
+
   it("keeps 4096+4096 active-revision frames to at most three IPC reads and two bounded pages", async () => {
     const store = new NativeBlueprintWorkspaceStore();
     for (let revision = 18; revision <= 22; revision += 1) {
@@ -426,6 +488,7 @@ describe("NativeBlueprintWorkspaceStore", () => {
     await expect(sourceValue?.readVerifiedBlueprintPage("library", null, 0)).resolves.toEqual(valid);
     expect(reader).toHaveBeenCalledWith({
       sessionId: IDENTITY.sessionId,
+      runId: IDENTITY.runId,
       expectedRevision: IDENTITY.revision,
       expectedRegistryFingerprint: IDENTITY.registryFingerprint,
       section: "library",
@@ -464,6 +527,7 @@ describe("NativeBlueprintWorkspaceStore", () => {
     });
     expect(reader).toHaveBeenCalledWith({
       sessionId: IDENTITY.sessionId,
+      runId: IDENTITY.runId,
       expectedRevision: IDENTITY.revision,
       expectedRegistryFingerprint: IDENTITY.registryFingerprint,
       section: "queue-membership",
@@ -503,6 +567,7 @@ describe("NativeBlueprintWorkspaceStore", () => {
     });
     expect(reader).toHaveBeenCalledWith({
       sessionId: IDENTITY.sessionId,
+      runId: IDENTITY.runId,
       expectedRevision: IDENTITY.revision,
       expectedRegistryFingerprint: IDENTITY.registryFingerprint,
       section: "library-membership",

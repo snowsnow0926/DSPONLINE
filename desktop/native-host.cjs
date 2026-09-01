@@ -1209,10 +1209,14 @@ class NativeCoreSessionRegistry {
 
   factoryInventoryProjection(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
-    exactObjectKeys(request, [
-      "sessionId", "expectedRevision", "cursor", "limit",
-    ], "native factory inventory projection request");
-    if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+    const hasRunId = Object.hasOwn(request ?? {}, "runId");
+    const hasRegistry = Object.hasOwn(request ?? {}, "expectedRegistryFingerprint");
+    exactObjectKeys(request, hasRunId ? [
+      "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint", "cursor", "limit",
+    ] : ["sessionId", "expectedRevision", "cursor", "limit"], "native factory inventory projection request");
+    if (hasRunId !== hasRegistry || hasRunId &&
+        (!validLogicalId(request.runId, 128) || !validLogicalId(request.expectedRegistryFingerprint, 256)) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
       !Number.isSafeInteger(request.cursor) || request.cursor < 0 ||
       !Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 256) {
       throw new TypeError("native factory inventory projection request is invalid");
@@ -1228,10 +1232,14 @@ class NativeCoreSessionRegistry {
 
   constructionInventoryProjection(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
-    exactObjectKeys(request, [
+    const hasRunId = Object.hasOwn(request ?? {}, "runId");
+    exactObjectKeys(request, hasRunId ? [
+      "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint", "cursor", "limit",
+    ] : [
       "sessionId", "expectedRevision", "expectedRegistryFingerprint", "cursor", "limit",
     ], "native construction inventory projection request");
-    if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+    if (hasRunId && !validLogicalId(request.runId, 128) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
       !validLogicalId(request.expectedRegistryFingerprint, 256) ||
       !Number.isSafeInteger(request.cursor) || request.cursor < 0 ||
       !Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 256) {
@@ -1249,11 +1257,13 @@ class NativeCoreSessionRegistry {
 
   blueprintWorkspaceProjection(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
+    const hasRunId = Object.hasOwn(request ?? {}, "runId");
     exactObjectKeys(request, [
-      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "section",
+      "sessionId", ...(hasRunId ? ["runId"] : []), "expectedRevision", "expectedRegistryFingerprint", "section",
       "blueprintId", "queueEntryId", "cursor", "limit",
     ], "native blueprint workspace projection request");
-    if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+    if (hasRunId && !validLogicalId(request.runId, 128) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
       !validLogicalId(request.expectedRegistryFingerprint, 256) ||
       !["library", "detail", "queue", "queue-membership", "library-membership"].includes(request.section) ||
       request.blueprintId !== null && !validBlueprintWorkspaceId(request.blueprintId) ||
@@ -1633,10 +1643,11 @@ class NativeCoreSessionRegistry {
   starMapOverviewProjection(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     const allowedKeys = new Set([
-      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "cursor", "limit",
+      "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint", "cursor", "limit",
     ]);
     if (!request || typeof request !== "object" || Array.isArray(request) ||
       Reflect.ownKeys(request).some((key) => typeof key !== "string" || !allowedKeys.has(key)) ||
+      Object.hasOwn(request, "runId") && !validLogicalId(request.runId, 128) ||
       !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
       !validLogicalId(request.expectedRegistryFingerprint, 256) ||
       !Number.isSafeInteger(request.cursor) || request.cursor < 0 || request.cursor > 0xffff_ffff ||
@@ -1661,11 +1672,12 @@ class NativeCoreSessionRegistry {
   starMapCatalogProjection(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     const allowedKeys = new Set([
-      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "systemCursor",
+      "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint", "systemCursor",
       "systemLimit", "planetCursor", "planetLimit",
     ]);
     if (!request || typeof request !== "object" || Array.isArray(request) ||
       Reflect.ownKeys(request).some((key) => typeof key !== "string" || !allowedKeys.has(key)) ||
+      Object.hasOwn(request, "runId") && !validLogicalId(request.runId, 128) ||
       !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
       !validLogicalId(request.expectedRegistryFingerprint, 256) ||
       !Number.isSafeInteger(request.systemCursor) || request.systemCursor < 0 ||
@@ -1697,12 +1709,13 @@ class NativeCoreSessionRegistry {
   stellarIndustryProjection(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     const allowedKeys = new Set([
-      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "systemId", "planetId",
+      "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint", "systemId", "planetId",
       "planetCursor", "planetLimit", "stationCursor", "stationLimit",
     ]);
     const validOptionalId = (value) => value === null || validOpaqueId(value);
     if (!request || typeof request !== "object" || Array.isArray(request) ||
       Reflect.ownKeys(request).some((key) => typeof key !== "string" || !allowedKeys.has(key)) ||
+      Object.hasOwn(request, "runId") && !validLogicalId(request.runId, 128) ||
       !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
       !validLogicalId(request.expectedRegistryFingerprint, 256) ||
       !validOptionalId(request.systemId) || !validOptionalId(request.planetId) ||
@@ -1737,13 +1750,14 @@ class NativeCoreSessionRegistry {
   stellarIndustryProjectionV2(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     const allowedKeys = new Set([
-      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "systemId", "planetId",
+      "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint", "systemId", "planetId",
       "planetCursor", "planetLimit", "stationCursor", "stationLimit", "routeCursor",
       "routeLimit", "routeFilter", "query",
     ]);
     const validOptionalId = (value) => value === null || validOpaqueId(value);
     if (!request || typeof request !== "object" || Array.isArray(request) ||
       Reflect.ownKeys(request).some((key) => typeof key !== "string" || !allowedKeys.has(key)) ||
+      Object.hasOwn(request, "runId") && !validLogicalId(request.runId, 128) ||
       !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
       !validLogicalId(request.expectedRegistryFingerprint, 256) ||
       !validOptionalId(request.systemId) || !validOptionalId(request.planetId) ||
@@ -1789,11 +1803,12 @@ class NativeCoreSessionRegistry {
   stellarQuantumProjection(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     const allowedKeys = new Set([
-      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "itemCursor", "itemLimit",
+      "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint", "itemCursor", "itemLimit",
       "collectorCursor", "collectorLimit",
     ]);
     if (!request || typeof request !== "object" || Array.isArray(request) ||
       Reflect.ownKeys(request).some((key) => typeof key !== "string" || !allowedKeys.has(key)) ||
+      Object.hasOwn(request, "runId") && !validLogicalId(request.runId, 128) ||
       !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
       !validLogicalId(request.expectedRegistryFingerprint, 256) ||
       !Number.isSafeInteger(request.itemCursor) || request.itemCursor < 0 ||
@@ -2048,7 +2063,7 @@ class NativeCoreSessionRegistry {
   commandPaletteEntitySearchProjection(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     const allowedKeys = new Set([
-      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "query", "cursor",
+      "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint", "query", "cursor",
       "limit", "buildingIds", "resourceIds", "planetIds",
     ]);
     const buildingIds = request?.buildingIds ?? [];
@@ -2059,6 +2074,7 @@ class NativeCoreSessionRegistry {
       values.every((id, index) => validLogicalId(id, 160) && (index === 0 || values[index - 1] < id));
     if (!request || typeof request !== "object" || Array.isArray(request) ||
       Reflect.ownKeys(request).some((key) => typeof key !== "string" || !allowedKeys.has(key)) ||
+      Object.hasOwn(request, "runId") && !validLogicalId(request.runId, 128) ||
       !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
       !validLogicalId(request.expectedRegistryFingerprint, 256) ||
       typeof request.query !== "string" || request.query.length < 2 ||

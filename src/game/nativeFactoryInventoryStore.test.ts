@@ -108,6 +108,38 @@ describe("NativeFactoryInventoryStore", () => {
     expect(reads).toBe(1);
   });
 
+  it("retains only a same-lineage older frame for read-only display while R+1 settles", async () => {
+    const store = new NativeFactoryInventoryStore();
+    await expect(store.refresh(source(async () => page(0, ["iron_ore"], 1)), IDENTITY))
+      .resolves.toBe("committed");
+    const nextIdentity = { ...IDENTITY, revision: 18 };
+    const pendingPage = deferred<NativeFactoryInventoryProjection | null>();
+    const pending = store.refresh({
+      boundIdentity: nextIdentity,
+      readVerifiedFactoryInventory: () => pendingPage.promise,
+    }, nextIdentity);
+
+    expect(selectNativeFactoryInventoryFrame(store.getSnapshot(), nextIdentity)?.revision)
+      .toBe(IDENTITY.revision);
+    expect(selectNativeFactoryInventoryFrame(store.getSnapshot(), {
+      ...nextIdentity,
+      runId: "authority-run-other",
+    })).toBeNull();
+    expect(selectNativeFactoryInventoryFrame(store.getSnapshot(), {
+      ...nextIdentity,
+      registryFingerprint: "builtin:other",
+    })).toBeNull();
+    expect(selectNativeFactoryInventoryFrame(store.getSnapshot(), {
+      ...nextIdentity,
+      revision: IDENTITY.revision - 1,
+    })).toBeNull();
+
+    pendingPage.resolve(null);
+    await expect(pending).resolves.toBe("unavailable");
+    expect(selectNativeFactoryInventoryFrame(store.getSnapshot(), nextIdentity)?.revision)
+      .toBe(IDENTITY.revision);
+  });
+
   it("discards every page when a later header drifts", async () => {
     const itemIds = inventoryIds(257);
     const pages = [

@@ -12,24 +12,30 @@ describe("native stellar workspace App integration", () => {
   it("selects the complete v2 workspace model for the exact authority identity and selector", () => {
     expect(app).toMatch(/selectNativeStarMapWorkspaceReadModel\([\s\S]*?nativeStellarWorkspaceSnapshot,[\s\S]*?nativeStellarProjectionIdentity,[\s\S]*?nativeStellarIndustrySelector/);
     expect(app).toMatch(/nativeStellarIndustrySelector = useMemo<NativeStellarIndustrySelector>[\s\S]*?planetCursor: 0,[\s\S]*?stationCursor: 0,[\s\S]*?routeCursor: 0,[\s\S]*?routeFilter/);
-    expect(app).toMatch(/createNativePlayerAuthorityStellarProjectionSource\(desktopBridge, nativeStellarProjectionIdentity\)/);
+    expect(app).toMatch(/nativeStellarProjectionIdentity = useMemo\([\s\S]*?nativeThinWorkspaceAuthorityFrames\.displayFrame/);
+    expect(app).toMatch(/nativeStellarProjectionReadIdentity = useMemo\([\s\S]*?nativeThinWorkspaceAuthorityFrames\.readFrame/);
+    expect(app).toMatch(/createNativePlayerAuthorityStellarProjectionSource\(desktopBridge, nativeStellarProjectionReadIdentity\)/);
     expect(app).not.toMatch(/const nativeStarMapOverviewProjection = useMemo/);
     expect(app).not.toMatch(/const nativeStellarIndustryProjection = useMemo/);
     expect(app).toMatch(/selectNativePlayerAuthorityStellarQuantumReadModel\([\s\S]*?nativeStellarWorkspaceSnapshot,[\s\S]*?nativeStellarProjectionIdentity,[\s\S]*?DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR/);
     expect(app).toMatch(/selectNativeStarMapCatalogFrame\(nativeStarMapCatalogSnapshot, nativeStellarProjectionIdentity\)/);
-    expect(app).toMatch(/createNativePlayerAuthorityStarMapCatalogSource\(desktopBridge, nativeStellarProjectionIdentity\)/);
+    expect(app).toMatch(/createNativePlayerAuthorityStarMapCatalogSource\(desktopBridge, nativeStellarProjectionReadIdentity\)/);
+    expect(app).toMatch(/nativeStarMapWritesEnabled = nativeStellarLineageCurrent &&[\s\S]*?nativeStarMapWorkspaceReadModel\?\.revision === nativeStellarProjectionReadIdentity\?\.revision/);
+    expect(app).toMatch(/nativeStellarQuantumWritesEnabled = nativeStellarLineageCurrent &&[\s\S]*?nativeStellarQuantumReadModel\?\.revision === nativeStellarProjectionReadIdentity\?\.revision/);
   });
 
   it("refreshes overview independently and makes scope, filter, and query latest-only through the store", () => {
-    expect(app).toMatch(/refreshOverview\([\s\S]*?nativeStellarProjectionIdentity,[\s\S]*?cursor: 0, limit: NATIVE_STELLAR_PAGE_ROWS/);
-    expect(app).toMatch(/refreshIndustry\([\s\S]*?nativeStellarProjectionIdentity,[\s\S]*?nativeStellarIndustrySelector/);
-    expect(app).toMatch(/nativeStellarIndustrySelector,[\s\S]*?nativeStellarProjectionIdentity,[\s\S]*?nativeStellarProjectionSource,[\s\S]*?nativeStellarWorkspaceStore,[\s\S]*?starMapOpen/);
+    expect(app).toMatch(/refreshOverview\([\s\S]*?nativeStellarProjectionReadIdentity,[\s\S]*?cursor: 0, limit: NATIVE_STELLAR_PAGE_ROWS/);
+    expect(app).toMatch(/refreshIndustry\([\s\S]*?nativeStellarProjectionReadIdentity,[\s\S]*?nativeStellarIndustrySelector/);
+    expect(app).toMatch(/nativeStellarIndustrySelector,[\s\S]*?nativeStellarProjectionIdentity,[\s\S]*?nativeStellarProjectionReadIdentity,[\s\S]*?nativeStellarProjectionSource,[\s\S]*?nativeStellarWorkspaceStore,[\s\S]*?starMapOpen/);
     expect(workspace).toMatch(/星际工业恒星系筛选/);
     expect(workspace).toMatch(/星际工业行星筛选/);
     expect(workspace).toMatch(/routeFilter: "issues"/);
     expect(workspace).toMatch(/query: clampNativeRouteQuery\(query\)/);
-    expect(app).toMatch(/refreshQuantum\([\s\S]*?nativeStellarProjectionSource,[\s\S]*?nativeStellarProjectionIdentity,[\s\S]*?DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR/);
-    expect(app).toMatch(/nativeStarMapCatalogStore\.refresh\([\s\S]*?nativeStarMapCatalogSource,[\s\S]*?nativeStellarProjectionIdentity/);
+    expect(app).toMatch(/refreshQuantum\([\s\S]*?nativeStellarProjectionSource,[\s\S]*?nativeStellarProjectionReadIdentity,[\s\S]*?DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR/);
+    expect(app).toMatch(/nativeStarMapCatalogStore\.refresh\([\s\S]*?nativeStarMapCatalogSource,[\s\S]*?nativeStellarProjectionReadIdentity/);
+    expect(app).toMatch(/if \(!nativeStellarProjectionReadIdentity \|\| !nativeStarMapCatalogSource\) return;/);
+    expect(app).toMatch(/!nativeStellarProjectionIdentity \|\|[\s\S]*?!nativeStellarProjectionReadIdentity \|\| !nativeStellarProjectionSource\) return;/);
   });
 
   it("passes only the selector-checked read model and fails closed for player authority", () => {

@@ -149,6 +149,7 @@ function OpenCommandPalette({
               icon: <Focus size={16} />,
               run: () => run(() => onFocusEntity(row.entityId, {
                 sessionId: nativeEntitySearch.sessionId,
+                runId: nativeEntitySearch.runId,
                 revision: nativeEntitySearch.revision,
                 registryFingerprint: nativeEntitySearch.registryFingerprint,
                 planetId: row.planetId,

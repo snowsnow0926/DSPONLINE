@@ -181,6 +181,12 @@ export interface NativeBlueprintWorkspaceSource {
 export interface NativeBlueprintWorkspaceFrame extends NativeBlueprintWorkspaceIdentity {
   readonly source: "native-core";
   readonly readOnly: true;
+  /** UI selector that produced this frame; never used as an authority write proof. */
+  readonly requestedSelector?: Readonly<{
+    readonly selectedBlueprintId: string | null;
+    readonly libraryCursor: number;
+    readonly queueCursor: number;
+  }>;
   readonly selectedBlueprintId: string | null;
   readonly library: readonly DesktopNativeCoreBlueprintSummary[];
   readonly libraryPage: NativeBlueprintWorkspacePage;
@@ -244,8 +250,15 @@ function sameIdentity(
   left: NativeBlueprintWorkspaceIdentity,
   right: NativeBlueprintWorkspaceIdentity,
 ): boolean {
+  return sameScope(left, right) && left.revision === right.revision;
+}
+
+function sameScope(
+  left: NativeBlueprintWorkspaceIdentity,
+  right: NativeBlueprintWorkspaceIdentity,
+): boolean {
   return left.sessionId === right.sessionId && left.runId === right.runId &&
-    left.revision === right.revision && left.registryFingerprint === right.registryFingerprint;
+    left.registryFingerprint === right.registryFingerprint;
 }
 
 function identityKey(
@@ -447,6 +460,7 @@ export function createNativePlayerAuthorityBlueprintWorkspaceSource(
       try {
         const page = await reader({
           sessionId: boundIdentity.sessionId,
+          runId: boundIdentity.runId,
           expectedRevision: boundIdentity.revision,
           expectedRegistryFingerprint: boundIdentity.registryFingerprint,
           section,
@@ -465,6 +479,7 @@ export function createNativePlayerAuthorityBlueprintWorkspaceSource(
       try {
         const page = await reader({
           sessionId: boundIdentity.sessionId,
+          runId: boundIdentity.runId,
           expectedRevision: boundIdentity.revision,
           expectedRegistryFingerprint: boundIdentity.registryFingerprint,
           section: "queue-membership",
@@ -495,6 +510,7 @@ export function createNativePlayerAuthorityBlueprintWorkspaceSource(
       try {
         const page = await reader({
           sessionId: boundIdentity.sessionId,
+          runId: boundIdentity.runId,
           expectedRevision: boundIdentity.revision,
           expectedRegistryFingerprint: boundIdentity.registryFingerprint,
           section: "library-membership",
@@ -526,9 +542,19 @@ export function createNativePlayerAuthorityBlueprintWorkspaceSource(
 export function selectNativeBlueprintWorkspaceFrame(
   snapshot: NativeBlueprintWorkspaceSnapshot,
   identity: NativeBlueprintWorkspaceIdentity,
+  selectedBlueprintId: string | null,
+  libraryCursor: number,
+  queueCursor: number,
 ): NativeBlueprintWorkspaceFrame | null {
-  return snapshot.status === "ready" && snapshot.frame && sameIdentity(snapshot.frame, identity)
-    ? snapshot.frame
+  const frame = snapshot.frame;
+  if (!frame || !sameScope(frame, identity) || frame.revision > identity.revision ||
+      snapshot.requestedRevision !== null && identity.revision < snapshot.requestedRevision ||
+      frame.requestedSelector?.selectedBlueprintId !== selectedBlueprintId ||
+      frame.requestedSelector.libraryCursor !== libraryCursor ||
+      frame.requestedSelector.queueCursor !== queueCursor) return null;
+  if (snapshot.status === "ready" && sameIdentity(frame, identity)) return frame;
+  return snapshot.status === "ready" || snapshot.status === "loading" || snapshot.status === "unavailable"
+    ? frame
     : null;
 }
 
@@ -937,17 +963,19 @@ export class NativeBlueprintWorkspaceStore {
       return Promise.resolve("unavailable");
     }
     const key = identityKey(identity, selectedBlueprintId, libraryCursor, queueCursor);
-    const keyChanged = this.currentKey !== key;
-    if (keyChanged) {
-      this.token += 1;
-      this.flight = null;
-      this.currentKey = key;
-    }
     if (this.flight?.key === key) return this.flight.promise;
-    if (!keyChanged && this.snapshot.status === "ready" && this.snapshot.frame &&
+    if (this.currentKey === key && this.snapshot.status === "ready" && this.snapshot.frame &&
         sameIdentity(this.snapshot.frame, identity)) return Promise.resolve("committed");
     const token = ++this.token;
-    const previous = this.snapshot.frame;
+    this.currentKey = key;
+    const previous = this.snapshot.frame && sameScope(this.snapshot.frame, identity) &&
+        this.snapshot.frame.revision <= identity.revision &&
+        identity.revision >= (this.snapshot.requestedRevision ?? this.snapshot.frame.revision) &&
+        this.snapshot.frame.requestedSelector?.selectedBlueprintId === selectedBlueprintId &&
+        this.snapshot.frame.requestedSelector.libraryCursor === libraryCursor &&
+        this.snapshot.frame.requestedSelector.queueCursor === queueCursor
+      ? this.snapshot.frame
+      : null;
     this.publish(Object.freeze({ status: "loading", requestedRevision: identity.revision, frame: previous }));
     const promise = this.performRefresh(
       source,
@@ -1025,6 +1053,11 @@ export class NativeBlueprintWorkspaceStore {
       source: "native-core" as const,
       readOnly: true as const,
       ...identity,
+      requestedSelector: Object.freeze({
+        selectedBlueprintId: requestedSelection,
+        libraryCursor,
+        queueCursor,
+      }),
       selectedBlueprintId,
       library: Object.freeze([...library]),
       libraryPage: Object.freeze({

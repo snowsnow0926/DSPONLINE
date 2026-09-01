@@ -746,6 +746,98 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
   });
 });
 
+test("authority workspace run lineage is validated at the host boundary and never forwarded into Rust schemas", async () => {
+  const catalog = {
+    protocolVersion: 1,
+    registryFingerprint: "builtin:test",
+    items: [{ id: "iron_ore", kind: "solid" }],
+    buildings: [{ id: "mining_machine", kind: "miner", speed: 1, inputCapacity: 0, outputCapacity: 50, powerDemandKw: 1, powerGenerationKw: 0 }],
+    recipes: [],
+    belts: [{ tier: 1, speed: 6 }],
+  };
+  const calls = [];
+  const client = { async request(request) {
+    calls.push(request);
+    if (request.operation === "coreOpen") return { sessionId: "core-lineage", authority: "shadow", summary: {} };
+    return { revision: 2 };
+  } };
+  const registry = new NativeCoreSessionRegistry(client);
+  await registry.open(7, {
+    slot: "normal-main",
+    generation: 1,
+    rootHash: "a".repeat(64),
+    revision: 1,
+    registryFingerprint: "builtin:test",
+    catalog,
+  });
+  const base = {
+    sessionId: "core-lineage",
+    runId: "run-lineage-1",
+    expectedRevision: 2,
+    expectedRegistryFingerprint: "builtin:test",
+  };
+  await registry.factoryInventoryProjection(7, { ...base, cursor: 0, limit: 256 });
+  await registry.constructionInventoryProjection(7, { ...base, cursor: 0, limit: 256 });
+  await registry.blueprintWorkspaceProjection(7, {
+    ...base,
+    section: "library",
+    blueprintId: null,
+    queueEntryId: null,
+    cursor: 0,
+    limit: 32,
+  });
+  await registry.starMapOverviewProjection(7, { ...base, cursor: 0, limit: 64 });
+  await registry.stellarIndustryProjectionV2(7, {
+    ...base,
+    systemId: null,
+    planetId: null,
+    planetCursor: 0,
+    planetLimit: 64,
+    stationCursor: 0,
+    stationLimit: 64,
+    routeCursor: 0,
+    routeLimit: 64,
+    routeFilter: "all",
+    query: "",
+  });
+  await registry.stellarQuantumProjection(7, {
+    ...base,
+    itemCursor: 0,
+    itemLimit: 64,
+    collectorCursor: 0,
+    collectorLimit: 64,
+  });
+  await registry.commandPaletteEntitySearchProjection(7, {
+    ...base,
+    query: "熔炉",
+    cursor: 0,
+    limit: 16,
+    buildingIds: ["mining_machine"],
+    resourceIds: ["iron_ore"],
+    planetIds: [],
+  });
+  for (const request of calls.slice(1)) {
+    assert.equal(Object.hasOwn(request, "runId"), false);
+  }
+  assert.throws(() => registry.factoryInventoryProjection(7, {
+    sessionId: "core-lineage",
+    runId: "run-lineage-1",
+    expectedRevision: 2,
+    cursor: 0,
+    limit: 256,
+  }), /factory inventory projection request is invalid/);
+  assert.throws(() => registry.commandPaletteEntitySearchProjection(7, {
+    ...base,
+    runId: "bad run",
+    query: "熔炉",
+    cursor: 0,
+    limit: 16,
+    buildingIds: [],
+    resourceIds: [],
+    planetIds: [],
+  }), /command palette entity-search request is invalid/);
+});
+
 test("statistics projection accepts the exact host window bound with player-authority lineage metadata", async () => {
   const calls = [];
   const client = { request(request) {

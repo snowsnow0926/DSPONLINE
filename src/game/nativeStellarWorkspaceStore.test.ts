@@ -37,6 +37,7 @@ import {
 
 const IDENTITY: NativeStellarProjectionIdentity = Object.freeze({
   sessionId: "authority-session-1",
+  runId: "authority-run-1",
   revision: 17,
   registryFingerprint: "registry-fingerprint-1",
 });
@@ -550,6 +551,7 @@ describe("native stellar workspace projection sources", () => {
     )).resolves.toEqual(industryV2(INDUSTRY_SELECTOR));
     expect(getIndustryV2).toHaveBeenCalledWith({
       sessionId: IDENTITY.sessionId,
+      runId: IDENTITY.runId,
       expectedRevision: IDENTITY.revision,
       expectedRegistryFingerprint: IDENTITY.registryFingerprint,
       ...INDUSTRY_SELECTOR,
@@ -580,6 +582,7 @@ describe("native stellar workspace projection sources", () => {
     )).resolves.toEqual(quantumProjection(QUANTUM_SELECTOR));
     expect(readQuantum).toHaveBeenCalledWith({
       sessionId: IDENTITY.sessionId,
+      runId: IDENTITY.runId,
       expectedRevision: IDENTITY.revision,
       expectedRegistryFingerprint: IDENTITY.registryFingerprint,
       ...QUANTUM_SELECTOR,
@@ -676,8 +679,24 @@ describe("NativeStellarWorkspaceStore quantum pages", () => {
       availableCount: 1,
       connectedStacks: 5,
     });
-    expect(selectNativePlayerAuthorityStellarQuantumReadModel(snapshot, NEXT_IDENTITY, QUANTUM_SELECTOR))
-      .toBeNull();
+    expect(selectNativePlayerAuthorityStellarQuantumReadModel(snapshot, NEXT_IDENTITY, QUANTUM_SELECTOR)?.revision)
+      .toBe(IDENTITY.revision);
+    expect(selectNativePlayerAuthorityStellarQuantumReadModel(snapshot, {
+      ...NEXT_IDENTITY,
+      runId: "authority-run-other",
+    }, QUANTUM_SELECTOR)).toBeNull();
+    expect(selectNativePlayerAuthorityStellarQuantumReadModel(snapshot, {
+      ...NEXT_IDENTITY,
+      registryFingerprint: "registry-other",
+    }, QUANTUM_SELECTOR)).toBeNull();
+    expect(selectNativePlayerAuthorityStellarQuantumReadModel(snapshot, {
+      ...NEXT_IDENTITY,
+      revision: IDENTITY.revision - 1,
+    }, QUANTUM_SELECTOR)).toBeNull();
+    expect(selectNativePlayerAuthorityStellarQuantumReadModel(snapshot, NEXT_IDENTITY, {
+      ...QUANTUM_SELECTOR,
+      itemLimit: 2,
+    })).toBeNull();
     expect(source.readVerifiedStellarQuantumProjection).toHaveBeenCalledTimes(3);
   });
 
@@ -771,9 +790,71 @@ describe("NativeStellarWorkspaceStore v2 pages", () => {
     expect(model?.planets).toHaveLength(2);
     expect(model?.stations).toHaveLength(2);
     expect(model?.routes).toHaveLength(2);
-    expect(selectNativeStarMapWorkspaceReadModel(snapshot, NEXT_IDENTITY)).toBeNull();
+    expect(selectNativeStarMapWorkspaceReadModel(snapshot, NEXT_IDENTITY)?.revision).toBe(IDENTITY.revision);
     expect(source.readVerifiedStarMapOverviewProjection).toHaveBeenCalledTimes(2);
     expect(source.readVerifiedStellarIndustryV2Projection).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps one atomic old star-map pair while independently paged R+1 reads settle", async () => {
+    const overviewSelector = { cursor: 0, limit: NATIVE_STELLAR_PAGE_ROWS } as const;
+    const industrySelector: NativeStellarIndustrySelector = {
+      ...INDUSTRY_SELECTOR,
+      planetLimit: NATIVE_STELLAR_PAGE_ROWS,
+      stationLimit: NATIVE_STELLAR_PAGE_ROWS,
+      routeLimit: NATIVE_STELLAR_PAGE_ROWS,
+    };
+    const store = new NativeStellarWorkspaceStore();
+    await expect(Promise.all([
+      store.refreshOverview(playerSource(), IDENTITY, overviewSelector),
+      store.refreshIndustry(playerSource(), IDENTITY, industrySelector),
+    ])).resolves.toEqual(["committed", "committed"]);
+
+    let releaseOverview!: (value: DesktopNativeCoreStarMapOverviewProjectionResult) => void;
+    let releaseIndustry!: (value: DesktopNativeCoreStellarIndustryV2ProjectionResult) => void;
+    const nextSource = playerSource(NEXT_IDENTITY, {
+      readVerifiedStarMapOverviewProjection: vi.fn(() =>
+        new Promise<DesktopNativeCoreStarMapOverviewProjectionResult>((resolve) => {
+          releaseOverview = resolve;
+        })),
+      readVerifiedStellarIndustryV2Projection: vi.fn(() =>
+        new Promise<DesktopNativeCoreStellarIndustryV2ProjectionResult>((resolve) => {
+          releaseIndustry = resolve;
+        })),
+    });
+    const pendingOverview = store.refreshOverview(nextSource, NEXT_IDENTITY, overviewSelector);
+    const pendingIndustry = store.refreshIndustry(nextSource, NEXT_IDENTITY, industrySelector);
+
+    expect(selectNativeStarMapWorkspaceReadModel(
+      store.getSnapshot(),
+      NEXT_IDENTITY,
+      industrySelector,
+    )?.revision).toBe(IDENTITY.revision);
+    releaseOverview(overview(overviewSelector, NEXT_IDENTITY));
+    await expect(pendingOverview).resolves.toBe("committed");
+    expect(selectNativeStarMapWorkspaceReadModel(
+      store.getSnapshot(),
+      NEXT_IDENTITY,
+      industrySelector,
+    )?.revision).toBe(IDENTITY.revision);
+
+    releaseIndustry(industryV2(industrySelector, NEXT_IDENTITY));
+    await expect(pendingIndustry).resolves.toBe("committed");
+    expect(selectNativeStarMapWorkspaceReadModel(
+      store.getSnapshot(),
+      NEXT_IDENTITY,
+      industrySelector,
+    )?.revision).toBe(NEXT_IDENTITY.revision);
+    for (const changedIdentity of [
+      { ...NEXT_IDENTITY, runId: "authority-run-other" },
+      { ...NEXT_IDENTITY, registryFingerprint: "registry-other" },
+      { ...NEXT_IDENTITY, revision: IDENTITY.revision - 1 },
+    ]) {
+      expect(selectNativeStarMapWorkspaceReadModel(
+        store.getSnapshot(),
+        changedIdentity,
+        industrySelector,
+      )).toBeNull();
+    }
   });
 
   it("rejects cross-page metadata drift and duplicate row identities", async () => {

@@ -99,14 +99,17 @@ describe("native blueprint workspace App integration", () => {
 
   it("binds every page to the active authority session, run, revision, and registry", () => {
     expect(app).toMatch(/new NativeBlueprintWorkspaceStore\(\)/);
-    expect(app).toMatch(/nativeFactoryInventoryIdentity = useMemo<NativeFactoryInventoryIdentity \| null>[\s\S]*?sessionId,[\s\S]*?runId,[\s\S]*?revision: factoryThinViewExpectedRevision,[\s\S]*?registryFingerprint: recipeWorkspaceRegistryFingerprint/);
-    expect(app).toMatch(/createNativePlayerAuthorityBlueprintWorkspaceSource\(desktopBridge, nativeFactoryInventoryIdentity\)/);
-    expect(app).toMatch(/selectNativeBlueprintWorkspaceFrame\(nativeBlueprintWorkspaceSnapshot, nativeFactoryInventoryIdentity\)/);
+    expect(app).toMatch(/nativeFactoryInventoryIdentity = useMemo<NativeFactoryInventoryIdentity \| null>[\s\S]*?nativeThinWorkspaceAuthorityFrames\.displayFrame[\s\S]*?sessionId: frame\.sessionId,[\s\S]*?runId: frame\.runId,[\s\S]*?revision: frame\.revision,[\s\S]*?registryFingerprint: recipeWorkspaceRegistryFingerprint/);
+    expect(app).toMatch(/nativeFactoryInventoryReadIdentity = useMemo<NativeFactoryInventoryIdentity \| null>[\s\S]*?nativeThinWorkspaceAuthorityFrames\.readFrame/);
+    expect(app).toMatch(/createNativePlayerAuthorityBlueprintWorkspaceSource\(desktopBridge, nativeFactoryInventoryReadIdentity\)/);
+    expect(app).toMatch(/selectNativeBlueprintWorkspaceFrame\([\s\S]*?nativeBlueprintWorkspaceSnapshot,[\s\S]*?nativeFactoryInventoryIdentity,[\s\S]*?nativeBlueprintSelectedId,[\s\S]*?nativeBlueprintLibraryCursor,[\s\S]*?nativeBlueprintQueueCursor/);
+    expect(app).toMatch(/nativeBlueprintWorkspaceWritesEnabled = nativeInventoryLineageCurrent &&[\s\S]*?nativeBlueprintWorkspaceFrame\?\.revision === nativeFactoryInventoryReadIdentity\?\.revision/);
   });
 
   it("reads only while the native-authority workspace is open and supersedes selection through the store", () => {
-    expect(app).toMatch(/!blueprintsOpen \|\| !nativePlayerAuthorityOwnsRuntime \|\| !nativeFactoryInventoryIdentity \|\|[\s\S]*?!nativeBlueprintWorkspaceSource \|\| !nativePlayerAuthorityActiveFrame[\s\S]*?nativeBlueprintWorkspaceStore\.clear\(\)/);
-    expect(app).toMatch(/nativeBlueprintWorkspaceStore\.refresh\([\s\S]*?nativeBlueprintWorkspaceSource,[\s\S]*?nativeFactoryInventoryIdentity,[\s\S]*?nativeBlueprintSelectedId/);
+    expect(app).toMatch(/!blueprintsOpen \|\| !nativePlayerAuthorityOwnsRuntime \|\| !nativeFactoryInventoryIdentity\) \{[\s\S]*?nativeBlueprintWorkspaceStore\.clear\(\)/);
+    expect(app).toMatch(/if \(!nativeFactoryInventoryReadIdentity \|\| !nativeBlueprintWorkspaceSource\) return;/);
+    expect(app).toMatch(/nativeBlueprintWorkspaceStore\.refresh\([\s\S]*?nativeBlueprintWorkspaceSource,[\s\S]*?nativeFactoryInventoryReadIdentity,[\s\S]*?nativeBlueprintSelectedId/);
     expect(app).toMatch(/onSelectBlueprint=\{setNativeBlueprintSelectedId\}/);
   });
 
@@ -150,7 +153,7 @@ describe("native blueprint workspace App integration", () => {
     expect(nativeTag).toContain("onExportBlueprint={exportNativeBlueprint}");
     expect(nativeTag).toContain("resolution={nativeBlueprintRenameResolution}");
     expect(nativeTag).toContain("onConsumeRenameResolution={consumeNativeBlueprintRenameResolution}");
-    expect(nativeTag).toMatch(/commandPending=\{nativePlayerAuthorityCommandPending \|\| nativeBlueprintEnqueueContextPending \|\|[\s\S]*?nativeBlueprintDirectDeployContextPending \|\| nativeBlueprintImportContextPending \|\|[\s\S]*?nativeBlueprintExportContextPending\}/);
+    expect(nativeTag).toMatch(/commandPending=\{nativePlayerAuthorityCommandPending \|\| nativeBlueprintEnqueueContextPending \|\|[\s\S]*?nativeBlueprintDirectDeployContextPending \|\| nativeBlueprintImportContextPending \|\|[\s\S]*?nativeBlueprintExportContextPending \|\| !nativeBlueprintWorkspaceWritesEnabled\}/);
     expect(nativeTag).not.toMatch(/\bgame=|onDeploy=|onRemove=|onRename=|onTransform=|onFund|onCancel=|onExport=|onImport=/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintTransformPending &&[\s\S]*?!nativeBlueprintRecipeOverridePending &&[\s\S]*?!nativeBlueprintDeletePending &&[\s\S]*?!nativeConstructionQueueCancelPending &&[\s\S]*?!nativeConstructionQueueFundPending &&[\s\S]*?!nativeConstructionQueueDeployPending &&[\s\S]*?!nativeBlueprintEnqueuePending &&[\s\S]*?!nativeBlueprintDirectDeployPending &&[\s\S]*?!nativeBlueprintImportPending &&[\s\S]*?!nativeBlueprintExportContextPending &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace[\s\S]*?game=\{game\}[\s\S]*?onDeploy=\{deployBlueprint\}/);
   });

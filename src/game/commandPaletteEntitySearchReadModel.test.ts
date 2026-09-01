@@ -84,10 +84,18 @@ describe("command palette native entity-search read model", () => {
 
   it("accepts only the same session, revision, fingerprint, selector and known local IDs", () => {
     const selector = createCommandPaletteEntitySearchSelector("熔炉", 0, 16);
-    const frame = { sessionId: "authority-1", revision: 7, selector, projection: projection(selector) };
+    const frame = {
+      sessionId: "authority-1",
+      runId: "run-1",
+      revision: 7,
+      registryFingerprint: "builtin:test",
+      selector,
+      projection: projection(selector),
+    };
     const binding = {
       enabled: true,
       sessionId: "authority-1",
+      runId: "run-1",
       expectedRevision: 7,
       expectedRegistryFingerprint: "builtin:test",
       selector,
@@ -136,6 +144,7 @@ describe("command palette native entity-search read model", () => {
     });
     const target = {
       sessionId: "authority-1",
+      runId: "run-1",
       revision: 7,
       registryFingerprint: "builtin:test",
       planetId: "home" as const,
@@ -146,7 +155,7 @@ describe("command palette native entity-search read model", () => {
     expect(createCommandPaletteNativeEntityFocusPlan(
       game,
       target,
-      { sessionId: "authority-1", revision: 7 },
+      { sessionId: "authority-1", runId: "run-1", revision: 7 },
       "builtin:test",
     )).toEqual({
       planetId: "home",
@@ -158,7 +167,7 @@ describe("command palette native entity-search read model", () => {
     expect(createCommandPaletteNativeEntityFocusPlan(
       game,
       target,
-      { sessionId: "authority-1", revision: 8 },
+      { sessionId: "authority-1", runId: "run-1", revision: 8 },
       "builtin:test",
     )).toBeNull();
   });

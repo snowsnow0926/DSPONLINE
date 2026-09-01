@@ -9,9 +9,11 @@ describe("native construction inventory App integration", () => {
 
   it("binds every page to the main-owned session, run, revision, and registry", () => {
     expect(app).toMatch(/new NativeConstructionInventoryStore\(\)/);
-    expect(app).toMatch(/createNativePlayerAuthorityConstructionInventorySource\(desktopBridge, nativeFactoryInventoryIdentity\)/);
-    expect(app).toMatch(/nativeConstructionInventoryStore\.refresh\([\s\S]*?nativeConstructionInventorySource,[\s\S]*?nativeFactoryInventoryIdentity/);
+    expect(app).toMatch(/createNativePlayerAuthorityConstructionInventorySource\(desktopBridge, nativeFactoryInventoryReadIdentity\)/);
+    expect(app).toMatch(/nativeConstructionInventoryStore\.refresh\([\s\S]*?nativeConstructionInventorySource,[\s\S]*?nativeFactoryInventoryReadIdentity/);
     expect(app).toMatch(/selectNativeConstructionInventoryFrame\(nativeConstructionInventorySnapshot, nativeFactoryInventoryIdentity\)/);
+    expect(app).toMatch(/nativeConstructionInventoryWritesEnabled = nativeInventoryLineageCurrent &&[\s\S]*?nativeConstructionInventoryFrame\?\.revision === nativeFactoryInventoryReadIdentity\?\.revision/);
+    expect(app).toMatch(/if \(!nativePlayerAuthorityOwnsRuntime \|\| !nativeFactoryInventoryIdentity\) \{[\s\S]*?nativeConstructionInventoryStore\.clear\(\)[\s\S]*?if \(!nativeFactoryInventoryReadIdentity \|\| !nativeConstructionInventorySource\) return;/);
   });
 
   it("renders only the Rust frame and routes one placement through a fresh Rust capability", () => {

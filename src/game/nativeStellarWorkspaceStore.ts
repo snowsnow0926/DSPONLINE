@@ -32,6 +32,7 @@ export const NATIVE_STELLAR_QUANTUM_PAGE_CACHE_ENTRIES = 192 as const;
 
 export interface NativeStellarProjectionIdentity {
   readonly sessionId: string;
+  readonly runId: string;
   readonly revision: number;
   readonly registryFingerprint: string;
 }
@@ -173,6 +174,11 @@ export interface NativeStellarWorkspaceSnapshot {
   readonly overview: NativeStellarWorkspaceSection<NativeStarMapOverviewFrame>;
   readonly industry: NativeStellarWorkspaceSection<NativeStellarIndustryFrame>;
   readonly quantum: NativeStellarWorkspaceSection<NativeStellarQuantumFrame>;
+  /** Last atomically compatible overview/industry pair retained while R+1 is loading. */
+  readonly stableStarMap: Readonly<{
+    readonly overview: NativeStarMapOverviewFrame;
+    readonly industry: NativeStellarIndustryFrame;
+  }> | null;
 }
 
 export interface NativeStellarQuantumReadModel extends NativeStellarProjectionIdentity {
@@ -246,6 +252,7 @@ const EMPTY_SNAPSHOT: NativeStellarWorkspaceSnapshot = Object.freeze({
   overview: Object.freeze({ status: "empty", requestedRevision: null, frame: null }),
   industry: Object.freeze({ status: "empty", requestedRevision: null, frame: null }),
   quantum: Object.freeze({ status: "empty", requestedRevision: null, frame: null }),
+  stableStarMap: null,
 });
 
 class BoundedLruCache<T> {
@@ -310,12 +317,11 @@ function identitiesEqual(
   left: NativeStellarProjectionIdentity | undefined,
   right: NativeStellarProjectionIdentity,
 ): boolean {
-  return left?.sessionId === right.sessionId && left.revision === right.revision &&
-    left.registryFingerprint === right.registryFingerprint;
+  return left !== undefined && exactIdentityFrame(left, right);
 }
 
 function identityKey(identity: NativeStellarProjectionIdentity): string {
-  return `${identity.sessionId}\u0000${identity.revision}\u0000${identity.registryFingerprint}`;
+  return `${identity.sessionId}\u0000${identity.runId}\u0000${identity.revision}\u0000${identity.registryFingerprint}`;
 }
 
 function exactLimits(
@@ -698,7 +704,14 @@ function exactIdentityFrame(
   frame: NativeStellarProjectionIdentity,
   identity: NativeStellarProjectionIdentity,
 ): boolean {
-  return frame.sessionId === identity.sessionId && frame.revision === identity.revision &&
+  return sameIdentityScope(frame, identity) && frame.revision === identity.revision;
+}
+
+function sameIdentityScope(
+  frame: NativeStellarProjectionIdentity,
+  identity: NativeStellarProjectionIdentity,
+): boolean {
+  return frame.sessionId === identity.sessionId && frame.runId === identity.runId &&
     frame.registryFingerprint === identity.registryFingerprint;
 }
 
@@ -813,6 +826,7 @@ export function createNativePlayerAuthorityStellarProjectionSource(
       try {
         const result = await readOverview({
           sessionId: boundIdentity.sessionId,
+          runId: boundIdentity.runId,
           expectedRevision,
           expectedRegistryFingerprint: boundIdentity.registryFingerprint,
           ...selector,
@@ -832,6 +846,7 @@ export function createNativePlayerAuthorityStellarProjectionSource(
       try {
         const result = await readIndustryV2({
           sessionId: boundIdentity.sessionId,
+          runId: boundIdentity.runId,
           expectedRevision,
           expectedRegistryFingerprint: boundIdentity.registryFingerprint,
           ...selector,
@@ -852,6 +867,7 @@ export function createNativePlayerAuthorityStellarProjectionSource(
         try {
           const result = await readQuantum({
             sessionId: boundIdentity.sessionId,
+            runId: boundIdentity.runId,
             expectedRevision,
             expectedRegistryFingerprint: boundIdentity.registryFingerprint,
             ...selector,
@@ -897,11 +913,12 @@ function selectFrames(
   snapshot: NativeStellarWorkspaceSnapshot,
   identity: NativeStellarProjectionIdentity,
 ): { overview: NativeStarMapOverviewFrame; industry: NativeStellarIndustryFrame } | null {
-  const overview = snapshot.overview.frame;
-  const industry = snapshot.industry.frame;
-  if (snapshot.overview.status !== "ready" || snapshot.industry.status !== "ready" ||
-      !overview || !industry || !exactIdentityFrame(overview, identity) ||
-      !exactIdentityFrame(industry, identity) || overview.sourceMode !== industry.sourceMode ||
+  const pair = snapshot.stableStarMap;
+  const overview = pair?.overview ?? null;
+  const industry = pair?.industry ?? null;
+  if (!overview || !industry || !sameIdentityScope(overview, identity) ||
+      !sameIdentityScope(industry, identity) || overview.revision !== industry.revision ||
+      overview.revision > identity.revision || overview.sourceMode !== industry.sourceMode ||
       overview.projection.activePlanetId !== industry.projection.activePlanetId ||
       overview.projection.activeSystemId !== industry.projection.activeSystemId) return null;
   return { overview, industry };
@@ -923,7 +940,10 @@ export function selectNativeStarMapWorkspaceReadModel(
   return Object.freeze({
     source: "native-core" as const,
     sourceMode: "player-authority" as const,
-    ...identity,
+    sessionId: frames.overview.sessionId,
+    runId: frames.overview.runId,
+    revision: frames.overview.revision,
+    registryFingerprint: frames.overview.registryFingerprint,
     activePlanetId: frames.overview.projection.activePlanetId,
     activeSystemId: frames.overview.projection.activeSystemId,
     galaxySeed: frames.overview.projection.galaxySeed,
@@ -948,13 +968,19 @@ export function selectNativePlayerAuthorityStellarQuantumReadModel(
   expectedSelector: NativeStellarQuantumSelector = DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR,
 ): NativeStellarQuantumReadModel | null {
   const frame = snapshot.quantum.frame;
-  if (snapshot.quantum.status !== "ready" || !frame || frame.sourceMode !== "player-authority" ||
-      !exactIdentityFrame(frame, identity) || !validCompleteQuantumSelector(expectedSelector) ||
+  if (!frame || frame.sourceMode !== "player-authority" || !sameIdentityScope(frame, identity) ||
+      frame.revision > identity.revision ||
+      snapshot.quantum.requestedRevision !== null && identity.revision < snapshot.quantum.requestedRevision ||
+      !["ready", "loading", "unavailable"].includes(snapshot.quantum.status) ||
+      !validCompleteQuantumSelector(expectedSelector) ||
       !exactQuantumSelectors(frame.selector, expectedSelector)) return null;
   return Object.freeze({
     source: "native-core" as const,
     sourceMode: "player-authority" as const,
-    ...identity,
+    sessionId: frame.sessionId,
+    runId: frame.runId,
+    revision: frame.revision,
+    registryFingerprint: frame.registryFingerprint,
     enabled: frame.projection.enabled,
     bandwidth: frame.projection.bandwidth,
     runtime: frame.projection.runtime,
@@ -977,7 +1003,10 @@ export function selectNativeShadowStarMapWorkspaceReadModel(
   return Object.freeze({
     source: "native-core" as const,
     sourceMode: "shadow" as const,
-    ...identity,
+    sessionId: frames.overview.sessionId,
+    runId: frames.overview.runId,
+    revision: frames.overview.revision,
+    registryFingerprint: frames.overview.registryFingerprint,
     activePlanetId: frames.overview.projection.activePlanetId,
     activeSystemId: frames.overview.projection.activeSystemId,
     galaxySeed: frames.overview.projection.galaxySeed,
@@ -1561,7 +1590,8 @@ export class NativeStellarWorkspaceStore {
     identity: NativeStellarProjectionIdentity,
   ): boolean {
     return (source.mode === "player-authority" || source.mode === "shadow") &&
-      validLogicalId(identity.sessionId, 128) && validRevision(identity.revision) &&
+      validLogicalId(identity.sessionId, 128) && validLogicalId(identity.runId, 128) &&
+      validRevision(identity.revision) &&
       validLogicalId(identity.registryFingerprint) &&
       (source.mode !== "player-authority" || identitiesEqual(source.boundIdentity, identity));
   }
@@ -1569,6 +1599,23 @@ export class NativeStellarWorkspaceStore {
   private prepareIdentity(identity: NativeStellarProjectionIdentity): void {
     const key = identityKey(identity);
     if (this.cacheIdentity === key) return;
+    const retain = <TFrame extends NativeStellarProjectionIdentity>(
+      section: NativeStellarWorkspaceSection<TFrame>,
+    ): TFrame | null => section.frame && sameIdentityScope(section.frame, identity) &&
+        section.frame.revision <= identity.revision &&
+        identity.revision >= (section.requestedRevision ?? section.frame.revision)
+      ? section.frame
+      : null;
+    const overview = retain(this.snapshot.overview);
+    const industry = retain(this.snapshot.industry);
+    const quantum = retain(this.snapshot.quantum);
+    const stable = this.snapshot.stableStarMap &&
+        sameIdentityScope(this.snapshot.stableStarMap.overview, identity) &&
+        sameIdentityScope(this.snapshot.stableStarMap.industry, identity) &&
+        this.snapshot.stableStarMap.overview.revision <= identity.revision &&
+        this.snapshot.stableStarMap.industry.revision <= identity.revision
+      ? this.snapshot.stableStarMap
+      : null;
     this.cacheIdentity = key;
     this.overviewToken += 1;
     this.industryToken += 1;
@@ -1577,7 +1624,24 @@ export class NativeStellarWorkspaceStore {
     this.industryFlight = null;
     this.quantumFlight = null;
     this.clearPageCaches();
-    this.publish(EMPTY_SNAPSHOT);
+    this.publish(Object.freeze({
+      overview: Object.freeze({
+        status: overview ? "loading" as const : "empty" as const,
+        requestedRevision: overview ? identity.revision : null,
+        frame: overview,
+      }),
+      industry: Object.freeze({
+        status: industry ? "loading" as const : "empty" as const,
+        requestedRevision: industry ? identity.revision : null,
+        frame: industry,
+      }),
+      quantum: Object.freeze({
+        status: quantum ? "loading" as const : "empty" as const,
+        requestedRevision: quantum ? identity.revision : null,
+        frame: quantum,
+      }),
+      stableStarMap: stable,
+    }));
   }
 
   private clearPageCaches(): void {
@@ -1593,6 +1657,7 @@ export class NativeStellarWorkspaceStore {
     this.publish(Object.freeze({
       ...this.snapshot,
       overview: Object.freeze({ status: "unavailable", requestedRevision: null, frame: null }),
+      stableStarMap: null,
     }));
   }
 
@@ -1602,6 +1667,7 @@ export class NativeStellarWorkspaceStore {
     this.publish(Object.freeze({
       ...this.snapshot,
       industry: Object.freeze({ status: "unavailable", requestedRevision: null, frame: null }),
+      stableStarMap: null,
     }));
   }
 
@@ -1615,8 +1681,21 @@ export class NativeStellarWorkspaceStore {
   }
 
   private publish(next: NativeStellarWorkspaceSnapshot): void {
-    if (this.snapshot === next) return;
-    this.snapshot = next;
+    let stableStarMap = next.stableStarMap;
+    const overview = next.overview.frame;
+    const industry = next.industry.frame;
+    if (next.overview.status === "ready" && next.industry.status === "ready" &&
+        overview && industry && exactIdentityFrame(overview, industry) &&
+        overview.sourceMode === industry.sourceMode &&
+        overview.projection.activePlanetId === industry.projection.activePlanetId &&
+        overview.projection.activeSystemId === industry.projection.activeSystemId) {
+      stableStarMap = Object.freeze({ overview, industry });
+    }
+    const published = stableStarMap === next.stableStarMap
+      ? next
+      : Object.freeze({ ...next, stableStarMap });
+    if (this.snapshot === published) return;
+    this.snapshot = published;
     for (const listener of this.listeners) listener();
   }
 }

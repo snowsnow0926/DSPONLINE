@@ -16,6 +16,7 @@ export const NATIVE_STAR_MAP_CATALOG_MAX_PAGES = 8_192 as const;
 
 export interface NativeStarMapCatalogIdentity {
   readonly sessionId: string;
+  readonly runId: string;
   readonly revision: number;
   readonly registryFingerprint: string;
 }
@@ -24,7 +25,7 @@ export interface NativeStarMapCatalogSource {
   readonly mode: "player-authority";
   readonly boundIdentity: NativeStarMapCatalogIdentity;
   readVerifiedStarMapCatalogProjection(
-    request: Omit<DesktopNativeCoreStarMapCatalogProjectionRequest, "sessionId" | "expectedRevision" | "expectedRegistryFingerprint">,
+    request: Omit<DesktopNativeCoreStarMapCatalogProjectionRequest, "sessionId" | "runId" | "expectedRevision" | "expectedRegistryFingerprint">,
     expectedRevision: number,
   ): Promise<DesktopNativeCoreStarMapCatalogProjectionResult | null>;
 }
@@ -65,20 +66,25 @@ function validLogicalId(value: string, maximumLength = 256): boolean {
 }
 
 function validIdentity(identity: NativeStarMapCatalogIdentity): boolean {
-  return validLogicalId(identity.sessionId, 128) && Number.isSafeInteger(identity.revision) &&
+  return validLogicalId(identity.sessionId, 128) && validLogicalId(identity.runId, 128) &&
+    Number.isSafeInteger(identity.revision) &&
     identity.revision >= 0 && validLogicalId(identity.registryFingerprint);
 }
 
 function identityKey(identity: NativeStarMapCatalogIdentity): string {
-  return `${identity.sessionId}\u0000${identity.revision}\u0000${identity.registryFingerprint}`;
+  return `${identity.sessionId}\u0000${identity.runId}\u0000${identity.revision}\u0000${identity.registryFingerprint}`;
+}
+
+function sameScope(left: NativeStarMapCatalogIdentity, right: NativeStarMapCatalogIdentity): boolean {
+  return left.sessionId === right.sessionId && left.runId === right.runId &&
+    left.registryFingerprint === right.registryFingerprint;
 }
 
 function exactIdentity(
   left: NativeStarMapCatalogIdentity,
   right: NativeStarMapCatalogIdentity,
 ): boolean {
-  return left.sessionId === right.sessionId && left.revision === right.revision &&
-    left.registryFingerprint === right.registryFingerprint;
+  return sameScope(left, right) && left.revision === right.revision;
 }
 
 function exactProjectionRequest(
@@ -198,7 +204,7 @@ export function createNativePlayerAuthorityStarMapCatalogSource(
     mode: "player-authority" as const,
     boundIdentity,
     async readVerifiedStarMapCatalogProjection(
-      request: Omit<DesktopNativeCoreStarMapCatalogProjectionRequest, "sessionId" | "expectedRevision" | "expectedRegistryFingerprint">,
+      request: Omit<DesktopNativeCoreStarMapCatalogProjectionRequest, "sessionId" | "runId" | "expectedRevision" | "expectedRegistryFingerprint">,
       expectedRevision: number,
     ) {
       if (expectedRevision !== boundIdentity.revision ||
@@ -211,6 +217,7 @@ export function createNativePlayerAuthorityStarMapCatalogSource(
       try {
         const projection = await reader({
           sessionId: boundIdentity.sessionId,
+          runId: boundIdentity.runId,
           expectedRevision,
           expectedRegistryFingerprint: boundIdentity.registryFingerprint,
           ...request,
@@ -227,8 +234,12 @@ export function selectNativeStarMapCatalogFrame(
   snapshot: NativeStarMapCatalogSnapshot,
   identity: NativeStarMapCatalogIdentity,
 ): NativeStarMapCatalogFrame | null {
-  return snapshot.status === "ready" && snapshot.frame && exactIdentity(snapshot.frame, identity)
-    ? snapshot.frame
+  const frame = snapshot.frame;
+  if (!frame || !sameScope(frame, identity) || frame.revision > identity.revision ||
+      snapshot.requestedRevision !== null && identity.revision < snapshot.requestedRevision) return null;
+  if (snapshot.status === "ready" && exactIdentity(frame, identity)) return frame;
+  return snapshot.status === "ready" || snapshot.status === "loading" || snapshot.status === "unavailable"
+    ? frame
     : null;
 }
 
@@ -262,17 +273,16 @@ export class NativeStarMapCatalogStore {
       return Promise.resolve("unavailable");
     }
     const key = identityKey(identity);
-    if (this.currentIdentityKey !== key) {
-      this.token += 1;
-      this.flight = null;
-      this.currentIdentityKey = key;
-      this.publish(EMPTY_SNAPSHOT);
-    }
     if (this.flight?.key === key) return this.flight.promise;
     if (this.snapshot.status === "ready" && this.snapshot.frame &&
         exactIdentity(this.snapshot.frame, identity)) return Promise.resolve("committed");
     const token = ++this.token;
-    const previous = this.snapshot.frame;
+    this.currentIdentityKey = key;
+    const previous = this.snapshot.frame && sameScope(this.snapshot.frame, identity) &&
+        this.snapshot.frame.revision <= identity.revision &&
+        identity.revision >= (this.snapshot.requestedRevision ?? this.snapshot.frame.revision)
+      ? this.snapshot.frame
+      : null;
     this.publish(Object.freeze({
       status: "loading",
       requestedRevision: identity.revision,

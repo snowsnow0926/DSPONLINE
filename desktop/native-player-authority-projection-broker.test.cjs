@@ -49,11 +49,21 @@ function fixture(initialSnapshot = {}) {
     },
     async factoryInventoryProjection(ownerId, request) {
       calls.push(["factory-inventory-v1", ownerId, request]);
-      return { projectionType: "factory-inventory-v1", schemaVersion: 1, revision: request.expectedRevision };
+      return {
+        projectionType: "factory-inventory-v1",
+        schemaVersion: 1,
+        revision: request.expectedRevision,
+        registryFingerprint: request.expectedRegistryFingerprint,
+      };
     },
     async constructionInventoryProjection(ownerId, request) {
       calls.push(["construction-inventory-v1", ownerId, request]);
-      return { projectionType: "construction-inventory-v1", schemaVersion: 1, revision: request.expectedRevision };
+      return {
+        projectionType: "construction-inventory-v1",
+        schemaVersion: 1,
+        revision: request.expectedRevision,
+        registryFingerprint: request.expectedRegistryFingerprint,
+      };
     },
     async constructionPlacementContext(ownerId, request) {
       calls.push(["construction-placement-context-v1", ownerId, request]);
@@ -98,7 +108,12 @@ function fixture(initialSnapshot = {}) {
     },
     async blueprintWorkspaceProjection(ownerId, request) {
       calls.push(["blueprint-workspace-v1", ownerId, request]);
-      return { projectionType: "blueprint-workspace-v1", schemaVersion: 1, revision: request.expectedRevision };
+      return {
+        projectionType: "blueprint-workspace-v1",
+        schemaVersion: 1,
+        revision: request.expectedRevision,
+        registryFingerprint: request.expectedRegistryFingerprint,
+      };
     },
     async blueprintCaptureContext(ownerId, request) {
       calls.push(["blueprint-capture-context-v1", ownerId, request]);
@@ -122,27 +137,57 @@ function fixture(initialSnapshot = {}) {
     },
     async commandPaletteEntitySearchProjection(ownerId, request) {
       calls.push(["command-palette-entity-search-v1", ownerId, request]);
-      return { projectionType: "command-palette-entity-search-v1", schemaVersion: 1, revision: request.expectedRevision };
+      return {
+        projectionType: "command-palette-entity-search-v1",
+        schemaVersion: 1,
+        revision: request.expectedRevision,
+        registryFingerprint: request.expectedRegistryFingerprint,
+      };
     },
     async starMapOverviewProjection(ownerId, request) {
       calls.push(["star-map-overview-v1", ownerId, request]);
-      return { projectionType: "star-map-overview-v1", schemaVersion: 1, revision: request.expectedRevision };
+      return {
+        projectionType: "star-map-overview-v1",
+        schemaVersion: 1,
+        revision: request.expectedRevision,
+        registryFingerprint: request.expectedRegistryFingerprint,
+      };
     },
     async starMapCatalogProjection(ownerId, request) {
       calls.push(["star-map-catalog-v1", ownerId, request]);
-      return { projectionType: "star-map-catalog-v1", schemaVersion: 1, revision: request.expectedRevision };
+      return {
+        projectionType: "star-map-catalog-v1",
+        schemaVersion: 1,
+        revision: request.expectedRevision,
+        registryFingerprint: request.expectedRegistryFingerprint,
+      };
     },
     async stellarIndustryProjection(ownerId, request) {
       calls.push(["stellar-industry-v1", ownerId, request]);
-      return { projectionType: "stellar-industry-v1", schemaVersion: 1, revision: request.expectedRevision };
+      return {
+        projectionType: "stellar-industry-v1",
+        schemaVersion: 1,
+        revision: request.expectedRevision,
+        registryFingerprint: request.expectedRegistryFingerprint,
+      };
     },
     async stellarIndustryProjectionV2(ownerId, request) {
       calls.push(["stellar-industry-v2", ownerId, request]);
-      return { projectionType: "stellar-industry-v2", schemaVersion: 2, revision: request.expectedRevision };
+      return {
+        projectionType: "stellar-industry-v2",
+        schemaVersion: 2,
+        revision: request.expectedRevision,
+        registryFingerprint: request.expectedRegistryFingerprint,
+      };
     },
     async stellarQuantumProjection(ownerId, request) {
       calls.push(["stellar-quantum-v1", ownerId, request]);
-      return { projectionType: "stellar-quantum-v1", schemaVersion: 1, revision: request.expectedRevision };
+      return {
+        projectionType: "stellar-quantum-v1",
+        schemaVersion: 1,
+        revision: request.expectedRevision,
+        registryFingerprint: request.expectedRegistryFingerprint,
+      };
     },
     async dysonWorkspaceProjection(ownerId, request) {
       calls.push(["dyson-workspace-v1", ownerId, request]);
@@ -238,7 +283,24 @@ test("active same-session same-revision reads use only the main owner identity",
           cursor: 0,
           limit: 32,
         }
-      : ["technology-v1", "recipe-workspace-v1", "dyson-workspace-v1", "orbital-contract-workspace-v1", "campaign-workspace-v1", "operations-workspace-v1", "galaxy-account-workspace-v1"].includes(projectionType)
+      : [
+          "factory-inventory-v1",
+          "construction-inventory-v1",
+          "blueprint-workspace-v1",
+          "technology-v1",
+          "recipe-workspace-v1",
+          "command-palette-entity-search-v1",
+          "star-map-overview-v1",
+          "star-map-catalog-v1",
+          "stellar-industry-v1",
+          "stellar-industry-v2",
+          "stellar-quantum-v1",
+          "dyson-workspace-v1",
+          "orbital-contract-workspace-v1",
+          "campaign-workspace-v1",
+          "operations-workspace-v1",
+          "galaxy-account-workspace-v1",
+        ].includes(projectionType)
       ? {
           sessionId: "core-main-1",
           runId: "run-1",
@@ -499,6 +561,92 @@ test("technology, recipe, and Dyson require complete run and registry lineage ta
     }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_REQUEST_INVALID");
     await assert.rejects(value.broker.read(23, projectionType, {
       sessionId: "core-main-1", expectedRevision: 17, expectedRegistryFingerprint: "7df8cf3a",
+    }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_REQUEST_INVALID");
+  }
+});
+
+test("inventory, blueprint, search, and stellar reads fence run, registry, owner epoch, and result registry", async () => {
+  const request = {
+    sessionId: "core-main-1",
+    runId: "run-1",
+    expectedRevision: 17,
+    expectedRegistryFingerprint: "7df8cf3a",
+  };
+  for (const [projectionType, method] of [
+    ["factory-inventory-v1", "factoryInventoryProjection"],
+    ["construction-inventory-v1", "constructionInventoryProjection"],
+    ["blueprint-workspace-v1", "blueprintWorkspaceProjection"],
+    ["command-palette-entity-search-v1", "commandPaletteEntitySearchProjection"],
+    ["star-map-overview-v1", "starMapOverviewProjection"],
+    ["star-map-catalog-v1", "starMapCatalogProjection"],
+    ["stellar-industry-v1", "stellarIndustryProjection"],
+    ["stellar-industry-v2", "stellarIndustryProjectionV2"],
+    ["stellar-quantum-v1", "stellarQuantumProjection"],
+  ]) {
+    const staleRun = fixture({ runId: "run-2", revision: 17 });
+    await assert.rejects(staleRun.broker.read(23, projectionType, request),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RUN_MISMATCH");
+    assert.equal(staleRun.calls.length, 0);
+
+    const wrongRegistry = fixture();
+    wrongRegistry.setSession({ registryFingerprint: "ffffffff" });
+    await assert.rejects(wrongRegistry.broker.read(23, projectionType, request),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_REGISTRY_MISMATCH");
+    assert.equal(wrongRegistry.calls.length, 0);
+
+    const handoffRace = fixture();
+    handoffRace.registry[method] = async (_ownerId, input) => {
+      handoffRace.setSession({ ownerEpoch: 3 });
+      return {
+        projectionType,
+        schemaVersion: projectionType === "stellar-industry-v2" ? 2 : 1,
+        revision: input.expectedRevision,
+        registryFingerprint: input.expectedRegistryFingerprint,
+      };
+    };
+    await assert.rejects(handoffRace.broker.read(23, projectionType, request),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_LINEAGE_MISMATCH");
+
+    const registryRace = fixture();
+    registryRace.registry[method] = async (_ownerId, input) => {
+      registryRace.setSession({ registryFingerprint: "ffffffff" });
+      return {
+        projectionType,
+        schemaVersion: projectionType === "stellar-industry-v2" ? 2 : 1,
+        revision: input.expectedRevision,
+        registryFingerprint: input.expectedRegistryFingerprint,
+      };
+    };
+    await assert.rejects(registryRace.broker.read(23, projectionType, request),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_REGISTRY_MISMATCH");
+
+    const forgedResult = fixture();
+    forgedResult.registry[method] = async (_ownerId, input) => ({
+      projectionType,
+      schemaVersion: projectionType === "stellar-industry-v2" ? 2 : 1,
+      revision: input.expectedRevision,
+      registryFingerprint: "ffffffff",
+    });
+    await assert.rejects(forgedResult.broker.read(23, projectionType, request),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RESULT_MISMATCH");
+  }
+
+  const partial = fixture();
+  for (const projectionType of [
+    "factory-inventory-v1",
+    "construction-inventory-v1",
+    "blueprint-workspace-v1",
+    "command-palette-entity-search-v1",
+    "star-map-overview-v1",
+    "star-map-catalog-v1",
+    "stellar-industry-v1",
+    "stellar-industry-v2",
+    "stellar-quantum-v1",
+  ]) {
+    await assert.rejects(partial.broker.read(23, projectionType, {
+      sessionId: "core-main-1",
+      expectedRevision: 17,
+      expectedRegistryFingerprint: "7df8cf3a",
     }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_REQUEST_INVALID");
   }
 });

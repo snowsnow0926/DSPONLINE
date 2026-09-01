@@ -990,7 +990,11 @@ export interface DesktopNativeCoreFactoryReadModelResult extends FactoryReadMode
 }
 
 export interface DesktopNativeCoreFactoryInventoryRequest extends DesktopNativeCoreSessionRequest {
+  /** Present only for a main-owned player-authority read; shadow reads omit it. */
+  runId?: string;
   expectedRevision: number;
+  /** Present together with runId so main can fence the registry owner epoch. */
+  expectedRegistryFingerprint?: string;
   cursor: number;
   limit: number;
 }
@@ -1050,6 +1054,8 @@ export interface DesktopNativeCoreFactoryInventoryResult {
 }
 
 export interface DesktopNativeCoreConstructionInventoryRequest extends DesktopNativeCoreSessionRequest {
+  /** Present only for a main-owned player-authority read; shadow reads omit it. */
+  runId?: string;
   expectedRevision: number;
   expectedRegistryFingerprint: string;
   cursor: number;
@@ -1093,6 +1099,8 @@ export type DesktopNativeCoreBlueprintWorkspaceSection =
   | "library-membership";
 
 export interface DesktopNativeCoreBlueprintWorkspaceRequest extends DesktopNativeCoreSessionRequest {
+  /** Present only for a main-owned player-authority read; shadow reads omit it. */
+  runId?: string;
   expectedRevision: number;
   expectedRegistryFingerprint: string;
   section: DesktopNativeCoreBlueprintWorkspaceSection;
@@ -2001,6 +2009,8 @@ export interface DesktopNativeCoreStellarPage<T> {
 }
 
 export interface DesktopNativeCoreStarMapOverviewProjectionRequest extends DesktopNativeCoreSessionRequest {
+  /** Present only for a main-owned player-authority read; shadow reads omit it. */
+  runId?: string;
   expectedRevision: number;
   expectedRegistryFingerprint: string;
   cursor: number;
@@ -2066,6 +2076,8 @@ export interface DesktopNativeCoreStarMapOverviewProjectionResult {
 }
 
 export interface DesktopNativeCoreStarMapCatalogProjectionRequest extends DesktopNativeCoreSessionRequest {
+  /** Present only for a main-owned player-authority read; shadow reads omit it. */
+  runId?: string;
   expectedRevision: number;
   expectedRegistryFingerprint: string;
   systemCursor: number;
@@ -2180,6 +2192,8 @@ export interface DesktopNativeCoreStarMapCatalogProjectionResult {
 }
 
 export interface DesktopNativeCoreStellarIndustryProjectionRequest extends DesktopNativeCoreSessionRequest {
+  /** Present only for a main-owned player-authority read; shadow reads omit it. */
+  runId?: string;
   expectedRevision: number;
   expectedRegistryFingerprint: string;
   systemId: string | null;
@@ -2407,6 +2421,8 @@ export interface DesktopNativeCoreStellarIndustryV2ProjectionResult
 }
 
 export interface DesktopNativeCoreStellarQuantumProjectionRequest extends DesktopNativeCoreSessionRequest {
+  /** Present only for a main-owned player-authority read; shadow reads omit it. */
+  runId?: string;
   expectedRevision: number;
   expectedRegistryFingerprint: string;
   itemCursor: number;
@@ -3081,6 +3097,8 @@ export interface DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult {
 }
 
 export interface DesktopNativeCoreCommandPaletteEntitySearchRequest extends DesktopNativeCoreSessionRequest {
+  /** Present only for a main-owned player-authority read; shadow reads omit it. */
+  runId?: string;
   expectedRevision: number;
   expectedRegistryFingerprint: string;
   query: string;

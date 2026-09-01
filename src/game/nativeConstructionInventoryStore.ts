@@ -90,8 +90,15 @@ function sameIdentity(
   left: NativeConstructionInventoryIdentity,
   right: NativeConstructionInventoryIdentity,
 ): boolean {
+  return sameScope(left, right) && left.revision === right.revision;
+}
+
+function sameScope(
+  left: NativeConstructionInventoryIdentity,
+  right: NativeConstructionInventoryIdentity,
+): boolean {
   return left.sessionId === right.sessionId && left.runId === right.runId &&
-    left.revision === right.revision && left.registryFingerprint === right.registryFingerprint;
+    left.registryFingerprint === right.registryFingerprint;
 }
 
 function validIdentity(identity: NativeConstructionInventoryIdentity): boolean {
@@ -176,6 +183,7 @@ export function createNativePlayerAuthorityConstructionInventorySource(
       try {
         const page = await reader({
           sessionId: boundIdentity.sessionId,
+          runId: boundIdentity.runId,
           expectedRevision,
           expectedRegistryFingerprint,
           cursor,
@@ -193,8 +201,12 @@ export function selectNativeConstructionInventoryFrame(
   snapshot: NativeConstructionInventorySnapshot,
   identity: NativeConstructionInventoryIdentity,
 ): NativeConstructionInventoryFrame | null {
-  return snapshot.status === "ready" && snapshot.frame && sameIdentity(snapshot.frame, identity)
-    ? snapshot.frame
+  const frame = snapshot.frame;
+  if (!frame || !sameScope(frame, identity) || frame.revision > identity.revision ||
+      snapshot.requestedRevision !== null && identity.revision < snapshot.requestedRevision) return null;
+  if (snapshot.status === "ready" && sameIdentity(frame, identity)) return frame;
+  return snapshot.status === "ready" || snapshot.status === "loading" || snapshot.status === "unavailable"
+    ? frame
     : null;
 }
 
@@ -228,18 +240,17 @@ export class NativeConstructionInventoryStore {
       return Promise.resolve("unavailable");
     }
     const key = identityKey(identity);
-    if (this.currentIdentityKey !== key) {
-      this.token += 1;
-      this.flight = null;
-      this.currentIdentityKey = key;
-      this.publish(EMPTY_SNAPSHOT);
-    }
     if (this.flight?.key === key) return this.flight.promise;
     if (this.snapshot.status === "ready" && this.snapshot.frame && sameIdentity(this.snapshot.frame, identity)) {
       return Promise.resolve("committed");
     }
     const token = ++this.token;
-    const previous = this.snapshot.frame;
+    this.currentIdentityKey = key;
+    const previous = this.snapshot.frame && sameScope(this.snapshot.frame, identity) &&
+        this.snapshot.frame.revision <= identity.revision &&
+        identity.revision >= (this.snapshot.requestedRevision ?? this.snapshot.frame.revision)
+      ? this.snapshot.frame
+      : null;
     this.publish(Object.freeze({ status: "loading", requestedRevision: identity.revision, frame: previous }));
     const promise = this.performRefresh(source, identity, token, previous);
     this.flight = { key, promise };

@@ -54,21 +54,48 @@ const STATISTICS_LINEAGE_KEYS = new Set([
   "minElapsedSeconds", "maxElapsedSeconds", "cursor", "limit", "planetId", "itemId",
 ]);
 const OWNER_LINEAGE_FENCED_PROJECTIONS = new Set([
+  "factory-inventory-v1",
+  "construction-inventory-v1",
+  "blueprint-workspace-v1",
   "statistics-v1",
   "technology-v1",
   "recipe-workspace-v1",
+  "command-palette-entity-search-v1",
+  "star-map-overview-v1",
+  "star-map-catalog-v1",
+  "stellar-industry-v1",
+  "stellar-industry-v2",
+  "stellar-quantum-v1",
   "dyson-workspace-v1",
   "campaign-workspace-v1",
   "galaxy-account-workspace-v1",
 ]);
 const OWNER_LINEAGE_REQUIRED_PROJECTIONS = new Set([
   ...EXACT_LINEAGE_WORKSPACE_PROJECTIONS,
+  "factory-inventory-v1",
+  "construction-inventory-v1",
+  "blueprint-workspace-v1",
   "technology-v1",
   "recipe-workspace-v1",
+  "command-palette-entity-search-v1",
+  "star-map-overview-v1",
+  "star-map-catalog-v1",
+  "stellar-industry-v1",
+  "stellar-industry-v2",
+  "stellar-quantum-v1",
   "dyson-workspace-v1",
 ]);
 const REGISTRY_RESULT_FENCED_PROJECTIONS = new Set([
+  "factory-inventory-v1",
+  "construction-inventory-v1",
+  "blueprint-workspace-v1",
   "recipe-workspace-v1",
+  "command-palette-entity-search-v1",
+  "star-map-overview-v1",
+  "star-map-catalog-v1",
+  "stellar-industry-v1",
+  "stellar-industry-v2",
+  "stellar-quantum-v1",
   "dyson-workspace-v1",
 ]);
 

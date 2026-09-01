@@ -103,6 +103,38 @@ describe("NativeConstructionInventoryStore", () => {
     expect(store.getSnapshot().frame?.runId).toBe("authority-run-2");
   });
 
+  it("retains only a same-lineage older frame for read-only display while R+1 settles", async () => {
+    const store = new NativeConstructionInventoryStore();
+    await expect(store.refresh(source(async () => page(0, ["smelter"], 1)), IDENTITY))
+      .resolves.toBe("committed");
+    const nextIdentity = { ...IDENTITY, revision: 24 };
+    const pendingPage = deferred<NativeConstructionInventoryProjection | null>();
+    const pending = store.refresh({
+      boundIdentity: nextIdentity,
+      readVerifiedConstructionInventory: () => pendingPage.promise,
+    }, nextIdentity);
+
+    expect(selectNativeConstructionInventoryFrame(store.getSnapshot(), nextIdentity)?.revision)
+      .toBe(IDENTITY.revision);
+    expect(selectNativeConstructionInventoryFrame(store.getSnapshot(), {
+      ...nextIdentity,
+      runId: "authority-run-other",
+    })).toBeNull();
+    expect(selectNativeConstructionInventoryFrame(store.getSnapshot(), {
+      ...nextIdentity,
+      registryFingerprint: "builtin:other",
+    })).toBeNull();
+    expect(selectNativeConstructionInventoryFrame(store.getSnapshot(), {
+      ...nextIdentity,
+      revision: IDENTITY.revision - 1,
+    })).toBeNull();
+
+    pendingPage.resolve(null);
+    await expect(pending).resolves.toBe("unavailable");
+    expect(selectNativeConstructionInventoryFrame(store.getSnapshot(), nextIdentity)?.revision)
+      .toBe(IDENTITY.revision);
+  });
+
   it("rejects page drift, sparse pages, duplicates, zero amounts, and unsafe totals", async () => {
     const buildingIds = ids(257);
     const first = page(0, buildingIds.slice(0, 256), 257);
@@ -153,6 +185,7 @@ describe("NativeConstructionInventoryStore", () => {
     )).resolves.toEqual(projection);
     expect(calls).toEqual([{
       sessionId: IDENTITY.sessionId,
+      runId: IDENTITY.runId,
       expectedRevision: IDENTITY.revision,
       expectedRegistryFingerprint: IDENTITY.registryFingerprint,
       cursor: 0,

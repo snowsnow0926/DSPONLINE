@@ -733,6 +733,8 @@ import {
 import {
   NativeCommandPaletteEntitySearchStore,
   createNativePlayerAuthorityCommandPaletteEntitySearchSource,
+  selectNativeCommandPaletteEntitySearchFrame,
+  type NativeCommandPaletteEntitySearchIdentity,
 } from "./game/nativeCommandPaletteEntitySearchStore";
 import {
   RECIPE_FOCUS_NATIVE_BASE_FIELDS,
@@ -3302,37 +3304,76 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         ? "unavailable" as const
         : nativeGalaxyWorkspaceSnapshot.status === "empty" ? "empty" as const : "loading" as const;
   const nativeFactoryInventoryIdentity = useMemo<NativeFactoryInventoryIdentity | null>(() => {
-    const sessionId = nativePlayerAuthorityActiveFrame?.sessionId;
-    const runId = nativePlayerAuthorityActiveFrame?.runId;
-    return sessionId && runId ? Object.freeze({
-      sessionId,
-      runId,
-      revision: factoryThinViewExpectedRevision,
+    const frame = nativeThinWorkspaceAuthorityFrames.displayFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+      sessionId: frame.sessionId,
+      runId: frame.runId,
+      revision: frame.revision,
       registryFingerprint: recipeWorkspaceRegistryFingerprint,
     }) : null;
   }, [
-    factoryThinViewExpectedRevision,
-    nativePlayerAuthorityActiveFrame,
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
     recipeWorkspaceRegistryFingerprint,
   ]);
-  const nativeFactoryInventorySource = useMemo(() => nativeFactoryInventoryIdentity
-    ? createNativePlayerAuthorityFactoryInventorySource(desktopBridge, nativeFactoryInventoryIdentity)
-    : null, [desktopBridge, nativeFactoryInventoryIdentity]);
+  const nativeFactoryInventoryReadIdentity = useMemo<NativeFactoryInventoryIdentity | null>(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.readFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+        sessionId: frame.sessionId,
+        runId: frame.runId,
+        revision: frame.revision,
+        registryFingerprint: recipeWorkspaceRegistryFingerprint,
+      })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeFactoryInventorySource = useMemo(() => nativeFactoryInventoryReadIdentity
+    ? createNativePlayerAuthorityFactoryInventorySource(desktopBridge, nativeFactoryInventoryReadIdentity)
+    : null, [desktopBridge, nativeFactoryInventoryReadIdentity]);
   const nativeFactoryInventoryFrame = useMemo(() => nativeFactoryInventoryIdentity
     ? selectNativeFactoryInventoryFrame(nativeFactoryInventorySnapshot, nativeFactoryInventoryIdentity)
     : null, [nativeFactoryInventoryIdentity, nativeFactoryInventorySnapshot]);
-  const nativeConstructionInventorySource = useMemo(() => nativeFactoryInventoryIdentity
-    ? createNativePlayerAuthorityConstructionInventorySource(desktopBridge, nativeFactoryInventoryIdentity)
-    : null, [desktopBridge, nativeFactoryInventoryIdentity]);
+  const nativeConstructionInventorySource = useMemo(() => nativeFactoryInventoryReadIdentity
+    ? createNativePlayerAuthorityConstructionInventorySource(desktopBridge, nativeFactoryInventoryReadIdentity)
+    : null, [desktopBridge, nativeFactoryInventoryReadIdentity]);
   const nativeConstructionInventoryFrame = useMemo(() => nativeFactoryInventoryIdentity
     ? selectNativeConstructionInventoryFrame(nativeConstructionInventorySnapshot, nativeFactoryInventoryIdentity)
     : null, [nativeConstructionInventorySnapshot, nativeFactoryInventoryIdentity]);
-  const nativeBlueprintWorkspaceSource = useMemo(() => nativeFactoryInventoryIdentity
-    ? createNativePlayerAuthorityBlueprintWorkspaceSource(desktopBridge, nativeFactoryInventoryIdentity)
-    : null, [desktopBridge, nativeFactoryInventoryIdentity]);
+  const nativeBlueprintWorkspaceSource = useMemo(() => nativeFactoryInventoryReadIdentity
+    ? createNativePlayerAuthorityBlueprintWorkspaceSource(desktopBridge, nativeFactoryInventoryReadIdentity)
+    : null, [desktopBridge, nativeFactoryInventoryReadIdentity]);
   const nativeBlueprintWorkspaceFrame = useMemo(() => nativeFactoryInventoryIdentity
-    ? selectNativeBlueprintWorkspaceFrame(nativeBlueprintWorkspaceSnapshot, nativeFactoryInventoryIdentity)
-    : null, [nativeBlueprintWorkspaceSnapshot, nativeFactoryInventoryIdentity]);
+    ? selectNativeBlueprintWorkspaceFrame(
+        nativeBlueprintWorkspaceSnapshot,
+        nativeFactoryInventoryIdentity,
+        nativeBlueprintSelectedId,
+        nativeBlueprintLibraryCursor,
+        nativeBlueprintQueueCursor,
+      )
+    : null, [
+    nativeBlueprintLibraryCursor,
+    nativeBlueprintQueueCursor,
+    nativeBlueprintSelectedId,
+    nativeBlueprintWorkspaceSnapshot,
+    nativeFactoryInventoryIdentity,
+  ]);
+  const nativeInventoryLineageCurrent = Boolean(nativeFactoryInventoryIdentity &&
+    nativeFactoryInventoryReadIdentity &&
+    nativeFactoryInventoryIdentity.sessionId === nativeFactoryInventoryReadIdentity.sessionId &&
+    nativeFactoryInventoryIdentity.runId === nativeFactoryInventoryReadIdentity.runId &&
+    nativeFactoryInventoryIdentity.revision === nativeFactoryInventoryReadIdentity.revision &&
+    nativeFactoryInventoryIdentity.registryFingerprint === nativeFactoryInventoryReadIdentity.registryFingerprint);
+  const nativeFactoryInventoryWritesEnabled = nativeInventoryLineageCurrent &&
+    nativeFactoryInventoryFrame?.revision === nativeFactoryInventoryReadIdentity?.revision;
+  const nativeConstructionInventoryWritesEnabled = nativeInventoryLineageCurrent &&
+    nativeConstructionInventoryFrame?.revision === nativeFactoryInventoryReadIdentity?.revision;
+  const nativeBlueprintWorkspaceWritesEnabled = nativeInventoryLineageCurrent &&
+    nativeBlueprintWorkspaceFrame?.revision === nativeFactoryInventoryReadIdentity?.revision;
   const nativeBlueprintTransformBinding = useMemo(
     () => selectNativeBlueprintTransformBinding(nativeBlueprintWorkspaceFrame),
     [nativeBlueprintWorkspaceFrame],
@@ -3531,29 +3572,50 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       ? current
       : { ...request });
   }, []);
-  const nativeStellarProjectionIdentity = useMemo(() => nativePlayerAuthorityActiveFrame?.sessionId
-    ? Object.freeze({
-        sessionId: nativePlayerAuthorityActiveFrame.sessionId,
-        revision: factoryThinViewExpectedRevision,
+  const nativeStellarProjectionIdentity = useMemo(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.displayFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+        sessionId: frame.sessionId,
+        runId: frame.runId,
+        revision: frame.revision,
         registryFingerprint: recipeWorkspaceRegistryFingerprint,
       })
-    : null, [
-    factoryThinViewExpectedRevision,
-    nativePlayerAuthorityActiveFrame,
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
     recipeWorkspaceRegistryFingerprint,
   ]);
-  const nativeStellarProjectionSource = useMemo(() => nativeStellarProjectionIdentity
-    ? createNativePlayerAuthorityStellarProjectionSource(desktopBridge, nativeStellarProjectionIdentity)
-    : null, [desktopBridge, nativeStellarProjectionIdentity]);
-  const nativeStarMapCatalogSource = useMemo(() => nativeStellarProjectionIdentity
-    ? createNativePlayerAuthorityStarMapCatalogSource(desktopBridge, nativeStellarProjectionIdentity)
-    : null, [desktopBridge, nativeStellarProjectionIdentity]);
+  const nativeStellarProjectionReadIdentity = useMemo(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.readFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+        sessionId: frame.sessionId,
+        runId: frame.runId,
+        revision: frame.revision,
+        registryFingerprint: recipeWorkspaceRegistryFingerprint,
+      })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeStellarProjectionSource = useMemo(() => nativeStellarProjectionReadIdentity
+    ? createNativePlayerAuthorityStellarProjectionSource(desktopBridge, nativeStellarProjectionReadIdentity)
+    : null, [desktopBridge, nativeStellarProjectionReadIdentity]);
+  const nativeStarMapCatalogSource = useMemo(() => nativeStellarProjectionReadIdentity
+    ? createNativePlayerAuthorityStarMapCatalogSource(desktopBridge, nativeStellarProjectionReadIdentity)
+    : null, [desktopBridge, nativeStellarProjectionReadIdentity]);
   const nativeStarMapCatalogFrame = useMemo(() => nativeStellarProjectionIdentity
     ? selectNativeStarMapCatalogFrame(nativeStarMapCatalogSnapshot, nativeStellarProjectionIdentity)
     : null, [nativeStarMapCatalogSnapshot, nativeStellarProjectionIdentity]);
   const nativeStarMapCatalogStatus: StarMapNativeReadStatus = !nativePlayerAuthorityBoundFrame ||
-      nativeStarMapCatalogFrame
+      nativeStarMapCatalogFrame?.revision === nativeStellarProjectionIdentity?.revision
     ? "ready"
+    : nativeStarMapCatalogFrame
+      ? "loading"
     : !nativeStellarProjectionIdentity || !nativeStarMapCatalogSource ||
         nativeStarMapCatalogSnapshot.status === "unavailable"
       ? "unavailable"
@@ -3570,8 +3632,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativeStellarWorkspaceSnapshot,
   ]);
   const nativeStarMapWorkspaceReadStatus: StarMapNativeReadStatus = !nativePlayerAuthorityBoundFrame ||
-      nativeStarMapWorkspaceReadModel
+      nativeStarMapWorkspaceReadModel?.revision === nativeStellarProjectionIdentity?.revision
     ? "ready"
+    : nativeStarMapWorkspaceReadModel
+      ? "loading"
     : !nativeStellarProjectionIdentity || !nativeStellarProjectionSource ||
         nativeStellarWorkspaceSnapshot.overview.status === "unavailable" ||
         nativeStellarWorkspaceSnapshot.industry.status === "unavailable"
@@ -3588,12 +3652,24 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativeStellarWorkspaceSnapshot,
   ]);
   const nativeStellarQuantumReadStatus: StarMapNativeReadStatus = !nativePlayerAuthorityBoundFrame ||
-      nativeStellarQuantumReadModel
+      nativeStellarQuantumReadModel?.revision === nativeStellarProjectionIdentity?.revision
     ? "ready"
+    : nativeStellarQuantumReadModel
+      ? "loading"
     : !nativeStellarProjectionIdentity || !nativeStellarProjectionSource ||
         nativeStellarWorkspaceSnapshot.quantum.status === "unavailable"
       ? "unavailable"
       : "loading";
+  const nativeStellarLineageCurrent = Boolean(nativeStellarProjectionIdentity &&
+    nativeStellarProjectionReadIdentity &&
+    nativeStellarProjectionIdentity.sessionId === nativeStellarProjectionReadIdentity.sessionId &&
+    nativeStellarProjectionIdentity.runId === nativeStellarProjectionReadIdentity.runId &&
+    nativeStellarProjectionIdentity.revision === nativeStellarProjectionReadIdentity.revision &&
+    nativeStellarProjectionIdentity.registryFingerprint === nativeStellarProjectionReadIdentity.registryFingerprint);
+  const nativeStarMapWritesEnabled = nativeStellarLineageCurrent &&
+    nativeStarMapWorkspaceReadModel?.revision === nativeStellarProjectionReadIdentity?.revision;
+  const nativeStellarQuantumWritesEnabled = nativeStellarLineageCurrent &&
+    nativeStellarQuantumReadModel?.revision === nativeStellarProjectionReadIdentity?.revision;
   const commandPaletteEntitySearchSelector = useMemo(
     () => createCommandPaletteEntitySearchSelector(
       commandPaletteEntitySearchRequest.query,
@@ -3610,6 +3686,36 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       ? current
       : { query, cursor });
   }, []);
+  const nativeCommandPaletteEntitySearchIdentity = useMemo<NativeCommandPaletteEntitySearchIdentity | null>(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.displayFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+        sessionId: frame.sessionId,
+        runId: frame.runId,
+        revision: frame.revision,
+        registryFingerprint: recipeWorkspaceRegistryFingerprint,
+      })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeCommandPaletteEntitySearchReadIdentity = useMemo<NativeCommandPaletteEntitySearchIdentity | null>(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.readFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+        sessionId: frame.sessionId,
+        runId: frame.runId,
+        revision: frame.revision,
+        registryFingerprint: recipeWorkspaceRegistryFingerprint,
+      })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
   const nativeCommandPaletteEntitySearchStoreRef = useRef<NativeCommandPaletteEntitySearchStore | null>(null);
   if (nativeCommandPaletteEntitySearchStoreRef.current === null) {
     nativeCommandPaletteEntitySearchStoreRef.current = new NativeCommandPaletteEntitySearchStore();
@@ -3620,13 +3726,37 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativeCommandPaletteEntitySearchStore.getSnapshot,
     nativeCommandPaletteEntitySearchStore.getSnapshot,
   );
+  const nativeCommandPaletteEntitySearchSource = useMemo(
+    () => nativeCommandPaletteEntitySearchReadIdentity
+      ? createNativePlayerAuthorityCommandPaletteEntitySearchSource(
+        desktopBridge,
+        nativeCommandPaletteEntitySearchReadIdentity,
+      )
+      : null,
+    [desktopBridge, nativeCommandPaletteEntitySearchReadIdentity],
+  );
+  const nativeCommandPaletteEntitySearchFrame = useMemo(
+    () => nativeCommandPaletteEntitySearchIdentity
+      ? selectNativeCommandPaletteEntitySearchFrame(
+        nativeCommandPaletteEntitySearchSnapshot,
+        nativeCommandPaletteEntitySearchIdentity,
+        commandPaletteEntitySearchSelector,
+      )
+      : null,
+    [
+      commandPaletteEntitySearchSelector,
+      nativeCommandPaletteEntitySearchIdentity,
+      nativeCommandPaletteEntitySearchSnapshot,
+    ],
+  );
   const nativeCommandPaletteEntitySearchReadModel = useMemo(
     () => selectNativeCommandPaletteEntitySearchReadModel(
-      nativeCommandPaletteEntitySearchSnapshot.frame,
+      nativeCommandPaletteEntitySearchFrame,
       {
-        enabled: Boolean(nativePlayerAuthorityActiveFrame),
-        sessionId: nativePlayerAuthorityActiveFrame?.sessionId ?? null,
-        expectedRevision: factoryThinViewExpectedRevision,
+        enabled: Boolean(nativeCommandPaletteEntitySearchIdentity),
+        sessionId: nativeCommandPaletteEntitySearchIdentity?.sessionId ?? null,
+        runId: nativeCommandPaletteEntitySearchIdentity?.runId ?? null,
+        expectedRevision: nativeCommandPaletteEntitySearchIdentity?.revision ?? factoryThinViewExpectedRevision,
         expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
         selector: commandPaletteEntitySearchSelector,
       },
@@ -3634,8 +3764,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     [
       commandPaletteEntitySearchSelector,
       factoryThinViewExpectedRevision,
-      nativeCommandPaletteEntitySearchSnapshot.frame,
-      nativePlayerAuthorityActiveFrame,
+      nativeCommandPaletteEntitySearchFrame,
+      nativeCommandPaletteEntitySearchIdentity,
       recipeWorkspaceRegistryFingerprint,
     ],
   );
@@ -3644,10 +3774,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     ? "empty"
     : commandPaletteEntitySearchSelector.truncated
       ? "truncated"
-      : !nativePlayerAuthorityActiveFrame
+      : !nativeCommandPaletteEntitySearchIdentity
         ? "unavailable"
-        : nativeCommandPaletteEntitySearchReadModel
+        : nativeCommandPaletteEntitySearchReadModel?.revision === nativeCommandPaletteEntitySearchIdentity.revision
           ? "ready"
+          : nativeCommandPaletteEntitySearchReadModel
+            ? "loading"
           : nativeCommandPaletteEntitySearchSnapshot.status === "unavailable"
             ? "unavailable"
             : "loading";
@@ -4462,48 +4594,48 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     windowsNativeCoreBetaStatus,
   ]);
   useEffect(() => {
-    if (!nativePlayerAuthorityOwnsRuntime || !nativeFactoryInventoryIdentity ||
-        !nativeFactoryInventorySource || !nativePlayerAuthorityActiveFrame) {
+    if (!nativePlayerAuthorityOwnsRuntime || !nativeFactoryInventoryIdentity) {
       nativeFactoryInventoryStore.clear();
       return;
     }
+    if (!nativeFactoryInventoryReadIdentity || !nativeFactoryInventorySource) return;
     void nativeFactoryInventoryStore.refresh(
       nativeFactoryInventorySource,
-      nativeFactoryInventoryIdentity,
+      nativeFactoryInventoryReadIdentity,
     ).catch(() => undefined);
   }, [
     nativeFactoryInventoryIdentity,
+    nativeFactoryInventoryReadIdentity,
     nativeFactoryInventorySource,
     nativeFactoryInventoryStore,
-    nativePlayerAuthorityActiveFrame,
     nativePlayerAuthorityOwnsRuntime,
   ]);
   useEffect(() => {
-    if (!nativePlayerAuthorityOwnsRuntime || !nativeFactoryInventoryIdentity ||
-        !nativeConstructionInventorySource || !nativePlayerAuthorityActiveFrame) {
+    if (!nativePlayerAuthorityOwnsRuntime || !nativeFactoryInventoryIdentity) {
       nativeConstructionInventoryStore.clear();
       return;
     }
+    if (!nativeFactoryInventoryReadIdentity || !nativeConstructionInventorySource) return;
     void nativeConstructionInventoryStore.refresh(
       nativeConstructionInventorySource,
-      nativeFactoryInventoryIdentity,
+      nativeFactoryInventoryReadIdentity,
     ).catch(() => undefined);
   }, [
     nativeConstructionInventorySource,
     nativeConstructionInventoryStore,
     nativeFactoryInventoryIdentity,
-    nativePlayerAuthorityActiveFrame,
+    nativeFactoryInventoryReadIdentity,
     nativePlayerAuthorityOwnsRuntime,
   ]);
   useEffect(() => {
-    if (!blueprintsOpen || !nativePlayerAuthorityOwnsRuntime || !nativeFactoryInventoryIdentity ||
-        !nativeBlueprintWorkspaceSource || !nativePlayerAuthorityActiveFrame) {
+    if (!blueprintsOpen || !nativePlayerAuthorityOwnsRuntime || !nativeFactoryInventoryIdentity) {
       nativeBlueprintWorkspaceStore.clear();
       return;
     }
+    if (!nativeFactoryInventoryReadIdentity || !nativeBlueprintWorkspaceSource) return;
     void nativeBlueprintWorkspaceStore.refresh(
       nativeBlueprintWorkspaceSource,
-      nativeFactoryInventoryIdentity,
+      nativeFactoryInventoryReadIdentity,
       nativeBlueprintSelectedId,
       nativeBlueprintLibraryCursor,
       nativeBlueprintQueueCursor,
@@ -4516,7 +4648,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativeBlueprintWorkspaceSource,
     nativeBlueprintWorkspaceStore,
     nativeFactoryInventoryIdentity,
-    nativePlayerAuthorityActiveFrame,
+    nativeFactoryInventoryReadIdentity,
     nativePlayerAuthorityOwnsRuntime,
   ]);
   useEffect(() => {
@@ -4616,76 +4748,78 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativePlayerAuthorityOwnsRuntime,
   ]);
   useEffect(() => {
-    if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity ||
-        !nativeStarMapCatalogSource) {
+    if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity) {
       nativeStarMapCatalogStore.clear();
       return;
     }
+    if (!nativeStellarProjectionReadIdentity || !nativeStarMapCatalogSource) return;
     void nativeStarMapCatalogStore.refresh(
       nativeStarMapCatalogSource,
-      nativeStellarProjectionIdentity,
+      nativeStellarProjectionReadIdentity,
     ).catch(() => undefined);
   }, [
     nativePlayerAuthorityBoundFrame,
     nativeStarMapCatalogSource,
     nativeStarMapCatalogStore,
     nativeStellarProjectionIdentity,
+    nativeStellarProjectionReadIdentity,
     starMapOpen,
   ]);
   useEffect(() => {
-    if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity ||
-        !nativeStellarProjectionSource) {
+    if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity) {
       nativeStellarWorkspaceStore.clear();
     }
   }, [
     nativePlayerAuthorityBoundFrame,
     nativeStellarProjectionIdentity,
-    nativeStellarProjectionSource,
     nativeStellarWorkspaceStore,
     starMapOpen,
   ]);
   useEffect(() => {
     if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity ||
-        !nativeStellarProjectionSource) return;
+        !nativeStellarProjectionReadIdentity || !nativeStellarProjectionSource) return;
     void nativeStellarWorkspaceStore.refreshOverview(
       nativeStellarProjectionSource,
-      nativeStellarProjectionIdentity,
+      nativeStellarProjectionReadIdentity,
       { cursor: 0, limit: NATIVE_STELLAR_PAGE_ROWS },
     ).catch(() => undefined);
   }, [
     nativePlayerAuthorityBoundFrame,
     nativeStellarProjectionIdentity,
+    nativeStellarProjectionReadIdentity,
     nativeStellarProjectionSource,
     nativeStellarWorkspaceStore,
     starMapOpen,
   ]);
   useEffect(() => {
     if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity ||
-        !nativeStellarProjectionSource) return;
+        !nativeStellarProjectionReadIdentity || !nativeStellarProjectionSource) return;
     void nativeStellarWorkspaceStore.refreshQuantum(
       nativeStellarProjectionSource,
-      nativeStellarProjectionIdentity,
+      nativeStellarProjectionReadIdentity,
       DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR,
     ).catch(() => undefined);
   }, [
     nativePlayerAuthorityBoundFrame,
     nativeStellarProjectionIdentity,
+    nativeStellarProjectionReadIdentity,
     nativeStellarProjectionSource,
     nativeStellarWorkspaceStore,
     starMapOpen,
   ]);
   useEffect(() => {
     if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity ||
-        !nativeStellarProjectionSource) return;
+        !nativeStellarProjectionReadIdentity || !nativeStellarProjectionSource) return;
     void nativeStellarWorkspaceStore.refreshIndustry(
       nativeStellarProjectionSource,
-      nativeStellarProjectionIdentity,
+      nativeStellarProjectionReadIdentity,
       nativeStellarIndustrySelector,
     ).catch(() => undefined);
   }, [
     nativePlayerAuthorityBoundFrame,
     nativeStellarIndustrySelector,
     nativeStellarProjectionIdentity,
+    nativeStellarProjectionReadIdentity,
     nativeStellarProjectionSource,
     nativeStellarWorkspaceStore,
     starMapOpen,
@@ -4711,48 +4845,31 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativePlayerAuthorityOwnsRuntime,
   ]);
   useEffect(() => {
-    if (!commandPaletteOpen || !nativePlayerAuthorityBoundFrame ||
+    if (!commandPaletteOpen || !nativeCommandPaletteEntitySearchIdentity ||
         commandPaletteEntitySearchSelector.query.length < 2) {
       nativeCommandPaletteEntitySearchStore.clear();
       return;
     }
     if (commandPaletteEntitySearchSelector.truncated) {
-      nativeCommandPaletteEntitySearchStore.markTruncated(factoryThinViewExpectedRevision);
+      nativeCommandPaletteEntitySearchStore.markTruncated(
+        nativeCommandPaletteEntitySearchIdentity,
+        commandPaletteEntitySearchSelector,
+      );
       return;
     }
-    if (!nativePlayerAuthorityActiveFrame) {
-      nativeCommandPaletteEntitySearchStore.clear();
-      return;
-    }
-    const sessionId = nativePlayerAuthorityActiveFrame.sessionId;
-    if (!sessionId) {
-      nativeCommandPaletteEntitySearchStore.markUnavailable(factoryThinViewExpectedRevision);
-      return;
-    }
-    const source = createNativePlayerAuthorityCommandPaletteEntitySearchSource(
-      desktopBridge,
-      sessionId,
-    );
-    if (!source) {
-      nativeCommandPaletteEntitySearchStore.markUnavailable(factoryThinViewExpectedRevision);
-      return;
-    }
+    if (!nativeCommandPaletteEntitySearchReadIdentity || !nativeCommandPaletteEntitySearchSource) return;
     void nativeCommandPaletteEntitySearchStore.refresh(
-      source,
-      sessionId,
-      factoryThinViewExpectedRevision,
-      recipeWorkspaceRegistryFingerprint,
+      nativeCommandPaletteEntitySearchSource,
+      nativeCommandPaletteEntitySearchReadIdentity,
       commandPaletteEntitySearchSelector,
     );
   }, [
     commandPaletteEntitySearchSelector,
     commandPaletteOpen,
-    desktopBridge,
-    factoryThinViewExpectedRevision,
+    nativeCommandPaletteEntitySearchIdentity,
+    nativeCommandPaletteEntitySearchReadIdentity,
+    nativeCommandPaletteEntitySearchSource,
     nativeCommandPaletteEntitySearchStore,
-    nativePlayerAuthorityActiveFrame,
-    nativePlayerAuthorityBoundFrame,
-    recipeWorkspaceRegistryFingerprint,
   ]);
   const simulationProjectionIndexRef = useRef<SimulationProjectionStateIndex>(createSimulationProjectionStateIndex(loaded.state));
   const simulationProjectionScopeRef = useRef<"default" | "full-top-level">("default");
@@ -21026,7 +21143,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         <RuntimeRenderProfile id="resource-rail">
         {nativePlayerAuthorityOwnsRuntime ? <NativeResourceRail
           frame={nativeFactoryInventoryFrame}
-          pending={nativePlayerAuthorityCommandPending || !nativePlayerAuthorityCommandSource}
+          pending={nativePlayerAuthorityCommandPending || !nativePlayerAuthorityCommandSource ||
+            !nativeFactoryInventoryWritesEnabled}
           onPickTray={takeNativeTrayItem}
           onDropCargo={returnNativeCargo}
           onStowEntityInventory={handleDraggedItemToTray}
@@ -21841,7 +21959,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         selectedBeltTier={nativeBeltPlacementTier}
         beltLanes={defaultBeltLanes}
         pending={nativePlacementContextPending || nativeBeltPlacementContextPending || nativePlayerAuthorityCommandPending ||
-          !nativePlayerAuthorityCommandSource ||
+          !nativePlayerAuthorityCommandSource || !nativeConstructionInventoryWritesEnabled ||
           typeof desktopBridge?.getNativeCoreConstructionPlacementContext !== "function" ||
           typeof desktopBridge?.getNativeCoreConstructionBeltPlacementContext !== "function"}
         onPlacementChange={selectNativeBuildingPlacement}
@@ -21946,7 +22064,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         onConsumeRenameResolution={consumeNativeBlueprintRenameResolution}
         commandPending={nativePlayerAuthorityCommandPending || nativeBlueprintEnqueueContextPending ||
           nativeBlueprintDirectDeployContextPending || nativeBlueprintImportContextPending ||
-          nativeBlueprintExportContextPending}
+          nativeBlueprintExportContextPending || !nativeBlueprintWorkspaceWritesEnabled}
       />
       {!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&
         !nativeBlueprintTransformPending &&
@@ -22337,20 +22455,34 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             industryReadRequest={starMapIndustryReadRequest}
             onIndustryReadRequest={updateStarMapIndustryReadRequest}
             onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setStarMapOpen(false)}
-            onNativeRoleChange={(projectedRevision, planetId, currentRole, targetRole) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
-              createNativeProjectedPlanetRoleCommand({ baseRevision, planetId, currentRole, targetRole }))}
-            onNativeQuantumItemCapacityChange={(projectedRevision, itemId, currentCapacity, targetCapacity) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
-              createNativeProjectedQuantumItemCapacityCommand({ baseRevision, itemId, currentCapacity, targetCapacity }))}
-            onNativeStationPriorityChange={(projectedRevision, stationId, slotIndex, currentPriority, targetPriority) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
-              createNativeProjectedStationPriorityCommand({ baseRevision, stationId, slotIndex, currentPriority, targetPriority }))}
-            onNativeStationMinimumLoadChange={(projectedRevision, stationId, slotIndex, currentMinimumLoad, targetMinimumLoad, primarySlot) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
-              createNativeProjectedStationMinimumLoadCommand({ baseRevision, stationId, slotIndex, currentMinimumLoad, targetMinimumLoad, primarySlot }))}
-            onNativeStationRoutePolicyChange={(projectedRevision, stationId, slotIndex, currentRoutePolicy, targetRoutePolicy) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
-              createNativeProjectedStationRoutePolicyCommand({ baseRevision, stationId, slotIndex, currentRoutePolicy, targetRoutePolicy }))}
-            onNativeStationWarperBudgetChange={(projectedRevision, stationId, slotIndex, currentWarperBudget, requestedWarperBudget) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
-              createNativeProjectedStationWarperBudgetCommand({ baseRevision, stationId, slotIndex, currentWarperBudget, requestedWarperBudget }))}
-            onNativeStationLimitsChange={(projectedRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
-              createNativeProjectedStationLimitsCommand({ baseRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock }))}
+            onNativeRoleChange={nativeStarMapWritesEnabled
+              ? (projectedRevision, planetId, currentRole, targetRole) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+                createNativeProjectedPlanetRoleCommand({ baseRevision, planetId, currentRole, targetRole }))
+              : undefined}
+            onNativeQuantumItemCapacityChange={nativeStellarQuantumWritesEnabled
+              ? (projectedRevision, itemId, currentCapacity, targetCapacity) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+                createNativeProjectedQuantumItemCapacityCommand({ baseRevision, itemId, currentCapacity, targetCapacity }))
+              : undefined}
+            onNativeStationPriorityChange={nativeStarMapWritesEnabled
+              ? (projectedRevision, stationId, slotIndex, currentPriority, targetPriority) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+                createNativeProjectedStationPriorityCommand({ baseRevision, stationId, slotIndex, currentPriority, targetPriority }))
+              : undefined}
+            onNativeStationMinimumLoadChange={nativeStarMapWritesEnabled
+              ? (projectedRevision, stationId, slotIndex, currentMinimumLoad, targetMinimumLoad, primarySlot) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+                createNativeProjectedStationMinimumLoadCommand({ baseRevision, stationId, slotIndex, currentMinimumLoad, targetMinimumLoad, primarySlot }))
+              : undefined}
+            onNativeStationRoutePolicyChange={nativeStarMapWritesEnabled
+              ? (projectedRevision, stationId, slotIndex, currentRoutePolicy, targetRoutePolicy) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+                createNativeProjectedStationRoutePolicyCommand({ baseRevision, stationId, slotIndex, currentRoutePolicy, targetRoutePolicy }))
+              : undefined}
+            onNativeStationWarperBudgetChange={nativeStarMapWritesEnabled
+              ? (projectedRevision, stationId, slotIndex, currentWarperBudget, requestedWarperBudget) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+                createNativeProjectedStationWarperBudgetCommand({ baseRevision, stationId, slotIndex, currentWarperBudget, requestedWarperBudget }))
+              : undefined}
+            onNativeStationLimitsChange={nativeStarMapWritesEnabled
+              ? (projectedRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock) => commitNativeProjectedCommand(projectedRevision, (baseRevision) =>
+                createNativeProjectedStationLimitsCommand({ baseRevision, stationId, slotIndex, currentMinStock, currentMaxStock, requestedMinStock, requestedMaxStock }))
+              : undefined}
             onFocusStation={focusStellarStation}
             onOpenSystemSpaceStation={openSystemSpaceStation}
           />

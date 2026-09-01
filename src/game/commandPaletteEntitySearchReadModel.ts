@@ -46,6 +46,7 @@ export interface CommandPaletteEntitySearchReadModel {
   readonly schema: "command-palette-entity-search-read-model-v1";
   readonly source: "native-core";
   readonly sessionId: string;
+  readonly runId: string;
   readonly revision: number;
   readonly registryFingerprint: string;
   readonly query: string;
@@ -58,6 +59,7 @@ export interface CommandPaletteEntitySearchReadModel {
 
 export interface CommandPaletteNativeEntityTarget {
   readonly sessionId: string;
+  readonly runId: string;
   readonly revision: number;
   readonly registryFingerprint: string;
   readonly planetId: PlanetId;
@@ -76,7 +78,9 @@ export interface CommandPaletteNativeEntityFocusPlan {
 
 export interface NativeCommandPaletteEntitySearchFrame {
   readonly sessionId: string;
+  readonly runId: string;
   readonly revision: number;
+  readonly registryFingerprint: string;
   readonly selector: CommandPaletteEntitySearchSelector;
   readonly projection: DesktopNativeCoreCommandPaletteEntitySearchResult;
 }
@@ -84,6 +88,7 @@ export interface NativeCommandPaletteEntitySearchFrame {
 export interface NativeCommandPaletteEntitySearchBinding {
   readonly enabled: boolean;
   readonly sessionId: string | null;
+  readonly runId: string | null;
   readonly expectedRevision: number;
   readonly expectedRegistryFingerprint: string;
   readonly selector: CommandPaletteEntitySearchSelector;
@@ -241,10 +246,15 @@ function knownRow(row: DesktopNativeCoreCommandPaletteEntitySearchRow): boolean 
 export function createCommandPaletteNativeEntityFocusPlan(
   game: Pick<GameState, "activePlanetId" | "settings">,
   target: CommandPaletteNativeEntityTarget,
-  authority: { readonly sessionId: string | null; readonly revision: number | null } | null,
+  authority: {
+    readonly sessionId: string | null;
+    readonly runId: string | null;
+    readonly revision: number | null;
+  } | null,
   currentRegistryFingerprint: string,
 ): CommandPaletteNativeEntityFocusPlan | null {
-  if (!authority || !authority.sessionId || authority.sessionId !== target.sessionId ||
+  if (!authority || !authority.sessionId || !authority.runId ||
+      authority.sessionId !== target.sessionId || authority.runId !== target.runId ||
       authority.revision !== target.revision ||
       currentRegistryFingerprint !== target.registryFingerprint ||
       !Number.isFinite(target.positionX) || Math.abs(target.positionX) > 10_000_000 ||
@@ -262,9 +272,10 @@ export function selectNativeCommandPaletteEntitySearchReadModel(
   frame: NativeCommandPaletteEntitySearchFrame | null,
   binding: NativeCommandPaletteEntitySearchBinding,
 ): CommandPaletteEntitySearchReadModel | null {
-  if (!frame || !binding.enabled || !binding.sessionId || binding.selector.truncated ||
-      frame.sessionId !== binding.sessionId || frame.revision !== binding.expectedRevision ||
-      frame.projection.revision !== binding.expectedRevision ||
+  if (!frame || !binding.enabled || !binding.sessionId || !binding.runId || binding.selector.truncated ||
+      frame.sessionId !== binding.sessionId || frame.runId !== binding.runId ||
+      frame.registryFingerprint !== binding.expectedRegistryFingerprint ||
+      frame.revision > binding.expectedRevision || frame.projection.revision !== frame.revision ||
       frame.projection.registryFingerprint !== binding.expectedRegistryFingerprint ||
       !commandPaletteEntitySearchSelectorsEqual(frame.selector, binding.selector)) return null;
   const projection = frame.projection;
@@ -290,6 +301,7 @@ export function selectNativeCommandPaletteEntitySearchReadModel(
     schema: "command-palette-entity-search-read-model-v1",
     source: "native-core",
     sessionId: frame.sessionId,
+    runId: frame.runId,
     revision: projection.revision,
     registryFingerprint: projection.registryFingerprint,
     query: projection.request.query,

@@ -15,6 +15,7 @@ import {
 
 const identity = Object.freeze({
   sessionId: "authority-1",
+  runId: "run-1",
   revision: 7,
   registryFingerprint: "builtin:test",
 }) satisfies NativeStarMapCatalogIdentity;
@@ -207,6 +208,7 @@ describe("NativeStarMapCatalogStore", () => {
     expect(result?.revision).toBe(7);
     expect(read).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: "authority-1",
+      runId: "run-1",
       expectedRevision: 7,
       expectedRegistryFingerprint: "builtin:test",
     }));
@@ -249,5 +251,36 @@ describe("NativeStarMapCatalogStore", () => {
     await expect(oldRefresh).resolves.toBe("superseded");
     await expect(nextRefresh).resolves.toBe("committed");
     expect(store.getSnapshot().frame?.revision).toBe(8);
+  });
+
+  it("retains only a same-lineage older catalog read-only while R+1 settles", async () => {
+    const store = new NativeStarMapCatalogStore();
+    await expect(store.refresh(source(), identity)).resolves.toBe("committed");
+    const nextIdentity = { ...identity, revision: 8 };
+    let resolveNext!: (value: DesktopNativeCoreStarMapCatalogProjectionResult | null) => void;
+    const nextSource: NativeStarMapCatalogSource = {
+      mode: "player-authority",
+      boundIdentity: nextIdentity,
+      readVerifiedStarMapCatalogProjection: () => new Promise((resolve) => { resolveNext = resolve; }),
+    };
+    const pending = store.refresh(nextSource, nextIdentity);
+
+    expect(selectNativeStarMapCatalogFrame(store.getSnapshot(), nextIdentity)?.revision).toBe(7);
+    expect(selectNativeStarMapCatalogFrame(store.getSnapshot(), {
+      ...nextIdentity,
+      runId: "run-other",
+    })).toBeNull();
+    expect(selectNativeStarMapCatalogFrame(store.getSnapshot(), {
+      ...nextIdentity,
+      registryFingerprint: "builtin:other",
+    })).toBeNull();
+    expect(selectNativeStarMapCatalogFrame(store.getSnapshot(), {
+      ...nextIdentity,
+      revision: 6,
+    })).toBeNull();
+
+    resolveNext(null);
+    await expect(pending).resolves.toBe("unavailable");
+    expect(selectNativeStarMapCatalogFrame(store.getSnapshot(), nextIdentity)?.revision).toBe(7);
   });
 });

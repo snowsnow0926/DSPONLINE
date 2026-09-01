@@ -934,6 +934,7 @@ test("core registry forwards exact bounded Dyson workspace page selectors and re
   });
   const request = {
     sessionId: "core-dyson",
+    runId: "run-dyson-1",
     expectedRevision: 8,
     expectedRegistryFingerprint: "builtin:test",
     selectedSystemId: "mod:星系/Ω🚀",
@@ -951,7 +952,8 @@ test("core registry forwards exact bounded Dyson workspace page selectors and re
     shellLimit: 12,
   };
   await registry.dysonWorkspaceProjection(7, request);
-  assert.deepEqual(calls, [{ operation: "coreDysonWorkspaceProjection", ...request }]);
+  const { runId: _rendererLineage, ...nativeRequest } = request;
+  assert.deepEqual(calls, [{ operation: "coreDysonWorkspaceProjection", ...nativeRequest }]);
   assert.throws(
     () => registry.dysonWorkspaceProjection(7, { ...request, selectedSystemId: "bad\nidentifier" }),
     /Dyson workspace projection request is invalid/,
@@ -968,6 +970,74 @@ test("core registry forwards exact bounded Dyson workspace page selectors and re
     () => registry.dysonWorkspaceProjection(7, { ...request, unexpected: true }),
     /Dyson workspace projection request is invalid/,
   );
+  assert.throws(
+    () => registry.dysonWorkspaceProjection(7, { ...request, runId: "bad run" }),
+    /Dyson workspace projection request is invalid/,
+  );
+});
+
+test("core registry validates renderer lineage tags and never forwards them into Rust projection schemas", async () => {
+  const calls = [];
+  const registry = new NativeCoreSessionRegistry({
+    request(request) {
+      calls.push(request);
+      return Promise.resolve({ schemaVersion: 1, revision: 8 });
+    },
+  });
+  registry.sessions.set("core-lineage", {
+    ownerId: 7,
+    slot: "normal-main",
+    registryFingerprint: "builtin:test",
+    ownerEpoch: 1,
+    state: "owned",
+    inFlight: 0,
+  });
+
+  await registry.technologyProjection(7, {
+    sessionId: "core-lineage",
+    runId: "run-lineage-1",
+    expectedRevision: 8,
+    expectedRegistryFingerprint: "builtin:test",
+  });
+  await registry.recipeWorkspaceProjection(7, {
+    sessionId: "core-lineage",
+    runId: "run-lineage-1",
+    expectedRevision: 8,
+    expectedRegistryFingerprint: "builtin:test",
+    itemIds: ["iron_ore"],
+    selectedItemId: "iron_ore",
+    location: null,
+  });
+
+  assert.deepEqual(calls, [
+    { operation: "coreTechnologyProjection", sessionId: "core-lineage" },
+    {
+      operation: "coreRecipeWorkspaceProjection",
+      sessionId: "core-lineage",
+      expectedRegistryFingerprint: "builtin:test",
+      itemIds: ["iron_ore"],
+      selectedItemId: "iron_ore",
+    },
+  ]);
+  assert.throws(() => registry.technologyProjection(7, {
+    sessionId: "core-lineage",
+    runId: "run-lineage-1",
+    expectedRevision: 8,
+  }), /technology projection request is invalid/);
+  assert.throws(() => registry.technologyProjection(7, {
+    sessionId: "core-lineage",
+    expectedRevision: 8,
+    expectedRegistryFingerprint: "builtin:test",
+  }), /technology projection request is invalid/);
+  assert.throws(() => registry.recipeWorkspaceProjection(7, {
+    sessionId: "core-lineage",
+    runId: "bad run",
+    expectedRevision: 8,
+    expectedRegistryFingerprint: "builtin:test",
+    itemIds: ["iron_ore"],
+    selectedItemId: "iron_ore",
+    location: null,
+  }), /recipe workspace projection request is invalid/);
 });
 
 test("core registry forwards exact bounded system-space-station selectors and lineage", async () => {

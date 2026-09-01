@@ -576,6 +576,8 @@ import {
 import {
   NativeTechnologyWorkspaceStore,
   createNativePlayerAuthorityTechnologyProjectionSource,
+  selectNativeTechnologyWorkspaceFrame,
+  type NativeTechnologyWorkspaceIdentity,
 } from "./game/nativeTechnologyWorkspaceStore";
 import {
   createWebTechnologyWorkspaceReadModel,
@@ -584,6 +586,8 @@ import {
 import {
   NativeRecipeWorkspaceStore,
   createNativePlayerAuthorityRecipeWorkspaceProjectionSource,
+  selectNativeRecipeWorkspaceFrame,
+  type NativeRecipeWorkspaceIdentity,
 } from "./game/nativeRecipeWorkspaceStore";
 import {
   DEFAULT_NATIVE_STELLAR_QUANTUM_SELECTOR,
@@ -795,6 +799,7 @@ import {
   selectActiveNativePlayerAuthorityFrame,
   selectBoundNativePlayerAuthorityFrame,
   selectNativePlayerAuthorityMacroStatus,
+  selectNativePlayerAuthorityWorkspaceFrames,
 } from "./game/nativePlayerAuthorityClock";
 import { NativePlanetNavigationDiscoveryStore } from "./game/nativePlanetNavigationDiscoveryStore";
 import {
@@ -2923,6 +2928,44 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativePlanetNavigationDiscoveryStore.getSnapshot,
     nativePlanetNavigationDiscoveryStore.getSnapshot,
   );
+  const recipeWorkspaceRegistryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
+  const nativeThinWorkspaceAuthorityFrames = useMemo(
+    () => selectNativePlayerAuthorityWorkspaceFrames(
+      nativePlayerAuthorityClockSnapshot,
+      nativePlayerAuthoritySessionId,
+    ),
+    [nativePlayerAuthorityClockSnapshot, nativePlayerAuthoritySessionId],
+  );
+  const nativeTechnologyWorkspaceIdentity = useMemo<NativeTechnologyWorkspaceIdentity | null>(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.displayFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+        })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeTechnologyWorkspaceReadIdentity = useMemo<NativeTechnologyWorkspaceIdentity | null>(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.readFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+        })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
   const nativeTechnologyWorkspaceStoreRef = useRef<NativeTechnologyWorkspaceStore | null>(null);
   if (nativeTechnologyWorkspaceStoreRef.current === null) {
     nativeTechnologyWorkspaceStoreRef.current = new NativeTechnologyWorkspaceStore();
@@ -2933,18 +2976,47 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativeTechnologyWorkspaceStore.getSnapshot,
     nativeTechnologyWorkspaceStore.getSnapshot,
   );
+  const nativeTechnologyWorkspaceSource = useMemo(() => nativeTechnologyWorkspaceReadIdentity
+    ? createNativePlayerAuthorityTechnologyProjectionSource(
+        desktopBridge,
+        nativeTechnologyWorkspaceReadIdentity,
+      )
+    : null, [desktopBridge, nativeTechnologyWorkspaceReadIdentity]);
+  const nativeTechnologyWorkspaceFrame = useMemo(() => nativeTechnologyWorkspaceIdentity
+    ? selectNativeTechnologyWorkspaceFrame(
+        nativeTechnologyWorkspaceSnapshot,
+        nativeTechnologyWorkspaceIdentity,
+      )
+    : null, [nativeTechnologyWorkspaceIdentity, nativeTechnologyWorkspaceSnapshot]);
   const nativeTechnologyWorkspaceReadModel = useMemo(
-    () => selectNativeTechnologyWorkspaceReadModel(nativeTechnologyWorkspaceSnapshot.frame, {
-      enabled: Boolean(nativePlayerAuthorityBoundFrame),
-      sessionId: nativePlayerAuthorityBoundFrame?.sessionId ?? null,
-      expectedRevision: factoryThinViewExpectedRevision,
+    () => selectNativeTechnologyWorkspaceReadModel(nativeTechnologyWorkspaceFrame, {
+      enabled: Boolean(nativeTechnologyWorkspaceIdentity),
+      sessionId: nativeTechnologyWorkspaceIdentity?.sessionId ?? null,
+      runId: nativeTechnologyWorkspaceIdentity?.runId ?? null,
+      expectedRevision: nativeTechnologyWorkspaceFrame?.revision ??
+        nativeTechnologyWorkspaceIdentity?.revision ?? factoryThinViewExpectedRevision,
+      expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
     }),
     [
       factoryThinViewExpectedRevision,
-      nativePlayerAuthorityBoundFrame,
-      nativeTechnologyWorkspaceSnapshot.frame,
+      nativeTechnologyWorkspaceFrame,
+      nativeTechnologyWorkspaceIdentity,
+      recipeWorkspaceRegistryFingerprint,
     ],
   );
+  const nativeTechnologyWorkspaceReadStatus = nativeTechnologyWorkspaceFrame &&
+      nativeTechnologyWorkspaceIdentity && nativeTechnologyWorkspaceSnapshot.status === "ready" &&
+      nativeTechnologyWorkspaceFrame.revision === nativeTechnologyWorkspaceIdentity.revision
+    ? "ready" as const
+    : nativeTechnologyWorkspaceFrame
+      ? nativeTechnologyWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : "loading" as const
+      : !nativeTechnologyWorkspaceIdentity || nativeTechnologyWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : nativeTechnologyWorkspaceSnapshot.status === "empty"
+          ? "empty" as const
+          : "loading" as const;
   const webTechnologyWorkspaceReadModel = useMemo(
     () => technologyOpen && !nativePlayerAuthorityBoundFrame
       ? createWebTechnologyWorkspaceReadModel(game)
@@ -2955,8 +3027,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     ? nativeTechnologyWorkspaceReadModel
     : webTechnologyWorkspaceReadModel;
   const nativeTechnologyCommandProjection = nativeTechnologyWorkspaceReadModel?.source === "native-core" &&
-      nativeTechnologyWorkspaceReadModel.revision === factoryThinViewExpectedRevision
-    ? nativeTechnologyWorkspaceSnapshot.frame?.projection ?? null
+      nativeTechnologyWorkspaceReadStatus === "ready" &&
+      nativeTechnologyWorkspaceReadModel.revision === nativeTechnologyWorkspaceIdentity?.revision
+    ? nativeTechnologyWorkspaceFrame?.projection ?? null
     : null;
   const updateRecipeWorkspaceSelector = useCallback((selector: RecipeWorkspaceSelector) => {
     setRecipeWorkspaceSelector((current) => recipeWorkspaceSelectorsEqual(current, selector)
@@ -2973,6 +3046,42 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativeRecipeWorkspaceStore.getSnapshot,
     nativeRecipeWorkspaceStore.getSnapshot,
   );
+  const nativeRecipeWorkspaceIdentity = useMemo<NativeRecipeWorkspaceIdentity | null>(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.displayFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+        })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeRecipeWorkspaceReadIdentity = useMemo<NativeRecipeWorkspaceIdentity | null>(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.readFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+        })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeRecipeWorkspaceSource = useMemo(() => nativeRecipeWorkspaceReadIdentity
+    ? createNativePlayerAuthorityRecipeWorkspaceProjectionSource(
+        desktopBridge,
+        nativeRecipeWorkspaceReadIdentity,
+      )
+    : null, [desktopBridge, nativeRecipeWorkspaceReadIdentity]);
   const nativeStatisticsWorkspaceStoreRef = useRef<NativeStatisticsWorkspaceStore | null>(null);
   if (nativeStatisticsWorkspaceStoreRef.current === null) {
     nativeStatisticsWorkspaceStoreRef.current = new NativeStatisticsWorkspaceStore();
@@ -3003,7 +3112,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativeGalaxyWorkspaceStore.getSnapshot,
     nativeGalaxyWorkspaceStore.getSnapshot,
   );
-  const recipeWorkspaceRegistryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
   const nativeStatisticsWorkspaceAuthorityFrames = useMemo(
     () => selectNativeStatisticsWorkspaceAuthorityFrames(
       nativePlayerAuthorityClockSnapshot,
@@ -3543,22 +3651,44 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           : nativeCommandPaletteEntitySearchSnapshot.status === "unavailable"
             ? "unavailable"
             : "loading";
+  const nativeRecipeWorkspaceFrame = useMemo(() => nativeRecipeWorkspaceIdentity
+    ? selectNativeRecipeWorkspaceFrame(
+        nativeRecipeWorkspaceSnapshot,
+        nativeRecipeWorkspaceIdentity,
+        recipeWorkspaceSelector,
+      )
+    : null, [nativeRecipeWorkspaceIdentity, nativeRecipeWorkspaceSnapshot, recipeWorkspaceSelector]);
   const nativeRecipeWorkspaceReadModel = useMemo(
-    () => selectNativeRecipeWorkspaceReadModel(nativeRecipeWorkspaceSnapshot.frame, {
-      enabled: Boolean(nativePlayerAuthorityBoundFrame),
-      sessionId: nativePlayerAuthorityBoundFrame?.sessionId ?? null,
-      expectedRevision: factoryThinViewExpectedRevision,
+    () => selectNativeRecipeWorkspaceReadModel(nativeRecipeWorkspaceFrame, {
+      enabled: Boolean(nativeRecipeWorkspaceIdentity),
+      sessionId: nativeRecipeWorkspaceIdentity?.sessionId ?? null,
+      runId: nativeRecipeWorkspaceIdentity?.runId ?? null,
+      expectedRevision: nativeRecipeWorkspaceFrame?.revision ??
+        nativeRecipeWorkspaceIdentity?.revision ?? factoryThinViewExpectedRevision,
       expectedRegistryFingerprint: recipeWorkspaceRegistryFingerprint,
       selector: recipeWorkspaceSelector,
     }),
     [
       factoryThinViewExpectedRevision,
-      nativePlayerAuthorityBoundFrame,
-      nativeRecipeWorkspaceSnapshot.frame,
+      nativeRecipeWorkspaceFrame,
+      nativeRecipeWorkspaceIdentity,
       recipeWorkspaceRegistryFingerprint,
       recipeWorkspaceSelector,
     ],
   );
+  const nativeRecipeWorkspaceReadStatus = nativeRecipeWorkspaceFrame &&
+      nativeRecipeWorkspaceIdentity && nativeRecipeWorkspaceSnapshot.status === "ready" &&
+      nativeRecipeWorkspaceFrame.revision === nativeRecipeWorkspaceIdentity.revision
+    ? "ready" as const
+    : nativeRecipeWorkspaceFrame
+      ? nativeRecipeWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : "loading" as const
+      : !nativeRecipeWorkspaceIdentity || nativeRecipeWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : nativeRecipeWorkspaceSnapshot.status === "empty"
+          ? "empty" as const
+          : "loading" as const;
   const webRecipeWorkspaceReadModel = useMemo(
     () => recipesOpen && !nativePlayerAuthorityBoundFrame
       ? createWebRecipeWorkspaceReadModel(game, recipeWorkspaceSelector, recipeWorkspaceRegistryFingerprint)
@@ -4127,24 +4257,73 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   );
   // A bound native session must never infer its Dyson target from the stale
   // renderer GameState. Until an active native factory frame identifies the
-  // current system, the native workspace stays fail-closed.
-  const nativeDysonEffectiveSystemId = nativeDysonSelectedSystemId ??
-    (nativeAuthoritativeFactoryWorkspaceFrame ? factoryActivePlanetNavigationRow?.systemId ?? null : null);
-  const nativeDysonWorkspaceIdentity = useMemo(() => nativeStellarProjectionIdentity &&
-      nativeDysonEffectiveSystemId
-    ? Object.freeze({
-        ...nativeStellarProjectionIdentity,
-        selectedSystemId: nativeDysonEffectiveSystemId,
-      })
-    : null, [nativeDysonEffectiveSystemId, nativeStellarProjectionIdentity]);
-  const nativeDysonWorkspaceSource = useMemo(() => nativeDysonWorkspaceIdentity
-    ? createNativePlayerAuthorityDysonWorkspaceSource(desktopBridge, nativeDysonWorkspaceIdentity)
-    : null, [desktopBridge, nativeDysonWorkspaceIdentity]);
+  // current system, only a previously verified same-run Dyson page may keep
+  // the workspace mounted through the next revision handshake.
+  const nativeDysonRetainedSystemId = useMemo(() => {
+    const frame = nativeDysonWorkspaceSnapshot.frame;
+    const authority = nativeThinWorkspaceAuthorityFrames.displayFrame;
+    return frame && authority && frame.sessionId === authority.sessionId &&
+        authority.revision !== null && frame.runId === authority.runId &&
+        frame.revision <= authority.revision &&
+        frame.registryFingerprint === recipeWorkspaceRegistryFingerprint
+      ? frame.selectedSystemId
+      : null;
+  }, [
+    nativeDysonWorkspaceSnapshot.frame,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeDysonFactorySystemId = nativeAuthoritativeFactoryWorkspaceFrame
+    ? factoryActivePlanetNavigationRow?.systemId
+    : undefined;
+  const nativeDysonEffectiveSystemId = nativeDysonSelectedSystemId ?? nativeDysonFactorySystemId ??
+    nativeDysonRetainedSystemId;
+  const nativeDysonWorkspaceIdentity = useMemo(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.displayFrame;
+    return frame?.sessionId && frame.runId && frame.revision !== null && nativeDysonEffectiveSystemId
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+          selectedSystemId: nativeDysonEffectiveSystemId,
+        })
+      : null;
+  }, [
+    nativeDysonEffectiveSystemId,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeDysonWorkspaceReadIdentity = useMemo(() => {
+    const frame = nativeThinWorkspaceAuthorityFrames.readFrame;
+    return frame?.sessionId && frame.runId && frame.revision !== null && nativeDysonEffectiveSystemId
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+          selectedSystemId: nativeDysonEffectiveSystemId,
+        })
+      : null;
+  }, [
+    nativeDysonEffectiveSystemId,
+    nativeThinWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeDysonWorkspaceSource = useMemo(() => nativeDysonWorkspaceReadIdentity
+    ? createNativePlayerAuthorityDysonWorkspaceSource(desktopBridge, nativeDysonWorkspaceReadIdentity)
+    : null, [desktopBridge, nativeDysonWorkspaceReadIdentity]);
   const nativeDysonWorkspaceFrame = useMemo(() => nativeDysonWorkspaceIdentity
     ? selectNativeDysonWorkspaceFrame(nativeDysonWorkspaceSnapshot, nativeDysonWorkspaceIdentity)
     : null, [nativeDysonWorkspaceIdentity, nativeDysonWorkspaceSnapshot]);
-  const nativeDysonWorkspaceReadStatus = nativeDysonWorkspaceFrame
+  const nativeDysonWorkspaceReadStatus = nativeDysonWorkspaceFrame &&
+      nativeDysonWorkspaceIdentity && nativeDysonWorkspaceSnapshot.status === "ready" &&
+      nativeDysonWorkspaceFrame.revision === nativeDysonWorkspaceIdentity.revision
     ? "ready" as const
+    : nativeDysonWorkspaceFrame
+      ? nativeDysonWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : "loading" as const
     : !nativeDysonWorkspaceIdentity || !nativeDysonWorkspaceSource ||
         nativeDysonWorkspaceSnapshot.status === "unavailable"
       ? "unavailable" as const
@@ -4341,67 +4520,40 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativePlayerAuthorityOwnsRuntime,
   ]);
   useEffect(() => {
-    if (!technologyOpen || !nativePlayerAuthorityBoundFrame) {
+    if (!technologyOpen || !nativePlayerAuthorityOwnsRuntime || !nativeTechnologyWorkspaceIdentity) {
       nativeTechnologyWorkspaceStore.clear();
       return;
     }
-    if (!nativePlayerAuthorityActiveFrame) return;
-    const sessionId = nativePlayerAuthorityActiveFrame.sessionId;
-    if (!sessionId) {
-      nativeTechnologyWorkspaceStore.clear();
-      return;
-    }
-    const source = createNativePlayerAuthorityTechnologyProjectionSource(
-      desktopBridge,
-      sessionId,
-    );
-    if (!source) {
-      nativeTechnologyWorkspaceStore.clear();
-      return;
-    }
+    if (!nativeTechnologyWorkspaceReadIdentity || !nativeTechnologyWorkspaceSource) return;
     void nativeTechnologyWorkspaceStore.refresh(
-      source,
-      sessionId,
-      factoryThinViewExpectedRevision,
+      nativeTechnologyWorkspaceSource,
+      nativeTechnologyWorkspaceReadIdentity,
     ).catch(() => undefined);
   }, [
-    desktopBridge,
-    factoryThinViewExpectedRevision,
-    nativePlayerAuthorityActiveFrame,
-    nativePlayerAuthorityBoundFrame,
+    nativePlayerAuthorityOwnsRuntime,
+    nativeTechnologyWorkspaceIdentity,
+    nativeTechnologyWorkspaceReadIdentity,
+    nativeTechnologyWorkspaceSource,
     nativeTechnologyWorkspaceStore,
     technologyOpen,
   ]);
   useEffect(() => {
-    if (!recipesOpen || !nativePlayerAuthorityBoundFrame) {
+    if (!recipesOpen || !nativePlayerAuthorityOwnsRuntime || !nativeRecipeWorkspaceIdentity) {
       nativeRecipeWorkspaceStore.clear();
       return;
     }
-    if (!nativePlayerAuthorityActiveFrame) return;
-    const sessionId = nativePlayerAuthorityActiveFrame.sessionId;
-    if (!sessionId) {
-      nativeRecipeWorkspaceStore.clear();
-      return;
-    }
-    const source = createNativePlayerAuthorityRecipeWorkspaceProjectionSource(desktopBridge, sessionId);
-    if (!source) {
-      nativeRecipeWorkspaceStore.clear();
-      return;
-    }
+    if (!nativeRecipeWorkspaceReadIdentity || !nativeRecipeWorkspaceSource) return;
     void nativeRecipeWorkspaceStore.refresh(
-      source,
-      sessionId,
-      factoryThinViewExpectedRevision,
-      recipeWorkspaceRegistryFingerprint,
+      nativeRecipeWorkspaceSource,
+      nativeRecipeWorkspaceReadIdentity,
       recipeWorkspaceSelector,
     ).catch(() => undefined);
   }, [
-    desktopBridge,
-    factoryThinViewExpectedRevision,
-    nativePlayerAuthorityActiveFrame,
-    nativePlayerAuthorityBoundFrame,
+    nativePlayerAuthorityOwnsRuntime,
+    nativeRecipeWorkspaceIdentity,
+    nativeRecipeWorkspaceReadIdentity,
+    nativeRecipeWorkspaceSource,
     nativeRecipeWorkspaceStore,
-    recipeWorkspaceRegistryFingerprint,
     recipeWorkspaceSelector,
     recipesOpen,
   ]);
@@ -4540,20 +4692,23 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   ]);
   useEffect(() => {
     if (!dysonPlannerOpen || !nativePlayerAuthorityBoundFrame || !nativeDysonWorkspaceIdentity ||
-        !nativeDysonWorkspaceSource) {
+        !nativePlayerAuthorityOwnsRuntime) {
       nativeDysonWorkspaceStore.clear();
       return;
     }
+    if (!nativeDysonWorkspaceReadIdentity || !nativeDysonWorkspaceSource) return;
     void nativeDysonWorkspaceStore.refresh(
       nativeDysonWorkspaceSource,
-      nativeDysonWorkspaceIdentity,
+      nativeDysonWorkspaceReadIdentity,
     ).catch(() => undefined);
   }, [
     dysonPlannerOpen,
     nativeDysonWorkspaceIdentity,
+    nativeDysonWorkspaceReadIdentity,
     nativeDysonWorkspaceSource,
     nativeDysonWorkspaceStore,
     nativePlayerAuthorityBoundFrame,
+    nativePlayerAuthorityOwnsRuntime,
   ]);
   useEffect(() => {
     if (!commandPaletteOpen || !nativePlayerAuthorityBoundFrame ||
@@ -21922,10 +22077,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         ) : null}
         {technologyOpen ? (technologyWorkspaceReadModel ? (
           <TechnologyWorkspace
+            key={nativeTechnologyWorkspaceIdentity
+              ? `${nativeTechnologyWorkspaceIdentity.sessionId}\u0000${nativeTechnologyWorkspaceIdentity.runId}\u0000${nativeTechnologyWorkspaceIdentity.registryFingerprint}`
+              : "technology-web"}
             open
             readModel={technologyWorkspaceReadModel}
             nativeAuthorityRequired={Boolean(nativePlayerAuthorityBoundFrame)}
-            nativeCommandPending={nativePlayerAuthorityCommandPending}
+            nativeCommandPending={nativePlayerAuthorityCommandPending ||
+              nativePlayerAuthorityOwnsRuntime && nativeTechnologyWorkspaceReadStatus !== "ready"}
             mobile={nextMobileShell}
             mobileSubview={mobileWorkspaceSubview}
             onMobileOpenDetail={mobileNavigation.openWorkspaceSubview}
@@ -22142,7 +22301,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           onOpenCanvasBookmark={openCanvasBookmark}
           onRemoveCanvasBookmark={(bookmarkId) => commitGame((current) => removeCanvasBookmark(current, bookmarkId))}
         />) : null}
-        {recipesOpen ? <RecipeWorkspace open readOnly={nativePlayerAuthorityOwnsRuntime && (!nativeRecipeFocusReadModel || nativePlayerAuthorityCommandPending)} readModel={recipeWorkspaceReadModel} onReadRequest={updateRecipeWorkspaceSelector} mobile={nextMobileShell} mobileSubview={mobileWorkspaceSubview} onMobileOpenDetail={mobileNavigation.openWorkspaceSubview} onMobileReplaceDetail={(subview) => mobileNavigation.replaceWorkspaceSubview(subview)} focusItemId={campaignFocusItemId} onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setRecipesOpen(false)} onFocus={onRecipeFocusChange} onLocateProductionLine={locateRecipeWorkspaceProduction} /> : null}
+        {recipesOpen ? <RecipeWorkspace key={nativeRecipeWorkspaceIdentity
+          ? `${nativeRecipeWorkspaceIdentity.sessionId}\u0000${nativeRecipeWorkspaceIdentity.runId}\u0000${nativeRecipeWorkspaceIdentity.registryFingerprint}`
+          : "recipe-web"} open readOnly={nativePlayerAuthorityOwnsRuntime && (!nativeRecipeFocusReadModel || nativePlayerAuthorityCommandPending || nativeRecipeWorkspaceReadStatus !== "ready")} readModel={recipeWorkspaceReadModel} onReadRequest={updateRecipeWorkspaceSelector} mobile={nextMobileShell} mobileSubview={mobileWorkspaceSubview} onMobileOpenDetail={mobileNavigation.openWorkspaceSubview} onMobileReplaceDetail={(subview) => mobileNavigation.replaceWorkspaceSubview(subview)} focusItemId={campaignFocusItemId} onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setRecipesOpen(false)} onFocus={onRecipeFocusChange} onLocateProductionLine={locateRecipeWorkspaceProduction} /> : null}
         {campaignOpen ? nativePlayerAuthorityOwnsRuntime ? (
           <NativeCampaignWorkspace
             key={nativeCampaignGalaxyIdentity
@@ -22301,6 +22462,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         /> : null}
         {dysonPlannerOpen ? nativePlayerAuthorityBoundFrame ? (
           <NativeDysonPlannerWorkspace
+            key={nativeDysonWorkspaceIdentity
+              ? `${nativeDysonWorkspaceIdentity.sessionId}\u0000${nativeDysonWorkspaceIdentity.runId}\u0000${nativeDysonWorkspaceIdentity.registryFingerprint}`
+              : "native-dyson-unbound"}
             frame={nativeDysonWorkspaceFrame}
             latestIdentity={nativeDysonWorkspaceIdentity}
             status={nativeDysonWorkspaceReadStatus}

@@ -13,6 +13,8 @@ describe("native technology workspace App integration", () => {
     expect(app).toMatch(/technologyOpen && !nativePlayerAuthorityBoundFrame[\s\S]*?createWebTechnologyWorkspaceReadModel\(game\)/);
     expect(app).toMatch(/const technologyWorkspaceReadModel = nativePlayerAuthorityBoundFrame[\s\S]*?nativeTechnologyWorkspaceReadModel[\s\S]*?: webTechnologyWorkspaceReadModel/);
     expect(app).toMatch(/technologyWorkspaceReadModel \? \([\s\S]*?<TechnologyWorkspace[\s\S]*?readModel=\{technologyWorkspaceReadModel\}[\s\S]*?: <WorkspaceLoading label="正在同步权威科研状态…"/);
+    expect(app).toMatch(/key=\{nativeTechnologyWorkspaceIdentity[\s\S]*?sessionId[\s\S]*?runId[\s\S]*?registryFingerprint/);
+    expect(app).not.toMatch(/nativeTechnologyWorkspaceIdentity\.revision[^\n]*: "technology-web"/);
   });
 
   it("keeps the component detached from GameState and the entity scan", () => {
@@ -24,7 +26,7 @@ describe("native technology workspace App integration", () => {
 
   it("routes the native research lifecycle through exact projected intent commands", () => {
     expect(app).toMatch(/nativeAuthorityRequired=\{Boolean\(nativePlayerAuthorityBoundFrame\)\}/);
-    expect(app).toMatch(/nativeCommandPending=\{nativePlayerAuthorityCommandPending\}/);
+    expect(app).toMatch(/nativeCommandPending=\{nativePlayerAuthorityCommandPending \|\|[\s\S]*?nativeTechnologyWorkspaceReadStatus !== "ready"\}/);
     expect(app).toMatch(/createNativeProjectedSelectTechnologyCommand\(\{ baseRevision, projection, techId \}\)/);
     expect(app).toMatch(/createNativeProjectedPauseResearchCommand\(\{ baseRevision, projection \}\)/);
     expect(app).toMatch(/createNativeProjectedCancelResearchCommand\(\{ baseRevision, projection \}\)/);
@@ -33,7 +35,14 @@ describe("native technology workspace App integration", () => {
     expect(app).toMatch(/createNativeProjectedTechnologyLayoutCommand\(\{[\s\S]*?baseRevision,[\s\S]*?projection,[\s\S]*?layout: technologyLayout/);
     expect(app).toMatch(/createNativeProjectedRemoveQueuedTechnologyCommand\(\{ baseRevision, projection, techId \}\)/);
     expect(app).toMatch(/createNativeProjectedInfiniteResearchAutomationCommand\(\{ baseRevision, projection, enabled \}\)/);
-    expect(app).toMatch(/nativeTechnologyWorkspaceReadModel\.revision === factoryThinViewExpectedRevision[\s\S]*?nativeTechnologyWorkspaceSnapshot\.frame\?\.projection/);
+    expect(app).toMatch(/nativeTechnologyWorkspaceReadStatus === "ready"[\s\S]*?nativeTechnologyWorkspaceReadModel\.revision === nativeTechnologyWorkspaceIdentity\?\.revision[\s\S]*?nativeTechnologyWorkspaceFrame\?\.projection/);
+  });
+
+  it("keeps a confirmed research projection mounted while the next native revision is pending", () => {
+    expect(app).toMatch(/nativeThinWorkspaceAuthorityFrames\.displayFrame/);
+    expect(app).toMatch(/nativeThinWorkspaceAuthorityFrames\.readFrame/);
+    expect(app).toMatch(/selectNativeTechnologyWorkspaceFrame\([\s\S]*?nativeTechnologyWorkspaceSnapshot,[\s\S]*?nativeTechnologyWorkspaceIdentity/);
+    expect(app).toMatch(/if \(!nativeTechnologyWorkspaceReadIdentity \|\| !nativeTechnologyWorkspaceSource\) return/);
   });
 
   it("keeps pending commands single-flight and explains the native-only infinite guard", () => {

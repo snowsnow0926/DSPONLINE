@@ -106,6 +106,18 @@ export interface NativePlayerAuthorityClockSnapshot {
   readonly lastConfirmedFrame: DesktopNativePlayerAuthorityClockState | null;
 }
 
+export interface NativePlayerAuthorityWorkspaceFrames {
+  /** Last verified player-authority frame that may remain mounted read-only. */
+  readonly displayFrame: DesktopNativePlayerAuthorityClockState | null;
+  /** Exact settled frame that is eligible to start a new projection read. */
+  readonly readFrame: DesktopNativePlayerAuthorityClockState | null;
+}
+
+const EMPTY_WORKSPACE_FRAMES: NativePlayerAuthorityWorkspaceFrames = Object.freeze({
+  displayFrame: null,
+  readFrame: null,
+});
+
 const EMPTY_CLOCK_SNAPSHOT: NativePlayerAuthorityClockSnapshot = Object.freeze({
   availability: "unsupported",
   expectedSessionId: null,
@@ -586,6 +598,33 @@ export function selectActiveNativePlayerAuthorityFrame(
     confirmed.acknowledgedSequence === current.acknowledgedSequence
     ? confirmed
     : null;
+}
+
+/**
+ * A successful tick is published before main clears the in-flight operation.
+ * Keep the last settled frame mounted during that narrow transition, but do
+ * not allow a projection read until main exposes the new settled frame. A run
+ * switch, revision rollback, terminal phase, or sequence rollback fails closed.
+ */
+export function selectNativePlayerAuthorityWorkspaceFrames(
+  snapshot: NativePlayerAuthorityClockSnapshot,
+  sessionId: string | null,
+): NativePlayerAuthorityWorkspaceFrames {
+  const settled = selectActiveNativePlayerAuthorityFrame(snapshot, sessionId);
+  if (settled) return Object.freeze({ displayFrame: settled, readFrame: settled });
+  if (sessionId === null || snapshot.expectedSessionId !== sessionId) return EMPTY_WORKSPACE_FRAMES;
+  const current = snapshot.currentFrame;
+  const confirmed = snapshot.lastConfirmedFrame;
+  if (current?.schemaVersion !== 1 || current.phase !== "active" ||
+      current.sessionId !== sessionId || current.lastErrorCode !== null ||
+      (!current.inFlight && current.currentOperation === null) ||
+      !confirmed || confirmed.sessionId !== current.sessionId || confirmed.runId !== current.runId ||
+      current.revision === null || confirmed.revision === null || current.revision < confirmed.revision ||
+      current.acknowledgedSequence === null || confirmed.acknowledgedSequence === null ||
+      current.acknowledgedSequence < confirmed.acknowledgedSequence) {
+    return EMPTY_WORKSPACE_FRAMES;
+  }
+  return Object.freeze({ displayFrame: confirmed, readFrame: null });
 }
 
 export function selectNativePlayerAuthorityMacroStatus(

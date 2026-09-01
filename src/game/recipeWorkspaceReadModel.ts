@@ -86,13 +86,16 @@ export interface RecipeWorkspaceReadModel {
 
 export interface NativeRecipeWorkspaceFrame {
   readonly sessionId: string;
+  readonly runId: string;
   readonly revision: number;
+  readonly registryFingerprint: string;
   readonly projection: DesktopNativeCoreRecipeWorkspaceProjectionResult;
 }
 
 export interface NativeRecipeWorkspaceBinding {
   readonly enabled: boolean;
   readonly sessionId: string | null;
+  readonly runId: string | null;
   readonly expectedRevision: number;
   readonly expectedRegistryFingerprint: string;
   readonly selector: RecipeWorkspaceSelector;
@@ -210,8 +213,10 @@ export function selectNativeRecipeWorkspaceReadModel(
   frame: NativeRecipeWorkspaceFrame | null,
   binding: NativeRecipeWorkspaceBinding,
 ): RecipeWorkspaceReadModel | null {
-  if (!frame || !binding.enabled || !binding.sessionId || !validRecipeWorkspaceSelector(binding.selector) ||
-      frame.sessionId !== binding.sessionId || frame.revision !== binding.expectedRevision ||
+  if (!frame || !binding.enabled || !binding.sessionId || !binding.runId ||
+      !validRecipeWorkspaceSelector(binding.selector) || frame.sessionId !== binding.sessionId ||
+      frame.runId !== binding.runId || frame.registryFingerprint !== binding.expectedRegistryFingerprint ||
+      frame.revision !== binding.expectedRevision ||
       frame.projection.revision !== binding.expectedRevision) return null;
   const projection = frame.projection;
   if (projection.schemaVersion !== 1 || projection.projectionType !== "recipe-workspace-v1" ||

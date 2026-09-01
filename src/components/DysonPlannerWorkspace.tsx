@@ -446,6 +446,7 @@ export function NativeDysonPlannerWorkspace({
   const resolvedLatestIdentity = latestIdentity === undefined
     ? exactFrame ? {
       sessionId: exactFrame.sessionId,
+      runId: exactFrame.runId,
       revision: exactFrame.revision,
       registryFingerprint: exactFrame.registryFingerprint,
       selectedSystemId: exactFrame.selectedSystemId,
@@ -454,6 +455,7 @@ export function NativeDysonPlannerWorkspace({
   const [cachedFrame, setCachedFrame] = useState<NativeDysonWorkspaceFrame | null>(exactFrame);
   const cachedFrameMatchesScope = Boolean(status === "loading" && cachedFrame && resolvedLatestIdentity &&
     cachedFrame.sessionId === resolvedLatestIdentity.sessionId &&
+    cachedFrame.runId === resolvedLatestIdentity.runId &&
     cachedFrame.registryFingerprint === resolvedLatestIdentity.registryFingerprint &&
     cachedFrame.selectedSystemId === resolvedLatestIdentity.selectedSystemId &&
     cachedFrame.selectedSystemId === selectedSystemId &&
@@ -469,6 +471,7 @@ export function NativeDysonPlannerWorkspace({
     if (status !== "loading" || !resolvedLatestIdentity) setCachedFrame(null);
     else setCachedFrame((current) => current &&
       current.sessionId === resolvedLatestIdentity.sessionId &&
+      current.runId === resolvedLatestIdentity.runId &&
       current.registryFingerprint === resolvedLatestIdentity.registryFingerprint &&
       current.selectedSystemId === resolvedLatestIdentity.selectedSystemId &&
       current.selectedSystemId === selectedSystemId &&
@@ -480,6 +483,7 @@ export function NativeDysonPlannerWorkspace({
     exactFrame,
     resolvedLatestIdentity?.registryFingerprint,
     resolvedLatestIdentity?.revision,
+    resolvedLatestIdentity?.runId,
     resolvedLatestIdentity?.selectedSystemId,
     resolvedLatestIdentity?.sessionId,
     selectedSystemId,

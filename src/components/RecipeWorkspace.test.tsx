@@ -28,10 +28,16 @@ function model(selectedItemId: ItemId = "iron_ore"): RecipeWorkspaceReadModel {
   return result;
 }
 
-function renderWorkspace(readModel: RecipeWorkspaceReadModel, onReadRequest = vi.fn(), focusItemId: ItemId | null = null) {
+function renderWorkspace(
+  readModel: RecipeWorkspaceReadModel,
+  onReadRequest = vi.fn(),
+  focusItemId: ItemId | null = null,
+  readOnly = false,
+) {
   act(() => root.render(<AppLocaleProvider>
     <RecipeWorkspace
       open
+      readOnly={readOnly}
       readModel={readModel}
       onReadRequest={onReadRequest}
       onClose={vi.fn()}
@@ -121,5 +127,18 @@ describe("RecipeWorkspace bounded read model", () => {
     renderWorkspace(native);
     expect(host.textContent).toContain("定位生产设备 · 3");
     expect(host.textContent).not.toContain("定位产线 · 3");
+  });
+
+  it("preserves the search control and focus when a confirmed native model becomes read-only during refresh", () => {
+    const readModel = { ...model(), source: "native-core" as const, revision: 7 };
+    const onReadRequest = vi.fn();
+    renderWorkspace(readModel, onReadRequest);
+    const before = host.querySelector<HTMLInputElement>("input[aria-label='搜索配方物品']")!;
+    act(() => before.focus());
+
+    renderWorkspace(readModel, onReadRequest, null, true);
+    const after = host.querySelector<HTMLInputElement>("input[aria-label='搜索配方物品']")!;
+    expect(after).toBe(before);
+    expect(document.activeElement).toBe(after);
   });
 });

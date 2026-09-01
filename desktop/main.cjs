@@ -1252,6 +1252,11 @@ function nativeStatisticsProjectionHasPlayerAuthorityLineage(request) {
     (Object.hasOwn(request, "runId") || Object.hasOwn(request, "expectedRegistryFingerprint"));
 }
 
+function nativeProjectionHasPlayerAuthorityRun(request) {
+  return request !== null && typeof request === "object" && !Array.isArray(request) &&
+    Object.hasOwn(request, "runId");
+}
+
 function nativeTechnologyProjectionResultContext(request) {
   return {
     sessionId: request?.sessionId,
@@ -2283,7 +2288,14 @@ ipcMain.handle("desktop:native-core-technology-projection", async (event, reques
     resultContext: nativeTechnologyProjectionResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
-    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+    if (nativeProjectionHasPlayerAuthorityRun(request) ||
+        nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      if (!nativePlayerAuthorityProjectionBroker) {
+        throw new NativePlayerAuthorityProjectionBrokerError(
+          "native player-authority technology projection broker is unavailable",
+          "NATIVE_PLAYER_AUTHORITY_PROJECTION_UNAVAILABLE",
+        );
+      }
       return await nativePlayerAuthorityProjectionBroker.read(ownerId, "technology-v1", request);
     }
     return await nativeCoreSessions.technologyProjection(ownerId, request);
@@ -2297,7 +2309,14 @@ ipcMain.handle("desktop:native-core-recipe-workspace-projection", async (event, 
     resultContext: nativeRecipeWorkspaceProjectionResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
-    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+    if (nativeProjectionHasPlayerAuthorityRun(request) ||
+        nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      if (!nativePlayerAuthorityProjectionBroker) {
+        throw new NativePlayerAuthorityProjectionBrokerError(
+          "native player-authority recipe projection broker is unavailable",
+          "NATIVE_PLAYER_AUTHORITY_PROJECTION_UNAVAILABLE",
+        );
+      }
       return await nativePlayerAuthorityProjectionBroker.read(ownerId, "recipe-workspace-v1", request);
     }
     return await nativeCoreSessions.recipeWorkspaceProjection(ownerId, request);
@@ -2381,7 +2400,14 @@ ipcMain.handle("desktop:native-core-dyson-workspace-projection", async (event, r
     resultContext: nativeDysonWorkspaceProjectionResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
-    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+    if (nativeProjectionHasPlayerAuthorityRun(request) ||
+        nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      if (!nativePlayerAuthorityProjectionBroker) {
+        throw new NativePlayerAuthorityProjectionBrokerError(
+          "native player-authority Dyson projection broker is unavailable",
+          "NATIVE_PLAYER_AUTHORITY_PROJECTION_UNAVAILABLE",
+        );
+      }
       return await nativePlayerAuthorityProjectionBroker.read(ownerId, "dyson-workspace-v1", request);
     }
     return await nativeCoreSessions.dysonWorkspaceProjection(ownerId, request);
@@ -2513,7 +2539,14 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
     let rawResult;
     if (request.projectionType === "viewport-v1") {
       rawResult = await nativeCoreSessions.viewportProjection(ownerId, normalizedRequest);
-    } else if (nativePlayerAuthorityProjectionBroker?.ownsSession(request.sessionId)) {
+    } else if (nativeProjectionHasPlayerAuthorityRun(normalizedRequest) ||
+        nativePlayerAuthorityProjectionBroker?.ownsSession(request.sessionId)) {
+      if (!nativePlayerAuthorityProjectionBroker) {
+        throw new NativePlayerAuthorityProjectionBrokerError(
+          "native player-authority projection broker is unavailable",
+          "NATIVE_PLAYER_AUTHORITY_PROJECTION_UNAVAILABLE",
+        );
+      }
       rawResult = await nativePlayerAuthorityProjectionBroker.read(
         ownerId,
         request.projectionType,

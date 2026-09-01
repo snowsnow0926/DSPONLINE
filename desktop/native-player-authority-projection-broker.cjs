@@ -55,8 +55,21 @@ const STATISTICS_LINEAGE_KEYS = new Set([
 ]);
 const OWNER_LINEAGE_FENCED_PROJECTIONS = new Set([
   "statistics-v1",
+  "technology-v1",
+  "recipe-workspace-v1",
+  "dyson-workspace-v1",
   "campaign-workspace-v1",
   "galaxy-account-workspace-v1",
+]);
+const OWNER_LINEAGE_REQUIRED_PROJECTIONS = new Set([
+  ...EXACT_LINEAGE_WORKSPACE_PROJECTIONS,
+  "technology-v1",
+  "recipe-workspace-v1",
+  "dyson-workspace-v1",
+]);
+const REGISTRY_RESULT_FENCED_PROJECTIONS = new Set([
+  "recipe-workspace-v1",
+  "dyson-workspace-v1",
 ]);
 
 class NativePlayerAuthorityProjectionBrokerError extends Error {
@@ -201,12 +214,16 @@ class NativePlayerAuthorityProjectionBroker {
       );
     }
     const method = PROJECTION_METHODS[projectionType];
+    const ownerLineageRequired = OWNER_LINEAGE_REQUIRED_PROJECTIONS.has(projectionType);
     if (!method || !isRecord(request) || !validLogicalId(request.sessionId) ||
         !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
         projectionType === "statistics-v1" && !validStatisticsLineageRequest(request) ||
         EXACT_LINEAGE_WORKSPACE_PROJECTIONS.has(projectionType) && !hasExactKeys(request, [
           "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint",
         ]) || EXACT_LINEAGE_WORKSPACE_PROJECTIONS.has(projectionType) &&
+          (!validLogicalId(request.runId) ||
+           !validLogicalId(request.expectedRegistryFingerprint, 256)) ||
+        ownerLineageRequired &&
           (!validLogicalId(request.runId) ||
            !validLogicalId(request.expectedRegistryFingerprint, 256))) {
       throw brokerError(
@@ -258,6 +275,13 @@ class NativePlayerAuthorityProjectionBroker {
     if (!isRecord(result) || result.revision !== request.expectedRevision) {
       throw brokerError(
         "native player-authority projection result is not bound to the requested revision",
+        "NATIVE_PLAYER_AUTHORITY_PROJECTION_RESULT_MISMATCH",
+      );
+    }
+    if (REGISTRY_RESULT_FENCED_PROJECTIONS.has(projectionType) &&
+        result.registryFingerprint !== request.expectedRegistryFingerprint) {
+      throw brokerError(
+        "native workspace projection result registry is not current",
         "NATIVE_PLAYER_AUTHORITY_PROJECTION_RESULT_MISMATCH",
       );
     }

@@ -16,6 +16,7 @@ import {
 
 const identity: NativeDysonWorkspaceIdentity = {
   sessionId: "core-dyson",
+  runId: "run-dyson",
   revision: 17,
   registryFingerprint: "builtin:test",
   selectedSystemId: "helios",
@@ -246,6 +247,12 @@ describe("NativeDysonWorkspaceStore", () => {
     expect(frame?.nodesByLayerId.get("layer:一")).toHaveLength(2);
     expect(frame?.orbitsById.get("orbit:一")?.sailsInOrbit).toBe(30);
     expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({
+      sessionId: "core-dyson",
+      runId: "run-dyson",
+      expectedRevision: 17,
+      expectedRegistryFingerprint: "builtin:test",
+    });
     expect(calls[1].systemCursor).toBe(8);
     expect(calls[1].layerCursor).toBe(1);
     expect(store.getSnapshot().status).toBe("ready");
@@ -303,6 +310,37 @@ describe("NativeDysonWorkspaceStore", () => {
     expect(await oldRefresh).toBe("superseded");
     expect(await nextRefresh).toBe("committed");
     expect(store.getSnapshot().frame?.selectedSystemId).toBe("helios-next");
+  });
+
+  it("retains a same-run page during revision refresh and rejects rollback or ABA lineage", async () => {
+    const store = new NativeDysonWorkspaceStore();
+    const firstSource = createNativePlayerAuthorityDysonWorkspaceSource(bridge(), identity)!;
+    await expect(store.refresh(firstSource, identity)).resolves.toBe("committed");
+
+    const nextIdentity = { ...identity, revision: 18 };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const calls: DesktopNativeCoreDysonWorkspaceProjectionRequest[] = [];
+    const nextSource = createNativePlayerAuthorityDysonWorkspaceSource(bridge(async (request) => {
+      calls.push(request);
+      await gate;
+      return projection(request);
+    }), nextIdentity)!;
+    const pending = store.refresh(nextSource, nextIdentity);
+    const duplicate = store.refresh(nextSource, nextIdentity);
+
+    expect(duplicate).toBe(pending);
+    expect(selectNativeDysonWorkspaceFrame(store.getSnapshot(), nextIdentity)?.revision).toBe(17);
+    expect(selectNativeDysonWorkspaceFrame(store.getSnapshot(), {
+      ...nextIdentity,
+      runId: "run-other",
+    })).toBeNull();
+    expect(selectNativeDysonWorkspaceFrame(store.getSnapshot(), identity)).toBeNull();
+
+    release();
+    await expect(pending).resolves.toBe("committed");
+    expect(calls[0]?.runId).toBe("run-dyson");
+    expect(selectNativeDysonWorkspaceFrame(store.getSnapshot(), nextIdentity)?.revision).toBe(18);
   });
 
   it("does not import or inspect renderer GameState", () => {

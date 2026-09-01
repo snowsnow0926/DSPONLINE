@@ -89,7 +89,12 @@ function fixture(initialSnapshot = {}) {
     },
     async recipeWorkspaceProjection(ownerId, request) {
       calls.push(["recipe-workspace-v1", ownerId, request]);
-      return { projectionType: "recipe-workspace-v1", schemaVersion: 1, revision: request.expectedRevision };
+      return {
+        projectionType: "recipe-workspace-v1",
+        schemaVersion: 1,
+        revision: request.expectedRevision,
+        registryFingerprint: request.expectedRegistryFingerprint,
+      };
     },
     async blueprintWorkspaceProjection(ownerId, request) {
       calls.push(["blueprint-workspace-v1", ownerId, request]);
@@ -141,7 +146,12 @@ function fixture(initialSnapshot = {}) {
     },
     async dysonWorkspaceProjection(ownerId, request) {
       calls.push(["dyson-workspace-v1", ownerId, request]);
-      return { projectionType: "dyson-workspace-v1", schemaVersion: 1, revision: request.expectedRevision };
+      return {
+        projectionType: "dyson-workspace-v1",
+        schemaVersion: 1,
+        revision: request.expectedRevision,
+        registryFingerprint: request.expectedRegistryFingerprint,
+      };
     },
     async systemSpaceStationWorkspaceProjection(ownerId, request) {
       calls.push(["system-space-station-workspace-v1", ownerId, request]);
@@ -228,7 +238,7 @@ test("active same-session same-revision reads use only the main owner identity",
           cursor: 0,
           limit: 32,
         }
-      : ["orbital-contract-workspace-v1", "campaign-workspace-v1", "operations-workspace-v1", "galaxy-account-workspace-v1"].includes(projectionType)
+      : ["technology-v1", "recipe-workspace-v1", "dyson-workspace-v1", "orbital-contract-workspace-v1", "campaign-workspace-v1", "operations-workspace-v1", "galaxy-account-workspace-v1"].includes(projectionType)
       ? {
           sessionId: "core-main-1",
           runId: "run-1",
@@ -424,6 +434,75 @@ test("campaign and Galaxy reads bind registry and owner epoch across delivery", 
   }
 });
 
+test("technology, recipe, and Dyson reads reject ABA runs and owner handoff across delivery", async () => {
+  const request = {
+    sessionId: "core-main-1",
+    runId: "run-1",
+    expectedRevision: 17,
+    expectedRegistryFingerprint: "7df8cf3a",
+  };
+  for (const [projectionType, method] of [
+    ["technology-v1", "technologyProjection"],
+    ["recipe-workspace-v1", "recipeWorkspaceProjection"],
+    ["dyson-workspace-v1", "dysonWorkspaceProjection"],
+  ]) {
+    const stale = fixture({ runId: "run-2", revision: 17 });
+    await assert.rejects(stale.broker.read(23, projectionType, request),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RUN_MISMATCH");
+    assert.equal(stale.calls.length, 0);
+
+    const handoffRace = fixture();
+    handoffRace.registry[method] = async (_ownerId, input) => {
+      handoffRace.setSession({ ownerEpoch: 3 });
+      return {
+        projectionType,
+        schemaVersion: 1,
+        revision: input.expectedRevision,
+        ...(projectionType === "technology-v1"
+          ? {}
+          : { registryFingerprint: input.expectedRegistryFingerprint }),
+      };
+    };
+    await assert.rejects(handoffRace.broker.read(23, projectionType, request),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_LINEAGE_MISMATCH");
+  }
+});
+
+test("recipe and Dyson result registries remain bound to the requested content pack", async () => {
+  const request = {
+    sessionId: "core-main-1",
+    runId: "run-1",
+    expectedRevision: 17,
+    expectedRegistryFingerprint: "7df8cf3a",
+  };
+  for (const [projectionType, method] of [
+    ["recipe-workspace-v1", "recipeWorkspaceProjection"],
+    ["dyson-workspace-v1", "dysonWorkspaceProjection"],
+  ]) {
+    const value = fixture();
+    value.registry[method] = async (_ownerId, input) => ({
+      projectionType,
+      schemaVersion: 1,
+      revision: input.expectedRevision,
+      registryFingerprint: "ffffffff",
+    });
+    await assert.rejects(value.broker.read(23, projectionType, request),
+      (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RESULT_MISMATCH");
+  }
+});
+
+test("technology, recipe, and Dyson require complete run and registry lineage tags", async () => {
+  const value = fixture();
+  for (const projectionType of ["technology-v1", "recipe-workspace-v1", "dyson-workspace-v1"]) {
+    await assert.rejects(value.broker.read(23, projectionType, {
+      sessionId: "core-main-1", runId: "run-1", expectedRevision: 17,
+    }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_REQUEST_INVALID");
+    await assert.rejects(value.broker.read(23, projectionType, {
+      sessionId: "core-main-1", expectedRevision: 17, expectedRegistryFingerprint: "7df8cf3a",
+    }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_REQUEST_INVALID");
+  }
+});
+
 test("statistics player-authority reads reject old runs before and after an asynchronous read", async () => {
   const request = {
     sessionId: "core-main-1",
@@ -586,15 +665,15 @@ test("main routes matching authority reads and keeps identity-bearing control ou
   assert.ok(statisticsHandler.indexOf('nativePlayerAuthorityProjectionBroker.read(ownerId, "statistics-v1", request)') <
     statisticsHandler.indexOf("nativeCoreSessions.statisticsProjection(ownerId, request)"));
   assert.match(main, /nativeStatisticsProjectionHasPlayerAuthorityLineage[\s\S]*?Object\.hasOwn\(request, "runId"\)[\s\S]*?Object\.hasOwn\(request, "expectedRegistryFingerprint"\)/);
-  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "technology-v1", request\)/);
-  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "recipe-workspace-v1", request\)/);
+  assert.match(main, /nativeProjectionHasPlayerAuthorityRun\(request\) \|\|[\s\S]*?nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "technology-v1", request\)/);
+  assert.match(main, /nativeProjectionHasPlayerAuthorityRun\(request\) \|\|[\s\S]*?nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "recipe-workspace-v1", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?"command-palette-entity-search-v1",[\s\S]*?request/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "star-map-overview-v1", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "star-map-catalog-v1", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "stellar-industry-v1", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "stellar-industry-v2", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "stellar-quantum-v1", request\)/);
-  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "dyson-workspace-v1", request\)/);
+  assert.match(main, /nativeProjectionHasPlayerAuthorityRun\(request\) \|\|[\s\S]*?nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "dyson-workspace-v1", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?"system-space-station-workspace-v1",[\s\S]*?request/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\.read\([\s\S]*?"campaign-workspace-v1",[\s\S]*?request/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\.read\([\s\S]*?"operations-workspace-v1",[\s\S]*?request/);

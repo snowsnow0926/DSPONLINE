@@ -68,6 +68,7 @@ function frame(): NativeDysonWorkspaceFrame {
     source: "native-core",
     sourceMode: "player-authority",
     sessionId: "session-a",
+    runId: "run-a",
     revision: 44,
     registryFingerprint: "registry-a",
     selectedSystemId: "sol",

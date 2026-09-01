@@ -181,4 +181,42 @@ describe("TechnologyWorkspace", () => {
     expect(layoutButtons.every((button) => button.title.includes("等待上一条原生科研命令确认")))
       .toBe(true);
   });
+
+  it("preserves local workspace state and focus when a confirmed projection becomes pending", () => {
+    const readModel = createWebTechnologyWorkspaceReadModel(createInitialState());
+    const callbacks = {
+      onClose: vi.fn(),
+      onSelect: vi.fn(),
+      onPauseResearch: vi.fn(),
+      onCancelResearch: vi.fn(),
+      onResumeResearch: vi.fn(),
+      onRemoveQueued: vi.fn(),
+      onSelectInfiniteResearch: vi.fn(),
+      onInfiniteResearchAutomation: vi.fn(),
+      onLayoutChange: vi.fn(),
+    };
+    const renderPending = (nativeCommandPending: boolean) => act(() => root.render(
+      <TechnologyWorkspace
+        open
+        readModel={readModel}
+        nativeAuthorityRequired
+        nativeCommandPending={nativeCommandPending}
+        {...callbacks}
+      />,
+    ));
+
+    renderPending(false);
+    const before = host.querySelector<HTMLButtonElement>(".research-advanced-toggle")!;
+    act(() => {
+      before.click();
+      before.focus();
+    });
+    expect(host.textContent).toContain("科研吞吐");
+
+    renderPending(true);
+    const after = host.querySelector<HTMLButtonElement>(".research-advanced-toggle")!;
+    expect(after).toBe(before);
+    expect(document.activeElement).toBe(after);
+    expect(host.textContent).toContain("科研吞吐");
+  });
 });

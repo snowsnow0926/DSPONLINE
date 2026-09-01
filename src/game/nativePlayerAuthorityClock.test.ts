@@ -13,6 +13,7 @@ import {
   selectActiveNativePlayerAuthorityFrame,
   selectBoundNativePlayerAuthorityFrame,
   selectNativePlayerAuthorityMacroStatus,
+  selectNativePlayerAuthorityWorkspaceFrames,
 } from "./nativePlayerAuthorityClock";
 
 function activeFrame(
@@ -412,6 +413,69 @@ describe("NativePlayerAuthorityClockController", () => {
     expect(value.bridge.getNativePlayerAuthorityState).toHaveBeenCalledTimes(2);
     expect(value.controller.getSnapshot().lastConfirmedFrame?.revision).toBe(11);
     expect(selectActiveNativePlayerAuthorityFrame(value.controller.getSnapshot(), "core-a")?.revision).toBe(11);
+  });
+
+  it("keeps only the last confirmed workspace frame mounted during an in-flight tick", async () => {
+    const value = clockFixture();
+    value.controller.bindSession("core-a");
+    value.controller.start();
+    await settlePromises();
+    value.setPulled(activeFrame({
+      revision: 11,
+      acknowledgedSequence: 5,
+      nextSequence: 6,
+      nextDeadlineMs: 11_000,
+    }));
+
+    value.emit(activeFrame({
+      revision: 11,
+      acknowledgedSequence: 5,
+      nextSequence: 6,
+      nextDeadlineMs: 11_000,
+      inFlight: true,
+      currentOperation: "tick",
+    }));
+
+    expect(selectNativePlayerAuthorityWorkspaceFrames(
+      value.controller.getSnapshot(),
+      "core-a",
+    )).toMatchObject({ displayFrame: { revision: 10, runId: "run-a" }, readFrame: null });
+    expect(selectNativePlayerAuthorityWorkspaceFrames(
+      value.controller.getSnapshot(),
+      "core-b",
+    )).toEqual({ displayFrame: null, readFrame: null });
+
+    await settlePromises();
+    expect(selectNativePlayerAuthorityWorkspaceFrames(
+      value.controller.getSnapshot(),
+      "core-a",
+    )).toMatchObject({
+      displayFrame: { revision: 11, runId: "run-a" },
+      readFrame: { revision: 11, runId: "run-a" },
+    });
+  });
+
+  it("fails the workspace display closed for terminal, rollback, and run-mismatched transitions", () => {
+    const confirmed = activeFrame();
+    for (const currentFrame of [
+      activeFrame({ phase: "faulted", lastErrorCode: "NATIVE_PLAYER_AUTHORITY_CLOCK_FAULTED" }),
+      activeFrame({
+        revision: 9,
+        acknowledgedSequence: 3,
+        nextSequence: 4,
+        nextDeadlineMs: 9_000,
+        inFlight: true,
+        currentOperation: "tick",
+      }),
+      activeFrame({ runId: "run-b", inFlight: true, currentOperation: "tick" }),
+    ]) {
+      expect(selectNativePlayerAuthorityWorkspaceFrames({
+        availability: "ready",
+        expectedSessionId: "core-a",
+        currentFrame,
+        lastConfirmedFrame: confirmed,
+      }, "core-a")).toEqual({ displayFrame: null, readFrame: null });
+    }
   });
 
   it("preserves legacy v1 pull reconciliation when startup observes an in-flight tick", async () => {

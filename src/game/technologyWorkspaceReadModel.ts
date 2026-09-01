@@ -59,14 +59,18 @@ export interface TechnologyWorkspaceReadModel {
 
 export interface NativeTechnologyWorkspaceFrame {
   readonly sessionId: string;
+  readonly runId: string;
   readonly revision: number;
+  readonly registryFingerprint: string;
   readonly projection: DesktopNativeCoreTechnologyProjectionResult;
 }
 
 export interface NativeTechnologyWorkspaceBinding {
   readonly enabled: boolean;
   readonly sessionId: string | null;
+  readonly runId: string | null;
   readonly expectedRevision: number;
+  readonly expectedRegistryFingerprint: string;
 }
 
 function effectiveInfiniteLevel(
@@ -204,8 +208,10 @@ export function selectNativeTechnologyWorkspaceReadModel(
   frame: NativeTechnologyWorkspaceFrame | null,
   binding: NativeTechnologyWorkspaceBinding,
 ): TechnologyWorkspaceReadModel | null {
-  if (!frame || !binding.enabled || !binding.sessionId ||
-    frame.sessionId !== binding.sessionId || frame.revision !== binding.expectedRevision ||
+  if (!frame || !binding.enabled || !binding.sessionId || !binding.runId ||
+    frame.sessionId !== binding.sessionId || frame.runId !== binding.runId ||
+    frame.registryFingerprint !== binding.expectedRegistryFingerprint ||
+    frame.revision !== binding.expectedRevision ||
     frame.projection.revision !== binding.expectedRevision) return null;
   const projection = frame.projection;
   if (projection.schemaVersion !== 1 || projection.projectionType !== "technology-v1" || projection.truncated ||

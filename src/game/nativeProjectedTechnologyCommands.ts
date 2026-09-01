@@ -12,6 +12,8 @@ import {
 import type { InfiniteResearchId, TechnologyLayoutMode, TechId } from "./types";
 
 const COMMAND_PROJECTION_SESSION_ID = "native-technology-command";
+const COMMAND_PROJECTION_RUN_ID = "native-technology-command-run";
+const COMMAND_PROJECTION_REGISTRY_FINGERPRINT = "builtin:native-technology-command";
 
 interface NativeProjectedTechnologyCommandInput {
   /** Exact revision carried by the verified technology-v1 projection. */
@@ -68,12 +70,16 @@ function requireExactNativeReadModel(
   }
   const readModel = selectNativeTechnologyWorkspaceReadModel({
     sessionId: COMMAND_PROJECTION_SESSION_ID,
+    runId: COMMAND_PROJECTION_RUN_ID,
     revision: input.baseRevision,
+    registryFingerprint: COMMAND_PROJECTION_REGISTRY_FINGERPRINT,
     projection: input.projection,
   }, {
     enabled: true,
     sessionId: COMMAND_PROJECTION_SESSION_ID,
+    runId: COMMAND_PROJECTION_RUN_ID,
     expectedRevision: input.baseRevision,
+    expectedRegistryFingerprint: COMMAND_PROJECTION_REGISTRY_FINGERPRINT,
   });
   if (!readModel || readModel.source !== "native-core" || readModel.revision !== input.baseRevision) {
     throw new TypeError("原生科研命令需要完整且未截断的当前投影");

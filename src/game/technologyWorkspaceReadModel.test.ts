@@ -18,6 +18,7 @@ import {
 import {
   NativeTechnologyWorkspaceStore,
   createNativePlayerAuthorityTechnologyProjectionSource,
+  selectNativeTechnologyWorkspaceFrame,
 } from "./nativeTechnologyWorkspaceStore";
 
 function projection(revision = 7): DesktopNativeCoreTechnologyProjectionResult {
@@ -93,8 +94,20 @@ describe("technology workspace read model", () => {
   });
 
   it("accepts only one complete session/revision-bound native atom", () => {
-    const frame = { sessionId: "authority-1", revision: 7, projection: projection() };
-    const binding = { enabled: true, sessionId: "authority-1", expectedRevision: 7 };
+    const frame = {
+      sessionId: "authority-1",
+      runId: "run-1",
+      revision: 7,
+      registryFingerprint: "builtin:test",
+      projection: projection(),
+    };
+    const binding = {
+      enabled: true,
+      sessionId: "authority-1",
+      runId: "run-1",
+      expectedRevision: 7,
+      expectedRegistryFingerprint: "builtin:test",
+    };
     const model = selectNativeTechnologyWorkspaceReadModel(frame, binding);
 
     expect(model).toMatchObject({
@@ -121,13 +134,17 @@ describe("technology workspace read model", () => {
 
   it("publishes no stale response after a newer revision wins", async () => {
     const store = new NativeTechnologyWorkspaceStore();
+    const oldIdentity = { sessionId: "authority-1", runId: "run-1", revision: 7, registryFingerprint: "builtin:test" };
+    const currentIdentity = { ...oldIdentity, revision: 8 };
     let resolveOld!: (value: DesktopNativeCoreTechnologyProjectionResult | null) => void;
     const old = store.refresh({
+      boundIdentity: oldIdentity,
       readVerifiedTechnologyProjection: () => new Promise((resolve) => { resolveOld = resolve; }),
-    }, "authority-1", 7);
+    }, oldIdentity);
     const current = await store.refresh({
+      boundIdentity: currentIdentity,
       readVerifiedTechnologyProjection: vi.fn().mockResolvedValue(projection(8)),
-    }, "authority-1", 8);
+    }, currentIdentity);
     resolveOld(projection(7));
 
     expect(current).toBe("committed");
@@ -139,17 +156,66 @@ describe("technology workspace read model", () => {
     });
   });
 
+  it("retains a same-run confirmed frame while the next revision loads and fails closed across lineage", async () => {
+    const store = new NativeTechnologyWorkspaceStore();
+    const identity7 = {
+      sessionId: "authority-1",
+      runId: "run-1",
+      revision: 7,
+      registryFingerprint: "builtin:test",
+    };
+    await expect(store.refresh({
+      boundIdentity: identity7,
+      readVerifiedTechnologyProjection: vi.fn().mockResolvedValue(projection(7)),
+    }, identity7)).resolves.toBe("committed");
+
+    const identity8 = { ...identity7, revision: 8 };
+    let resolveNext!: (value: DesktopNativeCoreTechnologyProjectionResult | null) => void;
+    const source = {
+      boundIdentity: identity8,
+      readVerifiedTechnologyProjection: vi.fn(() => new Promise<DesktopNativeCoreTechnologyProjectionResult | null>(
+        (resolve) => { resolveNext = resolve; },
+      )),
+    };
+    const first = store.refresh(source, identity8);
+    const duplicate = store.refresh(source, identity8);
+
+    expect(duplicate).toBe(first);
+    expect(source.readVerifiedTechnologyProjection).toHaveBeenCalledTimes(1);
+    expect(store.getSnapshot()).toMatchObject({ status: "loading", requestedRevision: 8 });
+    expect(selectNativeTechnologyWorkspaceFrame(store.getSnapshot(), identity8)?.revision).toBe(7);
+    expect(selectNativeTechnologyWorkspaceFrame(store.getSnapshot(), {
+      ...identity8,
+      runId: "run-2",
+    })).toBeNull();
+    expect(selectNativeTechnologyWorkspaceFrame(store.getSnapshot(), {
+      ...identity8,
+      registryFingerprint: "builtin:other",
+    })).toBeNull();
+    expect(selectNativeTechnologyWorkspaceFrame(store.getSnapshot(), identity7)).toBeNull();
+
+    resolveNext(projection(8));
+    await expect(first).resolves.toBe("committed");
+    expect(selectNativeTechnologyWorkspaceFrame(store.getSnapshot(), identity8)?.revision).toBe(8);
+  });
+
   it("binds the read-only authority source and rejects a revision mismatch", async () => {
     const bridge = {
       getNativeCoreTechnologyProjection: vi.fn().mockResolvedValue(projection(9)),
     };
-    const source = createNativePlayerAuthorityTechnologyProjectionSource(bridge, "authority-1");
+    const identity = { sessionId: "authority-1", runId: "run-1", revision: 8, registryFingerprint: "builtin:test" };
+    const source = createNativePlayerAuthorityTechnologyProjectionSource(bridge, identity);
     expect(source).not.toBeNull();
-    await expect(source!.readVerifiedTechnologyProjection(8)).resolves.toBeNull();
+    await expect(source!.readVerifiedTechnologyProjection()).resolves.toBeNull();
     expect(bridge.getNativeCoreTechnologyProjection).toHaveBeenCalledWith({
       sessionId: "authority-1",
+      runId: "run-1",
       expectedRevision: 8,
+      expectedRegistryFingerprint: "builtin:test",
     });
-    expect(createNativePlayerAuthorityTechnologyProjectionSource(bridge, "bad session")).toBeNull();
+    expect(createNativePlayerAuthorityTechnologyProjectionSource(bridge, {
+      ...identity,
+      sessionId: "bad session",
+    })).toBeNull();
   });
 });

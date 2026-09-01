@@ -23,6 +23,7 @@ type PageRequest = Omit<
 
 export interface NativeDysonWorkspaceIdentity {
   readonly sessionId: string;
+  readonly runId: string;
   readonly revision: number;
   readonly registryFingerprint: string;
   readonly selectedSystemId: string;
@@ -81,20 +82,25 @@ function validOpaqueId(value: string, maximumBytes = 1_024): boolean {
 
 function validIdentity(identity: NativeDysonWorkspaceIdentity): boolean {
   return identity.sessionId.length > 0 && identity.sessionId.length <= 128 &&
-    LOGICAL_ID.test(identity.sessionId) && Number.isSafeInteger(identity.revision) &&
+    LOGICAL_ID.test(identity.sessionId) && identity.runId.length > 0 && identity.runId.length <= 128 &&
+    LOGICAL_ID.test(identity.runId) && Number.isSafeInteger(identity.revision) &&
     identity.revision >= 0 && identity.registryFingerprint.length > 0 &&
     identity.registryFingerprint.length <= 256 && LOGICAL_ID.test(identity.registryFingerprint) &&
     validOpaqueId(identity.selectedSystemId);
 }
 
 function identityKey(identity: NativeDysonWorkspaceIdentity): string {
-  return `${identity.sessionId}\u0000${identity.revision}\u0000${identity.registryFingerprint}\u0000${identity.selectedSystemId}`;
+  return `${identity.sessionId}\u0000${identity.runId}\u0000${identity.revision}\u0000${identity.registryFingerprint}\u0000${identity.selectedSystemId}`;
+}
+
+function sameScope(left: NativeDysonWorkspaceIdentity, right: NativeDysonWorkspaceIdentity): boolean {
+  return left.sessionId === right.sessionId && left.runId === right.runId &&
+    left.registryFingerprint === right.registryFingerprint &&
+    left.selectedSystemId === right.selectedSystemId;
 }
 
 function exactIdentity(left: NativeDysonWorkspaceIdentity, right: NativeDysonWorkspaceIdentity): boolean {
-  return left.sessionId === right.sessionId && left.revision === right.revision &&
-    left.registryFingerprint === right.registryFingerprint &&
-    left.selectedSystemId === right.selectedSystemId;
+  return sameScope(left, right) && left.revision === right.revision;
 }
 
 const PAGE_FIELDS = ["system", "layer", "orbit", "node", "frame", "shell"] as const;
@@ -273,6 +279,7 @@ export function createNativePlayerAuthorityDysonWorkspaceSource(
       try {
         const projection = await reader({
           sessionId: boundIdentity.sessionId,
+          runId: boundIdentity.runId,
           expectedRevision,
           expectedRegistryFingerprint: boundIdentity.registryFingerprint,
           selectedSystemId: boundIdentity.selectedSystemId,
@@ -290,8 +297,12 @@ export function selectNativeDysonWorkspaceFrame(
   snapshot: NativeDysonWorkspaceSnapshot,
   identity: NativeDysonWorkspaceIdentity,
 ): NativeDysonWorkspaceFrame | null {
-  return snapshot.status === "ready" && snapshot.frame && exactIdentity(snapshot.frame, identity)
-    ? snapshot.frame
+  const frame = snapshot.frame;
+  if (!frame || !sameScope(frame, identity) || frame.revision > identity.revision ||
+      snapshot.requestedRevision !== null && identity.revision < snapshot.requestedRevision) return null;
+  if (snapshot.status === "ready" && frame.revision === identity.revision) return frame;
+  return snapshot.status === "ready" || snapshot.status === "loading" || snapshot.status === "unavailable"
+    ? frame
     : null;
 }
 
@@ -325,17 +336,16 @@ export class NativeDysonWorkspaceStore {
       return Promise.resolve("unavailable");
     }
     const key = identityKey(identity);
-    if (this.currentIdentityKey !== key) {
-      this.token += 1;
-      this.flight = null;
-      this.currentIdentityKey = key;
-      this.publish(EMPTY_SNAPSHOT);
-    }
     if (this.flight?.key === key) return this.flight.promise;
     if (this.snapshot.status === "ready" && this.snapshot.frame &&
         exactIdentity(this.snapshot.frame, identity)) return Promise.resolve("committed");
     const token = ++this.token;
-    const previous = this.snapshot.frame;
+    this.currentIdentityKey = key;
+    const previous = this.snapshot.frame && sameScope(this.snapshot.frame, identity) &&
+        this.snapshot.frame.revision <= identity.revision &&
+        identity.revision >= (this.snapshot.requestedRevision ?? this.snapshot.frame.revision)
+      ? this.snapshot.frame
+      : null;
     this.publish(Object.freeze({ status: "loading", requestedRevision: identity.revision, frame: previous }));
     const promise = this.performRefresh(source, identity, token, previous);
     this.flight = { key, promise };

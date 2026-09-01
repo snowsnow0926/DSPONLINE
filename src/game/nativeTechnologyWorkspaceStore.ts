@@ -9,11 +9,18 @@ export interface NativeTechnologyWorkspaceSnapshot {
   readonly requestedRevision: number | null;
   readonly frame: NativeTechnologyWorkspaceFrame | null;
 }
-export interface NativeTechnologyWorkspaceSource {
-  readVerifiedTechnologyProjection(
-    expectedRevision: number,
-  ): Promise<DesktopNativeCoreTechnologyProjectionResult | null>;
+export interface NativeTechnologyWorkspaceIdentity {
+  readonly sessionId: string;
+  readonly runId: string;
+  readonly revision: number;
+  readonly registryFingerprint: string;
 }
+export interface NativeTechnologyWorkspaceSource {
+  readonly boundIdentity: NativeTechnologyWorkspaceIdentity;
+  readVerifiedTechnologyProjection(): Promise<DesktopNativeCoreTechnologyProjectionResult | null>;
+}
+
+export type NativeTechnologyWorkspaceRefreshResult = "committed" | "superseded" | "unavailable";
 
 const EMPTY_SNAPSHOT: NativeTechnologyWorkspaceSnapshot = Object.freeze({
   status: "empty",
@@ -22,21 +29,53 @@ const EMPTY_SNAPSHOT: NativeTechnologyWorkspaceSnapshot = Object.freeze({
 });
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 
-function validSessionId(value: string | null | undefined): value is string {
-  return typeof value === "string" && value.length >= 1 && value.length <= 128 && LOGICAL_ID_PATTERN.test(value);
+function validLogicalId(value: string | null | undefined, maximum = 128): value is string {
+  return typeof value === "string" && value.length >= 1 && value.length <= maximum && LOGICAL_ID_PATTERN.test(value);
+}
+
+function validIdentity(identity: NativeTechnologyWorkspaceIdentity): boolean {
+  return validLogicalId(identity.sessionId) && validLogicalId(identity.runId) &&
+    Number.isSafeInteger(identity.revision) && identity.revision >= 0 &&
+    validLogicalId(identity.registryFingerprint, 256);
+}
+
+function sameScope(
+  left: NativeTechnologyWorkspaceIdentity,
+  right: NativeTechnologyWorkspaceIdentity,
+): boolean {
+  return left.sessionId === right.sessionId && left.runId === right.runId &&
+    left.registryFingerprint === right.registryFingerprint;
+}
+
+function exactIdentity(
+  left: NativeTechnologyWorkspaceIdentity,
+  right: NativeTechnologyWorkspaceIdentity,
+): boolean {
+  return sameScope(left, right) && left.revision === right.revision;
+}
+
+function identityKey(identity: NativeTechnologyWorkspaceIdentity): string {
+  return `${identity.sessionId}\u0000${identity.runId}\u0000${identity.revision}\u0000${identity.registryFingerprint}`;
 }
 
 export function createNativePlayerAuthorityTechnologyProjectionSource(
   bridge: Pick<DesktopBridge, "getNativeCoreTechnologyProjection"> | null,
-  sessionId: string,
+  identity: NativeTechnologyWorkspaceIdentity,
 ): NativeTechnologyWorkspaceSource | null {
-  if (!bridge || !validSessionId(sessionId) || typeof bridge.getNativeCoreTechnologyProjection !== "function") return null;
+  if (!bridge || !validIdentity(identity) || typeof bridge.getNativeCoreTechnologyProjection !== "function") return null;
+  const boundIdentity = Object.freeze({ ...identity });
   return Object.freeze({
-    async readVerifiedTechnologyProjection(expectedRevision: number) {
-      if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) return null;
+    boundIdentity,
+    async readVerifiedTechnologyProjection() {
       try {
-        const result = await bridge.getNativeCoreTechnologyProjection({ sessionId, expectedRevision });
-        return result.revision === expectedRevision ? result : null;
+        const result = await bridge.getNativeCoreTechnologyProjection({
+          sessionId: boundIdentity.sessionId,
+          runId: boundIdentity.runId,
+          expectedRevision: boundIdentity.revision,
+          expectedRegistryFingerprint: boundIdentity.registryFingerprint,
+        });
+        return result.schemaVersion === 1 && result.projectionType === "technology-v1" &&
+          result.revision === boundIdentity.revision ? result : null;
       } catch {
         return null;
       }
@@ -44,9 +83,27 @@ export function createNativePlayerAuthorityTechnologyProjectionSource(
   });
 }
 
+export function selectNativeTechnologyWorkspaceFrame(
+  snapshot: NativeTechnologyWorkspaceSnapshot,
+  identity: NativeTechnologyWorkspaceIdentity,
+): NativeTechnologyWorkspaceFrame | null {
+  const frame = snapshot.frame;
+  if (!frame || !sameScope(frame, identity) || frame.revision > identity.revision ||
+      snapshot.requestedRevision !== null && identity.revision < snapshot.requestedRevision) return null;
+  if (snapshot.status === "ready" && frame.revision === identity.revision) return frame;
+  return snapshot.status === "ready" || snapshot.status === "loading" || snapshot.status === "unavailable"
+    ? frame
+    : null;
+}
+
 export class NativeTechnologyWorkspaceStore {
   private snapshot: NativeTechnologyWorkspaceSnapshot = EMPTY_SNAPSHOT;
   private requestToken = 0;
+  private currentKey: string | null = null;
+  private flight: {
+    readonly key: string;
+    readonly promise: Promise<NativeTechnologyWorkspaceRefreshResult>;
+  } | null = null;
   private readonly listeners = new Set<() => void>();
 
   getSnapshot = (): NativeTechnologyWorkspaceSnapshot => this.snapshot;
@@ -58,35 +115,62 @@ export class NativeTechnologyWorkspaceStore {
 
   clear(): void {
     this.requestToken += 1;
+    this.currentKey = null;
+    this.flight = null;
     this.publish(EMPTY_SNAPSHOT);
   }
 
-  async refresh(
+  refresh(
     source: NativeTechnologyWorkspaceSource,
-    sessionId: string,
-    expectedRevision: number,
-  ): Promise<"committed" | "superseded" | "unavailable"> {
-    if (!validSessionId(sessionId) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
-      this.requestToken += 1;
-      this.publish(Object.freeze({ status: "unavailable", requestedRevision: null, frame: null }));
-      return "unavailable";
+    identity: NativeTechnologyWorkspaceIdentity,
+  ): Promise<NativeTechnologyWorkspaceRefreshResult> {
+    if (!validIdentity(identity) || !exactIdentity(source.boundIdentity, identity)) {
+      this.clear();
+      return Promise.resolve("unavailable");
+    }
+    const key = identityKey(identity);
+    if (this.flight?.key === key) return this.flight.promise;
+    if (this.snapshot.status === "ready" && this.snapshot.frame && exactIdentity(this.snapshot.frame, identity)) {
+      return Promise.resolve("committed");
     }
     const token = ++this.requestToken;
-    const previousFrame = this.snapshot.frame;
-    this.publish(Object.freeze({ status: "loading", requestedRevision: expectedRevision, frame: previousFrame }));
-    const projection = await source.readVerifiedTechnologyProjection(expectedRevision);
-    if (token !== this.requestToken) return "superseded";
+    this.currentKey = key;
+    const previousFrame = this.snapshot.frame && sameScope(this.snapshot.frame, identity) &&
+        this.snapshot.frame.revision <= identity.revision &&
+        identity.revision >= (this.snapshot.requestedRevision ?? this.snapshot.frame.revision)
+      ? this.snapshot.frame
+      : null;
+    this.publish(Object.freeze({ status: "loading", requestedRevision: identity.revision, frame: previousFrame }));
+    const promise = this.performRefresh(source, identity, key, token);
+    this.flight = { key, promise };
+    void promise.finally(() => {
+      if (this.flight?.promise === promise) this.flight = null;
+    });
+    return promise;
+  }
+
+  private async performRefresh(
+    source: NativeTechnologyWorkspaceSource,
+    identity: NativeTechnologyWorkspaceIdentity,
+    key: string,
+    token: number,
+  ): Promise<NativeTechnologyWorkspaceRefreshResult> {
+    const projection = await source.readVerifiedTechnologyProjection();
+    if (token !== this.requestToken || key !== this.currentKey) return "superseded";
     if (!projection || projection.schemaVersion !== 1 || projection.projectionType !== "technology-v1" ||
-      projection.revision !== expectedRevision) {
-      this.publish(Object.freeze({ status: "unavailable", requestedRevision: expectedRevision, frame: previousFrame }));
+      projection.revision !== identity.revision) {
+      this.publish(Object.freeze({
+        status: "unavailable",
+        requestedRevision: identity.revision,
+        frame: this.snapshot.frame,
+      }));
       return "unavailable";
     }
     const frame: NativeTechnologyWorkspaceFrame = Object.freeze({
-      sessionId,
-      revision: expectedRevision,
+      ...identity,
       projection,
     });
-    this.publish(Object.freeze({ status: "ready", requestedRevision: expectedRevision, frame }));
+    this.publish(Object.freeze({ status: "ready", requestedRevision: identity.revision, frame }));
     return "committed";
   }
 

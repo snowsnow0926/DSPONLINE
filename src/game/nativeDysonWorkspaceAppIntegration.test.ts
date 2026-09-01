@@ -7,15 +7,19 @@ describe("native Dyson workspace App integration", () => {
 
   it("binds the workspace to the exact native session, revision, registry, and selected system", () => {
     expect(app).toMatch(/new NativeDysonWorkspaceStore\(\)/);
-    expect(app).toMatch(/nativeDysonWorkspaceIdentity = useMemo\(\(\) => nativeStellarProjectionIdentity[\s\S]*?selectedSystemId: nativeDysonEffectiveSystemId/);
-    expect(app).toMatch(/createNativePlayerAuthorityDysonWorkspaceSource\(desktopBridge, nativeDysonWorkspaceIdentity\)/);
+    expect(app).toMatch(/nativeDysonWorkspaceIdentity = useMemo\(\(\) => \{[\s\S]*?nativeThinWorkspaceAuthorityFrames\.displayFrame[\s\S]*?runId: frame\.runId[\s\S]*?selectedSystemId: nativeDysonEffectiveSystemId/);
+    expect(app).toMatch(/nativeDysonWorkspaceReadIdentity = useMemo\(\(\) => \{[\s\S]*?nativeThinWorkspaceAuthorityFrames\.readFrame[\s\S]*?runId: frame\.runId[\s\S]*?selectedSystemId: nativeDysonEffectiveSystemId/);
+    expect(app).toMatch(/createNativePlayerAuthorityDysonWorkspaceSource\(desktopBridge, nativeDysonWorkspaceReadIdentity\)/);
     expect(app).toMatch(/selectNativeDysonWorkspaceFrame\(nativeDysonWorkspaceSnapshot, nativeDysonWorkspaceIdentity\)/);
     expect(app).toMatch(/<NativeDysonPlannerWorkspace[\s\S]*?latestIdentity=\{nativeDysonWorkspaceIdentity\}/);
   });
 
-  it("refreshes only while the native authority workspace is open and otherwise clears old pages", () => {
-    expect(app).toMatch(/!dysonPlannerOpen \|\| !nativePlayerAuthorityBoundFrame \|\| !nativeDysonWorkspaceIdentity \|\|[\s\S]*?!nativeDysonWorkspaceSource[\s\S]*?nativeDysonWorkspaceStore\.clear\(\)/);
-    expect(app).toMatch(/nativeDysonWorkspaceStore\.refresh\([\s\S]*?nativeDysonWorkspaceSource,[\s\S]*?nativeDysonWorkspaceIdentity/);
+  it("keeps the last confirmed page through an in-flight revision and clears only on scope loss", () => {
+    expect(app).toMatch(/!dysonPlannerOpen \|\| !nativePlayerAuthorityBoundFrame \|\| !nativeDysonWorkspaceIdentity \|\|[\s\S]*?!nativePlayerAuthorityOwnsRuntime[\s\S]*?nativeDysonWorkspaceStore\.clear\(\)/);
+    expect(app).toMatch(/if \(!nativeDysonWorkspaceReadIdentity \|\| !nativeDysonWorkspaceSource\) return/);
+    expect(app).toMatch(/nativeDysonWorkspaceStore\.refresh\([\s\S]*?nativeDysonWorkspaceSource,[\s\S]*?nativeDysonWorkspaceReadIdentity/);
+    expect(app).toMatch(/key=\{nativeDysonWorkspaceIdentity[\s\S]*?sessionId[\s\S]*?runId[\s\S]*?registryFingerprint/);
+    expect(app).not.toMatch(/key=\{[^}]*nativeDysonWorkspaceIdentity\.revision/);
   });
 
   it("renders the native component before the legacy workspace and wires only projected Dyson commands", () => {
@@ -48,7 +52,9 @@ describe("native Dyson workspace App integration", () => {
   });
 
   it("never derives the native selected system from a stale renderer save", () => {
-    expect(app).toMatch(/nativeAuthoritativeFactoryWorkspaceFrame \? factoryActivePlanetNavigationRow\?\.systemId \?\? null : null/);
+    expect(app).toMatch(/nativeDysonFactorySystemId = nativeAuthoritativeFactoryWorkspaceFrame[\s\S]*?\? factoryActivePlanetNavigationRow\?\.systemId[\s\S]*?: undefined/);
+    expect(app).toMatch(/nativeDysonRetainedSystemId = useMemo\(\(\) => \{[\s\S]*?frame\.sessionId === authority\.sessionId[\s\S]*?frame\.runId === authority\.runId[\s\S]*?frame\.revision <= authority\.revision[\s\S]*?frame\.registryFingerprint === recipeWorkspaceRegistryFingerprint/);
+    expect(app).toMatch(/nativeDysonEffectiveSystemId = nativeDysonSelectedSystemId[\s\S]*?nativeDysonRetainedSystemId/);
     expect(app).not.toMatch(/nativeDysonEffectiveSystemId[\s\S]{0,240}game\.activePlanetId/);
   });
 });

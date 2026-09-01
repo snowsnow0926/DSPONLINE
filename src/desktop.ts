@@ -1842,7 +1842,11 @@ export type DesktopTechnologyMatrixItemId =
   | "universe_matrix";
 
 export interface DesktopNativeCoreTechnologyProjectionRequest extends DesktopNativeCoreSessionRequest {
+  /** Present together only for a main-owned player-authority read. */
+  runId?: string;
   expectedRevision: number;
+  /** Present together with runId; shadow reads omit both lineage tags. */
+  expectedRegistryFingerprint?: string;
 }
 
 export interface DesktopNativeCoreTechnologyProgressRow {
@@ -1894,6 +1898,8 @@ export interface DesktopNativeCoreRecipeWorkspaceLocationRequest {
 }
 
 export interface DesktopNativeCoreRecipeWorkspaceProjectionRequest extends DesktopNativeCoreSessionRequest {
+  /** Main-owned player-authority reads bind the current runtime run. */
+  runId?: string;
   expectedRevision: number;
   expectedRegistryFingerprint: string;
   itemIds: string[];
@@ -2468,6 +2474,8 @@ export interface DesktopNativeCoreStellarQuantumProjectionResult {
 }
 
 export interface DesktopNativeCoreDysonWorkspaceProjectionRequest extends DesktopNativeCoreSessionRequest {
+  /** Main-owned player-authority reads bind the current runtime run. */
+  runId?: string;
   expectedRevision: number;
   expectedRegistryFingerprint: string;
   selectedSystemId: string;

@@ -211,6 +211,7 @@ const FRAME: NativeDysonWorkspaceFrame = Object.freeze({
   source: "native-core",
   sourceMode: "player-authority",
   sessionId: "native-dyson-session",
+  runId: "native-dyson-run",
   revision: 17,
   registryFingerprint: "builtin:test",
   selectedSystemId: "helios",
@@ -453,6 +454,7 @@ describe("NativeDysonPlannerWorkspace", () => {
 
     const revision18 = {
       sessionId: "native-dyson-session",
+      runId: "native-dyson-run",
       revision: 18,
       registryFingerprint: "builtin:test",
       selectedSystemId: "helios",

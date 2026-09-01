@@ -12,8 +12,16 @@ describe("native recipe workspace App integration", () => {
   it("never constructs the Web recipe model while a native authority session is bound", () => {
     expect(app).toMatch(/recipesOpen && !nativePlayerAuthorityBoundFrame[\s\S]*?createWebRecipeWorkspaceReadModel\(game/);
     expect(app).toMatch(/const recipeWorkspaceReadModel = nativePlayerAuthorityBoundFrame[\s\S]*?nativeRecipeWorkspaceReadModel[\s\S]*?: webRecipeWorkspaceReadModel/);
-    expect(app).toMatch(/<RecipeWorkspace open readOnly=\{nativePlayerAuthorityOwnsRuntime && \(!nativeRecipeFocusReadModel \|\| nativePlayerAuthorityCommandPending\)\} readModel=\{recipeWorkspaceReadModel\}[\s\S]*?onReadRequest=\{updateRecipeWorkspaceSelector\}/);
+    expect(app).toMatch(/<RecipeWorkspace key=\{nativeRecipeWorkspaceIdentity[\s\S]*?open readOnly=\{nativePlayerAuthorityOwnsRuntime && \(!nativeRecipeFocusReadModel \|\| nativePlayerAuthorityCommandPending \|\| nativeRecipeWorkspaceReadStatus !== "ready"\)\} readModel=\{recipeWorkspaceReadModel\}[\s\S]*?onReadRequest=\{updateRecipeWorkspaceSelector\}/);
+    expect(app).not.toMatch(/nativeRecipeWorkspaceIdentity\.revision[^\n]*: "recipe-web"/);
     expect(app).not.toMatch(/<RecipeWorkspace[^>]*game=\{game\}/);
+  });
+
+  it("keeps a confirmed recipe projection mounted while the next native revision is pending", () => {
+    expect(app).toMatch(/nativeThinWorkspaceAuthorityFrames\.displayFrame/);
+    expect(app).toMatch(/nativeThinWorkspaceAuthorityFrames\.readFrame/);
+    expect(app).toMatch(/selectNativeRecipeWorkspaceFrame\([\s\S]*?nativeRecipeWorkspaceSnapshot,[\s\S]*?nativeRecipeWorkspaceIdentity,[\s\S]*?recipeWorkspaceSelector/);
+    expect(app).toMatch(/if \(!nativeRecipeWorkspaceReadIdentity \|\| !nativeRecipeWorkspaceSource\) return/);
   });
 
   it("keeps native location fail-closed on an older or mismatched preload", () => {

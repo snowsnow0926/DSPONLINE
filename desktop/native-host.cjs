@@ -1575,7 +1575,16 @@ class NativeCoreSessionRegistry {
 
   technologyProjection(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
-    if (!Number.isSafeInteger(request?.expectedRevision) || request.expectedRevision < 0) {
+    const allowedKeys = new Set([
+      "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint",
+    ]);
+    const hasRunId = Object.hasOwn(request ?? {}, "runId");
+    const hasRegistry = Object.hasOwn(request ?? {}, "expectedRegistryFingerprint");
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+      Reflect.ownKeys(request).some((key) => typeof key !== "string" || !allowedKeys.has(key)) ||
+      hasRunId !== hasRegistry || hasRunId &&
+        (!validLogicalId(request.runId, 128) || !validLogicalId(request.expectedRegistryFingerprint, 256)) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0) {
       throw new TypeError("native core technology projection request is invalid");
     }
     return this.requestOwned(ownerId, request.sessionId, {
@@ -1589,11 +1598,12 @@ class NativeCoreSessionRegistry {
     const itemIds = request?.itemIds ?? [];
     const location = request?.location ?? null;
     const allowedKeys = new Set([
-      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "itemIds",
+      "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint", "itemIds",
       "selectedItemId", "location",
     ]);
     if (!request || typeof request !== "object" || Array.isArray(request) ||
       Reflect.ownKeys(request).some((key) => typeof key !== "string" || !allowedKeys.has(key)) ||
+      Object.hasOwn(request, "runId") && !validLogicalId(request.runId, 128) ||
       !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
       !validLogicalId(request.expectedRegistryFingerprint, 256) ||
       !Array.isArray(itemIds) || itemIds.length > 256 || new Set(itemIds).size !== itemIds.length ||
@@ -1815,7 +1825,7 @@ class NativeCoreSessionRegistry {
   dysonWorkspaceProjection(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     const allowedKeys = new Set([
-      "sessionId", "expectedRevision", "expectedRegistryFingerprint", "selectedSystemId",
+      "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint", "selectedSystemId",
       "systemCursor", "systemLimit", "layerCursor", "layerLimit", "orbitCursor",
       "orbitLimit", "nodeCursor", "nodeLimit", "frameCursor", "frameLimit",
       "shellCursor", "shellLimit",
@@ -1830,7 +1840,8 @@ class NativeCoreSessionRegistry {
     ];
     if (!request || typeof request !== "object" || Array.isArray(request) ||
       Reflect.ownKeys(request).some((key) => typeof key !== "string" || !allowedKeys.has(key)) ||
-      allowedKeys.size !== Reflect.ownKeys(request).length ||
+      Reflect.ownKeys(request).length !== allowedKeys.size - (Object.hasOwn(request, "runId") ? 0 : 1) ||
+      Object.hasOwn(request, "runId") && !validLogicalId(request.runId, 128) ||
       !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
       !validLogicalId(request.expectedRegistryFingerprint, 256) ||
       !validDysonWorkspaceId(request.selectedSystemId) ||

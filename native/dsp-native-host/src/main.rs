@@ -148,6 +148,7 @@ fn handle_request(
                     "native-core-checkpoint-v1",
                     "native-core-v47-stream-export-v1",
                     "native-core-v47-stream-import-v1",
+                    "native-core-v46-to-v47-stream-adapter-v1",
                     "native-core-offline-macro-v1",
                     "native-core-offline-candidate-export-v1",
                     EXACT_REALTIME_LEASE_CAPABILITY,

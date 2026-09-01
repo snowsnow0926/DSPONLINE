@@ -929,13 +929,12 @@ impl RuntimeCatalog {
                         3 => Some("conveyor_belt_mk3".to_owned()),
                         _ => None,
                     });
-                if let Some(construction_id) = construction_id {
-                    if belt_construction_ids
+                if let Some(construction_id) = construction_id
+                    && belt_construction_ids
                         .insert(tier, construction_id)
                         .is_some()
-                    {
-                        bail!("native catalog belt construction tier is repeated")
-                    }
+                {
+                    bail!("native catalog belt construction tier is repeated")
                 }
             }
         }

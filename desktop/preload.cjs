@@ -265,6 +265,20 @@ function subscribeNativePlayerAuthorityState(listener) {
   };
 }
 
+function subscribeNativePlayerAuthorityCloudProgress(listener) {
+  if (typeof listener !== "function") {
+    throw new TypeError("Windows 原生玩家权威云进度监听器无效");
+  }
+  const handler = (_event, progress) => listener(progress);
+  let subscribed = true;
+  ipcRenderer.on("desktop:native-player-authority-cloud-progress", handler);
+  return () => {
+    if (!subscribed) return;
+    subscribed = false;
+    ipcRenderer.removeListener("desktop:native-player-authority-cloud-progress", handler);
+  };
+}
+
 function requestNativeCoreProjectionTransfer(request) {
   return new Promise((resolve, reject) => {
     if (!hasExactKeys(request, ["sessionId", "projectionType", "payload"]) ||
@@ -570,6 +584,8 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   // session, run, owner, lease, checkpoint, or fencing identity.
   checkpointNativePlayerAuthority: () => invokeNative("desktop:native-player-authority-checkpoint", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_CHECKPOINT_FAILED", message: "Windows 原生权威检查点验证失败，请重试" }),
   exportNativePlayerAuthorityV47: (request) => invokeNative("desktop:native-player-authority-export-v47", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_EXPORT_FAILED", message: "Windows 原生权威 v47 存档导出失败" }, request),
+  uploadNativePlayerAuthorityCloudSave: (request) => invokeNative("desktop:native-player-authority-cloud-upload", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_CLOUD_UPLOAD_FAILED", message: "Windows 原生权威云上传失败" }, request),
+  onNativePlayerAuthorityCloudProgress: subscribeNativePlayerAuthorityCloudProgress,
   startNativePlayerAuthorityMacro: (request) => invokeNative("desktop:native-player-authority-macro-start", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算启动失败" }, request),
   advanceNativePlayerAuthorityMacro: () => invokeNative("desktop:native-player-authority-macro-advance", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算推进失败" }, {}),
   finishNativePlayerAuthorityMacro: () => invokeNative("desktop:native-player-authority-macro-finish", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算结束失败" }, {}),
@@ -588,7 +604,7 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   appendNativeWal: (request) => invokeNative("desktop:native-wal-append", { fallbackCode: "NATIVE_WAL_APPEND_FAILED", message: "原生存档日志写入失败，请重新检查存档状态" }, request),
   compactNativeSave: (request) => invokeNative("desktop:native-save-compact", { fallbackCode: "NATIVE_SAVE_COMPACT_FAILED", message: "原生存档空闲合并失败，请稍后重试" }, request),
   openNativeCore: (request) => invokeNative("desktop:native-core-open", { fallbackCode: "NATIVE_CORE_OPEN_FAILED", message: "原生影子核心打开失败，请重试" }, request),
-  importNativeCoreV47: (request) => invokeNative("desktop:native-core-import-v47", { fallbackCode: "NATIVE_CORE_V47_IMPORT_FAILED", message: "原生 v47 存档导入失败；未验证的内容不会进入游戏会话" }, request),
+  importNativeCoreV47: (request) => invokeNative("desktop:native-core-import-v47", { fallbackCode: "NATIVE_CORE_V47_IMPORT_FAILED", message: "原生 v46/v47 存档导入失败；未验证的内容不会进入游戏会话" }, request),
   getNativeCoreStatus: (request) => invokeNative("desktop:native-core-status", { fallbackCode: "NATIVE_CORE_STATUS_FAILED", message: "原生影子核心状态读取失败，请重试" }, request),
   getNativeCoreProjection: (request) => invokeNative("desktop:native-core-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生投影请求失败，请重试" }, request),
   getNativeCoreViewportProjection: (request) => invokeNative("desktop:native-core-viewport-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生视口投影请求失败，请重试" }, request),

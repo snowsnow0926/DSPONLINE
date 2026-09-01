@@ -328,6 +328,12 @@ pub struct SaveCommitResult {
     pub wal_bytes: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SaveCompactionResult {
+    pub removed_generations: usize,
+    pub cancelled: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveRecoveryResult {
@@ -1970,6 +1976,37 @@ impl SaveStore {
         Ok(records)
     }
 
+    /// Provides a generation-pinned, pull-based record reader. The manifest
+    /// is verified once and each decoded chunk is returned only when the core
+    /// asks for it, avoiding the previous full `BTreeMap<String, Vec<u8>>`
+    /// allocation during normal startup.
+    pub fn with_record_reader_at<T>(
+        &self,
+        slot: &str,
+        generation: u64,
+        root_hash: &str,
+        consume: impl FnOnce(
+            Vec<String>,
+            &mut dyn FnMut(&str) -> anyhow::Result<Vec<u8>>,
+        ) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let manifest = self
+            .recover_manifest(slot)?
+            .ok_or_else(|| anyhow!("native save slot is missing"))?;
+        if manifest.generation != generation || manifest.root_hash != root_hash {
+            bail!("native save generation changed during streamed readback");
+        }
+        let keys = manifest.records.keys().cloned().collect::<Vec<_>>();
+        let mut read = |key: &str| {
+            validate_key(key)?;
+            let metadata = manifest.records.get(key).ok_or_else(|| {
+                anyhow!("native save record disappeared during streamed readback")
+            })?;
+            self.read_verified_chunk(slot, metadata)
+        };
+        consume(keys, &mut read)
+    }
+
     pub fn append_wal(
         &self,
         slot: &str,
@@ -2355,6 +2392,27 @@ impl SaveStore {
     }
 
     pub fn compact(&self, slot: &str, retain_generations: usize) -> anyhow::Result<usize> {
+        Ok(self
+            .compact_cancellable(slot, retain_generations, |_, _| false)?
+            .removed_generations)
+    }
+
+    /// Plans compaction without changing durable state, then publishes the
+    /// already-decided generation removals only after the two superblocks are
+    /// proven byte-identical to the planning snapshot. Content-addressed
+    /// chunks do not need a copy pass; the directory/manifest scan is the
+    /// cancellable equivalent. The callback is invoked only during that
+    /// read-only phase. Once it returns false for the final item, publication
+    /// is intentionally short and non-cancellable.
+    pub fn compact_cancellable<F>(
+        &self,
+        slot: &str,
+        retain_generations: usize,
+        mut should_cancel: F,
+    ) -> anyhow::Result<SaveCompactionResult>
+    where
+        F: FnMut(usize, usize) -> bool,
+    {
         validate_slot(slot)?;
         self.require_generic_mutation_unfenced(slot)?;
         if self
@@ -2364,19 +2422,26 @@ impl SaveStore {
         {
             bail!("native save compaction cannot run while a transaction is active");
         }
+        let pointer_snapshot = self.published_pointer_snapshot(slot)?;
         let retain_generations = retain_generations.max(DEFAULT_RETAIN_GENERATIONS);
         let verified = self.scan_published_manifests(slot)?;
         let Some(active) = verified.last() else {
-            return Ok(0);
+            return Ok(SaveCompactionResult {
+                removed_generations: 0,
+                cancelled: false,
+            });
         };
         let generations_root = self.slot_subdirectory(slot, "generations")?;
-        let mut generations = self.generation_directories(slot)?;
+        let generations = self.generation_directories(slot)?;
 
         // Compaction is destructive. If only the active pointer can be fully
         // verified, keep every generation rather than guessing that a nearby
         // numeric directory is a healthy fallback.
         if verified.len() < DEFAULT_RETAIN_GENERATIONS {
-            return Ok(0);
+            return Ok(SaveCompactionResult {
+                removed_generations: 0,
+                cancelled: false,
+            });
         }
 
         let mut protected = verified
@@ -2394,8 +2459,15 @@ impl SaveStore {
             }
             protected.insert(*generation);
         }
-        let mut removed = 0;
-        for (generation, path) in generations.drain(..) {
+        let total = generations.len();
+        let mut removable = Vec::new();
+        for (index, (generation, path)) in generations.into_iter().enumerate() {
+            if should_cancel(index, total) {
+                return Ok(SaveCompactionResult {
+                    removed_generations: 0,
+                    cancelled: true,
+                });
+            }
             if protected.contains(&generation) || generation == active.generation {
                 continue;
             }
@@ -2403,12 +2475,55 @@ impl SaveStore {
                 bail!("native generation cleanup escaped its root");
             }
             require_direct_directory(&path, "native generation cleanup target")?;
+            removable.push(path);
+        }
+        if should_cancel(total, total) {
+            return Ok(SaveCompactionResult {
+                removed_generations: 0,
+                cancelled: true,
+            });
+        }
+
+        // Publication begins here. A checkpoint transaction or a changed
+        // superblock invalidates the read-only plan instead of allowing it to
+        // remove data from another revision.
+        if self
+            .transactions
+            .values()
+            .any(|transaction| transaction.slot == slot)
+        {
+            bail!("native save compaction was superseded by an active transaction");
+        }
+        if self.published_pointer_snapshot(slot)? != pointer_snapshot {
+            return Ok(SaveCompactionResult {
+                removed_generations: 0,
+                cancelled: true,
+            });
+        }
+        let mut removed = 0;
+        for path in removable {
             fs::remove_dir_all(path)?;
             removed += 1;
         }
         sync_directory(&generations_root)?;
         self.collect_unreferenced_chunks(slot)?;
-        Ok(removed)
+        Ok(SaveCompactionResult {
+            removed_generations: removed,
+            cancelled: false,
+        })
+    }
+
+    fn published_pointer_snapshot(&self, slot: &str) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+        let slot_dir = self.slot_dir(slot)?;
+        let mut snapshot = Vec::with_capacity(2);
+        for name in ["superblock-a.json", "superblock-b.json"] {
+            match fs::read(slot_dir.join(name)) {
+                Ok(bytes) => snapshot.push((name.to_owned(), bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context("read native save pointer snapshot"),
+            }
+        }
+        Ok(snapshot)
     }
 
     fn collect_unreferenced_chunks(&self, slot: &str) -> anyhow::Result<()> {
@@ -4563,6 +4678,50 @@ mod tests {
         assert!(!store.generation_dir("normal-main", 1).unwrap().exists());
         assert!(store.generation_dir("normal-main", 2).unwrap().exists());
         assert!(store.generation_dir("normal-main", 3).unwrap().exists());
+    }
+
+    #[test]
+    fn cancelled_compaction_scan_leaves_every_generation_and_chunk_untouched() {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        for revision in 1..=4 {
+            let tx = begin(&mut store, revision);
+            store
+                .put(&tx, "base", Some(&format!("revision-{revision}")))
+                .unwrap();
+            store.commit(&tx).unwrap();
+        }
+        let before = store
+            .generation_directories("normal-main")
+            .unwrap()
+            .into_iter()
+            .map(|(generation, _)| generation)
+            .collect::<Vec<_>>();
+        let chunks_root = store.slot_subdirectory("normal-main", "chunks").unwrap();
+        let chunks_before = fs::read_dir(&chunks_root).unwrap().count();
+
+        let result = store
+            .compact_cancellable("normal-main", 2, |index, _| index >= 1)
+            .unwrap();
+
+        assert_eq!(
+            result,
+            SaveCompactionResult {
+                removed_generations: 0,
+                cancelled: true,
+            }
+        );
+        assert_eq!(
+            store
+                .generation_directories("normal-main")
+                .unwrap()
+                .into_iter()
+                .map(|(generation, _)| generation)
+                .collect::<Vec<_>>(),
+            before
+        );
+        assert_eq!(fs::read_dir(chunks_root).unwrap().count(), chunks_before);
+        assert_eq!(store.recover("normal-main").unwrap().unwrap().revision, 4);
     }
 
     #[test]

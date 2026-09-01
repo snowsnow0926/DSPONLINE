@@ -311,6 +311,13 @@ export interface DesktopBridge {
   exportNativePlayerAuthorityV47?: (
     request: DesktopNativePlayerAuthorityExportRequest,
   ) => Promise<DesktopNativePlayerAuthorityExportResult>;
+  /** Main streams a fixed Rust export; renderer never receives save bytes or a file path. */
+  uploadNativePlayerAuthorityCloudSave?: (
+    request: DesktopNativePlayerAuthorityCloudUploadRequest,
+  ) => Promise<DesktopNativePlayerAuthorityCloudUploadResult>;
+  onNativePlayerAuthorityCloudProgress?: (
+    listener: (progress: DesktopNativePlayerAuthorityCloudProgress) => void,
+  ) => () => void;
   /** Revision/multiplier observation only; main derives all elapsed-time budgets. */
   startNativePlayerAuthorityMacro?: (
     request: DesktopNativePlayerAuthorityMacroStartRequest,
@@ -335,7 +342,7 @@ export interface DesktopBridge {
   appendNativeWal: (request: DesktopNativeWalAppendRequest) => Promise<DesktopNativeWalAppendResult>;
   compactNativeSave: (request: DesktopNativeSaveSlotRequest & { retainGenerations?: number }) => Promise<{ removedGenerations: number }>;
   openNativeCore: (request: DesktopNativeCoreOpenRequest) => Promise<DesktopNativeCoreOpenResult>;
-  /** Current Windows host only; legacy/web import remains the compatibility fallback. */
+  /** Current Windows host only; accepts GameState v46/v47 and normalizes to v47. */
   importNativeCoreV47?: (request: DesktopNativeCoreImportRequest) => Promise<DesktopNativeCoreImportResult>;
   getNativeCoreStatus: (request: DesktopNativeCoreSessionRequest) => Promise<DesktopNativeCoreSummary>;
   getNativeCoreProjection: (request: DesktopNativeCoreProjectionRequest) => Promise<DesktopNativeCoreProjectionResult>;
@@ -3574,6 +3581,36 @@ export interface DesktopNativeCoreExportResult {
 export interface DesktopNativePlayerAuthorityExportResult extends DesktopNativeCoreExportResult {
   authority: DesktopNativePlayerAuthorityArtifactIdentity;
 }
+
+export interface DesktopNativePlayerAuthorityCloudUploadRequest {
+  authorization: string;
+  expectedRevision: number;
+  retryToken?: string;
+  sessionId?: never;
+  runId?: never;
+  payload?: never;
+  sourcePath?: never;
+}
+
+export interface DesktopNativePlayerAuthorityCloudProgress {
+  stage: "uploading" | "confirmed" | "rejected" | "unknown";
+  token: string;
+  sentBytes: number;
+  totalBytes: number;
+}
+
+export type DesktopNativePlayerAuthorityCloudUploadResult = {
+  status: "confirmed" | "rejected" | "unknown";
+  token: string;
+  revision: number;
+  httpStatus?: number;
+  errorCode?: string;
+  body?: string;
+  cloudSave?: {
+    revision: number;
+    [key: string]: unknown;
+  };
+};
 
 export interface DesktopNativeCoreCompareRequest extends DesktopNativeCoreSessionRequest {
   revision: number;

@@ -24,6 +24,7 @@ use crate::entity_raw::json_bitwise_eq;
 
 const INTERNAL_MANIFEST_SUFFIX: &str = "manifest";
 const MAX_INTERNAL_RECORDS: usize = 4_096;
+const MAX_REPEATED_CHECKPOINT_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_ENTITY_COUNT: usize = 2_000_000;
 const MAX_BELT_COUNT: usize = 4_000_000;
 const MAX_PROJECTION_ENTITIES: usize = 32;
@@ -473,6 +474,8 @@ impl ExactRowIdIndex {
 
 #[derive(Debug, Clone, Default)]
 struct SaveDirtyPages {
+    base_domains: [bool; BASE_CHECKPOINT_DOMAIN_COUNT],
+    base_domain_generations: [u64; BASE_CHECKPOINT_DOMAIN_COUNT],
     entity_pages: BTreeSet<usize>,
     belt_pages: BTreeSet<usize>,
     entity_topology: bool,
@@ -480,6 +483,25 @@ struct SaveDirtyPages {
 }
 
 impl SaveDirtyPages {
+    fn mark_base(&mut self, domain: BaseCheckpointDomain) {
+        let index = domain.index();
+        if !self.base_domains[index] {
+            self.base_domain_generations[index] =
+                self.base_domain_generations[index].saturating_add(1);
+        }
+        self.base_domains[index] = true;
+    }
+
+    fn mark_all_base(&mut self) {
+        for domain in BASE_CHECKPOINT_DOMAINS {
+            self.mark_base(domain);
+        }
+    }
+
+    fn base_is_dirty(&self, domain: BaseCheckpointDomain) -> bool {
+        self.base_domains[domain.index()]
+    }
+
     fn mark_entity(&mut self, index: usize) {
         self.entity_pages
             .insert(index / ENTITY_CHECKPOINT_CHUNK_SIZE);
@@ -500,7 +522,11 @@ impl SaveDirtyPages {
     }
 
     fn clear(&mut self) {
-        *self = Self::default();
+        self.base_domains.fill(false);
+        self.entity_pages.clear();
+        self.belt_pages.clear();
+        self.entity_topology = false;
+        self.belt_topology = false;
     }
 }
 
@@ -880,6 +906,8 @@ enum BaseCheckpointDomain {
     Unknown,
 }
 
+const BASE_CHECKPOINT_DOMAIN_COUNT: usize = 5;
+
 const BASE_CHECKPOINT_DOMAINS: [BaseCheckpointDomain; 5] = [
     BaseCheckpointDomain::Core,
     BaseCheckpointDomain::Logistics,
@@ -889,6 +917,16 @@ const BASE_CHECKPOINT_DOMAINS: [BaseCheckpointDomain; 5] = [
 ];
 
 impl BaseCheckpointDomain {
+    const fn index(self) -> usize {
+        match self {
+            Self::Core => 0,
+            Self::Logistics => 1,
+            Self::Dyson => 2,
+            Self::Statistics => 3,
+            Self::Unknown => 4,
+        }
+    }
+
     fn id(self) -> &'static str {
         match self {
             Self::Core => "base:core",
@@ -908,6 +946,21 @@ impl BaseCheckpointDomain {
             Self::Unknown => "base-unknown-mod",
         }
     }
+}
+
+fn base_checkpoint_domain_changed(
+    previous: &Map<String, Value>,
+    current: &Map<String, Value>,
+    domain: BaseCheckpointDomain,
+) -> bool {
+    previous
+        .iter()
+        .filter(|(key, _)| classify_base_checkpoint_key(key) == domain)
+        .any(|(key, value)| current.get(key) != Some(value))
+        || current
+            .iter()
+            .filter(|(key, _)| classify_base_checkpoint_key(key) == domain)
+            .any(|(key, value)| previous.get(key) != Some(value))
 }
 
 fn classify_base_checkpoint_key(key: &str) -> BaseCheckpointDomain {
@@ -2886,36 +2939,120 @@ fn verify_chunk(metadata: &ChunkMetadata, bytes: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn take_manifest(
-    records: &mut BTreeMap<String, Vec<u8>>,
-) -> anyhow::Result<(String, ChunkedManifest)> {
-    let mut candidates = Vec::new();
-    for (key, bytes) in records.iter() {
-        if !key.ends_with(INTERNAL_MANIFEST_SUFFIX) {
-            continue;
-        }
-        let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
-            continue;
-        };
-        if !matches!(
-            value.get("formatVersion").and_then(Value::as_u64),
-            Some(1 | 2)
-        ) || value.get("chunks").and_then(Value::as_array).is_none()
-        {
-            continue;
-        }
-        let manifest = serde_json::from_value::<ChunkedManifest>(value)
-            .context("decode native core chunk manifest")?;
-        candidates.push((key.clone(), manifest));
+type InternalCheckpointLoader<'a> = Box<dyn FnMut(&str) -> anyhow::Result<Vec<u8>> + 'a>;
+
+struct InternalCheckpointRecords<'a> {
+    remaining: BTreeSet<String>,
+    repeated: HashMap<String, Arc<[u8]>>,
+    repeated_bytes: usize,
+    loader: InternalCheckpointLoader<'a>,
+}
+
+impl<'a> InternalCheckpointRecords<'a> {
+    fn from_owned(mut records: BTreeMap<String, Vec<u8>>) -> anyhow::Result<Self> {
+        let remaining = records.keys().cloned().collect::<BTreeSet<_>>();
+        Self::new(remaining.into_iter().collect(), move |key| {
+            records
+                .remove(key)
+                .ok_or_else(|| anyhow!("native core checkpoint record is missing: {key}"))
+        })
     }
+
+    fn new(
+        keys: Vec<String>,
+        loader: impl FnMut(&str) -> anyhow::Result<Vec<u8>> + 'a,
+    ) -> anyhow::Result<Self> {
+        if keys.is_empty() || keys.len() > MAX_INTERNAL_RECORDS {
+            bail!("native core checkpoint record count is invalid");
+        }
+        let key_count = keys.len();
+        let remaining = keys.into_iter().collect::<BTreeSet<_>>();
+        if remaining.is_empty()
+            || remaining.len() != key_count
+            || remaining.len() > MAX_INTERNAL_RECORDS
+        {
+            bail!("native core checkpoint record keys are invalid");
+        }
+        Ok(Self {
+            remaining,
+            repeated: HashMap::new(),
+            repeated_bytes: 0,
+            loader: Box::new(loader),
+        })
+    }
+
+    fn len(&self) -> usize {
+        self.remaining.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.remaining.is_empty()
+    }
+
+    fn manifest_keys(&self) -> Vec<String> {
+        self.remaining
+            .iter()
+            .filter(|key| key.ends_with(INTERNAL_MANIFEST_SUFFIX))
+            .cloned()
+            .collect()
+    }
+
+    fn take(&mut self, key: &str, referenced_again: bool) -> anyhow::Result<Arc<[u8]>> {
+        if !self.remaining.contains(key) {
+            bail!("native core checkpoint record is missing: {key}");
+        }
+        let bytes = if referenced_again {
+            if let Some(bytes) = self.repeated.get(key) {
+                Arc::clone(bytes)
+            } else {
+                let bytes = Arc::<[u8]>::from((self.loader)(key)?);
+                // A deduplicated manifest may reference one chunk many times.
+                // Keep only a bounded working set; an uncached chunk is safely
+                // verified again on its next reference instead of growing the
+                // open-time heap with the save size.
+                if self
+                    .repeated_bytes
+                    .checked_add(bytes.len())
+                    .is_some_and(|size| size <= MAX_REPEATED_CHECKPOINT_CACHE_BYTES)
+                {
+                    self.repeated_bytes += bytes.len();
+                    self.repeated.insert(key.to_owned(), Arc::clone(&bytes));
+                }
+                bytes
+            }
+        } else if let Some(bytes) = self.repeated.remove(key) {
+            self.repeated_bytes = self.repeated_bytes.saturating_sub(bytes.len());
+            bytes
+        } else {
+            Arc::<[u8]>::from((self.loader)(key)?)
+        };
+        if !referenced_again {
+            self.remaining.remove(key);
+        }
+        Ok(bytes)
+    }
+}
+
+fn take_manifest(
+    records: &mut InternalCheckpointRecords<'_>,
+) -> anyhow::Result<(String, ChunkedManifest)> {
+    let mut candidates = records.manifest_keys();
     if candidates.len() != 1 {
         bail!("native core checkpoint must contain exactly one chunk manifest");
     }
-    let (manifest_key, manifest) = candidates.pop().expect("one manifest");
-    let manifest_bytes = records
-        .remove(&manifest_key)
-        .ok_or_else(|| anyhow!("native core checkpoint manifest disappeared during open"))?;
-    drop(manifest_bytes);
+    let manifest_key = candidates.pop().expect("one manifest");
+    let manifest_bytes = records.take(&manifest_key, false)?;
+    let value = serde_json::from_slice::<Value>(manifest_bytes.as_ref())
+        .context("decode native core chunk manifest")?;
+    if !matches!(
+        value.get("formatVersion").and_then(Value::as_u64),
+        Some(1 | 2)
+    ) || value.get("chunks").and_then(Value::as_array).is_none()
+    {
+        bail!("native core checkpoint chunk manifest is invalid");
+    }
+    let manifest = serde_json::from_value::<ChunkedManifest>(value)
+        .context("decode native core chunk manifest")?;
     Ok((manifest_key, manifest))
 }
 
@@ -2926,37 +3063,16 @@ fn chunk_record_key(manifest_key: &str, id: &str) -> anyhow::Result<String> {
     Ok(format!("{prefix}chunk.{}", encoded_chunk_id(id)))
 }
 
-enum ChunkRecordBytes<'a> {
-    Borrowed(&'a [u8]),
-    Owned(Vec<u8>),
-}
-
-impl AsRef<[u8]> for ChunkRecordBytes<'_> {
-    fn as_ref(&self) -> &[u8] {
-        match self {
-            Self::Borrowed(bytes) => bytes,
-            Self::Owned(bytes) => bytes,
-        }
-    }
-}
-
-fn take_chunk_record<'a>(
-    records: &'a mut BTreeMap<String, Vec<u8>>,
+fn take_chunk_record(
+    records: &mut InternalCheckpointRecords<'_>,
     manifest_key: &str,
     id: &str,
     referenced_again: bool,
-) -> anyhow::Result<ChunkRecordBytes<'a>> {
+) -> anyhow::Result<Arc<[u8]>> {
     let key = chunk_record_key(manifest_key, id)?;
-    if referenced_again {
-        return records
-            .get(&key)
-            .map(|bytes| ChunkRecordBytes::Borrowed(bytes.as_slice()))
-            .ok_or_else(|| anyhow!("native core checkpoint chunk is missing: {id}"));
-    }
     records
-        .remove(&key)
-        .map(ChunkRecordBytes::Owned)
-        .ok_or_else(|| anyhow!("native core checkpoint chunk is missing: {id}"))
+        .take(&key, referenced_again)
+        .with_context(|| format!("read native core checkpoint chunk: {id}"))
 }
 
 fn has_later_chunk_reference(
@@ -2973,7 +3089,7 @@ fn has_later_chunk_reference(
 }
 
 fn load_checkpoint_base(
-    records: &mut BTreeMap<String, Vec<u8>>,
+    records: &mut InternalCheckpointRecords<'_>,
     manifest_key: &str,
     manifest: &ChunkedManifest,
     remaining_chunk_references: &mut HashMap<String, usize>,
@@ -3073,7 +3189,31 @@ impl CoreState {
 
     pub fn from_owned_internal_records(
         identity: CoreCheckpointIdentity,
-        mut records: BTreeMap<String, Vec<u8>>,
+        records: BTreeMap<String, Vec<u8>>,
+        catalog: RuntimeCatalog,
+    ) -> anyhow::Result<Self> {
+        let records = InternalCheckpointRecords::from_owned(records)?;
+        Self::from_internal_checkpoint_source(identity, records, catalog)
+    }
+
+    /// Opens one immutable checkpoint through a bounded pull reader. At most
+    /// one decoded chunk (plus the final raw/indexed representation) is held
+    /// by this loader unless a manifest deliberately references the same chunk
+    /// more than once. The caller remains responsible for verifying the
+    /// generation identity and every compressed chunk before returning bytes.
+    pub fn from_streamed_internal_records<'a>(
+        identity: CoreCheckpointIdentity,
+        record_keys: Vec<String>,
+        read_record: impl FnMut(&str) -> anyhow::Result<Vec<u8>> + 'a,
+        catalog: RuntimeCatalog,
+    ) -> anyhow::Result<Self> {
+        let records = InternalCheckpointRecords::new(record_keys, read_record)?;
+        Self::from_internal_checkpoint_source(identity, records, catalog)
+    }
+
+    fn from_internal_checkpoint_source(
+        identity: CoreCheckpointIdentity,
+        mut records: InternalCheckpointRecords<'_>,
         catalog: RuntimeCatalog,
     ) -> anyhow::Result<Self> {
         if records.is_empty() || records.len() > MAX_INTERNAL_RECORDS {
@@ -3326,6 +3466,8 @@ impl CoreState {
             PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS,
             BTreeMap::new(),
             SaveDirtyPages {
+                base_domains: [true; BASE_CHECKPOINT_DOMAIN_COUNT],
+                base_domain_generations: [1; BASE_CHECKPOINT_DOMAIN_COUNT],
                 entity_topology: true,
                 belt_topology: true,
                 ..SaveDirtyPages::default()
@@ -3680,16 +3822,44 @@ impl CoreState {
             Ok(())
         };
 
-        // Base domains intentionally do not depend on manually maintained
-        // dirty bits. Exact serialized content is compared with the last
-        // durable generation, so an unmarked mutation is still detected while
-        // unrelated systems remain reusable.
+        // Production checkpoints do not serialize or hash a clean base
+        // domain. Every writer crosses one of the centralized dirty APIs; a
+        // verified chunk can therefore be reused directly. Debug/test builds
+        // still encode the clean view as an audit oracle so a newly added
+        // writer cannot silently forget to mark its owning domain.
         for domain in BASE_CHECKPOINT_DOMAINS {
+            let cached = previous.get(domain.id()).filter(|chunk| {
+                chunk.kind == domain.kind()
+                    && chunk.offset == 0
+                    && checkpoint_chunk_has_valid_sha256_metadata(chunk)
+            });
+            if !self.save_dirty.base_is_dirty(domain)
+                && let Some(cached) = cached
+            {
+                #[cfg(debug_assertions)]
+                {
+                    let (audit_text, audit_count) =
+                        encode_base_checkpoint_domain(&self.base, domain)?;
+                    let audit = checkpoint_chunk_metadata(
+                        domain.id(),
+                        domain.kind(),
+                        0,
+                        audit_count,
+                        &audit_text,
+                    );
+                    if !checkpoint_chunk_content_matches(cached, &audit) {
+                        bail!(
+                            "native checkpoint base-domain dirty audit detected an unmarked writer"
+                        )
+                    }
+                }
+                install(cached.clone(), None)?;
+                continue;
+            }
             let (text, count) = encode_base_checkpoint_domain(&self.base, domain)?;
             let candidate = checkpoint_chunk_metadata(domain.id(), domain.kind(), 0, count, &text);
-            if let Some(cached) = previous
-                .get(domain.id())
-                .filter(|cached| checkpoint_chunk_content_matches(cached, &candidate))
+            if let Some(cached) =
+                cached.filter(|cached| checkpoint_chunk_content_matches(cached, &candidate))
             {
                 install(cached.clone(), None)?;
             } else {
@@ -4745,6 +4915,11 @@ impl CoreState {
     }
 
     pub(crate) fn base_value_mut(&mut self) -> &mut Map<String, Value> {
+        // This escape hatch is intentionally conservative. Product hot paths
+        // use typed commit/install APIs below; ad-hoc callers (mostly tests and
+        // recovery tools) cannot mutate a base field without dirtying every
+        // domain and therefore can never cause a stale checkpoint reuse.
+        self.save_dirty.mark_all_base();
         self.summary_cache.get_mut().take();
         self.production_history_tiers.invalidate();
         self.operations_projection_runtime.invalidate();
@@ -4773,6 +4948,23 @@ impl CoreState {
         self.base = base;
         if rebuild_production_history {
             self.rebuild_production_history_tiers();
+        }
+    }
+
+    pub(crate) fn mark_base_command_changes(
+        &mut self,
+        top_level_changes: &[crate::command::ValuePatch],
+        force_core: bool,
+    ) {
+        if force_core {
+            self.save_dirty.mark_base(BaseCheckpointDomain::Core);
+        }
+        for change in top_level_changes {
+            let Some(crate::command::PathSegment::Key(key)) = change.path.first() else {
+                self.save_dirty.mark_all_base();
+                continue;
+            };
+            self.save_dirty.mark_base(classify_base_checkpoint_key(key));
         }
     }
     pub(crate) fn base_value(&self) -> &Map<String, Value> {
@@ -5188,6 +5380,8 @@ impl CoreState {
             shared_rows,
             changed_rows: entity_writeback.len() - shared_rows,
         };
+        let changed_base_domains = BASE_CHECKPOINT_DOMAINS
+            .map(|domain| base_checkpoint_domain_changed(&self.base, &base, domain));
         if profile_enabled {
             eprintln!(
                 "DSP_NATIVE_CORE_PROFILE\tcommit-entity-raw-full-encode\t{:.3}\tencoded={}\tshared={}\tchanged={}",
@@ -5204,6 +5398,14 @@ impl CoreState {
         // valid candidate may replace `self`.
         let mut candidate = self.clone();
         candidate.summary_cache.get_mut().take();
+        for (domain, changed) in BASE_CHECKPOINT_DOMAINS
+            .into_iter()
+            .zip(changed_base_domains)
+        {
+            if changed {
+                candidate.save_dirty.mark_base(domain);
+            }
+        }
         for &index in &changed_entity_indices {
             candidate.save_dirty.mark_entity(index);
         }
@@ -7277,6 +7479,34 @@ mod tests {
     }
 
     #[test]
+    fn streamed_internal_records_pull_each_checkpoint_chunk_once() {
+        let mut source = fixture_records();
+        let keys = source.keys().cloned().collect::<Vec<_>>();
+        let expected_reads = keys.len();
+        let mut reads = Vec::new();
+
+        let state = CoreState::from_streamed_internal_records(
+            fixture_identity(7),
+            keys,
+            |key| {
+                reads.push(key.to_owned());
+                source
+                    .remove(key)
+                    .ok_or_else(|| anyhow!("test record is missing"))
+            },
+            fixture_catalog(),
+        )
+        .unwrap();
+
+        assert_eq!(reads.len(), expected_reads);
+        assert_eq!(reads.iter().collect::<HashSet<_>>().len(), expected_reads);
+        assert!(source.is_empty());
+        assert_eq!(state.revision, 7);
+        assert_eq!(state.entity_raw.len(), 1);
+        assert_eq!(state.belt_raw.len(), 1);
+    }
+
+    #[test]
     fn owned_internal_records_reject_v2_chunk_without_sha256() {
         let state = CoreState::from_owned_internal_records(
             fixture_identity(7),
@@ -8941,25 +9171,16 @@ mod tests {
         assert_eq!(clean.reused_records, 7);
         state.abort_checkpoint_visit();
 
-        // Content validation is authoritative even if a future call site
-        // mutates an owned domain without setting the coarse base dirty bit.
+        // Debug/test builds audit every supposedly clean domain. A future
+        // writer that bypasses the centralized dirty API fails closed instead
+        // of silently publishing stale metadata.
         state
             .base
             .insert("dysonSphere".to_owned(), json!({"structurePoints":8}));
-        let mut unmarked_delta = BTreeMap::new();
-        let unmarked = state
-            .visit_dirty_internal_checkpoint_records(46, |key, value| {
-                unmarked_delta.insert(key.to_owned(), value.as_bytes().to_vec());
-                Ok(())
-            })
-            .unwrap();
-        assert_eq!(unmarked.encoded_records, 2);
-        assert_eq!(unmarked.reused_records, 6);
-        assert!(
-            unmarked_delta
-                .keys()
-                .any(|key| key.ends_with("chunk.base%3Adyson"))
-        );
+        let error = state
+            .visit_dirty_internal_checkpoint_records(46, |_key, _value| Ok(()))
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("unmarked writer"));
         state.abort_checkpoint_visit();
 
         let restored = CoreState::from_internal_records(

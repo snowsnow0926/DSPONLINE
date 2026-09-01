@@ -9443,6 +9443,10 @@ impl CoreState {
             expansion.apply_to_base(self, &mut base)?;
         }
         next.install_base_from_command(base, rebuild_production_history);
+        next.mark_base_command_changes(
+            &applied_command.top_level_changes,
+            blueprint_intent.is_some() || construction_queue_intent.is_some(),
+        );
 
         for record in &applied_command.changed_entities {
             let index = *next

@@ -1076,7 +1076,7 @@ struct PlayerCommandHistory {
 
 #[derive(Clone, Debug)]
 enum PendingPlayerCommandHistory {
-    Record(PlayerCommandHistoryEntry),
+    Record(Box<PlayerCommandHistoryEntry>),
     Truncate(String),
 }
 
@@ -1144,20 +1144,28 @@ impl CoreRegistry {
             bail!("native core checkpoint identity changed before open");
         }
         let catalog = RuntimeCatalog::from_value(catalog_value, registry_fingerprint)?;
-        let records = store.read_records_at(slot, &recovery.record_keys, generation, root_hash)?;
-        let mut state = CoreState::from_owned_internal_records(
-            CoreCheckpointIdentity {
-                slot: slot.to_owned(),
-                generation,
-                root_hash: root_hash.to_owned(),
-                revision,
-                state_version: recovery.state_version,
-                mode: recovery.mode,
-                registry_fingerprint: registry_fingerprint.to_owned(),
-                base_primary_checksum: recovery.base_checksum,
+        let identity = CoreCheckpointIdentity {
+            slot: slot.to_owned(),
+            generation,
+            root_hash: root_hash.to_owned(),
+            revision,
+            state_version: recovery.state_version,
+            mode: recovery.mode,
+            registry_fingerprint: registry_fingerprint.to_owned(),
+            base_primary_checksum: recovery.base_checksum,
+        };
+        let mut state = store.with_record_reader_at(
+            slot,
+            generation,
+            root_hash,
+            |record_keys, read_record| {
+                CoreState::from_streamed_internal_records(
+                    identity,
+                    record_keys,
+                    |key| read_record(key),
+                    catalog,
+                )
             },
-            records,
-            catalog,
         )?;
         if let Some(history) = store.read_statistics_sidecar(slot, generation, revision, root_hash)
         {
@@ -2685,7 +2693,7 @@ impl CoreRegistry {
                     return;
                 }
                 history.redo.clear();
-                history.undo.push(entry);
+                history.undo.push(*entry);
                 if history.undo.len() > MAX_PLAYER_COMMAND_HISTORY_ENTRIES {
                     history.undo.remove(0);
                 }
@@ -3652,7 +3660,7 @@ impl CoreRegistry {
                     });
                 prepared_history = Some(match reversible {
                     Ok((forward, inverse)) => {
-                        PendingPlayerCommandHistory::Record(PlayerCommandHistoryEntry {
+                        PendingPlayerCommandHistory::Record(Box::new(PlayerCommandHistoryEntry {
                             command_id: request.command_id.clone(),
                             _semantic: request.command.clone(),
                             forward,
@@ -3661,7 +3669,7 @@ impl CoreRegistry {
                             result_sha256: preflight.canonical_sha256()?,
                             result_revision: applied.revision,
                             undo_revision: None,
-                        })
+                        }))
                     }
                     Err(error) => PendingPlayerCommandHistory::Truncate(format!(
                         "confirmed command is not reversibly representable: {error}"
@@ -21340,7 +21348,7 @@ mod tests {
     }
 
     #[test]
-    fn production_open_moves_records_into_owned_core_constructor() {
+    fn production_open_streams_records_without_a_complete_decoded_map() {
         let source = include_str!("core_runtime.rs");
         let open_start = source.find("    pub fn open(").unwrap();
         let open_and_later = &source[open_start..];
@@ -21348,15 +21356,17 @@ mod tests {
             .find("\n    pub fn ")
             .map_or(open_and_later.len(), |index| index + 1);
         let open_source = &open_and_later[..open_end];
+        let streamed_constructor = ["CoreState::from_", "streamed_internal_records("].concat();
         let owned_constructor = ["CoreState::from_", "owned_internal_records("].concat();
         let borrowed_constructor = ["CoreState::from_", "internal_records("].concat();
 
-        assert!(open_source.contains(&owned_constructor));
+        assert!(open_source.contains("with_record_reader_at("));
+        assert!(open_source.contains(&streamed_constructor));
+        assert!(!open_source.contains(&owned_constructor));
         assert!(!open_source.contains(&borrowed_constructor));
-        assert!(!open_source.contains("&records,"));
+        assert!(!open_source.contains("read_records_at("));
         assert!(!open_source.contains("records.clone()"));
-        assert!(open_source.contains("\n            records,\n            catalog,\n        )?;"));
-        let constructor_index = open_source.find(&owned_constructor).unwrap();
+        let constructor_index = open_source.find(&streamed_constructor).unwrap();
         assert!(
             constructor_index
                 < open_source

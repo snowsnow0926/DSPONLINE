@@ -19,8 +19,9 @@ import {
   Zap,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { getDesktopBridge, type DesktopNativePlayerAuthorityCloudProgress } from "../desktop";
 import { ACCOUNT_AVATARS, getActiveAccount, type AccountProfileChanges, type AccountState } from "../game/account";
-import { loginCloudAccount, logoutCloudAccount, resumeCloudSession, type CloudSession } from "../game/cloud";
+import { getCloudToken, loginCloudAccount, logoutCloudAccount, resumeCloudSession, type CloudSession } from "../game/cloud";
 import type {
   NativeCampaignGalaxyWorkspaceIdentity,
   NativeCampaignGalaxyWorkspaceReadStatus,
@@ -100,6 +101,8 @@ export function NativeGalaxyWorkspace({
   const [cloudPassword, setCloudPassword] = useState("");
   const [cloudBusy, setCloudBusy] = useState(false);
   const [cloudMessage, setCloudMessage] = useState<string | null>(null);
+  const [cloudRetryToken, setCloudRetryToken] = useState<string | null>(null);
+  const [cloudProgress, setCloudProgress] = useState<DesktopNativePlayerAuthorityCloudProgress | null>(null);
   const [dispatchDrafts, setDispatchDrafts] = useState<Record<string, string>>({});
   const [pendingDispatch, setPendingDispatch] = useState<Readonly<{
     projectId: keyof typeof EXPORT_LABELS;
@@ -155,6 +158,15 @@ export function NativeGalaxyWorkspace({
     void resumeCloudSession(projection.game.mode).then((session) => { if (active) setCloudSession(session); });
     return () => { active = false; };
   }, [open, projection?.game.mode]);
+  useEffect(() => {
+    if (!open) return;
+    const bridge = getDesktopBridge();
+    return bridge?.onNativePlayerAuthorityCloudProgress?.((progress) => {
+      if (progress && typeof progress === "object" && typeof progress.token === "string") {
+        setCloudProgress(progress);
+      }
+    });
+  }, [open]);
 
   const metrics = useMemo(() => projection ? [
     { label: "累计生产", value: compactDecimal(projection.production.totalProduced), icon: <Database size={18} /> },
@@ -216,6 +228,40 @@ export function NativeGalaxyWorkspace({
         : "云账号已退出，但本地身份在请求期间切换；未修改任何本地身份绑定。");
     } catch (error) {
       setCloudMessage(error instanceof Error ? error.message : "退出云账号失败");
+    } finally {
+      setCloudBusy(false);
+    }
+  };
+  const uploadNativeMainSave = async () => {
+    if (cloudBusy || !exactFrame || projection.game.mode !== "normal") return;
+    const bridge = getDesktopBridge();
+    const token = getCloudToken();
+    if (!bridge?.uploadNativePlayerAuthorityCloudSave || !token) {
+      setCloudMessage("当前桌面壳或云凭据不支持原生主档上传；未发送任何存档数据。");
+      return;
+    }
+    setCloudBusy(true);
+    setCloudMessage(null);
+    setCloudProgress(null);
+    try {
+      const result = await bridge.uploadNativePlayerAuthorityCloudSave({
+        authorization: `Bearer ${token}`,
+        expectedRevision: cloudSession.cloudSave?.revision ?? 0,
+        ...(cloudRetryToken ? { retryToken: cloudRetryToken } : {}),
+      });
+      if (result.status === "confirmed") {
+        setCloudRetryToken(null);
+        setCloudMessage(`Rust 主档已流式上传到云端修订 ${result.cloudSave?.revision ?? "已确认"}；renderer 从未接收存档正文。`);
+        setCloudSession(await resumeCloudSession("normal"));
+      } else if (result.status === "unknown") {
+        setCloudRetryToken(result.token);
+        setCloudMessage("网络结果暂时无法确认。原生导出和同一个幂等令牌已保留；请手动点击“重试同一份”，程序不会重新生成或自动覆盖云端。");
+      } else {
+        setCloudRetryToken(null);
+        setCloudMessage(`云端明确拒绝本次上传${result.httpStatus ? `（HTTP ${result.httpStatus}）` : ""}；本地权威检查点未改变。`);
+      }
+    } catch (error) {
+      setCloudMessage(error instanceof Error ? error.message : "原生主档上传失败；本地权威检查点未改变");
     } finally {
       setCloudBusy(false);
     }
@@ -327,7 +373,12 @@ export function NativeGalaxyWorkspace({
     {tab === "cloud" ? <div className="galaxy-cloud-view"><section className="galaxy-cloud-status"><header><i>{cloudSession.status === "offline" ? <CloudOff size={20} /> : <Cloud size={20} />}</i><span><small>账户域会话</small><strong>{cloudSession.user?.displayName ?? (cloudSession.status === "checking" ? "正在检查云身份" : "未登录云账号")}</strong></span><em className={`cloud-state cloud-state--${cloudSession.status}`}>{cloudSession.status}</em></header>
       {cloudSession.status === "authenticated" && cloudSession.user ? <div className="galaxy-cloud-identity"><span className="galaxy-avatar">{account.profile.avatar}</span><span><strong>{cloudSession.user.email}</strong><small>{cloudBoundToActiveAccount ? "已绑定到当前本地身份；这里只维护登录与绑定关系。" : "云会话已登录，但未绑定当前本地身份。"}</small></span><button type="button" disabled={cloudBusy} onClick={() => void submitLogout()}><LogOut size={14} />{cloudBoundToActiveAccount ? "退出并解绑" : "退出云账号"}</button></div> : <form className="galaxy-cloud-auth" onSubmit={(event) => { event.preventDefault(); void submitLogin(); }}><label><span>用户名或邮箱</span><input value={cloudIdentifier} autoComplete="username" onChange={(event) => setCloudIdentifier(event.currentTarget.value)} /></label><label><span>密码</span><input type="password" value={cloudPassword} autoComplete="current-password" onChange={(event) => setCloudPassword(event.currentTarget.value)} /></label><button type="submit" disabled={cloudBusy || cloudSession.status === "checking"}><LogIn size={14} />登录并绑定</button></form>}
       {cloudMessage || cloudSession.message ? <p className="galaxy-cloud-message">{cloudMessage ?? cloudSession.message}</p> : null}</section>
-      <div className="galaxy-cloud-policy"><LockKeyhole size={20} /><span><strong>主档写入边界保持关闭</strong><small>Rust 玩家权威运行时，恢复云存档、导入存档和覆盖当前主档均明确禁用。请先通过受控持久化切换流程退出当前权威会话；本页面不会绕过该边界。</small></span></div>
+      <div className="galaxy-cloud-policy"><LockKeyhole size={20} /><span><strong>云端恢复仍保持关闭</strong><small>Rust 玩家权威运行时，下载覆盖、冲突恢复和导入仍需先安全关闭当前 authority lineage；上传只读取 main 拥有的只读导出流，不读取旧 JavaScript 镜像。</small></span></div>
+      {cloudSession.status === "authenticated" && cloudSession.user && projection.game.mode === "normal" ? <section className="galaxy-cloud-status" data-native-cloud-upload="main-owned-stream-v1">
+        <header><i><Cloud size={20} /></i><span><small>普通模式主云档</small><strong>{cloudSession.cloudSave ? `当前云端修订 ${cloudSession.cloudSave.revision}` : "尚未上传"}</strong></span></header>
+        {cloudProgress?.stage === "uploading" ? <p className="galaxy-cloud-message">正在由主进程上传：{Math.min(100, Math.floor(cloudProgress.sentBytes * 100 / Math.max(1, cloudProgress.totalBytes)))}%</p> : null}
+        <button type="button" disabled={cloudBusy || !exactFrame} onClick={() => void uploadNativeMainSave()}><Cloud size={14} />{cloudRetryToken ? "重试同一份" : "流式上传 Rust 主档"}</button>
+      </section> : null}
     </div> : null}
     {dispatchConfirmationCurrent && pendingDispatch ? <AccessibleDialog
       open

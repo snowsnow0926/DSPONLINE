@@ -82,6 +82,9 @@ const {
   NativePlayerAuthorityPersistenceBroker,
 } = require("./native-player-authority-persistence-broker.cjs");
 const {
+  NativeAuthorityCloudTransfer,
+} = require("./native-authority-cloud-transfer.cjs");
+const {
   NativePlayerAuthorityStateBroker,
 } = require("./native-player-authority-state-broker.cjs");
 const {
@@ -1926,7 +1929,7 @@ ipcMain.handle("desktop:native-core-import-v47", async (event, request) => {
   try {
     const ownerId = requireTrustedNativeSender(event);
     const selection = await dialog.showOpenDialog(mainWindow, {
-      title: "导入 DSP极简网络 v47 存档到 Windows 原生核心",
+      title: "导入 DSP极简网络 v46/v47 存档到 Windows 原生核心",
       buttonLabel: "验证并导入",
       filters: [{ name: "DSP极简网络存档", extensions: ["json", "gz"] }],
       properties: ["openFile", "dontAddToRecent"],
@@ -1953,7 +1956,7 @@ ipcMain.handle("desktop:native-core-import-v47", async (event, request) => {
     }
     const imported = await runRendererNativeOperation("coreImport", {
       fallbackCode: "NATIVE_CORE_V47_IMPORT_FAILED",
-      message: "原生 v47 存档导入失败；未验证的内容不会进入游戏会话",
+      message: "原生 v46/v47 存档导入失败；未验证的内容不会进入游戏会话",
       onInvalidResult: async (raw) => {
         if (typeof raw?.sessionId === "string") await nativeCoreSessions?.close(ownerId, raw.sessionId);
       },
@@ -1967,7 +1970,7 @@ ipcMain.handle("desktop:native-core-import-v47", async (event, request) => {
   } catch (error) {
     throw createRendererNativeError(error, {
       fallbackCode: "NATIVE_CORE_V47_IMPORT_FAILED",
-      message: "原生 v47 存档导入失败；未验证的内容不会进入游戏会话",
+      message: "原生 v46/v47 存档导入失败；未验证的内容不会进入游戏会话",
     });
   }
 });
@@ -3072,6 +3075,32 @@ ipcMain.handle("desktop:native-player-authority-export-v47", async (event, reque
     throw createRendererNativeError(error, {
       fallbackCode: "NATIVE_PLAYER_AUTHORITY_EXPORT_FAILED",
       message: "Windows 原生权威 v47 存档导出失败；目标文件不会接收未经校验的内容",
+    });
+  }
+});
+
+ipcMain.handle("desktop:native-player-authority-cloud-upload", async (event, request) => {
+  try {
+    const rendererOwnerId = requireTrustedNativeSender(event);
+    if (!nativePlayerAuthorityPersistenceBroker || !nativeHostClient) {
+      throw Object.assign(new Error("native player-authority persistence broker is unavailable"), {
+        code: "NATIVE_PLAYER_AUTHORITY_PERSISTENCE_UNAVAILABLE",
+      });
+    }
+    const transfer = new NativeAuthorityCloudTransfer({
+      rootPath: nativeHostClient.rootPath,
+      resolveRequestUrl: resolveApiRequestUrl,
+      exportArtifact: (exportRequest) =>
+        nativePlayerAuthorityPersistenceBroker.exportV47(rendererOwnerId, exportRequest),
+    });
+    return await transfer.upload(request, (progress) => {
+      if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.id !== rendererOwnerId) return;
+      mainWindow.webContents.send("desktop:native-player-authority-cloud-progress", progress);
+    });
+  } catch (error) {
+    throw createRendererNativeError(error, {
+      fallbackCode: "NATIVE_PLAYER_AUTHORITY_CLOUD_UPLOAD_FAILED",
+      message: "Windows 原生权威云上传失败；本地检查点不会被覆盖",
     });
   }
 });

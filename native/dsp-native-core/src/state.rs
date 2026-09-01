@@ -2501,6 +2501,12 @@ pub(crate) struct FactoryTopology {
     /// without reducing work, so topology compilation releases that vector
     /// and records the stable full-scan decision here instead.
     pub production_history_rate_full_scan_required: bool,
+    /// Persisted rows with at least one material entry in `inputs` or
+    /// `outputs`. Ten-second inventory snapshots consume this directory
+    /// independently from rates/campaign metrics, avoiding an all-entity JSON
+    /// scan for sparse factories.
+    pub production_history_inventory_indices: Vec<usize>,
+    pub production_history_inventory_full_scan_required: bool,
     pub non_station_indices: Vec<usize>,
     pub research_entity_indices: Vec<usize>,
     pub entity_planet_indices: Vec<usize>,
@@ -2537,6 +2543,7 @@ impl FactoryTopology {
         self.vein_indices.shrink_to_fit();
         self.ordinary_machine_indices.shrink_to_fit();
         self.production_history_rate_indices.shrink_to_fit();
+        self.production_history_inventory_indices.shrink_to_fit();
         self.non_station_indices.shrink_to_fit();
         self.research_entity_indices.shrink_to_fit();
         self.entity_planet_indices.shrink_to_fit();
@@ -2567,6 +2574,7 @@ impl FactoryTopology {
             + self.vein_indices.capacity()
             + self.ordinary_machine_indices.capacity()
             + self.production_history_rate_indices.capacity()
+            + self.production_history_inventory_indices.capacity()
             + self.non_station_indices.capacity()
             + self.research_entity_indices.capacity()
             + self.entity_planet_indices.capacity()
@@ -2723,6 +2731,10 @@ pub struct CoreState {
     /// the factory; committed simulation revisions patch only changed rows.
     /// It is disposable and excluded from every persistent/canonical surface.
     pub(crate) campaign_projection_runtime: crate::campaign::CampaignProjectionRuntime,
+    /// Last successful exact-factory execution evidence. It is bounded,
+    /// disposable and excluded from every checkpoint/canonical surface.
+    last_factory_execution_diagnostics:
+        Option<crate::factory_writer_events::FactoryExecutionDiagnostics>,
 }
 
 pub(crate) struct PreparedSimulationRuntimeUpdates {
@@ -3547,6 +3559,7 @@ impl CoreState {
             operations_projection_runtime:
                 crate::operations_workspace::OperationsProjectionRuntime::default(),
             campaign_projection_runtime: crate::campaign::CampaignProjectionRuntime::default(),
+            last_factory_execution_diagnostics: None,
         };
         // Entity records remain shared by startup admission, route preparation
         // and the canonical proof. Belt records are intentionally decoded one
@@ -4496,6 +4509,16 @@ impl CoreState {
             if matches!(kind, "machine" | "vein") || building == "orbital_collector" {
                 factory_topology.production_history_rate_indices.push(index);
             }
+            if ["inputs", "outputs"].into_iter().any(|key| {
+                object
+                    .get(key)
+                    .and_then(Value::as_object)
+                    .is_some_and(|record| !record.is_empty())
+            }) {
+                factory_topology
+                    .production_history_inventory_indices
+                    .push(index);
+            }
             if building == "orbital_collector" {
                 factory_topology.orbital_collector_indices.push(index);
                 factory_topology.orbital_collector_full_scan_required |= kind != "station";
@@ -4695,6 +4718,18 @@ impl CoreState {
         {
             factory_topology.production_history_rate_indices = Vec::new();
             factory_topology.production_history_rate_full_scan_required = true;
+        }
+        if !factory_topology
+            .production_history_inventory_indices
+            .is_empty()
+            && factory_topology
+                .production_history_inventory_indices
+                .len()
+                .saturating_mul(4)
+                >= entity_values.len().saturating_mul(3)
+        {
+            factory_topology.production_history_inventory_indices = Vec::new();
+            factory_topology.production_history_inventory_full_scan_required = true;
         }
         if !factory_topology
             .system_space_station_entity_indices
@@ -5060,6 +5095,25 @@ impl CoreState {
     /// authoritative checkpoint manifest.
     pub fn production_history_sidecar(&self) -> Option<Value> {
         self.production_history_tiers.sidecar_value(&self.base)
+    }
+
+    pub fn factory_execution_diagnostics(
+        &self,
+    ) -> Option<&crate::factory_writer_events::FactoryExecutionDiagnostics> {
+        self.last_factory_execution_diagnostics
+            .as_ref()
+            .filter(|diagnostics| diagnostics.result_revision == self.revision)
+    }
+
+    pub(crate) fn install_factory_execution_diagnostics(
+        &mut self,
+        diagnostics: crate::factory_writer_events::FactoryExecutionDiagnostics,
+    ) -> anyhow::Result<()> {
+        if diagnostics.result_revision != self.revision {
+            bail!("native factory execution diagnostics revision is stale");
+        }
+        self.last_factory_execution_diagnostics = Some(diagnostics);
+        Ok(())
     }
 
     /// Installs a previously validated, identity-bound diagnostics cache.

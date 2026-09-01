@@ -8,6 +8,10 @@ use crate::deterministic_runtime::{
     DeterministicRuntime, PARALLEL_MIN_ITEMS, PartitionedPrepareDiagnostics,
     runtime as deterministic_runtime,
 };
+use crate::factory_writer_events::{
+    FactoryExecutionDiagnostics, FactoryExecutionDiagnosticsBuilder, FactoryScanStage,
+    FactoryWriterDomain, FactoryWriterEvents, SealedFactoryWriterEvents,
+};
 use crate::state::CoreState;
 
 const EPSILON: f64 = 0.0001;
@@ -105,6 +109,7 @@ pub(crate) struct PlanetMetricsRuntime {
     pending_entity_indices: BTreeSet<usize>,
     wake_all: bool,
     directory_fallback: bool,
+    last_scan: PlanetMetricScan,
     #[cfg(test)]
     scan_history: Vec<PlanetMetricScan>,
     #[cfg(test)]
@@ -167,6 +172,7 @@ impl PlanetMetricsRuntime {
             pending_entity_indices: BTreeSet::new(),
             wake_all: true,
             directory_fallback,
+            last_scan: PlanetMetricScan::default(),
             #[cfg(test)]
             scan_history: Vec::new(),
             #[cfg(test)]
@@ -308,6 +314,7 @@ impl PlanetMetricsRuntime {
         self.pending_entity_indices.clear();
         self.wake_all = false;
         self.directory_fallback |= fallback_detected;
+        self.last_scan = scan;
         #[cfg(test)]
         {
             self.scan_history.push(scan);
@@ -333,6 +340,7 @@ impl PlanetMetricsRuntime {
         }
         self.wake_all = false;
         self.directory_fallback |= selection.fallback_detected;
+        self.last_scan = selection.scan;
         #[cfg(test)]
         {
             self.scan_history.push(selection.scan);
@@ -353,6 +361,10 @@ impl PlanetMetricsRuntime {
     #[cfg(test)]
     pub(crate) fn selection_calls_for_test(&self) -> (usize, usize) {
         (self.indexed_selection_calls, self.flat_full_oracle_calls)
+    }
+
+    pub(crate) fn last_scan(&self) -> PlanetMetricScan {
+        self.last_scan
     }
 }
 
@@ -5402,7 +5414,7 @@ fn refresh_station_mode_dependent_directories(
 // bundling them would obscure which wake cache is committed only on success.
 struct SimulateStepOutcome {
     station_mode_topology_changed: bool,
-    campaign_metric_writer_indices: Vec<usize>,
+    writer_events: SealedFactoryWriterEvents,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5441,14 +5453,15 @@ fn simulate_step(
     interstellar_route_activity: &mut std::sync::Arc<
         crate::interstellar_logistics::InterstellarRouteActivity,
     >,
+    execution_diagnostics: &mut FactoryExecutionDiagnosticsBuilder,
     runtime: &DeterministicRuntime,
     seconds: f64,
     isolate_construction_automation: bool,
 ) -> anyhow::Result<SimulateStepOutcome> {
+    execution_diagnostics.begin_step(seconds);
     let profile_enabled = crate::profile_evidence::profile_environment_enabled();
     let mut profile_checkpoint = profile_enabled.then(std::time::Instant::now);
-    let mut planet_metric_writer_indices = Vec::<usize>::new();
-    let mut campaign_metric_writer_indices = Vec::<usize>::new();
+    let mut writer_events = FactoryWriterEvents::new(state.revision, entities.len());
     let mut planet_metric_directory_fallback = false;
     macro_rules! profile_mark {
         ($label:literal) => {
@@ -5498,10 +5511,15 @@ fn simulate_step(
         quantum_step_runtime.legacy_runtime_bandwidth(state, base, entities);
     profile_mark!("static-step-indexes");
     let time_warp_controller = prepare_time_warp(state, base, entities)?;
-    planet_metric_writer_indices.extend_from_slice(&state.factory_topology.time_warp_indices);
+    writer_events.record_rows(
+        FactoryWriterDomain::Inventory,
+        &state.factory_topology.time_warp_indices,
+    )?;
     crate::global_progress::advance_exploration(state, base, seconds)?;
     crate::global_progress::advance_handcraft(state, base, seconds)?;
     crate::dyson::advance_environment(base, seconds)?;
+    writer_events.record_global(FactoryWriterDomain::Research);
+    writer_events.record_global(FactoryWriterDomain::Dyson);
     crate::interstellar_logistics::refresh_peer_directory(
         state,
         base,
@@ -5518,7 +5536,10 @@ fn simulate_step(
     let local_step_runtime = std::sync::Arc::make_mut(local_step_directory);
     let runtime_reset_station_indices = local_step_runtime.runtime_reset_station_indices().to_vec();
     crate::local_logistics::reset_runtime_for_indices(entities, &runtime_reset_station_indices)?;
-    planet_metric_writer_indices.extend_from_slice(&runtime_reset_station_indices);
+    writer_events.record_rows(
+        FactoryWriterDomain::Logistics,
+        &runtime_reset_station_indices,
+    )?;
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tlocal-runtime-reset-active\t{}/{}",
@@ -5534,6 +5555,15 @@ fn simulate_step(
         entities,
         std::sync::Arc::make_mut(logistics_buffer_runtime),
     )?;
+    execution_diagnostics.observe(
+        FactoryScanStage::LogisticsBuffer,
+        logistics_buffer_scan.selected_rows,
+        logistics_buffer_scan.total_rows,
+        logistics_buffer_scan.stable_rows_skipped,
+        logistics_buffer_scan.dense_fallback,
+        logistics_buffer_scan.directory_fallback,
+        logistics_buffer_scan.full_scan,
+    );
     planet_metric_directory_fallback |= logistics_buffer_scan.directory_fallback;
     if profile_enabled {
         eprintln!(
@@ -5550,7 +5580,10 @@ fn simulate_step(
     // the source revision's runtime cache if any later simulation stage fails.
     let buffer_changed_station_indices =
         crate::local_logistics::transfer_buffers(state, base, entities, local_step_runtime)?;
-    planet_metric_writer_indices.extend_from_slice(&buffer_changed_station_indices);
+    writer_events.record_rows(
+        FactoryWriterDomain::Inventory,
+        &buffer_changed_station_indices,
+    )?;
     local_step_runtime.wake_ready_from_changed_stations(&buffer_changed_station_indices);
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
         &buffer_changed_station_indices,
@@ -5581,6 +5614,17 @@ fn simulate_step(
         quantum_runtime_bandwidth,
         false,
     )?;
+    execution_diagnostics.observe(
+        FactoryScanStage::Quantum,
+        quantum_flush_scan.selected_rows,
+        quantum_flush_scan.total_rows,
+        quantum_flush_scan
+            .total_rows
+            .saturating_sub(quantum_flush_scan.selected_rows),
+        quantum_flush_scan.dense_fallback,
+        quantum_flush_scan.directory_fallback,
+        quantum_flush_scan.dense_fallback || quantum_flush_scan.directory_fallback,
+    );
     planet_metric_directory_fallback |= quantum_flush_scan.directory_fallback;
     crate::quantum_logistics::record_quantum_oactive_scan(
         crate::quantum_logistics::QuantumOactiveProfileStage::SupplyFlush,
@@ -5597,7 +5641,10 @@ fn simulate_step(
     }
     let quantum_flush_changed_station_indices =
         quantum_step_runtime.take_inventory_written_station_indices();
-    planet_metric_writer_indices.extend_from_slice(&quantum_flush_changed_station_indices);
+    writer_events.record_rows(
+        FactoryWriterDomain::Quantum,
+        &quantum_flush_changed_station_indices,
+    )?;
     // Quantum upload can consume a remote-supply output while freeing the
     // same station's local-demand capacity. Wake both reverse graphs from the
     // exact changed endpoint set; the readiness probes still decide whether
@@ -5638,7 +5685,7 @@ fn simulate_step(
         seconds,
         &mut belt_changed_entity_indices,
     )?;
-    planet_metric_writer_indices.extend_from_slice(&belt_changed_entity_indices);
+    writer_events.record_rows(FactoryWriterDomain::Belt, &belt_changed_entity_indices)?;
     crate::local_logistics::wake_transfer_buffers_from_changed_entities(
         entities,
         &belt_changed_entity_indices,
@@ -5684,8 +5731,10 @@ fn simulate_step(
     if state.factory_topology.orbital_collector_full_scan_required {
         planet_metric_directory_fallback = true;
     } else {
-        planet_metric_writer_indices
-            .extend_from_slice(&state.factory_topology.orbital_collector_indices);
+        writer_events.record_rows(
+            FactoryWriterDomain::Production,
+            &state.factory_topology.orbital_collector_indices,
+        )?;
     }
     crate::interstellar_logistics::wake_orbital_supply_demands(
         interstellar_peer_directory,
@@ -5700,8 +5749,19 @@ fn simulate_step(
         false,
         material_delivery_mode,
     )?;
-    planet_metric_writer_indices
-        .extend_from_slice(&material_delivery_outcome.written_entity_indices);
+    execution_diagnostics.observe(
+        FactoryScanStage::MaterialDelivery,
+        material_delivery_outcome.scan.selected_rows,
+        material_delivery_outcome.scan.total_rows,
+        material_delivery_outcome.scan.stable_rows_skipped,
+        material_delivery_outcome.scan.dense_fallback,
+        material_delivery_outcome.scan.directory_fallback,
+        material_delivery_outcome.scan.full_scan,
+    );
+    writer_events.record_rows(
+        FactoryWriterDomain::Inventory,
+        &material_delivery_outcome.written_entity_indices,
+    )?;
     planet_metric_directory_fallback |= material_delivery_outcome.scan.directory_fallback;
     if profile_enabled {
         eprintln!(
@@ -5750,6 +5810,15 @@ fn simulate_step(
     )?;
     let power_probe_scan = prepared_power_sources.scan;
     let power_source_settlement_indices = prepared_power_sources.settlement_entity_indices;
+    execution_diagnostics.observe(
+        FactoryScanStage::PowerProbe,
+        power_probe_scan.selected_rows,
+        power_probe_scan.total_rows,
+        power_probe_scan.stable_rows_skipped,
+        power_probe_scan.dense_fallback,
+        power_probe_scan.directory_fallback,
+        power_probe_scan.full_scan,
+    );
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tpower-source-active\t{}/{}\tskipped={}\treplay={}\tdense={}\tdirectory-fallback={}",
@@ -6209,7 +6278,11 @@ fn simulate_step(
         &power_source_settlement_indices,
         &ordinary_production_selection,
     );
-    planet_metric_writer_indices.extend_from_slice(&ordinary_settlement_indices);
+    writer_events.record_rows(
+        FactoryWriterDomain::Production,
+        &ordinary_settlement_indices,
+    )?;
+    writer_events.record_global(FactoryWriterDomain::Power);
     for &entity_index in &ordinary_settlement_indices {
         if reset_research_progress_before_next_entity {
             reset_indexed_research_machine_progress(entities, research_entity_indexes)?;
@@ -6715,6 +6788,15 @@ fn simulate_step(
         &next_machine_awake,
         &next_vein_awake,
     )?;
+    execution_diagnostics.observe(
+        FactoryScanStage::OrdinaryProduction,
+        ordinary_production_scan.selected_rows,
+        ordinary_production_scan.total_rows,
+        ordinary_production_scan.stable_rows_skipped,
+        ordinary_production_scan.dense_fallback,
+        ordinary_production_scan.directory_fallback,
+        ordinary_production_scan.full_scan,
+    );
     planet_metric_directory_fallback |= ordinary_production_scan.directory_fallback;
     if profile_enabled {
         eprintln!(
@@ -6744,10 +6826,25 @@ fn simulate_step(
             &state.factory_topology.construction_center_indices,
             std::sync::Arc::make_mut(construction_runtime),
         )?;
+        execution_diagnostics.observe(
+            FactoryScanStage::Construction,
+            construction_outcome.scan.selected_rows,
+            construction_outcome.scan.total_rows,
+            construction_outcome
+                .scan
+                .total_rows
+                .saturating_sub(construction_outcome.scan.selected_rows),
+            construction_outcome.scan.dense_fallback,
+            construction_outcome.scan.directory_fallback,
+            construction_outcome.scan.dense_fallback
+                || construction_outcome.scan.directory_fallback,
+        );
         quantum_step_runtime
             .wake_construction_centers(&construction_outcome.quantum_wake.center_indices);
-        planet_metric_writer_indices
-            .extend_from_slice(&construction_outcome.planet_metric_writer_indices);
+        writer_events.record_rows(
+            FactoryWriterDomain::Construction,
+            &construction_outcome.planet_metric_writer_indices,
+        )?;
         planet_metric_directory_fallback |= construction_outcome.scan.directory_fallback;
         if profile_enabled {
             eprintln!(
@@ -6769,12 +6866,14 @@ fn simulate_step(
         &belt_reservation.output_credits,
         &reception,
     )?;
-    planet_metric_writer_indices.extend_from_slice(&reception.receiver_indices);
+    writer_events.record_rows(FactoryWriterDomain::Dyson, &reception.receiver_indices)?;
     profile_mark!("ray-receivers");
 
     crate::orbital_station::settle(state, base, entities, seconds)?;
-    planet_metric_writer_indices
-        .extend_from_slice(&state.factory_topology.orbital_cargo_terminal_indices);
+    writer_events.record_rows(
+        FactoryWriterDomain::Logistics,
+        &state.factory_topology.orbital_cargo_terminal_indices,
+    )?;
     profile_mark!("orbital-cargo-terminals");
 
     if !produced_by_item.is_empty() {
@@ -6793,8 +6892,7 @@ fn simulate_step(
         }
     }
 
-    planet_metric_writer_indices.sort_unstable();
-    planet_metric_writer_indices.dedup();
+    let planet_metric_writer_indices = writer_events.all_rows();
     {
         let metric_runtime = std::sync::Arc::make_mut(planet_metrics_runtime);
         if planet_metric_directory_fallback {
@@ -6814,6 +6912,16 @@ fn simulate_step(
             planet_metrics_runtime,
             planet_metric_mode,
         )?;
+    let planet_metric_scan = planet_metrics_runtime.last_scan();
+    execution_diagnostics.observe(
+        FactoryScanStage::PlanetMetrics,
+        planet_metric_scan.selected_rows,
+        planet_metric_scan.total_rows,
+        planet_metric_scan.stable_rows_skipped,
+        planet_metric_scan.dense_fallback,
+        planet_metric_scan.directory_fallback,
+        planet_metric_scan.full_scan,
+    );
     #[cfg(test)]
     if planet_metric_mode == PlanetMetricProbeMode::IndexedFailAfterCollect {
         bail!("injected failure after planet metric candidate collection");
@@ -6831,6 +6939,15 @@ fn simulate_step(
             quantum_step_runtime,
             &step_route_ledger,
         )?;
+        execution_diagnostics.observe(
+            FactoryScanStage::Quantum,
+            scan.selected_rows,
+            scan.total_rows,
+            scan.total_rows.saturating_sub(scan.selected_rows),
+            scan.dense_fallback,
+            scan.directory_fallback,
+            scan.dense_fallback || scan.directory_fallback,
+        );
         crate::quantum_logistics::record_quantum_oactive_scan(
             crate::quantum_logistics::QuantumOactiveProfileStage::Download,
             scan,
@@ -6867,6 +6984,10 @@ fn simulate_step(
     }
     let quantum_download_changed_station_indices =
         quantum_step_runtime.take_inventory_written_station_indices();
+    writer_events.record_rows(
+        FactoryWriterDomain::Quantum,
+        &quantum_download_changed_station_indices,
+    )?;
     std::sync::Arc::make_mut(planet_metrics_runtime)
         .wake_entity_indices(&quantum_download_changed_station_indices);
     crate::interstellar_logistics::wake_warper_refill_from_changed_stations(
@@ -6894,6 +7015,7 @@ fn simulate_step(
         seconds,
         &mut belt_changed_entity_indices,
     )?;
+    writer_events.record_rows(FactoryWriterDomain::Belt, &belt_changed_entity_indices)?;
     std::sync::Arc::make_mut(planet_metrics_runtime)
         .wake_entity_indices(&belt_changed_entity_indices);
     // `belts::transfer` clears and repopulates its movement evidence for each
@@ -6936,6 +7058,19 @@ fn simulate_step(
         seconds,
         true,
         material_delivery_mode,
+    )?;
+    execution_diagnostics.observe(
+        FactoryScanStage::MaterialDelivery,
+        material_delivery_outcome.scan.selected_rows,
+        material_delivery_outcome.scan.total_rows,
+        material_delivery_outcome.scan.stable_rows_skipped,
+        material_delivery_outcome.scan.dense_fallback,
+        material_delivery_outcome.scan.directory_fallback,
+        material_delivery_outcome.scan.full_scan,
+    );
+    writer_events.record_rows(
+        FactoryWriterDomain::Inventory,
+        &material_delivery_outcome.written_entity_indices,
     )?;
     {
         let metric_runtime = std::sync::Arc::make_mut(planet_metrics_runtime);
@@ -7025,6 +7160,21 @@ fn simulate_step(
             std::sync::Arc::make_mut(interstellar_route_activity),
             &step_route_ledger,
         )?;
+    execution_diagnostics.observe(
+        FactoryScanStage::WarperRefill,
+        warper_refill_scan.selected_station_rows,
+        warper_refill_scan.total_station_rows,
+        warper_refill_scan
+            .total_station_rows
+            .saturating_sub(warper_refill_scan.selected_station_rows),
+        warper_refill_scan.dense_fallback,
+        warper_refill_scan.directory_fallback,
+        warper_refill_scan.dense_fallback || warper_refill_scan.directory_fallback,
+    );
+    writer_events.record_rows(
+        FactoryWriterDomain::Logistics,
+        &warper_changed_station_indices,
+    )?;
     std::sync::Arc::make_mut(planet_metrics_runtime)
         .wake_entity_indices(&warper_changed_station_indices);
     if warper_refill_scan.directory_fallback {
@@ -7090,6 +7240,17 @@ fn simulate_step(
             &mut step_route_ledger,
         )?
     };
+    execution_diagnostics.observe(
+        FactoryScanStage::LocalDispatch,
+        local_dispatch_scan.selected_station_rows,
+        local_dispatch_scan.total_station_rows,
+        local_dispatch_scan
+            .total_station_rows
+            .saturating_sub(local_dispatch_scan.selected_station_rows),
+        local_dispatch_scan.dense_fallback,
+        local_dispatch_scan.directory_fallback,
+        local_dispatch_scan.dense_fallback || local_dispatch_scan.directory_fallback,
+    );
     let local_dispatch_duration_ns = local_dispatch_started
         .map(|started| u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX))
         .unwrap_or(0);
@@ -7176,6 +7337,17 @@ fn simulate_step(
         interstellar_peer_directory,
         &mut step_route_ledger,
     )?;
+    execution_diagnostics.observe(
+        FactoryScanStage::InterstellarDispatch,
+        interstellar_dispatch_scan.selected_demands,
+        interstellar_dispatch_scan.total_demand_rows,
+        interstellar_dispatch_scan
+            .total_demand_rows
+            .saturating_sub(interstellar_dispatch_scan.selected_demands),
+        interstellar_dispatch_scan.dense_fallback,
+        interstellar_dispatch_scan.directory_fallback,
+        interstellar_dispatch_scan.dense_fallback || interstellar_dispatch_scan.directory_fallback,
+    );
     if interstellar_dispatch_scan.directory_fallback {
         std::sync::Arc::make_mut(planet_metrics_runtime).force_directory_fallback();
     }
@@ -7205,6 +7377,10 @@ fn simulate_step(
             &station_powers,
             local_step_runtime,
         )?;
+    writer_events.record_rows(
+        FactoryWriterDomain::Route,
+        &local_route_changed_station_indices,
+    )?;
     std::sync::Arc::make_mut(planet_metrics_runtime)
         .wake_entity_indices(&local_route_changed_station_indices);
     profile_mark!("local-route-advance");
@@ -7215,13 +7391,15 @@ fn simulate_step(
         &station_powers,
         interstellar_step_runtime,
     )?;
+    writer_events.record_rows(
+        FactoryWriterDomain::Route,
+        &remote_route_changed_station_indices,
+    )?;
     std::sync::Arc::make_mut(planet_metrics_runtime)
         .wake_entity_indices(&remote_route_changed_station_indices);
     // `stationTrips` is the only Campaign factory metric written by an exact
     // simulation step. Both route domains return their writer-closed active
     // station rows, including source/target owners and deterministic peers.
-    campaign_metric_writer_indices.extend_from_slice(&local_route_changed_station_indices);
-    campaign_metric_writer_indices.extend_from_slice(&remote_route_changed_station_indices);
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
         &local_route_changed_station_indices,
         interstellar_peer_directory,
@@ -7276,6 +7454,22 @@ fn simulate_step(
             interstellar_step_runtime,
             &congestion_route_ledger,
         )?;
+    execution_diagnostics.observe(
+        FactoryScanStage::WarperRefill,
+        post_route_warper_refill_scan.selected_station_rows,
+        post_route_warper_refill_scan.total_station_rows,
+        post_route_warper_refill_scan
+            .total_station_rows
+            .saturating_sub(post_route_warper_refill_scan.selected_station_rows),
+        post_route_warper_refill_scan.dense_fallback,
+        post_route_warper_refill_scan.directory_fallback,
+        post_route_warper_refill_scan.dense_fallback
+            || post_route_warper_refill_scan.directory_fallback,
+    );
+    writer_events.record_rows(
+        FactoryWriterDomain::Logistics,
+        &post_route_warper_changed_station_indices,
+    )?;
     std::sync::Arc::make_mut(planet_metrics_runtime)
         .wake_entity_indices(&post_route_warper_changed_station_indices);
     if post_route_warper_refill_scan.directory_fallback {
@@ -7318,6 +7512,17 @@ fn simulate_step(
         local_step_runtime,
         &congestion_route_ledger,
     )?;
+    execution_diagnostics.observe(
+        FactoryScanStage::LocalCongestion,
+        local_congestion_scan.selected_station_rows,
+        local_congestion_scan.total_station_rows,
+        local_congestion_scan
+            .total_station_rows
+            .saturating_sub(local_congestion_scan.selected_station_rows),
+        local_congestion_scan.dense_fallback,
+        local_congestion_scan.directory_fallback,
+        local_congestion_scan.dense_fallback || local_congestion_scan.directory_fallback,
+    );
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tlocal-congestion-active\t{}/{}\tdense={}\tdirectory-fallback={}",
@@ -7336,6 +7541,20 @@ fn simulate_step(
         interstellar_peer_directory,
         &congestion_route_ledger,
     )?;
+    execution_diagnostics.observe(
+        FactoryScanStage::InterstellarCongestion,
+        interstellar_congestion_scan.selected_station_rows,
+        interstellar_congestion_scan.total_station_rows,
+        interstellar_congestion_scan
+            .total_station_rows
+            .saturating_sub(interstellar_congestion_scan.selected_station_rows),
+        interstellar_congestion_scan.dense_fallback,
+        interstellar_congestion_scan.directory_fallback
+            || interstellar_congestion_scan.generation_fallback,
+        interstellar_congestion_scan.dense_fallback
+            || interstellar_congestion_scan.directory_fallback
+            || interstellar_congestion_scan.generation_fallback,
+    );
     if interstellar_congestion_scan.directory_fallback {
         std::sync::Arc::make_mut(planet_metrics_runtime).force_directory_fallback();
     }
@@ -7359,6 +7578,10 @@ fn simulate_step(
     // active dependency rather than being hidden behind the route ledger.
     next_runtime_reset_station_indices
         .extend_from_slice(&state.factory_topology.orbital_collector_indices);
+    writer_events.record_rows(
+        FactoryWriterDomain::Logistics,
+        &next_runtime_reset_station_indices,
+    )?;
     std::sync::Arc::make_mut(planet_metrics_runtime)
         .wake_entity_indices(&next_runtime_reset_station_indices);
     local_step_runtime.replace_runtime_reset_station_indices(next_runtime_reset_station_indices);
@@ -7389,6 +7612,10 @@ fn simulate_step(
         &exporter_powers,
         &power_factors,
         seconds,
+    )?;
+    writer_events.record_rows(
+        FactoryWriterDomain::Production,
+        &state.factory_topology.galactic_material_exporter_indices,
     )?;
     std::sync::Arc::make_mut(planet_metrics_runtime)
         .wake_entity_indices(&state.factory_topology.galactic_material_exporter_indices);
@@ -7476,6 +7703,15 @@ fn simulate_step(
                 entities,
                 &congestion_route_ledger,
             )?;
+            execution_diagnostics.observe(
+                FactoryScanStage::StationTransition,
+                mode_scan.selected_rows,
+                mode_scan.total_rows,
+                mode_scan.total_rows.saturating_sub(mode_scan.selected_rows),
+                mode_scan.dense_fallback,
+                mode_scan.index_fallback || mode_scan.ledger_fallback,
+                mode_scan.dense_fallback || mode_scan.index_fallback || mode_scan.ledger_fallback,
+            );
             station_mode_topology_changed |= mode_changed;
             if mode_scan.index_fallback || mode_scan.ledger_fallback {
                 std::sync::Arc::make_mut(planet_metrics_runtime).force_directory_fallback();
@@ -7499,6 +7735,19 @@ fn simulate_step(
                     entities,
                     interstellar_step_runtime,
                 )?;
+            execution_diagnostics.observe(
+                FactoryScanStage::StationTransition,
+                quantum_transition_scan.selected_rows,
+                quantum_transition_scan.total_rows,
+                quantum_transition_scan
+                    .total_rows
+                    .saturating_sub(quantum_transition_scan.selected_rows),
+                quantum_transition_scan.dense_fallback,
+                quantum_transition_scan.runtime_fallback || quantum_transition_scan.ledger_fallback,
+                quantum_transition_scan.dense_fallback
+                    || quantum_transition_scan.runtime_fallback
+                    || quantum_transition_scan.ledger_fallback,
+            );
             station_mode_topology_changed |= quantum_transition_changed;
             if quantum_transition_scan.runtime_fallback || quantum_transition_scan.ledger_fallback {
                 std::sync::Arc::make_mut(planet_metrics_runtime).force_directory_fallback();
@@ -7536,6 +7785,18 @@ fn simulate_step(
                 &congestion_route_ledger,
                 post_research_quantum_runtime_bandwidth,
             )?;
+            execution_diagnostics.observe(
+                FactoryScanStage::Quantum,
+                quantum_upload_flush_scan.selected_rows,
+                quantum_upload_flush_scan.total_rows,
+                quantum_upload_flush_scan
+                    .total_rows
+                    .saturating_sub(quantum_upload_flush_scan.selected_rows),
+                quantum_upload_flush_scan.dense_fallback,
+                quantum_upload_flush_scan.directory_fallback,
+                quantum_upload_flush_scan.dense_fallback
+                    || quantum_upload_flush_scan.directory_fallback,
+            );
             crate::quantum_logistics::record_quantum_oactive_scan(
                 crate::quantum_logistics::QuantumOactiveProfileStage::Upload,
                 quantum_upload_flush_scan,
@@ -7555,6 +7816,10 @@ fn simulate_step(
         }
         let quantum_boundary_changed_station_indices =
             quantum_step_runtime.take_inventory_written_station_indices();
+        writer_events.record_rows(
+            FactoryWriterDomain::Quantum,
+            &quantum_boundary_changed_station_indices,
+        )?;
         std::sync::Arc::make_mut(planet_metrics_runtime)
             .wake_entity_indices(&quantum_boundary_changed_station_indices);
         local_step_runtime
@@ -7589,6 +7854,7 @@ fn simulate_step(
             interstellar_route_activity,
         )?;
         if station_mode_topology_changed {
+            writer_events.record_topology_change();
             std::sync::Arc::make_mut(planet_metrics_runtime).force_full();
         }
     }
@@ -7611,11 +7877,9 @@ fn simulate_step(
         }
     }
     profile_mark!("metrics-and-global-finalize");
-    campaign_metric_writer_indices.sort_unstable();
-    campaign_metric_writer_indices.dedup();
     Ok(SimulateStepOutcome {
         station_mode_topology_changed,
-        campaign_metric_writer_indices,
+        writer_events: writer_events.seal(),
     })
 }
 
@@ -7861,6 +8125,10 @@ pub(crate) struct PreparedFactoryAdvance {
         std::sync::Arc<crate::interstellar_logistics::InterstellarPeerDirectory>,
     pub interstellar_route_activity:
         std::sync::Arc<crate::interstellar_logistics::InterstellarRouteActivity>,
+    /// Stable writer manifest shared by active selectors, statistics and the
+    /// diagnostics projection. It is candidate-local until the state commit.
+    pub writer_events: SealedFactoryWriterEvents,
+    pub factory_execution_diagnostics: FactoryExecutionDiagnostics,
     /// `Some` is the writer-closed persisted-order set for Campaign metrics;
     /// `None` means a topology transition requires lazy flat reconstruction.
     pub campaign_metric_writer_indices: Option<Vec<usize>>,
@@ -8090,6 +8358,12 @@ fn prepare_advance_with_runtime_options(
     profile_mark!("parse-records");
     let prepared_domains =
         prepare_factory_domains_with_runtime(state, &base, &entities, deterministic_runtime)?;
+    let mut factory_execution_diagnostics = FactoryExecutionDiagnosticsBuilder::new(
+        state.revision,
+        deterministic_runtime.worker_limit(),
+        deterministic_runtime.observed_worker_count(),
+    );
+    factory_execution_diagnostics.observe_prepare(prepared_domains.scheduler.parallel);
     if profile_enabled {
         let scheduler = prepared_domains.scheduler;
         eprintln!(
@@ -8181,6 +8455,7 @@ fn prepare_advance_with_runtime_options(
         .unwrap_or(0.0);
     let mut advanced_wall = 0.0;
     let mut campaign_metric_writer_indices = Some(Vec::<usize>::new());
+    let mut factory_writer_events = FactoryWriterEvents::new(state.revision, entities.len());
     while remaining > EPSILON {
         let mut step = remaining.min(step_size);
         if record_internal_exact_seconds {
@@ -8236,11 +8511,13 @@ fn prepare_advance_with_runtime_options(
             &mut quantum_transition_runtime,
             &mut interstellar_peer_directory,
             &mut interstellar_route_activity,
+            &mut factory_execution_diagnostics,
             deterministic_runtime,
             step,
             isolate_construction_automation,
         )
         .context("advance native simple factory step")?;
+        factory_writer_events.merge(&step_outcome.writer_events)?;
         if step_outcome.station_mode_topology_changed {
             campaign_metric_writer_indices = None;
             let rebuilt_belt_routes = std::sync::Arc::new(
@@ -8252,7 +8529,7 @@ fn prepare_advance_with_runtime_options(
                 .context("rebuild native belt activity after station mode transition")?;
             belt_routes = rebuilt_belt_routes;
         } else if let Some(indices) = campaign_metric_writer_indices.as_mut() {
-            indices.extend(step_outcome.campaign_metric_writer_indices);
+            indices.extend_from_slice(step_outcome.writer_events.rows(FactoryWriterDomain::Route));
         }
         let wall_step = remaining_wall.min(step * wall_per_simulation_second);
         if wall_step > 0.0 {
@@ -8291,6 +8568,7 @@ fn prepare_advance_with_runtime_options(
                 &mut base,
                 &entities,
                 prepared_belt_flow,
+                Some(&step_outcome.writer_events),
                 deterministic_runtime,
             )?;
             if let crate::production_history::InternalExactHistoryRecord::Recorded(
@@ -8345,6 +8623,14 @@ fn prepare_advance_with_runtime_options(
         indices.sort_unstable();
         indices.dedup();
     }
+    let writer_events = factory_writer_events.seal();
+    let factory_execution_diagnostics = factory_execution_diagnostics.finish(
+        state
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("native core revision exhausted"))?,
+        &writer_events,
+    );
     profile_mark!("simulate-steps");
     let belt_activity = belt_runtime.activity_snapshot(&belt_routes);
     let belt_flow_requirement = crate::production_history::belt_flow_requirement(&base)?;
@@ -8402,6 +8688,8 @@ fn prepare_advance_with_runtime_options(
         quantum_transition_runtime,
         interstellar_peer_directory,
         interstellar_route_activity,
+        writer_events,
+        factory_execution_diagnostics,
         campaign_metric_writer_indices,
         production_history_tiers,
     })
@@ -10038,6 +10326,7 @@ pub(crate) mod tests {
         let quantum_transition_runtime = prepared.quantum_transition_runtime.clone();
         let interstellar_peer_directory = prepared.interstellar_peer_directory.clone();
         let interstellar_route_activity = prepared.interstellar_route_activity.clone();
+        let factory_execution_diagnostics = prepared.factory_execution_diagnostics.clone();
         let next_revision = state.revision + 1;
         state
             .commit_simulated_state(
@@ -10062,6 +10351,9 @@ pub(crate) mod tests {
         state.install_prepared_quantum_transition_runtime(quantum_transition_runtime);
         state.install_prepared_interstellar_peer_directory(interstellar_peer_directory);
         state.install_prepared_interstellar_route_activity(interstellar_route_activity);
+        state
+            .install_factory_execution_diagnostics(factory_execution_diagnostics)
+            .unwrap();
     }
 
     fn commit_and_install_exact_factory_test_state(
@@ -10082,6 +10374,7 @@ pub(crate) mod tests {
         let quantum_transition_runtime = prepared.quantum_transition_runtime.clone();
         let interstellar_peer_directory = prepared.interstellar_peer_directory.clone();
         let interstellar_route_activity = prepared.interstellar_route_activity.clone();
+        let factory_execution_diagnostics = prepared.factory_execution_diagnostics.clone();
         let next_revision = state.revision + 1;
         let campaign_metric_writer_indices = prepared.campaign_metric_writer_indices.take();
         let campaign_projection_update =
@@ -10101,6 +10394,7 @@ pub(crate) mod tests {
                 &prepared.entities,
                 Some(prepared.belt_flow),
                 cached_campaign_factory_metrics.as_ref(),
+                Some(&prepared.writer_events),
             )
             .unwrap();
         if let Some(production_history_tiers) = prepared.production_history_tiers.as_mut() {
@@ -10142,6 +10436,9 @@ pub(crate) mod tests {
         state.install_prepared_quantum_transition_runtime(quantum_transition_runtime);
         state.install_prepared_interstellar_peer_directory(interstellar_peer_directory);
         state.install_prepared_interstellar_route_activity(interstellar_route_activity);
+        state
+            .install_factory_execution_diagnostics(factory_execution_diagnostics)
+            .unwrap();
     }
 
     fn advance_material_delivery_test_state(
@@ -11056,6 +11353,36 @@ pub(crate) mod tests {
                 "statistics projection with {worker_count} workers"
             );
         }
+    }
+
+    #[test]
+    fn committed_factory_diagnostics_report_writer_and_active_scan_evidence() {
+        let source = ordinary_oactive_fixture(1_024);
+        let source_revision = source.revision;
+        let advanced = advance_exact_with_worker_count(source, 5.0, 4);
+        let diagnostics = advanced
+            .factory_execution_diagnostics()
+            .expect("successful exact advance installs bounded diagnostics");
+
+        assert_eq!(diagnostics.source_revision, source_revision);
+        assert_eq!(diagnostics.result_revision, advanced.revision);
+        assert_eq!(diagnostics.steps, 5);
+        assert_eq!(diagnostics.simulation_seconds, 5.0);
+        assert_eq!(diagnostics.worker_limit, 4);
+        assert!(diagnostics.writer_submitted_rows >= diagnostics.writer_unique_rows);
+        assert!(
+            diagnostics
+                .writer_domains
+                .iter()
+                .any(|domain| domain == "production")
+        );
+        assert!(
+            diagnostics
+                .stage_scans
+                .iter()
+                .any(|stage| stage.stage == "ordinary-production" && stage.scan.invocations == 5)
+        );
+        assert!(serde_json::to_vec(diagnostics).unwrap().len() < 16 * 1024);
     }
 
     #[test]

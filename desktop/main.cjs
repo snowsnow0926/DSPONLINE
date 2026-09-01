@@ -82,6 +82,11 @@ const {
   NativePlayerAuthorityPersistenceBroker,
 } = require("./native-player-authority-persistence-broker.cjs");
 const {
+  NativeProjectionSubscription,
+  normalizeSubscriptionRequest,
+  summarizeNativeProjectionSubscriptions,
+} = require("./native-projection-subscription.cjs");
+const {
   NativeAuthorityCloudTransfer,
 } = require("./native-authority-cloud-transfer.cjs");
 const {
@@ -190,6 +195,7 @@ let nativeHostClient = null;
 let nativeSaveSessions = null;
 let nativeCoreSessions = null;
 let nativePlayerAuthorityRuntime = null;
+let nativePlayerAuthorityRestartScheduled = false;
 let nativePlayerAuthorityCommandBroker = null;
 let nativePlayerAuthoritySystemSpaceStationBroker = null;
 let nativePlayerAuthorityOrbitalContractBroker = null;
@@ -198,6 +204,8 @@ let nativePlayerAuthorityMacroBroker = null;
 let nativePlayerAuthorityProjectionBroker = null;
 let nativePlayerAuthorityPersistenceBroker = null;
 let nativePlayerAuthorityStateBroker = null;
+const nativeProjectionSubscriptions = new Map();
+const nativeProjectionSubscriptionHistory = [];
 let nativePlayerAuthorityHandoffIpcBridge = null;
 let nativePlayerAuthorityHandoffCoordinator = null;
 let nativePlayerAuthorityHandoffAttempt = null;
@@ -1445,6 +1453,38 @@ function nativeCommandPaletteEntitySearchResultContext(request) {
   };
 }
 
+const NATIVE_SUBSCRIPTION_PROJECTION_NORMALIZERS = Object.freeze({
+  "viewport-v2": ["coreViewportProjectionV2", nativeViewportProjectionV2ResultContext],
+  "factory-read-model-v1": ["coreFactoryReadModelProjection", nativeFactoryReadModelResultContext],
+  "factory-inventory-v1": ["coreFactoryInventoryProjection", nativeFactoryInventoryResultContext],
+  "construction-inventory-v1": ["coreConstructionInventoryProjection", nativeConstructionInventoryResultContext],
+  "statistics-v1": ["coreStatisticsProjection", nativeStatisticsProjectionResultContext],
+  "technology-v1": ["coreTechnologyProjection", nativeTechnologyProjectionResultContext],
+  "operations-workspace-v1": ["coreOperationsWorkspaceProjection", nativeOperationsWorkspaceProjectionResultContext],
+});
+
+async function readNativeProjectionSubscriptionFrame(rendererOwnerId, request) {
+  const normalizer = NATIVE_SUBSCRIPTION_PROJECTION_NORMALIZERS[request.projectionType];
+  if (!normalizer || !nativePlayerAuthorityProjectionBroker?.ownsSession(request.sessionId)) {
+    throw Object.assign(new Error("native projection subscription is not bound to the active authority session"), {
+      code: "NATIVE_PLAYER_AUTHORITY_PROJECTION_UNAVAILABLE",
+    });
+  }
+  const normalizedRequest = Object.freeze({ ...request.payload, sessionId: request.sessionId });
+  const raw = await nativePlayerAuthorityProjectionBroker.read(
+    rendererOwnerId,
+    request.projectionType,
+    normalizedRequest,
+  );
+  return normalizeRendererNativeResult(normalizer[0], raw, normalizer[1](normalizedRequest));
+}
+
+function nativeProjectionSubscriptionDiagnostics() {
+  const active = [...nativeProjectionSubscriptions.values()].map((entry) => entry.snapshot());
+  const retained = nativeProjectionSubscriptionHistory.slice(-64);
+  return summarizeNativeProjectionSubscriptions(active, retained);
+}
+
 async function waitForResponseAck(record, expectedBytes) {
   if (record.cancelled) throw Object.assign(new Error("云存档上传已取消"), { name: "AbortError", code: "ABORTED" });
   await new Promise((resolve, reject) => {
@@ -1790,6 +1830,11 @@ ipcMain.handle("desktop:native-player-authority-macro-recover", async (event, re
 ipcMain.handle("desktop:runtime-diagnostics", async (event) => {
   if (!trustedSender(event)) throw new Error("桌面运行诊断调用来源无效");
   return runtimeDiagnosticsSampler.sample();
+});
+
+ipcMain.handle("desktop:native-projection-subscription-diagnostics", async (event) => {
+  if (!trustedSender(event)) throw new Error("原生投影订阅诊断调用来源无效");
+  return nativeProjectionSubscriptionDiagnostics();
 });
 
 ipcMain.handle("desktop:native-performance-policy", async (event) => runRendererNativeOperation("performancePolicy", {
@@ -2555,6 +2600,41 @@ ipcMain.handle("desktop:native-core-command-palette-entity-search", async (event
   });
 });
 
+ipcMain.on("desktop:native-core-projection-subscribe", (event, request) => {
+  const port = event.ports?.[0];
+  if (!port) return;
+  try {
+    const rendererOwnerId = requireTrustedNativeSender(event);
+    const normalized = normalizeSubscriptionRequest(request);
+    const key = `${rendererOwnerId}\0${normalized.subscriptionId}`;
+    if (nativeProjectionSubscriptions.has(key)) {
+      throw Object.assign(new Error("native projection subscription ID is already active"), {
+        code: "NATIVE_PROJECTION_SUBSCRIPTION_DUPLICATE",
+      });
+    }
+    const subscription = new NativeProjectionSubscription({
+      port,
+      initialRequest: normalized,
+      readProjection: (entry) => readNativeProjectionSubscriptionFrame(rendererOwnerId, entry),
+      encodeProjection: encodeNativeProjectionTransfer,
+      onClosed: (snapshot, reason) => {
+        if (nativeProjectionSubscriptions.get(key) === subscription) {
+          nativeProjectionSubscriptions.delete(key);
+        }
+        nativeProjectionSubscriptionHistory.push(Object.freeze({ ...snapshot, reason }));
+        if (nativeProjectionSubscriptionHistory.length > 64) {
+          nativeProjectionSubscriptionHistory.splice(0,
+            nativeProjectionSubscriptionHistory.length - 64);
+        }
+      },
+    });
+    nativeProjectionSubscriptions.set(key, subscription);
+    subscription.start();
+  } catch (error) {
+    postNativeProjectionTransferError(port, error);
+  }
+});
+
 ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
   const port = event.ports?.[0];
   if (!port) return;
@@ -3038,6 +3118,58 @@ ipcMain.handle("desktop:native-player-authority-checkpoint", async (event) => {
     }
     return nativePlayerAuthorityPersistenceBroker.checkpoint(rendererOwnerId);
   });
+});
+
+ipcMain.handle("desktop:native-player-authority-restart-from-durable", async (event, request) => {
+  try {
+    requireTrustedNativeSender(event);
+    if (!request || typeof request !== "object" || Array.isArray(request) ||
+        Reflect.ownKeys(request).length !== 1 || !Object.hasOwn(request, "expectedRevision") ||
+        !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+        nativePlayerAuthorityRestartScheduled || !nativePlayerAuthorityRuntime || !nativeCoreSessions) {
+      throw Object.assign(new Error("native player-authority durable restart request is invalid"), {
+        code: "NATIVE_PLAYER_AUTHORITY_DURABLE_RESTART_INVALID",
+      });
+    }
+    const proof = nativePlayerAuthorityRuntime.prepareDurableRestart();
+    if (proof.minimumRevision !== request.expectedRevision) {
+      throw Object.assign(new Error("native player-authority durable restart revision is stale"), {
+        code: "NATIVE_PLAYER_AUTHORITY_DURABLE_RESTART_STALE",
+      });
+    }
+    const owned = nativeCoreSessions.inspectSession("main-player-authority", proof.sessionId);
+    if (owned?.ownerId !== "main-player-authority" || owned.slot !== "normal-main" ||
+        owned.state !== "owned" || owned.inFlight !== 0) {
+      throw Object.assign(new Error("native player-authority durable restart owner is not settled"), {
+        code: "NATIVE_PLAYER_AUTHORITY_DURABLE_RESTART_OWNER_INVALID",
+      });
+    }
+    const summary = await nativeCoreSessions.status("main-player-authority", proof.sessionId);
+    if (!summary || summary.stateVersion !== 47 || summary.mode !== "normal" ||
+        !Number.isSafeInteger(summary.revision) || summary.revision < proof.minimumRevision ||
+        summary.coverage?.authorityEligible !== true) {
+      throw Object.assign(new Error("native player-authority durable restart state is not recoverable"), {
+        code: "NATIVE_PLAYER_AUTHORITY_DURABLE_RESTART_STATE_INVALID",
+      });
+    }
+    nativePlayerAuthorityRestartScheduled = true;
+    const response = Object.freeze({
+      schemaVersion: 1,
+      accepted: true,
+      recoveryMode: "rust-durable-reconcile",
+      minimumRevision: proof.minimumRevision,
+    });
+    setTimeout(() => {
+      app.relaunch();
+      app.quit();
+    }, 100);
+    return response;
+  } catch (error) {
+    throw createRendererNativeError(error, {
+      fallbackCode: "NATIVE_PLAYER_AUTHORITY_DURABLE_RESTART_FAILED",
+      message: "Windows 原生权威无法从当前 durable 边界安全重启；旧 JavaScript 镜像未启用",
+    });
+  }
 });
 
 ipcMain.handle("desktop:native-player-authority-export-v47", async (event, request) => {

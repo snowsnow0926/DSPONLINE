@@ -833,6 +833,40 @@ class NativePlayerAuthorityRuntime {
     return frozenSnapshot(this);
   }
 
+  /**
+   * Produces a main-only proof for an explicit full-process recovery. This
+   * never releases the Rust lease and never exposes the checkpoint to the
+   * renderer. A fresh Host reconciles the same or a newer durable revision;
+   * the abandoned JavaScript shell is not a fallback source.
+   */
+  prepareDurableRestart() {
+    const restartable = new Set([
+      "uncertain",
+      "pause-uncertain",
+      "resume-uncertain",
+      "macro-uncertain",
+      "faulted",
+    ]);
+    const context = this.context;
+    if (!restartable.has(this.phase) || !context || this.inFlight ||
+        this.currentOperation !== null || this.persistenceBoundaryInFlight ||
+        context.checkpoint.revision !== context.revision) {
+      throw runtimeError(
+        "native player-authority durable restart is not at a recoverable boundary",
+        "NATIVE_PLAYER_AUTHORITY_DURABLE_RESTART_UNAVAILABLE",
+      );
+    }
+    if (this.timer !== null) this.cancel(this.timer);
+    this.timer = null;
+    return Object.freeze({
+      sessionId: context.sessionId,
+      runId: context.runId,
+      minimumRevision: context.revision,
+      checkpoint: Object.freeze({ ...context.checkpoint }),
+      phase: this.phase,
+    });
+  }
+
   transition(phase, error = null) {
     this.phase = phase;
     this.lastError = error;

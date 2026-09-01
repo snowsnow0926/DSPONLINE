@@ -2533,6 +2533,22 @@ html[data-ui-font-scale="200"] .settings-group > header > small {
   inset: 0;
   z-index: 1;
   pointer-events: none;
+  overflow: hidden;
+}
+
+.canvas-belt-layer__topology,
+.canvas-belt-layer__telemetry {
+  position: absolute;
+  pointer-events: none;
+  transform-origin: 0 0;
+}
+
+.canvas-belt-layer__topology {
+  z-index: 0;
+}
+
+.canvas-belt-layer__telemetry {
+  z-index: 1;
 }
 
 .factory-canvas[data-batch-renderer="true"] .react-flow__nodes {

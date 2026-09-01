@@ -2613,3 +2613,56 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 - **发布成熟度**：保持独立 60% 基线，只有 25.6 的本机集中门禁和 25.7 的外部证据逐项完成才上调。代码行数、按钮数量和单项微基准不改变发布成熟度。
 
 本节计划冻结后，下一次开发从 BASE-500 和 AUTH-510 开始，连续推进至 F 波次代码冻结；在此之前不再临时插入新的“下一小块”或重复完整测试。若用户新增需求，必须明确说明它增加多少剩余单位并获得同意后才改变分母。
+
+## 26. 14 个工作包、6 个连续开发波次实施冻结（2026-09-02）
+
+> 工作树：`D:/GameDev/DSPidle2-windows-native-complete`
+>
+> 分支：`codex/windows-native-plan-completion`
+>
+> 冻结口径：本节记录的是 **100/100 代码工作单位已形成冻结候选**；25.6 的集中测试尚未完成前，不把它写成发布通过。25.7 的 24 小时、多硬件、签名、安装升级、真实云和灰度仍是外部门禁。
+
+本次严格保持 GameState v47、envelope v2、cloud schema v8、SQLite layout v3 和 package 1.2.3；没有连接生产、部署、签名、读取或修改真实玩家存档。`authority_eligible` 继续为 false，普通构建不能靠 renderer 开关或测试环境变量绕过发布证明。
+
+### 26.1 六个波次的冻结结果
+
+| 波次 | 工作包 | 冻结结果 | 对应提交/冻结动作 |
+| --- | --- | --- | --- |
+| A：覆盖冻结 | BASE-500、AUTH-510 | coverage、Host capability、玩家写面和宏观覆盖由机器清单共同约束；exact、pure-idle、offline/time-warp 使用同一 Rust 规则阶段与守恒候选 | `079465a6` |
+| B：玩家功能闭环 | WRITE-520、MOBILE-530、MOD-540 | 批量建筑/线路原子命令、剩余工作区动作、移动薄壳和声明式自定义建筑目录闭合；未知脚本型内容 fail closed 且不丢数据 | `d872b496`、`5a1a4fa7`、`c061c0ae`、`df7362d9` |
+| C：持久化与云边界 | SAVE-550、CLOUD-560、MEMORY-620 | base/实体/线路/拓扑分别记脏；durable ACK 后才清脏；v46/v47 原生流式导入、v47 流式导出、gzip/文件/云背压和有界冷页/分配预算闭合 | `2b7e313e` |
+| D：模拟热路径 | ACTIVE-570、PAR-580、STATS-590 | writer-closed 事件清单、活动/稠密退化诊断、独立 flat oracle、稳定事件排序与分区准备、稀疏生产历史索引和运行时统计 sidecar 闭合 | 本节冻结提交 |
+| E：薄 UI 与单所有者 | PROJ-600、RENDER-610、OWNER-630 | 持久分频道订阅、ACK/背压/哈希、静态/动态 Canvas 分层、OffscreenCanvas 有界队列，以及只从同 revision durable WAL 整进程重开的故障路径闭合 | 本节冻结提交 |
+| F：代码冻结 | 文档、清单、候选 metadata | 重新生成 `native/native-coverage-manifest.json`，固定实现状态与测试口径；功能修改停止，进入 25.6 集中矩阵 | 本节冻结提交 |
+
+### 26.2 固定 100 单位代码结算
+
+| 工作包 | 单位 | 冻结候选中的实际闭环 | 集中测试或外部证据仍要回答的问题 |
+| --- | ---: | --- | --- |
+| BASE-500 | 3 | 稳定生成 coverage/capability/write-surface manifest，29 个玩家写面均有 owner、kind、状态和数据保护原因 | 最终 SHA 上再次 verify，防止文档后漂移 |
+| AUTH-510 | 15 | ordinary 与宏观结算共用 Rust 规则和守恒摘要；无证明子图冻结而不复制终端物料；取消/恢复由 revision 和 durable budget 围栏 | 最终长差分、倍率/分段/故障完整矩阵 |
+| WRITE-520 | 16 | 桌面剩余批量、区域、特殊库存、星图和工作区持久动作均进入 Rust 有界语义命令；失败原子、重复 ID 幂等 | 完整 Host/renderer/WAL 故障矩阵 |
+| MOBILE-530 | 6 | `NativeMobileGameShell` 消费同一投影并提交同一命令，触摸层不持有可写 GameState | Chromium 窄屏、旋转、恢复和返回栈 E2E |
+| MOD-540 | 10 | catalog-backed 配方、端口、尺寸、堆叠、展示和建筑/线路语义；未知脚本型包阻止原生晋升但保留往返数据 | 全量最小内容包组合和安装环境验证 |
+| SAVE-550 | 8 | base 五域、实体页、线路页和拓扑分代记脏；清洁块复用 metadata；失败不清脏，commit ACK 后清除；compaction 可取消 | 磁盘满、只读目录、Defender 锁文件、强杀 |
+| CLOUD-560 | 7 | v46/v47 流式导入、v47 流式导出和 main-owned 有界云工件；renderer 不接收完整正文，未知网络保留幂等候选 | 本地 mock 全量与获授权测试账号真实往返 |
+| ACTIVE-570 | 10 | 14 个模拟扫描阶段写入确定性事件证据；稳定稀疏按活动键访问，75%/opaque/writer 未闭合时确定性退化并计数 | 最终极限合成档与只读获授权大档 A/B |
+| PAR-580 | 10 | 只读 snapshot 的稳定分片 prepare、固定键事件合并和自适应小批量单线程；无净收益的共享写冲突阶段保持串行 | 1/2/4/8/最大线程完整公开字节与端到端收益矩阵 |
+| STATS-590 | 5 | 生产历史使用 rate/inventory 稀疏索引和精确失效；查询有稳定游标，运行时执行诊断不进入 v47 公开字节 | 全量重载、时间桶和长跑失效验证 |
+| PROJ-600 | 4 | viewport/topology/telemetry/belt/inventory/workspace/notification 持久订阅；可靠频道有界排队，遥测只合并最新，安装完成才 ACK | 最终 UI Gate C 的真实 P95；超过 20% 才触发 shared-memory 方案 |
+| RENDER-610 | 3 | 静态拓扑与动态流量/选择分层；稠密图用 OffscreenCanvas；主线程与 worker 均只有一个在途和一个最新待处理帧 | production preview 的 P50/P95/P99、长任务、RDP/DPI/context-loss |
+| MEMORY-620 | 2 | typed 热列、共享原始记录、流式 reader、LRU/字节预算和 scratch 上限；没有为了标签强上会增加 Windows 文件锁风险的 mmap | 30 分钟全进程树 Private Bytes 斜率 |
+| OWNER-630 | 1 | 故障/不确定状态只在无在途事务且 checkpoint revision 匹配时允许 main 复核后整进程重启；不养旧 JS 镜像，不静默回档 | Host 强杀与 WAL 重开 E2E |
+| **合计** | **100/100** | **实现、定向回归和文档均已形成冻结候选** | **集中矩阵未完成前，发布状态仍为 No-Go** |
+
+这里的条件实现不是遗漏：MessagePort P95 未超过帧预算 20% 时，保留更简单的有界传输；Canvas 达标时不引入 WebGL/WebGPU；流式分页 reader 达标时不为“原生化”强上 mmap；不能证明并行有端到端净收益的共享写阶段继续确定性串行。只有集中测试用数据触发阈值，才重新打开对应代码包。
+
+### 26.3 波次 D/E 冻结前的新鲜定向证据
+
+1. Rust `factory_writer_events`：3/3；`production_history` 定向集合：28/28；提交后工厂执行证据：1/1。
+2. `cargo check -p dsp-native-core --all-targets` 与 `cargo clippy -p dsp-native-core --all-targets -- -D warnings` 均通过，Rust 已运行 `cargo fmt`。
+3. 投影订阅、operations boundary 和 durable restart：19/19；玩家 authority runtime 文件：62/62。
+4. Canvas、operations workspace、native core/renderer/mobile 集成：7 个 Vitest 文件、59/59；额外受影响定向集合：2 个文件、16/16。
+5. `npm run typecheck`、两个 Electron 入口 `node --check`、`git diff --check` 和重新生成后的 `npm run verify:native-coverage` 均通过。
+
+这些只是开发期 focused 证据，不能与 25.6 的完整通过数量合并。下一步在本节冻结提交上执行一次集中矩阵；若发现产品错误，保留首轮失败，修复后产生新的冻结 SHA，并只在最终 SHA 上重跑完整矩阵。

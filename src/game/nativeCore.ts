@@ -62,6 +62,7 @@ import {
   type DesktopNativeCoreDysonWorkspaceProjectionResult,
   type DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest,
   type DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult,
+  type DesktopNativeCoreOperationsWorkspaceProjectionResult,
   type DesktopNativeCoreCampaignWorkspaceProjectionRequest,
   type DesktopNativeCoreCampaignWorkspaceProjectionResult,
   type DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest,
@@ -104,7 +105,8 @@ type NativeCoreTransferProjection =
   | DesktopNativeCoreStellarIndustryV2ProjectionResult
   | DesktopNativeCoreStellarQuantumProjectionResult
   | DesktopNativeCoreDysonWorkspaceProjectionResult
-  | DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult;
+  | DesktopNativeCoreSystemSpaceStationWorkspaceProjectionResult
+  | DesktopNativeCoreOperationsWorkspaceProjectionResult;
 
 function projectionBodySchemaVersion(projectionType: NativeCoreTransferProjection["projectionType"]): 1 | 2 {
   return projectionType === "viewport-v2" || projectionType === "stellar-industry-v2" ? 2 : 1;
@@ -114,6 +116,10 @@ function bytesToHex(bytes: Uint8Array): string {
   let result = "";
   for (const byte of bytes) result += byte.toString(16).padStart(2, "0");
   return result;
+}
+
+function isArrayBuffer(value: unknown): value is ArrayBuffer {
+  return value instanceof ArrayBuffer || Object.prototype.toString.call(value) === "[object ArrayBuffer]";
 }
 
 export async function decodeNativeCoreProjectionTransfer<T extends NativeCoreTransferProjection>(
@@ -127,7 +133,7 @@ export async function decodeNativeCoreProjectionTransfer<T extends NativeCoreTra
     !Number.isSafeInteger(header.payloadLength) || header.payloadLength < 1 ||
     header.payloadLength > MAX_NATIVE_PROJECTION_TRANSFER_BYTES ||
     typeof header.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(header.sha256) ||
-    !(bodyBuffer instanceof ArrayBuffer) || bodyBuffer.byteLength !== header.payloadLength) {
+    !isArrayBuffer(bodyBuffer) || bodyBuffer.byteLength !== header.payloadLength) {
     throw new Error("原生投影二进制响应边界无效");
   }
   const digest = bytesToHex(new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bodyBuffer)));

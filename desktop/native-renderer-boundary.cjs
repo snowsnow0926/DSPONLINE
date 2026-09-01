@@ -8105,7 +8105,8 @@ function normalizeCoreOperationsWorkspaceProjection(value, context) {
   const label = "native operations workspace projection";
   const source = exactObject(value, [
     "schemaVersion", "projectionType", "source", "sessionId", "runId", "revision",
-    "registryFingerprint", "stateVersion", "truncated", "settings", "summary", "alerts", "limits",
+    "registryFingerprint", "stateVersion", "truncated", "settings", "summary", "alerts",
+    "factoryExecution", "limits",
   ], label);
   requireProjectionByteBudget(source, label);
   const identity = normalizeBoundWorkspaceIdentity(source, context, label, "operations-workspace-v1");
@@ -8191,10 +8192,85 @@ function normalizeCoreOperationsWorkspaceProjection(value, context) {
     const projectedCritical = rows.filter((row) => row.severity === "critical").length;
     if (projectedCritical !== criticalCount) throw protocolError(`${label}.alerts severity binding`);
   }
+  const factoryExecution = source.factoryExecution === null ? null : (() => {
+    const execution = exactObject(source.factoryExecution, [
+      "sourceRevision", "resultRevision", "simulationSeconds", "steps", "entityCount",
+      "writerSubmittedRows", "writerUniqueDomainRows", "writerUniqueRows", "writerDomains",
+      "topologyChanged", "workerLimit", "observedWorkerCount", "parallelPrepareStages",
+      "serialPrepareStages", "stageScans",
+    ], `${label}.factoryExecution`);
+    const sourceRevision = safeInteger(execution.sourceRevision, `${label}.factoryExecution.sourceRevision`);
+    const resultRevision = safeInteger(execution.resultRevision, `${label}.factoryExecution.resultRevision`, 1);
+    const simulationSeconds = finiteNumber(execution.simulationSeconds, `${label}.factoryExecution.simulationSeconds`);
+    const steps = safeInteger(execution.steps, `${label}.factoryExecution.steps`);
+    const entityCount = safeInteger(execution.entityCount, `${label}.factoryExecution.entityCount`);
+    const writerSubmittedRows = safeInteger(execution.writerSubmittedRows, `${label}.factoryExecution.writerSubmittedRows`);
+    const writerUniqueDomainRows = safeInteger(execution.writerUniqueDomainRows, `${label}.factoryExecution.writerUniqueDomainRows`);
+    const writerUniqueRows = safeInteger(execution.writerUniqueRows, `${label}.factoryExecution.writerUniqueRows`);
+    const workerLimit = safeInteger(execution.workerLimit, `${label}.factoryExecution.workerLimit`, 1);
+    const observedWorkerCount = safeInteger(execution.observedWorkerCount, `${label}.factoryExecution.observedWorkerCount`, 1);
+    const parallelPrepareStages = safeInteger(execution.parallelPrepareStages, `${label}.factoryExecution.parallelPrepareStages`);
+    const serialPrepareStages = safeInteger(execution.serialPrepareStages, `${label}.factoryExecution.serialPrepareStages`);
+    const domainValues = [
+      "inventory", "belt", "logistics", "route", "quantum", "production", "power",
+      "research", "dyson", "construction", "topology",
+    ];
+    if (!Array.isArray(execution.writerDomains) || execution.writerDomains.length > domainValues.length) {
+      throw protocolError(`${label}.factoryExecution.writerDomains`);
+    }
+    const writerDomains = execution.writerDomains.map((domain, index) =>
+      oneOf(domain, domainValues, `${label}.factoryExecution.writerDomains[${index}]`));
+    if (new Set(writerDomains).size !== writerDomains.length || !Array.isArray(execution.stageScans) ||
+        execution.stageScans.length > 14) {
+      throw protocolError(`${label}.factoryExecution bounded rows`);
+    }
+    const stageValues = [
+      "logistics-buffer", "material-delivery", "ordinary-production", "planet-metrics",
+      "power-probe", "quantum", "construction", "local-dispatch", "interstellar-dispatch",
+      "warper-refill", "local-congestion", "interstellar-congestion", "station-transition", "belt",
+    ];
+    const stageScans = execution.stageScans.map((value, index) => {
+      const stageLabel = `${label}.factoryExecution.stageScans[${index}]`;
+      const stage = exactObject(value, [
+        "stage", "invocations", "selectedRows", "totalCandidateRows", "stableRowsSkipped",
+        "denseFallbacks", "directoryFallbacks", "fullScans",
+      ], stageLabel);
+      const normalized = {
+        stage: oneOf(stage.stage, stageValues, `${stageLabel}.stage`),
+        invocations: safeInteger(stage.invocations, `${stageLabel}.invocations`, 1),
+        selectedRows: safeInteger(stage.selectedRows, `${stageLabel}.selectedRows`),
+        totalCandidateRows: safeInteger(stage.totalCandidateRows, `${stageLabel}.totalCandidateRows`),
+        stableRowsSkipped: safeInteger(stage.stableRowsSkipped, `${stageLabel}.stableRowsSkipped`),
+        denseFallbacks: safeInteger(stage.denseFallbacks, `${stageLabel}.denseFallbacks`),
+        directoryFallbacks: safeInteger(stage.directoryFallbacks, `${stageLabel}.directoryFallbacks`),
+        fullScans: safeInteger(stage.fullScans, `${stageLabel}.fullScans`),
+      };
+      if (normalized.selectedRows > normalized.totalCandidateRows ||
+          normalized.stableRowsSkipped > normalized.totalCandidateRows ||
+          normalized.denseFallbacks > normalized.invocations ||
+          normalized.directoryFallbacks > normalized.invocations ||
+          normalized.fullScans > normalized.invocations) throw protocolError(`${stageLabel} counters`);
+      return normalized;
+    });
+    if (new Set(stageScans.map((stage) => stage.stage)).size !== stageScans.length ||
+        simulationSeconds < 0 || resultRevision !== identity.revision ||
+        sourceRevision + 1 !== resultRevision || entityCount !== summary.entityCount ||
+        writerUniqueRows > entityCount || writerUniqueDomainRows > writerSubmittedRows ||
+        writerUniqueRows > writerUniqueDomainRows || workerLimit > 256 ||
+        observedWorkerCount > workerLimit || parallelPrepareStages + serialPrepareStages < 1) {
+      throw protocolError(`${label}.factoryExecution invariant`);
+    }
+    return {
+      sourceRevision, resultRevision, simulationSeconds, steps, entityCount,
+      writerSubmittedRows, writerUniqueDomainRows, writerUniqueRows, writerDomains,
+      topologyChanged: boolean(execution.topologyChanged, `${label}.factoryExecution.topologyChanged`),
+      workerLimit, observedWorkerCount, parallelPrepareStages, serialPrepareStages, stageScans,
+    };
+  })();
   return {
     schemaVersion: 1, projectionType: "operations-workspace-v1", source: "native-core",
     stateVersion: 47, ...identity, truncated: false, settings, summary,
-    alerts: { status, totalCount, criticalCount, warningCount, rows }, limits,
+    alerts: { status, totalCount, criticalCount, warningCount, rows }, factoryExecution, limits,
   };
 }
 

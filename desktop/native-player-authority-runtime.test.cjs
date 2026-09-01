@@ -2761,6 +2761,32 @@ test("shutdown cancels only the process timer and leaves durable recovery to Rus
   await assert.rejects(value.runtime.retryUncertain(), /no uncertain tick/);
 });
 
+test("explicit durable restart proof is available only after a fault and retains Rust ownership", async () => {
+  const value = fixture();
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  assert.throws(
+    () => value.runtime.prepareDurableRestart(),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_DURABLE_RESTART_UNAVAILABLE",
+  );
+  value.runtime.transition("faulted", Object.assign(new Error("synthetic fault"), {
+    code: "NATIVE_PLAYER_AUTHORITY_TICK_UNCERTAIN",
+  }));
+  const proof = value.runtime.prepareDurableRestart();
+  assert.deepEqual(proof, {
+    sessionId: "core-main-1",
+    runId: "player-run-1",
+    minimumRevision: 7,
+    checkpoint: value.checkpoint,
+    phase: "faulted",
+  });
+  assert.equal(value.timers[0].cancelled, true);
+  assert.equal(value.runtime.snapshot().phase, "faulted");
+  assert.equal(value.runtime.snapshot().sessionId, "core-main-1");
+});
+
 test("shutdown rejects active and queued command promises without starting another operation", async () => {
   const value = fixture({
     registry: {

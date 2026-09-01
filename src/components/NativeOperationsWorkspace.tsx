@@ -4,9 +4,14 @@ import type {
   DesktopNativeCoreOperationsAlertRow,
   DesktopNativeCoreOperationsWorkspaceProjectionRequest,
   DesktopNativeCoreOperationsWorkspaceProjectionResult,
+  DesktopNativeCoreProjectionSubscriptionEvent,
+  DesktopNativeCoreProjectionSubscriptionHandle,
+  DesktopNativeCoreProjectionSubscriptionRequest,
+  DesktopNativeProjectionSubscriptionDiagnostics,
   DesktopNativeOperationsSettingIntent,
 } from "../desktop";
 import { collectClientDiagnostics, downloadDiagnostics } from "../game/diagnostics";
+import { decodeNativeCoreProjectionTransfer } from "../game/nativeCore";
 import type { CanvasDetailPreference } from "../game/canvasDensityPresentation";
 import type { ConnectionHitArea, ConnectionPointSize } from "../game/uiPreferences";
 import type { AppLocale } from "../i18n/locale";
@@ -43,6 +48,11 @@ export interface NativeOperationsWorkspaceProps {
   onTabChange: (tab: OperationsTab) => void;
   identity: DesktopNativeCoreOperationsWorkspaceProjectionRequest | null;
   fetchProjection: ((request: DesktopNativeCoreOperationsWorkspaceProjectionRequest) => Promise<DesktopNativeCoreOperationsWorkspaceProjectionResult>) | null;
+  subscribeProjection: ((
+    request: DesktopNativeCoreProjectionSubscriptionRequest,
+    listener: (event: DesktopNativeCoreProjectionSubscriptionEvent) => void | boolean | Promise<void | boolean>,
+  ) => DesktopNativeCoreProjectionSubscriptionHandle) | null;
+  fetchProjectionDiagnostics: (() => Promise<DesktopNativeProjectionSubscriptionDiagnostics>) | null;
   commitSetting: ((request: {
     expectedSessionId: string;
     expectedRunId: string;
@@ -99,15 +109,27 @@ function matchesScope(
     projection.registryFingerprint === identity.expectedRegistryFingerprint && projection.truncated === false;
 }
 
+function matchesScopeKey(
+  left: DesktopNativeCoreOperationsWorkspaceProjectionRequest,
+  right: DesktopNativeCoreOperationsWorkspaceProjectionRequest,
+) {
+  return left.sessionId === right.sessionId && left.runId === right.runId &&
+    left.expectedRegistryFingerprint === right.expectedRegistryFingerprint;
+}
+
 function identityKey(identity: DesktopNativeCoreOperationsWorkspaceProjectionRequest | null) {
   return identity
     ? `${identity.sessionId}\0${identity.runId}\0${identity.expectedRevision}\0${identity.expectedRegistryFingerprint}`
     : "missing";
 }
 
-function unavailable(identity: NativeOperationsWorkspaceProps["identity"], fetchProjection: NativeOperationsWorkspaceProps["fetchProjection"]) {
+function unavailable(
+  identity: NativeOperationsWorkspaceProps["identity"],
+  fetchProjection: NativeOperationsWorkspaceProps["fetchProjection"],
+  subscribeProjection: NativeOperationsWorkspaceProps["subscribeProjection"],
+) {
   if (!identity) return "原生玩家权威 lineage 尚未就绪；运营中心不会读取旧 renderer GameState。";
-  if (!fetchProjection) return "当前 Windows Host 不支持运营中心薄投影；页面已安全关闭。";
+  if (!fetchProjection && !subscribeProjection) return "当前 Windows Host 不支持运营中心薄投影；页面已安全关闭。";
   return "运营投影未通过 session/run/revision/registry 或完整性校验；页面已安全关闭。";
 }
 
@@ -137,8 +159,12 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
   const [message, setMessage] = useState<string | null>(null);
   const [diagnosticStartedAt, setDiagnosticStartedAt] = useState<number | null>(null);
   const [diagnosticSeconds, setDiagnosticSeconds] = useState(0);
+  const [projectionDiagnostics, setProjectionDiagnostics] =
+    useState<DesktopNativeProjectionSubscriptionDiagnostics | null>(null);
   const commitGeneration = useRef(0);
   const commitLocked = useRef(false);
+  const subscriptionRef = useRef<DesktopNativeCoreProjectionSubscriptionHandle | null>(null);
+  const subscriptionRevisionRef = useRef<number | null>(null);
   const currentIdentityRef = useRef(props.identity);
   currentIdentityRef.current = props.identity;
   const currentIdentityKey = identityKey(props.identity);
@@ -156,8 +182,14 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
 
   useEffect(() => {
     if (!props.open) return;
-    if (!props.identity || !props.fetchProjection) {
-      setStatus({ phase: "unavailable", message: unavailable(props.identity, props.fetchProjection) });
+    if (!props.identity || props.subscribeProjection || !props.fetchProjection) {
+      if (!props.identity || !props.subscribeProjection && !props.fetchProjection) {
+        setStatus({ phase: "unavailable", message: unavailable(
+          props.identity,
+          props.fetchProjection,
+          props.subscribeProjection,
+        ) });
+      }
       return;
     }
     const identity = props.identity;
@@ -171,7 +203,7 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
         if (identityKey(currentIdentity) !== identityKey(identity)) return;
         setStatus((current) => current.phase === "ready" && matchesScope(current.projection, currentIdentity)
           ? current
-          : { phase: "unavailable", message: unavailable(identity, props.fetchProjection) });
+          : { phase: "unavailable", message: unavailable(identity, props.fetchProjection, props.subscribeProjection) });
         return;
       }
       setStatus((current) => current.phase === "ready" && matchesScope(current.projection, currentIdentity) &&
@@ -183,9 +215,95 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
       if (!currentIdentity || identityKey(currentIdentity) !== identityKey(identity)) return;
       setStatus((current) => current.phase === "ready" && matchesScope(current.projection, currentIdentity)
         ? current
-        : { phase: "unavailable", message: unavailable(identity, props.fetchProjection) });
+        : { phase: "unavailable", message: unavailable(identity, props.fetchProjection, props.subscribeProjection) });
     });
-  }, [currentIdentityKey, props.fetchProjection, props.open]);
+  }, [currentIdentityKey, props.fetchProjection, props.open, props.subscribeProjection]);
+
+  useEffect(() => {
+    if (!props.open || !props.identity || !props.subscribeProjection) return;
+    const initialIdentity = props.identity;
+    setStatus((current) => current.phase === "ready" && matchesScope(current.projection, initialIdentity)
+      ? current
+      : { phase: "loading" });
+    let handle: DesktopNativeCoreProjectionSubscriptionHandle;
+    try {
+      handle = props.subscribeProjection({
+        sessionId: initialIdentity.sessionId,
+        channel: "telemetry",
+        projectionType: "operations-workspace-v1",
+        payload: {
+          runId: initialIdentity.runId,
+          expectedRevision: initialIdentity.expectedRevision,
+          expectedRegistryFingerprint: initialIdentity.expectedRegistryFingerprint,
+        },
+      }, async (event) => {
+        if (subscriptionRef.current !== handle) return true;
+        if (event.kind === "error") {
+          if (!event.recoverable) {
+            const currentIdentity = currentIdentityRef.current;
+            if (currentIdentity && matchesScopeKey(currentIdentity, initialIdentity)) {
+              setStatus((current) => current.phase === "ready" ? current : {
+                phase: "unavailable",
+                message: unavailable(currentIdentity, props.fetchProjection, props.subscribeProjection),
+              });
+            }
+          }
+          return true;
+        }
+        const projection = await decodeNativeCoreProjectionTransfer<DesktopNativeCoreOperationsWorkspaceProjectionResult>(
+          event.transfer,
+          { sessionId: initialIdentity.sessionId, projectionType: "operations-workspace-v1" },
+        );
+        const currentIdentity = currentIdentityRef.current;
+        if (!currentIdentity || !matchesScope(projection, currentIdentity) ||
+            projection.revision > currentIdentity.expectedRevision) return true;
+        setStatus((current) => current.phase === "ready" &&
+          matchesScope(current.projection, currentIdentity) &&
+          current.projection.revision >= projection.revision
+          ? current
+          : { phase: "ready", projection });
+        return true;
+      });
+    } catch {
+      setStatus({
+        phase: "unavailable",
+        message: unavailable(initialIdentity, props.fetchProjection, props.subscribeProjection),
+      });
+      return;
+    }
+    subscriptionRef.current = handle;
+    subscriptionRevisionRef.current = initialIdentity.expectedRevision;
+    return () => {
+      if (subscriptionRef.current === handle) {
+        subscriptionRef.current = null;
+        subscriptionRevisionRef.current = null;
+      }
+      handle.close();
+    };
+  }, [identityScopeKey, props.fetchProjection, props.open, props.subscribeProjection]);
+
+  useEffect(() => {
+    const handle = subscriptionRef.current;
+    const identity = props.identity;
+    if (!props.open || !handle || !identity ||
+        subscriptionRevisionRef.current === identity.expectedRevision) return;
+    subscriptionRevisionRef.current = identity.expectedRevision;
+    setStatus((current) => current.phase === "ready" && matchesScope(current.projection, identity)
+      ? current
+      : { phase: "loading" });
+    try {
+      handle.update({
+        runId: identity.runId,
+        expectedRevision: identity.expectedRevision,
+        expectedRegistryFingerprint: identity.expectedRegistryFingerprint,
+      });
+    } catch {
+      setStatus((current) => current.phase === "ready" ? current : {
+        phase: "unavailable",
+        message: unavailable(identity, props.fetchProjection, props.subscribeProjection),
+      });
+    }
+  }, [currentIdentityKey, props.fetchProjection, props.identity, props.open, props.subscribeProjection]);
 
   useEffect(() => {
     if (diagnosticStartedAt === null) return;
@@ -198,6 +316,21 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
     const timer = window.setInterval(update, 250);
     return () => window.clearInterval(timer);
   }, [diagnosticStartedAt]);
+
+  useEffect(() => {
+    if (!props.open || props.tab !== "performance" || !props.fetchProjectionDiagnostics) return;
+    let active = true;
+    const refresh = () => void props.fetchProjectionDiagnostics?.().then((value) => {
+      if (!active || value?.schemaVersion !== 1 || !Number.isSafeInteger(value.acknowledgedFrames) ||
+          !Number.isFinite(value.gateC?.transportP95Ms) || !Number.isFinite(value.gateC?.frameBudgetRatio) ||
+          !["insufficient-samples", "bounded-message-port-retained", "shared-memory-evaluation-required"]
+            .includes(value.gateC?.decision)) return;
+      setProjectionDiagnostics(value);
+    }).catch(() => undefined);
+    refresh();
+    const timer = window.setInterval(refresh, 5_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [props.fetchProjectionDiagnostics, props.open, props.tab]);
 
   const projection = status.phase === "ready" && props.identity && matchesScope(status.projection, props.identity)
     ? status.projection : null;
@@ -340,7 +473,28 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
         <h3><Gauge size={17} /> 工厂规模与本地诊断</h3>
         <p>实体 {projection.summary.entityCount.toLocaleString()} · 传送带 {projection.summary.beltCount.toLocaleString()} · 施工队列 {projection.summary.constructionQueueCount.toLocaleString()}</p>
         <p>当前星球 {projection.summary.activePlanetId}：实体 {projection.summary.activePlanetEntityCount.toLocaleString()}，传送带 {projection.summary.activePlanetBeltCount.toLocaleString()}。</p>
+        {projection.factoryExecution ? <>
+          <p data-native-factory-execution>
+            最近结算 {projection.factoryExecution.simulationSeconds.toLocaleString()} 模拟秒 / {projection.factoryExecution.steps.toLocaleString()} 步；
+            写入 {projection.factoryExecution.writerUniqueRows.toLocaleString()} / {projection.factoryExecution.entityCount.toLocaleString()} 个实体；
+            线程 {projection.factoryExecution.observedWorkerCount}/{projection.factoryExecution.workerLimit}。
+          </p>
+          <p>
+            稠密退化 {projection.factoryExecution.stageScans.reduce((sum, stage) => sum + stage.denseFallbacks, 0).toLocaleString()} 次 ·
+            目录退化 {projection.factoryExecution.stageScans.reduce((sum, stage) => sum + stage.directoryFallbacks, 0).toLocaleString()} 次 ·
+            已证明跳过 {projection.factoryExecution.stageScans.reduce((sum, stage) => sum + stage.stableRowsSkipped, 0).toLocaleString()} 行。
+          </p>
+        </> : <p>当前 revision 没有可用的原生工厂结算诊断。</p>}
         <p><Activity size={14} /> 60 秒监测只观察 renderer 设备表现，不是游戏权威数据。</p>
+        {projectionDiagnostics ? <p data-native-projection-gate-c>
+          投影通道：确认 {projectionDiagnostics.acknowledgedFrames.toLocaleString()} 帧，合并 {projectionDiagnostics.coalescedFrames.toLocaleString()} 帧；
+          传输 P95 {projectionDiagnostics.gateC.transportP95Ms.toFixed(2)} ms（60 FPS 帧预算的 {(projectionDiagnostics.gateC.frameBudgetRatio * 100).toFixed(1)}%）；
+          Gate C：{projectionDiagnostics.gateC.decision === "bounded-message-port-retained"
+            ? "保留有界 MessagePort"
+            : projectionDiagnostics.gateC.decision === "shared-memory-evaluation-required"
+              ? "需要评估共享内存环"
+              : "样本不足"}。
+        </p> : <p>投影 Gate C 尚无足够的本机订阅样本。</p>}
         <WindowsNativePerformancePolicySetting />
         <button type="button" disabled={diagnosticStartedAt !== null} onClick={() => { setDiagnosticSeconds(0); setDiagnosticStartedAt(performance.now()); }}>开始 60 秒本地监测</button>
         <span>{diagnosticStartedAt !== null ? `监测中 ${diagnosticSeconds}/60 秒` : diagnosticSeconds === 60 ? "监测完成" : "尚未开始"}</span>
@@ -358,7 +512,7 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
         <button type="button" onClick={props.onOpenReleaseNotes}>查看版本说明</button>
         <button type="button" onClick={() => void downloadDiagnostics({
           ...collectClientDiagnostics(undefined),
-          nativeOperations: { revision: projection.revision, registryFingerprint: projection.registryFingerprint, summary: projection.summary, alerts: { ...projection.alerts, rows: undefined } },
+          nativeOperations: { revision: projection.revision, registryFingerprint: projection.registryFingerprint, summary: projection.summary, alerts: { ...projection.alerts, rows: undefined }, factoryExecution: projection.factoryExecution },
           rendererDiagnostic: { durationSeconds: diagnosticSeconds, authoritative: false },
         })}>导出无 GameState 诊断</button>
         <p>成就、物流改线、内容包校验/注册/启用/移除尚无安全语义链，当前只读不可用。</p>

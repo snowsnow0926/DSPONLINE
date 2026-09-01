@@ -1071,6 +1071,7 @@ impl CoreState {
             entities,
             prepared_belt_flow,
             None,
+            None,
             deterministic_runtime(),
         )
         .map(|_| ())
@@ -1082,12 +1083,14 @@ impl CoreState {
         entities: &[Value],
         prepared_belt_flow: Option<PreparedBeltFlow>,
         prepared_campaign_metrics: Option<&crate::campaign::CampaignFactoryMetrics>,
+        writer_events: Option<&crate::factory_writer_events::SealedFactoryWriterEvents>,
     ) -> anyhow::Result<Option<crate::campaign::CampaignFactoryMetrics>> {
         self.record_production_history_with_records_and_runtime(
             base,
             entities,
             prepared_belt_flow,
             prepared_campaign_metrics,
+            writer_events,
             deterministic_runtime(),
         )
     }
@@ -1102,6 +1105,7 @@ impl CoreState {
         base: &mut Map<String, Value>,
         entities: &[Value],
         prepared_belt_flow: PreparedBeltFlow,
+        writer_events: Option<&crate::factory_writer_events::SealedFactoryWriterEvents>,
         runtime: &DeterministicRuntime,
     ) -> anyhow::Result<InternalExactHistoryRecord> {
         let recorded_before = finite_number(base.get("historyRecordedAt")).unwrap_or(0.0);
@@ -1110,6 +1114,7 @@ impl CoreState {
             entities,
             Some(prepared_belt_flow),
             None,
+            writer_events,
             runtime,
         )?;
         let recorded_after = finite_number(base.get("historyRecordedAt")).unwrap_or(0.0);
@@ -1126,6 +1131,7 @@ impl CoreState {
         entities: &[Value],
         prepared_belt_flow: Option<PreparedBeltFlow>,
         prepared_campaign_metrics: Option<&crate::campaign::CampaignFactoryMetrics>,
+        writer_events: Option<&crate::factory_writer_events::SealedFactoryWriterEvents>,
         runtime: &DeterministicRuntime,
     ) -> anyhow::Result<Option<crate::campaign::CampaignFactoryMetrics>> {
         let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
@@ -1167,6 +1173,20 @@ impl CoreState {
             .ok_or_else(|| anyhow!("native production history is missing"))?;
         let previous = history.last();
         let refresh = boundary.refresh;
+        if let Some(events) = writer_events {
+            if events.source_revision() != self.revision || events.entity_count() != entities.len()
+            {
+                bail!("native production history writer manifest is stale");
+            }
+            if profile_enabled {
+                eprintln!(
+                    "DSP_NATIVE_CORE_PROFILE\thistory-writer-events\tsubmitted={}\tunique={}\ttopology={}",
+                    events.submitted_rows(),
+                    events.all_rows().len(),
+                    events.topology_changed(),
+                );
+            }
+        }
         let mut ordered_planets = self.catalog.planets.iter().collect::<Vec<_>>();
         ordered_planets.sort_by(|left, right| {
             left.simulation_order
@@ -1225,15 +1245,28 @@ impl CoreState {
         let rate_index_invalid = rate_indices
             .last()
             .is_some_and(|index| *index >= entities.len());
+        let inventory_indices = &self.factory_topology.production_history_inventory_indices;
+        let inventory_index_dense = self
+            .factory_topology
+            .production_history_inventory_full_scan_required;
+        let inventory_index_invalid = inventory_indices
+            .last()
+            .is_some_and(|index| *index >= entities.len());
+        // Inventory, rate and campaign readers have independent directories.
+        // A ten-second inventory boundary alone must not force every entity
+        // through the much heavier rate/campaign JSON probe.
         let full_entity_scan =
-            refresh || campaign_factory_metrics.is_some() || rate_index_dense || rate_index_invalid;
+            campaign_factory_metrics.is_some() || rate_index_dense || rate_index_invalid;
         if profile_enabled {
             eprintln!(
-                "DSP_NATIVE_CORE_PROFILE\thistory-rate-index\t{}/{}\tdense={}\tfull-scan={}",
+                "DSP_NATIVE_CORE_PROFILE\thistory-rate-index\t{}/{}\tdense={}\tfull-scan={}\tinventory={}/{}\tinventory-dense={}",
                 rate_indices.len(),
                 entities.len(),
                 rate_index_dense,
                 full_entity_scan,
+                inventory_indices.len(),
+                entities.len(),
+                inventory_index_dense,
             );
         }
         if full_entity_scan {
@@ -1438,6 +1471,22 @@ impl CoreState {
                     .symbols
                     .resolve(self.entities.buildings[index])
                     .unwrap_or_default();
+                if refresh
+                    && (kind == "machine"
+                        || kind == "vein" && self.entities.miner_counts[index] > 0.0)
+                {
+                    let count = if kind == "vein" {
+                        self.entities.miner_counts[index]
+                    } else {
+                        self.entities.machine_counts[index]
+                    };
+                    let utilization = finite_number(entity.get("utilization")).unwrap_or(0.0);
+                    productive_units += count;
+                    utilized_units += count * utilization;
+                    if utilization > EPSILON {
+                        active += count;
+                    }
+                }
                 add_history_entity_rates(
                     self,
                     index,
@@ -1451,6 +1500,32 @@ impl CoreState {
                     &mut planet_production,
                     &mut planet_consumption,
                 );
+            }
+            if refresh {
+                let inventory_rows: Box<dyn Iterator<Item = usize>> =
+                    if inventory_index_dense || inventory_index_invalid {
+                        Box::new(0..entities.len())
+                    } else {
+                        Box::new(inventory_indices.iter().copied())
+                    };
+                let inventory = inventory_values
+                    .as_mut()
+                    .expect("refresh boundary must own an inventory accumulator");
+                for index in inventory_rows {
+                    let Some(entity) = entities.get(index).and_then(Value::as_object) else {
+                        continue;
+                    };
+                    for record in [entity.get("inputs"), entity.get("outputs")] {
+                        let Some(record) = record.and_then(Value::as_object) else {
+                            continue;
+                        };
+                        for (item, amount) in record {
+                            if let Some(amount) = finite_number(Some(amount)) {
+                                add_rate(inventory, item, amount.floor());
+                            }
+                        }
+                    }
+                }
             }
         }
         if let Some(metrics) = &mut campaign_factory_metrics {
@@ -2350,6 +2425,7 @@ mod tests {
                         crate::belts::BeltFlowAggregate::default(),
                     )),
                     None,
+                    None,
                     &runtime,
                 )
                 .unwrap();
@@ -2367,6 +2443,74 @@ mod tests {
         }
         for candidate in &encoded[1..] {
             assert_eq!(candidate, &encoded[0]);
+        }
+    }
+
+    #[test]
+    fn sparse_inventory_directory_matches_the_independent_full_scan_oracle() {
+        let (_, base, mut entities, _) = history_parallel_fixture();
+        for (index, entity) in entities.iter_mut().enumerate().skip(1) {
+            if index > 64 {
+                let entity = entity.as_object_mut().unwrap();
+                entity.insert("kind".to_owned(), Value::from("storage"));
+                entity.insert("buildingId".to_owned(), Value::from("storage_mk1"));
+                entity.remove("recipeId");
+                entity.insert("productionRate".to_owned(), Value::from(0));
+                entity.insert("inputs".to_owned(), json!({}));
+                entity.insert("outputs".to_owned(), json!({}));
+            }
+        }
+        let indexed_state = history_fixture_state(&base, &entities);
+        assert_eq!(
+            indexed_state
+                .factory_topology
+                .production_history_inventory_indices
+                .len(),
+            64
+        );
+        assert!(
+            !indexed_state
+                .factory_topology
+                .production_history_inventory_full_scan_required
+        );
+        let mut oracle_state = indexed_state.clone();
+        let oracle_topology = std::sync::Arc::make_mut(&mut oracle_state.factory_topology);
+        oracle_topology.production_history_inventory_indices.clear();
+        oracle_topology.production_history_inventory_full_scan_required = true;
+
+        for workers in [1, 2, 4, 8] {
+            let runtime = DeterministicRuntime::for_test(workers);
+            let mut indexed = base.clone();
+            indexed_state
+                .record_production_history_with_records_and_runtime(
+                    &mut indexed,
+                    &entities,
+                    Some(PreparedBeltFlow::Exact(
+                        crate::belts::BeltFlowAggregate::default(),
+                    )),
+                    None,
+                    None,
+                    &runtime,
+                )
+                .unwrap();
+            let mut oracle = base.clone();
+            oracle_state
+                .record_production_history_with_records_and_runtime(
+                    &mut oracle,
+                    &entities,
+                    Some(PreparedBeltFlow::Exact(
+                        crate::belts::BeltFlowAggregate::default(),
+                    )),
+                    None,
+                    None,
+                    &runtime,
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::to_vec(&indexed).unwrap(),
+                serde_json::to_vec(&oracle).unwrap(),
+                "sparse inventory bytes differ at {workers} workers"
+            );
         }
     }
 
@@ -2406,6 +2550,7 @@ mod tests {
                         crate::belts::BeltFlowAggregate::default(),
                     )),
                     None,
+                    None,
                     &runtime,
                 )
                 .unwrap();
@@ -2417,6 +2562,7 @@ mod tests {
                     Some(PreparedBeltFlow::Exact(
                         crate::belts::BeltFlowAggregate::default(),
                     )),
+                    None,
                     None,
                     &runtime,
                 )
@@ -2470,6 +2616,7 @@ mod tests {
                     Some(PreparedBeltFlow::Exact(
                         crate::belts::BeltFlowAggregate::default(),
                     )),
+                    None,
                     None,
                     &runtime,
                 )
@@ -2560,6 +2707,7 @@ mod tests {
                 &entities,
                 Some(PreparedBeltFlow::NotRequired),
                 None,
+                None,
                 &DeterministicRuntime::for_test(8),
             )
             .unwrap();
@@ -2571,6 +2719,7 @@ mod tests {
                 &mut oracle,
                 &entities,
                 Some(PreparedBeltFlow::NotRequired),
+                None,
                 None,
                 &DeterministicRuntime::for_test(1),
             )
@@ -2633,6 +2782,7 @@ mod tests {
                     Some(PreparedBeltFlow::Exact(
                         crate::belts::BeltFlowAggregate::default(),
                     )),
+                    None,
                     None,
                     &runtime,
                 )
@@ -2720,6 +2870,7 @@ mod tests {
                 &entities,
                 Some(PreparedBeltFlow::NotRequired),
                 Some(&prepared_metrics),
+                None,
                 &DeterministicRuntime::for_test(8),
             )
             .unwrap();
@@ -2734,6 +2885,7 @@ mod tests {
                 &mut oracle,
                 &entities,
                 Some(PreparedBeltFlow::NotRequired),
+                None,
                 None,
                 &DeterministicRuntime::for_test(1),
             )

@@ -31,6 +31,7 @@ function projection() {
         code: "no-power", label: "无供电",
       }],
     },
+    factoryExecution: null,
     limits: { alertRows: 1024, projectionBytes: 524288 },
   };
 }
@@ -69,4 +70,52 @@ test("operations overflow is accepted only with empty rows and a proven count be
   const normalized = normalizeRendererNativeResult("coreOperationsWorkspaceProjection", value, context);
   assert.equal(normalized.alerts.status, "overflow");
   assert.deepEqual(normalized.alerts.rows, []);
+});
+
+test("operations boundary accepts revision-bound factory execution evidence", () => {
+  const value = projection();
+  value.summary.entityCount = 120;
+  value.summary.activePlanetEntityCount = 120;
+  value.factoryExecution = {
+    sourceRevision: 16,
+    resultRevision: 17,
+    simulationSeconds: 5,
+    steps: 5,
+    entityCount: 120,
+    writerSubmittedRows: 7,
+    writerUniqueDomainRows: 5,
+    writerUniqueRows: 3,
+    writerDomains: ["inventory", "production", "power"],
+    topologyChanged: false,
+    workerLimit: 4,
+    observedWorkerCount: 4,
+    parallelPrepareStages: 1,
+    serialPrepareStages: 0,
+    stageScans: [{
+      stage: "ordinary-production",
+      invocations: 5,
+      selectedRows: 12,
+      totalCandidateRows: 120,
+      stableRowsSkipped: 108,
+      denseFallbacks: 0,
+      directoryFallbacks: 0,
+      fullScans: 0,
+    }],
+  };
+
+  const normalized = normalizeRendererNativeResult("coreOperationsWorkspaceProjection", value, context);
+  assert.equal(normalized.factoryExecution.resultRevision, 17);
+  assert.equal(normalized.factoryExecution.stageScans[0].stableRowsSkipped, 108);
+
+  assert.throws(() => normalizeRendererNativeResult("coreOperationsWorkspaceProjection", {
+    ...value,
+    factoryExecution: { ...value.factoryExecution, resultRevision: 18 },
+  }, context), (error) => error.code === "NATIVE_PROTOCOL_INVALID");
+  assert.throws(() => normalizeRendererNativeResult("coreOperationsWorkspaceProjection", {
+    ...value,
+    factoryExecution: {
+      ...value.factoryExecution,
+      stageScans: [{ ...value.factoryExecution.stageScans[0], selectedRows: 121 }],
+    },
+  }, context), (error) => error.code === "NATIVE_PROTOCOL_INVALID");
 });

@@ -1,5 +1,5 @@
 const { contextBridge, ipcRenderer } = require("electron");
-const { createHash } = require("node:crypto");
+const { createHash, randomUUID } = require("node:crypto");
 const {
   createRendererNativeError,
   createRendererNativeRejection,
@@ -23,6 +23,15 @@ const NATIVE_CORE_TRANSFER_PROJECTION_TYPES = Object.freeze([
   "stellar-quantum-v1",
   "dyson-workspace-v1", "system-space-station-workspace-v1",
 ]);
+const NATIVE_CORE_SUBSCRIPTION_CHANNELS = Object.freeze({
+  "viewport-topology": Object.freeze(["viewport-v2", "factory-read-model-v1"]),
+  telemetry: Object.freeze(["statistics-v1", "operations-workspace-v1"]),
+  "belt-geometry": Object.freeze(["viewport-v2"]),
+  "belt-flow": Object.freeze(["viewport-v2"]),
+  inventory: Object.freeze(["factory-inventory-v1", "construction-inventory-v1"]),
+  workspace: Object.freeze(["technology-v1", "operations-workspace-v1"]),
+  notification: Object.freeze(["operations-workspace-v1"]),
+});
 let nativeProjectionSequence = 0;
 
 function isPlainRecord(value) {
@@ -427,6 +436,180 @@ function requestNativeCoreProjectionTransfer(request) {
   });
 }
 
+function subscribeNativeCoreProjection(request, listener) {
+  if (!hasExactKeys(request, ["sessionId", "channel", "projectionType", "payload"]) ||
+      !validLogicalPreloadId(request.sessionId, 128) ||
+      !Object.hasOwn(NATIVE_CORE_SUBSCRIPTION_CHANNELS, request.channel) ||
+      !NATIVE_CORE_SUBSCRIPTION_CHANNELS[request.channel].includes(request.projectionType) ||
+      !isPlainRecord(request.payload) || Object.hasOwn(request.payload, "sessionId") ||
+      typeof listener !== "function") {
+    throw new TypeError("原生投影订阅请求无效");
+  }
+  const encodedRequestBytes = Buffer.byteLength(JSON.stringify(request.payload), "utf8");
+  if (encodedRequestBytes > MAX_STELLAR_PROJECTION_REQUEST_BYTES) {
+    throw new TypeError("原生投影订阅请求超过安全上限");
+  }
+  const subscriptionId = `projection-${randomUUID()}`;
+  const channel = new MessageChannel();
+  let sequence = nativeProjectionSequence >= Number.MAX_SAFE_INTEGER
+    ? 1
+    : nativeProjectionSequence + 1;
+  nativeProjectionSequence = sequence;
+  let closed = false;
+  const finish = () => {
+    if (closed) return;
+    closed = true;
+    channel.port1.onmessage = null;
+    channel.port1.onmessageerror = null;
+    channel.port1.close();
+  };
+  const publishError = (error) => {
+    if (closed) return;
+    try { listener({ kind: "error", error }); } finally { finish(); }
+  };
+  channel.port1.onmessage = async (event) => {
+    if (closed) return;
+    if (event.data?.error) {
+      publishError(createRendererNativeError(event.data.error, {
+        fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+        message: "原生投影订阅失败，请重试",
+      }));
+      return;
+    }
+    if (event.data?.subscriptionError) {
+      const failure = event.data.subscriptionError;
+      if (!hasExactKeys(failure, ["schemaVersion", "subscriptionId", "sequence", "code"]) ||
+          failure.schemaVersion !== 1 || failure.subscriptionId !== subscriptionId ||
+          failure.sequence !== null && (!Number.isSafeInteger(failure.sequence) || failure.sequence < 1) ||
+          typeof failure.code !== "string" || !/^[A-Z][A-Z0-9_]{0,127}$/.test(failure.code)) {
+        publishError(localNativeError({
+          fallbackCode: "NATIVE_PROTOCOL_INVALID",
+          message: "原生投影订阅错误帧无效",
+        }));
+        return;
+      }
+      const recoverable = [
+        "NATIVE_PLAYER_AUTHORITY_PROJECTION_REVISION_MISMATCH",
+        "NATIVE_PLAYER_AUTHORITY_PROJECTION_UNAVAILABLE",
+      ].includes(failure.code);
+      const subscriptionError = Object.assign(new Error("原生投影订阅读取失败"), {
+        code: failure.code,
+      });
+      if (recoverable) {
+        listener({ kind: "error", error: subscriptionError, recoverable: true });
+      } else {
+        publishError(subscriptionError);
+      }
+      return;
+    }
+    const subscription = event.data?.subscription;
+    const header = event.data?.header;
+    const rawPayload = event.data?.payload;
+    const payload = rawPayload instanceof Uint8Array
+      ? rawPayload
+      : rawPayload instanceof ArrayBuffer
+        ? new Uint8Array(rawPayload)
+        : null;
+    if (!hasExactKeys(subscription, [
+      "schemaVersion", "subscriptionId", "channel", "coalescedCount", "readMs", "encodeMs",
+    ]) || subscription.schemaVersion !== 1 || subscription.subscriptionId !== subscriptionId ||
+        subscription.channel !== request.channel ||
+        !Number.isSafeInteger(subscription.coalescedCount) || subscription.coalescedCount < 0 ||
+        !Number.isFinite(subscription.readMs) || subscription.readMs < 0 || subscription.readMs > 60_000 ||
+        !Number.isFinite(subscription.encodeMs) || subscription.encodeMs < 0 || subscription.encodeMs > 60_000 ||
+        !header || header.schemaVersion !== 1 || header.sessionId !== request.sessionId ||
+        header.projectionType !== request.projectionType ||
+        !Number.isSafeInteger(header.sequence) || header.sequence < 1 ||
+        !Number.isSafeInteger(header.revision) || header.revision < 0 ||
+        !Number.isSafeInteger(header.payloadLength) || header.payloadLength < 1 ||
+        header.payloadLength > MAX_NATIVE_PROJECTION_TRANSFER_BYTES ||
+        typeof header.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(header.sha256) ||
+        !payload || payload.byteLength !== header.payloadLength) {
+      publishError(localNativeError({
+        fallbackCode: "NATIVE_PROTOCOL_INVALID",
+        message: "原生投影订阅帧验证失败",
+      }));
+      return;
+    }
+    const validationStartedAt = performance.now();
+    const checksum = createHash("sha256")
+      .update(Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength))
+      .digest("hex");
+    if (checksum !== header.sha256) {
+      publishError(localNativeError({
+        fallbackCode: "NATIVE_PROTOCOL_INVALID",
+        message: "原生投影订阅正文校验失败",
+      }));
+      return;
+    }
+    const bodyBuffer = payload.buffer.slice(payload.byteOffset, payload.byteOffset + payload.byteLength);
+    const validationMs = Math.max(0, performance.now() - validationStartedAt);
+    const installStartedAt = performance.now();
+    try {
+      const accepted = await listener({
+        kind: "frame",
+        transfer: { header, bodyBuffer },
+        metrics: {
+          channel: request.channel,
+          coalescedCount: subscription.coalescedCount,
+          readMs: subscription.readMs,
+          encodeMs: subscription.encodeMs,
+          validationMs,
+        },
+      });
+      if (accepted === false) throw new Error("renderer rejected the native projection subscription frame");
+      const installMs = Math.max(0, Math.min(60_000, performance.now() - installStartedAt));
+      channel.port1.postMessage({ projectionAck: {
+        subscriptionId,
+        sequence: header.sequence,
+        sha256: header.sha256,
+        validationMs,
+        installMs,
+      } });
+    } catch (error) {
+      publishError(createRendererNativeError(error, {
+        fallbackCode: "NATIVE_CORE_PROJECTION_INSTALL_FAILED",
+        message: "原生投影订阅安装失败",
+      }));
+    }
+  };
+  channel.port1.onmessageerror = () => publishError(localNativeError({
+    fallbackCode: "NATIVE_PROTOCOL_INVALID",
+    message: "原生投影订阅帧无法读取",
+  }));
+  channel.port1.start?.();
+  ipcRenderer.postMessage("desktop:native-core-projection-subscribe", {
+    subscriptionId,
+    sessionId: request.sessionId,
+    channel: request.channel,
+    projectionType: request.projectionType,
+    sequence,
+    payload: request.payload,
+  }, [channel.port2]);
+  return Object.freeze({
+    update(payload) {
+      if (closed) throw new Error("原生投影订阅已关闭");
+      if (!isPlainRecord(payload) || Object.hasOwn(payload, "sessionId") ||
+          Buffer.byteLength(JSON.stringify(payload), "utf8") > MAX_STELLAR_PROJECTION_REQUEST_BYTES) {
+        throw new TypeError("原生投影订阅更新无效");
+      }
+      if (sequence >= Number.MAX_SAFE_INTEGER) {
+        publishError(localNativeError({
+          fallbackCode: "NATIVE_PROTOCOL_INVALID",
+          message: "原生投影订阅序号已耗尽",
+        }));
+        return;
+      }
+      sequence += 1;
+      channel.port1.postMessage({ update: { sequence, payload } });
+    },
+    close() {
+      if (closed) return;
+      try { channel.port1.postMessage({ close: { subscriptionId } }); } finally { finish(); }
+    },
+  });
+}
+
 function prepareNativeOfflineStartup(request) {
   const normalizedRequest = normalizeNativeOfflineStartupPreloadRequest(request);
   return new Promise((resolve, reject) => {
@@ -583,6 +766,14 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   // Persistence is main-owned after handoff. Neither method accepts a
   // session, run, owner, lease, checkpoint, or fencing identity.
   checkpointNativePlayerAuthority: () => invokeNative("desktop:native-player-authority-checkpoint", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_CHECKPOINT_FAILED", message: "Windows 原生权威检查点验证失败，请重试" }),
+  restartNativePlayerAuthorityFromDurable: (request) => invokeNative(
+    "desktop:native-player-authority-restart-from-durable",
+    {
+      fallbackCode: "NATIVE_PLAYER_AUTHORITY_DURABLE_RESTART_FAILED",
+      message: "Windows 原生权威无法从当前 durable 边界安全重启",
+    },
+    request,
+  ),
   exportNativePlayerAuthorityV47: (request) => invokeNative("desktop:native-player-authority-export-v47", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_EXPORT_FAILED", message: "Windows 原生权威 v47 存档导出失败" }, request),
   uploadNativePlayerAuthorityCloudSave: (request) => invokeNative("desktop:native-player-authority-cloud-upload", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_CLOUD_UPLOAD_FAILED", message: "Windows 原生权威云上传失败" }, request),
   onNativePlayerAuthorityCloudProgress: subscribeNativePlayerAuthorityCloudProgress,
@@ -593,6 +784,8 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   /** Read-only candidate: renderer never supplies time, a path, or an export ID. */
   prepareNativeOfflineStartup,
   getRuntimeDiagnostics: () => ipcRenderer.invoke("desktop:runtime-diagnostics"),
+  getNativeProjectionSubscriptionDiagnostics: () =>
+    ipcRenderer.invoke("desktop:native-projection-subscription-diagnostics"),
   getNativePerformancePolicy: () => invokeNative("desktop:native-performance-policy", { fallbackCode: "NATIVE_PERFORMANCE_POLICY_READ_FAILED", message: "无法读取 Windows 原生性能策略" }),
   setNativePerformancePolicy: (request) => invokeNative("desktop:set-native-performance-policy", { fallbackCode: "NATIVE_PERFORMANCE_POLICY_WRITE_FAILED", message: "无法保存 Windows 原生性能策略" }, request),
   beginNativeSave: (request) => invokeNative("desktop:native-save-begin", { fallbackCode: "NATIVE_SAVE_BEGIN_FAILED", message: "原生存档事务启动失败，请重试" }, request),
@@ -640,6 +833,7 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   getNativeCoreGalaxyAccountWorkspaceProjection: (request) => invokeNative("desktop:native-core-galaxy-account-workspace-projection", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生银河账户工作区投影请求失败，请重试" }, normalizeAuthorityWorkspacePreloadRequest(request)),
   getNativeCoreCommandPaletteEntitySearch: (request) => invokeNative("desktop:native-core-command-palette-entity-search", { fallbackCode: "NATIVE_CORE_PROJECTION_FAILED", message: "原生命令面板设备搜索失败，请重试" }, request),
   requestNativeCoreProjectionTransfer,
+  subscribeNativeCoreProjection,
   applyNativeCoreCommand: (request) => invokeNative("desktop:native-core-apply-command", { fallbackCode: "NATIVE_CORE_COMMAND_FAILED", message: "原生影子命令执行失败，请重试" }, request),
   reconcileNativeCoreCommand: (request) => invokeNative("desktop:native-core-reconcile-command", { fallbackCode: "NATIVE_CORE_COMMAND_RECONCILE_FAILED", message: "原生权威命令耐久收据对账失败" }, request),
   getNativePlayerAuthorityHistoryStatus: (request) => invokeNative("desktop:native-player-authority-history-status", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_HISTORY_STATUS_FAILED", message: "原生撤销历史读取失败" }, request),

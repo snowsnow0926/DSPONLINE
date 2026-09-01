@@ -24,7 +24,7 @@ import {
   type SnapGrid,
 } from "@xyflow/react";
 import { lazy, memo, Profiler, startTransition, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
-import { Activity, AlertTriangle, ArrowUp, BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Focus, Map as MapIcon, PanelRightClose, Route, Satellite, Sparkles, Trash2, WandSparkles, X } from "lucide-react";
+import { Activity, AlertTriangle, ArrowUp, BookOpen, Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Copy, Download, Focus, Map as MapIcon, PanelRightClose, RefreshCw, Route, Satellite, Sparkles, Trash2, WandSparkles, X } from "lucide-react";
 import {
   ConstructionDock,
   HeaderControls,
@@ -2868,6 +2868,38 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const [nativePlayerAuthorityHistory, setNativePlayerAuthorityHistory] = useState<
     DesktopNativePlayerAuthorityHistoryStatus | null
   >(null);
+  const [nativeAuthorityDurableRestartPending, setNativeAuthorityDurableRestartPending] = useState(false);
+  const currentNativeAuthorityFrame = nativePlayerAuthorityClockSnapshot.currentFrame;
+  const nativeAuthorityDurableRestartRevision = currentNativeAuthorityFrame && (
+    currentNativeAuthorityFrame.schemaVersion === 1
+      ? ["uncertain", "pause-uncertain", "resume-uncertain", "faulted"].includes(
+        currentNativeAuthorityFrame.phase,
+      )
+      : ["macro-uncertain", "faulted"].includes(currentNativeAuthorityFrame.phase)
+  ) ? currentNativeAuthorityFrame.revision : null;
+  const restartNativeAuthorityFromDurable = useCallback(async () => {
+    const restart = desktopBridge?.restartNativePlayerAuthorityFromDurable;
+    const expectedRevision = nativeAuthorityDurableRestartRevision;
+    if (!restart || expectedRevision === null || nativeAuthorityDurableRestartPending) return;
+    if (!window.confirm(
+      `将关闭并重新启动 Windows 性能版，从 Rust 已落盘的不早于 revision ${expectedRevision} 的检查点恢复。不会读取旧 JavaScript 镜像，是否继续？`,
+    )) return;
+    setNativeAuthorityDurableRestartPending(true);
+    try {
+      const result = await restart({ expectedRevision });
+      if (result.schemaVersion !== 1 || result.accepted !== true ||
+          result.recoveryMode !== "rust-durable-reconcile" ||
+          result.minimumRevision !== expectedRevision) {
+        throw new Error("原生 durable 重启回执不一致");
+      }
+      setNotice(`已确认 revision ${expectedRevision} 的 Rust durable 恢复边界，应用正在安全重启`);
+    } catch (error) {
+      setNativeAuthorityDurableRestartPending(false);
+      setNotice(error instanceof Error
+        ? `${error.message}；仍保持 Rust 权威暂停，未切回旧 JavaScript 镜像`
+        : "原生 durable 重启失败；仍保持 Rust 权威暂停，未切回旧 JavaScript 镜像");
+    }
+  }, [desktopBridge, nativeAuthorityDurableRestartPending, nativeAuthorityDurableRestartRevision]);
   const [nativeConstructionCenterPendingIdentity, setNativeConstructionCenterPendingIdentity] = useState<
     NativeConstructionCenterPendingIdentity | null
   >(null);
@@ -3346,6 +3378,14 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   ) => Promise<DesktopNativeCoreOperationsWorkspaceProjectionResult>) | null>(() => {
     const readProjection = desktopBridge?.getNativeCoreOperationsWorkspaceProjection;
     return typeof readProjection === "function" ? readProjection : null;
+  }, [desktopBridge]);
+  const nativeOperationsSubscribeProjection = useMemo(() => {
+    const subscribe = desktopBridge?.subscribeNativeCoreProjection;
+    return typeof subscribe === "function" ? subscribe : null;
+  }, [desktopBridge]);
+  const nativeOperationsFetchProjectionDiagnostics = useMemo(() => {
+    const readDiagnostics = desktopBridge?.getNativeProjectionSubscriptionDiagnostics;
+    return typeof readDiagnostics === "function" ? readDiagnostics : null;
   }, [desktopBridge]);
   const nativeOperationsCommitSetting = useMemo<((
     request: DesktopNativeOperationsSettingIntentRequest,
@@ -15875,6 +15915,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       occupancy: canvasTopology.occupancy,
     };
   }, [activePlanetBelts, canvasTopology]);
+  const canvasBeltFlowActivity = useMemo(() => new Map(
+    activePlanetBelts.map((belt) => [belt.id, belt.lastFlow] as const),
+  ), [activePlanetBelts]);
 
   const beltBundleMap = canvasTopology.bundleByBeltId;
   const activeLogisticsEntityIdSet = useMemo(() => new Set(beltNodeIndex.activeEntityIds), [beltNodeIndex.activeEntityIds]);
@@ -22252,6 +22295,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
               width={canvasViewportSize.width}
               height={canvasViewportSize.height}
               selectedBeltIds={selectedBeltIdSet}
+              flowActivityByBeltId={canvasBeltFlowActivity}
               onUnavailable={handleCanvasBatchUnavailable}
             /> : null}
             <ViewportPortal>
@@ -23732,6 +23776,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onTabChange={setOperationsTab}
             identity={nativeOperationsIdentity}
             fetchProjection={nativeOperationsFetchProjection}
+            subscribeProjection={nativeOperationsSubscribeProjection}
+            fetchProjectionDiagnostics={nativeOperationsFetchProjectionDiagnostics}
             commitSetting={nativeOperationsCommitSetting}
             theme={themeMode}
             fontScale={nativeFontScale}
@@ -23948,6 +23994,26 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       />
       {!nativePlayerAuthorityOwnsRuntime ? <SpeedrunStatusPanel game={game} /> : null}
       {interactionBursts.map((burst) => <div className={`interaction-burst interaction-burst--${burst.tone}`} style={{ left: burst.x, top: burst.y }} key={burst.id}><i>{burst.tone === "warning" ? <Sparkles size={13} /> : <Check size={13} />}</i><span>{burst.label}</span></div>)}
+      {nativeAuthorityDurableRestartRevision !== null ? <aside
+        className="save-emergency-warning"
+        role="alert"
+        aria-live="assertive"
+        data-native-authority-durable-restart
+      >
+        <AlertTriangle size={20} />
+        <span>
+          <strong>Rust 权威已停在故障恢复边界，当前画面保持只读。</strong>
+          <small>不会回到旧 JavaScript 镜像；可让应用从当前 durable revision 重新打开。</small>
+        </span>
+        <button
+          type="button"
+          disabled={nativeAuthorityDurableRestartPending ||
+            typeof desktopBridge?.restartNativePlayerAuthorityFromDurable !== "function"}
+          onClick={() => void restartNativeAuthorityFromDurable()}
+        >
+          <RefreshCw size={15} /><span>{nativeAuthorityDurableRestartPending ? "正在重启" : "从检查点重启"}</span>
+        </button>
+      </aside> : null}
       {saveFailure ? <aside className="save-emergency-warning" role="alert" aria-live="assertive">
         <AlertTriangle size={20} />
         <span><strong>{saveFailure.code === "quota" ? "本地存储空间不足，当前进度尚未保存。请立即导出存档。" : saveFailure.message}</strong><small>{saveFailure.code === "read-only" ? "本页不会自动保存；关闭其他标签页后使用顶部接管按钮，或立即导出当前进度。" : saveFailure.code === "conflict" ? "双方版本都已保存；请先在顶部冲突提示中选择，不会静默覆盖。" : "自动保存会继续重试，导出文件不会删除或覆盖现有存档。"}</small></span>

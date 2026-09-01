@@ -3,7 +3,10 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DesktopNativeCoreOperationsWorkspaceProjectionResult } from "../desktop";
+import type {
+  DesktopNativeCoreOperationsWorkspaceProjectionResult,
+  DesktopNativeCoreProjectionSubscriptionEvent,
+} from "../desktop";
 import { NativeOperationsWorkspace, type NativeOperationsWorkspaceProps } from "./NativeOperationsWorkspace";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -27,6 +30,7 @@ function projection(overrides: Partial<DesktopNativeCoreOperationsWorkspaceProje
       status: "complete", totalCount: 1, criticalCount: 1, warningCount: 0,
       rows: [{ entityId: "entity-1", planetId: "home", buildingId: "arc_smelter", recipeId: null, resourceId: null, severity: "critical", code: "no-power", label: "无供电" }],
     },
+    factoryExecution: null,
     limits: { alertRows: 1024, projectionBytes: 524288 }, ...overrides,
   };
 }
@@ -36,7 +40,9 @@ function props(overrides: Partial<NativeOperationsWorkspaceProps> = {}): NativeO
     open: true,
     tab: "alerts", onTabChange: vi.fn(),
     identity: { sessionId: "session-1", runId: "run-1", expectedRevision: 7, expectedRegistryFingerprint: "7df8cf3a" },
-    fetchProjection: vi.fn(async () => projection()), commitSetting: vi.fn(async () => ({})),
+    fetchProjection: vi.fn(async () => projection()), subscribeProjection: null,
+    fetchProjectionDiagnostics: null,
+    commitSetting: vi.fn(async () => ({})),
     theme: "dark", fontScale: 1, factoryAlertsEnabled: true,
     canvasDetailPreference: "auto", connectionPointSize: "default",
     connectionHitArea: "auto", defaultBeltLanes: 1,
@@ -75,6 +81,36 @@ function setInputValue(input: HTMLInputElement, value: string) {
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+async function subscriptionFrame(
+  value: DesktopNativeCoreOperationsWorkspaceProjectionResult,
+): Promise<Extract<DesktopNativeCoreProjectionSubscriptionEvent, { kind: "frame" }>> {
+  const bodyBuffer = new TextEncoder().encode(JSON.stringify(value)).buffer;
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bodyBuffer));
+  const sha256 = [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return {
+    kind: "frame",
+    transfer: {
+      header: {
+        schemaVersion: 1,
+        sessionId: value.sessionId,
+        revision: value.revision,
+        sequence: value.revision + 1,
+        projectionType: "operations-workspace-v1",
+        payloadLength: bodyBuffer.byteLength,
+        sha256,
+      },
+      bodyBuffer,
+    },
+    metrics: {
+      channel: "telemetry",
+      coalescedCount: 0,
+      readMs: 0.2,
+      encodeMs: 0.1,
+      validationMs: 0.1,
+    },
+  };
+}
+
 describe("NativeOperationsWorkspace", () => {
   let host: HTMLDivElement;
   let root: Root;
@@ -87,6 +123,37 @@ describe("NativeOperationsWorkspace", () => {
     expect(host.textContent).toContain("无供电");
     await act(async () => button(host, "无供电").click());
     expect(value.onAlertSelect).toHaveBeenCalledWith(expect.objectContaining({ entityId: "entity-1" }));
+  });
+
+  it("keeps one ACK-gated telemetry subscription across authority revisions and releases it on close", async () => {
+    let listener: ((event: DesktopNativeCoreProjectionSubscriptionEvent) => unknown) | null = null;
+    const handle = { update: vi.fn(), close: vi.fn() };
+    const subscribeProjection: NonNullable<NativeOperationsWorkspaceProps["subscribeProjection"]> = vi.fn((_request, nextListener) => {
+      listener = nextListener;
+      return handle;
+    });
+    const value = props({ subscribeProjection, fetchProjection: vi.fn(async () => projection()) });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} />); });
+    expect(subscribeProjection).toHaveBeenCalledTimes(1);
+    expect(value.fetchProjection).not.toHaveBeenCalled();
+    await act(async () => { await listener?.(await subscriptionFrame(projection())); });
+    expect(host.textContent).toContain("REV 7");
+
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value}
+      identity={{
+        sessionId: "session-1",
+        runId: "run-1",
+        expectedRevision: 8,
+        expectedRegistryFingerprint: "7df8cf3a",
+      }} />); });
+    expect(subscribeProjection).toHaveBeenCalledTimes(1);
+    expect(handle.update).toHaveBeenCalledWith({
+      runId: "run-1",
+      expectedRevision: 8,
+      expectedRegistryFingerprint: "7df8cf3a",
+    });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} open={false} />); });
+    expect(handle.close).toHaveBeenCalledTimes(1);
   });
 
   it("retires an old projection when authority identity switches", async () => {

@@ -1448,6 +1448,7 @@ impl CoreState {
                 "totalCount": alerts.total_count, "criticalCount": alerts.critical_count,
                 "warningCount": alerts.warning_count, "rows": alerts.rows,
             },
+            "factoryExecution": self.factory_execution_diagnostics(),
             "limits": { "alertRows": MAX_ALERT_ROWS, "projectionBytes": MAX_PROJECTION_BYTES },
         });
         if serde_json::to_vec(&projection)?.len() > MAX_PROJECTION_BYTES {

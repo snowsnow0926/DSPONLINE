@@ -35,6 +35,7 @@ mod factory_canvas_presentation;
 mod factory_inventory;
 mod factory_layout_command;
 mod factory_read_model;
+mod factory_writer_events;
 mod galactic_export_command;
 mod galactic_exports;
 mod galaxy_account_workspace;
@@ -77,6 +78,9 @@ pub use catalog::{
     TechnologyDefinition,
 };
 pub use command::{CommandApplyResult, SimulationCommandPatch};
+pub use factory_writer_events::{
+    FactoryExecutionDiagnostics, FactoryStageExecutionDiagnostics, FactoryStageScanDiagnostics,
+};
 pub use profile_evidence::{
     ProfileOperationBinding, ProfileOperationCapture, ProfileOperationPurpose,
     with_profile_operation_binding,

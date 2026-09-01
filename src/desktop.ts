@@ -307,6 +307,10 @@ export interface DesktopBridge {
   ) => () => void;
   /** Main-owned and identity-free; reuses the last Rust lease ACK checkpoint. */
   checkpointNativePlayerAuthority?: () => Promise<DesktopNativePlayerAuthorityCheckpointResult>;
+  /** Explicit fault recovery; Rust ownership is retained and the app reopens from durable state. */
+  restartNativePlayerAuthorityFromDurable?: (
+    request: { readonly expectedRevision: number },
+  ) => Promise<DesktopNativePlayerAuthorityDurableRestartResult>;
   /** Main selects the active authority session; renderer supplies only export presentation data. */
   exportNativePlayerAuthorityV47?: (
     request: DesktopNativePlayerAuthorityExportRequest,
@@ -331,6 +335,8 @@ export interface DesktopBridge {
     request: DesktopNativeOfflineStartupRequest,
   ) => Promise<DesktopNativeOfflineStartupResult>;
   getRuntimeDiagnostics: () => Promise<DesktopRuntimeDiagnostics>;
+  getNativeProjectionSubscriptionDiagnostics?: () =>
+    Promise<DesktopNativeProjectionSubscriptionDiagnostics>;
   getNativePerformancePolicy: () => Promise<DesktopNativePerformancePolicyStatus>;
   setNativePerformancePolicy: (request: DesktopNativePerformancePolicy) => Promise<DesktopNativePerformancePolicyStatus>;
   beginNativeSave: (request: DesktopNativeSaveBeginRequest) => Promise<DesktopNativeSaveBeginResult>;
@@ -410,6 +416,12 @@ export interface DesktopBridge {
   /** Current Windows thin-UI host only; native authority never falls back to a renderer entity scan. */
   getNativeCoreCommandPaletteEntitySearch?: (request: DesktopNativeCoreCommandPaletteEntitySearchRequest) => Promise<DesktopNativeCoreCommandPaletteEntitySearchResult>;
   requestNativeCoreProjectionTransfer?: (request: DesktopNativeCoreProjectionTransferRequest) => Promise<DesktopNativeCoreProjectionTransferResult>;
+  /** Persistent, ACK-gated thin projection stream. Closing releases every queued frame in preload/main. */
+  subscribeNativeCoreProjection?: (
+    request: DesktopNativeCoreProjectionSubscriptionRequest,
+    listener: (event: DesktopNativeCoreProjectionSubscriptionEvent) =>
+      void | boolean | Promise<void | boolean>,
+  ) => DesktopNativeCoreProjectionSubscriptionHandle;
   applyNativeCoreCommand: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandResult>;
   /** Read-only lookup after a dispatched command lost its renderer response. */
   reconcileNativeCoreCommand?: (request: DesktopNativeCoreCommandRequest) => Promise<DesktopNativeCoreCommandReconciliationResult>;
@@ -570,6 +582,38 @@ export interface DesktopRuntimeProcessMetric {
     percent: number;
     idleWakeupsPerSecond: number;
     cumulativeSeconds?: number;
+  };
+}
+
+export interface DesktopNativeProjectionSubscriptionDiagnostics {
+  readonly schemaVersion: 1;
+  readonly activeSubscriptions: number;
+  readonly retainedClosedSubscriptions: number;
+  readonly acknowledgedFrames: number;
+  readonly deliveredFrames: number;
+  readonly coalescedFrames: number;
+  readonly queuedFrames: number;
+  readonly channels: ReadonlyArray<{
+    readonly channel: DesktopNativeCoreProjectionSubscriptionChannel;
+    readonly subscriptions: number;
+    readonly deliveredFrames: number;
+    readonly acknowledgedFrames: number;
+    readonly coalescedFrames: number;
+    readonly maximumQueuedFrames: number;
+    readonly readP95Ms: number;
+    readonly encodeP95Ms: number;
+    readonly validationP95Ms: number;
+    readonly installP95Ms: number;
+  }>;
+  readonly gateC: {
+    readonly frameBudgetMs: number;
+    readonly maximumRatio: 0.2;
+    readonly transportP95Ms: number;
+    readonly frameBudgetRatio: number;
+    readonly decision:
+      | "insufficient-samples"
+      | "bounded-message-port-retained"
+      | "shared-memory-evaluation-required";
   };
 }
 
@@ -3007,6 +3051,38 @@ export interface DesktopNativeCoreOperationsAlertRow {
   readonly label: string;
 }
 
+export interface DesktopNativeFactoryStageScanDiagnostics {
+  readonly stage: "logistics-buffer" | "material-delivery" | "ordinary-production" |
+    "planet-metrics" | "power-probe" | "quantum" | "construction" |
+    "local-dispatch" | "interstellar-dispatch" | "warper-refill" |
+    "local-congestion" | "interstellar-congestion" | "station-transition" | "belt";
+  readonly invocations: number;
+  readonly selectedRows: number;
+  readonly totalCandidateRows: number;
+  readonly stableRowsSkipped: number;
+  readonly denseFallbacks: number;
+  readonly directoryFallbacks: number;
+  readonly fullScans: number;
+}
+
+export interface DesktopNativeFactoryExecutionDiagnostics {
+  readonly sourceRevision: number;
+  readonly resultRevision: number;
+  readonly simulationSeconds: number;
+  readonly steps: number;
+  readonly entityCount: number;
+  readonly writerSubmittedRows: number;
+  readonly writerUniqueDomainRows: number;
+  readonly writerUniqueRows: number;
+  readonly writerDomains: readonly string[];
+  readonly topologyChanged: boolean;
+  readonly workerLimit: number;
+  readonly observedWorkerCount: number;
+  readonly parallelPrepareStages: number;
+  readonly serialPrepareStages: number;
+  readonly stageScans: readonly DesktopNativeFactoryStageScanDiagnostics[];
+}
+
 export interface DesktopNativeCoreOperationsWorkspaceProjectionResult {
   readonly schemaVersion: 1;
   readonly projectionType: "operations-workspace-v1";
@@ -3043,6 +3119,7 @@ export interface DesktopNativeCoreOperationsWorkspaceProjectionResult {
     readonly warningCount: number;
     readonly rows: readonly DesktopNativeCoreOperationsAlertRow[];
   };
+  readonly factoryExecution: DesktopNativeFactoryExecutionDiagnostics | null;
   readonly limits: { readonly alertRows: 1024; readonly projectionBytes: 524288 };
 }
 
@@ -3371,12 +3448,90 @@ export type DesktopNativeCoreProjectionTransferRequest =
       payload: Omit<DesktopNativeCoreSystemSpaceStationWorkspaceProjectionRequest, "sessionId">;
     };
 
+export type DesktopNativeCoreProjectionSubscriptionChannel =
+  | "viewport-topology"
+  | "telemetry"
+  | "belt-geometry"
+  | "belt-flow"
+  | "inventory"
+  | "workspace"
+  | "notification";
+
+export type DesktopNativeCoreProjectionSubscriptionRequest =
+  | {
+      sessionId: string;
+      channel: "viewport-topology" | "belt-geometry" | "belt-flow";
+      projectionType: "viewport-v2";
+      payload: Omit<DesktopNativeCoreViewportProjectionV2Request, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      channel: "viewport-topology";
+      projectionType: "factory-read-model-v1";
+      payload: Omit<DesktopNativeCoreFactoryReadModelRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      channel: "telemetry";
+      projectionType: "statistics-v1";
+      payload: Omit<DesktopNativeCoreStatisticsProjectionRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      channel: "telemetry" | "workspace" | "notification";
+      projectionType: "operations-workspace-v1";
+      payload: Omit<DesktopNativeCoreOperationsWorkspaceProjectionRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      channel: "inventory";
+      projectionType: "factory-inventory-v1";
+      payload: Omit<DesktopNativeCoreFactoryInventoryRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      channel: "inventory";
+      projectionType: "construction-inventory-v1";
+      payload: Omit<DesktopNativeCoreConstructionInventoryRequest, "sessionId">;
+    }
+  | {
+      sessionId: string;
+      channel: "workspace";
+      projectionType: "technology-v1";
+      payload: Omit<DesktopNativeCoreTechnologyProjectionRequest, "sessionId">;
+    };
+
+export interface DesktopNativeCoreProjectionSubscriptionMetrics {
+  readonly channel: DesktopNativeCoreProjectionSubscriptionChannel;
+  readonly coalescedCount: number;
+  readonly readMs: number;
+  readonly encodeMs: number;
+  readonly validationMs: number;
+}
+
+export type DesktopNativeCoreProjectionSubscriptionEvent =
+  | {
+      readonly kind: "frame";
+      readonly transfer: DesktopNativeCoreProjectionTransferResult;
+      readonly metrics: DesktopNativeCoreProjectionSubscriptionMetrics;
+    }
+  | {
+      readonly kind: "error";
+      readonly error: Error & { readonly code?: string };
+      readonly recoverable?: boolean;
+    };
+
+export interface DesktopNativeCoreProjectionSubscriptionHandle {
+  update(payload: DesktopNativeCoreProjectionSubscriptionRequest["payload"]): void;
+  close(): void;
+}
+
 export interface DesktopNativeCoreProjectionTransferHeader {
   schemaVersion: 1;
   sessionId: string;
   revision: number;
   sequence: number;
-  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "blueprint-workspace-v1" | "blueprint-capture-context-v1" | "blueprint-import-context-v1" | "blueprint-export-context-v1" | "blueprint-enqueue-context-v1" | "blueprint-direct-deploy-context-v1" | "construction-placement-context-v1" | "construction-belt-placement-context-v1" | "construction-belt-lane-context-v1" | "construction-belt-removal-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1" | "system-space-station-workspace-v1";
+  projectionType: "viewport-v1" | "viewport-v2" | "factory-read-model-v1" | "factory-inventory-v1" | "construction-inventory-v1" | "blueprint-workspace-v1" | "blueprint-capture-context-v1" | "blueprint-import-context-v1" | "blueprint-export-context-v1" | "blueprint-enqueue-context-v1" | "blueprint-direct-deploy-context-v1" | "construction-placement-context-v1" | "construction-belt-placement-context-v1" | "construction-belt-lane-context-v1" | "construction-belt-removal-context-v1" | "construction-removal-context-v1" | "construction-stack-context-v1" | "statistics-v1" | "technology-v1" | "recipe-workspace-v1" | "star-map-overview-v1" | "star-map-catalog-v1" | "stellar-industry-v1" | "stellar-industry-v2" | "stellar-quantum-v1" | "dyson-workspace-v1" | "system-space-station-workspace-v1" | "operations-workspace-v1";
   payloadLength: number;
   sha256: string;
 }
@@ -3541,6 +3696,13 @@ export interface DesktopNativePlayerAuthorityCheckpointResult {
   checkpoint: LocalSaveNativeAuthorityCheckpoint;
   summary: DesktopNativeCoreSummary;
   reusedAcknowledgedCheckpoint: true;
+}
+
+export interface DesktopNativePlayerAuthorityDurableRestartResult {
+  readonly schemaVersion: 1;
+  readonly accepted: true;
+  readonly recoveryMode: "rust-durable-reconcile";
+  readonly minimumRevision: number;
 }
 
 export interface DesktopNativePlayerAuthorityArtifactIdentity {

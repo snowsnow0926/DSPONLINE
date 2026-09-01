@@ -161,7 +161,7 @@ describe("factory thin-view App consumption", () => {
     expect(unlock).toMatch(/const ids = selectedEntities\.filter\(\(entity\) => entity\.interactionLocked\)[\s\S]*?commitGame\(\(current\) => setEntitiesInteractionLocked\(current, ids, false\)\)/);
   });
 
-  it("keeps the full-state mobile inspector on the legacy-only branch", () => {
+  it("uses the native thin mobile shell and keeps the full-state inspector on the legacy branch", () => {
     const app = readFileSync(resolve("src/App.tsx"), "utf8");
     const sheets = readFileSync(resolve("src/components/mobile/MobileSheets.tsx"), "utf8");
     const panels = readFileSync(resolve("src/components/mobile/MobileFactoryPanels.tsx"), "utf8");
@@ -169,7 +169,7 @@ describe("factory thin-view App consumption", () => {
     expect(app).toMatch(/factoryInteractionRows\.source === "native-authoritative"[\s\S]*?factoryInteractionRows\.inspectorSummaryReadModel/);
     expect(app).toMatch(/selectFactoryInspectorSummaryReadModel\([\s\S]*?nativeFactoryThinViewSnapshot/);
     expect(app).toMatch(/inspectorReadModel:\s*factoryInspectorSummaryReadModel/);
-    expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <MobileGameShell[\s\S]*?factoryGame=\{panelGame\}[\s\S]*?\/> : null/);
+    expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeMobileGameShell[\s\S]*?frame=\{nativeAuthoritativeFactoryWorkspaceFrame\}[\s\S]*?\/> : <MobileGameShell[\s\S]*?factoryGame=\{panelGame\}/);
     expect(app).not.toMatch(/factorySelectionReadGame/);
     expect(sheets).toMatch(/readModel=\{factory\.inspectorReadModel\}/);
     expect(sheets).toMatch(/<MobileInspectorSheet game=\{factoryGame\}/);

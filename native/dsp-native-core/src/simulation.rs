@@ -461,6 +461,7 @@ impl CoreState {
             let quantum_transition_runtime = prepared.quantum_transition_runtime.clone();
             let interstellar_peer_directory = prepared.interstellar_peer_directory.clone();
             let interstellar_route_activity = prepared.interstellar_route_activity.clone();
+            let factory_execution_diagnostics = prepared.factory_execution_diagnostics.clone();
             profile_mark!("simulate");
             let next_revision = previous_revision
                 .checked_add(1)
@@ -485,6 +486,7 @@ impl CoreState {
                     &prepared.entities,
                     Some(prepared.belt_flow),
                     cached_campaign_factory_metrics.as_ref(),
+                    Some(&prepared.writer_events),
                 )?;
             if let Some(production_history_tiers) = prepared.production_history_tiers.as_mut() {
                 production_history_tiers.refresh_after_internal_sample(&prepared.base);
@@ -526,6 +528,7 @@ impl CoreState {
             self.install_prepared_quantum_transition_runtime(quantum_transition_runtime);
             self.install_prepared_interstellar_peer_directory(interstellar_peer_directory);
             self.install_prepared_interstellar_route_activity(interstellar_route_activity);
+            self.install_factory_execution_diagnostics(factory_execution_diagnostics)?;
             profile_mark!("commit-state");
             if request.include_diagnostics {
                 profile_last!("summary");

@@ -2166,3 +2166,27 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 6. 回归覆盖 same-revision 工作区复用、1/5/60 秒增量与独立 flat oracle 完整投影 bytes/canonical hash、两类物流站行程 writer、topology reset、小数 MOD 负缓存、已完成 Campaign 零预载、历史稀疏复用、1/2/4/8 worker 旧 f64 收集一致性，以及三个失败候选/外层 Campaign 原子性边界。当前 focused 为 Campaign 过滤桶 `10/10`、production-history `23/23`、失败原子性 `3/3`；workspace check、Rust fmt、all-target strict clippy 和 diff check 通过。
 7. 完整 Core 默认并行首跑在 Windows 测试进程中以 `STATUS_ACCESS_VIOLATION` 退出，独立复跑又出现 `STATUS_HEAP_CORRUPTION`；相关定向并发/route/Campaign 测试均通过，改动不含 `unsafe`。单测试线程的 943 项首轮为 `940` 通过、`2` 按设计忽略、`1` 个旧 topology memory 手工公式失败；该公式按根因修复后，产品代码冻结点的 945 项串行全量为 `943` 通过、`2` 按设计忽略、`0` 失败（319.11 秒）。其后只把已有 completed-cache 测试扩展为 cold revision `0 rows/0 bytes`、workspace warm revision `0 rows incremental`，该扩展 fresh `1/1` 通过，未再改变产品代码。默认并行 heap corruption 另列 Windows 测试基础设施/全局状态 P0 调查，不静默删除，也不能用串行通过冒充并行问题已经解决。
 8. 本切片没有新增持久字段，不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Campaign 奖励、Host 协议或 `authorityEligible=false`；未读取真实玩家存档，未连接生产，未部署、打包或签名。
+
+### 24.38 Technology / Recipe / Dyson 跨 tick 稳定薄 UI 与自动边界门禁（2026-09-01，开发候选）
+
+本组合纵切把统计、Campaign/Galaxy 之后仍会在 player-authority tick 瞬态卸载的三个高频工作区统一收口，并把“Native 玩家界面不能重新吃回完整 GameState”从人工约定升级为 production build 门禁。它只稳定已存在的有界 Rust 投影和命令入口，不增加任何新的游戏结算语义。
+
+1. `6e74167` 让 Technology、Recipe 与 Dyson 使用同一套 `displayFrame/readFrame` 时钟边界。settled frame 可同时显示和读取；tick 已发布新 revision、main 尚未清除 in-flight 的窄窗口只保留同 session/run 的最后确认 frame 只读显示，不发不确定 revision 的 IPC。组件 key 不再包含 revision，因此普通每秒推进不会重建 DOM、清空搜索/草稿或丢失焦点与 IME。
+2. 三类 store 的 frame 与 source 都显式绑定 `sessionId/runId/revision/registryFingerprint`。同 lineage 的旧 revision 仅可在 loading/unavailable 窗口显示，所有写操作仍要求当前精确 projection；run、registry、owner epoch、revision 回退和 selector 改变会立即失败关闭。Technology/Recipe 请求与 projection broker 增加 run/registry 双侧验证，Dyson 默认恒星系也只从同 run 已验证页继承，不从旧 GameState 猜测。
+3. 请求去重只复用 exact request key 的同一 promise；迟到结果还要再次通过 owner、owner epoch、run、revision 与 registry 检查才可发布。业务拒绝不会把整个 authority 标成 uncertain，handoff/ABA 或 registry race 也不会把旧页重新绑定到新运行代际。
+4. `ed1b814` 增加基于 TypeScript AST 的 `verify-native-thin-ui-boundary`。production build 现在检查 App 中 13 个专用 Native 玩家界面绑定，禁止 `game/GameState/state/Worker/commitGame` 等完整状态或旧写入入口、禁止 JSX spread 隐藏整包依赖；同时扫描 12 个独立 Native 组件文件，拒绝 `GameState/FactoryEntity/BeltConnection` 完整工厂类型和直接 legacy authority 调用。合成反例与当前仓库门禁为 `4/4`。
+5. `62ea013` 修复一条旧静态测试的误匹配：它过去会把 `NativeGalaxyWorkspaceStore` 泛型声明误当成 `<NativeGalaxyWorkspace>` JSX，并把其后的上万行 App 当作 props。现在只截取精确自闭合 JSX opening；导航/失败关闭专项为 `11/11`，避免代码体积增长制造假回归。
+6. 冻结提交的新鲜验证为 focused Vitest 12 files `89/89`、Node broker/Host/三类 IPC/renderer boundary `75/75`、typecheck、production build（2,097 modules）、startup budget、Node syntax、diff check 与薄 UI 门禁全部通过。本节没有复用或冒充最终完整 Vitest、Rust、Server、E2E、安装、24 小时、多硬件、签名或灰度结果。
+7. 本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、canonical 规则或 `authorityEligible=false`；未读取真实玩家存档，未连接生产，未部署、打包或签名。
+
+### 24.39 可再生电源昂贵探测与结算活动化（2026-09-01，开发候选）
+
+`e266044` 收敛 `simple_factory` 中此前每个内部模拟步都会重新解析全部 power source JSON/catalog，并在随后 display patch 与 ordinary settlement 中再次访问全部可再生电源的热点。结论严格限定为“`O(active expensive probes + active renewable settlement)`”；全局浮点汇总仍按持久顺序重放全部紧凑行，不能把该子阶段写成完整 `O(active)` 电力系统。
+
+1. session-only `PowerProbeRuntime` 只缓存 writer-closed 的风力、太阳能和地热静态 probe；燃料电站、蓄电池、能量枢纽与射线接收始终动态重探。缓存绑定 revision、factory topology Arc、catalog Arc、entity/source 数量和完整 planet wind/solar/geothermal profile signature。冷启动、命令/import、拓扑或目录变化、profile 变化、非空 MOD registry、malformed shape、索引漂移及精确 75% 稠密阈值都走独立 flat-full 路径。
+2. 暖拍只为动态 source 构造完整 probe，并跳过已证明不变的 renewable display patch 与 ordinary settlement 行；冷拍与任何失效拍仍会全量写回。低负载→高负载→低负载、断电→恢复、动态 fuel/ray 与静态 renewable 混合回归逐字比较 `powerOutputKw/powerInputKw/utilization/productionRate`，没有用“当前恰好相同”替代 writer 审计。
+3. 无论 indexed 还是 flat-full，最终 grid/class 汇总仍按全部 source 的持久顺序重放紧凑标量，保留 JavaScript 的 IEEE-754 左结合顺序。`1/5/60`、1/2/4/8 workers、同一 advance 内科研完成边界、planet profile、dense/fail-closed、ray、fuel、MOD/malformed/topology 和候选失败原子性均要求完整物化 bytes、canonical/domain hash 与旧 oracle 相同。
+4. runtime 只在完整 simulation candidate 与外层 revision commit 成功后安装；失败候选不会清空源 cache 或发布部分 wake。内存估算按 runtime COW、静态 baseline、动态 source slots、profile signature 和一次完整 legacy probe buffer 的候选峰值保守计入，不把 cache 隐藏在 summary 外。
+5. 第一版只省 JSON/catalog probe，16,385 sources × 9 steps 的整段 A/B 仅约快 0.4%，因此没有合入。闭合 display patch/settlement 后，五次 indexed/flat-full 分别为 `1,115,235/1,520,441`、`1,121,843/1,495,976`、`1,404,874/1,787,710`、`1,174,693/1,736,010`、`1,149,744/1,608,502 µs`，稳定改善约 21%～32%，无跨零。expensive probes 为 `16,393 / 147,465`，两边 compact replay 均为 `147,465`。这只是合成电力子阶段证据，不外推完整模拟秒或真实玩家存档。
+6. focused `power_probe_` 首轮为 `11 passed / 0 failed / 1 ignored`，低→高→低负载专项 `1/1`；Rust fmt 与 dsp-native-core all-target/all-feature strict clippy `-D warnings` 通过。独立只读复审判定 `P0=0 / P1=0 / P2=2 / GO`：两个 P2 分别是缺少“candidate cache 已变异后再失败”的自动回归，以及峰值内存少计 full/dense 的两份 `Vec<usize>` 与 candidate profile allocation。`83d7521` 随即增加 post-`Arc::make_mut` 失败注入，逐项证明源 revision、完整 bytes、canonical hash、runtime Arc 和 scan history 不变；同时补齐保守内存 lower-bound。修复后 focused 为 `12 passed / 0 failed / 1 ignored`，strict clippy 与 fmt 继续通过。ignored 项是显式手工性能基准，不计作功能通过；最终组合 Core 全量仍待冻结后执行。
+7. 本切片没有新增持久字段，不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、Host/renderer 协议、package 1.2.3 或 `authorityEligible=false`；未读取真实玩家存档，未连接生产，未部署、打包或签名。

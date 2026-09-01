@@ -420,6 +420,12 @@ pub(crate) struct LocalPeerDirectory {
     runtime_reset_station_indices: Vec<usize>,
     local_congestion_reset_station_indices: Vec<usize>,
     interstellar_congestion_reset_station_indices: Vec<usize>,
+    /// Exact session-only generation of the interstellar peer directory whose
+    /// static waiting baseline has already been written. A new directory can
+    /// change remote peer availability without creating a route, so pointer
+    /// identity (rather than a lossy hash) forces one complete congestion
+    /// refresh before sparse route-only updates resume.
+    interstellar_congestion_generation: Option<Arc<()>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1129,10 +1135,6 @@ impl LocalPeerDirectory {
         self.runtime_reset_station_indices = station_indices;
     }
 
-    pub(crate) fn local_waiting_station_indices(&self) -> &[usize] {
-        &self.local_waiting_station_indices
-    }
-
     pub(crate) fn has_local_peer_match(
         &self,
         station_index: usize,
@@ -1175,6 +1177,16 @@ impl LocalPeerDirectory {
                 .all(|index| self.runtime_station_indices.binary_search(index).is_ok())
         );
         self.interstellar_congestion_reset_station_indices = station_indices;
+    }
+
+    pub(crate) fn interstellar_congestion_generation_matches(&self, generation: &Arc<()>) -> bool {
+        self.interstellar_congestion_generation
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, generation))
+    }
+
+    pub(crate) fn commit_interstellar_congestion_generation(&mut self, generation: &Arc<()>) {
+        self.interstellar_congestion_generation = Some(Arc::clone(generation));
     }
 
     fn route_scan_indices(&self) -> (Vec<usize>, bool) {
@@ -1492,6 +1504,7 @@ fn build_peer_directory(
         runtime_reset_station_indices: runtime_station_indices.to_vec(),
         local_congestion_reset_station_indices: station_indices.to_vec(),
         interstellar_congestion_reset_station_indices: runtime_station_indices.to_vec(),
+        interstellar_congestion_generation: None,
     })
 }
 
@@ -2967,23 +2980,30 @@ pub(crate) struct LocalCongestionScan {
     pub selected_station_rows: usize,
     pub total_station_rows: usize,
     pub dense_fallback: bool,
+    pub directory_fallback: bool,
 }
 
 fn select_congestion_station_indices(
     directory: &LocalPeerDirectory,
     route_ledger: &StationRouteLedger,
 ) -> (Vec<usize>, LocalCongestionScan) {
-    let mut selected = directory.local_waiting_station_indices().to_vec();
-    selected.extend_from_slice(directory.local_congestion_reset_station_indices());
+    // Static waiting is a topology property. A fresh/rebuilt directory seeds
+    // every station into `local_congestion_reset_station_indices`; once that
+    // baseline commits, only current routes and the previous route endpoints
+    // can change stationCongestion/stationProgress. Re-reading every configured
+    // demand here made an otherwise idle factory O(all waiting stations).
+    let mut selected = directory.local_congestion_reset_station_indices().to_vec();
     selected.extend(route_ledger.active_local_station_indices());
     selected.sort_unstable();
     selected.dedup();
     selected.retain(|index| directory.station_indices.binary_search(index).is_ok());
     let total_station_rows = directory.station_indices.len();
-    let dense_fallback = !selected.is_empty()
+    let directory_fallback = directory.dispatch_full_scan_required;
+    let dense_fallback = !directory_fallback
+        && !selected.is_empty()
         && selected.len().saturating_mul(LOCAL_ROUTE_DENSE_DENOMINATOR)
             >= total_station_rows.saturating_mul(LOCAL_ROUTE_DENSE_NUMERATOR);
-    if dense_fallback {
+    if directory_fallback || dense_fallback {
         selected.clear();
         selected.extend_from_slice(&directory.station_indices);
     }
@@ -2991,6 +3011,7 @@ fn select_congestion_station_indices(
         selected_station_rows: selected.len(),
         total_station_rows,
         dense_fallback,
+        directory_fallback,
     };
     (selected, scan)
 }
@@ -3090,12 +3111,27 @@ fn apply_congestion_updates(
 }
 
 pub(crate) fn update_congestion(
+    state: &CoreState,
+    entities: &mut [Value],
+    directory: &mut LocalPeerDirectory,
+    route_ledger: &StationRouteLedger,
+) -> anyhow::Result<LocalCongestionScan> {
+    update_congestion_with_runtime(
+        deterministic_runtime(),
+        state,
+        entities,
+        directory,
+        route_ledger,
+    )
+}
+
+pub(crate) fn update_congestion_with_runtime(
+    runtime: &DeterministicRuntime,
     _state: &CoreState,
     entities: &mut [Value],
     directory: &mut LocalPeerDirectory,
     route_ledger: &StationRouteLedger,
 ) -> anyhow::Result<LocalCongestionScan> {
-    let runtime = deterministic_runtime();
     let (station_indices, scan) = select_congestion_station_indices(directory, route_ledger);
     let updates = if !directory.has_local_pair() && !directory.has_local_routes() {
         plan_idle_congestion_updates(runtime, entities, &station_indices)
@@ -3494,9 +3530,102 @@ mod tests {
     }
 
     #[test]
-    fn sparse_congestion_scans_waiting_and_route_activity_then_clears_once() {
+    fn sparse_congestion_calibrates_once_then_matches_full_oracle_at_1_5_60_steps() {
+        const COUNT: usize = 1_024;
+        let source = (0..COUNT)
+            .map(|index| {
+                route_station(
+                    index,
+                    if index == 0 {
+                        "supply"
+                    } else if index == 7 {
+                        "demand"
+                    } else {
+                        "storage"
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+
+        for steps in [1_usize, 5, 60] {
+            let mut entities = source.clone();
+            entities[113]["stationRoutes"] =
+                Value::Array(vec![local_route(113, 113, 0.25, 120.0, 11.0)]);
+            let state = route_fixture_state(&entities);
+            let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+            let mut directory =
+                prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+            let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+
+            for step in 0..steps {
+                // This oracle always plans every station row and never calls
+                // the activity selector under test.
+                let full_updates = plan_congestion_updates(
+                    &DeterministicRuntime::for_test(4),
+                    &entities,
+                    &directory,
+                    &ledger,
+                )
+                .unwrap();
+                let mut expected = entities.clone();
+                apply_congestion_updates(&mut expected, full_updates).unwrap();
+                let scan =
+                    update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
+                assert_eq!(scan.total_station_rows, COUNT, "steps={steps} step={step}");
+                assert!(!scan.directory_fallback, "steps={steps} step={step}");
+                if step == 0 {
+                    assert_eq!(scan.selected_station_rows, COUNT);
+                    assert!(scan.dense_fallback);
+                } else {
+                    assert_eq!(scan.selected_station_rows, 2);
+                    assert!(!scan.dense_fallback);
+                }
+                assert_eq!(
+                    serde_json::to_vec(&entities).unwrap(),
+                    serde_json::to_vec(&expected).unwrap(),
+                    "steps={steps} step={step}"
+                );
+            }
+            assert_eq!(entities[7]["stationCongestion"], Value::from(0.35));
+            assert_eq!(directory.local_congestion_reset_station_indices(), [0, 113]);
+        }
+    }
+
+    #[test]
+    fn sparse_congestion_resets_completed_route_once_then_visits_zero_static_rows() {
         let count = 256;
         let mut entities = (0..count)
+            .map(|index| route_station(index, if index == 0 { "supply" } else { "demand" }))
+            .collect::<Vec<_>>();
+        entities[113]["stationRoutes"] =
+            Value::Array(vec![local_route(113, 113, 0.25, 120.0, 11.0)]);
+        let state = route_fixture_state(&entities);
+        let mut activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        let cold = update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
+        assert_eq!(cold.selected_station_rows, count);
+
+        entities[113]["stationRoutes"] = Value::Array(Vec::new());
+        activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        let reset = update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
+        assert_eq!(reset.selected_station_rows, 2);
+        assert!(
+            directory
+                .local_congestion_reset_station_indices()
+                .is_empty()
+        );
+        let quiet = update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
+        assert_eq!(quiet.selected_station_rows, 0);
+        assert_eq!(entities[0]["stationProgress"], Value::from(0.0));
+        assert_eq!(entities[113]["stationProgress"], Value::from(0.0));
+    }
+
+    fn local_congestion_replay_bytes(worker_count: usize, segments: &[usize]) -> Vec<u8> {
+        const COUNT: usize = 1_024;
+        let mut entities = (0..COUNT)
             .map(|index| {
                 route_station(
                     index,
@@ -3516,45 +3645,113 @@ mod tests {
         let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
         let mut directory =
             prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
-        directory.replace_local_congestion_reset_station_indices(Vec::new());
-        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        let runtime = DeterministicRuntime::for_test(worker_count);
+        let mut scans = Vec::new();
+        for &segment in segments {
+            for _ in 0..segment {
+                let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+                scans.push(
+                    update_congestion_with_runtime(
+                        &runtime,
+                        &state,
+                        &mut entities,
+                        &mut directory,
+                        &ledger,
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+        serde_json::to_vec(&json!({
+            "entities": entities,
+            "pendingReset": directory.local_congestion_reset_station_indices(),
+            "scans": scans
+                .iter()
+                .map(|scan| json!({
+                    "selected": scan.selected_station_rows,
+                    "total": scan.total_station_rows,
+                    "dense": scan.dense_fallback,
+                    "directory": scan.directory_fallback,
+                }))
+                .collect::<Vec<_>>(),
+        }))
+        .unwrap()
+    }
 
-        let full_updates = plan_congestion_updates(
-            &DeterministicRuntime::for_test(4),
-            &entities,
-            &directory,
-            &ledger,
+    #[test]
+    fn local_congestion_is_exact_for_1_2_4_8_workers_and_segmented_60_steps() {
+        let expected = local_congestion_replay_bytes(1, &[60]);
+        for worker_count in [1, 2, 4, 8] {
+            assert_eq!(
+                local_congestion_replay_bytes(worker_count, &[60]),
+                expected,
+                "single segment worker_count={worker_count}"
+            );
+            assert_eq!(
+                local_congestion_replay_bytes(worker_count, &[1, 4, 5, 10, 40]),
+                expected,
+                "segmented worker_count={worker_count}"
+            );
+        }
+    }
+
+    #[test]
+    fn congestion_fail_closes_mod_shape_and_exact_three_quarter_density() {
+        const COUNT: usize = 256;
+        let mut opaque_entities = (0..COUNT)
+            .map(|index| route_station(index, if index == 0 { "supply" } else { "demand" }))
+            .collect::<Vec<_>>();
+        opaque_entities[7]["stationRoutes"] = json!([{
+            "scope": "mod:wormhole/local",
+            "mod:payload": { "signedZero": -0.0, "text": "保持" }
+        }]);
+        let opaque_state = route_fixture_state(&opaque_entities);
+        let opaque_activity =
+            crate::interstellar_logistics::prepare_route_activity(&opaque_entities);
+        let mut opaque_directory = prepare_step_directory(
+            &opaque_entities,
+            &opaque_state.factory_topology.station_indices,
         )
         .unwrap();
-        let mut expected = entities.clone();
-        apply_congestion_updates(&mut expected, full_updates).unwrap();
-        let scan = update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
-        assert_eq!(scan.selected_station_rows, 3);
-        assert_eq!(scan.total_station_rows, count);
-        assert!(!scan.dense_fallback);
-        assert_eq!(
-            serde_json::to_vec(&entities).unwrap(),
-            serde_json::to_vec(&expected).unwrap()
+        opaque_directory.replace_local_congestion_reset_station_indices(Vec::new());
+        let opaque_ledger = StationRouteLedger::build(
+            &opaque_state,
+            &opaque_entities,
+            &opaque_directory,
+            &opaque_activity,
         );
-        assert_eq!(directory.local_congestion_reset_station_indices(), [0, 113]);
+        let (opaque_indices, opaque_scan) =
+            select_congestion_station_indices(&opaque_directory, &opaque_ledger);
+        assert_eq!(opaque_indices, (0..COUNT).collect::<Vec<_>>());
+        assert!(opaque_scan.directory_fallback);
+        assert!(!opaque_scan.dense_fallback);
 
-        // A completed route leaves its former endpoints in the reset set for
-        // exactly one more step; after their progress is cleared, only the
-        // statically waiting demand remains observable work.
-        entities[113]["stationRoutes"] = Value::Array(Vec::new());
-        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
-        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
-        let scan = update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
-        assert_eq!(scan.selected_station_rows, 3);
-        assert!(
-            directory
-                .local_congestion_reset_station_indices()
-                .is_empty()
+        let mut dense_entities = (0..COUNT)
+            .map(|index| route_station(index, if index == 0 { "supply" } else { "demand" }))
+            .collect::<Vec<_>>();
+        for (index, entity) in dense_entities.iter_mut().enumerate().skip(1).take(191) {
+            entity["stationRoutes"] =
+                Value::Array(vec![local_route(index, index, 0.25, 120.0, 11.0)]);
+        }
+        let dense_state = route_fixture_state(&dense_entities);
+        let dense_activity = crate::interstellar_logistics::prepare_route_activity(&dense_entities);
+        let mut dense_directory = prepare_step_directory(
+            &dense_entities,
+            &dense_state.factory_topology.station_indices,
+        )
+        .unwrap();
+        dense_directory.replace_local_congestion_reset_station_indices(Vec::new());
+        let dense_ledger = StationRouteLedger::build(
+            &dense_state,
+            &dense_entities,
+            &dense_directory,
+            &dense_activity,
         );
-        let scan = update_congestion(&state, &mut entities, &mut directory, &ledger).unwrap();
-        assert_eq!(scan.selected_station_rows, 1);
-        assert_eq!(entities[0]["stationProgress"], Value::from(0.0));
-        assert_eq!(entities[113]["stationProgress"], Value::from(0.0));
+        let (dense_indices, dense_scan) =
+            select_congestion_station_indices(&dense_directory, &dense_ledger);
+        assert_eq!(dense_indices, (0..COUNT).collect::<Vec<_>>());
+        assert!(!dense_scan.directory_fallback);
+        assert!(dense_scan.dense_fallback);
     }
 
     fn local_route(

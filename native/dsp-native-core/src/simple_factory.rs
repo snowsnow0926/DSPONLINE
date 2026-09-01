@@ -7320,10 +7320,11 @@ fn simulate_step(
     )?;
     if profile_enabled {
         eprintln!(
-            "DSP_NATIVE_CORE_PROFILE\tlocal-congestion-active\t{}/{}\tdense={}",
+            "DSP_NATIVE_CORE_PROFILE\tlocal-congestion-active\t{}/{}\tdense={}\tdirectory-fallback={}",
             local_congestion_scan.selected_station_rows,
             local_congestion_scan.total_station_rows,
             local_congestion_scan.dense_fallback,
+            local_congestion_scan.directory_fallback,
         );
     }
     profile_mark!("local-congestion");
@@ -7340,11 +7341,12 @@ fn simulate_step(
     }
     if profile_enabled {
         eprintln!(
-            "DSP_NATIVE_CORE_PROFILE\tinterstellar-congestion-active\t{}/{}\tdense={}\tdirectory-fallback={}",
+            "DSP_NATIVE_CORE_PROFILE\tinterstellar-congestion-active\t{}/{}\tdense={}\tdirectory-fallback={}\tgeneration-fallback={}",
             interstellar_congestion_scan.selected_station_rows,
             interstellar_congestion_scan.total_station_rows,
             interstellar_congestion_scan.dense_fallback,
             interstellar_congestion_scan.directory_fallback,
+            interstellar_congestion_scan.generation_fallback,
         );
     }
     let mut next_runtime_reset_station_indices = congestion_route_ledger.active_station_indices();

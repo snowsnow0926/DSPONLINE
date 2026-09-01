@@ -1227,7 +1227,7 @@ impl CoreRegistry {
             domain_sha256: summary.domain_sha256.clone(),
         };
         let authority_session_id = store.player_authority_session_binding(session_id)?;
-        let catalog = serde_json::to_value(&self.session(session_id)?.catalog.snapshot)?;
+        let catalog = serde_json::to_value(self.session(session_id)?.catalog_snapshot())?;
         // Publish the fixed-path catalog candidate before the lease. A crash
         // here leaves inert metadata because startup recovery is triggered
         // only by an active player lease with a pending command. Conversely,

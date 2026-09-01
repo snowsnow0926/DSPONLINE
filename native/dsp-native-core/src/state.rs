@@ -2374,6 +2374,11 @@ impl EntityBeltAdjacency {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FactoryTopology {
+    /// Catalog semantic hash used when compiling planet-order-dependent
+    /// aggregate indexes. Public catalog replacement is outside the authority
+    /// contract; projections fail closed instead of pairing a new directory
+    /// with stale per-planet vectors.
+    pub catalog_sha256: String,
     pub station_indices: Vec<usize>,
     /// Stable persisted-row order for exact orbital collectors. The normal
     /// simulation path can visit only these producers instead of discovering
@@ -2515,7 +2520,12 @@ impl FactoryTopology {
                 "DSP_NATIVE_CORE_PROFILE\tmemory-factory-breakdown\tindex={index_bytes},planet={planet_bytes},aggregate={aggregate_bytes},viewport={viewport_bytes},adjacency={adjacency_bytes},indexRows={index_capacity}"
             );
         }
-        index_bytes + planet_bytes + aggregate_bytes + viewport_bytes + adjacency_bytes
+        index_bytes
+            + planet_bytes
+            + aggregate_bytes
+            + viewport_bytes
+            + adjacency_bytes
+            + self.catalog_sha256.capacity() as u64
     }
 }
 
@@ -2523,7 +2533,10 @@ impl FactoryTopology {
 pub struct CoreState {
     pub identity: CoreCheckpointIdentity,
     pub revision: u64,
-    pub catalog: Arc<RuntimeCatalog>,
+    /// Immutable session catalog. External hosts construct it through
+    /// `RuntimeCatalog::validate` and hand ownership to `CoreState`; they may
+    /// not mutate derived maps behind the topology/catalog semantic seal.
+    pub(crate) catalog: Arc<RuntimeCatalog>,
     base: Map<String, Value>,
     entity_raw: SharedArc<Vec<RawRecord>>,
     belt_raw: SharedArc<Vec<RawRecord>>,
@@ -2616,12 +2629,24 @@ pub struct CoreState {
     /// A revision is immutable from the protocol's point of view, so repeated
     /// status/compare/checkpoint calls can safely reuse the small digest result
     /// instead of reparsing every entity and belt again.
-    summary_cache: SyncCell<Option<(u64, CoreStateSummary)>>,
+    summary_cache: SyncCell<Option<CachedCoreStateSummary>>,
     /// Runtime-only four-level production-history index. This cache is never
     /// serialized and never participates in the public v47 canonical hash.
     /// The established JS-authority `base.productionHistory` remains byte-for-
     /// byte unchanged for differential and cloud compatibility.
     production_history_tiers: SharedArc<crate::production_history::TieredProductionHistory>,
+    /// Session-only Operations alert/summary projection cache. Transactional
+    /// clones deliberately start empty; exact simulation may move and patch
+    /// the live cache only after every candidate proof has succeeded.
+    pub(crate) operations_projection_runtime:
+        crate::operations_workspace::OperationsProjectionRuntime,
+}
+
+#[derive(Debug, Clone)]
+struct CachedCoreStateSummary {
+    revision: u64,
+    operations_projection_runtime_bytes: u64,
+    summary: CoreStateSummary,
 }
 
 fn object_string<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
@@ -3339,6 +3364,8 @@ impl CoreState {
             pure_idle_macro_runtime: None,
             summary_cache: SyncCell::new(None),
             production_history_tiers: production_history_tiers.into(),
+            operations_projection_runtime:
+                crate::operations_workspace::OperationsProjectionRuntime::default(),
         };
         // Entity records remain shared by startup admission, route preparation
         // and the canonical proof. Belt records are intentionally decoded one
@@ -3381,12 +3408,19 @@ impl CoreState {
         // `coreOpen` must return a verified canonical proof. Reuse the parsed
         // entity graph while canonicalizing each raw belt independently.
         let canonical = state.canonical_digest_bundle_with_parsed(Some(&parsed_entities), None)?;
-        let summary = state.summary_from_digest(canonical);
-        state.summary_cache.replace(Some((state.revision, summary)));
+        let mut summary = state.summary_from_digest(canonical);
         if !sync_record_drop_enabled() {
             state.parsed_entity_runtime =
                 Arc::new(EntityRuntimeCache::with_values(parsed_entities));
         }
+        summary.memory = state.memory_estimate();
+        state.summary_cache.replace(Some(CachedCoreStateSummary {
+            revision: state.revision,
+            operations_projection_runtime_bytes: state
+                .operations_projection_runtime
+                .estimated_bytes(),
+            summary,
+        }));
         Ok(state)
     }
 
@@ -4019,6 +4053,7 @@ impl CoreState {
             .map(|(index, planet)| (planet.id.as_str(), index))
             .collect::<HashMap<_, _>>();
         let mut factory_topology = FactoryTopology {
+            catalog_sha256: self.catalog.fingerprint.clone(),
             entities_by_planet: vec![Vec::new(); self.catalog.planets.len()],
             belt_counts_by_planet: vec![0; self.catalog.planets.len()],
             device_counts_by_planet: vec![0.0; self.catalog.planets.len()],
@@ -4481,6 +4516,7 @@ impl CoreState {
     pub(crate) fn base_value_mut(&mut self) -> &mut Map<String, Value> {
         self.summary_cache.get_mut().take();
         self.production_history_tiers.invalidate();
+        self.operations_projection_runtime.invalidate();
         &mut self.base
     }
 
@@ -4490,6 +4526,7 @@ impl CoreState {
     /// rebuild the tiers whenever a patch can touch their public source.
     pub(crate) fn take_base_for_command(&mut self) -> Map<String, Value> {
         self.summary_cache.get_mut().take();
+        self.operations_projection_runtime.invalidate();
         std::mem::take(&mut self.base)
     }
 
@@ -4498,6 +4535,7 @@ impl CoreState {
         base: Map<String, Value>,
         rebuild_production_history: bool,
     ) {
+        self.operations_projection_runtime.invalidate();
         self.base = base;
         if rebuild_production_history {
             self.rebuild_production_history_tiers();
@@ -4505,6 +4543,17 @@ impl CoreState {
     }
     pub(crate) fn base_value(&self) -> &Map<String, Value> {
         &self.base
+    }
+
+    /// Read-only validated catalog payload for Host diagnostics/export. The
+    /// authoritative `Arc<RuntimeCatalog>` remains private so callers cannot
+    /// mutate derived maps behind topology and projection seals.
+    pub fn catalog_snapshot(&self) -> &crate::catalog::CatalogSnapshot {
+        &self.catalog.snapshot
+    }
+
+    pub(crate) fn invalidate_summary_cache(&self) {
+        self.summary_cache.replace(None);
     }
 
     pub(crate) fn refresh_production_history_tiers(&mut self) {
@@ -4657,12 +4706,14 @@ impl CoreState {
         self.parsed_entity_runtime.clear();
         self.summary_cache.get_mut().take();
         self.last_entity_raw_writeback = EntityRawWritebackDiagnostics::default();
+        self.operations_projection_runtime.invalidate();
         self.entity_raw[index] = value;
         self.save_dirty.mark_entity(index);
     }
 
     pub(crate) fn replace_belt_raw(&mut self, index: usize, value: RawRecord) {
         self.summary_cache.get_mut().take();
+        self.operations_projection_runtime.invalidate();
         self.belt_raw[index] = value;
         self.save_dirty.mark_belt(index);
     }
@@ -4672,11 +4723,13 @@ impl CoreState {
         self.summary_cache.get_mut().take();
         self.save_dirty.mark_entity_topology();
         self.last_entity_raw_writeback = EntityRawWritebackDiagnostics::default();
+        self.operations_projection_runtime.invalidate();
         &mut self.entity_raw
     }
 
     pub(crate) fn belt_raw_mut_topology(&mut self) -> &mut Vec<RawRecord> {
         self.summary_cache.get_mut().take();
+        self.operations_projection_runtime.invalidate();
         self.save_dirty.mark_belt_topology();
         &mut self.belt_raw
     }
@@ -4731,6 +4784,13 @@ impl CoreState {
         let entity_writeback =
             encode_entity_records_full(&entities, &self.entity_raw, &self.entities.ids)?;
         let (entity_writeback, inventory_entry_count, shared_rows) = entity_writeback.into_parts();
+        let changed_entity_indices = entity_writeback
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                (!Arc::ptr_eq(row, &self.entity_raw[index])).then_some(index)
+            })
+            .collect::<Vec<_>>();
         let entity_dynamics =
             EntityDynamicColumns::from_full_encode(entities.len(), inventory_entry_count);
         let entity_dynamics_changed = !entity_dynamics.bitwise_eq(&self.entity_dynamics);
@@ -4755,10 +4815,8 @@ impl CoreState {
         // valid candidate may replace `self`.
         let mut candidate = self.clone();
         candidate.summary_cache.get_mut().take();
-        for (index, row) in entity_writeback.iter().enumerate() {
-            if !Arc::ptr_eq(row, &self.entity_raw[index]) {
-                candidate.save_dirty.mark_entity(index);
-            }
+        for &index in &changed_entity_indices {
+            candidate.save_dirty.mark_entity(index);
         }
         for patch in belt_patches {
             let (index, raw) = patch.into_parts();
@@ -4781,12 +4839,25 @@ impl CoreState {
             candidate.belt_dynamics = belt_dynamics.into();
         }
         candidate.revision = next_revision;
-        let summary = if populate_summary_cache {
+        // Operations is a disposable, hash-neutral read model. Failure to
+        // derive its incremental projection must never make an otherwise
+        // valid simulation commit depend on whether the player opened the
+        // Operations workspace. Drop the cache and rebuild it lazily instead.
+        let operations_projection_update = self
+            .operations_projection_runtime
+            .prepare_simulation_update(
+                self,
+                &candidate.base,
+                &entities,
+                &changed_entity_indices,
+                next_revision,
+            )
+            .unwrap_or_else(|_| {
+                crate::operations_workspace::PreparedOperationsProjectionUpdate::reset_after_prepare_error()
+            });
+        let mut summary = if populate_summary_cache {
             let canonical = candidate.canonical_digest_bundle_with_parsed(Some(&entities), None)?;
             let summary = candidate.summary_from_digest(canonical);
-            candidate
-                .summary_cache
-                .replace(Some((candidate.revision, summary.clone())));
             Some(summary)
         } else {
             None
@@ -4797,6 +4868,25 @@ impl CoreState {
             candidate.install_parsed_entity_runtime(entities);
             None
         };
+        // All fallible candidate work is complete. Move the live disposable
+        // cache now, apply its already-proved patch, and publish it together
+        // with the same state revision. Transactional clones never shared this
+        // cache, so a failed candidate above left the source projection intact.
+        let operations_projection_runtime = std::mem::take(&mut self.operations_projection_runtime);
+        operations_projection_runtime.install_simulation_update(operations_projection_update);
+        candidate.operations_projection_runtime = operations_projection_runtime;
+        if let Some(value) = summary.as_mut() {
+            value.memory = candidate.memory_estimate();
+            candidate
+                .summary_cache
+                .replace(Some(CachedCoreStateSummary {
+                    revision: candidate.revision,
+                    operations_projection_runtime_bytes: candidate
+                        .operations_projection_runtime
+                        .estimated_bytes(),
+                    summary: value.clone(),
+                }));
+        }
         *self = candidate;
         self.refresh_production_history_tiers();
         if let Some(entities) = retired_entities {
@@ -6221,6 +6311,8 @@ impl CoreState {
             .unwrap_or(0);
         let parsed_entity_runtime_bytes =
             self.parsed_entity_runtime.estimated_bytes(raw_entity_bytes);
+        let operations_projection_runtime_bytes =
+            self.operations_projection_runtime.estimated_bytes();
         let estimated_runtime_bytes = raw_record_bytes
             + indexed_string_bytes
             + numeric_columns
@@ -6230,6 +6322,7 @@ impl CoreState {
             + topology_index_bytes
             + belt_activity_runtime_bytes
             + parsed_entity_runtime_bytes
+            + operations_projection_runtime_bytes
             + serde_json::to_vec(&self.base)
                 .map(|bytes| bytes.len() as u64)
                 .unwrap_or(0);
@@ -6286,19 +6379,28 @@ impl CoreState {
     }
 
     pub fn summary(&self) -> anyhow::Result<CoreStateSummary> {
+        let operations_projection_runtime_bytes =
+            self.operations_projection_runtime.estimated_bytes();
         if let Some(summary) = self
             .summary_cache
             .borrow()
             .as_ref()
-            .filter(|(revision, _)| *revision == self.revision)
-            .map(|(_, summary)| summary.clone())
+            .filter(|cached| {
+                cached.revision == self.revision
+                    && cached.operations_projection_runtime_bytes
+                        == operations_projection_runtime_bytes
+            })
+            .map(|cached| cached.summary.clone())
         {
             return Ok(summary);
         }
         let canonical = self.canonical_digest_bundle()?;
         let summary = self.summary_from_digest(canonical);
-        self.summary_cache
-            .replace(Some((self.revision, summary.clone())));
+        self.summary_cache.replace(Some(CachedCoreStateSummary {
+            revision: self.revision,
+            operations_projection_runtime_bytes,
+            summary: summary.clone(),
+        }));
         Ok(summary)
     }
 }

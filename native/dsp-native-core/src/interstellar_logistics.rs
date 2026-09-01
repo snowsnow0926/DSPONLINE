@@ -4136,6 +4136,12 @@ struct CongestionUpdate {
     active_progress: f64,
 }
 
+struct PlannedCongestionUpdates {
+    updates: Vec<Option<CongestionUpdate>>,
+    #[cfg(test)]
+    diagnostics: crate::deterministic_runtime::IndexedPrepareDiagnostics,
+}
+
 #[cfg(test)]
 fn plan_congestion_updates_with<F, L>(
     runtime: &DeterministicRuntime,
@@ -4231,6 +4237,12 @@ pub(crate) struct InterstellarCongestionScan {
     pub dense_fallback: bool,
     pub directory_fallback: bool,
     pub generation_fallback: bool,
+    #[cfg(test)]
+    pub selected_worker_count: usize,
+    #[cfg(test)]
+    pub observed_worker_count: usize,
+    #[cfg(test)]
+    pub parallel_prepare: bool,
 }
 
 fn select_congestion_station_indices(
@@ -4272,6 +4284,12 @@ fn select_congestion_station_indices(
         dense_fallback,
         directory_fallback,
         generation_fallback,
+        #[cfg(test)]
+        selected_worker_count: 0,
+        #[cfg(test)]
+        observed_worker_count: 0,
+        #[cfg(test)]
+        parallel_prepare: false,
     };
     (selected, scan)
 }
@@ -4286,62 +4304,69 @@ fn plan_indexed_congestion_updates(
     ledger: &StationRouteLedger,
     local_directory: &crate::local_logistics::LocalPeerDirectory,
     peer_directory: &InterstellarPeerDirectory,
-) -> anyhow::Result<Vec<Option<CongestionUpdate>>> {
-    runtime.indexed_try_map(
-        station_indices,
-        |_, station_index| -> anyhow::Result<Option<CongestionUpdate>> {
-            let station_index = *station_index;
-            let station = entities[station_index].as_object().expect("station object");
-            if !is_legacy_interstellar_station(station) || traditional_remote_disabled(station) {
-                return Ok(None);
+) -> anyhow::Result<PlannedCongestionUpdates> {
+    let plan_station = |_: usize,
+                        station_index: &usize|
+     -> anyhow::Result<Option<CongestionUpdate>> {
+        let station_index = *station_index;
+        let station = entities[station_index].as_object().expect("station object");
+        if !is_legacy_interstellar_station(station) || traditional_remote_disabled(station) {
+            return Ok(None);
+        }
+        let station_slots = slots(station)?;
+        let mut waiting = 0.0;
+        for (slot_index, slot) in station_slots.iter().enumerate() {
+            if slot.item_id.is_none() {
+                continue;
             }
-            let station_slots = slots(station)?;
-            let mut waiting = 0.0;
-            for (slot_index, slot) in station_slots.iter().enumerate() {
-                if slot.item_id.is_none() {
-                    continue;
-                }
-                let remote_waiting = slot.remote_mode == "demand"
-                    && !peer_matches_indexed(
-                        state,
-                        base,
-                        entities,
-                        station_index,
-                        slot_index,
-                        peer_directory,
-                    )?
-                    .0
-                    .is_empty();
-                if remote_waiting
-                    || local_directory.has_local_peer_match(station_index, slot_index)?
-                {
-                    waiting += 1.0;
-                }
+            let remote_waiting = slot.remote_mode == "demand"
+                && !peer_matches_indexed(
+                    state,
+                    base,
+                    entities,
+                    station_index,
+                    slot_index,
+                    peer_directory,
+                )?
+                .0
+                .is_empty();
+            if remote_waiting || local_directory.has_local_peer_match(station_index, slot_index)? {
+                waiting += 1.0;
             }
-            let installed = 50.0 * finite_number(station.get("machineCount")).floor().max(0.0)
-                + vessel_capacity(station);
-            let busy = ledger.local_busy(station_index) + ledger.remote_busy(station_index);
-            let fleet_load = if installed > 0.0 {
-                busy / installed
-            } else if waiting > 0.0 {
-                1.0
+        }
+        let installed = 50.0 * finite_number(station.get("machineCount")).floor().max(0.0)
+            + vessel_capacity(station);
+        let busy = ledger.local_busy(station_index) + ledger.remote_busy(station_index);
+        let fleet_load = if installed > 0.0 {
+            busy / installed
+        } else if waiting > 0.0 {
+            1.0
+        } else {
+            0.0
+        };
+        let congestion = fleet_load
+            .max(if waiting > 0.0 && busy == 0.0 {
+                0.35
             } else {
                 0.0
-            };
-            let congestion = fleet_load
-                .max(if waiting > 0.0 && busy == 0.0 {
-                    0.35
-                } else {
-                    0.0
-                })
-                .clamp(0.0, 1.0);
-            Ok(Some(CongestionUpdate {
-                station_index,
-                congestion: rounded(congestion, 3),
-                active_progress: ledger.active_progress(station_index),
-            }))
-        },
-    )
+            })
+            .clamp(0.0, 1.0);
+        Ok(Some(CongestionUpdate {
+            station_index,
+            congestion: rounded(congestion, 3),
+            active_progress: ledger.active_progress(station_index),
+        }))
+    };
+    #[cfg(test)]
+    let (updates, diagnostics) =
+        runtime.indexed_try_map_with_diagnostics(station_indices, plan_station);
+    #[cfg(not(test))]
+    let updates = runtime.indexed_try_map(station_indices, plan_station);
+    Ok(PlannedCongestionUpdates {
+        updates: updates?,
+        #[cfg(test)]
+        diagnostics,
+    })
 }
 
 pub(crate) fn update_congestion(
@@ -4380,7 +4405,9 @@ fn update_congestion_with_runtime(
         peer_directory,
         route_ledger,
     );
-    let updates = plan_indexed_congestion_updates(
+    #[cfg(test)]
+    let mut scan = scan;
+    let plan = plan_indexed_congestion_updates(
         runtime,
         state,
         base,
@@ -4390,7 +4417,13 @@ fn update_congestion_with_runtime(
         local_directory,
         peer_directory,
     )?;
-    apply_congestion_updates(entities, updates)?;
+    #[cfg(test)]
+    {
+        scan.selected_worker_count = plan.diagnostics.selected_worker_count;
+        scan.observed_worker_count = plan.diagnostics.observed_worker_count;
+        scan.parallel_prepare = plan.diagnostics.parallel;
+    }
+    apply_congestion_updates(entities, plan.updates)?;
     let mut next_reset = route_ledger.active_station_indices();
     next_reset.retain(|index| station_indices.binary_search(index).is_ok());
     local_directory.replace_interstellar_congestion_reset_station_indices(next_reset);
@@ -9179,6 +9212,80 @@ mod tests {
                 interstellar_congestion_replay_bytes(worker_count, 60),
                 expected,
                 "worker_count={worker_count}"
+            );
+        }
+    }
+
+    type CongestionAuthorityFingerprint = (Vec<u8>, String, String, String);
+
+    struct InterstellarParallelCongestionResult {
+        entity_bytes: Vec<u8>,
+        authority: CongestionAuthorityFingerprint,
+        scan: InterstellarCongestionScan,
+    }
+
+    fn production_interstellar_congestion_parallel_result(
+        worker_count: usize,
+    ) -> InterstellarParallelCongestionResult {
+        const COUNT: usize = PARALLEL_MIN_ITEMS + 257;
+        let mut entities = congestion_fixture(COUNT, false);
+        let state = dispatch_fixture_state(&entities);
+        let base = dispatch_fixture_base();
+        let base = base.as_object().unwrap();
+        let directory = InterstellarPeerDirectory::build(&state, base, &entities);
+        let mut local_directory = crate::local_logistics::prepare_step_directory(
+            &entities,
+            &state.factory_topology.station_indices,
+        )
+        .unwrap();
+        let activity = prepare_route_activity(&entities);
+        let ledger = StationRouteLedger::build(&state, &entities, &local_directory, &activity);
+        let scan = update_congestion_with_runtime(
+            &DeterministicRuntime::for_test(worker_count),
+            &state,
+            base,
+            &mut entities,
+            &mut local_directory,
+            &directory,
+            &ledger,
+        )
+        .unwrap();
+        let entity_bytes = serde_json::to_vec(&entities).unwrap();
+        let committed = dispatch_fixture_state(&entities);
+        InterstellarParallelCongestionResult {
+            entity_bytes,
+            authority: congestion_authority_fingerprint(&committed),
+            scan,
+        }
+    }
+
+    #[test]
+    fn production_interstellar_congestion_updater_really_uses_2_4_8_workers_and_stays_authoritative()
+     {
+        const COUNT: usize = PARALLEL_MIN_ITEMS + 257;
+        let expected = production_interstellar_congestion_parallel_result(1);
+        assert_eq!(expected.scan.selected_station_rows, COUNT);
+        assert_eq!(expected.scan.selected_worker_count, 1);
+        assert_eq!(expected.scan.observed_worker_count, 1);
+        assert!(!expected.scan.parallel_prepare);
+
+        for worker_count in [2, 4, 8] {
+            let actual = production_interstellar_congestion_parallel_result(worker_count);
+            assert_eq!(actual.scan.selected_station_rows, COUNT);
+            assert_eq!(actual.scan.selected_worker_count, worker_count);
+            assert!(actual.scan.parallel_prepare);
+            assert!(
+                (2..=worker_count).contains(&actual.scan.observed_worker_count),
+                "production updater did not actually enter multiple workers: requested={worker_count} observed={}",
+                actual.scan.observed_worker_count
+            );
+            assert_eq!(
+                actual.entity_bytes, expected.entity_bytes,
+                "entity bytes diverged at worker_count={worker_count}"
+            );
+            assert_eq!(
+                actual.authority, expected.authority,
+                "canonical/domain/material authority diverged at worker_count={worker_count}"
             );
         }
     }

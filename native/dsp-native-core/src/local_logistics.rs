@@ -2981,6 +2981,18 @@ pub(crate) struct LocalCongestionScan {
     pub total_station_rows: usize,
     pub dense_fallback: bool,
     pub directory_fallback: bool,
+    #[cfg(test)]
+    pub selected_worker_count: usize,
+    #[cfg(test)]
+    pub observed_worker_count: usize,
+    #[cfg(test)]
+    pub parallel_prepare: bool,
+}
+
+struct PlannedCongestionUpdates {
+    updates: Vec<Option<CongestionUpdate>>,
+    #[cfg(test)]
+    diagnostics: Option<crate::deterministic_runtime::IndexedPrepareDiagnostics>,
 }
 
 fn select_congestion_station_indices(
@@ -3012,6 +3024,12 @@ fn select_congestion_station_indices(
         total_station_rows,
         dense_fallback,
         directory_fallback,
+        #[cfg(test)]
+        selected_worker_count: 0,
+        #[cfg(test)]
+        observed_worker_count: 0,
+        #[cfg(test)]
+        parallel_prepare: false,
     };
     (selected, scan)
 }
@@ -3133,12 +3151,17 @@ pub(crate) fn update_congestion_with_runtime(
     route_ledger: &StationRouteLedger,
 ) -> anyhow::Result<LocalCongestionScan> {
     let (station_indices, scan) = select_congestion_station_indices(directory, route_ledger);
-    let updates = if !directory.has_local_pair() && !directory.has_local_routes() {
-        plan_idle_congestion_updates(runtime, entities, &station_indices)
+    #[cfg(test)]
+    let mut scan = scan;
+    let plan = if !directory.has_local_pair() && !directory.has_local_routes() {
+        PlannedCongestionUpdates {
+            updates: plan_idle_congestion_updates(runtime, entities, &station_indices),
+            #[cfg(test)]
+            diagnostics: None,
+        }
     } else {
-        runtime.indexed_try_map(
-            &station_indices,
-            |_, station_index| -> anyhow::Result<Option<CongestionUpdate>> {
+        let plan_station =
+            |_: usize, station_index: &usize| -> anyhow::Result<Option<CongestionUpdate>> {
                 let station_index = *station_index;
                 let station = entities[station_index].as_object().expect("station object");
                 if !matches!(
@@ -3181,10 +3204,25 @@ pub(crate) fn update_congestion_with_runtime(
                     congestion: rounded(congestion, 3),
                     active_progress: route_ledger.active_local_progress(station_index),
                 }))
-            },
-        )?
+            };
+        #[cfg(test)]
+        let (updates, diagnostics) =
+            runtime.indexed_try_map_with_diagnostics(&station_indices, plan_station);
+        #[cfg(not(test))]
+        let updates = runtime.indexed_try_map(&station_indices, plan_station);
+        PlannedCongestionUpdates {
+            updates: updates?,
+            #[cfg(test)]
+            diagnostics: Some(diagnostics),
+        }
     };
-    apply_congestion_updates(entities, updates)?;
+    #[cfg(test)]
+    if let Some(diagnostics) = plan.diagnostics {
+        scan.selected_worker_count = diagnostics.selected_worker_count;
+        scan.observed_worker_count = diagnostics.observed_worker_count;
+        scan.parallel_prepare = diagnostics.parallel;
+    }
+    apply_congestion_updates(entities, plan.updates)?;
     let mut next_reset = route_ledger.active_local_station_indices();
     next_reset.retain(|index| directory.station_indices.binary_search(index).is_ok());
     directory.replace_local_congestion_reset_station_indices(next_reset);
@@ -3848,6 +3886,84 @@ mod tests {
                 local_congestion_replay_bytes(worker_count, 60),
                 expected,
                 "worker_count={worker_count}"
+            );
+        }
+    }
+
+    type CongestionAuthorityFingerprint = (Vec<u8>, String, String, String);
+
+    struct LocalParallelCongestionResult {
+        entity_bytes: Vec<u8>,
+        authority: CongestionAuthorityFingerprint,
+        scan: LocalCongestionScan,
+    }
+
+    fn production_local_congestion_parallel_result(
+        worker_count: usize,
+    ) -> LocalParallelCongestionResult {
+        const COUNT: usize = PARALLEL_MIN_ITEMS + 257;
+        let mut entities = (0..COUNT)
+            .map(|index| {
+                route_station(
+                    index,
+                    if index == 0 {
+                        "supply"
+                    } else if index == 7 {
+                        "demand"
+                    } else {
+                        "storage"
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let state = route_fixture_state(&entities);
+        let activity = crate::interstellar_logistics::prepare_route_activity(&entities);
+        let mut directory =
+            prepare_step_directory(&entities, &state.factory_topology.station_indices).unwrap();
+        let ledger = StationRouteLedger::build(&state, &entities, &directory, &activity);
+        let scan = update_congestion_with_runtime(
+            &DeterministicRuntime::for_test(worker_count),
+            &state,
+            &mut entities,
+            &mut directory,
+            &ledger,
+        )
+        .unwrap();
+        let entity_bytes = serde_json::to_vec(&entities).unwrap();
+        let committed = route_fixture_state(&entities);
+        LocalParallelCongestionResult {
+            entity_bytes,
+            authority: congestion_authority_fingerprint(&committed),
+            scan,
+        }
+    }
+
+    #[test]
+    fn production_local_congestion_updater_really_uses_2_4_8_workers_and_stays_authoritative() {
+        const COUNT: usize = PARALLEL_MIN_ITEMS + 257;
+        let expected = production_local_congestion_parallel_result(1);
+        assert_eq!(expected.scan.selected_station_rows, COUNT);
+        assert_eq!(expected.scan.selected_worker_count, 1);
+        assert_eq!(expected.scan.observed_worker_count, 1);
+        assert!(!expected.scan.parallel_prepare);
+
+        for worker_count in [2, 4, 8] {
+            let actual = production_local_congestion_parallel_result(worker_count);
+            assert_eq!(actual.scan.selected_station_rows, COUNT);
+            assert_eq!(actual.scan.selected_worker_count, worker_count);
+            assert!(actual.scan.parallel_prepare);
+            assert!(
+                (2..=worker_count).contains(&actual.scan.observed_worker_count),
+                "production updater did not actually enter multiple workers: requested={worker_count} observed={}",
+                actual.scan.observed_worker_count
+            );
+            assert_eq!(
+                actual.entity_bytes, expected.entity_bytes,
+                "entity bytes diverged at worker_count={worker_count}"
+            );
+            assert_eq!(
+                actual.authority, expected.authority,
+                "canonical/domain/material authority diverged at worker_count={worker_count}"
             );
         }
     }

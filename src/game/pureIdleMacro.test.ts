@@ -17,10 +17,12 @@ import {
   advanceExactSimulationWindow,
   applyPureIdleAffineContract,
   applyPureIdleLightweightContractInPlace,
+  captureAggregateConservationBaseline,
   capturePureIdleCombinedConservationCheckpoint,
   createPureIdleLightweightCalibration,
   reconcilePureIdleLightweightMaterialDeltas,
   runFastOfflineSettlement,
+  validateAggregateConservation,
   validatePureIdleCombinedSettlementConservation,
   validatePureIdleTerminalMaterialConservation,
   type PureIdleAffineContract,
@@ -1030,6 +1032,82 @@ describe("pure idle macro session", () => {
     expect(result).toMatchObject({ ok: true });
     expect(state.tray.iron_ore).toBe(110);
     expect(state.totalProduced.iron_ore).toBe(10);
+  });
+
+  it("counts a Galactic activity delivery once and treats pending batches as an ACK outbox", () => {
+    const source = pureIdleState();
+    source.tray.universe_matrix = 10;
+    const baseline = captureAggregateConservationBaseline(source);
+    expect(baseline.totals.get("universe_matrix")).toBe(10n);
+
+    const delivered = structuredClone(source);
+    delivered.tray.universe_matrix = 0;
+    delivered.endgame.exportProjects.universe_archive.totalDelivered = 10;
+    delivered.endgame.totalExported = 10;
+    delivered.endgame.constructionActivity.personalDelivered.universe_matrix = 10;
+    delivered.endgame.constructionActivity.pendingBatches.universe_matrix = {
+      id: "activity:participant:universe_matrix:0",
+      itemId: "universe_matrix",
+      amount: 10,
+      sequence: 0,
+      firstDeliveredAtMs: 1_000,
+      lastDeliveredAtMs: 1_000,
+    };
+
+    expect(validateAggregateConservation(baseline, delivered)).toBeNull();
+    const deliveredBaseline = captureAggregateConservationBaseline(delivered);
+    expect(deliveredBaseline.totals.get("universe_matrix") ?? 0n).toBe(0n);
+
+    const acknowledged = structuredClone(delivered);
+    acknowledged.endgame.constructionActivity.pendingBatches = {};
+    expect(validateAggregateConservation(deliveredBaseline, acknowledged)).toBeNull();
+  });
+
+  it("ignores activity-only personal and outbox mirrors in the combined terminal ledger", () => {
+    const source = pureIdleState();
+    const checkpoint = capturePureIdleCombinedConservationCheckpoint(source);
+    const synchronized = structuredClone(source);
+    synchronized.endgame.constructionActivity.personalDelivered.small_carrier_rocket = 50;
+    synchronized.endgame.constructionActivity.pendingBatches.small_carrier_rocket = {
+      id: "activity:participant:small_carrier_rocket:0",
+      itemId: "small_carrier_rocket",
+      amount: 50,
+      sequence: 0,
+      firstDeliveredAtMs: 2_000,
+      lastDeliveredAtMs: 2_000,
+    };
+
+    expect(validatePureIdleCombinedSettlementConservation(checkpoint, synchronized)).toBeNull();
+  });
+
+  it("accepts rocket and sail launch sinks funded by interval-start inventory", () => {
+    const source = pureIdleState();
+    source.tray.small_carrier_rocket = 3;
+    source.tray.solar_sail = 4;
+    const baseline = captureAggregateConservationBaseline(source);
+    const launched = structuredClone(source);
+    launched.tray.small_carrier_rocket = 0;
+    launched.tray.solar_sail = 0;
+    launched.dysonSphere.totalRocketsLaunched += 3;
+    launched.dysonSwarm.totalLaunched += 4;
+
+    expect(validateAggregateConservation(baseline, launched)).toBeNull();
+  });
+
+  it.each([
+    ["rocket launch", (state: GameState) => { state.dysonSphere.totalRocketsLaunched += 1; }],
+    ["solar-sail launch", (state: GameState) => { state.dysonSwarm.totalLaunched += 1; }],
+    ["Galactic export", (state: GameState) => { state.endgame.exportProjects.universe_archive.totalDelivered += 1; }],
+  ] as const)("rejects an unfunded physical %s sink in the aggregate ledger", (_label, mutate) => {
+    const source = pureIdleState();
+    source.tray.small_carrier_rocket = 0;
+    source.tray.solar_sail = 0;
+    source.tray.universe_matrix = 0;
+    const candidate = structuredClone(source);
+    mutate(candidate);
+
+    expect(validateAggregateConservation(captureAggregateConservationBaseline(source), candidate))
+      .toContain("超过生产、奖励与库存来源");
   });
 
   it("applies the closed lightweight contract without cloning the full state", () => {
@@ -2219,7 +2297,8 @@ describe("pure idle macro session", () => {
 
     const result = applyPureIdleAffineContract(state, contract, 1, 1, { allowExactFallback: false });
     expect(result.ok).toBe(false);
-    expect(result.failure).toContain("终端物资守恒失败");
+    expect(result.failure).toContain("物资守恒失败");
+    expect(result.failure).toContain("small_carrier_rocket");
     expect(hashGameState(state)).toBe(sourceHash);
   });
 

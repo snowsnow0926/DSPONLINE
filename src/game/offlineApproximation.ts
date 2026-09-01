@@ -2332,13 +2332,10 @@ function captureAggregateItemStores(state: GameState): AggregateItemStoreCapture
   const hubWarpers = aggregateItemAmount(state.galacticHubNetwork.warpers);
   if (hubWarpers === null) failure ??= "galacticHubNetwork.warpers 不是非负整数";
   else addAggregateAmount(totals, "space_warper", hubWarpers);
-  for (const batch of Object.values(state.endgame.constructionActivity.pendingBatches)) {
-    if (batch && Number.isSafeInteger(batch.amount) && batch.amount >= 0) {
-      addAggregateAmount(totals, batch.itemId, BigInt(batch.amount));
-    } else if (batch) {
-      failure ??= `constructionActivity.pendingBatches.${batch.id}.amount 不是非负安全整数`;
-    }
-  }
+  // Construction-activity batches are a replay-safe server outbox. Their
+  // amounts mirror already delivered Galactic exports and are not player-owned
+  // stock; counting them here would duplicate material until the ACK arrives
+  // and then manufacture a false inventory loss when the outbox is cleared.
   return { totals, ...(failure ? { failure } : {}) };
 }
 
@@ -2399,6 +2396,12 @@ function captureKnownMaterialConsumption(state: GameState): { totals: Map<string
     if (amount === null) failure ??= `${label} 不是非负安全整数`;
     else addAggregateAmount(totals, itemId, amount);
   };
+  // Dyson launch counters are cumulative physical sinks. Their derived
+  // structure/orbit mirrors are validated separately and must not be counted
+  // again here.
+  addCounter("small_carrier_rocket", state.dysonSphere.totalRocketsLaunched,
+    "dysonSphere.totalRocketsLaunched");
+  addCounter("solar_sail", state.dysonSwarm.totalLaunched, "dysonSwarm.totalLaunched");
   for (const definition of GALACTIC_EXPORT_DEFINITIONS) {
     addCounter(definition.itemId, state.endgame.exportProjects[definition.id]?.totalDelivered,
       `endgame.exportProjects.${definition.id}.totalDelivered`);
@@ -2411,9 +2414,8 @@ function captureKnownMaterialConsumption(state: GameState): { totals: Map<string
       addCounter(itemId, amount, `orbitalStation.construction.${stage.stageId}.delivered.${itemId}`);
     }
   }
-  for (const [itemId, amount] of Object.entries(state.endgame.constructionActivity.personalDelivered)) {
-    addCounter(itemId, amount, `endgame.constructionActivity.personalDelivered.${itemId}`);
-  }
+  // personalDelivered is the activity/leaderboard mirror of the physical
+  // exportProjects.totalDelivered sink above, not a second consumption event.
   for (const [itemId, amount] of Object.entries(state.constructionAutomation.destroyedByproducts)) {
     addCounter(itemId, amount, `constructionAutomation.destroyedByproducts.${itemId}`);
   }
@@ -3474,8 +3476,8 @@ function knownTerminalConsumption(state: GameState, itemId: PureIdleTerminalMate
     total += ledgerCounter(stage.delivered[itemId] ?? "0",
       `orbitalStation.construction.${stage.stageId}.delivered.${itemId}`);
   }
-  total += ledgerCounter(state.endgame.constructionActivity.personalDelivered[itemId] ?? 0,
-    `endgame.constructionActivity.personalDelivered.${itemId}`);
+  // personalDelivered and pendingBatches are activity/transport mirrors of the
+  // physical Galactic project sink above. Neither may consume material twice.
   total += ledgerCounter(state.constructionAutomation.destroyedByproducts[itemId] ?? 0,
     `constructionAutomation.destroyedByproducts.${itemId}`);
   for (const entity of state.entities) {

@@ -8,6 +8,11 @@ describe("native planet navigation App integration", () => {
   const panels = readFileSync(resolve("src/components/GamePanels.tsx"), "utf8");
   const nativeRail = readFileSync(resolve("src/components/NativeResourceRail.tsx"), "utf8");
   const nativeConstructionDock = readFileSync(resolve("src/components/NativeConstructionDock.tsx"), "utf8");
+  const nativeWorkspaceOpening = (componentName: string): string => {
+    const match = app.match(new RegExp(`<${componentName}\\s[\\s\\S]*?\\/>`));
+    expect(match, `${componentName} JSX opening`).not.toBeNull();
+    return match?.[0] ?? "";
+  };
 
   it("routes every native factory projection with independently discovered Rust authority", () => {
     expect(app).toMatch(/import \{ createNativeProjectedActivePlanetCommand \}/);
@@ -147,9 +152,9 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/operationsOpen && nativePlayerAuthorityOwnsRuntime \? \([\s\S]*?<NativeOperationsWorkspace/);
     expect(app).toMatch(/<NativeOperationsWorkspace[\s\S]*?tab=\{operationsTab\}[\s\S]*?onTabChange=\{setOperationsTab\}/);
     expect(app).toMatch(/operationsOpen && !nativePlayerAuthorityOwnsRuntime \? \([\s\S]*?<OperationsWorkspace/);
-    const nativeGalaxy = app.slice(app.indexOf("<NativeGalaxyWorkspace"), app.indexOf("<GalaxyWorkspace"));
-    const nativeCampaign = app.slice(app.indexOf("<NativeCampaignWorkspace"), app.indexOf("<CampaignWorkspace"));
-    const nativeOperations = app.slice(app.indexOf("<NativeOperationsWorkspace"), app.indexOf("<OperationsWorkspace"));
+    const nativeGalaxy = nativeWorkspaceOpening("NativeGalaxyWorkspace");
+    const nativeCampaign = nativeWorkspaceOpening("NativeCampaignWorkspace");
+    const nativeOperations = nativeWorkspaceOpening("NativeOperationsWorkspace");
     for (const nativeWorkspace of [nativeGalaxy, nativeCampaign, nativeOperations]) {
       expect(nativeWorkspace).not.toMatch(/\bgame=\{game\}/);
     }

@@ -387,7 +387,25 @@ test("activation stays main-owned and arms one anchored exact-second timer", asy
 
 test("pause drains every tick due at the request anchor and leaves no live timer", async () => {
   const transitions = [];
-  const value = fixture({ onTransition: (state) => transitions.push(state) });
+  const value = fixture({
+    onTransition: (state) => transitions.push(state),
+    registry: {
+      async commitPlayerAuthorityTick(ownerId, request) {
+        value.calls.push(["tick", ownerId, request]);
+        return {
+          sequence: request.sequence,
+          revision: 8,
+          duplicate: false,
+          checkpoint: { generation: 4, rootHash: HASH_A, revision: 8 },
+          summary: summary(8),
+        };
+      },
+      async commitPlayerAuthorityPause(ownerId, request) {
+        value.calls.push(["pause", ownerId, request]);
+        return pauseLifecycleReceipt(request, 3, 5);
+      },
+    },
+  });
   await value.runtime.activate({
     sessionId: "core-main-1", runId: "player-run-1",
     expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
@@ -397,21 +415,18 @@ test("pause drains every tick due at the request anchor and leaves no live timer
   const paused = await value.runtime.setPaused(true);
 
   assert.equal(paused.phase, "paused");
-  assert.equal(paused.revision, 10);
+  assert.equal(paused.revision, 9);
   assert.equal(paused.acknowledgedSequence, 3);
   assert.equal(paused.nextSequence, 4);
   assert.equal(paused.nextDeadlineMs, 13_000);
   assert.deepEqual(value.calls.filter(([operation]) => ["tick", "pause"].includes(operation)), [
-    ["tick", "main-player-authority", {
-      sessionId: "core-main-1", runId: "player-run-1", sequence: 1,
-    }],
     ["tick", "main-player-authority", {
       sessionId: "core-main-1", runId: "player-run-1", sequence: 2,
     }],
     ["pause", "main-player-authority", {
       sessionId: "core-main-1",
       runId: "player-run-1",
-      baseRevision: 9,
+      baseRevision: 8,
       targetPaused: true,
       settledDeadlineMs: 12_000,
     }],
@@ -429,8 +444,105 @@ test("pause drains every tick due at the request anchor and leaves no live timer
   value.setNow(90_000);
   const stillPaused = await value.runtime.settleDue();
   assert.equal(stillPaused.phase, "paused");
-  assert.equal(stillPaused.revision, 10);
-  assert.equal(value.calls.filter(([operation]) => operation === "tick").length, 2);
+  assert.equal(stillPaused.revision, 9);
+  assert.equal(value.calls.filter(([operation]) => operation === "tick").length, 1);
+});
+
+test("an uncertain pause drain retries its original batch and never expands to later wall time", async () => {
+  let tickAttempts = 0;
+  const value = fixture({
+    registry: {
+      async commitPlayerAuthorityTick(ownerId, request) {
+        value.calls.push(["tick", ownerId, request]);
+        tickAttempts += 1;
+        if (tickAttempts === 1) throw Object.assign(new Error("lost tick ACK"), { code: "EPIPE" });
+        const revision = 8;
+        return {
+          sequence: request.sequence,
+          revision,
+          duplicate: true,
+          checkpoint: { generation: revision - 4, rootHash: HASH_A, revision },
+          summary: summary(revision),
+        };
+      },
+      async commitPlayerAuthorityPause(ownerId, request) {
+        value.calls.push(["pause", ownerId, request]);
+        return pauseLifecycleReceipt(request, 3, 5);
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  value.setNow(12_500);
+  await assert.rejects(
+    value.runtime.setPaused(true),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_TICK_UNCERTAIN",
+  );
+  assert.equal(value.runtime.snapshot().phase, "uncertain");
+  value.setNow(100_000);
+
+  const paused = await value.runtime.retryUncertain();
+
+  assert.equal(paused.phase, "paused");
+  assert.equal(paused.revision, 9);
+  assert.equal(paused.acknowledgedSequence, 3);
+  assert.equal(paused.nextDeadlineMs, 13_000);
+  assert.deepEqual(
+    value.calls.filter(([operation]) => operation === "tick").map((call) => call[2].sequence),
+    [2, 2],
+  );
+  assert.deepEqual(value.calls.filter(([operation]) => operation === "pause")[0][2], {
+    sessionId: "core-main-1",
+    runId: "player-run-1",
+    baseRevision: 8,
+    targetPaused: true,
+    settledDeadlineMs: 12_000,
+  });
+});
+
+test("pause drains 31 overdue seconds as 30 plus 1 without crossing its request anchor", async () => {
+  let revision = 7;
+  let acknowledgedSequence = 0;
+  const value = fixture({
+    registry: {
+      async commitPlayerAuthorityTick(ownerId, request) {
+        value.calls.push(["tick", ownerId, request]);
+        assert.ok(request.sequence - acknowledgedSequence <= 30);
+        acknowledgedSequence = request.sequence;
+        revision += 1;
+        return {
+          sequence: request.sequence,
+          revision,
+          duplicate: false,
+          checkpoint: { generation: revision - 4, rootHash: HASH_A, revision },
+          summary: summary(revision),
+        };
+      },
+      async commitPlayerAuthorityPause(ownerId, request) {
+        value.calls.push(["pause", ownerId, request]);
+        return pauseLifecycleReceipt(request, 32, 6);
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  value.setNow(41_000);
+
+  const paused = await value.runtime.setPaused(true);
+
+  assert.equal(paused.phase, "paused");
+  assert.equal(paused.revision, 10);
+  assert.equal(paused.acknowledgedSequence, 32);
+  assert.equal(paused.nextDeadlineMs, 42_000);
+  assert.deepEqual(
+    value.calls.filter(([operation]) => operation === "tick").map((call) => call[2].sequence),
+    [30, 31],
+  );
+  assert.equal(value.calls.filter(([operation]) => operation === "pause")[0][2].settledDeadlineMs, 41_000);
 });
 
 test("resume uses a fresh main-owned anchor and never backlogs paused wall time", async () => {
@@ -935,6 +1047,162 @@ test("only one tick is in flight and successful receipts advance exactly once", 
   assert.equal(settled.inFlight, false);
 });
 
+test("overdue wall time is one bounded 1, 2, 5, or 30 second exact batch", async (t) => {
+  for (const seconds of [1, 2, 5, 30]) {
+    await t.test(`${seconds}s`, async () => {
+      const value = fixture({
+        registry: {
+          async commitPlayerAuthorityTick(ownerId, request) {
+            value.calls.push(["tick", ownerId, request]);
+            const revision = 8;
+            return {
+              sequence: request.sequence,
+              revision,
+              duplicate: false,
+              checkpoint: { generation: 4, rootHash: HASH_A, revision },
+              summary: summary(revision),
+            };
+          },
+        },
+      });
+      await value.runtime.activate({
+        sessionId: "core-main-1", runId: "player-run-1",
+        expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+      });
+      value.setNow(10_000 + seconds * 1_000);
+
+      const settled = await value.runtime.settleDue();
+
+      assert.deepEqual(value.calls.filter(([operation]) => operation === "tick")[0][2], {
+        sessionId: "core-main-1", runId: "player-run-1", sequence: seconds,
+      });
+      assert.equal(settled.revision, 8);
+      assert.equal(settled.acknowledgedSequence, seconds);
+      assert.equal(settled.nextSequence, seconds + 1);
+      assert.equal(settled.nextDeadlineMs, 11_000 + seconds * 1_000);
+    });
+  }
+});
+
+test("more than 30 overdue seconds are split into yielded durable batches", async () => {
+  let revision = 7;
+  let acknowledgedSequence = 0;
+  const value = fixture({
+    registry: {
+      async commitPlayerAuthorityTick(ownerId, request) {
+        value.calls.push(["tick", ownerId, request]);
+        assert.ok(request.sequence > acknowledgedSequence);
+        assert.ok(request.sequence - acknowledgedSequence <= 30);
+        acknowledgedSequence = request.sequence;
+        revision += 1;
+        return {
+          sequence: request.sequence,
+          revision,
+          duplicate: false,
+          checkpoint: { generation: revision - 4, rootHash: HASH_A, revision },
+          summary: summary(revision),
+        };
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  value.setNow(41_000);
+
+  value.timers[0].callback();
+  const first = await value.runtime.inFlight;
+  assert.equal(first.acknowledgedSequence, 30);
+  assert.equal(first.revision, 8);
+  assert.equal(value.timers.at(-1).delay, 1);
+  assert.deepEqual(
+    value.calls.filter(([operation]) => operation === "tick").map((call) => call[2].sequence),
+    [30],
+  );
+
+  const second = await value.runtime.settleDue();
+  assert.equal(second.acknowledgedSequence, 31);
+  assert.equal(second.revision, 9);
+  assert.equal(second.nextDeadlineMs, 42_000);
+  assert.deepEqual(
+    value.calls.filter(([operation]) => operation === "tick").map((call) => call[2].sequence),
+    [30, 31],
+  );
+});
+
+test("lost batched tick response retries the immutable final sequence after wall time advances", async () => {
+  let attempts = 0;
+  const value = fixture({
+    registry: {
+      async commitPlayerAuthorityTick(ownerId, request) {
+        value.calls.push(["tick", ownerId, request]);
+        attempts += 1;
+        if (attempts === 1) throw Object.assign(new Error("pipe closed"), { code: "EPIPE" });
+        return {
+          sequence: request.sequence,
+          revision: 8,
+          duplicate: true,
+          checkpoint: { generation: 4, rootHash: HASH_A, revision: 8 },
+          summary: summary(8),
+        };
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  value.setNow(15_000);
+  await assert.rejects(
+    value.runtime.settleDue(),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_TICK_UNCERTAIN",
+  );
+  value.setNow(100_000);
+
+  const recovered = await value.runtime.retryUncertain();
+
+  assert.equal(recovered.revision, 8);
+  assert.equal(recovered.acknowledgedSequence, 5);
+  assert.equal(recovered.nextDeadlineMs, 16_000);
+  const requests = value.calls.filter(([operation]) => operation === "tick").map((call) => call[2]);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(requests[0], requests[1]);
+  assert.equal(requests[0].sequence, 5);
+});
+
+test("malformed batched tick ACK cannot partially advance the public clock", async () => {
+  const value = fixture({
+    registry: {
+      async commitPlayerAuthorityTick(ownerId, request) {
+        value.calls.push(["tick", ownerId, request]);
+        return {
+          sequence: request.sequence,
+          revision: 12,
+          duplicate: false,
+          checkpoint: { generation: 4, rootHash: HASH_A, revision: 12 },
+          summary: summary(12),
+        };
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  value.setNow(15_000);
+
+  await assert.rejects(
+    value.runtime.settleDue(),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_TICK_RECEIPT_INVALID",
+  );
+  const after = value.runtime.snapshot();
+  assert.equal(after.phase, "uncertain");
+  assert.equal(after.revision, 7);
+  assert.equal(after.acknowledgedSequence, 0);
+  assert.equal(after.nextDeadlineMs, 11_000);
+});
+
 test("lost tick response preserves the same sequence for explicit idempotent retry", async () => {
   let attempts = 0;
   const value = fixture({
@@ -1025,6 +1293,60 @@ test("player commands form one FIFO revision chain and ticks cannot overtake the
   assert.equal(value.runtime.snapshot().revision, 11);
   assert.equal(value.runtime.snapshot().acknowledgedSequence, 4);
   assert.equal(value.runtime.snapshot().nextDeadlineMs, 12_000);
+});
+
+test("an already queued command wins over an overdue multi-second batch", async () => {
+  let resolveCommand;
+  const value = fixture({
+    registry: {
+      commitPlayerAuthorityCommand(ownerId, request) {
+        value.calls.push(["command", ownerId, request]);
+        return new Promise((resolve) => { resolveCommand = resolve; });
+      },
+      async commitPlayerAuthorityTick(ownerId, request) {
+        value.calls.push(["tick", ownerId, request]);
+        return {
+          sequence: request.sequence,
+          revision: 9,
+          duplicate: false,
+          checkpoint: { generation: 5, rootHash: HASH_A, revision: 9 },
+          summary: summary(9),
+        };
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  value.setNow(15_000);
+
+  const command = value.runtime.commitCommand(playerCommand(7, "before-backlog", true));
+  const dueWhileQueued = value.runtime.settleDue();
+  await Promise.resolve();
+  assert.deepEqual(value.calls.map(([operation]) => operation), ["prepare", "activate", "command"]);
+  resolveCommand({
+    sequence: 1,
+    commandId: "before-backlog",
+    baseRevision: 7,
+    revision: 8,
+    settledDeadlineMs: 10_000,
+    duplicate: false,
+    ...changeReceipt(),
+    checkpoint: { generation: 4, rootHash: HASH_A, revision: 8 },
+    summary: summary(8),
+  });
+  await dueWhileQueued;
+  await command;
+  assert.equal(value.calls.filter(([operation]) => operation === "tick").length, 0);
+
+  const settled = await value.runtime.settleDue();
+
+  assert.deepEqual(value.calls.slice(-2).map(([operation]) => operation), ["command", "tick"]);
+  assert.equal(value.calls.at(-1)[2].sequence, 6);
+  assert.equal(settled.revision, 9);
+  assert.equal(settled.acknowledgedSequence, 6);
+  assert.equal(settled.nextDeadlineMs, 16_000);
 });
 
 test("system-space-station intents share the exact command FIFO without exposing a patch", async () => {
@@ -1524,6 +1846,59 @@ test("a command queued behind an in-flight tick waits and uses the next exact re
   assert.deepEqual(value.calls.slice(-2).map(([operation]) => operation), ["tick", "command"]);
 });
 
+test("a command arriving during a five-second batch projects only its one Core revision", async () => {
+  let resolveTick;
+  const value = fixture({
+    registry: {
+      commitPlayerAuthorityTick(ownerId, request) {
+        value.calls.push(["tick", ownerId, request]);
+        return new Promise((resolve) => { resolveTick = resolve; });
+      },
+      async commitPlayerAuthorityCommand(ownerId, request) {
+        value.calls.push(["command", ownerId, request]);
+        return {
+          sequence: 6,
+          commandId: request.commandId,
+          baseRevision: request.baseRevision,
+          revision: 9,
+          settledDeadlineMs: 15_000,
+          duplicate: false,
+          ...changeReceipt({ topologyDirty: false }),
+          checkpoint: { generation: 5, rootHash: HASH_A, revision: 9 },
+          summary: summary(9),
+        };
+      },
+    },
+  });
+  await value.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: value.checkpoint, settledDeadlineMs: 10_000,
+  });
+  value.setNow(15_000);
+  const tick = value.runtime.settleDue();
+  const command = value.runtime.commitCommand(playerCommand(8, "after-five-second-batch", true));
+  await Promise.resolve();
+  assert.equal(value.calls.filter(([operation]) => operation === "tick")[0][2].sequence, 5);
+  assert.equal(value.calls.filter(([operation]) => operation === "command").length, 0);
+
+  resolveTick({
+    sequence: 5,
+    revision: 8,
+    duplicate: false,
+    checkpoint: { generation: 4, rootHash: HASH_A, revision: 8 },
+    summary: summary(8),
+  });
+  await tick;
+  const committed = await command;
+
+  assert.equal(committed.previousRevision, 8);
+  assert.equal(committed.revision, 9);
+  assert.equal(committed.acknowledgedSequence, 6);
+  assert.equal(committed.nextDeadlineMs, 16_000);
+  assert.deepEqual(value.calls.slice(-2).map(([operation]) => operation), ["tick", "command"]);
+  assert.equal(value.calls.at(-1)[2].baseRevision, 8);
+});
+
 test("lost command response stays uncertain and retries the exact same command without JS fallback", async () => {
   let attempts = 0;
   const value = fixture({
@@ -1680,12 +2055,12 @@ test("real runtime finish recovery survives an overdue exact tick starting befor
         async commitPlayerAuthorityTick(ownerId, request) {
           value.calls.push(["tick", ownerId, request]);
           await tickGate.promise;
-          const revision = 7 + request.sequence;
+          const revision = 10;
           return {
             sequence: request.sequence,
             revision,
             duplicate: false,
-            checkpoint: { generation: 4 + request.sequence, rootHash: HASH_A, revision },
+            checkpoint: { generation: 5, rootHash: HASH_A, revision },
             summary: summary(revision),
           };
         },
@@ -2098,6 +2473,57 @@ test("clean startup immediately after activation resumes revision and sequence z
   assert.equal(value.timers.length, 1);
 });
 
+test("startup recovery accepts a 30-second ACK with one Core revision and continues at sequence 31", async () => {
+  const value = fixture({
+    registry: {
+      async commitPlayerAuthorityTick(ownerId, request) {
+        value.calls.push(["tick", ownerId, request]);
+        return {
+          sequence: request.sequence,
+          revision: 9,
+          duplicate: false,
+          checkpoint: { generation: 5, rootHash: HASH_A, revision: 9 },
+          summary: summary(9),
+        };
+      },
+    },
+  });
+  const resumed = value.runtime.resumeFromStartupRecovery({
+    schemaVersion: 1,
+    kind: "native-core-player-authority-startup-recovery-v1",
+    ownerId: "main-player-authority",
+    sessionId: "core-restarted-batch",
+    runId: "player-run-batch",
+    registryFingerprint: "builtin:test",
+    revision: 8,
+    checkpoint: { generation: 4, rootHash: HASH_A, revision: 8 },
+    acknowledgedSequence: 30,
+    nextSequence: 31,
+    settledDeadlineMs: 40_000,
+    nextDeadlineMs: 41_000,
+    commandId: null,
+    commandBaseRevision: null,
+    paused: false,
+    ...changeReceipt({ topologyDirty: false }),
+    summary: { ...summary(8), registryFingerprint: "builtin:test" },
+  });
+  assert.equal(resumed.revision, 8);
+  assert.equal(resumed.acknowledgedSequence, 30);
+  assert.equal(resumed.nextSequence, 31);
+  assert.equal(resumed.nextDeadlineMs, 41_000);
+  value.setNow(41_000);
+
+  const ticked = await value.runtime.settleDue();
+
+  assert.equal(ticked.revision, 9);
+  assert.equal(ticked.acknowledgedSequence, 31);
+  assert.deepEqual(value.calls.filter(([operation]) => operation === "tick")[0][2], {
+    sessionId: "core-restarted-batch",
+    runId: "player-run-batch",
+    sequence: 31,
+  });
+});
+
 test("startup receipt owner and session ownership mismatches fault closed", () => {
   const value = fixture({
     registry: {
@@ -2289,6 +2715,32 @@ test("safe-integer exhaustion cannot partially advance command or tick context",
   await assert.rejects(tickValue.runtime.settleDue(), /safe integer range/);
   assert.equal(tickValue.runtime.snapshot().revision, 7);
   assert.equal(tickValue.runtime.snapshot().nextDeadlineMs, 11_000);
+  assert.equal(tickValue.runtime.snapshot().phase, "faulted");
+  assert.equal(tickValue.calls.filter(([operation]) => operation === "tick").length, 0);
+
+  const deadlineValue = fixture();
+  await deadlineValue.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: deadlineValue.checkpoint, settledDeadlineMs: 10_000,
+  });
+  deadlineValue.runtime.context.nextDeadlineMs = Number.MAX_SAFE_INTEGER - 500;
+  deadlineValue.setNow(Number.MAX_SAFE_INTEGER - 500);
+  await assert.rejects(deadlineValue.runtime.settleDue(), /safe integer range/);
+  assert.equal(deadlineValue.runtime.snapshot().phase, "faulted");
+  assert.equal(deadlineValue.calls.filter(([operation]) => operation === "tick").length, 0);
+
+  const timerValue = fixture();
+  await timerValue.runtime.activate({
+    sessionId: "core-main-1", runId: "player-run-1",
+    expectedCheckpoint: timerValue.checkpoint, settledDeadlineMs: 10_000,
+  });
+  timerValue.runtime.context.nextSequence = Number.MAX_SAFE_INTEGER;
+  timerValue.setNow(11_000);
+  timerValue.timers[0].callback();
+  for (let index = 0; index < 4; index += 1) await Promise.resolve();
+  assert.equal(timerValue.runtime.snapshot().phase, "faulted");
+  assert.equal(timerValue.runtime.timer, null);
+  assert.equal(timerValue.calls.filter(([operation]) => operation === "tick").length, 0);
 });
 
 test("shutdown cancels only the process timer and leaves durable recovery to Rust", async () => {

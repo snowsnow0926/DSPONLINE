@@ -63,6 +63,14 @@ test("player-authority clock state is exact, bounded and contains no writer iden
     lastErrorCode: null,
   };
   assert.deepEqual(normalizeRendererNativeResult("playerAuthorityState", state), state);
+  const batched = {
+    ...state,
+    revision: 12,
+    acknowledgedSequence: 34,
+    nextSequence: 35,
+    nextDeadlineMs: 41_000,
+  };
+  assert.deepEqual(normalizeRendererNativeResult("playerAuthorityState", batched), batched);
   const hinted = {
     ...state,
     macroRecoveryHint: { kind: "finished-pending-disable", revision: 9 },

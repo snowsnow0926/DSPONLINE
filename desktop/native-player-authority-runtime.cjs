@@ -16,12 +16,13 @@ const { normalizeOperationsSettingIntent } = require("./native-operations-settin
  * main-owned normal-main session and supply the exact durable checkpoint that
  * was installed as the public player state.  The Rust host remains responsible
  * for the authoritative coverage gate and for the atomic WAL/checkpoint/ACK
- * transaction of each one-second tick.
+ * transaction of each bounded exact batch.
  */
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const TICK_MILLISECONDS = 1_000;
+const MAX_EXACT_BATCH_SECONDS = 30;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const MAX_DURABLE_COMMAND_BYTES = 1_750_000;
 const MAX_MACRO_BUDGET_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
@@ -192,11 +193,21 @@ function validateLeaseReceipt(value, phase, expected) {
   return { lease, sequence, checkpoint, summary: value.summary };
 }
 
-function validateTickReceipt(value, context) {
-  if (!isRecord(value) || value.sequence !== context.nextSequence ||
-      value.revision !== context.revision + 1 || typeof value.duplicate !== "boolean") {
+function validateTickReceipt(value, context, batch) {
+  if (!isRecord(value) || !isRecord(batch) ||
+      batch.baseRevision !== context.revision ||
+      batch.baseAcknowledgedSequence !== context.nextSequence - 1 ||
+      batch.baseNextDeadlineMs !== context.nextDeadlineMs ||
+      !sameCheckpoint(batch.baseCheckpoint, context.checkpoint) ||
+      !Number.isSafeInteger(batch.sequenceDelta) ||
+      batch.sequenceDelta < 1 || batch.sequenceDelta > MAX_EXACT_BATCH_SECONDS ||
+      batch.finalSequence !== batch.baseAcknowledgedSequence + batch.sequenceDelta ||
+      batch.nextSequence !== batch.finalSequence + 1 ||
+      batch.nextDeadlineMs !== batch.baseNextDeadlineMs + batch.sequenceDelta * TICK_MILLISECONDS ||
+      value.sequence !== batch.finalSequence ||
+      value.revision !== batch.baseRevision + 1 || typeof value.duplicate !== "boolean") {
     throw runtimeError(
-      "native player-authority tick receipt is not the requested next second",
+      "native player-authority tick receipt is not the requested exact batch",
       "NATIVE_PLAYER_AUTHORITY_TICK_RECEIPT_INVALID",
     );
   }
@@ -805,6 +816,10 @@ class NativePlayerAuthorityRuntime {
     this.pendingPauseAction = null;
     this.pauseDrainInProgress = false;
     this.pendingMacroAction = null;
+    // A tick request names the final sequence of one bounded exact batch. Keep
+    // that immutable identity across an uncertain response: recomputing it
+    // from a later wall clock would silently resize the durable Host request.
+    this.pendingTickBatch = null;
     // A main-owned checkpoint/export read holds the scheduler at an already
     // acknowledged durable boundary. It is intentionally separate from the
     // mutation `inFlight` promise so renderer clock frames never advertise a
@@ -1274,7 +1289,10 @@ class NativePlayerAuthorityRuntime {
 
   async drainDueTicksAndPause(requestedAtMs) {
     const context = this.context;
-    if (!context || this.phase !== "active" || this.pauseDrainInProgress) {
+    const retryingUncertainDrain = this.phase === "uncertain" &&
+      this.pendingTickBatch?.pauseDrain === true &&
+      this.pendingTickBatch.pauseRequestedAtMs === requestedAtMs;
+    if (!context || (this.phase !== "active" && !retryingUncertainDrain) || this.pauseDrainInProgress) {
       throw runtimeError(
         "native player-authority pause drain cannot start",
         "NATIVE_PLAYER_AUTHORITY_PAUSE_BUSY",
@@ -1285,7 +1303,7 @@ class NativePlayerAuthorityRuntime {
     this.transition("pausing");
     try {
       while (context.nextDeadlineMs <= requestedAtMs) {
-        await this.commitCurrentSequence({ pauseDrain: true });
+        await this.commitCurrentSequence({ pauseDrain: true, dueThroughMs: requestedAtMs });
         if (this.shutdownRequested || this.context !== context || this.phase !== "pausing") {
           throw runtimeError(
             "native player-authority pause drain changed before completion",
@@ -1850,11 +1868,22 @@ class NativePlayerAuthorityRuntime {
     if (this.phase !== "active" || !this.context) return Promise.resolve(this.snapshot());
     if (this.inFlight) return this.inFlight;
     if (this.persistenceBoundaryInFlight) return Promise.resolve(this.snapshot());
-    if (this.now() < this.context.nextDeadlineMs) {
+    if (this.activeCommand || this.commandQueue.length > 0) {
+      this.pump();
+      return this.inFlight ?? Promise.resolve(this.snapshot());
+    }
+    const dueThroughMs = this.now();
+    if (!Number.isFinite(dueThroughMs) || dueThroughMs < 0 ||
+        !Number.isSafeInteger(Math.floor(dueThroughMs))) {
+      const error = runtimeError("native player-authority clock is invalid");
+      this.transition("faulted", error);
+      return Promise.reject(error);
+    }
+    if (dueThroughMs < this.context.nextDeadlineMs) {
       this.armTimer();
       return Promise.resolve(this.snapshot());
     }
-    return this.commitCurrentSequence();
+    return this.commitCurrentSequence({ dueThroughMs: Math.floor(dueThroughMs) });
   }
 
   retryUncertain() {
@@ -1882,6 +1911,9 @@ class NativePlayerAuthorityRuntime {
       this.commitCurrentCommand();
       return retry;
     }
+    if (this.pendingTickBatch?.pauseDrain === true) {
+      return this.drainDueTicksAndPause(this.pendingTickBatch.pauseRequestedAtMs);
+    }
     return this.commitCurrentSequence();
   }
 
@@ -1895,14 +1927,64 @@ class NativePlayerAuthorityRuntime {
       ));
     }
     const pauseDrain = options?.pauseDrain === true;
+    let batch = this.pendingTickBatch;
+    if (batch === null) {
+      let dueThroughMs;
+      try {
+        const pauseRequestedAtMs = pauseDrain ? options?.dueThroughMs : null;
+        const candidateDueThroughMs = pauseDrain
+          ? pauseRequestedAtMs
+          : options?.dueThroughMs ?? this.now();
+        if (!Number.isFinite(candidateDueThroughMs) || candidateDueThroughMs < 0 ||
+            !Number.isSafeInteger(Math.floor(candidateDueThroughMs)) ||
+            candidateDueThroughMs < context.nextDeadlineMs ||
+            (pauseDrain && (!Number.isSafeInteger(pauseRequestedAtMs) ||
+              pauseRequestedAtMs < context.nextDeadlineMs))) {
+          throw runtimeError("native player-authority exact batch deadline is invalid");
+        }
+        dueThroughMs = Math.floor(candidateDueThroughMs);
+        const dueSeconds = Math.floor(
+          (dueThroughMs - context.nextDeadlineMs) / TICK_MILLISECONDS,
+        ) + 1;
+        const sequenceDelta = Math.min(MAX_EXACT_BATCH_SECONDS, dueSeconds);
+        const finalSequence = context.nextSequence + sequenceDelta - 1;
+        const nextSequence = finalSequence + 1;
+        const nextDeadlineMs = context.nextDeadlineMs + sequenceDelta * TICK_MILLISECONDS;
+        if (!Number.isSafeInteger(sequenceDelta) || sequenceDelta < 1 ||
+            !Number.isSafeInteger(finalSequence) || !Number.isSafeInteger(nextSequence) ||
+            !Number.isSafeInteger(nextDeadlineMs)) {
+          throw runtimeError("native player-authority exact batch exceeds the safe integer range");
+        }
+        batch = Object.freeze({
+          request: Object.freeze({
+            sessionId: context.sessionId,
+            runId: context.runId,
+            sequence: finalSequence,
+          }),
+          baseRevision: context.revision,
+          baseAcknowledgedSequence: context.nextSequence - 1,
+          baseNextDeadlineMs: context.nextDeadlineMs,
+          baseCheckpoint: Object.freeze({ ...context.checkpoint }),
+          sequenceDelta,
+          finalSequence,
+          nextSequence,
+          nextDeadlineMs,
+          pauseDrain,
+          pauseRequestedAtMs,
+        });
+        this.pendingTickBatch = batch;
+      } catch (error) {
+        const fault = error instanceof NativePlayerAuthorityRuntimeError
+          ? error
+          : runtimeError("native player-authority exact batch preflight failed", undefined, error);
+        if (!this.shutdownRequested) this.transition("faulted", fault);
+        return Promise.reject(fault);
+      }
+    }
     this.currentOperation = pauseDrain ? "pause" : "tick";
     let invocation;
     try {
-      invocation = this.registry.commitPlayerAuthorityTick(this.ownerId, {
-        sessionId: context.sessionId,
-        runId: context.runId,
-        sequence: context.nextSequence,
-      });
+      invocation = this.registry.commitPlayerAuthorityTick(this.ownerId, batch.request);
     } catch (cause) {
       invocation = Promise.reject(cause);
     }
@@ -1914,17 +1996,13 @@ class NativePlayerAuthorityRuntime {
           "NATIVE_PLAYER_AUTHORITY_RUNTIME_SHUTDOWN",
         );
       }
-      const validated = validateTickReceipt(receipt, context);
-      const nextSequence = context.nextSequence + 1;
-      const nextDeadlineMs = context.nextDeadlineMs + TICK_MILLISECONDS;
-      if (!Number.isSafeInteger(nextSequence) || !Number.isSafeInteger(nextDeadlineMs)) {
-        throw runtimeError("native player-authority clock exceeds the safe integer range");
-      }
+      const validated = validateTickReceipt(receipt, context, batch);
       context.revision = receipt.revision;
       context.checkpoint = validated.checkpoint;
-      context.nextSequence = nextSequence;
-      context.nextDeadlineMs = nextDeadlineMs;
+      context.nextSequence = batch.nextSequence;
+      context.nextDeadlineMs = batch.nextDeadlineMs;
       context.lastCommand = null;
+      this.pendingTickBatch = null;
       this.transition(pauseDrain ? "pausing" : "active");
     }).catch((cause) => {
       const error = cause instanceof NativePlayerAuthorityRuntimeError

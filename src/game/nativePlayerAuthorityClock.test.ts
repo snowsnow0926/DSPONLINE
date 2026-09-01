@@ -489,6 +489,130 @@ describe("NativePlayerAuthorityClockController", () => {
     expect(selectActiveNativePlayerAuthorityFrame(value.controller.getSnapshot(), "core-a")?.revision).toBe(10);
   });
 
+  it("orders bounded exact batches with many seconds but one Core revision", async () => {
+    const value = clockFixture();
+    value.controller.bindSession("core-a");
+    value.controller.start();
+    await settlePromises();
+
+    value.emit(activeFrame({
+      revision: 11,
+      acknowledgedSequence: 9,
+      nextSequence: 10,
+      nextDeadlineMs: 15_000,
+      inFlight: true,
+      currentOperation: "tick",
+    }));
+    value.emit(activeFrame({
+      revision: 11,
+      acknowledgedSequence: 9,
+      nextSequence: 10,
+      nextDeadlineMs: 15_000,
+    }));
+    expect(selectActiveNativePlayerAuthorityFrame(
+      value.controller.getSnapshot(),
+      "core-a",
+    )).toMatchObject({ revision: 11, acknowledgedSequence: 9, nextDeadlineMs: 15_000 });
+
+    value.emit(activeFrame({
+      revision: 12,
+      acknowledgedSequence: 39,
+      nextSequence: 40,
+      nextDeadlineMs: 45_000,
+    }));
+    expect(selectActiveNativePlayerAuthorityFrame(
+      value.controller.getSnapshot(),
+      "core-a",
+    )).toMatchObject({ revision: 12, acknowledgedSequence: 39, nextDeadlineMs: 45_000 });
+  });
+
+  it("rejects oversized, clock-mismatched, or revisionless exact batch frames", async () => {
+    for (const malformed of [
+      activeFrame({
+        revision: 11, acknowledgedSequence: 35, nextSequence: 36, nextDeadlineMs: 41_000,
+      }),
+      activeFrame({
+        revision: 11, acknowledgedSequence: 9, nextSequence: 10, nextDeadlineMs: 14_000,
+      }),
+      activeFrame({
+        revision: 10, acknowledgedSequence: 5, nextSequence: 6, nextDeadlineMs: 11_000,
+      }),
+      activeFrame({
+        revision: 12, acknowledgedSequence: 10, nextSequence: 11, nextDeadlineMs: 14_000,
+      }),
+      activeFrame({
+        revision: 12, acknowledgedSequence: 36, nextSequence: 37, nextDeadlineMs: 41_000,
+      }),
+      activeFrame({
+        revision: 12, acknowledgedSequence: 36, nextSequence: 37, nextDeadlineMs: 43_000,
+      }),
+      activeFrame({
+        revision: 12, acknowledgedSequence: 64, nextSequence: 65, nextDeadlineMs: 69_000,
+      }),
+      activeFrame({
+        revision: 12, acknowledgedSequence: 64, nextSequence: 65, nextDeadlineMs: 71_000,
+      }),
+    ]) {
+      const value = clockFixture();
+      value.controller.bindSession("core-a");
+      value.controller.start();
+      await settlePromises();
+      const confirmed = value.controller.getSnapshot().lastConfirmedFrame;
+
+      value.emit(malformed);
+
+      expect(value.controller.getSnapshot().currentFrame).toBe(confirmed);
+      expect(value.controller.getSnapshot().lastConfirmedFrame).toBe(confirmed);
+    }
+  });
+
+  it("allows a skipped command plus exact batch while preserving bounded event accounting", async () => {
+    const value = clockFixture();
+    value.controller.bindSession("core-a");
+    value.controller.start();
+    await settlePromises();
+
+    value.emit(activeFrame({
+      revision: 12,
+      acknowledgedSequence: 10,
+      nextSequence: 11,
+      nextDeadlineMs: 15_000,
+    }));
+
+    expect(selectActiveNativePlayerAuthorityFrame(
+      value.controller.getSnapshot(),
+      "core-a",
+    )).toMatchObject({ revision: 12, acknowledgedSequence: 10, nextDeadlineMs: 15_000 });
+  });
+
+  it("accepts the exact minimum deadline for bounded two-revision batch compositions", async () => {
+    for (const [sequenceDelta, deadlineDelta] of [
+      [31, 30_000],
+      [32, 32_000],
+      [60, 60_000],
+    ] as const) {
+      const value = clockFixture();
+      value.controller.bindSession("core-a");
+      value.controller.start();
+      await settlePromises();
+      value.emit(activeFrame({
+        revision: 12,
+        acknowledgedSequence: 4 + sequenceDelta,
+        nextSequence: 5 + sequenceDelta,
+        nextDeadlineMs: 10_000 + deadlineDelta,
+      }));
+
+      expect(selectActiveNativePlayerAuthorityFrame(
+        value.controller.getSnapshot(),
+        "core-a",
+      )).toMatchObject({
+        revision: 12,
+        acknowledgedSequence: 4 + sequenceDelta,
+        nextDeadlineMs: 10_000 + deadlineDelta,
+      });
+    }
+  });
+
   it("drops malformed, stale, regressing, cross-run and cross-session pushes", async () => {
     const value = clockFixture();
     value.controller.bindSession("core-a");

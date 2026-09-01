@@ -15,6 +15,8 @@ import type { NativeFactoryThinViewSource } from "./nativeFactoryThinViewStore";
 
 const LOGICAL_ID_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,127}$/;
+const EXACT_TICK_MILLISECONDS = 1_000;
+const MAX_EXACT_BATCH_SECONDS = 30;
 const MAX_MACRO_BUDGET_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 const CLOCK_STATE_KEYS = Object.freeze([
   "schemaVersion",
@@ -365,8 +367,38 @@ function clockFrameIsOrderedAfter(
     candidate.acknowledgedSequence === null || candidate.nextDeadlineMs === null) return false;
   const sequenceDelta = candidate.acknowledgedSequence - previous.acknowledgedSequence;
   const revisionDelta = candidate.revision - previous.revision;
-  return sequenceDelta >= 0 && revisionDelta >= 0 && sequenceDelta === revisionDelta &&
-    candidate.nextDeadlineMs >= previous.nextDeadlineMs;
+  const deadlineDelta = candidate.nextDeadlineMs - previous.nextDeadlineMs;
+  if (sequenceDelta < 0 || revisionDelta < 0 || deadlineDelta < 0) return false;
+  if (sequenceDelta === 0 || revisionDelta === 0) {
+    return sequenceDelta === 0 && revisionDelta === 0 && deadlineDelta === 0;
+  }
+  // Macro windows retain their original one-sequence-per-revision ordering.
+  // Ordinary v1 exact ticks may instead commit 1..30 simulated seconds as one
+  // durable Core revision. Across skipped frames, each revision must therefore
+  // account for at least one and at most thirty sequence positions.
+  if (previous.schemaVersion === 2 || candidate.schemaVersion === 2) {
+    return sequenceDelta === revisionDelta;
+  }
+  if (sequenceDelta < revisionDelta ||
+    Math.ceil(sequenceDelta / MAX_EXACT_BATCH_SECONDS) > revisionDelta) return false;
+  if (sequenceDelta > revisionDelta) {
+    const extraSequencePositions = sequenceDelta - revisionDelta;
+    const minimumBatchRevisions = Math.ceil(
+      extraSequencePositions / (MAX_EXACT_BATCH_SECONDS - 1),
+    );
+    const minimumTickSeconds = extraSequencePositions + minimumBatchRevisions;
+    if (deadlineDelta < minimumTickSeconds * EXACT_TICK_MILLISECONDS) return false;
+    if (minimumBatchRevisions === revisionDelta &&
+      deadlineDelta !== sequenceDelta * EXACT_TICK_MILLISECONDS) return false;
+  }
+  // One observed revision with more than one sequence can only be a single
+  // exact batch, so its wall deadline must advance by precisely the same
+  // number of seconds. A one-sequence event may be a command/pause/resume and
+  // intentionally has different deadline semantics.
+  if (revisionDelta === 1 && sequenceDelta > 1) {
+    return deadlineDelta === sequenceDelta * EXACT_TICK_MILLISECONDS;
+  }
+  return true;
 }
 
 function identityFrameMatches(

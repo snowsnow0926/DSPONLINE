@@ -1372,7 +1372,7 @@ test("player authority prepare and activate are main-owned, capability-gated, an
   });
 });
 
-test("player authority tick is main-owned, sequence-keyed, and rejects caller state proofs", async () => {
+test("player authority tick is main-owned, final-sequence-keyed, and rejects caller state proofs", async () => {
   const calls = [];
   const client = {
     hello: { capabilities: [NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY] },
@@ -1389,12 +1389,12 @@ test("player authority tick is main-owned, sequence-keyed, and rejects caller st
   await registry.commitPlayerAuthorityTick("main-authority", {
     sessionId: "core-1",
     runId: "player-run-1",
-    sequence: 8,
+    sequence: 30,
   });
   assert.deepEqual(calls, [{
     operation: "coreCommitPlayerAuthorityTick",
     sessionId: "core-1",
-    request: { runId: "player-run-1", sequence: 8 },
+    request: { runId: "player-run-1", sequence: 30 },
   }]);
 
   for (const field of ["baseRevision", "registryFingerprint", "proof", "checkpoint", "commandId"]) {
@@ -1644,10 +1644,10 @@ test("startup recovery receipt is strictly adopted once as a main-owned Rust ses
     revision: 11,
     entryCheckpoint: { generation: 3, rootHash: "e".repeat(64), revision: 7 },
     checkpoint: { generation: 8, rootHash: "a".repeat(64), revision: 11 },
-    acknowledgedSequence: 4,
-    nextSequence: 5,
-    settledDeadlineMs: 10_000,
-    nextDeadlineMs: 11_000,
+    acknowledgedSequence: 30,
+    nextSequence: 31,
+    settledDeadlineMs: 40_000,
+    nextDeadlineMs: 41_000,
     commandId: null,
     commandBaseRevision: null,
     changedEntityIds: [],
@@ -1811,6 +1811,9 @@ test("startup recovery receipt is strictly adopted once as a main-owned Rust ses
   receipt.summary.revision = 999;
   const adopted = registry.takePlayerAuthorityStartupRecovery("main-player-authority");
   assert.equal(adopted.summary.revision, 11);
+  assert.equal(adopted.acknowledgedSequence, 30);
+  assert.equal(adopted.nextSequence, 31);
+  assert.equal(adopted.nextDeadlineMs, 41_000);
   assert.deepEqual(adopted.entryCheckpoint, {
     generation: 3,
     rootHash: "e".repeat(64),

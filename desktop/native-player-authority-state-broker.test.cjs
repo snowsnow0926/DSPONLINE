@@ -189,8 +189,16 @@ test("broker serves only the trusted renderer and re-normalizes every read", () 
     isTrustedRendererOwner: (ownerId) => ownerId === 7,
   });
   assert.equal(broker.read(7).revision, 41);
-  value = active({ revision: 42, acknowledgedSequence: 10, nextSequence: 11 });
-  assert.equal(broker.read(7).revision, 42);
+  value = active({
+    revision: 42,
+    acknowledgedSequence: 39,
+    nextSequence: 40,
+    nextDeadlineMs: 80_000,
+  });
+  assert.deepEqual(broker.read(7), {
+    schemaVersion: 1,
+    ...value,
+  });
   assert.throws(
     () => broker.read(8),
     (error) => error.code === "NATIVE_PLAYER_AUTHORITY_STATE_RENDERER_UNTRUSTED",

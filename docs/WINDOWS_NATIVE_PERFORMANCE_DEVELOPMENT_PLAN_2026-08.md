@@ -2690,3 +2690,13 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 2. 一项是真实 writer 闭环回归。`LogisticsBufferRuntime` 冷启动会为全部 storage/splitter 物化旧版兼容的零值库存键，但共享 writer manifest 没有收到该阶段的实际访问行。1,024 行合成档中，第一次结算实际规范化 1,023 个仓库，却只上报另一个阶段的 1 行；长请求因 Campaign 全扫描看见 `iron_ingot: 0`，分段请求的稀疏库存扫描漏掉它，导致首个 `productionHistory` 样本不同。修正后 settlement 返回稳定有序的实际写入行：冷启动/稠密路径返回完整目录，休眠路径为空，稀疏路径只返回 wake queue；这些行进入统一 Inventory writer manifest，并新增 `1024 → 0 → 1` 行的回归断言。
 3. 最后一项是错误链断言仍匹配旧文案。当前分块读取器按“读取 chunk 上下文 → 缺失 record 根因”保留完整 `anyhow` 链；测试现在验证完整链和精确缺失 key，不改变损坏存档的拒绝行为。
 4. 修正后的 focused 集合为 6/6：物流写入行、60 秒单次/60 次 1 秒生产历史一致性、缺失 chunk，以及三项 MOD/排版/蓝图契约全部通过。完整矩阵仍必须在包含本节修正的新冻结 SHA 上从头运行，不能把这些 focused 结果拼成发布通过。
+
+### 26.6 第三次冻结的 Host 脏域审计失败与派生命令修正
+
+冻结 SHA `07ffd9f763b19fb7716544c8f9281b9fa7d4d9c6` 的静态门禁全部通过：TypeScript typecheck、Rust workspace all-target/all-feature strict Clippy、Rust fmt、125 个运行依赖许可证、13 个 App binding/12 个组件的薄 UI 边界和 native coverage 清单均为绿色。开启 long differential 的完整 Vitest 在 495.214 秒内通过：394 个文件，3,023 项通过、28 项条件跳过、0 项失败。
+
+Rust workspace 串行全量随后给出新的首轮证据：Core 为 1,056 项通过、3 项 ignored、0 项失败，耗时 452.45 秒；Host 在 40.55 秒内为 238 项通过、1 项失败、0 项 ignored，命令因此按设计停止，后续 binary 没有被冒充执行。唯一失败是 `construction_queue_cancel_is_idempotent_across_all_host_fault_boundaries`，错误为 checkpoint base-domain dirty audit 检出未登记 writer。
+
+根因是施工队列的 WAL 只持有有界意图，实际 `ConstructionQueueExpansion` 会在 Rust 内派生修改多个公开字段。既有 dirty 标记只看原始 `constructionQueue.intent` 并额外强制 Core；取消和补料还会修改属于 Logistics 域的 `portableFleet`，保存时却尝试复用旧 `base:logistics`。修正为每种派生计划显式声明实际触及的 v47 顶层字段，并统一交给已有 domain classifier：Cancel、Enqueue、Fund、Deploy、DirectDeploy 分别只标记各自的 construction、portableFleet、queue、version 和 allocator 字段。审计仍保持开启，并把错误信息补充为具体 domain ID。
+
+原失败测试修复后 1/1 通过；同一筛选下蓝图捕获、导入、入队、直接部署、施工部署和取消的全部 Host fault-boundary 场景为 6/6。该 focused 结果只允许形成新的冻结提交；25.6 集中矩阵仍需在新 SHA 上再次从头执行。

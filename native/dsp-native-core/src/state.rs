@@ -3870,7 +3870,8 @@ impl CoreState {
                     );
                     if !checkpoint_chunk_content_matches(cached, &audit) {
                         bail!(
-                            "native checkpoint base-domain dirty audit detected an unmarked writer"
+                            "native checkpoint base-domain dirty audit detected an unmarked writer: {}",
+                            domain.id()
                         )
                     }
                 }
@@ -5017,6 +5018,12 @@ impl CoreState {
                 self.save_dirty.mark_all_base();
                 continue;
             };
+            self.save_dirty.mark_base(classify_base_checkpoint_key(key));
+        }
+    }
+
+    pub(crate) fn mark_base_command_derived_keys(&mut self, keys: &[&str]) {
+        for key in keys {
             self.save_dirty.mark_base(classify_base_checkpoint_key(key));
         }
     }

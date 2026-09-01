@@ -232,6 +232,31 @@ impl ConstructionQueueExpansion {
             ConstructionQueuePlan::Deploy(_) | ConstructionQueuePlan::DirectDeploy(_)
         )
     }
+
+    /// Top-level public v47 fields changed by the derived plan in addition to
+    /// the bounded intent marker itself. The command transaction feeds these
+    /// keys through the same checkpoint-domain classifier as ordinary leaf
+    /// patches, so incremental persistence cannot reuse a stale clean chunk.
+    pub(crate) fn affected_base_keys(&self) -> &'static [&'static str] {
+        match &self.plan {
+            ConstructionQueuePlan::Cancel(_) => &[
+                "construction",
+                "portableFleet",
+                "constructionQueue",
+                "blueprintVersions",
+            ],
+            ConstructionQueuePlan::Enqueue(_) => {
+                &["blueprintVersions", "constructionQueue", "nextId"]
+            }
+            ConstructionQueuePlan::Fund(_) => {
+                &["construction", "portableFleet", "constructionQueue"]
+            }
+            ConstructionQueuePlan::Deploy(_) => {
+                &["constructionQueue", "blueprintVersions", "nextId"]
+            }
+            ConstructionQueuePlan::DirectDeploy(_) => &["construction", "nextId"],
+        }
+    }
 }
 
 fn apply_direct_deploy_plan(

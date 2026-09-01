@@ -9447,6 +9447,9 @@ impl CoreState {
             &applied_command.top_level_changes,
             blueprint_intent.is_some() || construction_queue_intent.is_some(),
         );
+        if let Some(expansion) = construction_queue_intent {
+            next.mark_base_command_derived_keys(expansion.affected_base_keys());
+        }
 
         for record in &applied_command.changed_entities {
             let index = *next

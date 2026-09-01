@@ -4156,6 +4156,7 @@ fn apply_construction_tail_certificate(
     state
         .commit_simulated_state(base, entities, belt_commit, next_revision, false)
         .map_err(|error| format!("construction-tail commit failed: {error:#}"))?;
+    state.invalidate_prepared_planet_metrics_runtime();
     if quantum_replay_attempted {
         state.invalidate_prepared_quantum_logistics_directory();
     }
@@ -8298,6 +8299,13 @@ fn advance_bounded_with_runtime(
         candidate.pure_idle_macro_runtime = None;
     }
 
+    if tail_seconds > EPSILON {
+        // Macro/tail settlement writes entity runtime fields outside the exact
+        // simple-factory writer protocol. Keep the disposable candidate
+        // fail-closed and publish a cold planet-metric cache state.
+        candidate.invalidate_prepared_planet_metrics_runtime();
+    }
+
     let previous_revision = state.revision;
     let revision = candidate.revision;
     let summary = request
@@ -10490,7 +10498,12 @@ mod tests {
     #[test]
     fn macro_v10_construction_tail_spends_real_stock_and_is_split_invariant() {
         for multiplier in [8.0, 12.0, 15.0, 16.0] {
-            let initial = productive_construction_macro_fixture(multiplier, 100);
+            let mut initial = productive_construction_macro_fixture(multiplier, 100);
+            let entities = initial.parse_entities_parallel().unwrap();
+            let metric_runtime =
+                crate::simple_factory::PlanetMetricsRuntime::build(&initial, &entities);
+            initial.install_prepared_planet_metrics_runtime(Arc::new(metric_runtime));
+            assert!(initial.prepared_planet_metrics_runtime().is_some());
             let mut prefix = initial.clone();
             let prefix_revision = prefix.revision;
             let prefix_result = advance_macro_v10(
@@ -10514,6 +10527,8 @@ mod tests {
             )
             .unwrap();
             assert!(result.supported, "reason={:?}", result.reason);
+            assert_eq!(result.exact_scope, "pure-idle-macro-v10");
+            assert!(long.prepared_planet_metrics_runtime().is_none());
             assert_eq!(
                 proof_counter(
                     long.base_value()["constructionAutomation"].get("totalCrafted"),
@@ -10542,6 +10557,9 @@ mod tests {
                 )
                 .unwrap();
                 assert!(result.supported, "reason={:?}", result.reason);
+                if result.exact_scope == "pure-idle-macro-v10" {
+                    assert!(segmented.prepared_planet_metrics_runtime().is_none());
+                }
             }
             assert_eq!(
                 segmented.summary().unwrap().canonical_sha256,

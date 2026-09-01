@@ -77,6 +77,9 @@ pub(crate) struct ConstructionRunOutcome {
     pub quantum_wake: ConstructionQuantumWake,
     pub scan: ConstructionActiveScan,
     pub receipt: ConstructionRunReceipt,
+    /// Exact persisted entity rows whose runtime display fields were written.
+    /// Planet-metric probing consumes this only as session-local wake evidence.
+    pub planet_metric_writer_indices: Vec<usize>,
 }
 
 /// Private evidence emitted by the construction stage itself. It is held only
@@ -3523,6 +3526,7 @@ pub(crate) fn run_centers(
             quantum_wake: ConstructionQuantumWake::default(),
             scan,
             receipt,
+            planet_metric_writer_indices: Vec::new(),
         });
     }
     let mut automation = base
@@ -3539,6 +3543,7 @@ pub(crate) fn run_centers(
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
     let mut wake_centers = BTreeSet::new();
+    let planet_metric_writer_indices = selected_center_indices.clone();
     let selected_center_indices = selected_center_indices.into_iter().collect::<HashSet<_>>();
     let mut centers_by_planet = vec![Vec::<usize>::new(); state.catalog.planets.len()];
     for &entity_index in center_indices {
@@ -3953,6 +3958,7 @@ pub(crate) fn run_centers(
         },
         scan,
         receipt,
+        planet_metric_writer_indices,
     })
 }
 

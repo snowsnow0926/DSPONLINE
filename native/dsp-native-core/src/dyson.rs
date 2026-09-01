@@ -34,7 +34,7 @@ pub(crate) struct Reception {
     pub efficiency_by_entity: HashMap<String, f64>,
     pub ray_power_by_entity: HashMap<String, f64>,
     pub receiver_load_kw: f64,
-    receiver_indices: Vec<usize>,
+    pub(crate) receiver_indices: Vec<usize>,
 }
 
 #[derive(Debug)]

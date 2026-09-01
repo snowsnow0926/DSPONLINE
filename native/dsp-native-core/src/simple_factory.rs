@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, anyhow, bail};
 use serde_json::{Map, Number, Value, json};
@@ -15,6 +15,10 @@ const MIN_BUILDING_BUFFER_LIMIT: f64 = 1_000.0;
 const DEFAULT_BUILDING_BUFFER_LIMIT: f64 = 1_000_000.0;
 const MAX_BUILDING_BUFFER_LIMIT: f64 = 100_000_000.0;
 const GRID_IDS: [&str; 3] = ["grid-a", "grid-b", "grid-c"];
+const PLANET_METRIC_ACTIVE_DENSE_NUMERATOR: usize = 3;
+const PLANET_METRIC_ACTIVE_DENSE_DENOMINATOR: usize = 4;
+const PLANET_METRIC_BTREE_FIRST_NODE_BYTES: u64 = 256;
+const PLANET_METRIC_BTREE_WORDS_PER_ENTRY: u64 = 6;
 
 fn collect_indexed_power_probes_with_runtime<T, R, F>(
     runtime: &DeterministicRuntime,
@@ -78,6 +82,358 @@ enum PlanetReserveKind {
     None,
     StoredEnergy,
     Fuel,
+}
+
+/// Session-only probe cache for the fields used by `planetMetrics`.
+///
+/// The expensive JSON/catalog probe is O(active/changed) after the cold pass.
+/// The compact probe values are still replayed in persisted entity order on
+/// every step because changing that IEEE-754 addition order changes gameplay
+/// bytes. This runtime is never serialized or hashed.
+#[derive(Debug, Clone)]
+pub(crate) struct PlanetMetricsRuntime {
+    // Retaining both Arcs makes same-length/same-capacity COW drift visible.
+    topology: std::sync::Arc<crate::state::FactoryTopology>,
+    catalog: std::sync::Arc<crate::catalog::RuntimeCatalog>,
+    entity_count: usize,
+    planet_count: usize,
+    committed_revision: u64,
+    baseline: std::sync::Arc<Vec<PlanetMetricProbe>>,
+    overrides: BTreeMap<usize, PlanetMetricProbe>,
+    pending_entity_indices: BTreeSet<usize>,
+    wake_all: bool,
+    directory_fallback: bool,
+    #[cfg(test)]
+    scan_history: Vec<PlanetMetricScan>,
+    #[cfg(test)]
+    indexed_selection_calls: usize,
+    #[cfg(test)]
+    flat_full_oracle_calls: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PlanetMetricScan {
+    pub selected_rows: usize,
+    pub total_rows: usize,
+    pub stable_rows_skipped: usize,
+    pub dense_fallback: bool,
+    pub directory_fallback: bool,
+    pub full_scan: bool,
+}
+
+struct PlanetMetricSelection {
+    entity_indices: Vec<usize>,
+    scan: PlanetMetricScan,
+    fallback_detected: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanetMetricProbeMode {
+    Indexed,
+    #[cfg(test)]
+    FlatFull,
+    #[cfg(test)]
+    IndexedFailAfterCollect,
+}
+
+impl PlanetMetricsRuntime {
+    pub(crate) fn build(state: &CoreState, entities: &[Value]) -> Self {
+        let planet_count = state.catalog.planets.len();
+        let directory_fallback = state.identity.registry_fingerprint
+            != crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+            || state.catalog.snapshot.registry_fingerprint
+                != crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+            || entities.len() != state.entities.ids.len()
+            || state.factory_topology.entity_planet_indices.len() != entities.len()
+            || planet_count > u32::MAX as usize
+            || state.factory_topology.orbital_collector_full_scan_required
+            || state.factory_topology.quantum_endpoint_full_scan_required
+            || state
+                .factory_topology
+                .system_space_station_full_scan_required
+            || entities.iter().enumerate().any(|(index, entity)| {
+                !validate_planet_metric_identity(state, entities, index, entity)
+            });
+        Self {
+            topology: state.factory_topology.clone(),
+            catalog: state.catalog.clone(),
+            entity_count: entities.len(),
+            planet_count,
+            committed_revision: state.revision,
+            baseline: std::sync::Arc::new(Vec::new()),
+            overrides: BTreeMap::new(),
+            pending_entity_indices: BTreeSet::new(),
+            wake_all: true,
+            directory_fallback,
+            #[cfg(test)]
+            scan_history: Vec::new(),
+            #[cfg(test)]
+            indexed_selection_calls: 0,
+            #[cfg(test)]
+            flat_full_oracle_calls: 0,
+        }
+    }
+
+    pub(crate) fn bind_committed_revision(&mut self, revision: u64) {
+        self.committed_revision = revision;
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> u64 {
+        let rows = self.entity_count as u64;
+        let probe_bytes = std::mem::size_of::<PlanetMetricProbe>() as u64;
+        let index_bytes = std::mem::size_of::<usize>() as u64;
+        let tree_entry_bytes = index_bytes.saturating_mul(PLANET_METRIC_BTREE_WORDS_PER_ENTRY);
+        let two_runtime_allocations = (std::mem::size_of::<Self>() as u64).saturating_mul(2);
+        let two_full_probe_buffers = rows.saturating_mul(probe_bytes).saturating_mul(2);
+        let full_selection_and_updates = rows
+            .saturating_mul(index_bytes)
+            .saturating_add(rows.saturating_mul(probe_bytes));
+        let peak_pending_and_override_trees = if rows == 0 {
+            0
+        } else {
+            PLANET_METRIC_BTREE_FIRST_NODE_BYTES
+                .saturating_mul(4)
+                .saturating_add(rows.saturating_mul(tree_entry_bytes).saturating_mul(2))
+        };
+        two_runtime_allocations
+            .saturating_add(two_full_probe_buffers)
+            .saturating_add(full_selection_and_updates)
+            .saturating_add(peak_pending_and_override_trees)
+    }
+
+    pub(crate) fn wake_entity_indices(&mut self, indices: &[usize]) {
+        if self.directory_fallback || self.wake_all {
+            return;
+        }
+        for &entity_index in indices {
+            if entity_index >= self.entity_count {
+                self.force_directory_fallback();
+                return;
+            }
+            self.pending_entity_indices.insert(entity_index);
+        }
+    }
+
+    pub(crate) fn force_full(&mut self) {
+        self.wake_all = true;
+        self.pending_entity_indices.clear();
+    }
+
+    pub(crate) fn force_directory_fallback(&mut self) {
+        self.directory_fallback = true;
+        self.force_full();
+    }
+
+    fn select(
+        &self,
+        state: &CoreState,
+        entities: &[Value],
+        planet_count: usize,
+    ) -> PlanetMetricSelection {
+        let topology_changed = !std::sync::Arc::ptr_eq(&self.topology, &state.factory_topology)
+            || !std::sync::Arc::ptr_eq(&self.catalog, &state.catalog)
+            || self.committed_revision != state.revision
+            || self.entity_count != entities.len()
+            || self.entity_count != state.entities.ids.len()
+            || self.planet_count != planet_count
+            || self.planet_count != state.catalog.planets.len()
+            || state.factory_topology.entity_planet_indices.len() != entities.len()
+            || (self.baseline.len() != self.entity_count && !self.baseline.is_empty())
+            || self
+                .overrides
+                .keys()
+                .any(|&entity_index| entity_index >= self.entity_count)
+            || self
+                .pending_entity_indices
+                .iter()
+                .any(|&entity_index| entity_index >= self.entity_count);
+        let identity_probe_all =
+            self.directory_fallback || self.wake_all || self.baseline.len() != self.entity_count;
+        let selected_identity_changed = !topology_changed
+            && if identity_probe_all {
+                entities.iter().enumerate().any(|(index, entity)| {
+                    !validate_planet_metric_identity(state, entities, index, entity)
+                })
+            } else {
+                self.pending_entity_indices.iter().any(|&index| {
+                    !validate_planet_metric_identity(state, entities, index, &entities[index])
+                })
+            };
+        let fallback_detected = topology_changed || selected_identity_changed;
+        let active = self.pending_entity_indices.len();
+        let dense_fallback = !self.directory_fallback
+            && !fallback_detected
+            && !self.wake_all
+            && active > 0
+            && active.saturating_mul(PLANET_METRIC_ACTIVE_DENSE_DENOMINATOR)
+                >= self
+                    .entity_count
+                    .saturating_mul(PLANET_METRIC_ACTIVE_DENSE_NUMERATOR);
+        let full_scan = self.directory_fallback
+            || fallback_detected
+            || self.wake_all
+            || self.baseline.len() != self.entity_count
+            || dense_fallback;
+        let entity_indices: Vec<usize> = if full_scan {
+            (0..entities.len()).collect()
+        } else {
+            self.pending_entity_indices.iter().copied().collect()
+        };
+        let selected_rows = entity_indices.len();
+        PlanetMetricSelection {
+            entity_indices,
+            scan: PlanetMetricScan {
+                selected_rows,
+                total_rows: entities.len(),
+                stable_rows_skipped: entities.len().saturating_sub(selected_rows),
+                dense_fallback,
+                directory_fallback: self.directory_fallback || fallback_detected,
+                full_scan,
+            },
+            fallback_detected,
+        }
+    }
+
+    fn commit_full(
+        &mut self,
+        probes: Vec<PlanetMetricProbe>,
+        scan: PlanetMetricScan,
+        fallback_detected: bool,
+        mode: PlanetMetricProbeMode,
+    ) {
+        self.baseline = std::sync::Arc::new(probes);
+        self.overrides.clear();
+        self.pending_entity_indices.clear();
+        self.wake_all = false;
+        self.directory_fallback |= fallback_detected;
+        #[cfg(test)]
+        {
+            self.scan_history.push(scan);
+            match mode {
+                PlanetMetricProbeMode::Indexed | PlanetMetricProbeMode::IndexedFailAfterCollect => {
+                    self.indexed_selection_calls += 1
+                }
+                PlanetMetricProbeMode::FlatFull => self.flat_full_oracle_calls += 1,
+            }
+        }
+        #[cfg(not(test))]
+        let _ = (scan, mode);
+    }
+
+    fn commit_sparse(
+        &mut self,
+        selection: &PlanetMetricSelection,
+        next_overrides: BTreeMap<usize, PlanetMetricProbe>,
+    ) {
+        self.overrides = next_overrides;
+        for &entity_index in &selection.entity_indices {
+            self.pending_entity_indices.remove(&entity_index);
+        }
+        self.wake_all = false;
+        self.directory_fallback |= selection.fallback_detected;
+        #[cfg(test)]
+        {
+            self.scan_history.push(selection.scan);
+            self.indexed_selection_calls += 1;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scan_history_for_test(&self) -> &[PlanetMetricScan] {
+        &self.scan_history
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_rows_for_test(&self) -> Vec<usize> {
+        self.pending_entity_indices.iter().copied().collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selection_calls_for_test(&self) -> (usize, usize) {
+        (self.indexed_selection_calls, self.flat_full_oracle_calls)
+    }
+}
+
+fn value_has_opaque_mod_key(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object
+            .iter()
+            .any(|(key, value)| key.starts_with("mod:") || value_has_opaque_mod_key(value)),
+        Value::Array(values) => values.iter().any(value_has_opaque_mod_key),
+        _ => false,
+    }
+}
+
+fn metric_number_shape_is_closed(value: Option<&Value>) -> bool {
+    matches!(value, None | Some(Value::Null))
+        || value.and_then(Value::as_f64).is_some_and(f64::is_finite)
+}
+
+fn validate_planet_metric_identity(
+    state: &CoreState,
+    entities: &[Value],
+    index: usize,
+    entity: &Value,
+) -> bool {
+    let Some(object) = entity.as_object() else {
+        return false;
+    };
+    if index >= entities.len()
+        || index >= state.entities.ids.len()
+        || value_has_opaque_mod_key(entity)
+        || object.get("id").and_then(Value::as_str) != Some(&state.entities.ids[index])
+        || object.get("kind").and_then(Value::as_str)
+            != state
+                .entities
+                .kinds
+                .get(index)
+                .and_then(|symbol| state.symbols.resolve(*symbol))
+        || object.get("planetId").and_then(Value::as_str)
+            != state
+                .entities
+                .planets
+                .get(index)
+                .and_then(|symbol| state.symbols.resolve(*symbol))
+        || !metric_number_shape_is_closed(object.get("productionRate"))
+    {
+        return false;
+    }
+    let expected_building = state
+        .entities
+        .buildings
+        .get(index)
+        .and_then(|symbol| state.symbols.resolve(*symbol))
+        .filter(|id| !id.is_empty());
+    let observed_building = object.get("buildingId").and_then(Value::as_str);
+    if observed_building != expected_building {
+        return false;
+    }
+    let Some(building_id) = observed_building else {
+        return true;
+    };
+    let Some(building) = state.catalog.buildings.get(building_id) else {
+        return false;
+    };
+    if matches!(building_id, "accumulator" | "energy_exchanger") {
+        metric_number_shape_is_closed(object.get("storedEnergyMj"))
+            && metric_number_shape_is_closed(object.get("machineCount"))
+    } else if is_fuel_generator(building_id) {
+        let Some(inputs) = object.get("inputs").and_then(Value::as_object) else {
+            return false;
+        };
+        metric_number_shape_is_closed(object.get("fuelRemainingMj"))
+            && metric_number_shape_is_closed(object.get("machineCount"))
+            && object
+                .get("fuelItemId")
+                .and_then(Value::as_str)
+                .is_some_and(|fuel_id| {
+                    building.fuel_item_ids.iter().any(|id| id == fuel_id)
+                        && state.catalog.items.contains_key(fuel_id)
+                        && metric_number_shape_is_closed(inputs.get(fuel_id))
+                })
+    } else {
+        true
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -580,10 +936,21 @@ fn collect_planet_metric_probes_with_runtime(
     runtime: &DeterministicRuntime,
     state: &CoreState,
     entities: &[Value],
+    entity_indices: &[usize],
 ) -> anyhow::Result<Vec<PlanetMetricProbe>> {
-    // The range variant writes directly into one ordered result buffer and
-    // retains only the lowest failing index. Unlike `indexed_try_map`, this
-    // avoids holding both `Vec<Result<_>>` and `Vec<_>` for every factory row.
+    runtime.indexed_try_map(entity_indices, |_, &entity_index| {
+        probe_planet_metric(state, entity_index, &entities[entity_index])
+    })
+}
+
+#[cfg(test)]
+fn collect_flat_full_planet_metric_probes_with_runtime(
+    runtime: &DeterministicRuntime,
+    state: &CoreState,
+    entities: &[Value],
+) -> anyhow::Result<Vec<PlanetMetricProbe>> {
+    // This range is intentionally independent from PlanetMetricsRuntime
+    // selection. Tests use it as the real flat-full oracle.
     runtime.indexed_try_map_range(
         0..entities.len(),
         |entity_index| probe_planet_metric(state, entity_index, &entities[entity_index]),
@@ -634,18 +1001,17 @@ fn probe_planet_metric(
 
 type PlanetPowerReserves = (f64, f64, f64, f64);
 
-fn collect_planet_metrics_with_runtime(
-    runtime: &DeterministicRuntime,
-    state: &CoreState,
-    entities: &[Value],
+fn fold_planet_metric_probes<I>(
+    probes: I,
     planet_count: usize,
-) -> anyhow::Result<(Vec<f64>, Vec<PlanetPowerReserves>)> {
-    let probes = collect_planet_metric_probes_with_runtime(runtime, state, entities)?;
+) -> anyhow::Result<(Vec<f64>, Vec<PlanetPowerReserves>)>
+where
+    I: IntoIterator<Item = PlanetMetricProbe>,
+{
     let mut total_items_before_global = vec![0.0; planet_count];
     let mut power_reserves_by_planet = vec![(0.0, 0.0, 0.0, 0.0); planet_count];
     // Worker scheduling must never decide an IEEE-754 accumulation order.
-    // `indexed_try_map` returns the original entity order, and only this
-    // serial replay touches the per-planet totals.
+    // Only this persisted-row-order serial replay touches per-planet totals.
     for probe in probes {
         if probe.planet_index == u32::MAX {
             continue;
@@ -672,6 +1038,99 @@ fn collect_planet_metrics_with_runtime(
         }
     }
     Ok((total_items_before_global, power_reserves_by_planet))
+}
+
+fn fold_cached_planet_metric_probes(
+    baseline: &[PlanetMetricProbe],
+    overrides: &BTreeMap<usize, PlanetMetricProbe>,
+    planet_count: usize,
+) -> anyhow::Result<(Vec<f64>, Vec<PlanetPowerReserves>)> {
+    let mut override_iter = overrides.iter().peekable();
+    fold_planet_metric_probes(
+        baseline.iter().enumerate().map(move |(index, probe)| {
+            override_iter
+                .next_if(|(override_index, _)| **override_index == index)
+                .map(|(_, override_probe)| *override_probe)
+                .unwrap_or(*probe)
+        }),
+        planet_count,
+    )
+}
+
+fn collect_planet_metrics_with_runtime(
+    runtime: &DeterministicRuntime,
+    state: &CoreState,
+    entities: &[Value],
+    planet_count: usize,
+    planet_metrics_runtime: &mut std::sync::Arc<PlanetMetricsRuntime>,
+    mode: PlanetMetricProbeMode,
+) -> anyhow::Result<(Vec<f64>, Vec<PlanetPowerReserves>)> {
+    #[cfg(test)]
+    if mode == PlanetMetricProbeMode::FlatFull {
+        let probes = collect_flat_full_planet_metric_probes_with_runtime(runtime, state, entities)?;
+        let metrics = fold_planet_metric_probes(probes.iter().copied(), planet_count)?;
+        let scan = PlanetMetricScan {
+            selected_rows: entities.len(),
+            total_rows: entities.len(),
+            stable_rows_skipped: 0,
+            dense_fallback: false,
+            directory_fallback: planet_metrics_runtime.directory_fallback,
+            full_scan: true,
+        };
+        std::sync::Arc::make_mut(planet_metrics_runtime).commit_full(probes, scan, false, mode);
+        return Ok(metrics);
+    }
+
+    let selection = planet_metrics_runtime.select(state, entities, planet_count);
+    let probes = collect_planet_metric_probes_with_runtime(
+        runtime,
+        state,
+        entities,
+        &selection.entity_indices,
+    )?;
+    if selection.scan.full_scan {
+        let metrics = fold_planet_metric_probes(probes.iter().copied(), planet_count)?;
+        std::sync::Arc::make_mut(planet_metrics_runtime).commit_full(
+            probes,
+            selection.scan,
+            selection.fallback_detected,
+            mode,
+        );
+        return Ok(metrics);
+    }
+
+    if selection.entity_indices.len() != probes.len() {
+        bail!("native planet metric probe selection diverged");
+    }
+    let mut next_overrides = planet_metrics_runtime.overrides.clone();
+    for (&entity_index, probe) in selection.entity_indices.iter().zip(probes) {
+        next_overrides.insert(entity_index, probe);
+    }
+    let metrics = fold_cached_planet_metric_probes(
+        &planet_metrics_runtime.baseline,
+        &next_overrides,
+        planet_count,
+    )?;
+    let compact = !next_overrides.is_empty()
+        && next_overrides
+            .len()
+            .saturating_mul(PLANET_METRIC_ACTIVE_DENSE_DENOMINATOR)
+            >= entities
+                .len()
+                .saturating_mul(PLANET_METRIC_ACTIVE_DENSE_NUMERATOR);
+    let runtime = std::sync::Arc::make_mut(planet_metrics_runtime);
+    runtime.commit_sparse(&selection, next_overrides);
+    if compact {
+        let compacted = runtime
+            .baseline
+            .iter()
+            .enumerate()
+            .map(|(index, probe)| runtime.overrides.get(&index).copied().unwrap_or(*probe))
+            .collect::<Vec<_>>();
+        runtime.baseline = std::sync::Arc::new(compacted);
+        runtime.overrides.clear();
+    }
+    Ok(metrics)
 }
 
 fn item_output_free(
@@ -4131,6 +4590,11 @@ enum MaterialDeliveryDrainMode {
     FlatFull,
 }
 
+struct MaterialDeliveryDrainOutcome {
+    scan: crate::material_delivery::MaterialDeliveryScan,
+    written_entity_indices: Vec<usize>,
+}
+
 fn drain_material_delivery_hub_indices(
     state: &CoreState,
     base: &mut Map<String, Value>,
@@ -4247,7 +4711,7 @@ fn drain_material_delivery_hubs(
     seconds: f64,
     second_phase: bool,
     mode: MaterialDeliveryDrainMode,
-) -> anyhow::Result<crate::material_delivery::MaterialDeliveryScan> {
+) -> anyhow::Result<MaterialDeliveryDrainOutcome> {
     match mode {
         MaterialDeliveryDrainMode::Indexed => {}
         #[cfg(test)]
@@ -4263,12 +4727,16 @@ fn drain_material_delivery_hubs(
                 full_scan: true,
             };
             runtime.record_flat_full_scan_for_test(scan);
-            return Ok(scan);
+            return Ok(MaterialDeliveryDrainOutcome {
+                scan,
+                written_entity_indices: entity_indices,
+            });
         }
     }
     let selection = runtime.select(state, entities);
+    let written_entity_indices = selection.entity_indices.clone();
     drain_material_delivery_hub_indices(state, base, entities, &selection.entity_indices, seconds)?;
-    if second_phase {
+    let scan = if second_phase {
         let stay_awake = selection
             .entity_indices
             .iter()
@@ -4279,10 +4747,14 @@ fn drain_material_delivery_hubs(
                 )
             })
             .collect::<Vec<_>>();
-        runtime.commit_second_phase(selection, &stay_awake)
+        runtime.commit_second_phase(selection, &stay_awake)?
     } else {
-        Ok(runtime.commit_first_phase(selection))
-    }
+        runtime.commit_first_phase(selection)
+    };
+    Ok(MaterialDeliveryDrainOutcome {
+        scan,
+        written_entity_indices,
+    })
 }
 
 fn prepare_time_warp(
@@ -4428,6 +4900,8 @@ fn simulate_step(
     ordinary_production_runtime: &mut std::sync::Arc<
         crate::ordinary_production::OrdinaryProductionRuntime,
     >,
+    planet_metrics_runtime: &mut std::sync::Arc<PlanetMetricsRuntime>,
+    planet_metric_mode: PlanetMetricProbeMode,
     local_step_directory: &mut std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
     quantum_logistics_directory: &mut std::sync::Arc<
         crate::quantum_logistics::QuantumLogisticsDirectory,
@@ -4451,6 +4925,8 @@ fn simulate_step(
 ) -> anyhow::Result<bool> {
     let profile_enabled = crate::profile_evidence::profile_environment_enabled();
     let mut profile_checkpoint = profile_enabled.then(std::time::Instant::now);
+    let mut planet_metric_writer_indices = Vec::<usize>::new();
+    let mut planet_metric_directory_fallback = false;
     macro_rules! profile_mark {
         ($label:literal) => {
             if let Some(checkpoint) = profile_checkpoint.as_mut() {
@@ -4499,6 +4975,7 @@ fn simulate_step(
         quantum_step_runtime.legacy_runtime_bandwidth(state, base, entities);
     profile_mark!("static-step-indexes");
     let time_warp_controller = prepare_time_warp(state, base, entities)?;
+    planet_metric_writer_indices.extend_from_slice(&state.factory_topology.time_warp_indices);
     crate::global_progress::advance_exploration(state, base, seconds)?;
     crate::global_progress::advance_handcraft(state, base, seconds)?;
     crate::dyson::advance_environment(base, seconds)?;
@@ -4518,6 +4995,7 @@ fn simulate_step(
     let local_step_runtime = std::sync::Arc::make_mut(local_step_directory);
     let runtime_reset_station_indices = local_step_runtime.runtime_reset_station_indices().to_vec();
     crate::local_logistics::reset_runtime_for_indices(entities, &runtime_reset_station_indices)?;
+    planet_metric_writer_indices.extend_from_slice(&runtime_reset_station_indices);
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tlocal-runtime-reset-active\t{}/{}",
@@ -4533,6 +5011,7 @@ fn simulate_step(
         entities,
         std::sync::Arc::make_mut(logistics_buffer_runtime),
     )?;
+    planet_metric_directory_fallback |= logistics_buffer_scan.directory_fallback;
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tordinary-buffer-active\t{}/{}\tskipped={}\tdense={}\tdirectory-fallback={}",
@@ -4548,6 +5027,7 @@ fn simulate_step(
     // the source revision's runtime cache if any later simulation stage fails.
     let buffer_changed_station_indices =
         crate::local_logistics::transfer_buffers(state, base, entities, local_step_runtime)?;
+    planet_metric_writer_indices.extend_from_slice(&buffer_changed_station_indices);
     local_step_runtime.wake_ready_from_changed_stations(&buffer_changed_station_indices);
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
         &buffer_changed_station_indices,
@@ -4578,6 +5058,7 @@ fn simulate_step(
         quantum_runtime_bandwidth,
         false,
     )?;
+    planet_metric_directory_fallback |= quantum_flush_scan.directory_fallback;
     crate::quantum_logistics::record_quantum_oactive_scan(
         crate::quantum_logistics::QuantumOactiveProfileStage::SupplyFlush,
         quantum_flush_scan,
@@ -4593,6 +5074,7 @@ fn simulate_step(
     }
     let quantum_flush_changed_station_indices =
         quantum_step_runtime.take_inventory_written_station_indices();
+    planet_metric_writer_indices.extend_from_slice(&quantum_flush_changed_station_indices);
     // Quantum upload can consume a remote-supply output while freeing the
     // same station's local-demand capacity. Wake both reverse graphs from the
     // exact changed endpoint set; the readiness probes still decide whether
@@ -4633,6 +5115,7 @@ fn simulate_step(
         seconds,
         &mut belt_changed_entity_indices,
     )?;
+    planet_metric_writer_indices.extend_from_slice(&belt_changed_entity_indices);
     crate::local_logistics::wake_transfer_buffers_from_changed_entities(
         entities,
         &belt_changed_entity_indices,
@@ -4675,11 +5158,17 @@ fn simulate_step(
         seconds,
         &belt_reservation.output_credits,
     )?;
+    if state.factory_topology.orbital_collector_full_scan_required {
+        planet_metric_directory_fallback = true;
+    } else {
+        planet_metric_writer_indices
+            .extend_from_slice(&state.factory_topology.orbital_collector_indices);
+    }
     crate::interstellar_logistics::wake_orbital_supply_demands(
         interstellar_peer_directory,
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
-    let material_delivery_scan = drain_material_delivery_hubs(
+    let material_delivery_outcome = drain_material_delivery_hubs(
         state,
         base,
         entities,
@@ -4688,14 +5177,17 @@ fn simulate_step(
         false,
         material_delivery_mode,
     )?;
+    planet_metric_writer_indices
+        .extend_from_slice(&material_delivery_outcome.written_entity_indices);
+    planet_metric_directory_fallback |= material_delivery_outcome.scan.directory_fallback;
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tmaterial-delivery-active-pre\t{}/{}\tskipped={}\tdense={}\tdirectory-fallback={}",
-            material_delivery_scan.selected_rows,
-            material_delivery_scan.total_rows,
-            material_delivery_scan.stable_rows_skipped,
-            material_delivery_scan.dense_fallback,
-            material_delivery_scan.directory_fallback,
+            material_delivery_outcome.scan.selected_rows,
+            material_delivery_outcome.scan.total_rows,
+            material_delivery_outcome.scan.stable_rows_skipped,
+            material_delivery_outcome.scan.dense_fallback,
+            material_delivery_outcome.scan.directory_fallback,
         );
     }
     let reception = crate::dyson::calculate_reception(state, base, entities)?;
@@ -4811,6 +5303,7 @@ fn simulate_step(
         &state.factory_topology.construction_center_indices,
         power_demand_multiplier,
     );
+    planet_metric_directory_fallback |= construction_power_plan.directory_fallback;
     ready_stations.extend(crate::galactic_exports::ready_exporter_indices(
         state, entities,
     ));
@@ -5183,6 +5676,7 @@ fn simulate_step(
         &state.factory_topology.power_source_indices,
         &ordinary_production_selection,
     );
+    planet_metric_writer_indices.extend_from_slice(&ordinary_settlement_indices);
     for &entity_index in &ordinary_settlement_indices {
         if reset_research_progress_before_next_entity {
             reset_indexed_research_machine_progress(entities, research_entity_indexes)?;
@@ -5688,6 +6182,7 @@ fn simulate_step(
         &next_machine_awake,
         &next_vein_awake,
     )?;
+    planet_metric_directory_fallback |= ordinary_production_scan.directory_fallback;
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tordinary-production-active\t{}/{}\tskipped={}\tdense={}\tdirectory-fallback={}\tresearch-boundary={}",
@@ -5718,6 +6213,9 @@ fn simulate_step(
         )?;
         quantum_step_runtime
             .wake_construction_centers(&construction_outcome.quantum_wake.center_indices);
+        planet_metric_writer_indices
+            .extend_from_slice(&construction_outcome.planet_metric_writer_indices);
+        planet_metric_directory_fallback |= construction_outcome.scan.directory_fallback;
         if profile_enabled {
             eprintln!(
                 "DSP_NATIVE_CORE_PROFILE\tconstruction-active\t{}/{}\tdense={}\tdirectory-fallback={}",
@@ -5738,9 +6236,12 @@ fn simulate_step(
         &belt_reservation.output_credits,
         &reception,
     )?;
+    planet_metric_writer_indices.extend_from_slice(&reception.receiver_indices);
     profile_mark!("ray-receivers");
 
     crate::orbital_station::settle(state, base, entities, seconds)?;
+    planet_metric_writer_indices
+        .extend_from_slice(&state.factory_topology.orbital_cargo_terminal_indices);
     profile_mark!("orbital-cargo-terminals");
 
     if !produced_by_item.is_empty() {
@@ -5759,11 +6260,31 @@ fn simulate_step(
         }
     }
 
-    // Every entity can be inspected independently, but the f64 additions are
-    // observable. Probe on the shared deterministic pool and replay the
-    // ordered scalar results exactly as the former serial scan did.
+    planet_metric_writer_indices.sort_unstable();
+    planet_metric_writer_indices.dedup();
+    {
+        let metric_runtime = std::sync::Arc::make_mut(planet_metrics_runtime);
+        if planet_metric_directory_fallback {
+            metric_runtime.force_directory_fallback();
+        } else {
+            metric_runtime.wake_entity_indices(&planet_metric_writer_indices);
+        }
+    }
+    // Entity probes use the writer-closed wake snapshot. The compact results
+    // still replay in historical global row order for exact IEEE-754 bytes.
     let (total_items_before_global, power_reserves_by_planet) =
-        collect_planet_metrics_with_runtime(runtime, state, entities, planet_ids.len())?;
+        collect_planet_metrics_with_runtime(
+            runtime,
+            state,
+            entities,
+            planet_ids.len(),
+            planet_metrics_runtime,
+            planet_metric_mode,
+        )?;
+    #[cfg(test)]
+    if planet_metric_mode == PlanetMetricProbeMode::IndexedFailAfterCollect {
+        bail!("injected failure after planet metric candidate collection");
+    }
     profile_mark!("planet-metrics-probe");
 
     let quantum_flow = if crossed_quantum_boundary {
@@ -5786,6 +6307,9 @@ fn simulate_step(
                 "DSP_NATIVE_CORE_PROFILE\tquantum-download-active\t{}/{}\tdense={}\tdirectory-fallback={}",
                 scan.selected_rows, scan.total_rows, scan.dense_fallback, scan.directory_fallback,
             );
+        }
+        if scan.directory_fallback {
+            std::sync::Arc::make_mut(planet_metrics_runtime).force_directory_fallback();
         }
         let construction_inventory_wakes =
             quantum_step_runtime.take_construction_inventory_written_center_indices();
@@ -5810,6 +6334,8 @@ fn simulate_step(
     }
     let quantum_download_changed_station_indices =
         quantum_step_runtime.take_inventory_written_station_indices();
+    std::sync::Arc::make_mut(planet_metrics_runtime)
+        .wake_entity_indices(&quantum_download_changed_station_indices);
     crate::interstellar_logistics::wake_warper_refill_from_changed_stations(
         &quantum_download_changed_station_indices,
         std::sync::Arc::make_mut(interstellar_route_activity),
@@ -5835,6 +6361,8 @@ fn simulate_step(
         seconds,
         &mut belt_changed_entity_indices,
     )?;
+    std::sync::Arc::make_mut(planet_metrics_runtime)
+        .wake_entity_indices(&belt_changed_entity_indices);
     // `belts::transfer` clears and repopulates its movement evidence for each
     // phase. At this point the vector is therefore exactly the late output
     // transfer set, not an append-only continuation of the input phase.
@@ -5867,7 +6395,7 @@ fn simulate_step(
         std::sync::Arc::make_mut(interstellar_route_activity),
     );
     quantum_step_runtime.wake_from_stations(&belt_changed_entity_indices);
-    let material_delivery_scan = drain_material_delivery_hubs(
+    let material_delivery_outcome = drain_material_delivery_hubs(
         state,
         base,
         entities,
@@ -5876,14 +6404,21 @@ fn simulate_step(
         true,
         material_delivery_mode,
     )?;
+    {
+        let metric_runtime = std::sync::Arc::make_mut(planet_metrics_runtime);
+        metric_runtime.wake_entity_indices(&material_delivery_outcome.written_entity_indices);
+        if material_delivery_outcome.scan.directory_fallback {
+            metric_runtime.force_directory_fallback();
+        }
+    }
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tmaterial-delivery-active-post\t{}/{}\tskipped={}\tdense={}\tdirectory-fallback={}",
-            material_delivery_scan.selected_rows,
-            material_delivery_scan.total_rows,
-            material_delivery_scan.stable_rows_skipped,
-            material_delivery_scan.dense_fallback,
-            material_delivery_scan.directory_fallback,
+            material_delivery_outcome.scan.selected_rows,
+            material_delivery_outcome.scan.total_rows,
+            material_delivery_outcome.scan.stable_rows_skipped,
+            material_delivery_outcome.scan.dense_fallback,
+            material_delivery_outcome.scan.directory_fallback,
         );
     }
     profile_mark!("belt-output-transfer");
@@ -5941,6 +6476,9 @@ fn simulate_step(
             station_power_scan.runtime_fallback,
         );
     }
+    if station_power_scan.directory_fallback || station_power_scan.runtime_fallback {
+        std::sync::Arc::make_mut(planet_metrics_runtime).force_directory_fallback();
+    }
     crate::interstellar_logistics::refresh_dispatch_power_wakes(
         &station_power_indices,
         &station_powers,
@@ -5954,6 +6492,11 @@ fn simulate_step(
             std::sync::Arc::make_mut(interstellar_route_activity),
             &step_route_ledger,
         )?;
+    std::sync::Arc::make_mut(planet_metrics_runtime)
+        .wake_entity_indices(&warper_changed_station_indices);
+    if warper_refill_scan.directory_fallback {
+        std::sync::Arc::make_mut(planet_metrics_runtime).force_directory_fallback();
+    }
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\twarper-refill-active\t{}/{}\treservation-rows={}\tdense={}\tdirectory-fallback={}",
@@ -6017,6 +6560,9 @@ fn simulate_step(
     let local_dispatch_duration_ns = local_dispatch_started
         .map(|started| u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX))
         .unwrap_or(0);
+    if local_dispatch_scan.directory_fallback {
+        std::sync::Arc::make_mut(planet_metrics_runtime).force_directory_fallback();
+    }
     profile_mark!("local-dispatch");
     if profile_enabled {
         eprintln!(
@@ -6097,6 +6643,9 @@ fn simulate_step(
         interstellar_peer_directory,
         &mut step_route_ledger,
     )?;
+    if interstellar_dispatch_scan.directory_fallback {
+        std::sync::Arc::make_mut(planet_metrics_runtime).force_directory_fallback();
+    }
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tinterstellar-dispatch-active\t{}/{}\tprobed={}\tdense={}\tpeer-candidates={}\tfull-scan-rows={}\tdirectory-fallback={}",
@@ -6123,6 +6672,8 @@ fn simulate_step(
             &station_powers,
             local_step_runtime,
         )?;
+    std::sync::Arc::make_mut(planet_metrics_runtime)
+        .wake_entity_indices(&local_route_changed_station_indices);
     profile_mark!("local-route-advance");
     let remote_route_changed_station_indices = crate::interstellar_logistics::advance_routes(
         state,
@@ -6131,6 +6682,8 @@ fn simulate_step(
         &station_powers,
         interstellar_step_runtime,
     )?;
+    std::sync::Arc::make_mut(planet_metrics_runtime)
+        .wake_entity_indices(&remote_route_changed_station_indices);
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
         &local_route_changed_station_indices,
         interstellar_peer_directory,
@@ -6185,6 +6738,11 @@ fn simulate_step(
             interstellar_step_runtime,
             &congestion_route_ledger,
         )?;
+    std::sync::Arc::make_mut(planet_metrics_runtime)
+        .wake_entity_indices(&post_route_warper_changed_station_indices);
+    if post_route_warper_refill_scan.directory_fallback {
+        std::sync::Arc::make_mut(planet_metrics_runtime).force_directory_fallback();
+    }
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\twarper-refill-post-route-active\t{}/{}\treservation-rows={}\tdense={}\tdirectory-fallback={}",
@@ -6239,6 +6797,9 @@ fn simulate_step(
         interstellar_peer_directory,
         &congestion_route_ledger,
     )?;
+    if interstellar_congestion_scan.directory_fallback {
+        std::sync::Arc::make_mut(planet_metrics_runtime).force_directory_fallback();
+    }
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tinterstellar-congestion-active\t{}/{}\tdense={}\tdirectory-fallback={}",
@@ -6258,6 +6819,8 @@ fn simulate_step(
     // active dependency rather than being hidden behind the route ledger.
     next_runtime_reset_station_indices
         .extend_from_slice(&state.factory_topology.orbital_collector_indices);
+    std::sync::Arc::make_mut(planet_metrics_runtime)
+        .wake_entity_indices(&next_runtime_reset_station_indices);
     local_step_runtime.replace_runtime_reset_station_indices(next_runtime_reset_station_indices);
     profile_mark!("interstellar-congestion");
     let exporter_powers = state
@@ -6287,6 +6850,8 @@ fn simulate_step(
         &power_factors,
         seconds,
     )?;
+    std::sync::Arc::make_mut(planet_metrics_runtime)
+        .wake_entity_indices(&state.factory_topology.galactic_material_exporter_indices);
     profile_mark!("galactic-exports");
     crate::dyson::finalize(base)?;
     profile_mark!("logistics-dispatch-and-routes");
@@ -6372,6 +6937,9 @@ fn simulate_step(
                 &congestion_route_ledger,
             )?;
             station_mode_topology_changed |= mode_changed;
+            if mode_scan.index_fallback || mode_scan.ledger_fallback {
+                std::sync::Arc::make_mut(planet_metrics_runtime).force_directory_fallback();
+            }
             if profile_enabled {
                 eprintln!(
                     "DSP_NATIVE_CORE_PROFILE\tstation-mode-transition-active\t{}/{}\ttransitions={}\troute-probes={}\tdense={}\tindex-fallback={}\tledger-fallback={}",
@@ -6392,6 +6960,9 @@ fn simulate_step(
                     interstellar_step_runtime,
                 )?;
             station_mode_topology_changed |= quantum_transition_changed;
+            if quantum_transition_scan.runtime_fallback || quantum_transition_scan.ledger_fallback {
+                std::sync::Arc::make_mut(planet_metrics_runtime).force_directory_fallback();
+            }
             if profile_enabled {
                 eprintln!(
                     "DSP_NATIVE_CORE_PROFILE\tquantum-transition-active\t{}/{}\ttransitions={}\troute-memberships={}\troute-validation={}\troute-rebuild={}\tdense={}\truntime-fallback={}\tledger-fallback={}",
@@ -6429,6 +7000,9 @@ fn simulate_step(
                 crate::quantum_logistics::QuantumOactiveProfileStage::Upload,
                 quantum_upload_flush_scan,
             );
+            if quantum_upload_flush_scan.directory_fallback {
+                std::sync::Arc::make_mut(planet_metrics_runtime).force_directory_fallback();
+            }
             if profile_enabled {
                 eprintln!(
                     "DSP_NATIVE_CORE_PROFILE\tquantum-upload-flush-active\t{}/{}\tdense={}\tdirectory-fallback={}",
@@ -6441,6 +7015,8 @@ fn simulate_step(
         }
         let quantum_boundary_changed_station_indices =
             quantum_step_runtime.take_inventory_written_station_indices();
+        std::sync::Arc::make_mut(planet_metrics_runtime)
+            .wake_entity_indices(&quantum_boundary_changed_station_indices);
         local_step_runtime
             .wake_ready_from_changed_stations(&quantum_boundary_changed_station_indices);
         crate::interstellar_logistics::wake_dispatch_from_changed_stations(
@@ -6472,6 +7048,9 @@ fn simulate_step(
             interstellar_peer_directory,
             interstellar_route_activity,
         )?;
+        if station_mode_topology_changed {
+            std::sync::Arc::make_mut(planet_metrics_runtime).force_full();
+        }
     }
     profile_mark!("local-directory-boundary-refresh");
     if let Some(endgame) = base.get_mut("endgame").and_then(Value::as_object_mut) {
@@ -6503,6 +7082,7 @@ pub(crate) struct PreparedFactoryDomains {
         std::sync::Arc<crate::material_delivery::MaterialDeliveryRuntime>,
     pub(crate) ordinary_production_runtime:
         std::sync::Arc<crate::ordinary_production::OrdinaryProductionRuntime>,
+    pub(crate) planet_metrics_runtime: std::sync::Arc<PlanetMetricsRuntime>,
     pub(crate) local_peer_directory: std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
     pub(crate) quantum_logistics_directory:
         std::sync::Arc<crate::quantum_logistics::QuantumLogisticsDirectory>,
@@ -6531,6 +7111,7 @@ pub(crate) fn prepare_factory_domains_with_runtime(
     let cached_logistics_buffer_runtime = state.prepared_logistics_buffer_runtime();
     let cached_material_delivery_runtime = state.prepared_material_delivery_runtime();
     let cached_ordinary_production_runtime = state.prepared_ordinary_production_runtime();
+    let cached_planet_metrics_runtime = state.prepared_planet_metrics_runtime();
     let cached_local_peer_directory = state.prepared_local_peer_directory();
     let cached_quantum_logistics_directory = state.prepared_quantum_logistics_directory();
     let cached_construction_runtime = state.prepared_construction_runtime();
@@ -6544,7 +7125,8 @@ pub(crate) fn prepare_factory_domains_with_runtime(
         | (u8::from(
             cached_logistics_buffer_runtime.is_none()
                 || cached_material_delivery_runtime.is_none()
-                || cached_ordinary_production_runtime.is_none(),
+                || cached_ordinary_production_runtime.is_none()
+                || cached_planet_metrics_runtime.is_none(),
         ) << 1)
         | (u8::from(cached_local_peer_directory.is_none()) << 2)
         | (u8::from(cached_quantum_logistics_directory.is_none()) << 3)
@@ -6556,7 +7138,12 @@ pub(crate) fn prepare_factory_domains_with_runtime(
     let (
         (
             belt_routes,
-            (logistics_buffer_runtime, material_delivery_runtime, ordinary_production_runtime),
+            (
+                logistics_buffer_runtime,
+                material_delivery_runtime,
+                ordinary_production_runtime,
+                planet_metrics_runtime,
+            ),
             local_peer_directory,
             quantum_logistics_directory,
             construction_runtime,
@@ -6595,6 +7182,9 @@ pub(crate) fn prepare_factory_domains_with_runtime(
                             state, entities,
                         ),
                     )
+                }),
+                cached_planet_metrics_runtime.unwrap_or_else(|| {
+                    std::sync::Arc::new(PlanetMetricsRuntime::build(state, entities))
                 }),
             )
         },
@@ -6679,6 +7269,7 @@ pub(crate) fn prepare_factory_domains_with_runtime(
         logistics_buffer_runtime,
         material_delivery_runtime,
         ordinary_production_runtime,
+        planet_metrics_runtime,
         local_peer_directory,
         quantum_logistics_directory,
         construction_runtime,
@@ -6703,6 +7294,7 @@ pub(crate) struct PreparedFactoryAdvance {
         std::sync::Arc<crate::material_delivery::MaterialDeliveryRuntime>,
     pub ordinary_production_runtime:
         std::sync::Arc<crate::ordinary_production::OrdinaryProductionRuntime>,
+    pub planet_metrics_runtime: std::sync::Arc<PlanetMetricsRuntime>,
     pub local_peer_directory: std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
     pub quantum_logistics_directory:
         std::sync::Arc<crate::quantum_logistics::QuantumLogisticsDirectory>,
@@ -6746,6 +7338,7 @@ fn prepare_advance_with_runtime(
         isolate_construction_automation,
         deterministic_runtime,
         MaterialDeliveryDrainMode::Indexed,
+        PlanetMetricProbeMode::Indexed,
         None,
     )
 }
@@ -6767,6 +7360,29 @@ fn prepare_advance_with_material_delivery_test_options(
         isolate_construction_automation,
         deterministic_runtime,
         material_delivery_mode,
+        PlanetMetricProbeMode::Indexed,
+        step_size_override,
+    )
+}
+
+#[cfg(test)]
+fn prepare_advance_with_planet_metric_test_options(
+    state: &CoreState,
+    simulation_seconds: f64,
+    wall_seconds: f64,
+    isolate_construction_automation: bool,
+    deterministic_runtime: &DeterministicRuntime,
+    planet_metric_mode: PlanetMetricProbeMode,
+    step_size_override: Option<f64>,
+) -> anyhow::Result<PreparedFactoryAdvance> {
+    prepare_advance_with_runtime_options(
+        state,
+        simulation_seconds,
+        wall_seconds,
+        isolate_construction_automation,
+        deterministic_runtime,
+        MaterialDeliveryDrainMode::Indexed,
+        planet_metric_mode,
         step_size_override,
     )
 }
@@ -6779,6 +7395,7 @@ fn prepare_advance_with_runtime_options(
     isolate_construction_automation: bool,
     deterministic_runtime: &DeterministicRuntime,
     material_delivery_mode: MaterialDeliveryDrainMode,
+    planet_metric_mode: PlanetMetricProbeMode,
     step_size_override: Option<f64>,
 ) -> anyhow::Result<PreparedFactoryAdvance> {
     let profile_enabled = crate::profile_evidence::profile_environment_enabled();
@@ -6847,6 +7464,7 @@ fn prepare_advance_with_runtime_options(
     let mut logistics_buffer_runtime = prepared_domains.logistics_buffer_runtime;
     let mut material_delivery_runtime = prepared_domains.material_delivery_runtime;
     let mut ordinary_production_runtime = prepared_domains.ordinary_production_runtime;
+    let mut planet_metrics_runtime = prepared_domains.planet_metrics_runtime;
     let mut local_peer_directory = prepared_domains.local_peer_directory;
     let mut quantum_logistics_directory = prepared_domains.quantum_logistics_directory;
     let mut construction_runtime = prepared_domains.construction_runtime;
@@ -6957,6 +7575,8 @@ fn prepare_advance_with_runtime_options(
             &mut material_delivery_runtime,
             material_delivery_mode,
             &mut ordinary_production_runtime,
+            &mut planet_metrics_runtime,
+            planet_metric_mode,
             &mut local_peer_directory,
             &mut quantum_logistics_directory,
             &mut construction_runtime,
@@ -7092,6 +7712,7 @@ fn prepare_advance_with_runtime_options(
         logistics_buffer_runtime,
         material_delivery_runtime,
         ordinary_production_runtime,
+        planet_metrics_runtime,
         local_peer_directory,
         quantum_logistics_directory,
         construction_runtime,
@@ -7110,6 +7731,7 @@ pub(crate) mod tests {
         PlanetDefinition, ProliferatorDefinition, RecipeDefinition, RuntimeCatalog,
         TechnologyDefinition,
     };
+    use crate::command::{PathSegment, RecordPatch, SimulationCommandPatch, ValuePatch};
     use crate::simulation::{CoreAdvanceMode, CoreAdvanceRequest};
     use crate::state::CoreCheckpointIdentity;
     use serde_json::json;
@@ -8158,6 +8780,7 @@ pub(crate) mod tests {
         assert!(state.prepared_logistics_buffer_runtime().is_none());
         assert!(state.prepared_material_delivery_runtime().is_none());
         assert!(state.prepared_ordinary_production_runtime().is_none());
+        assert!(state.prepared_planet_metrics_runtime().is_none());
         assert!(state.prepared_local_peer_directory().is_none());
         assert!(state.prepared_quantum_logistics_directory().is_none());
         assert!(state.prepared_construction_runtime().is_none());
@@ -8436,6 +9059,46 @@ pub(crate) mod tests {
         material_delivery_belt_fixture(hub_count, false, true)
     }
 
+    fn material_delivery_sparse_output_belt_fixture(stable_row_count: usize) -> CoreState {
+        let seed = material_delivery_output_belt_fixture(1);
+        let Value::Object(mut base) = seed.materialize().unwrap() else {
+            panic!("material-delivery fixture must materialize to an object");
+        };
+        let mut entities = base
+            .remove("entities")
+            .and_then(|value| value.as_array().cloned())
+            .unwrap();
+        let belts = base
+            .remove("belts")
+            .and_then(|value| value.as_array().cloned())
+            .unwrap();
+        entities.extend((0..stable_row_count).map(|index| {
+            json!({
+                "id": format!("material-delivery-stable-{index:05}"),
+                "kind": "storage",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "storage_mk1",
+                "recipeId": null,
+                "storedItemId": "iron_ore",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "routingCursor": 0
+            })
+        }));
+        fixture_state_from_base_belts_with_registry(
+            Value::Object(base),
+            &entities,
+            &belts,
+            crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        )
+    }
+
     fn material_delivery_segment_fixture(hub_count: usize) -> CoreState {
         let mut base = construction_isolation_base();
         base["tray"]["iron_ingot"] = Value::from(0);
@@ -8660,6 +9323,7 @@ pub(crate) mod tests {
         let logistics_buffer_runtime = prepared.logistics_buffer_runtime.clone();
         let material_delivery_runtime = prepared.material_delivery_runtime.clone();
         let ordinary_production_runtime = prepared.ordinary_production_runtime.clone();
+        let planet_metrics_runtime = prepared.planet_metrics_runtime.clone();
         let local_peer_directory = prepared.local_peer_directory.clone();
         let quantum_logistics_directory = prepared.quantum_logistics_directory.clone();
         let construction_runtime = prepared.construction_runtime.clone();
@@ -8682,6 +9346,7 @@ pub(crate) mod tests {
         state.install_prepared_logistics_buffer_runtime(logistics_buffer_runtime);
         state.install_prepared_material_delivery_runtime(material_delivery_runtime);
         state.install_prepared_ordinary_production_runtime(ordinary_production_runtime);
+        state.install_prepared_planet_metrics_runtime(planet_metrics_runtime);
         state.install_prepared_local_peer_directory(local_peer_directory);
         state.install_prepared_quantum_logistics_directory(quantum_logistics_directory);
         state.install_prepared_construction_runtime(construction_runtime);
@@ -8929,6 +9594,7 @@ pub(crate) mod tests {
         let logistics_buffer_runtime = prepared.logistics_buffer_runtime.clone();
         let material_delivery_runtime = prepared.material_delivery_runtime.clone();
         let ordinary_production_runtime = prepared.ordinary_production_runtime.clone();
+        let planet_metrics_runtime = prepared.planet_metrics_runtime.clone();
         let local_peer_directory = prepared.local_peer_directory.clone();
         let quantum_logistics_directory = prepared.quantum_logistics_directory.clone();
         let construction_runtime = prepared.construction_runtime.clone();
@@ -8952,6 +9618,7 @@ pub(crate) mod tests {
         state.install_prepared_logistics_buffer_runtime(logistics_buffer_runtime);
         state.install_prepared_material_delivery_runtime(material_delivery_runtime);
         state.install_prepared_ordinary_production_runtime(ordinary_production_runtime);
+        state.install_prepared_planet_metrics_runtime(planet_metrics_runtime);
         state.install_prepared_local_peer_directory(local_peer_directory);
         state.install_prepared_quantum_logistics_directory(quantum_logistics_directory);
         state.install_prepared_construction_runtime(construction_runtime);
@@ -10763,6 +11430,130 @@ pub(crate) mod tests {
         (state, entities)
     }
 
+    fn planet_metric_oactive_fixture(row_count: usize) -> CoreState {
+        assert!(row_count >= 1);
+        let mut entities = Vec::with_capacity(row_count);
+        entities.push(json!({
+            "id": "planet-metric-wind",
+            "kind": "power",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "wind_turbine",
+            "machineCount": 1,
+            "minerCount": 0,
+            "inputs": {},
+            "outputs": {},
+            "progress": 0,
+            "utilization": 0,
+            "productionRate": 0,
+            "routingCursor": 0
+        }));
+        entities.extend((1..row_count).map(|index| {
+            let production_rate = match index % 8 {
+                0 => 10_000_000_000_000_000.0,
+                1 => 1.0,
+                2 => -10_000_000_000_000_000.0,
+                3 => 0.25,
+                4 => -0.0,
+                5 => 0.5,
+                6 => -0.125,
+                _ => 0.0625,
+            };
+            json!({
+                "id": format!("planet-metric-storage-{index:05}"),
+                "kind": "storage",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "storage_mk1",
+                "recipeId": null,
+                "storedItemId": "iron_ingot",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "utilization": 0,
+                "productionRate": production_rate,
+                "routingCursor": 0
+            })
+        }));
+        fixture_state_from_base_with_registry(
+            construction_isolation_base(),
+            &entities,
+            crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        )
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct PlanetMetricOactiveRun {
+        bytes: Vec<u8>,
+        canonical: String,
+        domain: String,
+        conservation: String,
+        scans: Vec<PlanetMetricScan>,
+        selection_calls: (usize, usize),
+    }
+
+    fn run_planet_metric_oactive_advance(
+        seconds: f64,
+        worker_count: usize,
+        mode: PlanetMetricProbeMode,
+        step_size_override: Option<f64>,
+    ) -> PlanetMetricOactiveRun {
+        let mut state = planet_metric_oactive_fixture(1_024);
+        let prepared = prepare_advance_with_planet_metric_test_options(
+            &state,
+            seconds,
+            seconds,
+            false,
+            &DeterministicRuntime::for_test(worker_count),
+            mode,
+            step_size_override,
+        )
+        .unwrap();
+        let scans = prepared
+            .planet_metrics_runtime
+            .scan_history_for_test()
+            .to_vec();
+        let selection_calls = prepared.planet_metrics_runtime.selection_calls_for_test();
+        commit_and_install_factory_test_state(&mut state, prepared);
+        PlanetMetricOactiveRun {
+            bytes: serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+            canonical: state.canonical_sha256().unwrap(),
+            domain: state.domain_sha256().unwrap(),
+            conservation: synthetic_conservation_sha256(&state),
+            scans,
+            selection_calls,
+        }
+    }
+
+    fn advance_planet_metric_test_state(
+        state: &mut CoreState,
+        seconds: f64,
+        step_size_override: f64,
+    ) {
+        let prepared = prepare_advance_with_planet_metric_test_options(
+            state,
+            seconds,
+            seconds,
+            false,
+            &DeterministicRuntime::for_test(4),
+            PlanetMetricProbeMode::Indexed,
+            Some(step_size_override),
+        )
+        .unwrap();
+        commit_and_install_factory_test_state(state, prepared);
+    }
+
+    fn planet_metric_state_fingerprint(state: &CoreState) -> (Vec<u8>, String, String, String) {
+        (
+            serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+            state.canonical_sha256().unwrap(),
+            state.domain_sha256().unwrap(),
+            synthetic_conservation_sha256(state),
+        )
+    }
+
     fn serial_planet_metrics_oracle(
         state: &CoreState,
         entities: &[Value],
@@ -11158,6 +11949,598 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn planet_metric_indexed_matches_true_flat_full_for_one_five_and_sixty_seconds() {
+        for seconds in [1.0, 5.0, 60.0] {
+            let indexed =
+                run_planet_metric_oactive_advance(seconds, 4, PlanetMetricProbeMode::Indexed, None);
+            let flat = run_planet_metric_oactive_advance(
+                seconds,
+                4,
+                PlanetMetricProbeMode::FlatFull,
+                None,
+            );
+            assert_eq!(indexed.bytes, flat.bytes, "entity/base bytes at {seconds}s");
+            assert_eq!(indexed.canonical, flat.canonical, "canonical at {seconds}s");
+            assert_eq!(indexed.domain, flat.domain, "domain at {seconds}s");
+            assert_eq!(
+                indexed.conservation, flat.conservation,
+                "conservation at {seconds}s"
+            );
+            assert_eq!(indexed.selection_calls.0, seconds as usize);
+            assert_eq!(indexed.selection_calls.1, 0);
+            assert_eq!(flat.selection_calls.0, 0);
+            assert_eq!(flat.selection_calls.1, seconds as usize);
+            assert_eq!(indexed.scans[0].selected_rows, 1_024);
+            assert!(indexed.scans[0].full_scan);
+            assert!(
+                indexed
+                    .scans
+                    .iter()
+                    .skip(1)
+                    .all(|scan| scan.selected_rows <= 1 && !scan.full_scan)
+            );
+            assert!(
+                flat.scans
+                    .iter()
+                    .all(|scan| scan.selected_rows == 1_024 && scan.full_scan)
+            );
+        }
+    }
+
+    #[test]
+    fn planet_metric_full_advance_is_identical_for_one_two_four_and_eight_workers() {
+        let baseline =
+            run_planet_metric_oactive_advance(5.0, 1, PlanetMetricProbeMode::FlatFull, None);
+        for workers in [1, 2, 4, 8] {
+            let indexed = run_planet_metric_oactive_advance(
+                5.0,
+                workers,
+                PlanetMetricProbeMode::Indexed,
+                None,
+            );
+            assert_eq!(indexed.bytes, baseline.bytes, "bytes for {workers} workers");
+            assert_eq!(
+                indexed.canonical, baseline.canonical,
+                "canonical for {workers} workers"
+            );
+            assert_eq!(
+                indexed.domain, baseline.domain,
+                "domain for {workers} workers"
+            );
+            assert_eq!(
+                indexed.conservation, baseline.conservation,
+                "conservation for {workers} workers"
+            );
+        }
+    }
+
+    #[test]
+    fn planet_metric_one_ten_and_thirty_second_steps_and_segmented_commits_match() {
+        for (step_size, segments) in [
+            (1.0, vec![1.0; 60]),
+            (10.0, vec![10.0; 6]),
+            (30.0, vec![30.0; 2]),
+        ] {
+            let mut long = planet_metric_oactive_fixture(1_024);
+            let long_source_revision = long.revision;
+            advance_planet_metric_test_state(&mut long, 60.0, step_size);
+
+            let mut segmented = planet_metric_oactive_fixture(1_024);
+            let segmented_source_revision = segmented.revision;
+            for &seconds in &segments {
+                advance_planet_metric_test_state(&mut segmented, seconds, step_size);
+            }
+            assert_eq!(long.revision, long_source_revision + 1);
+            assert_eq!(
+                segmented.revision,
+                segmented_source_revision + segments.len() as u64
+            );
+            segmented.revision = long.revision;
+            assert_eq!(
+                planet_metric_state_fingerprint(&segmented),
+                planet_metric_state_fingerprint(&long),
+                "planet metric state diverged for {step_size}s internal steps"
+            );
+            assert_eq!(
+                long.prepared_planet_metrics_runtime()
+                    .unwrap()
+                    .scan_history_for_test()
+                    .len(),
+                (60.0 / step_size) as usize
+            );
+        }
+    }
+
+    #[test]
+    fn planet_metric_same_length_topology_cow_and_exact_dense_threshold_use_full_scan() {
+        let mut state = planet_metric_oactive_fixture(1_024);
+        let entities = state.parse_entities_parallel().unwrap();
+        let mut metric_runtime =
+            std::sync::Arc::new(PlanetMetricsRuntime::build(&state, &entities));
+        collect_planet_metrics_with_runtime(
+            &DeterministicRuntime::for_test(4),
+            &state,
+            &entities,
+            1,
+            &mut metric_runtime,
+            PlanetMetricProbeMode::Indexed,
+        )
+        .unwrap();
+        assert!(metric_runtime.pending_rows_for_test().is_empty());
+
+        // Merely taking a mutable topology reference must COW because the
+        // runtime retains the former Arc. Length and capacity stay unchanged.
+        let topology_len = state.factory_topology.entity_planet_indices.len();
+        let topology_capacity = state.factory_topology.entity_planet_indices.capacity();
+        let topology = std::sync::Arc::make_mut(&mut state.factory_topology);
+        topology.entity_grid_indices[1] = if topology.entity_grid_indices[1] == 0 {
+            1
+        } else {
+            0
+        };
+        assert_eq!(topology.entity_planet_indices.len(), topology_len);
+        assert_eq!(topology.entity_planet_indices.capacity(), topology_capacity);
+        std::sync::Arc::make_mut(&mut metric_runtime).wake_entity_indices(&[1]);
+        collect_planet_metrics_with_runtime(
+            &DeterministicRuntime::for_test(4),
+            &state,
+            &entities,
+            1,
+            &mut metric_runtime,
+            PlanetMetricProbeMode::Indexed,
+        )
+        .unwrap();
+        let drift = metric_runtime.scan_history_for_test().last().unwrap();
+        assert!(drift.full_scan && drift.directory_fallback);
+        assert_eq!(drift.selected_rows, 1_024);
+
+        let state = planet_metric_oactive_fixture(1_024);
+        let entities = state.parse_entities_parallel().unwrap();
+        let mut dense_runtime = std::sync::Arc::new(PlanetMetricsRuntime::build(&state, &entities));
+        collect_planet_metrics_with_runtime(
+            &DeterministicRuntime::for_test(4),
+            &state,
+            &entities,
+            1,
+            &mut dense_runtime,
+            PlanetMetricProbeMode::Indexed,
+        )
+        .unwrap();
+        let dense_indices = (0..768).collect::<Vec<_>>();
+        std::sync::Arc::make_mut(&mut dense_runtime).wake_entity_indices(&dense_indices);
+        collect_planet_metrics_with_runtime(
+            &DeterministicRuntime::for_test(4),
+            &state,
+            &entities,
+            1,
+            &mut dense_runtime,
+            PlanetMetricProbeMode::Indexed,
+        )
+        .unwrap();
+        let dense = dense_runtime.scan_history_for_test().last().unwrap();
+        assert!(dense.full_scan && dense.dense_fallback);
+        assert!(!dense.directory_fallback);
+        assert_eq!(dense.selected_rows, 1_024);
+    }
+
+    #[test]
+    fn planet_metric_opaque_and_malformed_shapes_stay_on_flat_full() {
+        for malformed in [false, true] {
+            let state = planet_metric_oactive_fixture(1_024);
+            let mut entities = state.parse_entities_parallel().unwrap();
+            if malformed {
+                entities[17]["productionRate"] = Value::from("opaque-number");
+            } else {
+                entities[17]["mod:opaque"] = json!({"writer": true});
+            }
+            let mut metric_runtime =
+                std::sync::Arc::new(PlanetMetricsRuntime::build(&state, &entities));
+            for _ in 0..2 {
+                collect_planet_metrics_with_runtime(
+                    &DeterministicRuntime::for_test(4),
+                    &state,
+                    &entities,
+                    1,
+                    &mut metric_runtime,
+                    PlanetMetricProbeMode::Indexed,
+                )
+                .unwrap();
+            }
+            assert!(metric_runtime.scan_history_for_test().iter().all(|scan| {
+                scan.full_scan && scan.directory_fallback && scan.selected_rows == 1_024
+            }));
+        }
+
+        let state = fixture_state_from_base_with_registry(
+            construction_isolation_base(),
+            &[json!({
+                "id": "planet-metric-malformed-fuel",
+                "kind": "power",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "thermal_power_plant",
+                "fuelItemId": "coal",
+                "fuelRemainingMj": 0,
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": { "coal": 1 },
+                "outputs": {},
+                "progress": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "routingCursor": 0
+            })],
+            crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        );
+        let mut entities = state.parse_entities_parallel().unwrap();
+        entities[0]["inputs"]["coal"] = Value::from("opaque-number");
+        let mut metric_runtime =
+            std::sync::Arc::new(PlanetMetricsRuntime::build(&state, &entities));
+        for _ in 0..2 {
+            collect_planet_metrics_with_runtime(
+                &DeterministicRuntime::for_test(4),
+                &state,
+                &entities,
+                1,
+                &mut metric_runtime,
+                PlanetMetricProbeMode::Indexed,
+            )
+            .unwrap();
+        }
+        assert!(
+            metric_runtime.scan_history_for_test().iter().all(|scan| {
+                scan.full_scan && scan.directory_fallback && scan.selected_rows == 1
+            })
+        );
+    }
+
+    #[test]
+    fn planet_metric_memory_estimate_is_a_conservative_peak_lower_bound() {
+        let state = planet_metric_oactive_fixture(1_024);
+        let entities = state.parse_entities_parallel().unwrap();
+        let runtime = PlanetMetricsRuntime::build(&state, &entities);
+        let rows = entities.len() as u64;
+        let minimum_two_probe_buffers = rows * std::mem::size_of::<PlanetMetricProbe>() as u64 * 2;
+        let minimum_full_selection = rows * std::mem::size_of::<usize>() as u64;
+        assert!(
+            runtime.estimated_bytes()
+                >= minimum_two_probe_buffers.saturating_add(minimum_full_selection)
+        );
+        assert!(state.memory_estimate().topology_index_bytes >= runtime.estimated_bytes());
+    }
+
+    #[test]
+    fn generic_entity_patch_invalidates_planet_metric_runtime() {
+        let mut state = planet_metric_oactive_fixture(32);
+        assert!(state.prepared_planet_metrics_runtime().is_some());
+        let entity_id = state.entities.ids[1].to_owned();
+        let base_revision = state.revision;
+        state
+            .apply_command(&SimulationCommandPatch {
+                protocol_version: crate::CORE_PROTOCOL_VERSION,
+                base_revision,
+                top_level_changes: Vec::new(),
+                changed_entities: vec![RecordPatch {
+                    id: entity_id,
+                    changes: vec![ValuePatch {
+                        path: vec![PathSegment::Key("productionRate".to_owned())],
+                        operation: "set".to_owned(),
+                        value: Some(Value::from(7.25)),
+                    }],
+                }],
+                added_entities: Vec::new(),
+                removed_entity_ids: Vec::new(),
+                changed_belts: Vec::new(),
+                added_belts: Vec::new(),
+                removed_belt_ids: Vec::new(),
+            })
+            .unwrap();
+        assert!(state.prepared_planet_metrics_runtime().is_none());
+    }
+
+    #[test]
+    fn planet_metric_public_advance_installs_the_committed_candidate_runtime() {
+        let mut state = planet_metric_oactive_fixture(1_024);
+        let source_runtime = state.prepared_planet_metrics_runtime().unwrap();
+        let source_revision = state.revision;
+        let first = state
+            .advance(&CoreAdvanceRequest {
+                base_revision: source_revision,
+                simulation_seconds: 1.0,
+                wall_seconds: 1.0,
+                advance_mode: CoreAdvanceMode::Exact,
+                include_diagnostics: false,
+            })
+            .unwrap();
+        assert!(first.supported);
+        assert_eq!(state.revision, source_revision + 1);
+        let first_runtime = state.prepared_planet_metrics_runtime().unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first_runtime, &source_runtime));
+        assert!(
+            first_runtime
+                .scan_history_for_test()
+                .last()
+                .unwrap()
+                .full_scan
+        );
+
+        let second = state
+            .advance(&CoreAdvanceRequest {
+                base_revision: state.revision,
+                simulation_seconds: 1.0,
+                wall_seconds: 1.0,
+                advance_mode: CoreAdvanceMode::Exact,
+                include_diagnostics: false,
+            })
+            .unwrap();
+        assert!(second.supported);
+        let second_runtime = state.prepared_planet_metrics_runtime().unwrap();
+        let scan = second_runtime.scan_history_for_test().last().unwrap();
+        assert!(!scan.full_scan);
+        assert_eq!(scan.selected_rows, 1);
+    }
+
+    #[test]
+    fn planet_metric_outer_campaign_failure_keeps_the_source_runtime_and_state_atomic() {
+        let mut state = planet_metric_oactive_fixture(1_024);
+        state.base_value_mut().remove("campaign");
+        let source_revision = state.revision;
+        let source_fingerprint = planet_metric_state_fingerprint(&state);
+        let source_runtime = state.prepared_planet_metrics_runtime().unwrap();
+        let source_scans = source_runtime.scan_history_for_test().to_vec();
+        let source_pending = source_runtime.pending_rows_for_test();
+        let source_selection_calls = source_runtime.selection_calls_for_test();
+
+        let error = state
+            .advance(&CoreAdvanceRequest {
+                base_revision: source_revision,
+                simulation_seconds: 1.0,
+                wall_seconds: 1.0,
+                advance_mode: CoreAdvanceMode::Exact,
+                include_diagnostics: false,
+            })
+            .unwrap_err();
+        let error_chain = format!("{error:#}");
+        assert!(
+            error_chain.contains("native campaign state is missing"),
+            "unexpected error chain: {error_chain}"
+        );
+        assert_eq!(state.revision, source_revision);
+        assert_eq!(planet_metric_state_fingerprint(&state), source_fingerprint);
+        let retained_runtime = state.prepared_planet_metrics_runtime().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&retained_runtime, &source_runtime));
+        assert_eq!(retained_runtime.scan_history_for_test(), source_scans);
+        assert_eq!(retained_runtime.pending_rows_for_test(), source_pending);
+        assert_eq!(
+            retained_runtime.selection_calls_for_test(),
+            source_selection_calls
+        );
+    }
+
+    #[test]
+    fn planet_metric_failure_after_candidate_collect_leaves_source_bytes_hashes_and_runtime_unchanged()
+     {
+        let state = planet_metric_oactive_fixture(1_024);
+        let source_fingerprint = planet_metric_state_fingerprint(&state);
+        let source_runtime = state.prepared_planet_metrics_runtime().unwrap();
+        let source_scans = source_runtime.scan_history_for_test().to_vec();
+        let source_pending = source_runtime.pending_rows_for_test();
+        let source_selection_calls = source_runtime.selection_calls_for_test();
+
+        let error = match prepare_advance_with_planet_metric_test_options(
+            &state,
+            1.0,
+            1.0,
+            false,
+            &DeterministicRuntime::for_test(4),
+            PlanetMetricProbeMode::IndexedFailAfterCollect,
+            None,
+        ) {
+            Ok(_) => panic!("injected post-collect failure unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        let error_chain = format!("{error:#}");
+        assert!(
+            error_chain.contains("injected failure after planet metric candidate collection"),
+            "unexpected error chain: {error_chain}"
+        );
+
+        assert_eq!(planet_metric_state_fingerprint(&state), source_fingerprint);
+        let retained_runtime = state.prepared_planet_metrics_runtime().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&retained_runtime, &source_runtime));
+        assert_eq!(retained_runtime.scan_history_for_test(), source_scans);
+        assert_eq!(retained_runtime.pending_rows_for_test(), source_pending);
+        assert_eq!(
+            retained_runtime.selection_calls_for_test(),
+            source_selection_calls
+        );
+    }
+
+    #[test]
+    fn planet_metric_post_barrier_material_writer_stays_pending_for_the_next_step() {
+        let mut indexed = material_delivery_sparse_output_belt_fixture(64);
+        let hub_index = indexed.factory_topology.material_delivery_hub_indices[0];
+        let cold = prepare_advance_with_planet_metric_test_options(
+            &indexed,
+            1.0,
+            1.0,
+            false,
+            &DeterministicRuntime::for_test(4),
+            PlanetMetricProbeMode::Indexed,
+            Some(1.0),
+        )
+        .unwrap();
+        assert!(
+            cold.planet_metrics_runtime
+                .pending_rows_for_test()
+                .contains(&hub_index)
+        );
+        assert!(
+            cold.planet_metrics_runtime
+                .scan_history_for_test()
+                .last()
+                .unwrap()
+                .full_scan
+        );
+        commit_and_install_factory_test_state(&mut indexed, cold);
+
+        let mut flat = indexed.clone();
+        let indexed_next = prepare_advance_with_planet_metric_test_options(
+            &indexed,
+            1.0,
+            1.0,
+            false,
+            &DeterministicRuntime::for_test(4),
+            PlanetMetricProbeMode::Indexed,
+            Some(1.0),
+        )
+        .unwrap();
+        let indexed_scan = *indexed_next
+            .planet_metrics_runtime
+            .scan_history_for_test()
+            .last()
+            .unwrap();
+        assert!(!indexed_scan.full_scan, "unexpected scan: {indexed_scan:?}");
+        assert!(indexed_scan.selected_rows > 0);
+        assert!(indexed_scan.selected_rows < indexed_scan.total_rows);
+
+        let flat_next = prepare_advance_with_planet_metric_test_options(
+            &flat,
+            1.0,
+            1.0,
+            false,
+            &DeterministicRuntime::for_test(4),
+            PlanetMetricProbeMode::FlatFull,
+            Some(1.0),
+        )
+        .unwrap();
+        commit_and_install_factory_test_state(&mut indexed, indexed_next);
+        commit_and_install_factory_test_state(&mut flat, flat_next);
+        assert_eq!(
+            planet_metric_state_fingerprint(&indexed),
+            planet_metric_state_fingerprint(&flat)
+        );
+    }
+
+    #[test]
+    fn planet_metric_correctness_gate_precedes_synthetic_ab_evidence() {
+        let state = planet_metric_oactive_fixture(16_384);
+        let mut entities = state.parse_entities_parallel().unwrap();
+        let deterministic_runtime = DeterministicRuntime::for_test(8);
+        let mut indexed_runtime =
+            std::sync::Arc::new(PlanetMetricsRuntime::build(&state, &entities));
+        let mut flat_runtime = std::sync::Arc::new(PlanetMetricsRuntime::build(&state, &entities));
+        let bits = |result: &(Vec<f64>, Vec<PlanetPowerReserves>)| {
+            (
+                result
+                    .0
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                result
+                    .1
+                    .iter()
+                    .map(|value| {
+                        [
+                            value.0.to_bits(),
+                            value.1.to_bits(),
+                            value.2.to_bits(),
+                            value.3.to_bits(),
+                        ]
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let warm_indexed = collect_planet_metrics_with_runtime(
+            &deterministic_runtime,
+            &state,
+            &entities,
+            1,
+            &mut indexed_runtime,
+            PlanetMetricProbeMode::Indexed,
+        )
+        .unwrap();
+        let warm_flat = collect_planet_metrics_with_runtime(
+            &deterministic_runtime,
+            &state,
+            &entities,
+            1,
+            &mut flat_runtime,
+            PlanetMetricProbeMode::FlatFull,
+        )
+        .unwrap();
+        assert_eq!(bits(&warm_indexed), bits(&warm_flat));
+
+        let mut indexed_micros = Vec::new();
+        let mut flat_micros = Vec::new();
+        for round in 0..9_usize {
+            let changed_index = 8_192;
+            entities[changed_index]["productionRate"] = Value::from(round as f64 * 0.125);
+            std::sync::Arc::make_mut(&mut indexed_runtime).wake_entity_indices(&[changed_index]);
+            let mut measure_indexed = || {
+                let started = std::time::Instant::now();
+                let result = collect_planet_metrics_with_runtime(
+                    &deterministic_runtime,
+                    &state,
+                    std::hint::black_box(&entities),
+                    1,
+                    &mut indexed_runtime,
+                    PlanetMetricProbeMode::Indexed,
+                )
+                .unwrap();
+                (started.elapsed().as_micros(), result)
+            };
+            let mut measure_flat = || {
+                let started = std::time::Instant::now();
+                let result = collect_planet_metrics_with_runtime(
+                    &deterministic_runtime,
+                    &state,
+                    std::hint::black_box(&entities),
+                    1,
+                    &mut flat_runtime,
+                    PlanetMetricProbeMode::FlatFull,
+                )
+                .unwrap();
+                (started.elapsed().as_micros(), result)
+            };
+            let ((indexed_elapsed, indexed), (flat_elapsed, flat)) = if round.is_multiple_of(2) {
+                (measure_indexed(), measure_flat())
+            } else {
+                let flat = measure_flat();
+                let indexed = measure_indexed();
+                (indexed, flat)
+            };
+            assert_eq!(bits(&indexed), bits(&flat), "A/B round {round}");
+            indexed_micros.push(indexed_elapsed);
+            flat_micros.push(flat_elapsed);
+        }
+        indexed_micros.sort_unstable();
+        flat_micros.sort_unstable();
+        let indexed_probe_rows = indexed_runtime
+            .scan_history_for_test()
+            .iter()
+            .skip(1)
+            .map(|scan| scan.selected_rows)
+            .sum::<usize>();
+        let flat_probe_rows = flat_runtime
+            .scan_history_for_test()
+            .iter()
+            .skip(1)
+            .map(|scan| scan.selected_rows)
+            .sum::<usize>();
+        assert_eq!(indexed_probe_rows, 9);
+        assert_eq!(flat_probe_rows, 9 * entities.len());
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tplanet-metric-oactive-pre-gate-ab\tentities={}\trounds=9\tindexed-probe-rows={}\tflat-probe-rows={}\tindexed-median-us={}\tflat-median-us={}\tclaim=synthetic-pre-gate-evidence-only",
+            entities.len(),
+            indexed_probe_rows,
+            flat_probe_rows,
+            indexed_micros[indexed_micros.len() / 2],
+            flat_micros[flat_micros.len() / 2],
+        );
+    }
+
+    #[test]
     fn planet_metrics_are_bit_exact_for_one_two_four_and_eight_workers() {
         let (state, entities) = planet_metric_fixture(PARALLEL_MIN_ITEMS + 73);
         let bits = |result: &(Vec<f64>, Vec<PlanetPowerReserves>)| {
@@ -11188,11 +12571,15 @@ pub(crate) mod tests {
         assert!(baseline.1[0].2 > 0.0);
         assert!(baseline.1[0].3 > 0.0);
         for worker_count in [1, 2, 4, 8] {
+            let mut metric_runtime =
+                std::sync::Arc::new(PlanetMetricsRuntime::build(&state, &entities));
             let observed = collect_planet_metrics_with_runtime(
                 &DeterministicRuntime::for_test(worker_count),
                 &state,
                 &entities,
                 1,
+                &mut metric_runtime,
+                PlanetMetricProbeMode::Indexed,
             )
             .unwrap();
             assert_eq!(
@@ -11219,12 +12606,18 @@ pub(crate) mod tests {
                     (started.elapsed().as_secs_f64() * 1_000.0, result)
                 };
                 let measure_parallel = || {
+                    let mut metric_runtime = std::sync::Arc::new(PlanetMetricsRuntime::build(
+                        &profile_state,
+                        &profile_entities,
+                    ));
                     let started = std::time::Instant::now();
                     let result = collect_planet_metrics_with_runtime(
                         &runtime,
                         &profile_state,
                         std::hint::black_box(&profile_entities),
                         1,
+                        &mut metric_runtime,
+                        PlanetMetricProbeMode::Indexed,
                     )
                     .unwrap();
                     (started.elapsed().as_secs_f64() * 1_000.0, result)
@@ -11260,11 +12653,16 @@ pub(crate) mod tests {
         let entity_bytes = serde_json::to_vec(&entities).unwrap();
         let state_hash = state.canonical_sha256().unwrap();
         for worker_count in [1, 2, 4, 8] {
+            let mut metric_runtime =
+                std::sync::Arc::new(PlanetMetricsRuntime::build(&state, &entities));
+            let source_metric_runtime = metric_runtime.clone();
             let error = collect_planet_metrics_with_runtime(
                 &DeterministicRuntime::for_test(worker_count),
                 &state,
                 &entities,
                 1,
+                &mut metric_runtime,
+                PlanetMetricProbeMode::Indexed,
             )
             .unwrap_err();
             assert_eq!(
@@ -11273,6 +12671,10 @@ pub(crate) mod tests {
             );
             assert_eq!(serde_json::to_vec(&entities).unwrap(), entity_bytes);
             assert_eq!(state.canonical_sha256().unwrap(), state_hash);
+            assert!(std::sync::Arc::ptr_eq(
+                &metric_runtime,
+                &source_metric_runtime
+            ));
         }
 
         let values = (0..PARALLEL_MIN_ITEMS + 31).collect::<Vec<_>>();

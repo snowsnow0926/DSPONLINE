@@ -1,5 +1,13 @@
 # DSP极简网络项目现状
 
+> **Windows Rust 行星指标活动探针缓存（2026-09-01，开发候选，未发布）**：在完整 writer-closure 审计通过后，`simple_factory` 的 `planetMetrics` 不再每个模拟步重新解码/查询全部实体。新的 session-only runtime 保存一份按持久实体顺序排列的紧凑 probe 基线、稀疏 override 和有序 pending writer 集；冷拍、命令/拓扑失配、非空 MOD registry、opaque/畸形形状、目录证据不完整及精确 `75%` 稠密阈值仍走真实 flat-full。`productionRate`、储能/容量、燃料余热与选中燃料输入、`machineCount` 及 planet/building/topology 的产品 writer 清单和闭合方式见 [writer 审计](./NATIVE_PLANET_METRICS_WRITER_AUDIT.md)。
+>
+> 优化只把昂贵 JSON/catalog 实体探针收敛为 O(active/changed)；每拍仍把紧凑 probe 按历史全局实体顺序做 O(E) 标量折叠，因此没有用 delta sum 或重排加法改变 IEEE-754 字节。后屏障 belt/material/quantum/route/export writer 保持 pending 到下一内部步。runtime 不持久化、不进入 v47、WAL、checkpoint 或 canonical/domain hash；候选 `Arc` 只在完整 revision commit 成功后安装，pure-idle construction tail 会显式丢弃缓存。
+>
+> 当前 focused 证据为 planet-metric `15/15`、material-delivery `6/6`、construction module `24/24`、prepared-cache 保留 `1/1`、pure-idle construction tail `1/1`。1,024 行的 indexed 与真正绕过 indexed selection 的 flat-full oracle 在 `1/5/60` 秒完整 bytes、canonical、domain 与物料守恒 SHA-256 一致；`1/10/30` 秒内部步长的长 advance 与同分步提交一致，完整 advance 在 1/2/4/8 workers 一致。同长度 topology COW、opaque/畸形稳定全扫、collect 后注入失败和真实外层 campaign 失败的源 bytes/hash/runtime 原子性、正式 public advance 成功安装、后屏障 writer 下一步重探、扫描计数和保守峰值内存估算均有专项。最终格式化源码上的 16,384 行、9 轮门槛前合成 A/B 在先逐轮比特相等后记录 `9` 对 `147,456` 个 probe rows，中位 `502 µs` 对 `1,416 µs`；这是合成预门禁证据，不是玩家档或整体模拟加速承诺。workspace all-target/all-feature strict clippy `-D warnings`、fmt check 与 diff check 通过；未跑组合全量，留给 root 冻结后执行。
+>
+> GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、Host/renderer 协议和 `authorityEligible=false` 均未改变；没有连接生产、部署、签名、打包或读取/修改真实玩家存档。
+
 > **Windows material-delivery hub 双阶段活动队列（2026-09-01，开发候选，未发布）**：Rust `simple_factory` 对内置物资配送枢纽增加 session-only、按持久实体行排序的 wake queue。冷拍仍在历史前/后两个 drain 阶段各全扫一次；第一阶段选中的行必定带到第二阶段，只有输入已经合法归零、三个 delivery slot 可证明且目标托盘未满的 hub 才休眠。两段真实 belt changed-entity 事件分别闭合前后唤醒；托盘满、残留输入、MOD/opaque、identity/topology 漂移、精确 75% 稠密都保持常醒或回退原 full scan。
 >
 > 1,024 hub 的 `1/5/60` 秒 indexed 与 flat-full 选择对照在完整 bytes、canonical、domain 和物料守恒 SHA-256 上一致；该对照完全绕过 `MaterialDeliveryRuntime::select`，把完整 topology 行直接送入共享的旧 drain 结算体，因此是独立选择对照、不是独立结算实现。共 `2/10/120` 次 drain，indexed 冷拍两次各选 1,024，之后每阶段最多 1 行，flat-full 每次 1,024。真实 relay、producer 与 hub-as-source output belt 覆盖同拍前后两阶段及输出端唤醒；60 秒一次 advance 与 `1/10/30` 秒内部分步、以及对应 `60/6/2` 次提交在显式区分 revision 后保持全部其余状态字段一致；60 秒结果在 1/2/4/8 workers 一致。runtime 持有 topology `Arc` clone，使同长度/同容量内容编辑必经 COW 并稳定触发全扫；内存估算包含首个 `BTreeSet` 节点固定开销、全行候选及源/候选 Arc COW 双份峰值。失败候选保留源 wake 和源字节。

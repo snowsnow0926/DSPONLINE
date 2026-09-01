@@ -1,5 +1,13 @@
 # 测试与发布基线
 
+> **Windows Rust 行星指标活动探针门禁（2026-09-01，开发候选）**：产品实现的前置条件是 [writer 审计](./NATIVE_PLANET_METRICS_WRITER_AUDIT.md) 对 `productionRate`、储能/容量、燃料余热与选中燃料输入、`machineCount` 和 planet/building/topology 全部闭合；任何新 writer 在没有 exact wake/invalidate/full-fallback 证据前不得跳过。测试 oracle 必须直接遍历 flat entity range，不能要求 indexed selector“选择全部”冒充独立对照。
+>
+> 必须同时覆盖：`1/5/60` 秒 indexed/flat 完整 bytes、canonical/domain/守恒哈希；`1/10/30` 秒内部步长的长 advance 与同分步提交；1/2/4/8 workers；同长度/同容量 topology COW；非空 MOD/递归 opaque key/畸形数值稳定 full；精确 `75%` 稠密退化；后屏障 writer 保持 pending；最低失败实体、collect 后晚期失败的源 bytes/hash/runtime `Arc` 原子性；扫描计数与保守峰值内存下界。性能采样只能在逐轮比特相等之后执行，不设“必须更快”的脆弱断言，也不得外推为整机、玩家档或发布收益。
+>
+> 当前 fresh focused：`cargo test -p dsp-native-core --lib planet_metric -- --nocapture` 为 `15/15`；`material_delivery_` 为 `6/6`；`construction::tests::` 为 `24/24`；prepared-cache 保留与 pure-idle construction tail 各 `1/1`。最终格式化源码上的 16,384 行合成 A/B 共 9 轮，indexed/flat probe rows 为 `9/147456`，中位 `502/1416 µs`，且每轮结果先按 `to_bits()` 相等。实现过程中 `1/10/30` 测试曾错误地横向比较不同内部步长，改为每个步长各自比较单次长 advance 与同分步提交后通过；后屏障测试的首个 6 行夹具精确触发 75% 安全阈值，加入 64 个稳定行以真正验证 sparse 下一步重探后通过。pure-idle 首个断言曾错误要求 exact-only 前缀也清缓存，收窄为实际 `pure-idle-macro-v10` 尾段后通过。首次 strict clippy 还拒绝了 topology COW 测试中的自赋值，改为真实同长度 grid-index 修改后通过。这些红测都没有放宽产品 fallback。
+>
+> 本工作树只跑 focused Rust、`cargo fmt --all --check`、workspace all-target/all-feature strict clippy `-D warnings` 和 diff check；不运行或借用完整 Core/workspace/Host/Node/Vitest/E2E/打包数字，组合全量由 root 在最终冻结提交上执行。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 不变；没有真实存档、生产、部署或签名操作。
+
 > **Windows Campaign / Galaxy 薄 UI 门禁（2026-09-01，开发候选）**：Core 合成夹具必须证明 Campaign 固定目录/进度与 Galaxy 饱和十进制/去重已知计数有界、只读、源 canonical hash 不变；Host 必须证明活动 exact lease 的 session/run/revision/registry 四重绑定和旧 run 同 revision ABA 拒绝。Desktop boundary 必须覆盖 `truncated=true`、重复 task ID、counts 不一致、stale run/revision/registry、超 256 位十进制、unsafe count、difficulty 超限、额外 GameState/库存字段和活动 authority restore/import/overwrite=true 全部拒绝。
 >
 > 组件与 App 必须证明 native authority 下 Campaign/Galaxy 路由可达，只挂载 Native workspace；Web workspace 仅作为非 native fallback。失败投影整页关闭，不显示任务或账户操作；Galaxy props 与组件不能接收 GameState、主档恢复/导入/覆盖/上传 writer，按钮也不得提供这些动作。账户创建/切换在 native ownership 下不得调用 `recordAccountProgress` 或 `baselineAccountProgress`。build/startup budget、完整 native/Vitest/E2E/24 小时/多硬件/签名门禁仍须另跑，focused 数字不得冒充发布通过。

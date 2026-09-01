@@ -105,6 +105,9 @@ const {
   rendererNativeErrorCode,
   serializeRendererNativeError,
 } = require("./native-renderer-boundary.cjs");
+const {
+  streamNativeOfflineStartupCandidate,
+} = require("./native-offline-startup-transfer.cjs");
 const { RuntimeDiagnosticsSampler } = require("./runtime-diagnostics.cjs");
 const { initializeShellRuntimePolicy } = require("./shell-runtime-policy.cjs");
 const packageMetadata = require("../package.json");
@@ -128,6 +131,7 @@ const performanceEditionRuntimeIdentity = initializePerformanceEditionIdentity({
 const shellRuntimePolicy = initializeShellRuntimePolicy({ app, environment: process.env });
 
 const isDevelopment = Boolean(process.env.DSP_DESKTOP_DEV_URL);
+const sampleNativeOfflineStartupWallClock = createMonotonicOrbitalContractClock();
 const channels = createReleaseChannels({
   updateBaseUrl: process.env.DSP_UPDATE_BASE_URL || packageMetadata.updateBaseUrl,
   stableUrl: process.env.DSP_UPDATE_STABLE_URL,
@@ -1045,6 +1049,14 @@ function postNativeProjectionTransferError(port, error) {
   });
   try { port.postMessage({ error: safe }); } catch { /* renderer is gone */ }
   closeTransferPort(port);
+}
+
+function postNativeOfflineStartupTransferError(port, error) {
+  const safe = serializeRendererNativeError(error, {
+    fallbackCode: "NATIVE_OFFLINE_STARTUP_FAILED",
+    message: "Windows 原生离线结算候选失败，正在回退兼容结算",
+  });
+  try { port.postMessage({ error: safe }); } catch { /* renderer is gone */ }
 }
 
 async function runRendererNativeOperation(kind, options, operation) {
@@ -2762,6 +2774,35 @@ ipcMain.on("desktop:native-core-projection-transfer", (event, request) => {
   port.start();
   void run()
     .catch((error) => postNativeProjectionTransferError(port, error))
+    .finally(() => closeTransferPort(port));
+});
+
+// Startup settlement is a read-only candidate transaction. Renderer supplies
+// only an exact source proof; main owns both the wall clock and the temporary
+// export identity. Rust keeps the source session/checkpoint unchanged until
+// the browser validates and persists the streamed v47 envelope.
+ipcMain.on("desktop:native-offline-startup-transfer", (event, request) => {
+  const port = event.ports?.[0];
+  if (!port) return;
+  const run = async () => {
+    const ownerId = requireTrustedNativeSender(event);
+    await streamNativeOfflineStartupCandidate({
+      registry: nativeCoreSessions,
+      ownerId,
+      request,
+      observedNowMs: sampleNativeOfflineStartupWallClock(),
+      nativeRootPath: resolveFixedNativeSaveRootPath(
+        performanceEditionRuntimeIdentity.userDataPath,
+      ),
+      port,
+      normalizeResult: (value) => normalizeRendererNativeResult(
+        "coreOfflineCandidateExport",
+        value,
+      ),
+    });
+  };
+  void run()
+    .catch((error) => postNativeOfflineStartupTransferError(port, error))
     .finally(() => closeTransferPort(port));
 });
 

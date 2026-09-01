@@ -6,6 +6,7 @@ const path = require("node:path");
 const test = require("node:test");
 
 const {
+  NativeCoreSessionRegistry,
   NativeExactRealtimeLeaseRegistry,
   NativeHostClient,
   NativeSaveSessionRegistry,
@@ -66,7 +67,7 @@ function fnv1aUtf16(value) {
 
 const binaryPath = path.resolve("native", "target", "release", process.platform === "win32" ? "dsp-native-host.exe" : "dsp-native-host");
 
-async function createSyntheticPureIdleFixture(cacheDir) {
+async function createSyntheticPureIdleFixture(cacheDir, options = {}) {
   const { createServer } = await import("vite");
   const vite = await createServer({
     root: path.resolve("."),
@@ -156,6 +157,16 @@ async function createSyntheticPureIdleFixture(cacheDir) {
       requiredPowerKw: 10 ** 16,
       allocatedPowerKw: 10 ** 16,
     };
+    if (options.offline === true) {
+      state.timeWarp = {
+        ...state.timeWarp,
+        enabled: false,
+        requestedMultiplier: 1,
+        effectiveMultiplier: 1,
+        pendingSimulationSeconds: 0,
+        pendingWallSeconds: 0,
+      };
+    }
 
     const runtime = contentPacks.createContentPackRuntimeSnapshot(
       contentPacks.createContentPackRegistry(),
@@ -1324,6 +1335,65 @@ test("real Rust host permits only the lease-owned pending core commit and exact 
   }), /exact realtime lease/i);
   assert.equal((await client.request({ operation: "coreStatus", sessionId: opened.sessionId })).revision, exactCommit.revision);
   assert.equal((await client.request({ operation: "coreClose", sessionId: opened.sessionId })).closed, true);
+});
+
+test("real Rust host prepares a read-only offline candidate export without advancing its source session", {
+  skip: !fs.existsSync(binaryPath) ? "release native host has not been built" : false,
+  timeout: 60_000,
+}, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "dsp-native-offline-candidate-host-"));
+  const fixture = await createSyntheticPureIdleFixture(path.join(root, "vite-cache"), {
+    offline: true,
+  });
+  const client = new NativeHostClient({ binaryPath, rootPath: root, requestTimeoutMs: 30_000 });
+  t.after(async () => {
+    await client.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const hello = await client.start("offline-candidate-host-contract");
+  assert.ok(hello.capabilities.includes("native-core-offline-candidate-export-v1"));
+  const checkpoint = await seedSyntheticCheckpoint(new NativeSaveSessionRegistry(client), fixture);
+  const registry = new NativeCoreSessionRegistry(client);
+  const opened = await registry.open(17, {
+    slot: "normal-main",
+    generation: checkpoint.generation,
+    rootHash: checkpoint.rootHash,
+    revision: checkpoint.revision,
+    registryFingerprint: fixture.registryFingerprint,
+    catalog: fixture.catalog,
+  });
+  const sourceBefore = await registry.status(17, opened.sessionId);
+  const exportId = "offlinecandidateintegration";
+  const candidate = await registry.prepareOfflineSettlementExport(17, {
+    sessionId: opened.sessionId,
+    expectedGeneration: checkpoint.generation,
+    expectedRootHash: checkpoint.rootHash,
+    expectedRevision: checkpoint.revision,
+    expectedRegistryFingerprint: fixture.registryFingerprint,
+    expectedCanonicalSha256: opened.summary.canonicalSha256,
+    expectedDomainSha256: opened.summary.domainSha256,
+    strategy: "macro-v1",
+  }, 60_001, exportId);
+  assert.equal(candidate.prepared, true);
+  assert.equal(candidate.sourceSavedAtMs, 1);
+  assert.equal(candidate.settledAtMs, 60_001);
+  assert.equal(candidate.settledSeconds, 60);
+  assert.equal(candidate.export.exportId, exportId);
+  assert.equal(candidate.advance.previousRevision, checkpoint.revision);
+  assert.ok(candidate.advance.revision > checkpoint.revision);
+  assert.equal(candidate.advance.revision, candidate.candidateSummary.revision);
+  assert.equal(candidate.export.result.revision, candidate.candidateSummary.revision);
+  const exportPath = path.join(root, "exports", `${exportId}.json`);
+  const raw = fs.readFileSync(exportPath);
+  assert.equal(raw.byteLength, candidate.export.result.byteLength);
+  assert.equal(sha256(raw), candidate.export.result.envelopeSha256);
+  const envelope = JSON.parse(raw.toString("utf8"));
+  assert.equal(envelope.state.elapsedSeconds, fixture.state.elapsedSeconds + 60);
+  const sourceAfter = await registry.status(17, opened.sessionId);
+  assert.equal(sourceAfter.revision, sourceBefore.revision);
+  assert.equal(sourceAfter.canonicalSha256, sourceBefore.canonicalSha256);
+  assert.equal(sourceAfter.domainSha256, sourceBefore.domainSha256);
+  assert.equal((await registry.close(17, opened.sessionId)).closed, true);
 });
 
 test("pure-idle conservative host operations preserve credit, WAL atomicity and v47 export", {

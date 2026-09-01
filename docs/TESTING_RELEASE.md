@@ -1,5 +1,11 @@
 # 测试与发布基线
 
+> **Windows 原生离线启动采用门禁（2026-09-02，开发候选）**：必须用合成 v47 primary/native checkpoint 同时证明成功采用和所有无损回退。成功链要求 normal-main primary、同 generation/root/revision/registry/`savedAt`、零 WAL、canonical/domain/活动行星/实体线路/elapsed 摘要一致；结果要求 main-owned wall clock/export ID/path、游戏 7～30 天科研封顶、1 MiB 连续分块、逐块 ACK、最终 SHA-256 ACK、FNV transfer checksum、可信 envelope、候选 revision/time/elapsed 闭合，以及 source session 明确关闭后才调用一次既有 finalizer。StartMenu 只允许快速模式尝试，显式精确、速通、暂停、非 v47、非 primary 和不足一秒保持旧路径。
+>
+> 失败矩阵必须覆盖：renderer 夹带时间/path/export ID、capability 缺失、checkpoint/`savedAt`/registry/WAL 漂移、Host export ID 或 proof 漂移、乱序/超限/损坏 chunk、最终 hash 不符、envelope/state/canonical/domain/revision/elapsed 不符、取消、close false/throw。每项都必须证明源存档对象、源 checkpoint、WAL、revision 和公开字节未变，并回退原 JavaScript Worker；不得从候选的半成品继续。零正文 unavailable 路径也必须终态 ACK，避免端口关闭竞态。
+>
+> 当前冻结前新鲜结果：StartMenu/service Vitest `7/7`；transfer/preload `10/10`；fresh Release Host 只读候选集成 `1/1`；完整 fast Vitest `2989 passed / 29 skipped / 0 failed`；Rust workspace 串行 `1270 passed / 3 explicitly ignored / 0 failed`（Core `1031/3/0`、Host library `236/0/0`、Host binary `3/0/0`）；完整 native/desktop `567 passed / 1 Windows symlink privilege skip / 0 failed`；typecheck、workspace all-target/all-feature strict Clippy、Rust fmt、production build、startup budget、Native thin-UI boundary 与 diff check 通过。本段没有执行或复用完整 Chromium、durable E2E、desktop pack/install/升级、24 小时、多硬件、Defender/磁盘、签名、灰度或生产门禁。
+
 > **Windows Rust 行星指标活动探针门禁（2026-09-01，开发候选）**：产品实现的前置条件是 [writer 审计](./NATIVE_PLANET_METRICS_WRITER_AUDIT.md) 对 `productionRate`、储能/容量、燃料余热与选中燃料输入、`machineCount` 和 planet/building/topology 全部闭合；任何新 writer 在没有 exact wake/invalidate/full-fallback 证据前不得跳过。测试 oracle 必须直接遍历 flat entity range，不能要求 indexed selector“选择全部”冒充独立对照。
 >
 > 必须同时覆盖：`1/5/60` 秒 indexed/flat 完整 bytes、canonical/domain/守恒哈希；`1/10/30` 秒内部步长的长 advance 与同分步提交；1/2/4/8 workers；同长度/同容量 topology COW；非空 MOD/递归 opaque key/畸形数值稳定 full；精确 `75%` 稠密退化；后屏障 writer 保持 pending；最低失败实体、collect 后晚期失败的源 bytes/hash/runtime `Arc` 原子性；扫描计数与保守峰值内存下界。性能采样只能在逐轮比特相等之后执行，不设“必须更快”的脆弱断言，也不得外推为整机、玩家档或发布收益。

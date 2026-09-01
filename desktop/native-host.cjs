@@ -91,6 +91,8 @@ const MAX_DURABLE_PLAYER_AUTHORITY_COMMAND_BYTES = 1_750_000;
 const MAX_PLAYER_AUTHORITY_MACRO_BUDGET_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 const NATIVE_V47_STREAM_IMPORT_CAPABILITY = "native-core-v47-stream-import-v1";
 const NATIVE_OFFLINE_MACRO_CAPABILITY = "native-core-offline-macro-v1";
+const NATIVE_OFFLINE_CANDIDATE_EXPORT_CAPABILITY =
+  "native-core-offline-candidate-export-v1";
 const NATIVE_HOST_SPAWN_ENVIRONMENT_KEYS = new Set([
   "DSP_NATIVE_CORE_THREADS",
   "DSP_NATIVE_CORE_SYNC_RECORD_DROP",
@@ -2179,6 +2181,45 @@ class NativeCoreSessionRegistry {
     }, 300_000);
   }
 
+  prepareOfflineSettlementExport(ownerId, request, observedNowMs = Date.now(), exportId) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (!this.client.hello?.capabilities?.includes(NATIVE_OFFLINE_CANDIDATE_EXPORT_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide read-only offline candidate export",
+        "NATIVE_CORE_CAPABILITY_MISSING",
+      );
+    }
+    exactObjectKeys(request, [
+      "sessionId", "expectedGeneration", "expectedRootHash", "expectedRevision",
+      "expectedRegistryFingerprint", "expectedCanonicalSha256", "expectedDomainSha256", "strategy",
+    ], "native offline candidate intent");
+    if (!Number.isSafeInteger(request.expectedGeneration) || request.expectedGeneration < 1 ||
+      typeof request.expectedRootHash !== "string" || !/^[a-f0-9]{64}$/.test(request.expectedRootHash) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256) ||
+      typeof request.expectedCanonicalSha256 !== "string" || !/^[a-f0-9]{64}$/.test(request.expectedCanonicalSha256) ||
+      typeof request.expectedDomainSha256 !== "string" || !/^[a-f0-9]{64}$/.test(request.expectedDomainSha256) ||
+      request.strategy !== "macro-v1" || !Number.isSafeInteger(observedNowMs) || observedNowMs < 0 ||
+      !validLogicalId(exportId, 128) || exportId.includes(":") || exportId.includes(".")) {
+      throw new TypeError("native offline candidate intent is invalid");
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "corePrepareOfflineSettlementExport",
+      sessionId: request.sessionId,
+      request: {
+        expectedGeneration: request.expectedGeneration,
+        expectedRootHash: request.expectedRootHash,
+        expectedRevision: request.expectedRevision,
+        expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+        expectedCanonicalSha256: request.expectedCanonicalSha256,
+        expectedDomainSha256: request.expectedDomainSha256,
+        observedNowMs,
+        strategy: "macro-v1",
+        exportId,
+      },
+    }, 300_000);
+  }
+
   commitOperationExactRealtime(ownerId, request) {
     this.assertOwner(ownerId, request?.sessionId);
     if (!this.client.hello?.capabilities?.includes(NATIVE_EXACT_REALTIME_WRITER_FENCE_CAPABILITY)) {
@@ -2869,6 +2910,7 @@ module.exports = {
   NATIVE_VIEWPORT_ENTITY_PRESENTATION_CAPABILITY,
   NATIVE_V47_STREAM_IMPORT_CAPABILITY,
   NATIVE_OFFLINE_MACRO_CAPABILITY,
+  NATIVE_OFFLINE_CANDIDATE_EXPORT_CAPABILITY,
   NativeHostClient,
   NativeHostError,
   NativeCoreSessionRegistry,

@@ -2367,3 +2367,18 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 6. 该纵切还不是玩家可见的完整启动链：`StartMenu` 当前仍在原生 session 建立前调用 JavaScript Worker，Electron IPC/preload 也尚未把匹配的 native 主检查点导出并交还启动加载器。下一大块必须完成 main-owned 启动协调、检查点身份匹配、结算结果流式导出、失败回退与重复启动回归；在此之前不得宣称 Windows 客户端已实际使用本算法。
 7. 固定能力口径暂更新为 `Rust 唯一权威约 87% / 完整薄 UI 约 97% / 真正 O(active) 物流约 97% / 全领域确定性原生并行约 75% / 四项目标能力加权综合约 91% / 可放心发布成熟度约 60%`。上调来自一条闭合的离线领域与耐久恢复事务，不来自代码行数；发布成熟度不变，因为产品启动接线、组合全量、24 小时、多硬件、安装/升级、签名与灰度仍未关闭。
 8. GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不变；没有读取或修改真实玩家存档，没有连接生产，没有部署、打包发布或签名。
+
+### 24.54 主进程权威启动采用与有界候选传输（2026-09-02，开发候选）
+
+本纵切关闭 24.53 明确留下的产品接线缺口：Windows 普通主存档在玩家选择“快速离线结算”后，开始菜单现在会优先尝试 Rust `offline-macro-v1` 候选；任何身份、字节、状态、时间或会话关闭门禁不成立时，都从原始 `DeferredLoadedGame` 无损回退既有 JavaScript Worker。Rust 候选始终是只读分支，不会在浏览器验证和公开保存前替换源检查点，因此失败、取消或窗口销毁不能产生半次离线收益。
+
+1. 入口只允许 `normal-main` 的当前 primary、GameState v47、未暂停、非速通且至少离线一整秒；玩家显式选择“精确”时继续使用原 Worker，不偷偷改变旧模式。renderer 请求固定为 8 个证明字段：session、generation、root hash、revision、registry fingerprint、canonical SHA-256、domain SHA-256 和 `macro-v1`。墙钟、导出 ID、文件路径和离线秒数均由 main/Host 生成，额外字段在 preload 与 Node registry 两层提前拒绝。
+2. main 先恢复固定 `normal-main` 检查点，并要求 generation/root/revision/registry、`savedAt`、零 WAL 与浏览器当前状态完全一致；随后以 Rust shadow 打开同一检查点，再核对 canonical/domain、活动行星、实体/线路数量和 elapsedSeconds。任何 mismatch 都关闭临时 session 并回退，不能把“差不多同一个存档”当成相邻 revision。
+3. Host 新增只读 `corePrepareOfflineSettlementExport`。候选在私有 Core 副本完成一次 1× 离线结算和 v47 envelope 流式导出；源 session 的 checkpoint、WAL、revision 和规范哈希保持不变。候选使用 main 生成的一次性 export ID，结果中的 ID 必须逐字匹配；临时文件只在固定 native root 的 `exports` 下按该 ID 打开和清理。
+4. main→preload 使用 MessagePort 发送最多 256 MiB 的正文，固定 1 MiB 分块；每块必须按连续 offset ACK，结束时再以 SHA-256 ACK。无候选的零字节结果也必须完成终态 ACK，避免 postMessage 后立即关口造成竞态。preload 只预分配一个精确大小的 `Uint8Array`，边收边计算 SHA-256 与公开 FNV-1a transfer checksum，不在 renderer 堆积 chunk 数组；当前 Electron bridge 最终交给应用时仍可能发生一次结构化克隆，因此这是有界传输，不冒充共享内存零拷贝。
+5. renderer 对流式正文继续执行可信 envelope、state checksum、FNV、byte length、canonical/domain、revision、registry、`savedAt`、elapsedSeconds 与候选 summary 全链验证。游戏离线封顶同步修正为公开规则：基础 7 天，加 `continuum_simulation` 每级 1 天，最多 30 天；缺少该科研按 0 级处理，字段存在但畸形则失败关闭。Host 的 durable 提交路径和只读候选路径共用这一上限，不再无条件按 30 天。
+6. StartMenu 只在全部验证并确认 source session 安全关闭后采用候选；取消发生在原生计算期间时，计算结束后丢弃候选，原存档、`savedAt` 和离线时长均不变。采用后仍调用既有 `finalizeDeferredOfflineGame`，以 Rust 返回的精确 sourceSavedAt/settledSeconds 添加一次 returning reward；不会再跑 Worker 或重复发奖。原生不可用、候选冻结、校验失败、Host/IPC/流损坏或关闭结果不确定都会走原 Worker。
+7. 离线报告不伪造精度：没有宏观尾段时标为 exact；存在守恒但冻结的尾段时标为 approximate，最大误差诚实记为 100%，因为某个无法证明的子系统可能完全少产，但不会凭空多产火箭、太阳帆、施工、出口或合同交付。
+8. 当前组合源码的新鲜门禁包括完整 fast Vitest `2989 passed / 29 skipped / 0 failed`、Windows native/desktop `567 passed / 1 Windows symlink privilege skip / 0 failed`、Rust workspace 串行 `1270 passed / 3 explicitly ignored / 0 failed`（Core `1031/3/0`、Host library `236/0/0`、Host binary `3/0/0`）、新增启动传输专项 `10/10` 与 fresh Release Host 只读候选集成 `1/1`，以及 typecheck、workspace all-target/all-feature strict Clippy、Rust fmt、production build、startup budget、Native thin-UI boundary 与 diff check。完整 Chromium、durable E2E、desktop pack/install/覆盖升级、24 小时、多硬件、Defender/磁盘、签名和灰度仍未在本纵切上执行。
+9. 该纵切使 Windows 产品启动链真正消费 Rust 离线候选，因此固定能力口径更新为 `Rust 唯一权威约 89% / 完整薄 UI 约 97% / 真正 O(active) 物流约 97% / 全领域确定性原生并行约 75% / 四项目标能力加权综合约 92% / 可放心发布成熟度约 60%`。剩余开发重点转向非离线的最后玩家写面、默认多核提交覆盖和 24 小时组合稳定性；发布成熟度不因代码接通而上调。
+10. 本切片不新增持久字段，不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3、公开 canonical 规则或 `authorityEligible=false`；未读取或修改真实玩家存档，未连接生产，未部署、打包发布或签名。

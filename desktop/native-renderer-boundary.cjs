@@ -85,6 +85,7 @@ const PUBLIC_NATIVE_ERROR_CODES = new Set([
   "NATIVE_CORE_V47_IMPORT_FILE_INVALID", "NATIVE_CORE_V47_IMPORT_UNAVAILABLE",
   "NATIVE_HOST_EXITED", "NATIVE_HOST_START_FAILED", "NATIVE_HOST_TIMEOUT",
   "NATIVE_HOST_UNAVAILABLE", "NATIVE_HOST_WRITE_FAILED", "NATIVE_OPERATION_FAILED",
+  "NATIVE_OFFLINE_STARTUP_FAILED", "NATIVE_OFFLINE_STARTUP_TIMEOUT",
   "NATIVE_PERFORMANCE_POLICY_READ_FAILED", "NATIVE_PERFORMANCE_POLICY_WRITE_FAILED",
   "NATIVE_PLAYER_AUTHORITY_STATE_FAILED", "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED",
   "NATIVE_PLAYER_AUTHORITY_MACRO_BUSY", "NATIVE_PLAYER_AUTHORITY_MACRO_CLOCK_INVALID",
@@ -8627,6 +8628,49 @@ function normalizeCoreExport(value) {
   };
 }
 
+function normalizeCoreOfflineCandidateExport(value) {
+  const source = objectWithKeys(
+    value,
+    ["prepared", "strategy", "sourceSavedAtMs", "settledAtMs", "settledSeconds", "sourceSummary"],
+    ["reason", "advance", "export", "candidateSummary"],
+    "native offline candidate export result",
+  );
+  const result = {
+    prepared: boolean(source.prepared, "native offline candidate prepared flag"),
+    strategy: oneOf(source.strategy, ["macro-v1"], "native offline candidate strategy"),
+    sourceSavedAtMs: safeInteger(source.sourceSavedAtMs, "native offline candidate source timestamp"),
+    settledAtMs: safeInteger(source.settledAtMs, "native offline candidate settled timestamp"),
+    settledSeconds: safeInteger(source.settledSeconds, "native offline candidate settled seconds"),
+    sourceSummary: normalizeCoreSummary(source.sourceSummary),
+  };
+  if (source.reason !== undefined) result.reason = publicReason(source.reason);
+  if (source.advance !== undefined) result.advance = normalizeCoreAdvance(source.advance);
+  if (source.export !== undefined) result.export = normalizeCoreExport(source.export);
+  if (source.candidateSummary !== undefined) result.candidateSummary = normalizeCoreSummary(source.candidateSummary);
+  const exactSettledAt = result.sourceSavedAtMs + result.settledSeconds * 1_000;
+  if (!Number.isSafeInteger(exactSettledAt) || result.settledAtMs !== exactSettledAt ||
+      result.sourceSummary.mode !== "normal" || result.sourceSummary.stateVersion !== 47) {
+    throw protocolError("native offline candidate time or source binding");
+  }
+  if (result.prepared) {
+    if (result.settledSeconds < 1 || result.reason !== undefined || !result.advance || !result.export ||
+        !result.candidateSummary || !result.advance.supported ||
+        result.advance.exactScope !== "offline-macro-v1" ||
+        result.advance.previousRevision !== result.sourceSummary.revision ||
+        result.advance.revision !== result.candidateSummary.revision ||
+        result.export.mode !== "normal" ||
+        result.export.result.revision !== result.candidateSummary.revision ||
+        result.export.result.savedAtMs !== result.settledAtMs ||
+        result.candidateSummary.registryFingerprint !== result.sourceSummary.registryFingerprint) {
+      throw protocolError("native offline candidate prepared binding");
+    }
+  } else if (result.export || result.candidateSummary || result.settledSeconds === 0 && result.advance ||
+      result.settledSeconds > 0 && !result.advance || result.reason === undefined) {
+    throw protocolError("native offline candidate unavailable binding");
+  }
+  return result;
+}
+
 function normalizePlayerAuthorityExport(value) {
   const source = exactObject(
     value,
@@ -9027,6 +9071,7 @@ const RESULT_NORMALIZERS = Object.freeze({
   coreCheckpoint: normalizeCoreCheckpoint,
   playerAuthorityCheckpoint: normalizePlayerAuthorityCheckpoint,
   coreExport: normalizeCoreExport,
+  coreOfflineCandidateExport: normalizeCoreOfflineCandidateExport,
   playerAuthorityExport: normalizePlayerAuthorityExport,
   coreCompare: normalizeCoreCompare,
   coreClose: normalizeCoreClose,

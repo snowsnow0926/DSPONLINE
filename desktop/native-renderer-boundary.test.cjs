@@ -924,6 +924,71 @@ test("v47 import and export receipts use exact Host key sets", () => {
   }), /native player-authority export authority is invalid/);
 });
 
+test("offline candidate export binds source, one-shot advance, and envelope proof", () => {
+  const sourceSummary = coreSummary(2);
+  const candidateSummary = coreSummary(3);
+  const value = {
+    prepared: true,
+    strategy: "macro-v1",
+    sourceSavedAtMs: 1_000,
+    settledAtMs: 601_000,
+    settledSeconds: 600,
+    advance: {
+      supported: true,
+      exactScope: "offline-macro-v1",
+      changed: true,
+      previousRevision: 2,
+      revision: 3,
+      algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v1",
+      exactCalibrationSeconds: 30,
+      approximatedSeconds: 570,
+      summary: candidateSummary,
+    },
+    export: {
+      exportId: "offlinecandidate7",
+      mode: "normal",
+      result: {
+        revision: 3,
+        savedAtMs: 601_000,
+        byteLength: 2048,
+        envelopeSha256: SHA_B,
+        stateChecksum: "1234abcd",
+      },
+    },
+    sourceSummary,
+    candidateSummary,
+  };
+  const normalized = normalizeRendererNativeResult("coreOfflineCandidateExport", value);
+  assert.equal(normalized.prepared, true);
+  assert.equal(normalized.export.result.byteLength, 2048);
+  assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", {
+    ...value,
+    sourcePath: SECRET_PATH,
+  }), /native offline candidate export result is invalid/);
+  assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", {
+    ...value,
+    settledAtMs: 600_999,
+  }), /native offline candidate time or source binding is invalid/);
+  assert.throws(() => normalizeRendererNativeResult("coreOfflineCandidateExport", {
+    ...value,
+    export: { ...value.export, result: { ...value.export.result, revision: 4 } },
+  }), /native offline candidate prepared binding is invalid/);
+});
+
+test("native offline startup errors publish only stable symbolic identities", () => {
+  assert.deepEqual(serializeRendererNativeError({
+    code: "NATIVE_OFFLINE_STARTUP_TIMEOUT",
+    message: SECRET_BODY,
+  }, {
+    fallbackCode: "NATIVE_OFFLINE_STARTUP_FAILED",
+    message: "Windows 原生离线候选失败",
+  }), {
+    name: "NativeHostError",
+    message: "Windows 原生离线候选失败（NATIVE_OFFLINE_STARTUP_TIMEOUT）",
+    code: "NATIVE_OFFLINE_STARTUP_TIMEOUT",
+  });
+});
+
 test("save/open/advance/checkpoint/compare receipts fail closed on Host-only fields", () => {
   assert.deepEqual(normalizeRendererNativeResult("saveRead", {
     slot: "normal-main",

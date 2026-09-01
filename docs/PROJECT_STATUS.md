@@ -1,5 +1,11 @@
 # DSP极简网络项目现状
 
+> **Windows 主进程权威离线启动采用（2026-09-02，开发候选，未发布）**：24.53 的 Rust `offline-macro-v1` 已接入真实 StartMenu 快速结算链。普通主档必须与固定 native checkpoint 的 generation/root/revision/registry/`savedAt`/canonical/domain/实体线路摘要及零 WAL 完全一致；renderer 只发 8 个身份字段，main 独占墙钟、临时 export ID 与文件路径。候选以 1 MiB MessagePort 分块、逐块 ACK、最终 SHA-256 ACK 和 256 MiB 总上限传输，preload 只保留一个精确大小缓冲；空候选也完成终态 ACK。候选正文再次通过 envelope、checksum、canonical/domain、revision、时间与 elapsedSeconds 校验，source session 安全关闭后才采用；否则原始存档无损回退 JavaScript Worker。
+>
+> 同批修正原生离线封顶为游戏公开规则“基础 7 天 + `continuum_simulation` 每级 1 天，最多 30 天”，而非所有存档固定 30 天。取消、流损坏、Host ID 漂移、候选冻结和关闭结果不确定均不提交源检查点；returning reward 仍只由既有 finalizer 添加一次。当前新鲜门禁为完整 fast Vitest `2989/29/0`、native/desktop `567/1/0`、Rust workspace 串行 `1270/3/0`（Core `1031/3/0`、Host library `236/0/0`、Host binary `3/0/0`）、启动传输专项 `10/10`、fresh Release Host 候选集成 `1/1`，typecheck、strict Clippy、fmt、production build、startup budget 与薄 UI 边界通过；E2E、安装、24 小时、多硬件、签名和灰度仍按实际结果单列。
+>
+> 统一进度更新为 `Rust 89% / 薄 UI 97% / O(active) 97% / 并行 75% / 综合开发 92% / 发布成熟度 60%`。这里上调的是“玩家真实启动已经采用原生离线候选”，不是把未跑的发布门禁算完成；GameState v47、envelope v2、cloud v8、SQLite v3、package 1.2.3 与 `authorityEligible=false` 均不变。
+
 > **Windows Rust 原生离线宏观结算核心（2026-09-01，开发候选，未发布）**：新增独立 `offline-macro-v1`，只以 1× 运行 30 秒精确校准与闭合物料账本；不继承时间扭曲探针信用，无法证明守恒的尾段冻结。Host 从已发布 `normal-main` 的 `savedAt` 和 Electron main 时钟推导完整离线秒数，renderer 不能提交时间或 command ID；WAL 已落盘而 checkpoint 未发布时，冷启动复用原预算，避免重复离线收益。
 >
 > 当前新鲜 focused 为 pure-idle 模块 `122/1/0`、离线专项 `4/4`、Host 耐久 `3/3`、Node boundary `55/55`、nativeCore Vitest `23/23`；typecheck、strict Clippy 与 Rust fmt 通过。该能力尚未接入 `StartMenu` 的真实启动链，组合全量/build/E2E 也未在最终提交上执行，因此当前统一口径为 `Rust 87% / 薄 UI 97% / O(active) 97% / 并行 75% / 综合开发 91% / 发布成熟度 60%`，`authorityEligible=false` 不变。下一大块是 main-owned 启动接线、匹配检查点流式导出和失败回退。

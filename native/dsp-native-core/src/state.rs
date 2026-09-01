@@ -4645,6 +4645,43 @@ impl CoreState {
         &self.base
     }
 
+    /// Mirrors the public v47 continuum-simulation offline cap without
+    /// exposing the base object to Host. Missing optional research state is
+    /// level zero; malformed present values fail closed before any settlement.
+    pub fn offline_limit_seconds(&self) -> anyhow::Result<u64> {
+        const BASE_OFFLINE_SECONDS: u64 = 7 * 24 * 60 * 60;
+        const MAX_OFFLINE_SECONDS: u64 = 30 * 24 * 60 * 60;
+        const PER_LEVEL_SECONDS: u64 = 24 * 60 * 60;
+        let Some(endgame) = self.base.get("endgame") else {
+            return Ok(BASE_OFFLINE_SECONDS);
+        };
+        let endgame = endgame
+            .as_object()
+            .ok_or_else(|| anyhow!("native offline endgame state is invalid"))?;
+        let Some(infinite_research) = endgame.get("infiniteResearch") else {
+            return Ok(BASE_OFFLINE_SECONDS);
+        };
+        let infinite_research = infinite_research
+            .as_object()
+            .ok_or_else(|| anyhow!("native offline infinite research state is invalid"))?;
+        let Some(continuum) = infinite_research.get("continuum_simulation") else {
+            return Ok(BASE_OFFLINE_SECONDS);
+        };
+        let continuum = continuum
+            .as_object()
+            .ok_or_else(|| anyhow!("native offline continuum research state is invalid"))?;
+        let Some(level) = continuum.get("level") else {
+            return Ok(BASE_OFFLINE_SECONDS);
+        };
+        let level = level
+            .as_f64()
+            .filter(|value| value.is_finite() && *value >= 0.0)
+            .ok_or_else(|| anyhow!("native offline continuum research level is invalid"))?;
+        let maximum_bonus_levels = (MAX_OFFLINE_SECONDS - BASE_OFFLINE_SECONDS) / PER_LEVEL_SECONDS;
+        let bounded_level = level.floor().min(maximum_bonus_levels as f64) as u64;
+        Ok(BASE_OFFLINE_SECONDS + bounded_level * PER_LEVEL_SECONDS)
+    }
+
     pub fn exact_history_clock(&self) -> anyhow::Result<CoreExactHistoryClock> {
         let read = |key: &str| {
             self.base

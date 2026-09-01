@@ -3,12 +3,16 @@ const { createHash } = require("node:crypto");
 const {
   createRendererNativeError,
   createRendererNativeRejection,
+  normalizeRendererNativeResult,
 } = require("./native-renderer-boundary.cjs");
 const {
   subscribeRendererToNativePlayerAuthorityHandoff,
 } = require("./native-player-authority-handoff-ipc.cjs");
 
 const MAX_NATIVE_PROJECTION_TRANSFER_BYTES = 1024 * 1024;
+const MAX_NATIVE_OFFLINE_STARTUP_TRANSFER_BYTES = 256 * 1024 * 1024;
+const MAX_NATIVE_OFFLINE_STARTUP_CHUNK_BYTES = 1024 * 1024;
+const NATIVE_OFFLINE_STARTUP_TIMEOUT_MS = 305_000;
 const MAX_STELLAR_PROJECTION_REQUEST_BYTES = 32_768;
 const MAX_BLUEPRINT_CAPTURE_REQUEST_BYTES = 1024 * 1024;
 const MAX_BLUEPRINT_CAPTURE_ENTITY_IDS = 512;
@@ -113,6 +117,26 @@ function normalizeOperationsSettingPreloadRequest(request) {
     expectedRegistryFingerprint: request.expectedRegistryFingerprint,
     intent: { type: request.intent.type, value: request.intent.value },
   };
+}
+
+function normalizeNativeOfflineStartupPreloadRequest(request) {
+  const keys = [
+    "sessionId", "expectedGeneration", "expectedRootHash", "expectedRevision",
+    "expectedRegistryFingerprint", "expectedCanonicalSha256", "expectedDomainSha256", "strategy",
+  ];
+  if (!hasExactKeys(request, keys) || !validLogicalPreloadId(request.sessionId, 128) ||
+      !Number.isSafeInteger(request.expectedGeneration) || request.expectedGeneration < 1 ||
+      typeof request.expectedRootHash !== "string" || !/^[a-f0-9]{64}$/.test(request.expectedRootHash) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalPreloadId(request.expectedRegistryFingerprint, 256) ||
+      typeof request.expectedCanonicalSha256 !== "string" ||
+        !/^[a-f0-9]{64}$/.test(request.expectedCanonicalSha256) ||
+      typeof request.expectedDomainSha256 !== "string" ||
+        !/^[a-f0-9]{64}$/.test(request.expectedDomainSha256) ||
+      request.strategy !== "macro-v1") {
+    throw new TypeError("Windows 原生离线结算请求无效");
+  }
+  return Object.fromEntries(keys.map((key) => [key, request[key]]));
 }
 
 function normalizeBlueprintCapturePreloadRequest(request) {
@@ -389,6 +413,137 @@ function requestNativeCoreProjectionTransfer(request) {
   });
 }
 
+function prepareNativeOfflineStartup(request) {
+  const normalizedRequest = normalizeNativeOfflineStartupPreloadRequest(request);
+  return new Promise((resolve, reject) => {
+    const channel = new MessageChannel();
+    let settled = false;
+    let watchdog = null;
+    let start = null;
+    let payload = null;
+    let receivedBytes = 0;
+    let payloadHash = null;
+    let payloadChecksum = 0x811c9dc5;
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      if (watchdog) clearTimeout(watchdog);
+      channel.port1.close();
+      callback();
+    };
+    const failProtocol = () => finish(() => reject(localNativeError({
+      fallbackCode: "NATIVE_PROTOCOL_INVALID",
+      message: "Windows 原生离线结算候选验证失败，正在回退兼容结算",
+    })));
+    const armWatchdog = () => {
+      if (watchdog) clearTimeout(watchdog);
+      watchdog = setTimeout(() => finish(() => reject(localNativeError({
+        fallbackCode: "NATIVE_OFFLINE_STARTUP_TIMEOUT",
+        message: "Windows 原生离线结算候选超时，正在回退兼容结算",
+      }))), NATIVE_OFFLINE_STARTUP_TIMEOUT_MS);
+    };
+    armWatchdog();
+    channel.port1.onmessage = (event) => {
+      armWatchdog();
+      const message = event.data;
+      if (message?.error) {
+        const error = createRendererNativeError(message.error, {
+          fallbackCode: "NATIVE_OFFLINE_STARTUP_FAILED",
+          message: "Windows 原生离线结算候选失败，正在回退兼容结算",
+        });
+        finish(() => reject(error));
+        return;
+      }
+      if (hasExactKeys(message, ["start", "payloadByteLength"])) {
+        if (start !== null || !Number.isSafeInteger(message.payloadByteLength) ||
+            message.payloadByteLength < 0 ||
+            message.payloadByteLength > MAX_NATIVE_OFFLINE_STARTUP_TRANSFER_BYTES) {
+          failProtocol();
+          return;
+        }
+        try {
+          start = normalizeRendererNativeResult("coreOfflineCandidateExport", message.start);
+        } catch {
+          failProtocol();
+          return;
+        }
+        const expectedBytes = start.prepared ? start.export?.result?.byteLength : 0;
+        if (message.payloadByteLength !== expectedBytes) {
+          failProtocol();
+          return;
+        }
+        if (start.prepared) {
+          payload = new Uint8Array(message.payloadByteLength);
+          payloadHash = createHash("sha256");
+        }
+        return;
+      }
+      if (hasExactKeys(message, ["chunk", "offset"])) {
+        const chunk = message.chunk instanceof Uint8Array
+          ? message.chunk
+          : message.chunk instanceof ArrayBuffer
+            ? new Uint8Array(message.chunk)
+            : null;
+        if (!start?.prepared || !payload || !payloadHash || !chunk || chunk.byteLength < 1 ||
+            chunk.byteLength > MAX_NATIVE_OFFLINE_STARTUP_CHUNK_BYTES ||
+            !Number.isSafeInteger(message.offset) ||
+            message.offset !== receivedBytes + chunk.byteLength ||
+            message.offset > payload.byteLength) {
+          failProtocol();
+          return;
+        }
+        payload.set(chunk, receivedBytes);
+        payloadHash.update(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+        for (let index = 0; index < chunk.byteLength; index += 1) {
+          payloadChecksum ^= chunk[index];
+          payloadChecksum = Math.imul(payloadChecksum, 0x01000193);
+        }
+        receivedBytes = message.offset;
+        channel.port1.postMessage({ ack: receivedBytes });
+        return;
+      }
+      if (hasExactKeys(message, ["end", "totalBytes", "envelopeSha256"]) && message.end === true) {
+        if (!start || !Number.isSafeInteger(message.totalBytes) || message.totalBytes < 0) {
+          failProtocol();
+          return;
+        }
+        if (!start.prepared) {
+          if (message.totalBytes !== 0 || message.envelopeSha256 !== null || receivedBytes !== 0) {
+            failProtocol();
+            return;
+          }
+          channel.port1.postMessage({ completeAck: null });
+          finish(() => resolve(start));
+          return;
+        }
+        const expectedSha256 = start.export.result.envelopeSha256;
+        const actualSha256 = payloadHash.digest("hex");
+        if (!payload || receivedBytes !== payload.byteLength || message.totalBytes !== receivedBytes ||
+            message.envelopeSha256 !== expectedSha256 || actualSha256 !== expectedSha256) {
+          failProtocol();
+          return;
+        }
+        const checksum = (payloadChecksum >>> 0).toString(16).padStart(8, "0");
+        channel.port1.postMessage({ completeAck: actualSha256 });
+        finish(() => resolve({
+          ...start,
+          payloadBytes: payload.buffer,
+          payloadChecksum: checksum,
+        }));
+        return;
+      }
+      failProtocol();
+    };
+    channel.port1.onmessageerror = failProtocol;
+    channel.port1.start?.();
+    ipcRenderer.postMessage(
+      "desktop:native-offline-startup-transfer",
+      normalizedRequest,
+      [channel.port2],
+    );
+  });
+}
+
 contextBridge.exposeInMainWorld("dspDesktop", {
   isDesktop: true,
   setFontScale: (scale) => ipcRenderer.invoke("desktop:set-font-scale", scale),
@@ -419,6 +574,8 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   advanceNativePlayerAuthorityMacro: () => invokeNative("desktop:native-player-authority-macro-advance", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算推进失败" }, {}),
   finishNativePlayerAuthorityMacro: () => invokeNative("desktop:native-player-authority-macro-finish", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算结束失败" }, {}),
   recoverNativePlayerAuthorityMacro: () => invokeNative("desktop:native-player-authority-macro-recover", { fallbackCode: "NATIVE_PLAYER_AUTHORITY_MACRO_FAILED", message: "Windows 原生纯挂机结算恢复失败" }, {}),
+  /** Read-only candidate: renderer never supplies time, a path, or an export ID. */
+  prepareNativeOfflineStartup,
   getRuntimeDiagnostics: () => ipcRenderer.invoke("desktop:runtime-diagnostics"),
   getNativePerformancePolicy: () => invokeNative("desktop:native-performance-policy", { fallbackCode: "NATIVE_PERFORMANCE_POLICY_READ_FAILED", message: "无法读取 Windows 原生性能策略" }),
   setNativePerformancePolicy: (request) => invokeNative("desktop:set-native-performance-policy", { fallbackCode: "NATIVE_PERFORMANCE_POLICY_WRITE_FAILED", message: "无法保存 Windows 原生性能策略" }, request),

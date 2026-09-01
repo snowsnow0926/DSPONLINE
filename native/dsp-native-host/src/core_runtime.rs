@@ -617,6 +617,43 @@ pub struct CoreCommitOfflineSettlementResult {
     pub summary: CoreStateSummary,
 }
 
+/// One read-only startup candidate. Unlike `CoreCommitOfflineSettlementRequest`,
+/// this path never appends WAL, mutates the open session, or publishes a new
+/// normal-main checkpoint. It exists so a legacy JavaScript primary can verify
+/// and adopt a native offline result without risking a half-transferred commit.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CorePrepareOfflineSettlementExportRequest {
+    pub expected_generation: u64,
+    pub expected_root_hash: String,
+    pub expected_revision: u64,
+    pub expected_registry_fingerprint: String,
+    pub expected_canonical_sha256: String,
+    pub expected_domain_sha256: String,
+    pub observed_now_ms: u64,
+    pub strategy: CoreOfflineSettlementStrategy,
+    pub export_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CorePrepareOfflineSettlementExportResult {
+    pub prepared: bool,
+    pub strategy: &'static str,
+    pub source_saved_at_ms: u64,
+    pub settled_at_ms: u64,
+    pub settled_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advance: Option<CoreAdvanceResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export: Option<CoreExportResult>,
+    pub source_summary: CoreStateSummary,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_summary: Option<CoreStateSummary>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoreCheckpointResult {
@@ -4371,6 +4408,171 @@ impl CoreRegistry {
         self.session_mut(session_id)?.advance(request)
     }
 
+    /// Builds a Windows startup offline candidate on a clone-on-write CoreState
+    /// and streams that candidate to a host-owned export. The open session and
+    /// published normal-main checkpoint remain byte-for-byte unchanged until a
+    /// separately verified browser primary adopts the exported envelope.
+    pub fn prepare_offline_settlement_export(
+        &self,
+        store: &SaveStore,
+        session_id: &str,
+        request: CorePrepareOfflineSettlementExportRequest,
+    ) -> anyhow::Result<CorePrepareOfflineSettlementExportResult> {
+        validate_session_id(session_id)?;
+        if request.strategy != CoreOfflineSettlementStrategy::MacroV1
+            || request.expected_generation == 0
+            || request.expected_generation > MAX_SAFE_INTEGER
+            || request.expected_revision > MAX_SAFE_INTEGER
+            || request.observed_now_ms > MAX_SAFE_INTEGER
+            || request.expected_registry_fingerprint.is_empty()
+            || request.expected_registry_fingerprint.len() > 256
+            || request.expected_root_hash.len() != 64
+            || request.expected_canonical_sha256.len() != 64
+            || request.expected_domain_sha256.len() != 64
+            || !request
+                .expected_root_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || !request
+                .expected_canonical_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || !request
+                .expected_domain_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            bail!("native offline candidate intent is invalid");
+        }
+        let source = store
+            .recover("normal-main")?
+            .ok_or_else(|| anyhow!("native offline candidate source checkpoint is missing"))?;
+        if source.slot != "normal-main"
+            || source.mode != "normal"
+            || source.state_version != 47
+            || source.generation != request.expected_generation
+            || source.root_hash != request.expected_root_hash
+            || source.revision != request.expected_revision
+            || source.registry_fingerprint != request.expected_registry_fingerprint
+        {
+            bail!("native offline candidate source checkpoint identity changed");
+        }
+        let source_state = self.session(session_id)?;
+        if source_state.identity.slot != source.slot
+            || source_state.identity.mode != source.mode
+            || source_state.identity.state_version != source.state_version
+            || source_state.identity.generation != source.generation
+            || source_state.identity.root_hash != source.root_hash
+            || source_state.revision != source.revision
+            || source_state.identity.registry_fingerprint != source.registry_fingerprint
+        {
+            bail!("native offline candidate core session identity changed");
+        }
+        let source_summary = source_state.summary()?;
+        if source_summary.canonical_sha256 != request.expected_canonical_sha256
+            || source_summary.domain_sha256 != request.expected_domain_sha256
+        {
+            bail!("native offline candidate differs from the verified browser primary");
+        }
+        if request.observed_now_ms < source.saved_at_ms {
+            bail!("native offline candidate clock regressed");
+        }
+        let offline_limit_milliseconds =
+            source_state
+                .offline_limit_seconds()?
+                .checked_mul(1_000)
+                .ok_or_else(|| anyhow!("native offline candidate limit overflowed"))?;
+        let settled_seconds = request
+            .observed_now_ms
+            .saturating_sub(source.saved_at_ms)
+            .min(offline_limit_milliseconds)
+            / 1_000;
+        if settled_seconds == 0 {
+            return Ok(CorePrepareOfflineSettlementExportResult {
+                prepared: false,
+                strategy: "macro-v1",
+                source_saved_at_ms: source.saved_at_ms,
+                settled_at_ms: source.saved_at_ms,
+                settled_seconds: 0,
+                reason: Some(
+                    "native offline interval is shorter than one complete second".to_owned(),
+                ),
+                advance: None,
+                export: None,
+                source_summary,
+                candidate_summary: None,
+            });
+        }
+        let settled_at_ms = source
+            .saved_at_ms
+            .checked_add(
+                settled_seconds
+                    .checked_mul(1_000)
+                    .ok_or_else(|| anyhow!("native offline candidate clock overflowed"))?,
+            )
+            .filter(|value| *value <= MAX_SAFE_INTEGER)
+            .ok_or_else(|| anyhow!("native offline candidate clock overflowed"))?;
+        let mut candidate = source_state.clone();
+        let advance = candidate.advance(&CoreAdvanceRequest {
+            base_revision: source.revision,
+            simulation_seconds: settled_seconds as f64,
+            wall_seconds: settled_seconds as f64,
+            advance_mode: CoreAdvanceMode::OfflineMacroV1,
+            include_diagnostics: true,
+        })?;
+        if !advance.supported {
+            return Ok(CorePrepareOfflineSettlementExportResult {
+                prepared: false,
+                strategy: "macro-v1",
+                source_saved_at_ms: source.saved_at_ms,
+                settled_at_ms,
+                settled_seconds,
+                reason: advance.reason.clone(),
+                advance: Some(advance),
+                export: None,
+                source_summary,
+                candidate_summary: None,
+            });
+        }
+        let candidate_summary = candidate.summary()?;
+        if advance.previous_revision != source.revision
+            || candidate_summary.revision != advance.revision
+            || candidate_summary.revision <= source.revision
+            || candidate_summary.registry_fingerprint != source.registry_fingerprint
+        {
+            bail!("native offline candidate revision or catalog identity is invalid");
+        }
+        let preflight = candidate.write_v47_envelope(settled_at_ms, std::io::sink())?;
+        let exported =
+            store.publish_export(&request.export_id, preflight.byte_length, |writer| {
+                candidate.write_v47_envelope(settled_at_ms, writer)
+            })?;
+        if exported.revision != preflight.revision
+            || exported.saved_at_ms != preflight.saved_at_ms
+            || exported.byte_length != preflight.byte_length
+            || exported.envelope_sha256 != preflight.envelope_sha256
+            || exported.state_checksum != preflight.state_checksum
+        {
+            bail!("native offline candidate changed during export publication");
+        }
+        Ok(CorePrepareOfflineSettlementExportResult {
+            prepared: true,
+            strategy: "macro-v1",
+            source_saved_at_ms: source.saved_at_ms,
+            settled_at_ms,
+            settled_seconds,
+            reason: None,
+            advance: Some(advance),
+            export: Some(CoreExportResult {
+                export_id: request.export_id,
+                mode: candidate.identity.mode.clone(),
+                result: exported,
+            }),
+            source_summary,
+            candidate_summary: Some(candidate_summary),
+        })
+    }
+
     /// Settles a published normal-main checkpoint through one WAL-backed,
     /// one-shot OfflineMacroV1 operation and immediately publishes the dirty
     /// native pages. The command identity is derived solely from the source
@@ -4383,7 +4585,6 @@ impl CoreRegistry {
         session_id: &str,
         request: CoreCommitOfflineSettlementRequest,
     ) -> anyhow::Result<CoreCommitOfflineSettlementResult> {
-        const MAX_OFFLINE_MILLISECONDS: u64 = 30 * 24 * 60 * 60 * 1_000;
         validate_session_id(session_id)?;
         if request.strategy != CoreOfflineSettlementStrategy::MacroV1
             || request.expected_generation == 0
@@ -4422,6 +4623,7 @@ impl CoreRegistry {
         {
             bail!("native offline core session identity changed");
         }
+        let offline_limit_seconds = state.offline_limit_seconds()?;
 
         let command_id = format!(
             "offline-main-g{}-r{}-s{}",
@@ -4437,7 +4639,7 @@ impl CoreRegistry {
                 || operation.simulation_seconds.to_bits() != operation.wall_seconds.to_bits()
                 || operation.simulation_seconds <= 0.0
                 || operation.simulation_seconds.fract().abs() > f64::EPSILON
-                || operation.simulation_seconds > (MAX_OFFLINE_MILLISECONDS / 1_000) as f64
+                || operation.simulation_seconds > offline_limit_seconds as f64
             {
                 bail!("native offline durable operation conflicts with its source checkpoint");
             }
@@ -4452,7 +4654,11 @@ impl CoreRegistry {
             request
                 .observed_now_ms
                 .saturating_sub(source.saved_at_ms)
-                .min(MAX_OFFLINE_MILLISECONDS)
+                .min(
+                    offline_limit_seconds
+                        .checked_mul(1_000)
+                        .ok_or_else(|| anyhow!("native offline settlement limit overflowed"))?,
+                )
                 / 1_000
         };
         if settled_seconds == 0 {
@@ -7685,6 +7891,25 @@ mod tests {
         }
     }
 
+    fn offline_candidate_request(
+        source: &crate::save_store::SaveRecoveryResult,
+        summary: &CoreStateSummary,
+        observed_now_ms: u64,
+        export_id: &str,
+    ) -> CorePrepareOfflineSettlementExportRequest {
+        CorePrepareOfflineSettlementExportRequest {
+            expected_generation: source.generation,
+            expected_root_hash: source.root_hash.clone(),
+            expected_revision: source.revision,
+            expected_registry_fingerprint: source.registry_fingerprint.clone(),
+            expected_canonical_sha256: summary.canonical_sha256.clone(),
+            expected_domain_sha256: summary.domain_sha256.clone(),
+            observed_now_ms,
+            strategy: CoreOfflineSettlementStrategy::MacroV1,
+            export_id: export_id.to_owned(),
+        }
+    }
+
     fn player_authority_fixture_from_parts(
         bytes: Vec<u8>,
         catalog: Value,
@@ -7957,6 +8182,121 @@ mod tests {
         assert_eq!(after.root_hash, source.root_hash);
         assert_eq!(after.revision, source.revision);
         assert_eq!(after.saved_at_ms, source.saved_at_ms);
+    }
+
+    #[test]
+    fn offline_candidate_exports_without_mutating_session_wal_or_checkpoint() {
+        let (root, store, registry, imported, _catalog) = offline_settlement_fixture();
+        let source = store.recover("normal-main").unwrap().unwrap();
+        let before = registry.status(&imported.session_id).unwrap();
+        let result = registry
+            .prepare_offline_settlement_export(
+                &store,
+                &imported.session_id,
+                offline_candidate_request(
+                    &source,
+                    &before,
+                    source.saved_at_ms + 600_999,
+                    "offline-candidate-one",
+                ),
+            )
+            .unwrap();
+        assert!(result.prepared);
+        assert_eq!(result.settled_seconds, 600);
+        assert_eq!(result.settled_at_ms, source.saved_at_ms + 600_000);
+        assert_eq!(
+            result.source_summary.canonical_sha256,
+            before.canonical_sha256
+        );
+        assert_eq!(
+            result.candidate_summary.as_ref().unwrap().revision,
+            result.advance.as_ref().unwrap().revision
+        );
+        let exported = result.export.as_ref().unwrap();
+        let export_path = root
+            .path()
+            .join("exports")
+            .join(format!("{}.json", exported.export_id));
+        let bytes = std::fs::read(export_path).unwrap();
+        assert_eq!(bytes.len() as u64, exported.result.byte_length);
+        let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(envelope["savedAt"].as_u64(), Some(result.settled_at_ms));
+        assert_eq!(envelope["state"]["elapsedSeconds"].as_f64(), Some(602.0));
+
+        let after = registry.status(&imported.session_id).unwrap();
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.canonical_sha256, before.canonical_sha256);
+        assert_eq!(
+            store
+                .read_wal("normal-main", source.revision)
+                .unwrap()
+                .len(),
+            0
+        );
+        let published = store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(published.generation, source.generation);
+        assert_eq!(published.root_hash, source.root_hash);
+        assert_eq!(published.revision, source.revision);
+        assert_eq!(published.saved_at_ms, source.saved_at_ms);
+    }
+
+    #[test]
+    fn offline_candidate_rejects_a_mismatched_browser_proof_before_export() {
+        let (root, store, registry, imported, _catalog) = offline_settlement_fixture();
+        let source = store.recover("normal-main").unwrap().unwrap();
+        let before = registry.status(&imported.session_id).unwrap();
+        let mut request = offline_candidate_request(
+            &source,
+            &before,
+            source.saved_at_ms + 600_000,
+            "offline-candidate-forged",
+        );
+        request.expected_canonical_sha256 = "0".repeat(64);
+        let error = registry
+            .prepare_offline_settlement_export(&store, &imported.session_id, request)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("differs from the verified browser primary")
+        );
+        assert!(
+            !root
+                .path()
+                .join("exports/offline-candidate-forged.json")
+                .exists()
+        );
+        let after = registry.status(&imported.session_id).unwrap();
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.canonical_sha256, before.canonical_sha256);
+    }
+
+    #[test]
+    fn offline_candidate_respects_the_gameplay_continuum_limit() {
+        let (_root, store, registry, imported, _catalog) = offline_settlement_fixture();
+        let source = store.recover("normal-main").unwrap().unwrap();
+        let before = registry.status(&imported.session_id).unwrap();
+        let result = registry
+            .prepare_offline_settlement_export(
+                &store,
+                &imported.session_id,
+                offline_candidate_request(
+                    &source,
+                    &before,
+                    source.saved_at_ms + 10 * 24 * 60 * 60 * 1_000,
+                    "offline-candidate-gameplay-cap",
+                ),
+            )
+            .unwrap();
+        assert!(result.prepared);
+        assert_eq!(result.settled_seconds, 7 * 24 * 60 * 60);
+        assert_eq!(
+            result.settled_at_ms,
+            source.saved_at_ms + 7 * 24 * 60 * 60 * 1_000
+        );
+        let after = registry.status(&imported.session_id).unwrap();
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.canonical_sha256, before.canonical_sha256);
     }
 
     fn player_authority_fixture_with_probe(

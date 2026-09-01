@@ -272,6 +272,18 @@ export interface DesktopNativePlayerAuthorityMacroReceipt {
   readonly recovered: boolean;
 }
 
+/** Exact browser source proof only; Electron main owns time and export identity. */
+export interface DesktopNativeOfflineStartupRequest {
+  readonly sessionId: string;
+  readonly expectedGeneration: number;
+  readonly expectedRootHash: string;
+  readonly expectedRevision: number;
+  readonly expectedRegistryFingerprint: string;
+  readonly expectedCanonicalSha256: string;
+  readonly expectedDomainSha256: string;
+  readonly strategy: "macro-v1";
+}
+
 export interface DesktopBridge {
   isDesktop: true;
   setFontScale: (scale: number) => Promise<{ scale: number; zoomFactor: number }>;
@@ -307,6 +319,10 @@ export interface DesktopBridge {
   advanceNativePlayerAuthorityMacro?: () => Promise<DesktopNativePlayerAuthorityMacroReceipt>;
   finishNativePlayerAuthorityMacro?: () => Promise<DesktopNativePlayerAuthorityMacroReceipt>;
   recoverNativePlayerAuthorityMacro?: () => Promise<DesktopNativePlayerAuthorityMacroReceipt>;
+  /** Read-only startup candidate; source checkpoint remains unchanged until browser adoption. */
+  prepareNativeOfflineStartup?: (
+    request: DesktopNativeOfflineStartupRequest,
+  ) => Promise<DesktopNativeOfflineStartupResult>;
   getRuntimeDiagnostics: () => Promise<DesktopRuntimeDiagnostics>;
   getNativePerformancePolicy: () => Promise<DesktopNativePerformancePolicyStatus>;
   setNativePerformancePolicy: (request: DesktopNativePerformancePolicy) => Promise<DesktopNativePerformancePolicyStatus>;
@@ -3365,6 +3381,35 @@ export interface DesktopNativeCoreAdvanceResult {
   beltScheduler?: DesktopNativeBeltSchedulerDiagnostics;
   summary?: DesktopNativeCoreSummary;
 }
+
+interface DesktopNativeOfflineStartupResultBase {
+  strategy: "macro-v1";
+  sourceSavedAtMs: number;
+  settledAtMs: number;
+  settledSeconds: number;
+  sourceSummary: DesktopNativeCoreSummary;
+}
+
+export type DesktopNativeOfflineStartupResult =
+  | (DesktopNativeOfflineStartupResultBase & {
+    prepared: true;
+    advance: DesktopNativeCoreAdvanceResult;
+    export: DesktopNativeCoreExportResult;
+    candidateSummary: DesktopNativeCoreSummary;
+    payloadBytes: ArrayBuffer;
+    /** FNV-1a transfer checksum consumed by decodeVerifiedSaveTransfer. */
+    payloadChecksum: string;
+    reason?: never;
+  })
+  | (DesktopNativeOfflineStartupResultBase & {
+    prepared: false;
+    reason: string;
+    advance?: DesktopNativeCoreAdvanceResult;
+    export?: never;
+    candidateSummary?: never;
+    payloadBytes?: never;
+    payloadChecksum?: never;
+  });
 
 export interface DesktopNativeBeltSchedulerDiagnostics {
   routeCount: number;

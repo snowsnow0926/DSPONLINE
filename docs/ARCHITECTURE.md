@@ -1,5 +1,11 @@
 # 系统架构
 
+> **Windows 原生离线启动候选边界（2026-09-02，开发候选，未发布）**：离线启动采用三段式只读事务。renderer 先用当前 primary v47 构造 canonical/domain proof；Electron main 在固定 `normal-main` native root 恢复同 `savedAt`、零 WAL 的 checkpoint，并独占单调墙钟、一次性 export ID 和文件路径；Rust Host 从同一已发布 generation 建立 shadow 候选、推进 `offline-macro-v1` 并直接流式导出 envelope。源 checkpoint/session 在全流程中不写入、不前推，候选只有在 renderer 完成 envelope、state/FNV/SHA、revision、registry、时间、elapsedSeconds 和 source/candidate summary 全链验证，且 source session 明确关闭后才进入既有公开保存 finalizer。
+>
+> main→preload 的 MessagePort 合同固定为最多 256 MiB、1 MiB 分块、连续 offset ACK 和最终 SHA-256 ACK；零正文也必须终态 ACK。preload 预分配一个正文缓冲并增量哈希，不能积累 chunks；Electron context bridge 仍可能为最终 ArrayBuffer 做一次结构化克隆，所以该设计只声称内存有界，不声称零拷贝。renderer 请求不能包含 wall clock、offline duration、path 或 export ID。任何 capability、identity、WAL、Host result、chunk 顺序、hash、envelope、状态证明、关闭 ACK 或取消门禁失败，都丢弃候选并从原 `DeferredLoadedGame` 进入旧 Worker；不得从部分验证状态继续。
+>
+> 原生离线最长时长由 v47 状态内 `continuum_simulation` 等级派生：7 天基础、每级加 1 天、上限 30 天。缺字段按零级兼容，存在但类型/范围畸形则失败关闭。候选尾段继续只提交闭合物料账本可证明的收益；无法证明的领域冻结，因此报告可以少产但不能凭空复制物料。该边界不改变公开 schema、canonical 规则或 `authorityEligible=false`。
+
 > **Windows Rust 行星指标 writer-closed 活动探针边界（2026-09-01，开发候选，未发布）**：`PlanetMetricsRuntime` 是绑定单个已提交 revision 的 session-only COW 缓存。它保留 topology/catalog `Arc` 身份、实体/行星数量、一份按持久实体行排列的 `Arc<Vec<PlanetMetricProbe>>` 基线、`BTreeMap<row, probe>` override 和 `BTreeSet<row>` pending writer。每拍只对 pending 行执行 JSON/catalog 解析，然后以 `baseline[row]` 或 `override[row]` 严格从 row 0 到末尾重放旧 `f64` 加法；因此昂贵探针是 O(active/changed)，但为保持历史 IEEE-754 累加字节，紧凑标量折叠有意仍是 O(E)。override 达到 `75%` 时合并基线，pending 达到同一阈值时直接 full probe。
 >
 > writer closure 覆盖 renewable/vein/ordinary/research/Dyson launch、电源与 exchanger/fuel、time-warp、两段 belt/material-delivery、local/quantum buffer、collector、construction、ray receiver、orbital terminal、warper、local/interstellar route、exporter 和 pure-idle construction tail；逐字段清单见 [行星指标 writer 审计](./NATIVE_PLANET_METRICS_WRITER_AUDIT.md)。屏障前 writer 进入本拍选择，屏障后 writer 留在 pending 等待下一拍，当前扫描不会误确认未来 wake。命令/导入/拓扑重建清缓存；retained topology/catalog Arc、revision、row identity/shape、planet count、目录 fallback、非空 MOD registry 或任意递归 `mod:` key 不可证明时走持久顺序 flat full，topology/COW 或 opaque 失配一经观察即保持 fail-closed full。

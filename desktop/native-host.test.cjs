@@ -22,6 +22,7 @@ const {
   NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY,
   NATIVE_OFFLINE_MACRO_CAPABILITY,
+  NATIVE_OFFLINE_CANDIDATE_EXPORT_CAPABILITY,
   NATIVE_VIEWPORT_ENTITY_PRESENTATION_CAPABILITY,
   NativeHostClient,
   NativeCoreSessionRegistry,
@@ -156,6 +157,77 @@ test("native offline settlement injects the main clock and rejects renderer-owne
     ...intent,
     observedNowMs: 1,
   }, 123_456), /offline settlement intent/);
+});
+
+test("native offline candidate keeps clock and export identity main-owned", async () => {
+  const calls = [];
+  const client = {
+    hello: { capabilities: [NATIVE_OFFLINE_CANDIDATE_EXPORT_CAPABILITY] },
+    async request(request) {
+      calls.push(request);
+      if (request.operation === "coreOpen") {
+        return { sessionId: "core-offline-candidate", authority: "shadow", summary: {} };
+      }
+      return { prepared: true };
+    },
+  };
+  const registry = new NativeCoreSessionRegistry(client);
+  const catalog = {
+    protocolVersion: 1,
+    registryFingerprint: "builtin:test",
+    items: [{ id: "iron_ore", kind: "solid" }],
+    buildings: [{
+      id: "mining_machine", kind: "miner", speed: 1, inputCapacity: 0,
+      outputCapacity: 50, powerDemandKw: 1, powerGenerationKw: 0,
+    }],
+    recipes: [],
+    belts: [{ tier: 1, speed: 6 }],
+  };
+  await registry.open(7, {
+    slot: "normal-main", generation: 3, rootHash: "a".repeat(64), revision: 9,
+    registryFingerprint: "builtin:test", catalog,
+  });
+  const intent = {
+    sessionId: "core-offline-candidate",
+    expectedGeneration: 3,
+    expectedRootHash: "a".repeat(64),
+    expectedRevision: 9,
+    expectedRegistryFingerprint: "builtin:test",
+    expectedCanonicalSha256: "b".repeat(64),
+    expectedDomainSha256: "c".repeat(64),
+    strategy: "macro-v1",
+  };
+  await registry.prepareOfflineSettlementExport(
+    7,
+    intent,
+    123_456,
+    "offlinecandidate123",
+  );
+  assert.deepEqual(calls.at(-1), {
+    operation: "corePrepareOfflineSettlementExport",
+    sessionId: "core-offline-candidate",
+    request: {
+      expectedGeneration: 3,
+      expectedRootHash: "a".repeat(64),
+      expectedRevision: 9,
+      expectedRegistryFingerprint: "builtin:test",
+      expectedCanonicalSha256: "b".repeat(64),
+      expectedDomainSha256: "c".repeat(64),
+      observedNowMs: 123_456,
+      strategy: "macro-v1",
+      exportId: "offlinecandidate123",
+    },
+  });
+  assert.throws(() => registry.prepareOfflineSettlementExport(7, {
+    ...intent,
+    observedNowMs: 1,
+  }, 123_456, "offlinecandidate123"), /offline candidate intent/);
+  assert.throws(() => registry.prepareOfflineSettlementExport(
+    7,
+    intent,
+    123_456,
+    "../outside",
+  ), /offline candidate intent/);
 });
 
 test("native frame codec survives arbitrary stream boundaries", () => {

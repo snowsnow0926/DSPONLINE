@@ -13719,9 +13719,14 @@ pub(crate) mod tests {
             .unwrap();
         assert!(second.supported);
         let second_runtime = state.prepared_planet_metrics_runtime().unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&second_runtime, &first_runtime));
         let scan = second_runtime.scan_history_for_test().last().unwrap();
         assert!(!scan.full_scan);
-        assert_eq!(scan.selected_rows, 1);
+        // Static renewable display/settlement rows now sleep after the cold
+        // calibration. With no dynamic entity writer in this fixture the
+        // committed public advance still installs the next runtime, but its
+        // planet-metric candidate correctly visits no entity rows.
+        assert_eq!(scan.selected_rows, 0);
     }
 
     #[test]

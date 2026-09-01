@@ -13,7 +13,9 @@ describe("native command palette thin integration", () => {
   });
 
   it("exposes only already-migrated workspaces in native authority mode", () => {
-    expect(palette).toMatch(/nativeWorkspaceIds = new Set\(\["star-map", "galaxy", "statistics", "recipes", "technology", "operations", "campaign", "blueprints", "dyson", "inspector"\]\)/);
+    expect(palette).toMatch(/nativeWorkspaceIds = new Set\(\["star-map", "galaxy", "statistics", "recipes", "technology", "operations", "campaign", "blueprints", "construction-center", "dyson", "inspector"\]\)/);
     expect(palette).toMatch(/nativeAuthority[\s\S]*?workspaceCommands\.filter/);
+    expect(palette).toMatch(/workspace\("construction-center", "打开建筑制造中心"/);
+    expect(app).toMatch(/workspace === "construction-center"[\s\S]*?setConstructionCenterOpen\(true\)/);
   });
 });

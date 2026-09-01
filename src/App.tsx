@@ -13125,6 +13125,10 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       setBlueprintsOpen(true);
       if (nextMobileShell) mobileNavigation.replaceModalWithWorkspace("blueprints");
       else mobileNavigation.openWorkspace("blueprints");
+    } else if (workspace === "construction-center") {
+      setConstructionCenterOpen(true);
+      if (nextMobileShell) mobileNavigation.replaceModalWithWorkspace("construction-center");
+      else mobileNavigation.openWorkspace("construction-center");
     } else if (workspace === "dyson") {
       setDysonPlannerOpen(true);
       if (nextMobileShell) mobileNavigation.replaceModalWithWorkspace("dyson");

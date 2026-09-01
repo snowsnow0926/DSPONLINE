@@ -13,7 +13,7 @@ import { StableTextInput, clearStableTextDraft } from "./CompositionSafeInput";
 
 const COMMAND_PALETTE_DRAFT_ID = "command-palette-search";
 
-export type CommandWorkspace = "operations" | "campaign" | "galaxy" | "star-map" | "statistics" | "recipes" | "technology" | "blueprints" | "dyson" | "inspector" | "resources";
+export type CommandWorkspace = "operations" | "campaign" | "galaxy" | "star-map" | "statistics" | "recipes" | "technology" | "blueprints" | "construction-center" | "dyson" | "inspector" | "resources";
 
 interface CommandPaletteProps {
   open: boolean;
@@ -99,15 +99,16 @@ function OpenCommandPalette({
       workspace("operations", "打开运营中心", "警报、设置和存档", <Gauge size={16} />, "operations"),
       workspace("campaign", "打开主线任务", "查看章节目标和奖励", <Flag size={16} />, "campaign"),
       workspace("blueprints", "打开蓝图库", "部署和管理生产蓝图", <Factory size={16} />, "blueprints"),
+      workspace("construction-center", "打开建筑制造中心", "原生自动补足与量子仓库直供", <Factory size={16} />, "construction-center"),
       workspace("dyson", "打开戴森规划", "轨道、壳层和发射", <Map size={16} />, "dyson"),
       workspace("inspector", "打开设备检查器", "查看当前选中设备", <Wrench size={16} />, "inspector"),
       workspace("resources", "打开物资托盘", "库存与跨星球物资", <PackageOpen size={16} />, "resources"),
     ];
-    const nativeWorkspaceIds = new Set(["star-map", "galaxy", "statistics", "recipes", "technology", "operations", "campaign", "blueprints", "dyson", "inspector"]);
+    const nativeWorkspaceIds = new Set(["star-map", "galaxy", "statistics", "recipes", "technology", "operations", "campaign", "blueprints", "construction-center", "dyson", "inspector"]);
     const base: PaletteCommand[] = nativeAuthority
       ? workspaceCommands.filter((command) => nativeWorkspaceIds.has(command.id))
       : [
-          ...workspaceCommands,
+          ...workspaceCommands.filter((command) => command.id !== "construction-center"),
           { id: "pause", label: paused ? "继续模拟" : "暂停模拟", detail: "Space", icon: paused ? <Play size={16} /> : <Pause size={16} />, run: () => run(onPauseToggle) },
           { id: "performance", label: performanceMode ? "关闭性能模式" : "开启性能模式", detail: "降低大规模工厂视觉负载", icon: <Gauge size={16} />, run: () => run(onTogglePerformance) },
           { id: "motion", label: reducedMotion ? "开启动态效果" : "减少动态效果", detail: "尊重动效偏好", icon: <Settings2 size={16} />, run: () => run(onToggleReducedMotion) },

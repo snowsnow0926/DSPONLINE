@@ -2575,6 +2575,9 @@ pub struct CoreState {
     /// Runtime-only ordered probe cache for planet production and power
     /// reserves. It is candidate-owned and installed only after commit.
     prepared_planet_metrics_runtime: Option<Arc<crate::simple_factory::PlanetMetricsRuntime>>,
+    /// Runtime-only compact renewable source probes plus the writer-closed
+    /// dynamic source index. It never enters a checkpoint or canonical hash.
+    prepared_power_probe_runtime: Option<Arc<crate::simple_factory::PowerProbeRuntime>>,
     prepared_local_peer_directory: Option<Arc<crate::local_logistics::LocalPeerDirectory>>,
     /// Runtime-only static quantum endpoint/slot directory plus active wake
     /// queues. Installed only after the complete simulation candidate commits.
@@ -3356,6 +3359,7 @@ impl CoreState {
             prepared_material_delivery_runtime: None,
             prepared_ordinary_production_runtime: None,
             prepared_planet_metrics_runtime: None,
+            prepared_power_probe_runtime: None,
             prepared_local_peer_directory: None,
             prepared_quantum_logistics_directory: None,
             prepared_construction_runtime: None,
@@ -3418,6 +3422,7 @@ impl CoreState {
             state.prepared_material_delivery_runtime = Some(prepared.material_delivery_runtime);
             state.prepared_ordinary_production_runtime = Some(prepared.ordinary_production_runtime);
             state.prepared_planet_metrics_runtime = Some(prepared.planet_metrics_runtime);
+            state.prepared_power_probe_runtime = Some(prepared.power_probe_runtime);
             state.prepared_local_peer_directory = Some(prepared.local_peer_directory);
             state.prepared_quantum_logistics_directory = Some(prepared.quantum_logistics_directory);
             state.prepared_construction_runtime = Some(prepared.construction_runtime);
@@ -3853,6 +3858,7 @@ impl CoreState {
         self.prepared_material_delivery_runtime = None;
         self.prepared_ordinary_production_runtime = None;
         self.prepared_planet_metrics_runtime = None;
+        self.prepared_power_probe_runtime = None;
         self.prepared_quantum_logistics_directory = None;
         self.prepared_construction_runtime = None;
         self.prepared_quantum_transition_runtime = None;
@@ -3872,6 +3878,7 @@ impl CoreState {
         self.prepared_material_delivery_runtime = None;
         self.prepared_ordinary_production_runtime = None;
         self.prepared_planet_metrics_runtime = None;
+        self.prepared_power_probe_runtime = None;
         self.prepared_local_peer_directory = None;
         self.prepared_quantum_logistics_directory = None;
         self.prepared_construction_runtime = None;
@@ -3968,17 +3975,34 @@ impl CoreState {
 
     /// A pause-only durable command advances the authority revision without
     /// changing any entity, catalog, directory, or topology field consumed by
-    /// planet metrics. Preserve that proven cache while binding it to the new
-    /// committed revision; all other commands still invalidate it through
-    /// `invalidate_factory_static_admission`.
+    /// planet metrics or power-source probes. Preserve those proven caches
+    /// while binding them to the new committed revision; all other commands
+    /// still invalidate them through `invalidate_factory_static_admission`.
     pub(crate) fn rebind_prepared_planet_metrics_runtime_revision(&mut self) {
         if let Some(runtime) = &mut self.prepared_planet_metrics_runtime {
+            Arc::make_mut(runtime).bind_committed_revision(self.revision);
+        }
+        if let Some(runtime) = &mut self.prepared_power_probe_runtime {
             Arc::make_mut(runtime).bind_committed_revision(self.revision);
         }
     }
 
     pub(crate) fn invalidate_prepared_planet_metrics_runtime(&mut self) {
         self.prepared_planet_metrics_runtime = None;
+    }
+
+    pub(crate) fn prepared_power_probe_runtime(
+        &self,
+    ) -> Option<Arc<crate::simple_factory::PowerProbeRuntime>> {
+        self.prepared_power_probe_runtime.clone()
+    }
+
+    pub(crate) fn install_prepared_power_probe_runtime(
+        &mut self,
+        mut runtime: Arc<crate::simple_factory::PowerProbeRuntime>,
+    ) {
+        Arc::make_mut(&mut runtime).bind_committed_revision(self.revision);
+        self.prepared_power_probe_runtime = Some(runtime);
     }
 
     pub(crate) fn install_prepared_local_peer_directory(
@@ -4403,6 +4427,7 @@ impl CoreState {
         self.prepared_material_delivery_runtime = None;
         self.prepared_ordinary_production_runtime = None;
         self.prepared_planet_metrics_runtime = None;
+        self.prepared_power_probe_runtime = None;
         self.prepared_quantum_logistics_directory = None;
         self.prepared_construction_runtime = None;
         self.prepared_interstellar_peer_directory = None;
@@ -6374,6 +6399,11 @@ impl CoreState {
             .as_ref()
             .map(|runtime| runtime.estimated_bytes())
             .unwrap_or(0);
+        let prepared_power_probe_bytes = self
+            .prepared_power_probe_runtime
+            .as_ref()
+            .map(|runtime| runtime.estimated_bytes())
+            .unwrap_or(0);
         let prepared_quantum_logistics_bytes = self
             .prepared_quantum_logistics_directory
             .as_ref()
@@ -6410,6 +6440,7 @@ impl CoreState {
             + prepared_material_delivery_bytes
             + prepared_ordinary_production_bytes
             + prepared_planet_metrics_bytes
+            + prepared_power_probe_bytes
             + prepared_local_peer_bytes
             + prepared_quantum_logistics_bytes
             + prepared_construction_runtime_bytes
@@ -6420,7 +6451,7 @@ impl CoreState {
             + factory_topology_bytes;
         if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
             eprintln!(
-                "DSP_NATIVE_CORE_PROFILE\tmemory-topology-breakdown\tbelts={prepared_belt_route_bytes},buffers={prepared_logistics_buffer_bytes},materialDelivery={prepared_material_delivery_bytes},production={prepared_ordinary_production_bytes},planetMetrics={prepared_planet_metrics_bytes},local={prepared_local_peer_bytes},quantum={prepared_quantum_logistics_bytes},construction={prepared_construction_runtime_bytes},stationMode={prepared_station_mode_transition_bytes},quantumTransition={prepared_quantum_transition_bytes},interstellar={prepared_interstellar_peer_bytes},activity={prepared_interstellar_activity_bytes},factory={factory_topology_bytes}"
+                "DSP_NATIVE_CORE_PROFILE\tmemory-topology-breakdown\tbelts={prepared_belt_route_bytes},buffers={prepared_logistics_buffer_bytes},materialDelivery={prepared_material_delivery_bytes},production={prepared_ordinary_production_bytes},planetMetrics={prepared_planet_metrics_bytes},powerProbes={prepared_power_probe_bytes},local={prepared_local_peer_bytes},quantum={prepared_quantum_logistics_bytes},construction={prepared_construction_runtime_bytes},stationMode={prepared_station_mode_transition_bytes},quantumTransition={prepared_quantum_transition_bytes},interstellar={prepared_interstellar_peer_bytes},activity={prepared_interstellar_activity_bytes},factory={factory_topology_bytes}"
             );
         }
         let belt_activity_runtime_bytes = self

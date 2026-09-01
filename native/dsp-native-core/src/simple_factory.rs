@@ -19,6 +19,8 @@ const PLANET_METRIC_ACTIVE_DENSE_NUMERATOR: usize = 3;
 const PLANET_METRIC_ACTIVE_DENSE_DENOMINATOR: usize = 4;
 const PLANET_METRIC_BTREE_FIRST_NODE_BYTES: u64 = 256;
 const PLANET_METRIC_BTREE_WORDS_PER_ENTRY: u64 = 6;
+const POWER_PROBE_ACTIVE_DENSE_NUMERATOR: usize = 3;
+const POWER_PROBE_ACTIVE_DENSE_DENOMINATOR: usize = 4;
 
 fn collect_indexed_power_probes_with_runtime<T, R, F>(
     runtime: &DeterministicRuntime,
@@ -451,7 +453,7 @@ enum DispatchKind {
     Exchanger,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct PowerCandidate {
     entity_index: usize,
     capacity: f64,
@@ -530,7 +532,7 @@ impl Default for GridRuntime {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PowerSourceKind {
     Ray,
     Fuel,
@@ -541,7 +543,7 @@ enum PowerSourceKind {
     Geothermal,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq)]
 struct PowerSourceProbe {
     entity_index: usize,
     planet_index: usize,
@@ -594,6 +596,343 @@ impl PowerSourceProbe {
     }
 }
 
+/// Compact, read-only part of a renewable power-source probe.
+///
+/// Ordinary exact simulation never writes any consumed field here:
+/// `machineCount`, planet/grid membership and the three planet multipliers
+/// change only through a command/import/topology rebuild. Runtime display
+/// fields (`powerOutputKw`, `powerInputKw`, `utilization`) are deliberately
+/// absent. Fuel, storage, exchangers and ray receivers are never represented
+/// by this type and remain live probes on every internal step.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StaticRenewablePowerProbe {
+    entity_index: usize,
+    planet_index: usize,
+    grid_index: usize,
+    kind: PowerSourceKind,
+    generator_count: f64,
+    output_kw: f64,
+}
+
+impl StaticRenewablePowerProbe {
+    fn from_full(probe: &PowerSourceProbe) -> Option<Self> {
+        matches!(
+            probe.kind,
+            PowerSourceKind::Wind | PowerSourceKind::Solar | PowerSourceKind::Geothermal
+        )
+        .then_some(Self {
+            entity_index: probe.entity_index,
+            planet_index: probe.planet_index,
+            grid_index: probe.grid_index,
+            kind: probe.kind,
+            generator_count: probe.generator_count,
+            output_kw: probe.base_generation_kw,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PowerProbeScan {
+    /// Rows that paid the JSON/catalog power-source probe in this step.
+    pub selected_rows: usize,
+    pub total_rows: usize,
+    /// Compact rows replayed in persisted source order. This intentionally
+    /// remains O(all power sources) to preserve observable f64 addition order.
+    pub compact_replay_rows: usize,
+    pub stable_rows_skipped: usize,
+    pub dense_fallback: bool,
+    pub directory_fallback: bool,
+    pub full_scan: bool,
+}
+
+struct PowerProbeSelection {
+    source_slots: Vec<usize>,
+    scan: PowerProbeScan,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PowerProbeMode {
+    Indexed,
+    #[cfg(test)]
+    FlatFull,
+    #[cfg(test)]
+    IndexedFailAfterCollect,
+}
+
+/// Session-only writer-closed cache for power-source probes.
+///
+/// The immutable topology order is the stable index. A cold pass captures
+/// only compact wind/solar/geothermal rows. Every source whose capacity can
+/// change during exact simulation (fuel, accumulator, exchanger, ray power)
+/// stays in `dynamic_source_slots` and is re-probed each internal step.
+/// Commands/imports drop the complete runtime through the normal factory
+/// domain invalidation path. Nothing here is serialized or hashed.
+#[derive(Debug, Clone)]
+pub(crate) struct PowerProbeRuntime {
+    topology: std::sync::Arc<crate::state::FactoryTopology>,
+    catalog: std::sync::Arc<crate::catalog::RuntimeCatalog>,
+    entity_count: usize,
+    source_count: usize,
+    committed_revision: u64,
+    static_baseline: std::sync::Arc<Vec<Option<StaticRenewablePowerProbe>>>,
+    dynamic_source_slots: std::sync::Arc<Vec<usize>>,
+    profile_signature: Option<Vec<[u64; 3]>>,
+    wake_all: bool,
+    directory_fallback: bool,
+    #[cfg(test)]
+    scan_history: Vec<PowerProbeScan>,
+    #[cfg(test)]
+    indexed_selection_calls: usize,
+    #[cfg(test)]
+    flat_full_oracle_calls: usize,
+}
+
+impl PowerProbeRuntime {
+    pub(crate) fn build(state: &CoreState, entities: &[Value]) -> Self {
+        let mut directory_fallback = state.identity.registry_fingerprint
+            != crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+            || state.catalog.snapshot.registry_fingerprint
+                != crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+            || entities.len() != state.entities.ids.len();
+        let mut dynamic_source_slots = Vec::new();
+        for (source_slot, &entity_index) in state
+            .factory_topology
+            .power_source_indices
+            .iter()
+            .enumerate()
+        {
+            let Some(entity) = entities.get(entity_index) else {
+                directory_fallback = true;
+                continue;
+            };
+            if !power_source_cache_identity_is_closed(state, entities, entity_index, entity) {
+                directory_fallback = true;
+            }
+            if !static_renewable_source_is_closed(state, entity_index, entity) {
+                dynamic_source_slots.push(source_slot);
+            }
+        }
+        dynamic_source_slots.shrink_to_fit();
+        Self {
+            topology: state.factory_topology.clone(),
+            catalog: state.catalog.clone(),
+            entity_count: entities.len(),
+            source_count: state.factory_topology.power_source_indices.len(),
+            committed_revision: state.revision,
+            static_baseline: std::sync::Arc::new(Vec::new()),
+            dynamic_source_slots: std::sync::Arc::new(dynamic_source_slots),
+            profile_signature: None,
+            wake_all: true,
+            directory_fallback,
+            #[cfg(test)]
+            scan_history: Vec::new(),
+            #[cfg(test)]
+            indexed_selection_calls: 0,
+            #[cfg(test)]
+            flat_full_oracle_calls: 0,
+        }
+    }
+
+    pub(crate) fn bind_committed_revision(&mut self, revision: u64) {
+        self.committed_revision = revision;
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> u64 {
+        let sources = self.source_count as u64;
+        let dynamic = self.dynamic_source_slots.capacity() as u64;
+        let profile_rows = self
+            .profile_signature
+            .as_ref()
+            .map(Vec::capacity)
+            .unwrap_or(0) as u64;
+        // Include candidate COW and one full legacy probe buffer so the
+        // authority memory budget remains conservative during a cold/dense
+        // pass instead of reporting only the compact steady-state baseline.
+        (std::mem::size_of::<Self>() as u64)
+            .saturating_mul(2)
+            .saturating_add(
+                sources
+                    .saturating_mul(std::mem::size_of::<Option<StaticRenewablePowerProbe>>() as u64)
+                    .saturating_mul(2),
+            )
+            .saturating_add(
+                sources.saturating_mul(std::mem::size_of::<Option<PowerSourceProbe>>() as u64),
+            )
+            .saturating_add(dynamic.saturating_mul(std::mem::size_of::<usize>() as u64))
+            .saturating_add(profile_rows.saturating_mul(std::mem::size_of::<[u64; 3]>() as u64))
+    }
+
+    fn select(
+        &self,
+        state: &CoreState,
+        entities: &[Value],
+        profiles: &[PlanetProfile],
+        mode: PowerProbeMode,
+    ) -> PowerProbeSelection {
+        let profile_signature = power_probe_profile_signature(profiles);
+        let directory_fallback = self.directory_fallback
+            || state.revision != self.committed_revision
+            || !std::sync::Arc::ptr_eq(&self.topology, &state.factory_topology)
+            || !std::sync::Arc::ptr_eq(&self.catalog, &state.catalog)
+            || entities.len() != self.entity_count
+            || self.source_count != state.factory_topology.power_source_indices.len()
+            || self.static_baseline.len() != self.source_count
+            || self.profile_signature.as_ref() != Some(&profile_signature);
+        let dense_fallback = !self.dynamic_source_slots.is_empty()
+            && self
+                .dynamic_source_slots
+                .len()
+                .saturating_mul(POWER_PROBE_ACTIVE_DENSE_DENOMINATOR)
+                >= self
+                    .source_count
+                    .saturating_mul(POWER_PROBE_ACTIVE_DENSE_NUMERATOR);
+        #[cfg(test)]
+        let flat_full = mode == PowerProbeMode::FlatFull;
+        #[cfg(not(test))]
+        let flat_full = {
+            let _ = mode;
+            false
+        };
+        let full_scan = flat_full || self.wake_all || directory_fallback || dense_fallback;
+        let source_slots = if full_scan {
+            (0..self.source_count).collect()
+        } else {
+            self.dynamic_source_slots.as_ref().clone()
+        };
+        PowerProbeSelection {
+            scan: PowerProbeScan {
+                selected_rows: source_slots.len(),
+                total_rows: self.source_count,
+                compact_replay_rows: self.source_count,
+                stable_rows_skipped: self.source_count.saturating_sub(source_slots.len()),
+                dense_fallback,
+                directory_fallback,
+                full_scan,
+            },
+            source_slots,
+        }
+    }
+
+    fn commit_full(
+        &mut self,
+        probes: &[Option<PowerSourceProbe>],
+        profiles: &[PlanetProfile],
+        mut scan: PowerProbeScan,
+        mode: PowerProbeMode,
+    ) {
+        let mut dynamic_slots = self.dynamic_source_slots.iter().copied().peekable();
+        let mut malformed_static = false;
+        let baseline = probes
+            .iter()
+            .enumerate()
+            .map(|(source_slot, probe)| {
+                if dynamic_slots.peek().copied() == Some(source_slot) {
+                    dynamic_slots.next();
+                    None
+                } else {
+                    let compact = probe
+                        .as_ref()
+                        .and_then(StaticRenewablePowerProbe::from_full);
+                    malformed_static |= compact.is_none();
+                    compact
+                }
+            })
+            .collect::<Vec<_>>();
+        self.static_baseline = std::sync::Arc::new(baseline);
+        self.profile_signature = Some(power_probe_profile_signature(profiles));
+        self.directory_fallback |= malformed_static;
+        self.wake_all = false;
+        scan.directory_fallback |= malformed_static;
+        #[cfg(test)]
+        {
+            self.scan_history.push(scan);
+            if mode == PowerProbeMode::FlatFull {
+                self.flat_full_oracle_calls += 1;
+            } else {
+                self.indexed_selection_calls += 1;
+            }
+        }
+        #[cfg(not(test))]
+        let _ = (scan, mode);
+    }
+
+    fn commit_sparse(&mut self, scan: PowerProbeScan) {
+        #[cfg(test)]
+        {
+            self.scan_history.push(scan);
+            self.indexed_selection_calls += 1;
+        }
+        #[cfg(not(test))]
+        let _ = scan;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scan_history_for_test(&self) -> &[PowerProbeScan] {
+        &self.scan_history
+    }
+
+    #[cfg(test)]
+    pub(crate) fn selection_calls_for_test(&self) -> (usize, usize) {
+        (self.indexed_selection_calls, self.flat_full_oracle_calls)
+    }
+}
+
+fn power_probe_profile_signature(profiles: &[PlanetProfile]) -> Vec<[u64; 3]> {
+    profiles
+        .iter()
+        .map(|profile| {
+            [
+                profile.wind_multiplier.to_bits(),
+                profile.solar_power_multiplier.to_bits(),
+                profile.geothermal_multiplier.to_bits(),
+            ]
+        })
+        .collect()
+}
+
+fn power_source_cache_identity_is_closed(
+    state: &CoreState,
+    entities: &[Value],
+    entity_index: usize,
+    entity: &Value,
+) -> bool {
+    if !validate_planet_metric_identity(state, entities, entity_index, entity) {
+        return false;
+    }
+    let Some(object) = entity.as_object() else {
+        return false;
+    };
+    let planet = state.factory_topology.entity_planet_indices[entity_index];
+    let grid = state.factory_topology.entity_grid_indices[entity_index];
+    planet != usize::MAX
+        && state.catalog.planets.get(planet).is_some()
+        && grid < GRID_IDS.len()
+        && object.get("powerGridId").and_then(Value::as_str) == Some(GRID_IDS[grid])
+        && metric_number_shape_is_closed(object.get("machineCount"))
+}
+
+fn static_renewable_source_is_closed(
+    state: &CoreState,
+    entity_index: usize,
+    entity: &Value,
+) -> bool {
+    let Some(object) = entity.as_object() else {
+        return false;
+    };
+    object.get("kind").and_then(Value::as_str) == Some("power")
+        && state
+            .entities
+            .buildings
+            .get(entity_index)
+            .and_then(|symbol| state.symbols.resolve(*symbol))
+            .is_some_and(is_independent_renewable_power_facility)
+        && object
+            .get("buildingId")
+            .and_then(Value::as_str)
+            .is_some_and(is_independent_renewable_power_facility)
+        && metric_number_shape_is_closed(object.get("machineCount"))
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PowerDemandProbe {
     entity_index: usize,
@@ -626,11 +965,10 @@ fn collect_renewable_power_facility_patches_with_runtime(
     runtime: &DeterministicRuntime,
     state: &CoreState,
     entities: &[Value],
+    power_source_settlement_indices: &[usize],
     grids: &[GridRuntime],
 ) -> anyhow::Result<Vec<RenewablePowerFacilityPatch>> {
-    let indices = state
-        .factory_topology
-        .power_source_indices
+    let indices = power_source_settlement_indices
         .iter()
         .copied()
         .filter(|&entity_index| {
@@ -1434,7 +1772,7 @@ fn probe_power_source(
     Ok(Some(probe))
 }
 
-fn apply_power_source_probe(probe: PowerSourceProbe, grids: &mut [GridRuntime]) {
+fn apply_power_source_probe(probe: &PowerSourceProbe, grids: &mut [GridRuntime]) {
     let runtime = &mut grids[probe.planet_index * GRID_IDS.len() + probe.grid_index];
     runtime.has_power_source = true;
     runtime.generator_count += probe.generator_count;
@@ -1464,20 +1802,174 @@ fn apply_power_source_probe(probe: PowerSourceProbe, grids: &mut [GridRuntime]) 
             runtime.geothermal_generation_kw += probe.geothermal_generation_kw;
         }
     }
-    if let Some(candidate) = probe.dispatch_candidate {
-        runtime.dispatch_candidates.push(candidate);
+    if let Some(candidate) = &probe.dispatch_candidate {
+        runtime.dispatch_candidates.push(candidate.clone());
     }
-    if let Some(candidate) = probe.accumulator_charge_candidate {
-        runtime.accumulator_charge_candidates.push(candidate);
+    if let Some(candidate) = &probe.accumulator_charge_candidate {
+        runtime
+            .accumulator_charge_candidates
+            .push(candidate.clone());
     }
-    if let Some(candidate) = probe.exchanger_charge_candidate {
-        runtime.exchanger_charge_candidates.push(candidate);
+    if let Some(candidate) = &probe.exchanger_charge_candidate {
+        runtime.exchanger_charge_candidates.push(candidate.clone());
     }
     if let Some(output) = probe.power_output_kw {
         runtime
             .power_output_by_entity
             .insert(probe.entity_index, output);
     }
+}
+
+fn apply_static_renewable_power_probe(probe: StaticRenewablePowerProbe, grids: &mut [GridRuntime]) {
+    let runtime = &mut grids[probe.planet_index * GRID_IDS.len() + probe.grid_index];
+    runtime.has_power_source = true;
+    runtime.generator_count += probe.generator_count;
+    runtime.base_generation_kw += probe.output_kw;
+    match probe.kind {
+        PowerSourceKind::Wind => runtime.wind_generation_kw += probe.output_kw,
+        PowerSourceKind::Solar => runtime.solar_generation_kw += probe.output_kw,
+        PowerSourceKind::Geothermal => runtime.geothermal_generation_kw += probe.output_kw,
+        PowerSourceKind::Ray
+        | PowerSourceKind::Fuel
+        | PowerSourceKind::Accumulator
+        | PowerSourceKind::Exchanger => {
+            unreachable!("dynamic power source entered the static renewable cache")
+        }
+    }
+    runtime
+        .power_output_by_entity
+        .insert(probe.entity_index, probe.output_kw);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_power_sources_with_runtime(
+    deterministic_runtime: &DeterministicRuntime,
+    state: &CoreState,
+    entities: &[Value],
+    reception: &crate::dyson::Reception,
+    profiles: &[PlanetProfile],
+    production_buffer_limit: f64,
+    seconds: f64,
+    power_probe_runtime: &mut std::sync::Arc<PowerProbeRuntime>,
+    mode: PowerProbeMode,
+    grids: &mut [GridRuntime],
+) -> anyhow::Result<PreparedPowerSources> {
+    let selection = power_probe_runtime.select(state, entities, profiles, mode);
+    let settlement_entity_indices = selection
+        .source_slots
+        .iter()
+        .map(|&source_slot| state.factory_topology.power_source_indices[source_slot])
+        .collect::<Vec<_>>();
+    let probed = collect_indexed_power_probes_with_runtime(
+        deterministic_runtime,
+        &selection.source_slots,
+        |&source_slot| {
+            let entity_index = state.factory_topology.power_source_indices[source_slot];
+            probe_power_source(
+                state,
+                entities,
+                reception,
+                profiles,
+                production_buffer_limit,
+                seconds,
+                entity_index,
+            )
+        },
+    )
+    .into_iter()
+    .collect::<anyhow::Result<Vec<_>>>()?;
+    #[cfg(test)]
+    if mode == PowerProbeMode::IndexedFailAfterCollect {
+        bail!("injected failure after power probe candidate collection");
+    }
+
+    if selection.scan.full_scan {
+        if selection.source_slots.len() != state.factory_topology.power_source_indices.len()
+            || selection
+                .source_slots
+                .iter()
+                .copied()
+                .ne(0..selection.source_slots.len())
+        {
+            bail!("native full power probe selection diverged");
+        }
+        for probe in probed.iter().flatten() {
+            apply_power_source_probe(probe, grids);
+        }
+        std::sync::Arc::make_mut(power_probe_runtime).commit_full(
+            &probed,
+            profiles,
+            selection.scan,
+            mode,
+        );
+        return Ok(PreparedPowerSources {
+            scan: selection.scan,
+            settlement_entity_indices,
+        });
+    }
+
+    if selection.source_slots.len() != probed.len() {
+        bail!("native sparse power probe selection diverged");
+    }
+    let baseline = &power_probe_runtime.static_baseline;
+    if baseline.len() != state.factory_topology.power_source_indices.len() {
+        bail!("native sparse power probe baseline diverged");
+    }
+    // Validate the complete compact replay before mutating the candidate
+    // grids. A malformed cache can only fail this candidate; it can never
+    // partially publish power allocation or replace the committed runtime.
+    let mut dynamic_slots = selection.source_slots.iter().copied().peekable();
+    for source_slot in 0..baseline.len() {
+        if dynamic_slots.peek().copied() == Some(source_slot) {
+            dynamic_slots.next();
+        } else if baseline[source_slot].is_none() {
+            bail!("native sparse power probe cache is incomplete");
+        }
+    }
+    if dynamic_slots.next().is_some() {
+        bail!("native sparse power probe order diverged");
+    }
+
+    let mut dynamic = selection
+        .source_slots
+        .iter()
+        .copied()
+        .zip(probed.iter())
+        .peekable();
+    for (source_slot, static_probe) in baseline.iter().copied().enumerate() {
+        if dynamic
+            .peek()
+            .is_some_and(|(dynamic_slot, _)| *dynamic_slot == source_slot)
+        {
+            let (_, probe) = dynamic
+                .next()
+                .expect("peeked dynamic power probe disappeared");
+            if let Some(probe) = probe {
+                apply_power_source_probe(probe, grids);
+            }
+        } else {
+            apply_static_renewable_power_probe(
+                static_probe.expect("validated static power probe disappeared"),
+                grids,
+            );
+        }
+    }
+    if dynamic.next().is_some() {
+        bail!("native sparse power probe replay diverged");
+    }
+    std::sync::Arc::make_mut(power_probe_runtime).commit_sparse(selection.scan);
+    Ok(PreparedPowerSources {
+        scan: selection.scan,
+        settlement_entity_indices,
+    })
+}
+
+struct PreparedPowerSources {
+    scan: PowerProbeScan,
+    /// Persisted-order rows whose runtime display/inventory fields can change
+    /// in this step. Static renewables are present on cold/profile-reset/full
+    /// passes and sleep on proven warm passes.
+    settlement_entity_indices: Vec<usize>,
 }
 
 fn probe_ready_station_demand(
@@ -4907,6 +5399,8 @@ fn simulate_step(
     >,
     planet_metrics_runtime: &mut std::sync::Arc<PlanetMetricsRuntime>,
     planet_metric_mode: PlanetMetricProbeMode,
+    power_probe_runtime: &mut std::sync::Arc<PowerProbeRuntime>,
+    power_probe_mode: PowerProbeMode,
     local_step_directory: &mut std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
     quantum_logistics_directory: &mut std::sync::Arc<
         crate::quantum_logistics::QuantumLogisticsDirectory,
@@ -5219,25 +5713,30 @@ fn simulate_step(
     let mut grids = vec![GridRuntime::default(); planet_ids.len() * GRID_IDS.len()];
     let grid_slot = |planet: usize, grid: usize| planet * GRID_IDS.len() + grid;
 
-    let power_source_probes = collect_indexed_power_probes_with_runtime(
+    let prepared_power_sources = collect_power_sources_with_runtime(
         runtime,
-        &state.factory_topology.power_source_indices,
-        |&entity_index| {
-            probe_power_source(
-                state,
-                entities,
-                &reception,
-                &profiles,
-                production_buffer_limit,
-                seconds,
-                entity_index,
-            )
-        },
-    );
-    for probe in power_source_probes {
-        if let Some(probe) = probe? {
-            apply_power_source_probe(probe, &mut grids);
-        }
+        state,
+        entities,
+        &reception,
+        &profiles,
+        production_buffer_limit,
+        seconds,
+        power_probe_runtime,
+        power_probe_mode,
+        &mut grids,
+    )?;
+    let power_probe_scan = prepared_power_sources.scan;
+    let power_source_settlement_indices = prepared_power_sources.settlement_entity_indices;
+    if profile_enabled {
+        eprintln!(
+            "DSP_NATIVE_CORE_PROFILE\tpower-source-active\t{}/{}\tskipped={}\treplay={}\tdense={}\tdirectory-fallback={}",
+            power_probe_scan.selected_rows,
+            power_probe_scan.total_rows,
+            power_probe_scan.stable_rows_skipped,
+            power_probe_scan.compact_replay_rows,
+            power_probe_scan.dense_fallback,
+            power_probe_scan.directory_fallback,
+        );
     }
     // A full-output miner has no demand, but the legacy probe still counts it
     // as connected/disconnected. Preserve that display metric with a static
@@ -5661,8 +6160,13 @@ fn simulate_step(
         .is_some()
         .then(Vec::<MachineProductionEvent>::new);
     profile_mark!("machine-local-settlement-plan");
-    let renewable_power_facility_patches =
-        collect_renewable_power_facility_patches_with_runtime(runtime, state, entities, &grids)?;
+    let renewable_power_facility_patches = collect_renewable_power_facility_patches_with_runtime(
+        runtime,
+        state,
+        entities,
+        &power_source_settlement_indices,
+        &grids,
+    )?;
     if profile_enabled {
         eprintln!(
             "DSP_NATIVE_CORE_PROFILE\tfactory-renewable-power-patches\tworkers={}\tcandidates={}",
@@ -5679,7 +6183,7 @@ fn simulate_step(
     let mut reset_research_progress_before_next_entity = false;
 
     let ordinary_settlement_indices = crate::ordinary_production::merge_settlement_indices(
-        &state.factory_topology.power_source_indices,
+        &power_source_settlement_indices,
         &ordinary_production_selection,
     );
     planet_metric_writer_indices.extend_from_slice(&ordinary_settlement_indices);
@@ -7099,6 +7603,7 @@ pub(crate) struct PreparedFactoryDomains {
     pub(crate) ordinary_production_runtime:
         std::sync::Arc<crate::ordinary_production::OrdinaryProductionRuntime>,
     pub(crate) planet_metrics_runtime: std::sync::Arc<PlanetMetricsRuntime>,
+    pub(crate) power_probe_runtime: std::sync::Arc<PowerProbeRuntime>,
     pub(crate) local_peer_directory: std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
     pub(crate) quantum_logistics_directory:
         std::sync::Arc<crate::quantum_logistics::QuantumLogisticsDirectory>,
@@ -7128,6 +7633,7 @@ pub(crate) fn prepare_factory_domains_with_runtime(
     let cached_material_delivery_runtime = state.prepared_material_delivery_runtime();
     let cached_ordinary_production_runtime = state.prepared_ordinary_production_runtime();
     let cached_planet_metrics_runtime = state.prepared_planet_metrics_runtime();
+    let cached_power_probe_runtime = state.prepared_power_probe_runtime();
     let cached_local_peer_directory = state.prepared_local_peer_directory();
     let cached_quantum_logistics_directory = state.prepared_quantum_logistics_directory();
     let cached_construction_runtime = state.prepared_construction_runtime();
@@ -7142,7 +7648,8 @@ pub(crate) fn prepare_factory_domains_with_runtime(
             cached_logistics_buffer_runtime.is_none()
                 || cached_material_delivery_runtime.is_none()
                 || cached_ordinary_production_runtime.is_none()
-                || cached_planet_metrics_runtime.is_none(),
+                || cached_planet_metrics_runtime.is_none()
+                || cached_power_probe_runtime.is_none(),
         ) << 1)
         | (u8::from(cached_local_peer_directory.is_none()) << 2)
         | (u8::from(cached_quantum_logistics_directory.is_none()) << 3)
@@ -7159,6 +7666,7 @@ pub(crate) fn prepare_factory_domains_with_runtime(
                 material_delivery_runtime,
                 ordinary_production_runtime,
                 planet_metrics_runtime,
+                power_probe_runtime,
             ),
             local_peer_directory,
             quantum_logistics_directory,
@@ -7201,6 +7709,9 @@ pub(crate) fn prepare_factory_domains_with_runtime(
                 }),
                 cached_planet_metrics_runtime.unwrap_or_else(|| {
                     std::sync::Arc::new(PlanetMetricsRuntime::build(state, entities))
+                }),
+                cached_power_probe_runtime.unwrap_or_else(|| {
+                    std::sync::Arc::new(PowerProbeRuntime::build(state, entities))
                 }),
             )
         },
@@ -7286,6 +7797,7 @@ pub(crate) fn prepare_factory_domains_with_runtime(
         material_delivery_runtime,
         ordinary_production_runtime,
         planet_metrics_runtime,
+        power_probe_runtime,
         local_peer_directory,
         quantum_logistics_directory,
         construction_runtime,
@@ -7311,6 +7823,7 @@ pub(crate) struct PreparedFactoryAdvance {
     pub ordinary_production_runtime:
         std::sync::Arc<crate::ordinary_production::OrdinaryProductionRuntime>,
     pub planet_metrics_runtime: std::sync::Arc<PlanetMetricsRuntime>,
+    pub power_probe_runtime: std::sync::Arc<PowerProbeRuntime>,
     pub local_peer_directory: std::sync::Arc<crate::local_logistics::LocalPeerDirectory>,
     pub quantum_logistics_directory:
         std::sync::Arc<crate::quantum_logistics::QuantumLogisticsDirectory>,
@@ -7358,6 +7871,7 @@ fn prepare_advance_with_runtime(
         deterministic_runtime,
         MaterialDeliveryDrainMode::Indexed,
         PlanetMetricProbeMode::Indexed,
+        PowerProbeMode::Indexed,
         None,
     )
 }
@@ -7380,6 +7894,7 @@ fn prepare_advance_with_material_delivery_test_options(
         deterministic_runtime,
         material_delivery_mode,
         PlanetMetricProbeMode::Indexed,
+        PowerProbeMode::Indexed,
         step_size_override,
     )
 }
@@ -7402,6 +7917,30 @@ fn prepare_advance_with_planet_metric_test_options(
         deterministic_runtime,
         MaterialDeliveryDrainMode::Indexed,
         planet_metric_mode,
+        PowerProbeMode::Indexed,
+        step_size_override,
+    )
+}
+
+#[cfg(test)]
+fn prepare_advance_with_power_probe_test_options(
+    state: &CoreState,
+    simulation_seconds: f64,
+    wall_seconds: f64,
+    isolate_construction_automation: bool,
+    deterministic_runtime: &DeterministicRuntime,
+    power_probe_mode: PowerProbeMode,
+    step_size_override: Option<f64>,
+) -> anyhow::Result<PreparedFactoryAdvance> {
+    prepare_advance_with_runtime_options(
+        state,
+        simulation_seconds,
+        wall_seconds,
+        isolate_construction_automation,
+        deterministic_runtime,
+        MaterialDeliveryDrainMode::Indexed,
+        PlanetMetricProbeMode::Indexed,
+        power_probe_mode,
         step_size_override,
     )
 }
@@ -7415,6 +7954,7 @@ fn prepare_advance_with_runtime_options(
     deterministic_runtime: &DeterministicRuntime,
     material_delivery_mode: MaterialDeliveryDrainMode,
     planet_metric_mode: PlanetMetricProbeMode,
+    power_probe_mode: PowerProbeMode,
     step_size_override: Option<f64>,
 ) -> anyhow::Result<PreparedFactoryAdvance> {
     let profile_enabled = crate::profile_evidence::profile_environment_enabled();
@@ -7484,6 +8024,7 @@ fn prepare_advance_with_runtime_options(
     let mut material_delivery_runtime = prepared_domains.material_delivery_runtime;
     let mut ordinary_production_runtime = prepared_domains.ordinary_production_runtime;
     let mut planet_metrics_runtime = prepared_domains.planet_metrics_runtime;
+    let mut power_probe_runtime = prepared_domains.power_probe_runtime;
     let mut local_peer_directory = prepared_domains.local_peer_directory;
     let mut quantum_logistics_directory = prepared_domains.quantum_logistics_directory;
     let mut construction_runtime = prepared_domains.construction_runtime;
@@ -7597,6 +8138,8 @@ fn prepare_advance_with_runtime_options(
             &mut ordinary_production_runtime,
             &mut planet_metrics_runtime,
             planet_metric_mode,
+            &mut power_probe_runtime,
+            power_probe_mode,
             &mut local_peer_directory,
             &mut quantum_logistics_directory,
             &mut construction_runtime,
@@ -7740,6 +8283,7 @@ fn prepare_advance_with_runtime_options(
         material_delivery_runtime,
         ordinary_production_runtime,
         planet_metrics_runtime,
+        power_probe_runtime,
         local_peer_directory,
         quantum_logistics_directory,
         construction_runtime,
@@ -8809,6 +9353,7 @@ pub(crate) mod tests {
         assert!(state.prepared_material_delivery_runtime().is_none());
         assert!(state.prepared_ordinary_production_runtime().is_none());
         assert!(state.prepared_planet_metrics_runtime().is_none());
+        assert!(state.prepared_power_probe_runtime().is_none());
         assert!(state.prepared_local_peer_directory().is_none());
         assert!(state.prepared_quantum_logistics_directory().is_none());
         assert!(state.prepared_construction_runtime().is_none());
@@ -9352,6 +9897,7 @@ pub(crate) mod tests {
         let material_delivery_runtime = prepared.material_delivery_runtime.clone();
         let ordinary_production_runtime = prepared.ordinary_production_runtime.clone();
         let planet_metrics_runtime = prepared.planet_metrics_runtime.clone();
+        let power_probe_runtime = prepared.power_probe_runtime.clone();
         let local_peer_directory = prepared.local_peer_directory.clone();
         let quantum_logistics_directory = prepared.quantum_logistics_directory.clone();
         let construction_runtime = prepared.construction_runtime.clone();
@@ -9375,6 +9921,7 @@ pub(crate) mod tests {
         state.install_prepared_material_delivery_runtime(material_delivery_runtime);
         state.install_prepared_ordinary_production_runtime(ordinary_production_runtime);
         state.install_prepared_planet_metrics_runtime(planet_metrics_runtime);
+        state.install_prepared_power_probe_runtime(power_probe_runtime);
         state.install_prepared_local_peer_directory(local_peer_directory);
         state.install_prepared_quantum_logistics_directory(quantum_logistics_directory);
         state.install_prepared_construction_runtime(construction_runtime);
@@ -9623,6 +10170,7 @@ pub(crate) mod tests {
         let material_delivery_runtime = prepared.material_delivery_runtime.clone();
         let ordinary_production_runtime = prepared.ordinary_production_runtime.clone();
         let planet_metrics_runtime = prepared.planet_metrics_runtime.clone();
+        let power_probe_runtime = prepared.power_probe_runtime.clone();
         let local_peer_directory = prepared.local_peer_directory.clone();
         let quantum_logistics_directory = prepared.quantum_logistics_directory.clone();
         let construction_runtime = prepared.construction_runtime.clone();
@@ -9647,6 +10195,7 @@ pub(crate) mod tests {
         state.install_prepared_material_delivery_runtime(material_delivery_runtime);
         state.install_prepared_ordinary_production_runtime(ordinary_production_runtime);
         state.install_prepared_planet_metrics_runtime(planet_metrics_runtime);
+        state.install_prepared_power_probe_runtime(power_probe_runtime);
         state.install_prepared_local_peer_directory(local_peer_directory);
         state.install_prepared_quantum_logistics_directory(quantum_logistics_directory);
         state.install_prepared_construction_runtime(construction_runtime);
@@ -11237,6 +11786,102 @@ pub(crate) mod tests {
         (0..count).map(renewable_power_entity).collect()
     }
 
+    fn clean_renewable_power_entity(index: usize) -> Value {
+        let building_id = match index % 3 {
+            0 => "wind_turbine",
+            1 => "solar_panel",
+            _ => "geothermal_power_station",
+        };
+        json!({
+            "id": format!("power-probe-renewable-{index:05}"),
+            "kind": "power",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": building_id,
+            "machineCount": 1 + index % 7,
+            "minerCount": 0,
+            "inputs": {},
+            "outputs": {},
+            "progress": 0,
+            "utilization": 0,
+            "productionRate": 0,
+            "powerOutputKw": 0,
+            "powerInputKw": 0,
+            "routingCursor": 0
+        })
+    }
+
+    fn power_probe_thermal_entity(index: usize) -> Value {
+        json!({
+            "id": format!("power-probe-thermal-{index:05}"),
+            "kind": "power",
+            "planetId": "home",
+            "powerGridId": "grid-a",
+            "buildingId": "thermal_power_plant",
+            "machineCount": 1 + index % 3,
+            "minerCount": 0,
+            "fuelItemId": "coal",
+            "fuelRemainingMj": (index % 2) as f64 * 0.75,
+            "inputs": { "coal": 10 + index },
+            "outputs": {},
+            "progress": 0,
+            "utilization": 0,
+            "productionRate": 0,
+            "powerOutputKw": 0,
+            "powerInputKw": 0,
+            "routingCursor": 0
+        })
+    }
+
+    fn power_probe_oactive_fixture(renewable_count: usize, thermal_count: usize) -> CoreState {
+        let mut entities = (0..renewable_count)
+            .map(clean_renewable_power_entity)
+            .collect::<Vec<_>>();
+        entities.extend((0..thermal_count).map(power_probe_thermal_entity));
+        fixture_state_from_base_with_registry(
+            construction_isolation_base(),
+            &entities,
+            crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+        )
+    }
+
+    #[derive(Debug)]
+    struct PowerProbeRun {
+        bytes: Vec<u8>,
+        canonical: String,
+        domain: String,
+        scans: Vec<PowerProbeScan>,
+    }
+
+    fn run_power_probe_advance(
+        mut state: CoreState,
+        seconds: f64,
+        worker_count: usize,
+        mode: PowerProbeMode,
+    ) -> PowerProbeRun {
+        let prepared = prepare_advance_with_power_probe_test_options(
+            &state,
+            seconds,
+            seconds,
+            false,
+            &DeterministicRuntime::for_test(worker_count),
+            mode,
+            Some(1.0),
+        )
+        .unwrap();
+        let scans = prepared
+            .power_probe_runtime
+            .scan_history_for_test()
+            .to_vec();
+        commit_and_install_factory_test_state(&mut state, prepared);
+        PowerProbeRun {
+            bytes: serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+            canonical: state.canonical_sha256().unwrap(),
+            domain: state.domain_sha256().unwrap(),
+            scans,
+        }
+    }
+
     fn renewable_power_grids(count: usize) -> Vec<GridRuntime> {
         let mut grids = vec![GridRuntime::default(); GRID_IDS.len()];
         for index in 0..count {
@@ -11308,6 +11953,7 @@ pub(crate) mod tests {
             &DeterministicRuntime::for_test(worker_count),
             state,
             &entities,
+            &state.factory_topology.power_source_indices,
             grids,
         )
         .unwrap();
@@ -11782,6 +12428,693 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn power_probe_runtime_skips_static_json_probes_but_replays_persisted_order() {
+        let state = power_probe_oactive_fixture(1_024, 1);
+        let entities = state.parse_entities_parallel().unwrap();
+        let mut power_runtime = std::sync::Arc::new(PowerProbeRuntime::build(&state, &entities));
+        let profiles = [fixture_profile()];
+        let reception = crate::dyson::Reception::default();
+        let mut first_grids = vec![GridRuntime::default(); GRID_IDS.len()];
+        let first = collect_power_sources_with_runtime(
+            &DeterministicRuntime::for_test(4),
+            &state,
+            &entities,
+            &reception,
+            &profiles,
+            DEFAULT_BUILDING_BUFFER_LIMIT,
+            1.0,
+            &mut power_runtime,
+            PowerProbeMode::Indexed,
+            &mut first_grids,
+        )
+        .unwrap()
+        .scan;
+        let mut second_grids = vec![GridRuntime::default(); GRID_IDS.len()];
+        let second = collect_power_sources_with_runtime(
+            &DeterministicRuntime::for_test(4),
+            &state,
+            &entities,
+            &reception,
+            &profiles,
+            DEFAULT_BUILDING_BUFFER_LIMIT,
+            1.0,
+            &mut power_runtime,
+            PowerProbeMode::Indexed,
+            &mut second_grids,
+        )
+        .unwrap()
+        .scan;
+
+        assert_eq!(first.selected_rows, 1_025);
+        assert!(first.full_scan);
+        assert_eq!(second.selected_rows, 1);
+        assert_eq!(second.stable_rows_skipped, 1_024);
+        assert_eq!(second.compact_replay_rows, 1_025);
+        assert!(!second.full_scan);
+        assert_eq!(
+            power_generation_capacity_in_js_order(&first_grids[0]),
+            power_generation_capacity_in_js_order(&second_grids[0])
+        );
+        assert_eq!(
+            first_grids[0].generator_count.to_bits(),
+            second_grids[0].generator_count.to_bits()
+        );
+        assert_eq!(
+            first_grids[0].power_output_by_entity,
+            second_grids[0].power_output_by_entity
+        );
+        assert_eq!(power_runtime.selection_calls_for_test(), (2, 0));
+    }
+
+    #[test]
+    fn renewable_display_fields_are_stable_across_low_high_low_grid_demand() {
+        const RENEWABLES: usize = 32;
+        let state = power_probe_oactive_fixture(RENEWABLES, 1);
+        let mut entities = state.parse_entities_parallel().unwrap();
+        let mut power_runtime = std::sync::Arc::new(PowerProbeRuntime::build(&state, &entities));
+        let profiles = [fixture_profile()];
+        let reception = crate::dyson::Reception::default();
+        let mut stable_bytes = None;
+        for (step, demand_kw) in [1.0, 1_000_000_000.0, 1.0].into_iter().enumerate() {
+            let mut grids = vec![GridRuntime::default(); GRID_IDS.len()];
+            let prepared = collect_power_sources_with_runtime(
+                &DeterministicRuntime::for_test(4),
+                &state,
+                &entities,
+                &reception,
+                &profiles,
+                DEFAULT_BUILDING_BUFFER_LIMIT,
+                1.0,
+                &mut power_runtime,
+                PowerProbeMode::Indexed,
+                &mut grids,
+            )
+            .unwrap();
+            let grid = &mut grids[0];
+            (grid.base_generation_kw, grid.generation_kw) =
+                power_generation_capacity_in_js_order(grid);
+            grid.demand_kw = demand_kw;
+            grid.regular_supplied_kw = demand_kw.min(grid.generation_kw);
+            grid.supplied_kw = grid.regular_supplied_kw;
+            let missing_kw = (grid.supplied_kw - grid.base_generation_kw).max(0.0);
+            let candidates = grid.dispatch_candidates.clone();
+            allocate_power_by_priority(&candidates, missing_kw, &mut grid.power_output_by_entity);
+            grid.factor = if demand_kw <= EPSILON {
+                1.0
+            } else {
+                (grid.supplied_kw / demand_kw).min(1.0)
+            };
+            let patches = collect_renewable_power_facility_patches_with_runtime(
+                &DeterministicRuntime::for_test(4),
+                &state,
+                &entities,
+                &prepared.settlement_entity_indices,
+                &grids,
+            )
+            .unwrap();
+            if step == 0 {
+                assert_eq!(patches.len(), RENEWABLES, "cold pass must patch all");
+            } else {
+                assert!(patches.is_empty(), "warm static renewables must sleep");
+            }
+            for patch in patches {
+                let entity_index = patch.entity_index;
+                apply_renewable_power_facility_patch(&mut entities[entity_index], patch).unwrap();
+            }
+            let bytes = serde_json::to_vec(&entities[..RENEWABLES]).unwrap();
+            if let Some(expected) = &stable_bytes {
+                assert_eq!(
+                    &bytes, expected,
+                    "renewable display bytes changed at demand step {step}"
+                );
+            } else {
+                stable_bytes = Some(bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn power_probe_indexed_and_flat_oracle_match_full_state_at_1_5_60_seconds() {
+        for seconds in [1.0, 5.0, 60.0] {
+            let indexed = run_power_probe_advance(
+                power_probe_oactive_fixture(257, 1),
+                seconds,
+                4,
+                PowerProbeMode::Indexed,
+            );
+            let oracle = run_power_probe_advance(
+                power_probe_oactive_fixture(257, 1),
+                seconds,
+                4,
+                PowerProbeMode::FlatFull,
+            );
+            assert_eq!(indexed.bytes, oracle.bytes, "bytes at {seconds}s");
+            assert_eq!(
+                indexed.canonical, oracle.canonical,
+                "canonical at {seconds}s"
+            );
+            assert_eq!(indexed.domain, oracle.domain, "domain at {seconds}s");
+            assert_eq!(indexed.scans.len(), seconds as usize);
+            assert_eq!(oracle.scans.len(), seconds as usize);
+            assert!(oracle.scans.iter().all(|scan| {
+                scan.full_scan && scan.selected_rows == 258 && scan.compact_replay_rows == 258
+            }));
+            if seconds > 1.0 {
+                assert!(indexed.scans[0].full_scan);
+                assert!(indexed.scans[1..].iter().all(|scan| {
+                    !scan.full_scan
+                        && scan.selected_rows == 1
+                        && scan.stable_rows_skipped == 257
+                        && scan.compact_replay_rows == 258
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn power_probe_full_state_is_deterministic_at_1_2_4_8_workers() {
+        let baseline = run_power_probe_advance(
+            power_probe_oactive_fixture(1_029, 3),
+            5.0,
+            1,
+            PowerProbeMode::Indexed,
+        );
+        for workers in [2, 4, 8] {
+            let observed = run_power_probe_advance(
+                power_probe_oactive_fixture(1_029, 3),
+                5.0,
+                workers,
+                PowerProbeMode::Indexed,
+            );
+            assert_eq!(observed.bytes, baseline.bytes, "bytes at {workers} workers");
+            assert_eq!(
+                observed.canonical, baseline.canonical,
+                "canonical at {workers} workers"
+            );
+            assert_eq!(
+                observed.domain, baseline.domain,
+                "domain at {workers} workers"
+            );
+            assert_eq!(observed.scans, baseline.scans);
+        }
+    }
+
+    #[test]
+    fn power_probe_research_completion_boundary_matches_flat_oracle() {
+        let indexed = run_power_probe_advance(
+            research_boundary_fixture(257, 1.0, 99_999.0),
+            5.0,
+            4,
+            PowerProbeMode::Indexed,
+        );
+        let oracle = run_power_probe_advance(
+            research_boundary_fixture(257, 1.0, 99_999.0),
+            5.0,
+            4,
+            PowerProbeMode::FlatFull,
+        );
+        assert_eq!(indexed.bytes, oracle.bytes);
+        assert_eq!(indexed.canonical, oracle.canonical);
+        assert_eq!(indexed.domain, oracle.domain);
+        assert_eq!(indexed.scans.len(), 5);
+        assert_eq!(indexed.scans[0].selected_rows, 1);
+        assert!(
+            indexed.scans[1..]
+                .iter()
+                .all(|scan| scan.selected_rows == 0 && scan.compact_replay_rows == 1)
+        );
+        assert!(oracle.scans.iter().all(|scan| scan.selected_rows == 1));
+    }
+
+    #[test]
+    fn power_probe_global_profile_change_and_dense_dynamic_set_fail_closed() {
+        let state = power_probe_oactive_fixture(32, 1);
+        let entities = state.parse_entities_parallel().unwrap();
+        let mut power_runtime = std::sync::Arc::new(PowerProbeRuntime::build(&state, &entities));
+        let reception = crate::dyson::Reception::default();
+        for (profiles, expected_full) in [
+            ([fixture_profile()], true),
+            ([fixture_profile()], false),
+            (
+                [PlanetProfile {
+                    solar_power_multiplier: 1.25,
+                    ..fixture_profile()
+                }],
+                true,
+            ),
+        ] {
+            let mut grids = vec![GridRuntime::default(); GRID_IDS.len()];
+            let scan = collect_power_sources_with_runtime(
+                &DeterministicRuntime::for_test(4),
+                &state,
+                &entities,
+                &reception,
+                &profiles,
+                DEFAULT_BUILDING_BUFFER_LIMIT,
+                1.0,
+                &mut power_runtime,
+                PowerProbeMode::Indexed,
+                &mut grids,
+            )
+            .unwrap()
+            .scan;
+            assert_eq!(scan.full_scan, expected_full);
+        }
+
+        let dense_state = power_probe_oactive_fixture(1, 3);
+        let dense_entities = dense_state.parse_entities_parallel().unwrap();
+        let mut dense_runtime =
+            std::sync::Arc::new(PowerProbeRuntime::build(&dense_state, &dense_entities));
+        for _ in 0..2 {
+            let mut grids = vec![GridRuntime::default(); GRID_IDS.len()];
+            let scan = collect_power_sources_with_runtime(
+                &DeterministicRuntime::for_test(4),
+                &dense_state,
+                &dense_entities,
+                &reception,
+                &[fixture_profile()],
+                DEFAULT_BUILDING_BUFFER_LIMIT,
+                1.0,
+                &mut dense_runtime,
+                PowerProbeMode::Indexed,
+                &mut grids,
+            )
+            .unwrap()
+            .scan;
+            assert!(scan.full_scan && scan.dense_fallback);
+            assert_eq!(scan.selected_rows, 4);
+        }
+    }
+
+    #[test]
+    fn power_probe_ray_receiver_stays_dynamic_when_dyson_reception_changes() {
+        let mut state = power_probe_oactive_fixture(32, 0);
+        let catalog = std::sync::Arc::make_mut(&mut state.catalog);
+        catalog
+            .buildings
+            .insert("ray_receiver".to_owned(), fixture_building("ray_receiver"));
+        catalog.recipes.insert(
+            "ray_power".to_owned(),
+            fixture_recipe("ray_power", "ray_receiver", None, vec![], vec![]),
+        );
+        let receiver_index = 31;
+        state.replace_entity_raw(
+            receiver_index,
+            serde_json::to_string(&json!({
+                "id": "power-probe-ray-receiver",
+                "kind": "machine",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "ray_receiver",
+                "recipeId": "ray_power",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "powerOutputKw": 0,
+                "powerInputKw": 0,
+                "routingCursor": 0
+            }))
+            .unwrap()
+            .into(),
+        );
+        state.rebuild_indexes().unwrap();
+        state.refresh_factory_static_admission().unwrap();
+        assert_eq!(state.factory_topology.power_source_indices.len(), 32);
+        let entities = state.parse_entities_parallel().unwrap();
+        let mut runtime = std::sync::Arc::new(PowerProbeRuntime::build(&state, &entities));
+        let profiles = [fixture_profile()];
+        let mut cold_grids = vec![GridRuntime::default(); GRID_IDS.len()];
+        collect_power_sources_with_runtime(
+            &DeterministicRuntime::for_test(4),
+            &state,
+            &entities,
+            &crate::dyson::Reception::default(),
+            &profiles,
+            DEFAULT_BUILDING_BUFFER_LIMIT,
+            1.0,
+            &mut runtime,
+            PowerProbeMode::Indexed,
+            &mut cold_grids,
+        )
+        .unwrap();
+        let mut changed_reception = crate::dyson::Reception::default();
+        changed_reception
+            .ray_power_by_entity
+            .insert("power-probe-ray-receiver".to_owned(), 12_345.25);
+        let mut indexed_grids = vec![GridRuntime::default(); GRID_IDS.len()];
+        let indexed_scan = collect_power_sources_with_runtime(
+            &DeterministicRuntime::for_test(4),
+            &state,
+            &entities,
+            &changed_reception,
+            &profiles,
+            DEFAULT_BUILDING_BUFFER_LIMIT,
+            1.0,
+            &mut runtime,
+            PowerProbeMode::Indexed,
+            &mut indexed_grids,
+        )
+        .unwrap()
+        .scan;
+        assert_eq!(indexed_scan.selected_rows, 1);
+        assert_eq!(indexed_grids[0].ray_generation_kw, 12_345.25);
+
+        let mut flat_runtime = std::sync::Arc::new(PowerProbeRuntime::build(&state, &entities));
+        let mut flat_grids = vec![GridRuntime::default(); GRID_IDS.len()];
+        let flat_scan = collect_power_sources_with_runtime(
+            &DeterministicRuntime::for_test(4),
+            &state,
+            &entities,
+            &changed_reception,
+            &profiles,
+            DEFAULT_BUILDING_BUFFER_LIMIT,
+            1.0,
+            &mut flat_runtime,
+            PowerProbeMode::FlatFull,
+            &mut flat_grids,
+        )
+        .unwrap()
+        .scan;
+        assert_eq!(flat_scan.selected_rows, 32);
+        assert_eq!(
+            power_generation_capacity_in_js_order(&indexed_grids[0]),
+            power_generation_capacity_in_js_order(&flat_grids[0])
+        );
+        assert_eq!(
+            indexed_grids[0].power_output_by_entity,
+            flat_grids[0].power_output_by_entity
+        );
+    }
+
+    #[test]
+    fn power_probe_mixed_fuel_ray_outage_restore_keeps_static_renewables_asleep() {
+        const STATIC_RENEWABLES: usize = 32;
+        let mut state = power_probe_oactive_fixture(STATIC_RENEWABLES + 1, 1);
+        let catalog = std::sync::Arc::make_mut(&mut state.catalog);
+        catalog
+            .buildings
+            .insert("ray_receiver".to_owned(), fixture_building("ray_receiver"));
+        catalog.recipes.insert(
+            "ray_power".to_owned(),
+            fixture_recipe("ray_power", "ray_receiver", None, vec![], vec![]),
+        );
+        let receiver_index = STATIC_RENEWABLES;
+        let thermal_index = STATIC_RENEWABLES + 1;
+        state.replace_entity_raw(
+            receiver_index,
+            serde_json::to_string(&json!({
+                "id": "power-probe-mixed-ray",
+                "kind": "machine",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "ray_receiver",
+                "recipeId": "ray_power",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {},
+                "progress": 0,
+                "utilization": 0,
+                "productionRate": 0,
+                "powerOutputKw": 0,
+                "powerInputKw": 0,
+                "routingCursor": 0
+            }))
+            .unwrap()
+            .into(),
+        );
+        state.rebuild_indexes().unwrap();
+        state.refresh_factory_static_admission().unwrap();
+
+        let mut entities = state.parse_entities_parallel().unwrap();
+        // Keep the static sources present in the topology while making the
+        // synthetic outage observable without a residual renewable supply.
+        for entity in &mut entities[..STATIC_RENEWABLES] {
+            entity["machineCount"] = Value::from(0);
+        }
+        entities[thermal_index]["fuelRemainingMj"] = Value::from(0.0);
+        entities[thermal_index]["inputs"]["coal"] = Value::from(0.0);
+
+        let profiles = [fixture_profile()];
+        let mut runtime = std::sync::Arc::new(PowerProbeRuntime::build(&state, &entities));
+        let mut stable_renewable_bytes = None;
+        for (phase, (coal, ray_power, expect_generation)) in [
+            (0.0, 0.0, false),
+            (10.0, 12_345.25, true),
+            (0.0, 0.0, false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            entities[thermal_index]["inputs"]["coal"] = Value::from(coal);
+            let mut reception = crate::dyson::Reception::default();
+            if ray_power > 0.0 {
+                reception
+                    .ray_power_by_entity
+                    .insert("power-probe-mixed-ray".to_owned(), ray_power);
+            }
+            let mut indexed_grids = vec![GridRuntime::default(); GRID_IDS.len()];
+            let prepared = collect_power_sources_with_runtime(
+                &DeterministicRuntime::for_test(4),
+                &state,
+                &entities,
+                &reception,
+                &profiles,
+                DEFAULT_BUILDING_BUFFER_LIMIT,
+                1.0,
+                &mut runtime,
+                PowerProbeMode::Indexed,
+                &mut indexed_grids,
+            )
+            .unwrap();
+            if phase == 0 {
+                assert!(prepared.scan.full_scan);
+                assert_eq!(prepared.scan.selected_rows, STATIC_RENEWABLES + 2);
+            } else {
+                assert!(!prepared.scan.full_scan);
+                assert_eq!(prepared.scan.selected_rows, 2);
+                assert_eq!(prepared.scan.stable_rows_skipped, STATIC_RENEWABLES);
+            }
+
+            let (_, indexed_generation) = power_generation_capacity_in_js_order(&indexed_grids[0]);
+            assert_eq!(indexed_generation > EPSILON, expect_generation);
+
+            let mut flat_runtime = std::sync::Arc::new(PowerProbeRuntime::build(&state, &entities));
+            let mut flat_grids = vec![GridRuntime::default(); GRID_IDS.len()];
+            let flat = collect_power_sources_with_runtime(
+                &DeterministicRuntime::for_test(4),
+                &state,
+                &entities,
+                &reception,
+                &profiles,
+                DEFAULT_BUILDING_BUFFER_LIMIT,
+                1.0,
+                &mut flat_runtime,
+                PowerProbeMode::FlatFull,
+                &mut flat_grids,
+            )
+            .unwrap();
+            assert!(flat.scan.full_scan);
+            assert_eq!(flat.scan.selected_rows, STATIC_RENEWABLES + 2);
+            assert_eq!(
+                power_generation_capacity_in_js_order(&indexed_grids[0]),
+                power_generation_capacity_in_js_order(&flat_grids[0])
+            );
+            assert_eq!(
+                indexed_grids[0].power_output_by_entity,
+                flat_grids[0].power_output_by_entity
+            );
+
+            let patches = collect_renewable_power_facility_patches_with_runtime(
+                &DeterministicRuntime::for_test(4),
+                &state,
+                &entities,
+                &prepared.settlement_entity_indices,
+                &indexed_grids,
+            )
+            .unwrap();
+            if phase == 0 {
+                assert_eq!(patches.len(), STATIC_RENEWABLES);
+            } else {
+                assert!(patches.is_empty());
+            }
+            for patch in patches {
+                let entity_index = patch.entity_index;
+                apply_renewable_power_facility_patch(&mut entities[entity_index], patch).unwrap();
+            }
+            let bytes = serde_json::to_vec(&entities[..STATIC_RENEWABLES]).unwrap();
+            if let Some(expected) = &stable_renewable_bytes {
+                assert_eq!(
+                    &bytes, expected,
+                    "static renewable bytes changed in phase {phase}"
+                );
+            } else {
+                stable_renewable_bytes = Some(bytes);
+            }
+        }
+    }
+
+    #[test]
+    fn power_probe_mod_malformed_and_topology_drift_stay_on_full_oracle() {
+        for malformed in [false, true] {
+            let state = power_probe_oactive_fixture(32, 0);
+            let mut entities = state.parse_entities_parallel().unwrap();
+            if malformed {
+                entities[7]["machineCount"] = Value::from("opaque-number");
+            } else {
+                entities[7]["mod:power-writer"] = json!({ "enabled": true });
+            }
+            let mut power_runtime =
+                std::sync::Arc::new(PowerProbeRuntime::build(&state, &entities));
+            for _ in 0..2 {
+                let mut grids = vec![GridRuntime::default(); GRID_IDS.len()];
+                let scan = collect_power_sources_with_runtime(
+                    &DeterministicRuntime::for_test(4),
+                    &state,
+                    &entities,
+                    &crate::dyson::Reception::default(),
+                    &[fixture_profile()],
+                    DEFAULT_BUILDING_BUFFER_LIMIT,
+                    1.0,
+                    &mut power_runtime,
+                    PowerProbeMode::Indexed,
+                    &mut grids,
+                )
+                .unwrap()
+                .scan;
+                assert!(scan.full_scan && scan.directory_fallback);
+                assert_eq!(scan.selected_rows, 32);
+            }
+        }
+
+        let mut drifted = power_probe_oactive_fixture(32, 0);
+        let entities = drifted.parse_entities_parallel().unwrap();
+        let mut power_runtime = std::sync::Arc::new(PowerProbeRuntime::build(&drifted, &entities));
+        let mut grids = vec![GridRuntime::default(); GRID_IDS.len()];
+        collect_power_sources_with_runtime(
+            &DeterministicRuntime::for_test(4),
+            &drifted,
+            &entities,
+            &crate::dyson::Reception::default(),
+            &[fixture_profile()],
+            DEFAULT_BUILDING_BUFFER_LIMIT,
+            1.0,
+            &mut power_runtime,
+            PowerProbeMode::Indexed,
+            &mut grids,
+        )
+        .unwrap();
+        drifted.factory_topology = std::sync::Arc::new((*drifted.factory_topology).clone());
+        let mut drift_grids = vec![GridRuntime::default(); GRID_IDS.len()];
+        let scan = collect_power_sources_with_runtime(
+            &DeterministicRuntime::for_test(4),
+            &drifted,
+            &entities,
+            &crate::dyson::Reception::default(),
+            &[fixture_profile()],
+            DEFAULT_BUILDING_BUFFER_LIMIT,
+            1.0,
+            &mut power_runtime,
+            PowerProbeMode::Indexed,
+            &mut drift_grids,
+        )
+        .unwrap()
+        .scan;
+        assert!(scan.full_scan && scan.directory_fallback);
+    }
+
+    #[test]
+    fn failed_power_probe_candidate_keeps_source_bytes_hash_and_runtime() {
+        let mut state = power_probe_oactive_fixture(257, 1);
+        let prepared = prepare_advance_with_power_probe_test_options(
+            &state,
+            1.0,
+            1.0,
+            false,
+            &DeterministicRuntime::for_test(4),
+            PowerProbeMode::Indexed,
+            Some(1.0),
+        )
+        .unwrap();
+        commit_and_install_factory_test_state(&mut state, prepared);
+        let source_runtime = state.prepared_power_probe_runtime().unwrap();
+        let source_history = source_runtime.scan_history_for_test().to_vec();
+        let source_bytes = serde_json::to_vec(&state.materialize().unwrap()).unwrap();
+        let source_hash = state.canonical_sha256().unwrap();
+        let source_revision = state.revision;
+
+        let error = match prepare_advance_with_power_probe_test_options(
+            &state,
+            1.0,
+            1.0,
+            false,
+            &DeterministicRuntime::for_test(4),
+            PowerProbeMode::IndexedFailAfterCollect,
+            Some(1.0),
+        ) {
+            Ok(_) => panic!("injected power probe failure unexpectedly committed"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("injected failure after power probe"));
+        assert_eq!(state.revision, source_revision);
+        assert_eq!(state.canonical_sha256().unwrap(), source_hash);
+        assert_eq!(
+            serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+            source_bytes
+        );
+        let retained = state.prepared_power_probe_runtime().unwrap();
+        assert!(std::sync::Arc::ptr_eq(&source_runtime, &retained));
+        assert_eq!(retained.scan_history_for_test(), source_history);
+    }
+
+    #[test]
+    #[ignore = "synthetic wall-clock evidence; run explicitly outside correctness gates"]
+    fn power_probe_synthetic_wall_clock_ab_evidence() {
+        const SOURCES: usize = 16_384;
+        const ROUNDS: usize = 9;
+        let indexed_state = power_probe_oactive_fixture(SOURCES, 1);
+        let flat_state = power_probe_oactive_fixture(SOURCES, 1);
+        let indexed_start = std::time::Instant::now();
+        let indexed =
+            run_power_probe_advance(indexed_state, ROUNDS as f64, 4, PowerProbeMode::Indexed);
+        let indexed_elapsed = indexed_start.elapsed();
+        let flat_start = std::time::Instant::now();
+        let flat = run_power_probe_advance(flat_state, ROUNDS as f64, 4, PowerProbeMode::FlatFull);
+        let flat_elapsed = flat_start.elapsed();
+        assert_eq!(indexed.bytes, flat.bytes);
+        assert_eq!(indexed.canonical, flat.canonical);
+        assert_eq!(indexed.domain, flat.domain);
+        let indexed_probes = indexed
+            .scans
+            .iter()
+            .map(|scan| scan.selected_rows)
+            .sum::<usize>();
+        let flat_probes = flat
+            .scans
+            .iter()
+            .map(|scan| scan.selected_rows)
+            .sum::<usize>();
+        eprintln!(
+            "power-probe-ab\tsources={}\trounds={}\tindexed-probes={}\tflat-probes={}\tcompact-replay={}\tindexed-us={}\tflat-us={}",
+            SOURCES + 1,
+            ROUNDS,
+            indexed_probes,
+            flat_probes,
+            indexed
+                .scans
+                .iter()
+                .map(|scan| scan.compact_replay_rows)
+                .sum::<usize>(),
+            indexed_elapsed.as_micros(),
+            flat_elapsed.as_micros(),
+        );
+    }
+
+    #[test]
     fn power_generation_groups_base_sources_in_javascript_order() {
         let mut runtime = GridRuntime {
             wind_generation_kw: 5_571_240.0,
@@ -12241,6 +13574,7 @@ pub(crate) mod tests {
     fn generic_entity_patch_invalidates_planet_metric_runtime() {
         let mut state = planet_metric_oactive_fixture(32);
         assert!(state.prepared_planet_metrics_runtime().is_some());
+        assert!(state.prepared_power_probe_runtime().is_some());
         let entity_id = state.entities.ids[1].to_owned();
         let base_revision = state.revision;
         state
@@ -12264,6 +13598,7 @@ pub(crate) mod tests {
             })
             .unwrap();
         assert!(state.prepared_planet_metrics_runtime().is_none());
+        assert!(state.prepared_power_probe_runtime().is_none());
     }
 
     #[test]

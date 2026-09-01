@@ -21506,7 +21506,7 @@ mod tests {
         let context = state
             .blueprint_import_context_projection(9, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, &raw)
             .unwrap();
-        assert_eq!(context["support"]["supported"], true);
+        assert_eq!(context["support"]["supported"], true, "{context:#}");
         let final_name = context["preparedIntent"]["blueprint"]["name"]
             .as_str()
             .unwrap();
@@ -22011,6 +22011,71 @@ mod tests {
             serde_json::json!({})
         );
         assert_eq!(live.parse_belt(0).unwrap()["id"], "belt-priority");
+    }
+
+    #[test]
+    fn blueprint_capture_accepts_registered_data_only_custom_buildings() {
+        const REGISTRY: &str = "modded-blueprint-registry";
+        let mut state = player_command_state_for_registry(REGISTRY);
+        state
+            .base_value_mut()
+            .insert("blueprints".to_owned(), serde_json::json!([]));
+        let mut catalog = serde_json::to_value(state.catalog.snapshot.clone()).unwrap();
+        for building in catalog["buildings"].as_array_mut().unwrap() {
+            if building["id"] == "arc_smelter" {
+                building["id"] = Value::from("mod:smelter");
+                building["name"] = Value::from("模组熔炉");
+                building["shortName"] = Value::from("模炉");
+                building["stackLimit"] = Value::from(100);
+                building["stackLimitComplete"] = Value::Bool(true);
+                building["ports"] = serde_json::json!([
+                    { "index": 0, "direction": "input", "accepts": "solid", "maxConnections": 4 },
+                    { "index": 0, "direction": "output", "accepts": "solid", "maxConnections": 4 }
+                ]);
+                building["capabilities"] = serde_json::json!(["ordinary-production"]);
+            }
+        }
+        for recipe in catalog["recipes"].as_array_mut().unwrap() {
+            if recipe["buildingId"] == "arc_smelter" {
+                recipe["buildingId"] = Value::from("mod:smelter");
+                recipe["name"] = Value::from("模组冶炼");
+            }
+        }
+        for construction in catalog["constructions"].as_array_mut().unwrap() {
+            if construction["id"] == "arc_smelter" {
+                construction["id"] = Value::from("mod:smelter");
+            }
+        }
+        state.catalog = Arc::new(RuntimeCatalog::from_value(catalog, REGISTRY).unwrap());
+        assert!(state.catalog.data_only_native_supported);
+        let completed = state
+            .catalog
+            .technologies
+            .keys()
+            .cloned()
+            .map(Value::from)
+            .collect::<Vec<_>>();
+        state.base_value_mut()["research"]["completedTechIds"] = Value::Array(completed);
+        let index = *state.entity_index.get("smelter-a").unwrap();
+        let mut entity = state.parse_entity(index).unwrap();
+        entity["buildingId"] = Value::from("mod:smelter");
+        state.replace_entity_raw(index, Arc::<str>::from(entity.to_string()));
+        state.rebuild_indexes().unwrap();
+        assert_eq!(
+            ordinary_placement_support_reason(&state, "mod:smelter").unwrap(),
+            None
+        );
+
+        let context = state
+            .blueprint_capture_context_projection(9, REGISTRY, &["smelter-a".to_owned()])
+            .unwrap();
+        assert_eq!(context["support"]["supported"], true, "{context:#}");
+        let command = blueprint_capture_intent_command(9, &["smelter-a"]);
+        state.apply_player_authority_command(&command).unwrap();
+        assert_eq!(
+            state.base_value()["blueprints"][0]["entities"][0]["buildingId"],
+            "mod:smelter"
+        );
     }
 
     #[test]

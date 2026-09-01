@@ -273,6 +273,69 @@ fn unique_ids<'a>(values: impl IntoIterator<Item = &'a str>) -> anyhow::Result<(
     Ok(())
 }
 
+fn upgrade_graph_is_acyclic(metadata: &HashMap<String, BuildingRuntimeMetadata>) -> bool {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mark {
+        Visiting,
+        Complete,
+    }
+
+    fn visit(
+        id: &str,
+        metadata: &HashMap<String, BuildingRuntimeMetadata>,
+        marks: &mut HashMap<String, Mark>,
+    ) -> bool {
+        match marks.get(id) {
+            Some(Mark::Visiting) => return false,
+            Some(Mark::Complete) => return true,
+            None => {}
+        }
+        marks.insert(id.to_owned(), Mark::Visiting);
+        if let Some(target) = metadata
+            .get(id)
+            .and_then(|definition| definition.upgrade_target_id.as_deref())
+            && !visit(target, metadata, marks)
+        {
+            return false;
+        }
+        marks.insert(id.to_owned(), Mark::Complete);
+        true
+    }
+
+    let mut marks = HashMap::new();
+    metadata.keys().all(|id| visit(id, metadata, &mut marks))
+}
+
+fn data_only_catalog_relations_are_closed(catalog: &RuntimeCatalog) -> bool {
+    let technology_known = |id: &Option<String>| {
+        id.as_ref()
+            .is_none_or(|id| catalog.technologies.contains_key(id))
+    };
+    catalog
+        .recipes
+        .values()
+        .all(|recipe| technology_known(&recipe.required_tech_id))
+        && catalog
+            .constructions
+            .values()
+            .all(|definition| technology_known(&definition.required_tech_id))
+        && catalog.building_metadata.iter().all(|(id, metadata)| {
+            technology_known(&metadata.required_tech_id)
+                && metadata
+                    .upgrade_target_id
+                    .as_ref()
+                    .is_none_or(|target| target != id && catalog.buildings.contains_key(target))
+        })
+        && upgrade_graph_is_acyclic(&catalog.building_metadata)
+        && catalog.belt_speeds.keys().all(|tier| {
+            *tier <= 3
+                || catalog
+                    .belt_construction_ids
+                    .get(tier)
+                    .is_some_and(|id| catalog.constructions.contains_key(id))
+        })
+}
+
 impl RuntimeCatalog {
     pub fn validate(
         snapshot: CatalogSnapshot,
@@ -871,7 +934,103 @@ impl RuntimeCatalog {
                 catalog.belt_construction_ids.insert(tier, construction_id);
             }
         }
-        catalog.data_only_native_supported = data_only_native_supported;
+        // Cross references are intentionally checked after the permissive v1
+        // decoder has retained every unknown row. A malformed or scripted
+        // content pack therefore remains importable/exportable, while native
+        // player-authority admission fails closed instead of silently running
+        // a partial upgrade/technology/line policy.
+        catalog.data_only_native_supported =
+            data_only_native_supported && data_only_catalog_relations_are_closed(&catalog);
         Ok(catalog)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn catalog_value(buildings: Value, belts: Value) -> Value {
+        json!({
+            "protocolVersion": crate::CORE_PROTOCOL_VERSION,
+            "registryFingerprint": "catalog-closure-test",
+            "planets": [{ "id": "home", "systemId": "helios", "kind": "terrestrial", "orbitIndex": 1 }],
+            "items": [{ "id": "ore", "kind": "solid" }],
+            "buildings": buildings,
+            "recipes": [],
+            "constructions": [
+                { "id": "mod_a", "outputAmount": 1, "costs": [{ "itemId": "ore", "amount": 1 }] },
+                { "id": "mod_b", "outputAmount": 1, "costs": [{ "itemId": "ore", "amount": 1 }] },
+                { "id": "mod_belt", "outputAmount": 1, "costs": [{ "itemId": "ore", "amount": 1 }] }
+            ],
+            "belts": belts,
+            "technologies": [{ "id": "mod_tech", "costs": [{ "itemId": "ore", "amount": 1 }] }]
+        })
+    }
+
+    #[test]
+    fn declarative_upgrade_and_custom_belt_relations_are_native_eligible() {
+        let value = catalog_value(
+            json!([
+                { "id": "mod_a", "kind": "machine", "speed": 1, "inputCapacity": 10, "outputCapacity": 10,
+                  "stackLimit": 20, "stackLimitComplete": true, "requiredTechId": "mod_tech", "upgradeTargetId": "mod_b" },
+                { "id": "mod_b", "kind": "machine", "speed": 2, "inputCapacity": 20, "outputCapacity": 20,
+                  "stackLimit": 20, "stackLimitComplete": true }
+            ]),
+            json!([{ "tier": 4, "speed": 120, "constructionId": "mod_belt" }]),
+        );
+        let catalog = RuntimeCatalog::from_value(value, "catalog-closure-test").unwrap();
+        assert!(catalog.data_only_native_supported);
+        assert_eq!(
+            catalog.belt_construction_ids.get(&4).map(String::as_str),
+            Some("mod_belt")
+        );
+    }
+
+    #[test]
+    fn unknown_technology_cycle_script_or_unfunded_custom_belt_fail_closed() {
+        let cases = [
+            catalog_value(
+                json!([
+                    { "id": "mod_a", "kind": "machine", "speed": 1, "inputCapacity": 10, "outputCapacity": 10,
+                      "stackLimit": 20, "stackLimitComplete": true, "requiredTechId": "missing" },
+                    { "id": "mod_b", "kind": "machine", "speed": 1, "inputCapacity": 10, "outputCapacity": 10,
+                      "stackLimit": 20, "stackLimitComplete": true }
+                ]),
+                json!([]),
+            ),
+            catalog_value(
+                json!([
+                    { "id": "mod_a", "kind": "machine", "speed": 1, "inputCapacity": 10, "outputCapacity": 10,
+                      "stackLimit": 20, "stackLimitComplete": true, "upgradeTargetId": "mod_b" },
+                    { "id": "mod_b", "kind": "machine", "speed": 1, "inputCapacity": 10, "outputCapacity": 10,
+                      "stackLimit": 20, "stackLimitComplete": true, "upgradeTargetId": "mod_a" }
+                ]),
+                json!([]),
+            ),
+            catalog_value(
+                json!([
+                    { "id": "mod_a", "kind": "machine", "speed": 1, "inputCapacity": 10, "outputCapacity": 10,
+                      "stackLimit": 20, "stackLimitComplete": true, "scripted": true },
+                    { "id": "mod_b", "kind": "machine", "speed": 1, "inputCapacity": 10, "outputCapacity": 10,
+                      "stackLimit": 20, "stackLimitComplete": true }
+                ]),
+                json!([]),
+            ),
+            catalog_value(
+                json!([
+                    { "id": "mod_a", "kind": "machine", "speed": 1, "inputCapacity": 10, "outputCapacity": 10,
+                      "stackLimit": 20, "stackLimitComplete": true },
+                    { "id": "mod_b", "kind": "machine", "speed": 1, "inputCapacity": 10, "outputCapacity": 10,
+                      "stackLimit": 20, "stackLimitComplete": true }
+                ]),
+                json!([{ "tier": 4, "speed": 120 }]),
+            ),
+        ];
+        for value in cases {
+            let catalog = RuntimeCatalog::from_value(value, "catalog-closure-test").unwrap();
+            assert!(!catalog.data_only_native_supported);
+        }
     }
 }

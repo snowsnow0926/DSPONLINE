@@ -1192,4 +1192,68 @@ mod tests {
         );
         assert_eq!(row, json!({ "entityId": "MOD/entity", "supported": false }));
     }
+
+    #[test]
+    fn registered_data_only_custom_building_has_a_normal_factory_presentation() {
+        let catalog = RuntimeCatalog::from_value(
+            json!({
+                "protocolVersion": 1,
+                "registryFingerprint": "modded-registry",
+                "planets": [{ "id": "home", "name": "母星", "systemId": "helios", "kind": "terrestrial", "orbitIndex": 1 }],
+                "items": [
+                    { "id": "mod_ore", "name": "模组矿", "kind": "solid" },
+                    { "id": "mod_ingot", "name": "模组锭", "kind": "solid" }
+                ],
+                "buildings": [{
+                    "id": "mod_smelter", "name": "模组熔炉", "shortName": "模炉", "description": "数据型建筑",
+                    "kind": "machine", "speed": 2, "inputCapacity": 100, "outputCapacity": 200,
+                    "stackLimit": 64, "stackLimitComplete": true,
+                    "layoutWidth": 360, "layoutHeight": 240, "layoutClearance": 30,
+                    "ports": [
+                        { "index": 0, "direction": "input", "accepts": "solid", "maxConnections": 4 },
+                        { "index": 0, "direction": "output", "accepts": "solid", "maxConnections": 4 }
+                    ],
+                    "capabilities": ["ordinary-production"]
+                }],
+                "recipes": [{
+                    "id": "mod_smelt", "name": "模组冶炼", "buildingId": "mod_smelter", "duration": 2,
+                    "inputs": [{ "itemId": "mod_ore", "amount": 2 }],
+                    "outputs": [{ "itemId": "mod_ingot", "amount": 1 }]
+                }],
+                "constructions": [{
+                    "id": "mod_smelter", "outputAmount": 1,
+                    "costs": [{ "itemId": "mod_ingot", "amount": 2 }]
+                }],
+                "belts": [],
+                "technologies": []
+            }),
+            "modded-registry",
+        )
+        .unwrap();
+        let base = json!({
+            "paused": false,
+            "settings": { "resourceMode": "finite", "productionBufferLimit": 1_000 },
+            "research": { "completedTechIds": [] },
+            "endgame": { "infiniteResearch": {} },
+            "galaxy": { "profiles": { "home": { "oceanType": "none" } } }
+        });
+        let entity = json!({
+            "id": "mod-entity", "kind": "machine", "planetId": "home",
+            "buildingId": "mod_smelter", "recipeId": "mod_smelt", "machineCount": 2,
+            "powerFactor": 1, "progress": 0.5, "utilization": 1, "productionRate": 120,
+            "inputs": { "mod_ore": 3 }, "outputs": { "mod_ingot": 1 }
+        });
+        let row = project_entity(
+            "modded-registry",
+            &catalog,
+            base.as_object().unwrap(),
+            &entity,
+        );
+        assert_eq!(row["entityId"], "mod-entity");
+        assert_eq!(row["supported"], true);
+        assert_eq!(row["acceptedInputItemIds"], json!(["mod_ore"]));
+        assert_eq!(row["producedOutputItemIds"], json!(["mod_ingot"]));
+        assert_eq!(row["outputCapacity"], 400.0);
+        assert_eq!(row["cycleRatePerSecond"], 2.0);
+    }
 }

@@ -18,9 +18,7 @@ use crate::{
         queue_only_definition_supported, queue_only_definition_supported_on_planet,
         validate_blueprint_directory, validate_queue_directory, validate_version_directory,
     },
-    command::{
-        AddedRecord, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, PathSegment, SimulationCommandPatch,
-    },
+    command::{AddedRecord, PathSegment, SimulationCommandPatch},
     state::CoreState,
 };
 
@@ -33,6 +31,11 @@ const MAX_REFUND_ROWS: usize = 4_096;
 const MAX_OPAQUE_ID_BYTES: usize = 512;
 const MAX_NAME_BYTES: usize = 256;
 const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+fn data_only_catalog_identity_supported(state: &CoreState) -> bool {
+    state.identity.registry_fingerprint == state.catalog.snapshot.registry_fingerprint
+        && state.catalog.data_only_native_supported
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Refund {
@@ -1140,9 +1143,7 @@ fn prepare_enqueue(
     if active_planet.kind != "terrestrial" {
         return Ok(EnqueuePreparation::Unsupported("unsupported-active-planet"));
     }
-    if state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
-        || state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
-    {
+    if !data_only_catalog_identity_supported(state) {
         return Ok(EnqueuePreparation::Unsupported(
             "unsupported-blueprint-domain",
         ));
@@ -1599,9 +1600,7 @@ fn validated_fund_plan(
     state: &CoreState,
     intent: FundIntent,
 ) -> anyhow::Result<ConstructionQueueFundPlan> {
-    if state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
-        || state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
-    {
+    if !data_only_catalog_identity_supported(state) {
         bail!("native construction queue funding domain is unsupported")
     }
     let base = state.base_value();
@@ -2134,8 +2133,7 @@ pub(crate) fn queue_entry_deploy_ready(
     row: &Map<String, Value>,
     definition: &Map<String, Value>,
 ) -> anyhow::Result<bool> {
-    if state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
-        || state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    if !data_only_catalog_identity_supported(state)
         || queue_status(row)? != "pending-materials"
         || !matches!(row.get("allowExactOverlap"), None | Some(Value::Null))
         || !matches!(row.get("buildingCompletedAt"), None | Some(Value::Null))
@@ -2673,9 +2671,7 @@ fn prepare_direct_deploy<'a>(
             "unsupported-active-planet",
         ));
     }
-    if state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
-        || state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
-    {
+    if !data_only_catalog_identity_supported(state) {
         return Ok(DirectDeployPreparation::Unsupported(
             "unsupported-blueprint-domain",
         ));

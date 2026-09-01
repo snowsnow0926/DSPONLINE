@@ -607,13 +607,6 @@ fn exact_capture_stack(value: Option<&Value>) -> anyhow::Result<u64> {
         .ok_or_else(|| anyhow!("native blueprint capture machine count is invalid"))
 }
 
-fn builtin_content_id(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-}
-
 fn copy_present_fields(
     source: &Map<String, Value>,
     target: &mut Map<String, Value>,
@@ -689,10 +682,8 @@ fn prepare_capture(
             "unsupported-active-planet",
         ));
     }
-    if state.identity.registry_fingerprint
-        != crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
-        || state.catalog.snapshot.registry_fingerprint
-            != crate::command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    if state.identity.registry_fingerprint != state.catalog.snapshot.registry_fingerprint
+        || !state.catalog.data_only_native_supported
     {
         return Ok(BlueprintCapturePreparation::Unsupported(
             "unsupported-blueprint-domain",
@@ -746,11 +737,6 @@ fn prepare_capture(
             ));
         }
         let building_id = required_capture_text(entity, "buildingId", "building ID")?;
-        if !builtin_content_id(building_id) {
-            return Ok(BlueprintCapturePreparation::Unsupported(
-                "unsupported-blueprint-domain",
-            ));
-        }
         if !crate::command::ordinary_placement_building_domain_supported(building_id) {
             return Ok(BlueprintCapturePreparation::Unsupported(
                 "unsupported-blueprint-domain",
@@ -877,11 +863,6 @@ fn prepare_capture(
             ));
         }
         let item_id = required_capture_text(belt, "itemId", "belt item ID")?;
-        if !builtin_content_id(item_id) {
-            return Ok(BlueprintCapturePreparation::Unsupported(
-                "unsupported-blueprint-domain",
-            ));
-        }
         if !state.catalog.items.contains_key(item_id) {
             return Ok(BlueprintCapturePreparation::Unsupported(
                 "catalog-incomplete",

@@ -767,16 +767,16 @@ pub(crate) fn queue_only_definition_supported_on_planet(
     blueprint: &Map<String, Value>,
     planet_id: &str,
 ) -> anyhow::Result<bool> {
-    // Built-in catalog identifiers are lower snake case. Content packs use
-    // namespaced IDs (the public convention is `MOD/...`; older opaque saves
-    // also contain `mod:...`). Requiring the built-in alphabet makes this P0
-    // proof independent of a forged catalog row carrying a MOD ID.
-    let builtin_content_id = |value: &str| {
-        !value.is_empty()
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-    };
+    // A registry-bearing catalog is admissible only when it is exactly the
+    // catalog bound to this authoritative state and the loader proved that all
+    // referenced semantics are declarative and closed. Scripted or incomplete
+    // content packs remain fail-closed, while registered data-only IDs no
+    // longer need to masquerade as built-in lower-snake-case identifiers.
+    if state.identity.registry_fingerprint != state.catalog.snapshot.registry_fingerprint
+        || !state.catalog.data_only_native_supported
+    {
+        return Ok(false);
+    }
     let detail = compact_detail(state, blueprint)?;
     if detail.get("status").and_then(Value::as_str) != Some("supported") {
         return Ok(false);
@@ -803,43 +803,12 @@ pub(crate) fn queue_only_definition_supported_on_planet(
             .ok_or_else(|| {
                 anyhow!("native blueprint workspace queue-only building ID is invalid")
             })?;
-        if !builtin_content_id(building_id)
-            || crate::command::ordinary_placement_support_reason_on_planet(
-                state,
-                building_id,
-                planet_id,
-            )?
-            .is_some()
-        {
-            return Ok(false);
-        }
-    }
-    for belt in detail
-        .get("belts")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("native blueprint workspace queue-only belts are invalid"))?
-    {
-        if !belt
-            .get("itemId")
-            .and_then(Value::as_str)
-            .is_some_and(builtin_content_id)
-        {
-            return Ok(false);
-        }
-    }
-    for group in detail
-        .get("recipeOverrideGroups")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("native blueprint workspace queue-only recipes are invalid"))?
-    {
-        if !group
-            .get("sourceRecipeId")
-            .and_then(Value::as_str)
-            .is_some_and(builtin_content_id)
-            || !group
-                .get("targetRecipeId")
-                .and_then(Value::as_str)
-                .is_some_and(builtin_content_id)
+        if crate::command::ordinary_placement_support_reason_on_planet(
+            state,
+            building_id,
+            planet_id,
+        )?
+        .is_some()
         {
             return Ok(false);
         }

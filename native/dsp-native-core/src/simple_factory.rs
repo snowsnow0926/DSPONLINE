@@ -10159,7 +10159,7 @@ pub(crate) mod tests {
             Some(step_size_override),
         )
         .unwrap();
-        commit_and_install_factory_test_state(state, prepared);
+        commit_and_install_exact_factory_test_state(state, prepared);
     }
 
     fn material_delivery_state_fingerprint(state: &CoreState) -> (Vec<u8>, String, String, String) {
@@ -11047,17 +11047,95 @@ pub(crate) mod tests {
         ));
     }
 
-    fn assert_material_delivery_state_equal_except_revision(
-        left: &CoreState,
-        right: &CoreState,
+    fn assert_history_partition(state: &CoreState, durations: &[f64], context: &str) {
+        let public = state.materialize().unwrap();
+        let history = public["productionHistory"]
+            .as_array()
+            .expect("production history fixture must remain an array");
+        assert_eq!(history.len(), durations.len(), "{context}: bucket count");
+        let mut elapsed = 0.0;
+        for (index, (&duration, sample)) in durations.iter().zip(history).enumerate() {
+            elapsed += duration;
+            assert_eq!(
+                sample["sampleDurationSeconds"].as_f64(),
+                Some(duration),
+                "{context}: bucket {index} duration"
+            );
+            assert_eq!(
+                sample["elapsedSeconds"].as_f64(),
+                Some(elapsed),
+                "{context}: bucket {index} endpoint"
+            );
+        }
+        assert_eq!(
+            public["historyRecordedAt"].as_f64(),
+            Some(elapsed),
+            "{context}: public history clock"
+        );
+    }
+
+    fn assert_forced_legacy_step_state_equal_except_history_and_revision(
+        long: &CoreState,
+        segmented: &CoreState,
+        step_size: f64,
+        segment_count: usize,
         context: &str,
     ) {
-        let mut normalized_left = left.clone();
-        normalized_left.revision = right.revision;
+        assert_history_partition(long, &[60.0], &format!("{context}: long call"));
+        assert_history_partition(
+            segmented,
+            &vec![step_size; segment_count],
+            &format!("{context}: segmented calls"),
+        );
+
+        let mut normalized_long_public = long.materialize().unwrap();
+        let mut normalized_segmented_public = segmented.materialize().unwrap();
+        let long_history = normalized_long_public
+            .as_object_mut()
+            .unwrap()
+            .remove("productionHistory")
+            .unwrap();
+        let segmented_history = normalized_segmented_public
+            .as_object_mut()
+            .unwrap()
+            .remove("productionHistory")
+            .unwrap();
+        assert_ne!(
+            long_history, segmented_history,
+            "{context}: the explicit 10/30-second public call partitions must remain observable"
+        );
+        assert!(
+            normalized_long_public == normalized_segmented_public,
+            "{context}: only productionHistory may differ between the forced legacy call partitions"
+        );
         assert_eq!(
-            material_delivery_state_fingerprint(&normalized_left),
-            material_delivery_state_fingerprint(right),
-            "{context}; revision was asserted separately and no other state field was omitted"
+            serde_json::to_vec(&normalized_long_public).unwrap(),
+            serde_json::to_vec(&normalized_segmented_public).unwrap(),
+            "{context}: every non-history public v47 byte"
+        );
+        assert_eq!(
+            synthetic_conservation_sha256(long),
+            synthetic_conservation_sha256(segmented),
+            "{context}: conservation hash"
+        );
+
+        // Canonical state includes the intentionally different public history.
+        // Replacing exactly that one field (and host revision metadata) must
+        // make the complete persisted fingerprint byte-identical.
+        let mut normalized_long = long.clone();
+        normalized_long.revision = segmented.revision;
+        assert_eq!(
+            normalized_long.domain_sha256().unwrap(),
+            segmented.domain_sha256().unwrap(),
+            "{context}: domain hash after normalizing only host revision metadata"
+        );
+        normalized_long
+            .base_value_mut()
+            .insert("productionHistory".to_owned(), segmented_history);
+        assert_eq!(
+            material_delivery_state_fingerprint(&normalized_long),
+            material_delivery_state_fingerprint(segmented),
+            "{context}: replacing only the documented call-bucket history and revision must close the complete fingerprint"
         );
     }
 
@@ -11606,16 +11684,38 @@ pub(crate) mod tests {
                 long.revision, segmented.revision,
                 "revision is deliberately asserted outside the complete persisted-state comparison"
             );
-            assert_material_delivery_state_equal_except_revision(
-                &long,
-                &segmented,
-                &format!("material delivery state diverged for {step_size}s internal steps"),
+            let context =
+                format!("material delivery state diverged for {step_size}s internal steps");
+            if step_size == 1.0 {
+                assert_public_exact_state_equal_except_revision(
+                    &long,
+                    &segmented,
+                    segments.len() as u64 - 1,
+                    &context,
+                );
+            } else {
+                assert_forced_legacy_step_state_equal_except_history_and_revision(
+                    &long,
+                    &segmented,
+                    step_size,
+                    segments.len(),
+                    &context,
+                );
+            }
+            let long_runtime = long.prepared_material_delivery_runtime().unwrap();
+            let segmented_runtime = segmented.prepared_material_delivery_runtime().unwrap();
+            assert_eq!(
+                long_runtime.scan_history_for_test(),
+                segmented_runtime.scan_history_for_test(),
+                "{context}: runtime scan history"
             );
             assert_eq!(
-                long.prepared_material_delivery_runtime()
-                    .unwrap()
-                    .scan_history_for_test()
-                    .len(),
+                long_runtime.pending_rows_for_test(),
+                segmented_runtime.pending_rows_for_test(),
+                "{context}: pending rows"
+            );
+            assert_eq!(
+                long_runtime.scan_history_for_test().len(),
                 (60.0 / step_size) as usize * 2
             );
         }
@@ -13305,7 +13405,7 @@ pub(crate) mod tests {
             Some(step_size_override),
         )
         .unwrap();
-        commit_and_install_factory_test_state(state, prepared);
+        commit_and_install_exact_factory_test_state(state, prepared);
     }
 
     fn planet_metric_state_fingerprint(state: &CoreState) -> (Vec<u8>, String, String, String) {
@@ -14541,17 +14641,42 @@ pub(crate) mod tests {
                 segmented.revision,
                 segmented_source_revision + segments.len() as u64
             );
-            segmented.revision = long.revision;
+            let context = format!("planet metric state diverged for {step_size}s internal steps");
+            if step_size == 1.0 {
+                assert_public_exact_state_equal_except_revision(
+                    &long,
+                    &segmented,
+                    segments.len() as u64 - 1,
+                    &context,
+                );
+            } else {
+                assert_forced_legacy_step_state_equal_except_history_and_revision(
+                    &long,
+                    &segmented,
+                    step_size,
+                    segments.len(),
+                    &context,
+                );
+            }
+            let long_runtime = long.prepared_planet_metrics_runtime().unwrap();
+            let segmented_runtime = segmented.prepared_planet_metrics_runtime().unwrap();
             assert_eq!(
-                planet_metric_state_fingerprint(&segmented),
-                planet_metric_state_fingerprint(&long),
-                "planet metric state diverged for {step_size}s internal steps"
+                long_runtime.scan_history_for_test(),
+                segmented_runtime.scan_history_for_test(),
+                "{context}: runtime scan history"
             );
             assert_eq!(
-                long.prepared_planet_metrics_runtime()
-                    .unwrap()
-                    .scan_history_for_test()
-                    .len(),
+                long_runtime.pending_rows_for_test(),
+                segmented_runtime.pending_rows_for_test(),
+                "{context}: pending rows"
+            );
+            assert_eq!(
+                long_runtime.selection_calls_for_test(),
+                segmented_runtime.selection_calls_for_test(),
+                "{context}: indexed/full selection calls"
+            );
+            assert_eq!(
+                long_runtime.scan_history_for_test().len(),
                 (60.0 / step_size) as usize
             );
         }

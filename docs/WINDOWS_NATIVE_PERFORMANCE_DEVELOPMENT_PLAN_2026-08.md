@@ -2210,3 +2210,14 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 4. 当前组合源码的新鲜前端完整测试为 `368 files passed / 13 skipped`、`2947 passed / 29 skipped / 0 failed`；修复第 10 条后的完整 native Node 边界为 `534 tests / 533 passed / 1 privilege-dependent skipped / 0 failed`。TypeScript 通过；production build 处理 `2097 modules`，startup 总 gzip `180777 B`、JavaScript `87089 B`、CSS `93688 B`、最大启动 JavaScript `58974 B`、menu `258325 B`、forbidden startup module `0`；薄 UI 自动门禁通过 `13` 个 App binding 和 `12` 个独立组件文件。最终 Rust/E2E/长跑仍必须在所有并发纵切冻结后统一执行。
 
 本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；未读取玩家存档，未连接生产，未部署、打包或签名。
+
+### 24.42 物流拥堵 O(active) 独立裁判与真实多 worker 证书（2026-09-01，开发候选）
+
+`118c86f4`、`ab444bf1` 和 `624bbeb1` 将本地/星际站点拥堵显示从每个模拟步扫全部等待/需求站，收敛为冷启全量、暖拍 `prior-active reset ∪ current route endpoints`、精确 75% 稠密回退。这一节只宣称拥堵 selector/updater 的活动化已建立可信证书，不将全部物流系统写成已经完全 `O(active)`。
+
+1. 首版合成证据展示 8,192 个休眠站的拥堵计算从 `8192 → 0` 行，1,024 站加 1 条活跃路由从 `1024 → 2` 行。独立审查没有把这个扫描数当成正确性：它发现旧 expected 与 product 共用 active ledger、peer cache 和 indexed runtime，而所谓 segmented-60 只是对同一循环重新分组，可能同源漏行而假绿，因此首轮认证为 No-Go。
+2. `ab444bf1` 改用 persisted-order serial flat oracle：expected 不调生产 selector、active ledger instance、peer bucket 或 `DeterministicRuntime`，并分别重建状态比较 entity bytes、完整 bytes、canonical、domain 和 material/conservation。回归进入真实 updater，覆盖拓扑 generation 变化、MOD/opaque、invalid shape、75% 稠密回退与本地 updater 失败原子性，并补计 `Arc<()>` 的 `2 × usize` 驻留估算。focused 为 `17/17`，strict Clippy、rustfmt 和 diff check 通过。
+3. 二次独立审查为 `P0=0 / P1=0 / P2=3 / GO`，但指出旧 1/2/4/8 夹具只有 1,024 行，低于 4,096 并行阈值，因此“多 worker”证据实际全部串行。`624bbeb1` 使用 4,353 个合法站点直接调用真实 production updater；1-worker 记录 `selected/observed=1/1`，2/4/8-worker 均要求 runtime 实际 observed 至少 2 个 worker，最终 entity bytes、完整 state bytes、canonical、domain 和 material 与 1-worker 严格相同。两条真实多 worker 门禁 `2/2`、全 congestion 专项 `19/19`，strict Clippy、rustfmt 和 diff check 通过。诊断只存在 `cfg(test)`，release 仍调用原 `indexed_try_map`，没有为测试改生产阈值、公式或提交顺序。
+4. 仍保留两个明确证据边界：flat oracle 与生产 ledger 仍共用底层路由 JSON 解码，所以该 oracle 专门证明 active-set 不漏行，不是第二套完整物流引擎；topology/MOD/invalid/75% 已走真实 updater，但 public advance + checkpoint reload 的全链路分段等价仍受 production-history/Campaign 调用边界阻断，按后续多秒 Exact 纵切单独修复，不用物料哈希相同掩盖完整状态不等价。
+
+本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；未读取玩家存档，未连接生产，未部署、打包或签名。

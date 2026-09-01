@@ -213,6 +213,7 @@ test("desktop direct and transfer routes never request a renderer GameState", ()
   const host = readFileSync("desktop/native-host.cjs", "utf8");
   const rustHost = readFileSync("native/dsp-native-host/src/main.rs", "utf8");
   assert.match(main, /desktop:native-core-system-space-station-workspace-projection/);
+  assert.match(main, /desktop:native-core-system-space-station-workspace-projection"[\s\S]*?routeNativeProjectionRead\(\{[\s\S]*?projectionType: "system-space-station-workspace-v1"[\s\S]*?shadowRead: \(\) => nativeCoreSessions\.systemSpaceStationWorkspaceProjection\(ownerId, request\)/);
   assert.match(main, /"system-space-station-workspace-v1"/);
   assert.match(main, /nativeCoreSessions\.systemSpaceStationWorkspaceProjection/);
   assert.match(preload, /getNativeCoreSystemSpaceStationWorkspaceProjection/);

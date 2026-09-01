@@ -50,6 +50,10 @@ const EXACT_LINEAGE_WORKSPACE_PROJECTIONS = new Set([
   "operations-workspace-v1",
   "galaxy-account-workspace-v1",
 ]);
+const RESULT_LINEAGE_FENCED_PROJECTIONS = new Set([
+  ...EXACT_LINEAGE_WORKSPACE_PROJECTIONS,
+  "system-space-station-workspace-v1",
+]);
 const STATISTICS_LINEAGE_KEYS = new Set([
   "sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint",
   "minElapsedSeconds", "maxElapsedSeconds", "cursor", "limit", "planetId", "itemId",
@@ -68,6 +72,7 @@ const OWNER_LINEAGE_FENCED_PROJECTIONS = new Set([
   "stellar-industry-v2",
   "stellar-quantum-v1",
   "dyson-workspace-v1",
+  "system-space-station-workspace-v1",
   "campaign-workspace-v1",
   "galaxy-account-workspace-v1",
 ]);
@@ -85,6 +90,7 @@ const OWNER_LINEAGE_REQUIRED_PROJECTIONS = new Set([
   "stellar-industry-v2",
   "stellar-quantum-v1",
   "dyson-workspace-v1",
+  "system-space-station-workspace-v1",
 ]);
 const REGISTRY_RESULT_FENCED_PROJECTIONS = new Set([
   "factory-inventory-v1",
@@ -98,6 +104,7 @@ const REGISTRY_RESULT_FENCED_PROJECTIONS = new Set([
   "stellar-industry-v2",
   "stellar-quantum-v1",
   "dyson-workspace-v1",
+  "system-space-station-workspace-v1",
 ]);
 
 class NativePlayerAuthorityProjectionBrokerError extends Error {
@@ -345,7 +352,7 @@ class NativePlayerAuthorityProjectionBroker {
         "NATIVE_PLAYER_AUTHORITY_PROJECTION_RESULT_MISMATCH",
       );
     }
-    if (EXACT_LINEAGE_WORKSPACE_PROJECTIONS.has(projectionType) &&
+    if (RESULT_LINEAGE_FENCED_PROJECTIONS.has(projectionType) &&
         (result.sessionId !== request.sessionId || result.runId !== request.runId ||
          result.registryFingerprint !== request.expectedRegistryFingerprint)) {
       throw brokerError(

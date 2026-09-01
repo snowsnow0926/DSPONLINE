@@ -205,7 +205,10 @@ function fixture(initialSnapshot = {}) {
       return {
         projectionType: "system-space-station-workspace-v1",
         schemaVersion: 1,
+        sessionId: request.sessionId,
+        runId: request.runId,
         revision: request.expectedRevision,
+        registryFingerprint: request.expectedRegistryFingerprint,
       };
     },
     async orbitalContractWorkspaceProjection(ownerId, request) {
@@ -298,6 +301,7 @@ test("active same-session same-revision reads use only the main owner identity",
           "stellar-industry-v2",
           "stellar-quantum-v1",
           "dyson-workspace-v1",
+          "system-space-station-workspace-v1",
           "orbital-contract-workspace-v1",
           "campaign-workspace-v1",
           "operations-workspace-v1",
@@ -653,6 +657,63 @@ test("inventory, blueprint, search, and stellar reads fence run, registry, owner
   }
 });
 
+test("system-space-station reads fence run, registry, owner epoch, and result lineage", async () => {
+  const request = {
+    sessionId: "core-main-1",
+    runId: "run-1",
+    expectedRevision: 17,
+    expectedRegistryFingerprint: "7df8cf3a",
+    systemId: "helios",
+    requirementCursor: 0,
+    requirementLimit: 1,
+    inventoryCursor: 0,
+    inventoryLimit: 1,
+    trayCursor: 0,
+    trayLimit: 1,
+    stationCursor: 0,
+    stationLimit: 1,
+  };
+  const result = (input, overrides = {}) => ({
+    projectionType: "system-space-station-workspace-v1",
+    schemaVersion: 1,
+    sessionId: input.sessionId,
+    runId: input.runId,
+    revision: input.expectedRevision,
+    registryFingerprint: input.expectedRegistryFingerprint,
+    ...overrides,
+  });
+
+  const staleRun = fixture({ runId: "run-2", revision: 17 });
+  await assert.rejects(staleRun.broker.read(23, "system-space-station-workspace-v1", request),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RUN_MISMATCH");
+  assert.equal(staleRun.calls.length, 0);
+
+  const ownerRace = fixture();
+  ownerRace.registry.systemSpaceStationWorkspaceProjection = async (_ownerId, input) => {
+    ownerRace.setSession({ ownerEpoch: 3 });
+    return result(input);
+  };
+  await assert.rejects(ownerRace.broker.read(23, "system-space-station-workspace-v1", request),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_LINEAGE_MISMATCH");
+
+  const registryResultRace = fixture();
+  registryResultRace.registry.systemSpaceStationWorkspaceProjection = async (_ownerId, input) =>
+    result(input, { registryFingerprint: "ffffffff" });
+  await assert.rejects(registryResultRace.broker.read(23, "system-space-station-workspace-v1", request),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RESULT_MISMATCH");
+
+  const runResultRace = fixture();
+  runResultRace.registry.systemSpaceStationWorkspaceProjection = async (_ownerId, input) =>
+    result(input, { runId: "run-2" });
+  await assert.rejects(runResultRace.broker.read(23, "system-space-station-workspace-v1", request),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RESULT_MISMATCH");
+
+  await assert.rejects(fixture().broker.read(23, "system-space-station-workspace-v1", {
+    ...request,
+    runId: undefined,
+  }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_REQUEST_INVALID");
+});
+
 test("statistics player-authority reads reject old runs before and after an asynchronous read", async () => {
   const request = {
     sessionId: "core-main-1",
@@ -845,6 +906,71 @@ test("tagged projection routing never falls through to shadow after authority ow
   assert.equal(shadowReads, 0);
 });
 
+test("system-space-station tagged routing fails closed while untagged legacy reads keep shadow compatibility", async () => {
+  let authorityReads = 0;
+  let shadowReads = 0;
+  const taggedRequest = {
+    sessionId: "station-session-1",
+    runId: "station-run-1",
+    expectedRevision: 17,
+    expectedRegistryFingerprint: "registry-1",
+  };
+  const broker = {
+    ownsSession() {
+      return false;
+    },
+    async read() {
+      authorityReads += 1;
+      throw Object.assign(new Error("owner epoch changed"), {
+        code: "NATIVE_PLAYER_AUTHORITY_PROJECTION_LINEAGE_MISMATCH",
+      });
+    },
+  };
+
+  await assert.rejects(routeNativeProjectionRead({
+    broker,
+    ownerId: 23,
+    projectionType: "system-space-station-workspace-v1",
+    request: taggedRequest,
+    shadowRead: async () => {
+      shadowReads += 1;
+      return { source: "shadow" };
+    },
+  }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_LINEAGE_MISMATCH");
+  assert.equal(authorityReads, 1);
+  assert.equal(shadowReads, 0);
+
+  await assert.rejects(routeNativeProjectionRead({
+    broker: undefined,
+    ownerId: 23,
+    projectionType: "system-space-station-workspace-v1",
+    request: taggedRequest,
+    shadowRead: async () => {
+      shadowReads += 1;
+      return { source: "shadow" };
+    },
+  }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_UNAVAILABLE");
+  assert.equal(shadowReads, 0);
+
+  const legacyResult = await routeNativeProjectionRead({
+    broker,
+    ownerId: 23,
+    projectionType: "system-space-station-workspace-v1",
+    request: {
+      sessionId: "station-session-1",
+      expectedRevision: 17,
+      expectedRegistryFingerprint: "registry-1",
+    },
+    shadowRead: async () => {
+      shadowReads += 1;
+      return { source: "shadow" };
+    },
+  });
+  assert.deepEqual(legacyResult, { source: "shadow" });
+  assert.equal(authorityReads, 1);
+  assert.equal(shadowReads, 1);
+});
+
 test("untagged legacy projection routing remains compatible with shadow sessions", async () => {
   let authorityReads = 0;
   let shadowReads = 0;
@@ -895,6 +1021,7 @@ test("main routes matching authority reads and keeps identity-bearing control ou
     ["desktop:native-core-stellar-industry-projection", "stellar-industry-v1", "stellarIndustryProjection"],
     ["desktop:native-core-stellar-industry-v2-projection", "stellar-industry-v2", "stellarIndustryProjectionV2"],
     ["desktop:native-core-stellar-quantum-projection", "stellar-quantum-v1", "stellarQuantumProjection"],
+    ["desktop:native-core-system-space-station-workspace-projection", "system-space-station-workspace-v1", "systemSpaceStationWorkspaceProjection"],
   ];
 
   assert.match(main, /new NativePlayerAuthorityProjectionBroker\(\{[\s\S]*?runtime:\s*nativePlayerAuthorityRuntime[\s\S]*?registry:\s*nativeCoreSessions/);
@@ -921,7 +1048,6 @@ test("main routes matching authority reads and keeps identity-bearing control ou
   assert.match(main, /nativeProjectionHasPlayerAuthorityRun\(request\) \|\|[\s\S]*?nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "technology-v1", request\)/);
   assert.match(main, /nativeProjectionHasPlayerAuthorityRun\(request\) \|\|[\s\S]*?nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "recipe-workspace-v1", request\)/);
   assert.match(main, /nativeProjectionHasPlayerAuthorityRun\(request\) \|\|[\s\S]*?nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "dyson-workspace-v1", request\)/);
-  assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?"system-space-station-workspace-v1",[\s\S]*?request/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\.read\([\s\S]*?"campaign-workspace-v1",[\s\S]*?request/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\.read\([\s\S]*?"operations-workspace-v1",[\s\S]*?request/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\.read\([\s\S]*?"galaxy-account-workspace-v1",[\s\S]*?request/);

@@ -2434,14 +2434,13 @@ ipcMain.handle("desktop:native-core-system-space-station-workspace-projection", 
     resultContext: nativeSystemSpaceStationWorkspaceProjectionResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
-    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
-      return await nativePlayerAuthorityProjectionBroker.read(
-        ownerId,
-        "system-space-station-workspace-v1",
-        request,
-      );
-    }
-    return await nativeCoreSessions.systemSpaceStationWorkspaceProjection(ownerId, request);
+    return await routeNativeProjectionRead({
+      broker: nativePlayerAuthorityProjectionBroker,
+      ownerId,
+      projectionType: "system-space-station-workspace-v1",
+      request,
+      shadowRead: () => nativeCoreSessions.systemSpaceStationWorkspaceProjection(ownerId, request),
+    });
   });
 });
 

@@ -95,9 +95,9 @@ describe("native planet navigation App integration", () => {
     expect(nativeRail).toMatch(/建筑间直拖与永久丢弃仍保持关闭/);
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeConstructionDock[\s\S]*?frame=\{nativeConstructionInventoryFrame\}[\s\S]*?: <StableConstructionDock/);
     expect(nativeConstructionDock).toMatch(/!frame[\s\S]*?data-native-authority-unavailable="construction-inventory-v1"/);
-    expect(nativeConstructionDock).toMatch(/普通建筑可单栋放置/);
-    expect(nativeConstructionDock).toMatch(/Mk\.I–III 线路可单条连接/);
-    expect(nativeConstructionDock).toMatch(/自动选级、连续批量拉线和特殊物流端口仍保持关闭/);
+    expect(nativeConstructionDock).toMatch(/数据型建筑可单栋放置/);
+    expect(nativeConstructionDock).toMatch(/已注册线路可单条连接/);
+    expect(nativeConstructionDock).toMatch(/连续批量拉线和特殊物流端口使用独立原子命令/);
     expect(app).toMatch(/enabled=\{nextMobileShell && !nativePlayerAuthorityOwnsRuntime\}/);
     expect(app).toMatch(/native-mobile-shell-unavailable[\s\S]*?为避免显示旧星球数据/);
 
@@ -120,7 +120,7 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <CanvasSelectionTools/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <PendingBlueprintLayer/);
     expect(app).not.toMatch(/!nativePlayerAuthorityOwnsRuntime \? <SelectionToolbar/);
-    expect(app).toMatch(/<SelectionToolbar[\s\S]*?unsafeActionsEnabled=\{!nativePlayerAuthorityOwnsRuntime\}/);
+    expect(app).toMatch(/<SelectionToolbar[\s\S]*?unsafeActionsEnabled=\{!nativePlayerAuthorityOwnsRuntime \|\| Boolean\([\s\S]*?nativeAuthoritativeFactoryCanvasFrame/);
     expect(app).toMatch(/<NativeBlueprintWorkspace[\s\S]*?!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintTransformPending &&[\s\S]*?!nativeBlueprintRecipeOverridePending &&[\s\S]*?!nativeBlueprintDeletePending &&[\s\S]*?!nativeConstructionQueueCancelPending &&[\s\S]*?!nativeBlueprintEnqueuePending &&[\s\S]*?!nativeBlueprintDirectDeployPending &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <RuntimeRenderProfile id="onboarding">/);
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeFactoryInspectorPanel[\s\S]*?: <StableInspectorPanel/);

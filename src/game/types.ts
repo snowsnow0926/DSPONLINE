@@ -862,7 +862,25 @@ export interface BuildingDefinition {
   stackLimit?: number;
   family?: "smelter" | "assembler" | "chemical";
   megastructure?: boolean;
+  /** Data-only native layout/interaction metadata used by content packs. */
+  unique?: boolean;
+  upgradeTargetId?: BuildingId;
+  layoutWidth?: number;
+  layoutHeight?: number;
+  layoutClearance?: number;
+  ports?: BuildingPortDefinition[];
+  capabilities?: string[];
+  /** Script/native-code extensions remain Web-only and block Rust authority. */
+  scripted?: boolean;
   description: string;
+}
+
+export interface BuildingPortDefinition {
+  index: number;
+  direction: "input" | "output" | "bidirectional";
+  accepts: "solid" | "fluid" | "matrix" | "any";
+  maxConnections?: number;
+  special?: string;
 }
 
 export interface ConstructionDefinition {

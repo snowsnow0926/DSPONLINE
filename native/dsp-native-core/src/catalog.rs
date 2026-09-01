@@ -170,12 +170,86 @@ pub struct RuntimeCatalog {
     /// protocol-v1 payloads remain readable but cannot authorize increases in
     /// a content-pack registry because they omitted the optional stack bound.
     pub building_stack_policies: HashMap<String, BuildingStackPolicy>,
+    /// Command/layout/presentation fields carried by the canonical renderer
+    /// snapshot without widening the public v47 save schema.  Older protocol
+    /// v1 catalogs get conservative defaults; a current data-only content pack
+    /// supplies every field explicitly and is therefore eligible for native
+    /// placement, stacking, layout and display.
+    pub building_metadata: HashMap<String, BuildingRuntimeMetadata>,
+    /// Stable construction item for each registered belt tier.  Core tiers
+    /// retain their historical IDs while declarative tiers carry their own ID
+    /// in the catalog payload.
+    pub belt_construction_ids: HashMap<u8, String>,
+    /// False when a catalog declares script/native-code behavior that the
+    /// deterministic data-only core cannot execute.  The save remains readable
+    /// and exportable; player-authority admission must fail closed.
+    pub data_only_native_supported: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BuildingStackPolicy {
     pub limit: Option<u64>,
     pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuildingPortDefinition {
+    pub index: u8,
+    pub direction: String,
+    pub accepts: String,
+    pub max_connections: u8,
+    pub special: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuildingRuntimeMetadata {
+    pub name: String,
+    pub short_name: String,
+    pub description: String,
+    pub required_tech_id: Option<String>,
+    pub upgrade_target_id: Option<String>,
+    pub unique: bool,
+    pub megastructure: bool,
+    pub layout_width: f64,
+    pub layout_height: f64,
+    pub layout_clearance: f64,
+    pub ports: Vec<BuildingPortDefinition>,
+    pub capabilities: HashSet<String>,
+    pub scripted: bool,
+}
+
+fn builtin_megastructure(id: &str) -> bool {
+    matches!(
+        id,
+        "orbital_cargo_terminal"
+            | "construction_center"
+            | "galactic_material_exporter"
+            | "micro_black_hole_connector"
+            | "time_warp_device"
+            | "space_station_construction_launcher"
+    )
+}
+
+fn default_building_metadata(building: &BuildingDefinition) -> BuildingRuntimeMetadata {
+    let megastructure = builtin_megastructure(&building.id);
+    BuildingRuntimeMetadata {
+        name: building.id.clone(),
+        short_name: building.id.clone(),
+        description: String::new(),
+        required_tech_id: None,
+        upgrade_target_id: None,
+        unique: matches!(
+            building.id.as_str(),
+            "micro_black_hole_connector" | "time_warp_device"
+        ),
+        megastructure,
+        layout_width: if megastructure { 620.0 } else { 300.0 },
+        layout_height: if megastructure { 420.0 } else { 220.0 },
+        layout_clearance: 24.0,
+        ports: Vec::new(),
+        capabilities: HashSet::new(),
+        scripted: false,
+    }
 }
 
 fn valid_id(value: &str) -> bool {
@@ -464,6 +538,28 @@ impl RuntimeCatalog {
                 )
             })
             .collect();
+        let building_metadata = snapshot
+            .buildings
+            .iter()
+            .map(|building| (building.id.clone(), default_building_metadata(building)))
+            .collect();
+        let belt_construction_ids = snapshot
+            .belts
+            .iter()
+            .filter_map(|belt| {
+                let id = match belt.tier {
+                    1 => "conveyor_belt_mk1",
+                    2 => "conveyor_belt_mk2",
+                    3 => "conveyor_belt_mk3",
+                    _ => return None,
+                };
+                snapshot
+                    .constructions
+                    .iter()
+                    .any(|definition| definition.id == id)
+                    .then(|| (belt.tier, id.to_owned()))
+            })
+            .collect();
         Ok(Self {
             snapshot,
             fingerprint,
@@ -476,11 +572,16 @@ impl RuntimeCatalog {
             proliferators,
             technologies,
             building_stack_policies,
+            building_metadata,
+            belt_construction_ids,
+            data_only_native_supported: true,
         })
     }
 
     pub fn from_value(value: Value, expected_registry_fingerprint: &str) -> anyhow::Result<Self> {
         let mut building_stack_policies = HashMap::new();
+        let mut building_metadata = HashMap::new();
+        let mut data_only_native_supported = true;
         if let Some(buildings) = value.get("buildings").and_then(Value::as_array) {
             for building in buildings {
                 let Some(object) = building.as_object() else {
@@ -515,6 +616,239 @@ impl RuntimeCatalog {
                 };
                 building_stack_policies
                     .insert(id.to_owned(), BuildingStackPolicy { limit, complete });
+
+                let name = object
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty() && value.len() <= 160)
+                    .unwrap_or(id)
+                    .to_owned();
+                let short_name = object
+                    .get("shortName")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty() && value.len() <= 80)
+                    .unwrap_or(&name)
+                    .to_owned();
+                let description = object
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .filter(|value| value.len() <= 2_048)
+                    .unwrap_or_default()
+                    .to_owned();
+                let required_tech_id = object
+                    .get("requiredTechId")
+                    .filter(|value| !value.is_null())
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .filter(|value| valid_id(value))
+                            .map(str::to_owned)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "native catalog building required technology is invalid: {id}"
+                                )
+                            })
+                    })
+                    .transpose()?;
+                let upgrade_target_id = object
+                    .get("upgradeTargetId")
+                    .filter(|value| !value.is_null())
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .filter(|value| valid_id(value))
+                            .map(str::to_owned)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "native catalog building upgrade target is invalid: {id}"
+                                )
+                            })
+                    })
+                    .transpose()?;
+                let boolean = |key: &str, default: bool| -> anyhow::Result<bool> {
+                    match object.get(key) {
+                        None => Ok(default),
+                        Some(Value::Bool(value)) => Ok(*value),
+                        Some(_) => bail!("native catalog building {key} flag is invalid: {id}"),
+                    }
+                };
+                let megastructure = boolean("megastructure", builtin_megastructure(id))?;
+                let unique = boolean(
+                    "unique",
+                    matches!(id, "micro_black_hole_connector" | "time_warp_device"),
+                )?;
+                let scripted = boolean("scripted", false)?;
+                data_only_native_supported &= !scripted;
+                let bounded_dimension = |key: &str, default: f64| -> anyhow::Result<f64> {
+                    match object.get(key) {
+                        None => Ok(default),
+                        Some(value) => value
+                            .as_f64()
+                            .filter(|value| {
+                                value.is_finite() && *value >= 0.0 && *value <= 10_000.0
+                            })
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("native catalog building {key} is invalid: {id}")
+                            }),
+                    }
+                };
+                let layout_width =
+                    bounded_dimension("layoutWidth", if megastructure { 620.0 } else { 300.0 })?;
+                let layout_height =
+                    bounded_dimension("layoutHeight", if megastructure { 420.0 } else { 220.0 })?;
+                let layout_clearance = bounded_dimension("layoutClearance", 24.0)?;
+                if layout_width <= 0.0 || layout_height <= 0.0 {
+                    bail!("native catalog building layout size is empty: {id}")
+                }
+                let capabilities = object
+                    .get("capabilities")
+                    .map(|value| {
+                        let values = value
+                            .as_array()
+                            .filter(|values| values.len() <= 64)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "native catalog building capabilities are invalid: {id}"
+                                )
+                            })?;
+                        let mut result = HashSet::with_capacity(values.len());
+                        for value in values {
+                            let capability = value
+                                .as_str()
+                                .filter(|value| valid_id(value))
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "native catalog building capability is invalid: {id}"
+                                    )
+                                })?;
+                            if !result.insert(capability.to_owned()) {
+                                bail!("native catalog building capability is repeated: {id}")
+                            }
+                        }
+                        Ok(result)
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                let ports = object
+                    .get("ports")
+                    .map(|value| {
+                        let values = value
+                            .as_array()
+                            .filter(|values| values.len() <= 32)
+                            .ok_or_else(|| anyhow::anyhow!("native catalog building ports are invalid: {id}"))?;
+                        let mut seen = HashSet::new();
+                        let mut result = Vec::with_capacity(values.len());
+                        for value in values {
+                            let port = value
+                                .as_object()
+                                .ok_or_else(|| anyhow::anyhow!("native catalog building port is invalid: {id}"))?;
+                            let index = port
+                                .get("index")
+                                .and_then(Value::as_u64)
+                                .and_then(|value| u8::try_from(value).ok())
+                                .filter(|value| *value < 32)
+                                .ok_or_else(|| anyhow::anyhow!("native catalog building port index is invalid: {id}"))?;
+                            let direction = port
+                                .get("direction")
+                                .and_then(Value::as_str)
+                                .filter(|value| matches!(*value, "input" | "output" | "bidirectional"))
+                                .ok_or_else(|| anyhow::anyhow!("native catalog building port direction is invalid: {id}"))?
+                                .to_owned();
+                            if !seen.insert((index, direction.clone())) {
+                                bail!("native catalog building port is repeated: {id}")
+                            }
+                            let accepts = port
+                                .get("accepts")
+                                .and_then(Value::as_str)
+                                .filter(|value| matches!(*value, "solid" | "fluid" | "matrix" | "any"))
+                                .unwrap_or("any")
+                                .to_owned();
+                            let max_connections = port
+                                .get("maxConnections")
+                                .and_then(Value::as_u64)
+                                .and_then(|value| u8::try_from(value).ok())
+                                .filter(|value| *value > 0 && *value <= 16)
+                                .unwrap_or(1);
+                            let special = port
+                                .get("special")
+                                .filter(|value| !value.is_null())
+                                .map(|value| {
+                                    value
+                                        .as_str()
+                                        .filter(|value| valid_id(value))
+                                        .map(str::to_owned)
+                                        .ok_or_else(|| anyhow::anyhow!("native catalog building port special kind is invalid: {id}"))
+                                })
+                                .transpose()?;
+                            result.push(BuildingPortDefinition {
+                                index,
+                                direction,
+                                accepts,
+                                max_connections,
+                                special,
+                            });
+                        }
+                        result.sort_by(|left, right| {
+                            (left.index, left.direction.as_str())
+                                .cmp(&(right.index, right.direction.as_str()))
+                        });
+                        Ok(result)
+                    })
+                    .transpose()?
+                    .unwrap_or_default();
+                building_metadata.insert(
+                    id.to_owned(),
+                    BuildingRuntimeMetadata {
+                        name,
+                        short_name,
+                        description,
+                        required_tech_id,
+                        upgrade_target_id,
+                        unique,
+                        megastructure,
+                        layout_width,
+                        layout_height,
+                        layout_clearance,
+                        ports,
+                        capabilities,
+                        scripted,
+                    },
+                );
+            }
+        }
+        let mut belt_construction_ids = HashMap::new();
+        if let Some(belts) = value.get("belts").and_then(Value::as_array) {
+            for belt in belts {
+                let Some(object) = belt.as_object() else {
+                    continue;
+                };
+                let Some(tier) = object
+                    .get("tier")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u8::try_from(value).ok())
+                else {
+                    continue;
+                };
+                let construction_id = object
+                    .get("constructionId")
+                    .or_else(|| object.get("id"))
+                    .and_then(Value::as_str)
+                    .filter(|value| valid_id(value))
+                    .map(str::to_owned)
+                    .or_else(|| match tier {
+                        1 => Some("conveyor_belt_mk1".to_owned()),
+                        2 => Some("conveyor_belt_mk2".to_owned()),
+                        3 => Some("conveyor_belt_mk3".to_owned()),
+                        _ => None,
+                    });
+                if let Some(construction_id) = construction_id {
+                    if belt_construction_ids
+                        .insert(tier, construction_id)
+                        .is_some()
+                    {
+                        bail!("native catalog belt construction tier is repeated")
+                    }
+                }
             }
         }
         let snapshot =
@@ -525,6 +859,19 @@ impl RuntimeCatalog {
                 catalog.building_stack_policies.insert(id, policy);
             }
         }
+        for (id, metadata) in building_metadata {
+            if catalog.buildings.contains_key(&id) {
+                catalog.building_metadata.insert(id, metadata);
+            }
+        }
+        for (tier, construction_id) in belt_construction_ids {
+            if catalog.belt_speeds.contains_key(&tier)
+                && catalog.constructions.contains_key(&construction_id)
+            {
+                catalog.belt_construction_ids.insert(tier, construction_id);
+            }
+        }
+        catalog.data_only_native_supported = data_only_native_supported;
         Ok(catalog)
     }
 }

@@ -395,6 +395,16 @@ function registerBuildings(packs: RegisteredContentPack[]): void {
       accepts: building.accepts ?? "any",
       ...(building.powerDemandKw !== undefined ? { powerDemandKw: Math.max(0, building.powerDemandKw) } : {}),
       ...(building.powerGenerationKw !== undefined ? { powerGenerationKw: Math.max(0, building.powerGenerationKw) } : {}),
+      ...(building.stackLimit !== undefined ? { stackLimit: Math.max(1, Math.floor(building.stackLimit)) } : {}),
+      ...(building.megastructure !== undefined ? { megastructure: building.megastructure } : {}),
+      ...(building.unique !== undefined ? { unique: building.unique } : {}),
+      ...(building.upgradeTargetId ? { upgradeTargetId: building.upgradeTargetId as BuildingDefinition["upgradeTargetId"] } : {}),
+      ...(building.layoutWidth !== undefined ? { layoutWidth: building.layoutWidth } : {}),
+      ...(building.layoutHeight !== undefined ? { layoutHeight: building.layoutHeight } : {}),
+      ...(building.layoutClearance !== undefined ? { layoutClearance: building.layoutClearance } : {}),
+      ...(building.ports ? { ports: building.ports.map((port) => ({ ...port })) } : {}),
+      ...(building.capabilities ? { capabilities: [...building.capabilities] } : {}),
+      ...(building.scripted !== undefined ? { scripted: building.scripted } : {}),
       description: building.description?.trim() || `${pack.manifest.name} 提供的建筑。`,
     };
   }

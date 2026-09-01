@@ -670,6 +670,9 @@ export interface DesktopNativeCoreItemDefinition {
 
 export interface DesktopNativeCoreBuildingDefinition {
   id: string;
+  name?: string;
+  shortName?: string;
+  description?: string;
   kind: string;
   speed: number;
   inputCapacity: number;
@@ -685,6 +688,22 @@ export interface DesktopNativeCoreBuildingDefinition {
   /** Present on current clients so Rust can distinguish unbounded from omitted. */
   stackLimit?: number | null;
   stackLimitComplete?: boolean;
+  requiredTechId?: string;
+  upgradeTargetId?: string;
+  megastructure?: boolean;
+  unique?: boolean;
+  layoutWidth?: number;
+  layoutHeight?: number;
+  layoutClearance?: number;
+  ports?: Array<{
+    index: number;
+    direction: "input" | "output" | "bidirectional";
+    accepts: "solid" | "fluid" | "matrix" | "any";
+    maxConnections?: number;
+    special?: string;
+  }>;
+  capabilities?: string[];
+  scripted?: boolean;
 }
 
 export interface DesktopNativeCoreRecipeDefinition {
@@ -726,7 +745,7 @@ export interface DesktopNativeCoreCatalog {
   buildings: DesktopNativeCoreBuildingDefinition[];
   recipes: DesktopNativeCoreRecipeDefinition[];
   constructions: DesktopNativeCoreConstructionDefinition[];
-  belts: Array<{ tier: number; speed: number }>;
+  belts: Array<{ tier: number; speed: number; id?: string; name?: string; constructionId?: string }>;
   proliferators: Array<{
     tier: number;
     itemId: string;

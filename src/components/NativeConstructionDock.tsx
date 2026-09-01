@@ -1,6 +1,6 @@
 import { Factory, LockKeyhole, Route } from "lucide-react";
 import { useMemo } from "react";
-import { BUILDINGS, CONSTRUCTION } from "../game/content";
+import { BUILDINGS, CONSTRUCTION, getBeltConstructionId, getBeltTiers } from "../game/content";
 import type { NativeConstructionInventoryFrame } from "../game/nativeConstructionInventoryStore";
 import type { BeltTier } from "../game/types";
 import { QuantityValue } from "./QuantityValue";
@@ -16,14 +16,8 @@ interface NativeConstructionDockProps {
   onBeltLanesChange: (lanes: number) => void;
 }
 
-const BELT_TIER_BY_CONSTRUCTION_ID = Object.freeze({
-  conveyor_belt_mk1: 1,
-  conveyor_belt_mk2: 2,
-  conveyor_belt_mk3: 3,
-} satisfies Record<string, BeltTier>);
-
 function beltTierForConstruction(buildingId: string): BeltTier | null {
-  return BELT_TIER_BY_CONSTRUCTION_ID[buildingId as keyof typeof BELT_TIER_BY_CONSTRUCTION_ID] ?? null;
+  return getBeltTiers().find((tier) => getBeltConstructionId(tier) === buildingId) ?? null;
 }
 
 function constructionLabel(
@@ -133,7 +127,7 @@ export function NativeConstructionDock({
       })}
     </div>
     <p className="native-construction-dock__notice">
-      普通建筑可单栋放置，Mk.I–III 线路可单条连接；每次都会重新向 Rust 申请凭证并原子扣料。自动选级、连续批量拉线和特殊物流端口仍保持关闭。
+      数据型建筑可单栋放置，已注册线路可单条连接；每次都会重新向 Rust 申请凭证并原子扣料。连续批量拉线和特殊物流端口使用独立原子命令。
     </p>
   </footer>;
 }

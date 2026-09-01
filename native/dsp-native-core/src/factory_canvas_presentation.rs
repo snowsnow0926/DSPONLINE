@@ -10,7 +10,6 @@ use serde_json::{Map, Value, json};
 
 use crate::catalog::{BuildingDefinition, RecipeDefinition, RuntimeCatalog};
 
-const EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT: &str = "7df8cf3a";
 const MAX_ITEM_ROWS: usize = 32;
 const MAX_LABEL_BYTES: usize = 256;
 const MIN_BUILDING_BUFFER_LIMIT: f64 = 1_000.0;
@@ -1022,8 +1021,8 @@ pub(crate) fn project_entity(
         return unsupported("");
     };
     let entity_id = entity.get("id").and_then(Value::as_str).unwrap_or_default();
-    if identity_registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
-        || catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
+    if identity_registry_fingerprint != catalog.snapshot.registry_fingerprint
+        || !catalog.data_only_native_supported
         || entity_id.is_empty()
         || entity_id.contains('\0')
         || !inventory_is_proven(entity.get("inputs"), catalog)
@@ -1089,6 +1088,8 @@ mod tests {
         BeltDefinition, BuildingDefinition, CatalogSnapshot, ItemDefinition, PlanetDefinition,
     };
     use std::collections::HashMap;
+
+    const EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT: &str = "7df8cf3a";
 
     fn catalog(registry_fingerprint: &str) -> RuntimeCatalog {
         RuntimeCatalog::validate(

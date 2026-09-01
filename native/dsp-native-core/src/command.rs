@@ -1185,6 +1185,20 @@ pub(crate) fn ordinary_building_removal_eligibility(
     state: &CoreState,
     entity_id: &str,
 ) -> anyhow::Result<OrdinaryBuildingRemovalEligibility> {
+    ordinary_building_removal_eligibility_with_incident_allowlist(state, entity_id, &HashSet::new())
+}
+
+/// Variant used by one atomic selection-removal intent.  A building can be
+/// removed together with all of its incident ordinary belts, but a renderer
+/// must never be able to hide an unaccounted route behind the batch marker.
+/// The caller therefore supplies the exact belt IDs that the same expanded
+/// command will remove; every other incident route keeps the ordinary removal
+/// fail-closed.
+pub(crate) fn ordinary_building_removal_eligibility_with_incident_allowlist(
+    state: &CoreState,
+    entity_id: &str,
+    allowed_incident_belt_ids: &HashSet<String>,
+) -> anyhow::Result<OrdinaryBuildingRemovalEligibility> {
     let active_planet_id = state
         .base_value()
         .get("activePlanetId")
@@ -1282,6 +1296,10 @@ pub(crate) fn ordinary_building_removal_eligibility(
         if ["source", "target"]
             .iter()
             .any(|key| belt.get(*key).and_then(Value::as_str) == Some(entity_id))
+            && belt
+                .get("id")
+                .and_then(Value::as_str)
+                .is_none_or(|belt_id| !allowed_incident_belt_ids.contains(belt_id))
         {
             return Ok(eligibility.unsupported("incident-belt"));
         }
@@ -8537,6 +8555,9 @@ impl CoreState {
         if crate::factory_layout_command::command_contains_intent(command) {
             return crate::factory_layout_command::validate_command(self, command);
         }
+        if crate::factory_batch_command::command_contains_intent(command) {
+            return crate::factory_batch_command::validate_command(self, command);
+        }
         if crate::blueprint_command::command_contains_intent(command) {
             return crate::blueprint_command::validate_command(self, command);
         }
@@ -8821,6 +8842,13 @@ impl CoreState {
             result.topology_dirty = true;
             return Ok(result);
         }
+        if crate::factory_batch_command::command_contains_intent(command) {
+            crate::factory_batch_command::validate_resume_marker(command)?;
+            result.changed_entity_ids.clear();
+            result.changed_belt_ids.clear();
+            result.topology_dirty = true;
+            return Ok(result);
+        }
         if crate::recipe_command::command_contains_intent(command) {
             let entity_id = crate::recipe_command::validate_resume_marker(command)?;
             result.changed_entity_ids.push(entity_id);
@@ -8948,6 +8976,20 @@ impl CoreState {
             result.topology_dirty = true;
             return Ok(result);
         }
+        if crate::factory_batch_command::command_contains_intent(command) {
+            if command.protocol_version != crate::CORE_PROTOCOL_VERSION {
+                bail!("native player-authority command protocol version is unsupported")
+            }
+            if command.base_revision != self.revision {
+                bail!("native player-authority command base revision is not current")
+            }
+            let expanded = crate::factory_batch_command::expand_intent(self, command)?;
+            let mut result = self.apply_command(&expanded)?;
+            result.changed_entity_ids.clear();
+            result.changed_belt_ids.clear();
+            result.topology_dirty = true;
+            return Ok(result);
+        }
         self.validate_player_authority_command(command)?;
         if !command_contains_station_slot_mode(command)
             && !command_contains_station_slot_item(command)
@@ -9056,6 +9098,7 @@ impl CoreState {
         let expanded_special_input_port_intent;
         let expanded_galactic_export_intent;
         let expanded_factory_layout_intent;
+        let expanded_factory_batch_intent;
         let mut compact_entity_recipe_receipt_id = None;
         let mut compact_special_input_port_receipt_id = None;
         let mut compact_galactic_export_receipt = None;
@@ -9063,11 +9106,17 @@ impl CoreState {
         let mut blueprint_intent = None;
         let mut construction_queue_intent = None;
         let mut factory_layout_refresh = false;
+        let mut factory_batch_refresh = false;
         let applied_command = if crate::factory_layout_command::command_contains_intent(command) {
             expanded_factory_layout_intent =
                 crate::factory_layout_command::expand_intent(self, command)?;
             factory_layout_refresh = true;
             &expanded_factory_layout_intent
+        } else if crate::factory_batch_command::command_contains_intent(command) {
+            expanded_factory_batch_intent =
+                crate::factory_batch_command::expand_intent(self, command)?;
+            factory_batch_refresh = true;
+            &expanded_factory_batch_intent
         } else if command_contains_active_planet_intent(command) {
             expanded_active_planet_intent = expand_active_planet_intent(self, command)?;
             &expanded_active_planet_intent
@@ -9399,6 +9448,15 @@ impl CoreState {
             // Keep the live receipt byte-for-byte compatible with recovery of
             // the compact marker. The next bounded viewport projection owns
             // every moved row and belt redraw.
+            result.changed_entity_ids.clear();
+            result.changed_belt_ids.clear();
+            result.topology_dirty = true;
+        }
+        if factory_batch_refresh {
+            // The compact marker contains only selected IDs and an operation;
+            // every debit/refund and derived incident belt is recalculated at
+            // replay.  Live and recovered receipts therefore use the same
+            // bounded full-topology invalidation.
             result.changed_entity_ids.clear();
             result.changed_belt_ids.clear();
             result.topology_dirty = true;

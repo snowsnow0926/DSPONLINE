@@ -290,6 +290,7 @@ import { createCanvasRenderSnapshot, reconcileCanvasRenderSnapshot, type CanvasR
 import { createCanvasNodeSemanticRevisionToken, isCanvasNodeSemanticRevisionApplied } from "./game/canvasNodeSemanticRevision";
 import { planFactoryAutoLayout } from "./game/layout";
 import { createNativeFactoryAutoLayoutCommand } from "./game/nativeFactoryAutoLayoutCommands";
+import { createNativeFactoryBatchCommand } from "./game/nativeFactoryBatchCommands";
 import { createNativeFactoryPositionCommand } from "./game/nativeFactoryPositionCommands";
 import { createProductionPlan, removeProductionPlan, setProductionPlanRecipe, updateProductionPlan } from "./game/planning";
 import { getProductionLineLocations, type ProductionLineLocation } from "./game/productionLocator";
@@ -20126,6 +20127,44 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   const activePlanetRegionCount = factoryCanvasRegions.length;
 
   const confirmRemoveSelection = useCallback(async () => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const entityIds = [...selectedEntityIdsRef.current];
+      const beltIds = [...new Set([
+        ...selectedBeltIdsRef.current,
+        ...(selectedBeltIdRef.current ? [selectedBeltIdRef.current] : []),
+      ])];
+      if (entityIds.length === 0 && beltIds.length === 0) {
+        setNotice("当前选区没有可回收内容");
+        return;
+      }
+      const confirmed = await gameDialog.confirm(
+        `确认由 Rust 在当前权威 revision 重新核算并回收 ${entityIds.length} 个建筑节点与 ${beltIds.length} 条已选线路？关联普通线路会一并纳入，任一退款或领域校验失败时整批不改变。`,
+        { danger: true, confirmLabel: "确认原子回收" },
+      );
+      if (!confirmed) return;
+      const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+      if (!frame) {
+        setNotice("Windows 原生建筑画面正在刷新；本次回收未提交");
+        return;
+      }
+      const accepted = commitNativeProjectedCommand(
+        frame.revision,
+        (baseRevision) => createNativeFactoryBatchCommand(baseRevision, {
+          kind: "remove",
+          entityIds,
+          beltIds,
+        }),
+        () => {
+          setSelectedEntityIds([]);
+          setSelectedBeltIds([]);
+          setSelectedBeltId(null);
+          setNotice("Rust 已原子回收选区并重新核算全部施工退款；正在刷新拓扑");
+          playTone("remove");
+        },
+      );
+      if (accepted) setNotice("Rust 正在按当前 revision 核算选区回收与关联线路…");
+      return;
+    }
     if (rejectLegacyFactoryInteractionWhileNative("批量回收")) return;
     const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const entityIds = [...selectedEntityIdsRef.current];
@@ -20168,9 +20207,45 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setSelectedBeltId(null);
     setNotice(`已回收 ${preview.entityCount} 个建筑节点和 ${preview.relatedBeltCount} 条相关传送带`);
     playTone("remove");
-  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, commitNativeProjectedCommand, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
 
   const batchIncreaseSelected = useCallback(async (amount: number) => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const entityIds = [...selectedEntityIdsRef.current];
+      const beltIds = [...new Set([
+        ...selectedBeltIdsRef.current,
+        ...(selectedBeltIdRef.current ? [selectedBeltIdRef.current] : []),
+      ])];
+      if (entityIds.length === 0 && beltIds.length === 0) {
+        setNotice("请先选择建筑或线路");
+        return;
+      }
+      const confirmed = await gameDialog.confirm(
+        `确认请求每个可增加的所选建筑/线路增加 ${formatQuantityCompact(amount)}？Rust 会按当前 revision 重新检查堆叠上限与施工库存；库存不足时整批不扣料。`,
+        { confirmLabel: "确认原子增加" },
+      );
+      if (!confirmed) return;
+      const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+      if (!frame) {
+        setNotice("Windows 原生建筑画面正在刷新；本次批量增加未提交");
+        return;
+      }
+      const accepted = commitNativeProjectedCommand(
+        frame.revision,
+        (baseRevision) => createNativeFactoryBatchCommand(baseRevision, {
+          kind: "increase",
+          entityIds,
+          beltIds,
+          amount,
+        }),
+        () => {
+          setNotice("Rust 已按当前 revision 原子增加选区数量；正在刷新库存与画布");
+          playTone("confirm");
+        },
+      );
+      if (accepted) setNotice("Rust 正在重新核算批量增加的上限和施工材料…");
+      return;
+    }
     if (rejectLegacyFactoryInteractionWhileNative("批量增加建筑与线路")) return;
     const authorityEpoch = captureLegacyFactoryInteractionEpoch();
     const entityIds = [...selectedEntityIdsRef.current];
@@ -20208,7 +20283,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     const limitCount = result.buildingAtLimitCount + result.beltAtLimitCount;
     setNotice(`已批量增加 ${result.changedBuildingCount} 个建筑、${result.changedBeltCount} 条传送带${limitCount > 0 ? ` · ${limitCount} 项达到上限` : ""}${result.uniqueBuildingSkippedCount > 0 ? ` · ${result.uniqueBuildingSkippedCount} 座唯一巨构已跳过` : ""}`);
     playTone("confirm");
-  }, [captureLegacyFactoryInteractionEpoch, commitGame, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
+  }, [captureLegacyFactoryInteractionEpoch, commitGame, commitNativeProjectedCommand, gameDialog, playTone, rejectLegacyFactoryContinuationAfterAwait, rejectLegacyFactoryInteractionWhileNative]);
 
   const changeRemoteStationSlotItem = useCallback(async (entityId: string, slotIndex: number, itemId: ItemId | null) => {
     if (rejectLegacyFactoryInteractionWhileNative("远程物流槽位设置")) return;
@@ -21994,7 +22069,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           /> : null}
           <SelectionToolbar
             model={factorySelectionToolbarReadModel}
-            unsafeActionsEnabled={!nativePlayerAuthorityOwnsRuntime}
+            unsafeActionsEnabled={!nativePlayerAuthorityOwnsRuntime || Boolean(
+              nativeAuthoritativeFactoryCanvasFrame && !nativePlayerAuthorityCommandPending,
+            )}
             copyActionEnabled={!nativePlayerAuthorityOwnsRuntime || Boolean(
               nativeBlueprintCaptureSelection && !nativeBlueprintCaptureContextPending &&
               !nativePlayerAuthorityCommandPending && !nativeBlueprintCapturePending,
@@ -22002,17 +22079,63 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             eligibleCount={nativePlayerAuthorityOwnsRuntime
               ? nativeBlueprintCaptureSelection?.entityIds.length ?? 0
               : blueprintEligibleIds.length}
-            canUpgrade={!nativePlayerAuthorityOwnsRuntime && canUpgradeEntities(game, selectedEntityIds)}
-            canUpgradeBelts={!nativePlayerAuthorityOwnsRuntime && selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}
+            canUpgrade={nativePlayerAuthorityOwnsRuntime
+              ? selectedEntityIds.length > 0
+              : canUpgradeEntities(game, selectedEntityIds)}
+            canUpgradeBelts={nativePlayerAuthorityOwnsRuntime
+              ? selectedBeltIds.length > 0
+              : selectedBelts.some((belt) => canUpgradeBelt(game, belt.id))}
             onFocus={() => focusEntityIds(selectedEntityIds)}
             onAutoLayout={() => autoLayoutEntities(selectedEntityIds)}
             onCopy={copySelectionAsBlueprint}
             onUpgrade={() => {
+              if (nativePlayerAuthorityOwnsRuntime) {
+                const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+                if (!frame) {
+                  setNotice("Windows 原生建筑画面正在刷新；升级未提交");
+                  return;
+                }
+                const entityIds = [...selectedEntityIdsRef.current];
+                const accepted = commitNativeProjectedCommand(
+                  frame.revision,
+                  (baseRevision) => createNativeFactoryBatchCommand(baseRevision, {
+                    kind: "upgrade-buildings",
+                    entityIds,
+                  }),
+                  () => {
+                    setNotice("Rust 已原子升级选区内所有可升级设备；材料与返还已重新核算");
+                    playTone("upgrade");
+                  },
+                );
+                if (accepted) setNotice("Rust 正在核算选区建筑升级…");
+                return;
+              }
               commitGame((current) => upgradeEntities(current, selectedEntityIds));
               setNotice("已批量升级选区内可升级设备");
               playTone("upgrade");
             }}
             onUpgradeBelts={() => {
+              if (nativePlayerAuthorityOwnsRuntime) {
+                const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+                if (!frame) {
+                  setNotice("Windows 原生线路画面正在刷新；升级未提交");
+                  return;
+                }
+                const beltIds = [...selectedBeltIdsRef.current];
+                const accepted = commitNativeProjectedCommand(
+                  frame.revision,
+                  (baseRevision) => createNativeFactoryBatchCommand(baseRevision, {
+                    kind: "upgrade-belts",
+                    beltIds,
+                  }),
+                  () => {
+                    setNotice("Rust 已原子升级选区内可升级线路；原连接保持不变");
+                    playTone("upgrade");
+                  },
+                );
+                if (accepted) setNotice("Rust 正在核算选区线路升级…");
+                return;
+              }
               commitGame((current) => selectedBeltIds.reduce((next, beltId) => upgradeBelt(next, beltId), current));
               setNotice(`已升级选区内 ${selectedBeltIds.length} 条可升级传送带，原连接保持不变`);
               playTone("upgrade");

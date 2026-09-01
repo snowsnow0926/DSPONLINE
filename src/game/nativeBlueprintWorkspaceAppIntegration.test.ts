@@ -467,15 +467,15 @@ describe("native blueprint workspace App integration", () => {
     expect(app).toMatch(/blueprintEligibleIds = useMemo\(\(\) => nativePlayerAuthorityOwnsRuntime \|\| selectedEntityIds\.length === 0/);
     expect(app).toMatch(/activeBlueprint = nativePlayerAuthorityOwnsRuntime[\s\S]*?\? null[\s\S]*?: game\.blueprints\.find/);
     expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime && blueprintPlacementId \? <section className="canvas-placement-options/);
-    expect(app).toMatch(/canUpgrade=\{!nativePlayerAuthorityOwnsRuntime && canUpgradeEntities/);
-    expect(app).toMatch(/canUpgradeBelts=\{!nativePlayerAuthorityOwnsRuntime && selectedBelts\.some/);
+    expect(app).toMatch(/canUpgrade=\{nativePlayerAuthorityOwnsRuntime[\s\S]*?selectedEntityIds\.length > 0[\s\S]*?: canUpgradeEntities/);
+    expect(app).toMatch(/canUpgradeBelts=\{nativePlayerAuthorityOwnsRuntime[\s\S]*?selectedBeltIds\.length > 0[\s\S]*?: selectedBelts\.some/);
     expect(app).toMatch(/if \(!nativePlayerAuthorityOwnsRuntime\) return;[\s\S]*?setBlueprintPlacementId\(null\);[\s\S]*?setBlueprintAllowOverlap\(false\);/);
     expect(app).toMatch(/const nativeBlueprintCaptureSelection = useMemo<NativeBlueprintCaptureSelectionBinding \| null>[\s\S]*?selectedEntityIds\.length < 1 \|\| selectedEntityIds\.length > 512[\s\S]*?entityIds: Object\.freeze\(\[\.\.\.selectedEntityIds\]\)/);
     const toolbar = app.slice(
       app.lastIndexOf("<SelectionToolbar"),
       app.indexOf("</SelectionToolbar>", app.lastIndexOf("<SelectionToolbar")),
     );
-    expect(toolbar).toMatch(/unsafeActionsEnabled=\{!nativePlayerAuthorityOwnsRuntime\}/);
+    expect(toolbar).toMatch(/unsafeActionsEnabled=\{!nativePlayerAuthorityOwnsRuntime \|\| Boolean\([\s\S]*?nativeAuthoritativeFactoryCanvasFrame/);
     expect(toolbar).toMatch(/copyActionEnabled=\{!nativePlayerAuthorityOwnsRuntime \|\| Boolean\([\s\S]*?nativeBlueprintCaptureSelection/);
     expect(toolbar).toMatch(/eligibleCount=\{nativePlayerAuthorityOwnsRuntime[\s\S]*?nativeBlueprintCaptureSelection\?\.entityIds\.length/);
   });

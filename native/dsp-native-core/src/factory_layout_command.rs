@@ -12,10 +12,7 @@ use anyhow::{anyhow, bail};
 use serde_json::Value;
 
 use crate::{
-    command::{
-        EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT, PathSegment, RecordPatch, SimulationCommandPatch,
-        ValuePatch,
-    },
+    command::{PathSegment, RecordPatch, SimulationCommandPatch, ValuePatch},
     state::CoreState,
 };
 
@@ -29,15 +26,6 @@ const ROW_GAP: f64 = 240.0;
 const GRID_SIZE: f64 = 20.0;
 const MAX_ROW_OFFSETS: usize = 512;
 const COLLISION_CELL_SIZE: f64 = 1_024.0;
-
-const BUILTIN_MEGASTRUCTURES: &[&str] = &[
-    "orbital_cargo_terminal",
-    "construction_center",
-    "galactic_material_exporter",
-    "micro_black_hole_connector",
-    "time_warp_device",
-    "space_station_construction_launcher",
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LayoutScope {
@@ -56,11 +44,13 @@ struct LayoutEntity {
     entity_index: usize,
     id: String,
     kind: String,
-    building_id: Option<String>,
     sort_label: String,
     interaction_locked: bool,
     x: f64,
     y: f64,
+    layout_width: f64,
+    layout_height: f64,
+    layout_clearance: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -239,25 +229,21 @@ pub(crate) fn validate_resume_marker(command: &SimulationCommandPatch) -> anyhow
 
 fn collision_bounds(entity: &LayoutEntity, x: f64, y: f64) -> anyhow::Result<CollisionBounds> {
     let fixed_resource = entity.kind == "vein";
-    let megastructure = entity
-        .building_id
-        .as_deref()
-        .is_some_and(|building| BUILTIN_MEGASTRUCTURES.contains(&building));
     let width = if fixed_resource {
         360.0
-    } else if megastructure {
-        620.0
     } else {
-        300.0
+        entity.layout_width
     };
     let height = if fixed_resource {
         300.0
-    } else if megastructure {
-        420.0
     } else {
-        220.0
+        entity.layout_height
     };
-    let clearance = if fixed_resource { 80.0 } else { 24.0 };
+    let clearance = if fixed_resource {
+        80.0
+    } else {
+        entity.layout_clearance
+    };
     let bounds = CollisionBounds {
         left: x - clearance,
         top: y - clearance,
@@ -299,10 +285,8 @@ fn load_active_planet_entities(
     state: &CoreState,
     intent: &LayoutIntent,
 ) -> anyhow::Result<(usize, Vec<LayoutEntity>, HashSet<String>)> {
-    if state.catalog.snapshot.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
-        || state.identity.registry_fingerprint != EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT
-    {
-        bail!("native player-authority factory layout requires the built-in catalog");
+    if !state.catalog.data_only_native_supported {
+        bail!("native player-authority factory layout cannot execute scripted content packs");
     }
     let active_planet_id = state
         .base_value()
@@ -412,6 +396,12 @@ fn load_active_planet_entities(
             .and_then(Value::as_f64)
             .filter(|value| value.is_finite())
             .ok_or_else(|| anyhow!("native factory layout entity Y is invalid"))?;
+        let metadata = building_id
+            .as_deref()
+            .and_then(|building_id| state.catalog.building_metadata.get(building_id));
+        if building_id.is_some() && metadata.is_none() {
+            bail!("native factory layout building metadata is missing")
+        }
         entities.push(LayoutEntity {
             entity_index,
             id: id.to_owned(),
@@ -421,10 +411,12 @@ fn load_active_planet_entities(
                 .or(resource_id.as_deref())
                 .unwrap_or_default()
                 .to_owned(),
-            building_id,
             interaction_locked,
             x,
             y,
+            layout_width: metadata.map_or(300.0, |metadata| metadata.layout_width),
+            layout_height: metadata.map_or(220.0, |metadata| metadata.layout_height),
+            layout_clearance: metadata.map_or(24.0, |metadata| metadata.layout_clearance),
         });
     }
     Ok((planet_index, entities, requested))

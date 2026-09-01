@@ -8543,6 +8543,9 @@ impl CoreState {
         if crate::recipe_command::command_contains_intent(command) {
             return crate::recipe_command::validate_command(self, command);
         }
+        if crate::dyson_plan_command::command_contains_intent(command) {
+            return crate::dyson_plan_command::validate_command(self, command);
+        }
         if command_contains_black_hole_pause_intent(command) {
             return validate_black_hole_pause_command(self, command);
         }
@@ -8973,6 +8976,7 @@ impl CoreState {
         let expanded_blueprint_intent;
         let expanded_construction_queue_intent;
         let expanded_entity_recipe_intent;
+        let expanded_dyson_plan_intent;
         let mut compact_entity_recipe_receipt_id = None;
         let mut blueprint_workspace_refresh = false;
         let mut blueprint_intent = None;
@@ -9014,6 +9018,9 @@ impl CoreState {
                 Some(crate::recipe_command::validate_resume_marker(command)?);
             expanded_entity_recipe_intent = crate::recipe_command::expand_intent(self, command)?;
             &expanded_entity_recipe_intent
+        } else if crate::dyson_plan_command::command_contains_intent(command) {
+            expanded_dyson_plan_intent = crate::dyson_plan_command::expand_intent(self, command)?;
+            &expanded_dyson_plan_intent
         } else if crate::blueprint_command::command_contains_intent(command) {
             expanded_blueprint_intent = crate::blueprint_command::expand_intent(self, command)?;
             blueprint_workspace_refresh = expanded_blueprint_intent.requires_workspace_refresh();

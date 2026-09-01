@@ -25,6 +25,7 @@ mod construction_removal_context;
 mod construction_stack_context;
 mod deterministic_runtime;
 mod dyson;
+mod dyson_plan_command;
 mod dyson_workspace;
 mod entity_raw;
 mod factory_canvas_presentation;

@@ -1,5 +1,9 @@
 # DSP极简网络项目现状
 
+> **Windows 戴森框架/壳面 Rust 权威纵切（2026-09-01，开发候选，未发布）**：原生戴森薄 UI 已开放“闭合框架、规划壳面、清除壳面”。renderer 只发送绑定当前 session/run/revision/registry/system/layer 的最小 `dysonPlans.intent`；Rust 从权威节点、科技、`nextId` 和现有无向边重新生成框架/壳面，重算派生完成量与吸附显示，但不增加或清零玩家的结构点、火箭、壳面帆或其他物料。WAL 只保存语义意图；`AfterWal` 故障后的新进程重放与无故障提交具有相同 revision、canonical SHA-256、ID 顺序和公开 v47 状态，相同 command ID 只返回 duplicate receipt。
+>
+> 新鲜 focused 结果为 Rust 戴森 `25/25`（新增命令 `4/4`）、Host 冷恢复 `1/1`、Vitest `22/22`、desktop broker `28/28`，以及 TypeScript、Rust fmt、Core+Host strict Clippy 和 diff check 通过。完整组合门禁尚未重跑；新建/删除层、节点、壳层几何和太阳帆轨道生命周期仍未迁移，因此固定能力百分比暂不调整。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不变；未读取玩家存档，未连接生产，未部署、打包或签名。
+
 > **Windows Rust 行星指标活动探针缓存（2026-09-01，开发候选，未发布）**：在完整 writer-closure 审计通过后，`simple_factory` 的 `planetMetrics` 不再每个模拟步重新解码/查询全部实体。新的 session-only runtime 保存一份按持久实体顺序排列的紧凑 probe 基线、稀疏 override 和有序 pending writer 集；冷拍、命令/拓扑失配、非空 MOD registry、opaque/畸形形状、目录证据不完整及精确 `75%` 稠密阈值仍走真实 flat-full。`productionRate`、储能/容量、燃料余热与选中燃料输入、`machineCount` 及 planet/building/topology 的产品 writer 清单和闭合方式见 [writer 审计](./NATIVE_PLANET_METRICS_WRITER_AUDIT.md)。
 >
 > 优化只把昂贵 JSON/catalog 实体探针收敛为 O(active/changed)；每拍仍把紧凑 probe 按历史全局实体顺序做 O(E) 标量折叠，因此没有用 delta sum 或重排加法改变 IEEE-754 字节。后屏障 belt/material/quantum/route/export writer 保持 pending 到下一内部步。runtime 不持久化、不进入 v47、WAL、checkpoint 或 canonical/domain hash；候选 `Arc` 只在完整 revision commit 成功后安装，pure-idle construction tail 会显式丢弃缓存。

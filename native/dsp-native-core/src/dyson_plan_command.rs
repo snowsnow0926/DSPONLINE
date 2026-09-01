@@ -1,0 +1,868 @@
+//! Durable semantic edits for an existing Dyson shell layer.
+//!
+//! The renderer sends only `{ kind, systemId, layerId }`. Rust validates the
+//! complete authoritative plan, derives stable frame/shell identifiers from
+//! `nextId`, reconciles material allocation, and stores the compact intent in
+//! the WAL. Cold replay therefore produces the same plan without trusting a
+//! renderer-authored structure array or material counter.
+
+use std::collections::HashSet;
+
+use anyhow::{anyhow, bail};
+use serde_json::{Map, Value, json};
+
+use crate::{
+    command::{PathSegment, SimulationCommandPatch, ValuePatch, technology_is_completed},
+    dyson::reconcile_plan,
+    state::CoreState,
+};
+
+const INTENT_ROOT: &str = "dysonPlans";
+const INTENT_LEAF: &str = "intent";
+const MAX_OPAQUE_ID_BYTES: usize = 1_024;
+const MAX_JAVASCRIPT_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const MAX_DYSON_LAYERS: usize = 8;
+const MAX_DYSON_NODES_PER_LAYER: usize = 24;
+const MAX_DYSON_FRAMES_PER_LAYER: usize = 576;
+const MAX_DYSON_SHELLS_PER_LAYER: usize = 576;
+const DYSON_SHELL_CAPACITY_PER_STRUCTURE: u64 = 40;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DysonPlanIntentKind {
+    AutoConnect,
+    PlanShell,
+    ClearShell,
+}
+
+#[derive(Debug)]
+struct DysonPlanIntent {
+    kind: DysonPlanIntentKind,
+    system_id: String,
+    layer_id: String,
+}
+
+#[derive(Clone, Debug)]
+struct OrderedNode {
+    id: String,
+    angle: f64,
+    original_index: usize,
+}
+
+fn exact_intent_path(path: &[PathSegment]) -> bool {
+    matches!(
+        path,
+        [PathSegment::Key(root), PathSegment::Key(leaf)]
+            if root == INTENT_ROOT && leaf == INTENT_LEAF
+    )
+}
+
+pub(crate) fn command_contains_intent(command: &SimulationCommandPatch) -> bool {
+    command
+        .top_level_changes
+        .iter()
+        .any(|change| exact_intent_path(&change.path))
+}
+
+fn valid_opaque_id(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_OPAQUE_ID_BYTES && !value.chars().any(char::is_control)
+}
+
+fn require_intent(command: &SimulationCommandPatch) -> anyhow::Result<DysonPlanIntent> {
+    if command.top_level_changes.len() != 1
+        || !command.changed_entities.is_empty()
+        || !command.added_entities.is_empty()
+        || !command.removed_entity_ids.is_empty()
+        || !command.changed_belts.is_empty()
+        || !command.added_belts.is_empty()
+        || !command.removed_belt_ids.is_empty()
+    {
+        bail!("native player-authority Dyson plan intent shape is invalid")
+    }
+    let change = &command.top_level_changes[0];
+    if !exact_intent_path(&change.path) || change.operation != "set" {
+        bail!("native player-authority Dyson plan intent path is invalid")
+    }
+    let intent = change
+        .value
+        .as_ref()
+        .and_then(Value::as_object)
+        .filter(|intent| {
+            intent.len() == 3
+                && intent.contains_key("kind")
+                && intent.contains_key("systemId")
+                && intent.contains_key("layerId")
+        })
+        .ok_or_else(|| anyhow!("native player-authority Dyson plan intent is invalid"))?;
+    let kind = match intent.get("kind").and_then(Value::as_str) {
+        Some("auto-connect") => DysonPlanIntentKind::AutoConnect,
+        Some("plan-shell") => DysonPlanIntentKind::PlanShell,
+        Some("clear-shell") => DysonPlanIntentKind::ClearShell,
+        _ => bail!("native player-authority Dyson plan intent kind is invalid"),
+    };
+    let system_id = intent
+        .get("systemId")
+        .and_then(Value::as_str)
+        .filter(|value| valid_opaque_id(value))
+        .ok_or_else(|| anyhow!("native player-authority Dyson plan system ID is invalid"))?;
+    let layer_id = intent
+        .get("layerId")
+        .and_then(Value::as_str)
+        .filter(|value| valid_opaque_id(value))
+        .ok_or_else(|| anyhow!("native player-authority Dyson plan layer ID is invalid"))?;
+    Ok(DysonPlanIntent {
+        kind,
+        system_id: system_id.to_owned(),
+        layer_id: layer_id.to_owned(),
+    })
+}
+
+fn safe_integer(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
+    let value = value
+        .and_then(Value::as_f64)
+        .filter(|value| {
+            value.is_finite()
+                && *value >= 0.0
+                && *value <= MAX_JAVASCRIPT_SAFE_INTEGER as f64
+                && value.fract() == 0.0
+        })
+        .ok_or_else(|| anyhow!("native player-authority Dyson {label} is invalid"))?;
+    Ok(value as u64)
+}
+
+fn positive_integer(value: Option<&Value>, label: &str) -> anyhow::Result<u64> {
+    safe_integer(value, label).and_then(|value| {
+        if value == 0 {
+            bail!("native player-authority Dyson {label} is invalid")
+        }
+        Ok(value)
+    })
+}
+
+fn canonical_angle(value: Option<&Value>, label: &str) -> anyhow::Result<f64> {
+    value
+        .and_then(Value::as_f64)
+        .filter(|value| {
+            value.is_finite()
+                && (0.0..360.0).contains(value)
+                && (value * 10.0 - (value * 10.0).round()).abs() < 1e-9
+        })
+        .ok_or_else(|| anyhow!("native player-authority Dyson {label} is invalid"))
+}
+
+fn require_id<'a>(value: Option<&'a Value>, label: &str) -> anyhow::Result<&'a str> {
+    value
+        .and_then(Value::as_str)
+        .filter(|value| valid_opaque_id(value))
+        .ok_or_else(|| anyhow!("native player-authority Dyson {label} is invalid"))
+}
+
+fn undirected_edge(source: &str, target: &str) -> (String, String) {
+    if source <= target {
+        (source.to_owned(), target.to_owned())
+    } else {
+        (target.to_owned(), source.to_owned())
+    }
+}
+
+fn frame_exists(frames: &[Value], source: &str, target: &str) -> bool {
+    frames.iter().filter_map(Value::as_object).any(|frame| {
+        let frame_source = frame.get("sourceNodeId").and_then(Value::as_str);
+        let frame_target = frame.get("targetNodeId").and_then(Value::as_str);
+        (frame_source == Some(source) && frame_target == Some(target))
+            || (frame_source == Some(target) && frame_target == Some(source))
+    })
+}
+
+fn shell_exists(shells: &[Value], source: &str, target: &str) -> bool {
+    shells.iter().filter_map(Value::as_object).any(|shell| {
+        let shell_source = shell.get("sourceNodeId").and_then(Value::as_str);
+        let shell_target = shell.get("targetNodeId").and_then(Value::as_str);
+        (shell_source == Some(source) && shell_target == Some(target))
+            || (shell_source == Some(target) && shell_target == Some(source))
+    })
+}
+
+fn frame_requirement(radius: u64, source_angle: f64, target_angle: f64) -> u64 {
+    let direct = (source_angle - target_angle).abs() % 360.0;
+    let arc = direct.min(360.0 - direct);
+    ((radius as f64 / 10_000.0 * arc / 45.0).ceil() as u64).max(1)
+}
+
+fn validate_layer(
+    layer: &Map<String, Value>,
+    all_ids: &mut HashSet<String>,
+) -> anyhow::Result<Vec<OrderedNode>> {
+    let layer_id = require_id(layer.get("id"), "layer ID")?;
+    if !all_ids.insert(layer_id.to_owned()) {
+        bail!("native player-authority Dyson design ID is duplicated")
+    }
+    let radius = positive_integer(layer.get("radius"), "layer radius")?;
+    if !(5_000..=50_000).contains(&radius) {
+        bail!("native player-authority Dyson layer radius is outside its canonical range")
+    }
+    let inclination = layer
+        .get("inclination")
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && value.fract() == 0.0 && (-90.0..=90.0).contains(value))
+        .ok_or_else(|| anyhow!("native player-authority Dyson layer inclination is invalid"))?;
+    let _ = inclination;
+    canonical_angle(layer.get("longitude"), "layer longitude")?;
+    safe_integer(
+        layer.get("structureAllocationFloor"),
+        "structure allocation floor",
+    )?;
+    safe_integer(layer.get("shellAllocationFloor"), "shell allocation floor")?;
+
+    let nodes = layer
+        .get("nodes")
+        .and_then(Value::as_array)
+        .filter(|nodes| nodes.len() <= MAX_DYSON_NODES_PER_LAYER)
+        .ok_or_else(|| anyhow!("native player-authority Dyson node directory is invalid"))?;
+    let mut ordered_nodes = Vec::with_capacity(nodes.len());
+    let mut node_ids = HashSet::with_capacity(nodes.len());
+    for (index, node) in nodes.iter().enumerate() {
+        let node = node
+            .as_object()
+            .ok_or_else(|| anyhow!("native player-authority Dyson node is invalid"))?;
+        let id = require_id(node.get("id"), "node ID")?;
+        if !node_ids.insert(id.to_owned()) || !all_ids.insert(id.to_owned()) {
+            bail!("native player-authority Dyson node ID is duplicated")
+        }
+        let angle = canonical_angle(node.get("angle"), "node angle")?;
+        let required = positive_integer(node.get("requiredStructurePoints"), "node requirement")?;
+        let completed = safe_integer(node.get("completedStructurePoints"), "node completion")?;
+        if completed > required {
+            bail!("native player-authority Dyson node completion exceeds its requirement")
+        }
+        ordered_nodes.push(OrderedNode {
+            id: id.to_owned(),
+            angle,
+            original_index: index,
+        });
+    }
+
+    let frames = layer
+        .get("frames")
+        .and_then(Value::as_array)
+        .filter(|frames| frames.len() <= MAX_DYSON_FRAMES_PER_LAYER)
+        .ok_or_else(|| anyhow!("native player-authority Dyson frame directory is invalid"))?;
+    let mut frame_ids = HashSet::with_capacity(frames.len());
+    let mut frame_edges = HashSet::with_capacity(frames.len());
+    for frame in frames {
+        let frame = frame
+            .as_object()
+            .ok_or_else(|| anyhow!("native player-authority Dyson frame is invalid"))?;
+        let id = require_id(frame.get("id"), "frame ID")?;
+        let source = require_id(frame.get("sourceNodeId"), "frame source node ID")?;
+        let target = require_id(frame.get("targetNodeId"), "frame target node ID")?;
+        if source == target || !node_ids.contains(source) || !node_ids.contains(target) {
+            bail!("native player-authority Dyson frame endpoints are invalid")
+        }
+        if !frame_ids.insert(id.to_owned())
+            || !all_ids.insert(id.to_owned())
+            || !frame_edges.insert(undirected_edge(source, target))
+        {
+            bail!("native player-authority Dyson frame ID or edge is duplicated")
+        }
+        let required = positive_integer(frame.get("requiredStructurePoints"), "frame requirement")?;
+        let completed = safe_integer(frame.get("completedStructurePoints"), "frame completion")?;
+        if completed > required {
+            bail!("native player-authority Dyson frame completion exceeds its requirement")
+        }
+    }
+
+    let shells = layer
+        .get("shells")
+        .and_then(Value::as_array)
+        .filter(|shells| shells.len() <= MAX_DYSON_SHELLS_PER_LAYER)
+        .ok_or_else(|| anyhow!("native player-authority Dyson shell directory is invalid"))?;
+    let mut shell_edges = HashSet::with_capacity(shells.len());
+    for shell in shells {
+        let shell = shell
+            .as_object()
+            .ok_or_else(|| anyhow!("native player-authority Dyson shell is invalid"))?;
+        let id = require_id(shell.get("id"), "shell ID")?;
+        let source = require_id(shell.get("sourceNodeId"), "shell source node ID")?;
+        let target = require_id(shell.get("targetNodeId"), "shell target node ID")?;
+        if source == target || !node_ids.contains(source) || !node_ids.contains(target) {
+            bail!("native player-authority Dyson shell endpoints are invalid")
+        }
+        if !all_ids.insert(id.to_owned()) || !shell_edges.insert(undirected_edge(source, target)) {
+            bail!("native player-authority Dyson shell ID or edge is duplicated")
+        }
+        let boundaries = shell
+            .get("boundaryFrameIds")
+            .and_then(Value::as_array)
+            .filter(|boundaries| !boundaries.is_empty() && boundaries.len() <= frames.len())
+            .ok_or_else(|| anyhow!("native player-authority Dyson shell boundary is invalid"))?;
+        let mut boundary_ids = HashSet::with_capacity(boundaries.len());
+        for boundary in boundaries {
+            let boundary = require_id(Some(boundary), "shell boundary frame ID")?;
+            if !frame_ids.contains(boundary) || !boundary_ids.insert(boundary) {
+                bail!("native player-authority Dyson shell boundary is missing or duplicated")
+            }
+        }
+        let capacity = positive_integer(shell.get("sailCapacity"), "shell capacity")?;
+        let absorbed = safe_integer(shell.get("absorbedSails"), "absorbed shell sails")?;
+        if absorbed > capacity {
+            bail!("native player-authority Dyson absorbed sails exceed shell capacity")
+        }
+    }
+    Ok(ordered_nodes)
+}
+
+fn validate_plan(
+    plan: &Map<String, Value>,
+    target_layer_id: &str,
+) -> anyhow::Result<(usize, Vec<OrderedNode>, HashSet<String>)> {
+    safe_integer(plan.get("structurePoints"), "plan structure points")?;
+    safe_integer(plan.get("shellSails"), "plan shell sails")?;
+    let layers = plan
+        .get("layers")
+        .and_then(Value::as_array)
+        .filter(|layers| layers.len() <= MAX_DYSON_LAYERS)
+        .ok_or_else(|| anyhow!("native player-authority Dyson layer directory is invalid"))?;
+    let mut all_ids = HashSet::new();
+    let mut target = None;
+    for (index, layer) in layers.iter().enumerate() {
+        let layer = layer
+            .as_object()
+            .ok_or_else(|| anyhow!("native player-authority Dyson layer is invalid"))?;
+        let layer_id = require_id(layer.get("id"), "layer ID")?.to_owned();
+        let nodes = validate_layer(layer, &mut all_ids)?;
+        if layer_id == target_layer_id && target.replace((index, nodes)).is_some() {
+            bail!("native player-authority Dyson target layer is duplicated")
+        }
+    }
+    if let Some(active_layer_id) = plan.get("activeLayerId").filter(|value| !value.is_null()) {
+        let active_layer_id = require_id(Some(active_layer_id), "active layer ID")?;
+        if !layers
+            .iter()
+            .any(|layer| layer.get("id").and_then(Value::as_str) == Some(active_layer_id))
+        {
+            bail!("native player-authority Dyson active layer is missing")
+        }
+    } else if !plan.get("activeLayerId").is_some_and(Value::is_null) {
+        bail!("native player-authority Dyson active layer is invalid")
+    }
+    let (index, mut nodes) =
+        target.ok_or_else(|| anyhow!("native player-authority Dyson target layer is missing"))?;
+    nodes.sort_by(|left, right| {
+        left.angle
+            .total_cmp(&right.angle)
+            .then(left.original_index.cmp(&right.original_index))
+    });
+    Ok((index, nodes, all_ids))
+}
+
+fn allocate_id(
+    prefix: &str,
+    next_id: &mut u64,
+    all_ids: &mut HashSet<String>,
+) -> anyhow::Result<String> {
+    let following = next_id
+        .checked_add(1)
+        .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+        .ok_or_else(|| anyhow!("native player-authority Dyson next ID overflows"))?;
+    let id = format!("{prefix}_{}", *next_id);
+    if !all_ids.insert(id.clone()) {
+        bail!("native player-authority Dyson generated ID collides with existing design")
+    }
+    *next_id = following;
+    Ok(id)
+}
+
+fn add_missing_frames(
+    layer: &mut Map<String, Value>,
+    nodes: &[OrderedNode],
+    next_id: &mut u64,
+    all_ids: &mut HashSet<String>,
+) -> anyhow::Result<usize> {
+    let radius = positive_integer(layer.get("radius"), "layer radius")?;
+    let frames = layer
+        .get_mut("frames")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow!("native player-authority Dyson frame directory is invalid"))?;
+    let mut added = 0;
+    for index in 0..nodes.len() {
+        let source = &nodes[index];
+        let target = &nodes[(index + 1) % nodes.len()];
+        if frame_exists(frames, &source.id, &target.id) {
+            continue;
+        }
+        if frames.len() >= MAX_DYSON_FRAMES_PER_LAYER {
+            bail!("native player-authority Dyson frame limit is exceeded")
+        }
+        let id = allocate_id("dyson_frame", next_id, all_ids)?;
+        frames.push(json!({
+            "id": id,
+            "sourceNodeId": source.id,
+            "targetNodeId": target.id,
+            "requiredStructurePoints": frame_requirement(radius, source.angle, target.angle),
+            "completedStructurePoints": 0,
+        }));
+        added += 1;
+    }
+    Ok(added)
+}
+
+fn add_missing_shells(
+    layer: &mut Map<String, Value>,
+    nodes: &[OrderedNode],
+    next_id: &mut u64,
+    all_ids: &mut HashSet<String>,
+) -> anyhow::Result<usize> {
+    let frames = layer
+        .get("frames")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("native player-authority Dyson frame directory is invalid"))?;
+    let new_shells = {
+        let shells = layer
+            .get("shells")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("native player-authority Dyson shell directory is invalid"))?;
+        let mut additions = Vec::new();
+        for index in 0..nodes.len() {
+            let source = &nodes[index];
+            let target = &nodes[(index + 1) % nodes.len()];
+            if shell_exists(shells, &source.id, &target.id) {
+                continue;
+            }
+            let frame = frames
+                .iter()
+                .filter_map(Value::as_object)
+                .find(|frame| {
+                    let frame_source = frame.get("sourceNodeId").and_then(Value::as_str);
+                    let frame_target = frame.get("targetNodeId").and_then(Value::as_str);
+                    (frame_source == Some(&source.id) && frame_target == Some(&target.id))
+                        || (frame_source == Some(&target.id) && frame_target == Some(&source.id))
+                })
+                .ok_or_else(|| {
+                    anyhow!("native player-authority Dyson shell boundary frame is missing")
+                })?;
+            let frame_id = require_id(frame.get("id"), "shell boundary frame ID")?;
+            let required =
+                positive_integer(frame.get("requiredStructurePoints"), "frame requirement")?;
+            let sail_capacity = required
+                .checked_mul(DYSON_SHELL_CAPACITY_PER_STRUCTURE)
+                .filter(|value| *value <= MAX_JAVASCRIPT_SAFE_INTEGER)
+                .ok_or_else(|| anyhow!("native player-authority Dyson shell capacity overflows"))?;
+            additions.push((
+                source.id.clone(),
+                target.id.clone(),
+                frame_id.to_owned(),
+                sail_capacity,
+            ));
+        }
+        additions
+    };
+    let shells = layer
+        .get_mut("shells")
+        .and_then(Value::as_array_mut)
+        .expect("Dyson shell directory was validated");
+    if shells.len().saturating_add(new_shells.len()) > MAX_DYSON_SHELLS_PER_LAYER {
+        bail!("native player-authority Dyson shell limit is exceeded")
+    }
+    let added = new_shells.len();
+    for (source, target, frame_id, sail_capacity) in new_shells {
+        let id = allocate_id("dyson_shell", next_id, all_ids)?;
+        shells.push(json!({
+            "id": id,
+            "sourceNodeId": source,
+            "targetNodeId": target,
+            "boundaryFrameIds": [frame_id],
+            "sailCapacity": sail_capacity,
+            "absorbedSails": 0,
+        }));
+    }
+    Ok(added)
+}
+
+pub(crate) fn validate_command(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<()> {
+    expand_intent(state, command).map(|_| ())
+}
+
+pub(crate) fn expand_intent(
+    state: &CoreState,
+    command: &SimulationCommandPatch,
+) -> anyhow::Result<SimulationCommandPatch> {
+    let intent = require_intent(command)?;
+    if !state
+        .catalog
+        .planets
+        .iter()
+        .any(|planet| planet.system_id == intent.system_id)
+    {
+        bail!("native player-authority Dyson plan system is unknown")
+    }
+    let exploration = state
+        .base_value()
+        .get("exploration")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority Dyson exploration state is invalid"))?;
+    if !exploration
+        .get("unlockedSystemIds")
+        .and_then(Value::as_array)
+        .is_some_and(|systems| {
+            systems
+                .iter()
+                .any(|system| system.as_str() == Some(&intent.system_id))
+        })
+        || !technology_is_completed(state, "dyson_sphere_program")
+    {
+        bail!("native player-authority Dyson plan system or technology is locked")
+    }
+    if intent.kind == DysonPlanIntentKind::PlanShell
+        && !technology_is_completed(state, "dyson_shell")
+    {
+        bail!("native player-authority Dyson shell technology is locked")
+    }
+    let original_plan = state
+        .base_value()
+        .get("dysonPlans")
+        .and_then(Value::as_object)
+        .and_then(|plans| plans.get(&intent.system_id))
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("native player-authority Dyson plan is missing"))?;
+    let (layer_index, nodes, mut all_ids) = validate_plan(original_plan, &intent.layer_id)?;
+    if intent.kind != DysonPlanIntentKind::ClearShell && nodes.len() < 3 {
+        bail!("native player-authority Dyson layer needs at least three nodes")
+    }
+    let mut candidate_plan = original_plan.clone();
+    let mut next_id = safe_integer(state.base_value().get("nextId"), "next ID")?;
+    let original_next_id = next_id;
+    let layer = candidate_plan
+        .get_mut("layers")
+        .and_then(Value::as_array_mut)
+        .and_then(|layers| layers.get_mut(layer_index))
+        .and_then(Value::as_object_mut)
+        .expect("Dyson plan and target layer were validated");
+    let changed = match intent.kind {
+        DysonPlanIntentKind::AutoConnect => {
+            add_missing_frames(layer, &nodes, &mut next_id, &mut all_ids)? > 0
+        }
+        DysonPlanIntentKind::PlanShell => {
+            let frames = add_missing_frames(layer, &nodes, &mut next_id, &mut all_ids)?;
+            let shells = add_missing_shells(layer, &nodes, &mut next_id, &mut all_ids)?;
+            frames + shells > 0
+        }
+        DysonPlanIntentKind::ClearShell => {
+            let shells = layer
+                .get_mut("shells")
+                .and_then(Value::as_array_mut)
+                .ok_or_else(|| {
+                    anyhow!("native player-authority Dyson shell directory is invalid")
+                })?;
+            if shells.is_empty() {
+                false
+            } else {
+                shells.clear();
+                true
+            }
+        }
+    };
+    if !changed {
+        bail!("native player-authority Dyson plan target is unchanged")
+    }
+    reconcile_plan(&mut candidate_plan)?;
+
+    let mut top_level_changes = vec![ValuePatch {
+        path: vec![
+            PathSegment::Key("dysonPlans".to_owned()),
+            PathSegment::Key(intent.system_id),
+        ],
+        operation: "set".to_owned(),
+        value: Some(Value::Object(candidate_plan)),
+    }];
+    if next_id != original_next_id {
+        top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("nextId".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(Value::from(next_id)),
+        });
+    }
+    Ok(SimulationCommandPatch {
+        protocol_version: command.protocol_version,
+        base_revision: command.base_revision,
+        top_level_changes,
+        changed_entities: Vec::new(),
+        added_entities: Vec::new(),
+        removed_entity_ids: Vec::new(),
+        changed_belts: Vec::new(),
+        added_belts: Vec::new(),
+        removed_belt_ids: Vec::new(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        CoreCheckpointIdentity,
+        catalog::{CatalogSnapshot, RuntimeCatalog},
+        command::EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+    };
+
+    fn catalog() -> RuntimeCatalog {
+        let snapshot: CatalogSnapshot = serde_json::from_value(json!({
+            "protocolVersion": crate::CORE_PROTOCOL_VERSION,
+            "registryFingerprint": EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT,
+            "planets": [
+                { "id": "home", "systemId": "helios", "kind": "terrestrial", "orbitIndex": 1 },
+                { "id": "away", "systemId": "sigma", "kind": "terrestrial", "orbitIndex": 1 }
+            ],
+            "items": [{ "id": "universe_matrix", "kind": "matrix" }],
+            "buildings": [],
+            "recipes": [],
+            "constructions": [],
+            "belts": [],
+            "technologies": [
+                {
+                    "id": "dyson_sphere_program",
+                    "costs": [{ "itemId": "universe_matrix", "amount": 1 }],
+                    "prerequisites": []
+                },
+                {
+                    "id": "dyson_shell",
+                    "costs": [{ "itemId": "universe_matrix", "amount": 1 }],
+                    "prerequisites": ["dyson_sphere_program"]
+                }
+            ]
+        }))
+        .unwrap();
+        RuntimeCatalog::validate(snapshot, EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT).unwrap()
+    }
+
+    fn state() -> CoreState {
+        let base = json!({
+            "version": 47,
+            "mode": "normal",
+            "activePlanetId": "home",
+            "elapsedSeconds": 10,
+            "paused": false,
+            "nextId": 100,
+            "research": {
+                "completedTechIds": ["dyson_sphere_program", "dyson_shell"]
+            },
+            "exploration": {
+                "unlockedSystemIds": ["helios"]
+            },
+            "dysonPlans": {
+                "helios": {
+                    "activeLayerId": "mod:layer/alpha🚀",
+                    "structurePoints": 12,
+                    "shellSails": 80,
+                    "layers": [{
+                        "id": "mod:layer/alpha🚀",
+                        "name": "Alpha",
+                        "radius": 10000,
+                        "inclination": 0,
+                        "longitude": 0,
+                        "structureAllocationFloor": 0,
+                        "shellAllocationFloor": 0,
+                        "nodes": [
+                            { "id": "node-c", "angle": 180, "requiredStructurePoints": 1, "completedStructurePoints": 1 },
+                            { "id": "node-a", "angle": 0, "requiredStructurePoints": 1, "completedStructurePoints": 1 },
+                            { "id": "node-d", "angle": 270, "requiredStructurePoints": 1, "completedStructurePoints": 1 },
+                            { "id": "node-b", "angle": 90, "requiredStructurePoints": 1, "completedStructurePoints": 1 }
+                        ],
+                        "frames": [],
+                        "shells": []
+                    }]
+                }
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        CoreState::from_public_v47_parts(
+            CoreCheckpointIdentity {
+                slot: "normal-main".to_owned(),
+                generation: 1,
+                root_hash: "a".repeat(64),
+                revision: 7,
+                state_version: 47,
+                mode: "normal".to_owned(),
+                registry_fingerprint: EMPTY_CONTENT_PACK_REGISTRY_FINGERPRINT.to_owned(),
+                base_primary_checksum: "12345678".to_owned(),
+            },
+            base,
+            Vec::new(),
+            Vec::new(),
+            catalog(),
+        )
+        .unwrap()
+    }
+
+    fn intent(revision: u64, kind: &str) -> SimulationCommandPatch {
+        SimulationCommandPatch {
+            protocol_version: crate::CORE_PROTOCOL_VERSION,
+            base_revision: revision,
+            top_level_changes: vec![ValuePatch {
+                path: vec![
+                    PathSegment::Key(INTENT_ROOT.to_owned()),
+                    PathSegment::Key(INTENT_LEAF.to_owned()),
+                ],
+                operation: "set".to_owned(),
+                value: Some(json!({
+                    "kind": kind,
+                    "systemId": "helios",
+                    "layerId": "mod:layer/alpha🚀"
+                })),
+            }],
+            changed_entities: Vec::new(),
+            added_entities: Vec::new(),
+            removed_entity_ids: Vec::new(),
+            changed_belts: Vec::new(),
+            added_belts: Vec::new(),
+            removed_belt_ids: Vec::new(),
+        }
+    }
+
+    fn layer(state: &CoreState) -> &Map<String, Value> {
+        state.base_value()["dysonPlans"]["helios"]["layers"][0]
+            .as_object()
+            .unwrap()
+    }
+
+    #[test]
+    fn auto_connect_is_a_compact_semantic_intent_with_stable_sorted_edges() {
+        let mut state = state();
+        let command = intent(state.revision, "auto-connect");
+        state.validate_player_authority_command(&command).unwrap();
+        let serialized = serde_json::to_vec(&command).unwrap();
+        assert!(serialized.len() < 512);
+        let result = state.apply_command(&command).unwrap();
+        assert_eq!(result.revision, 8);
+        assert!(result.topology_dirty);
+        let frames = layer(&state)["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 4);
+        assert_eq!(
+            frames
+                .iter()
+                .map(|frame| (
+                    frame["id"].as_str().unwrap(),
+                    frame["sourceNodeId"].as_str().unwrap(),
+                    frame["targetNodeId"].as_str().unwrap(),
+                    frame["requiredStructurePoints"].as_f64().unwrap() as u64,
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                ("dyson_frame_100", "node-a", "node-b", 2),
+                ("dyson_frame_101", "node-b", "node-c", 2),
+                ("dyson_frame_102", "node-c", "node-d", 2),
+                ("dyson_frame_103", "node-d", "node-a", 2),
+            ]
+        );
+        assert_eq!(state.base_value()["nextId"], Value::from(104));
+        assert_eq!(
+            state.base_value()["dysonPlans"]["helios"]["structurePoints"].as_f64(),
+            Some(12.0)
+        );
+        assert_eq!(
+            state.base_value()["dysonPlans"]["helios"]["shellSails"].as_f64(),
+            Some(80.0)
+        );
+    }
+
+    #[test]
+    fn plan_shell_connects_frames_then_derives_shells_without_minting_material() {
+        let mut state = state();
+        let command = intent(state.revision, "plan-shell");
+        state.validate_player_authority_command(&command).unwrap();
+        state.apply_command(&command).unwrap();
+        let layer = layer(&state);
+        assert_eq!(layer["frames"].as_array().unwrap().len(), 4);
+        let shells = layer["shells"].as_array().unwrap();
+        assert_eq!(shells.len(), 4);
+        assert_eq!(shells[0]["id"], "dyson_shell_104");
+        assert_eq!(shells[0]["boundaryFrameIds"], json!(["dyson_frame_100"]));
+        assert_eq!(shells[0]["sailCapacity"].as_f64(), Some(80.0));
+        assert_eq!(state.base_value()["nextId"], 108);
+        assert_eq!(
+            state.base_value()["dysonPlans"]["helios"]["structurePoints"].as_f64(),
+            Some(12.0)
+        );
+        assert_eq!(
+            state.base_value()["dysonPlans"]["helios"]["shellSails"].as_f64(),
+            Some(80.0)
+        );
+        assert_eq!(
+            shells
+                .iter()
+                .map(|shell| shell["absorbedSails"].as_f64().unwrap() as u64)
+                .sum::<u64>(),
+            80
+        );
+    }
+
+    #[test]
+    fn clear_shell_preserves_material_and_replay_is_deterministic() {
+        let initial = state();
+        let plan = intent(initial.revision, "plan-shell");
+        let mut live = initial.clone();
+        live.apply_command(&plan).unwrap();
+        let mut replayed = initial;
+        replayed.apply_command(&plan).unwrap();
+        assert_eq!(live.base_value(), replayed.base_value());
+
+        let clear = intent(live.revision, "clear-shell");
+        live.validate_player_authority_command(&clear).unwrap();
+        live.apply_command(&clear).unwrap();
+        assert!(layer(&live)["shells"].as_array().unwrap().is_empty());
+        assert_eq!(
+            live.base_value()["dysonPlans"]["helios"]["structurePoints"].as_f64(),
+            Some(12.0)
+        );
+        assert_eq!(
+            live.base_value()["dysonPlans"]["helios"]["shellSails"].as_f64(),
+            Some(80.0)
+        );
+        assert_eq!(live.base_value()["nextId"], 108);
+    }
+
+    #[test]
+    fn locked_noop_collision_and_renderer_authored_arrays_fail_closed() {
+        let mut locked = state();
+        locked.base_value_mut()["research"]["completedTechIds"] = json!([]);
+        assert!(
+            locked
+                .validate_player_authority_command(&intent(locked.revision, "auto-connect"))
+                .is_err()
+        );
+
+        let mut collision = state();
+        collision.base_value_mut()["dysonPlans"]["helios"]["layers"][0]["frames"] = json!([{
+            "id": "dyson_frame_100",
+            "sourceNodeId": "node-a",
+            "targetNodeId": "node-c",
+            "requiredStructurePoints": 4,
+            "completedStructurePoints": 4
+        }]);
+        assert!(
+            collision
+                .validate_player_authority_command(&intent(collision.revision, "auto-connect"))
+                .is_err()
+        );
+
+        let mut connected = state();
+        let first = intent(connected.revision, "auto-connect");
+        connected.apply_command(&first).unwrap();
+        assert!(
+            connected
+                .validate_player_authority_command(&intent(connected.revision, "auto-connect"))
+                .is_err()
+        );
+
+        let mut forged = intent(7, "plan-shell");
+        forged.top_level_changes.push(ValuePatch {
+            path: vec![PathSegment::Key("dysonPlans".to_owned())],
+            operation: "set".to_owned(),
+            value: Some(json!({ "forged": true })),
+        });
+        assert!(state().validate_player_authority_command(&forged).is_err());
+    }
+}

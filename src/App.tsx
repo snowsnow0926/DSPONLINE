@@ -711,10 +711,13 @@ import {
 import {
   createNativeProjectedDysonActiveLayerCommand,
   createNativeProjectedDysonActiveOrbitCommand,
+  createNativeProjectedDysonAutoConnectCommand,
+  createNativeProjectedDysonClearShellCommand,
   createNativeProjectedDysonLaunchEnabledCommand,
   createNativeProjectedDysonLaunchModeCommand,
   createNativeProjectedDysonLaunchThrottleCommand,
   createNativeProjectedDysonOrbitGeometryCommand,
+  createNativeProjectedDysonPlanShellCommand,
   type NativeProjectedDysonOrbitGeometry,
 } from "./game/nativeProjectedDysonCommands";
 import {
@@ -13159,6 +13162,48 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     );
   }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
 
+  const onNativeDysonAutoConnect = useCallback((layerId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次框架闭合未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonAutoConnectCommand(frame, layerId)
+        : null,
+      () => setNotice("已由 Rust 补齐当前壳层的闭合框架"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonPlanShell = useCallback((layerId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次壳面规划未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonPlanShellCommand(frame, layerId)
+        : null,
+      () => setNotice("已由 Rust 补齐框架并规划当前壳面"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
+  const onNativeDysonClearShell = useCallback((layerId: string) => {
+    const frame = nativeDysonWorkspaceFrame;
+    if (!frame) {
+      setNotice("原生戴森投影尚未就绪；本次壳面清除未应用");
+      return;
+    }
+    commitNativeProjectedCommand(frame.revision, (baseRevision) =>
+      baseRevision === frame.revision
+        ? createNativeProjectedDysonClearShellCommand(frame, layerId)
+        : null,
+      () => setNotice("已由 Rust 清除当前层壳面设计；结构点与太阳帆总量保持不变"),
+    );
+  }, [commitNativeProjectedCommand, nativeDysonWorkspaceFrame]);
+
   const onFuelChange = useCallback((entityId: string, itemId: ItemId) => {
     commitGame((current) => setFuelItem(current, entityId, itemId));
   }, [commitGame]);
@@ -22609,6 +22654,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             onLaunchModeChange={onNativeDysonLaunchModeChange}
             onLaunchThrottleChange={onNativeDysonLaunchThrottleChange}
             onLaunchEnabledChange={onNativeDysonLaunchEnabledChange}
+            onAutoConnect={onNativeDysonAutoConnect}
+            onPlanShell={onNativeDysonPlanShell}
+            onClearShell={onNativeDysonClearShell}
             onClose={() => {
               setNativeDysonSelectedSystemId(null);
               if (nextMobileShell) mobileNavigation.requestBack();

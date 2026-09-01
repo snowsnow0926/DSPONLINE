@@ -175,6 +175,42 @@ test("blueprint rename crosses as one opaque semantic marker and returns topolog
   assert.equal(encoded.includes("nextId"), false);
 });
 
+test("Dyson shell planning crosses as one compact opaque intent and invalidates projections", async () => {
+  const dysonCommand = command(17, {
+    topLevelChanges: [{
+      path: ["dysonPlans", "intent"],
+      operation: "set",
+      value: {
+        kind: "plan-shell",
+        systemId: "mod:system/Ω🚀",
+        layerId: "mod:layer/alpha🚀",
+      },
+    }],
+  });
+  const observed = [];
+  const { broker, calls } = brokerFixture({
+    onCommittedCommand(value) { observed.push(value); },
+    commit: async (request) => commandResult(request, {
+      changedEntityIds: [],
+      changedBeltIds: [],
+      topologyDirty: true,
+    }),
+  });
+
+  const receipt = await broker.commit(7, { sessionId: "core-1", command: dysonCommand });
+  assert.equal(receipt.revision, 18);
+  assert.equal(receipt.topologyDirty, true);
+  assert.deepEqual(calls[0].command, dysonCommand);
+  assert.deepEqual(observed[0].command, dysonCommand);
+  const encoded = JSON.stringify(calls[0].command);
+  assert.equal(encoded.includes("requiredStructurePoints"), false);
+  assert.equal(encoded.includes("completedStructurePoints"), false);
+  assert.equal(encoded.includes("sailCapacity"), false);
+  assert.equal(encoded.includes("absorbedSails"), false);
+  assert.equal(encoded.includes("nextId"), false);
+  assert.ok(Buffer.byteLength(encoded, "utf8") < 512);
+});
+
 test("time-warp intent and ejector target cross the host without renderer-derived state", async () => {
   const timeWarpCommand = command(17, {
     topLevelChanges: [{

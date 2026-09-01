@@ -8018,6 +8018,38 @@ mod tests {
         }
     }
 
+    fn player_authority_dyson_plan_intent_command(
+        base_revision: u64,
+        command_id: &str,
+        kind: &str,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [{
+                    "path": ["dysonPlans", "intent"],
+                    "operation": "set",
+                    "value": {
+                        "kind": kind,
+                        "systemId": "helios",
+                        "layerId": "mod:layer/alpha🚀"
+                    }
+                }],
+                "changedEntities": [],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
     fn player_authority_blueprint_rename_intent_command(
         base_revision: u64,
         command_id: &str,
@@ -16874,6 +16906,155 @@ mod tests {
         )
         .unwrap();
         assert_eq!(replayed["state"], live_state);
+    }
+
+    #[test]
+    fn dyson_shell_plan_intent_survives_player_authority_wal_cold_reopen_without_minting_material()
+    {
+        let mut catalog = player_authority_catalog();
+        catalog["technologies"].as_array_mut().unwrap().extend([
+            json!({
+                "id": "dyson_sphere_program",
+                "costs": [{ "itemId": "iron_ore", "amount": 1 }],
+                "prerequisites": []
+            }),
+            json!({
+                "id": "dyson_shell",
+                "costs": [{ "itemId": "iron_ore", "amount": 1 }],
+                "prerequisites": ["dyson_sphere_program"]
+            }),
+        ]);
+        let mut envelope: Value = serde_json::from_slice(&import_envelope()).unwrap();
+        envelope["state"]["research"]["completedTechIds"] =
+            json!(["dyson_sphere_program", "dyson_shell"]);
+        envelope["state"]["nextId"] = Value::from(100);
+        envelope["state"]["dysonPlans"]["helios"] = json!({
+            "systemId": "helios",
+            "activeLayerId": "mod:layer/alpha🚀",
+            "structurePoints": 12,
+            "shellSails": 80,
+            "layers": [{
+                "id": "mod:layer/alpha🚀",
+                "name": "Alpha",
+                "radius": 10000,
+                "inclination": 0,
+                "longitude": 0,
+                "structureAllocationFloor": 0,
+                "shellAllocationFloor": 0,
+                "nodes": [
+                    { "id": "node-c", "angle": 180, "requiredStructurePoints": 1, "completedStructurePoints": 1 },
+                    { "id": "node-a", "angle": 0, "requiredStructurePoints": 1, "completedStructurePoints": 1 },
+                    { "id": "node-d", "angle": 270, "requiredStructurePoints": 1, "completedStructurePoints": 1 },
+                    { "id": "node-b", "angle": 90, "requiredStructurePoints": 1, "completedStructurePoints": 1 }
+                ],
+                "frames": [],
+                "shells": []
+            }]
+        });
+        let state = serde_json::to_string(&envelope["state"]).unwrap();
+        envelope["checksum"] = Value::from(utf16_fnv(&format!(
+            "{{\"formatVersion\":2,\"state\":{state}}}"
+        )));
+        let bytes = serde_json::to_vec(&envelope).unwrap();
+        let (clean_root, mut clean_store, mut clean_registry, clean_session_id, clean_checkpoint) =
+            player_authority_fixture_from_parts(bytes.clone(), catalog.clone());
+        let request = |revision| {
+            player_authority_dyson_plan_intent_command(
+                revision,
+                "dyson-plan-shell-before-cold-reopen",
+                "plan-shell",
+            )
+        };
+        let clean = clean_registry
+            .commit_player_authority_command(
+                &mut clean_store,
+                &clean_session_id,
+                request(clean_checkpoint.revision),
+            )
+            .unwrap();
+        assert_eq!(clean.revision, clean_checkpoint.revision + 1);
+        assert!(clean.changed_entity_ids.is_empty());
+        assert!(clean.changed_belt_ids.is_empty());
+        assert!(clean.topology_dirty);
+        let live = export_test_state(
+            clean_root.path(),
+            &clean_registry,
+            &clean_store,
+            &clean_session_id,
+            "dyson-plan-shell-clean",
+        );
+        let live_hash = clean.summary.canonical_sha256.clone();
+        let live_plan = &live["dysonPlans"]["helios"];
+        assert_eq!(
+            live_plan["layers"][0]["frames"].as_array().unwrap().len(),
+            4
+        );
+        assert_eq!(
+            live_plan["layers"][0]["shells"].as_array().unwrap().len(),
+            4
+        );
+        assert_eq!(live_plan["structurePoints"].as_f64(), Some(12.0));
+        assert_eq!(live_plan["shellSails"].as_f64(), Some(80.0));
+        assert_eq!(live["nextId"], 108);
+        assert!(live["dysonPlans"].get("intent").is_none());
+
+        let (root, mut store, mut registry, session_id, checkpoint) =
+            player_authority_fixture_from_parts(bytes, catalog);
+        assert_eq!(checkpoint.revision, clean_checkpoint.revision);
+        let error = registry
+            .commit_player_authority_command_internal(
+                &mut store,
+                &session_id,
+                request(checkpoint.revision),
+                PlayerAuthorityCommandKind::Gameplay,
+                PlayerAuthorityCommandFault::AfterWal,
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("lost response"));
+        let wal = store.read_wal("normal-main", checkpoint.revision).unwrap();
+        assert_eq!(wal.len(), 1);
+        let wal_payload = serde_json::to_string(&wal).unwrap();
+        assert!(wal_payload.contains("dysonPlans"));
+        assert!(wal_payload.contains("plan-shell"));
+        assert!(wal_payload.contains("mod:layer/alpha🚀"));
+        assert!(!wal_payload.contains("requiredStructurePoints"));
+        assert!(!wal_payload.contains("completedStructurePoints"));
+        assert!(!wal_payload.contains("sailCapacity"));
+        assert!(!wal_payload.contains("absorbedSails"));
+        assert!(!wal_payload.contains("nextId"));
+
+        drop(registry);
+        drop(store);
+
+        let mut reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = resumable_player_authority_registry_for_test();
+        let startup = reopened_registry
+            .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+            .unwrap()
+            .expect("WAL-staged Dyson command must provide a startup receipt");
+        assert_eq!(startup.revision, clean.revision);
+        assert_eq!(startup.summary.canonical_sha256, live_hash);
+        assert_eq!(
+            startup.command_id.as_deref(),
+            Some("dyson-plan-shell-before-cold-reopen")
+        );
+        let duplicate = reopened_registry
+            .commit_player_authority_command(
+                &mut reopened_store,
+                &startup.session_id,
+                request(checkpoint.revision),
+            )
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.summary.canonical_sha256, live_hash);
+        let replayed = export_test_state(
+            root.path(),
+            &reopened_registry,
+            &reopened_store,
+            &startup.session_id,
+            "dyson-plan-shell-replayed",
+        );
+        assert_eq!(replayed, live);
     }
 
     #[test]

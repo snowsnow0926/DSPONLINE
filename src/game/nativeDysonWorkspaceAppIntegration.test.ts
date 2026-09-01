@@ -32,11 +32,14 @@ describe("native Dyson workspace App integration", () => {
     expect(nativeTag).toContain("onLaunchModeChange={onNativeDysonLaunchModeChange}");
     expect(nativeTag).toContain("onLaunchThrottleChange={onNativeDysonLaunchThrottleChange}");
     expect(nativeTag).toContain("onLaunchEnabledChange={onNativeDysonLaunchEnabledChange}");
+    expect(nativeTag).toContain("onAutoConnect={onNativeDysonAutoConnect}");
+    expect(nativeTag).toContain("onPlanShell={onNativeDysonPlanShell}");
+    expect(nativeTag).toContain("onClearShell={onNativeDysonClearShell}");
     expect(nativeTag).not.toMatch(/\bgame=|onAddLayer=|commitGame/);
     expect(app).toMatch(/nativePlayerAuthorityBoundFrame \? \([\s\S]*?<NativeDysonPlannerWorkspace[\s\S]*?: authorityWorkspaceSync === "dyson"[\s\S]*?<DysonPlannerWorkspace/);
   });
 
-  it("commits launch and orbit changes against the exact projected revision without mutating the renderer save", () => {
+  it("commits launch, orbit, and shell-plan changes against the exact projected revision without mutating the renderer save", () => {
     const handlers = app.slice(
       app.indexOf("const onNativeDysonSelectLayer"),
       app.indexOf("const onFuelChange"),
@@ -48,6 +51,9 @@ describe("native Dyson workspace App integration", () => {
     expect(handlers).toMatch(/createNativeProjectedDysonLaunchModeCommand\(frame, mode\)/);
     expect(handlers).toMatch(/createNativeProjectedDysonLaunchThrottleCommand\(frame, throttle\)/);
     expect(handlers).toMatch(/createNativeProjectedDysonLaunchEnabledCommand\(frame, enabled\)/);
+    expect(handlers).toMatch(/createNativeProjectedDysonAutoConnectCommand\(frame, layerId\)/);
+    expect(handlers).toMatch(/createNativeProjectedDysonPlanShellCommand\(frame, layerId\)/);
+    expect(handlers).toMatch(/createNativeProjectedDysonClearShellCommand\(frame, layerId\)/);
     expect(handlers).not.toMatch(/commitGame|gameRef|publishRuntimeGame/);
   });
 

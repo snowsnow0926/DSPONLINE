@@ -347,6 +347,16 @@ function nativeDysonShellPath(sourceAngle: number, targetAngle: number, radius: 
   return `M 0 0 L ${source.x.toFixed(2)} ${source.y.toFixed(2)} A ${radius.toFixed(2)} ${radius.toFixed(2)} 0 ${distance > 180 ? 1 : 0} 1 ${target.x.toFixed(2)} ${target.y.toFixed(2)} Z`;
 }
 
+function nativeDysonSameEdge(
+  leftSource: string,
+  leftTarget: string,
+  rightSource: string,
+  rightTarget: string,
+): boolean {
+  return leftSource === rightSource && leftTarget === rightTarget ||
+    leftSource === rightTarget && leftTarget === rightSource;
+}
+
 function nativeDysonFrameIsComplete(
   frame: NativeDysonWorkspaceFrame | null,
   status: NativeDysonWorkspaceReadStatus,
@@ -424,6 +434,9 @@ export function NativeDysonPlannerWorkspace({
   onLaunchModeChange,
   onLaunchThrottleChange,
   onLaunchEnabledChange,
+  onAutoConnect,
+  onPlanShell,
+  onClearShell,
   onClose,
 }: {
   frame: NativeDysonWorkspaceFrame | null;
@@ -438,6 +451,9 @@ export function NativeDysonPlannerWorkspace({
   onLaunchModeChange: (mode: DysonLaunchMode) => void;
   onLaunchThrottleChange: (throttle: DysonLaunchThrottle) => void;
   onLaunchEnabledChange: (enabled: boolean) => void;
+  onAutoConnect: (layerId: string) => void;
+  onPlanShell: (layerId: string) => void;
+  onClearShell: (layerId: string) => void;
   onClose: () => void;
 }) {
   const exactFrame = nativeDysonFrameIsComplete(candidateFrame, status, selectedSystemId)
@@ -520,6 +536,25 @@ export function NativeDysonPlannerWorkspace({
   const activeNodes = activeLayer ? frame.nodesByLayerId.get(activeLayer.layerId) ?? [] : [];
   const activeFrames = activeLayer ? frame.framesByLayerId.get(activeLayer.layerId) ?? [] : [];
   const activeShells = activeLayer ? frame.shellsByLayerId.get(activeLayer.layerId) ?? [] : [];
+  const activeRingNodes = [...activeNodes].sort((left, right) => left.angle - right.angle);
+  const activeLayerNeedsFrames = activeRingNodes.length >= 3 && activeRingNodes.some((node, index) => {
+    const target = activeRingNodes[(index + 1) % activeRingNodes.length];
+    return !activeFrames.some((candidate) => nativeDysonSameEdge(
+      candidate.sourceNodeId,
+      candidate.targetNodeId,
+      node.nodeId,
+      target.nodeId,
+    ));
+  });
+  const activeLayerNeedsShells = activeRingNodes.length >= 3 && activeRingNodes.some((node, index) => {
+    const target = activeRingNodes[(index + 1) % activeRingNodes.length];
+    return !activeShells.some((candidate) => nativeDysonSameEdge(
+      candidate.sourceNodeId,
+      candidate.targetNodeId,
+      node.nodeId,
+      target.nodeId,
+    ));
+  });
   const launchModeLabel = { balanced: "均衡", swarm: "太阳帆", sphere: "火箭" } as const;
 
   return (
@@ -540,7 +575,7 @@ export function NativeDysonPlannerWorkspace({
           <span>总功率 <strong><PowerValue valueKw={globalGenerationKw} /></strong></span>
         </div>
         <div className="dyson-planner-commandbar" role="toolbar" aria-label="原生戴森球规划命令">
-          <button type="button" disabled data-native-dyson-action="design" title="设计命令尚未接入原生权威状态机"><LockKeyhole size={17} /><span>设计只读</span></button>
+          <button type="button" disabled data-native-dyson-action="design" title="框架闭合与壳面规划已接入 Rust；其余设计命令继续分批开放"><LockKeyhole size={17} /><span>部分设计</span></button>
           <button type="button" disabled data-native-dyson-action="save" title="原生权威检查点由运行时持久化"><Save size={17} /><span>权威保存</span></button>
           <button type="button" onClick={onClose} title="关闭戴森球规划" aria-label="关闭戴森球规划"><X size={18} /><span>关闭</span></button>
         </div>
@@ -691,7 +726,7 @@ export function NativeDysonPlannerWorkspace({
         <aside className="dyson-layer-inspector">
           {activeLayer ? (
             <>
-              <header><i><Orbit size={17} /></i><div><span>当前原生壳层 · 只读</span><strong>{nativeDysonLabel(activeLayer.name, activeLayer.layerId)}</strong></div><em>{activeLayer.nodeCount} 节点</em></header>
+              <header><i><Orbit size={17} /></i><div><span>当前原生壳层 · Rust 权威</span><strong>{nativeDysonLabel(activeLayer.name, activeLayer.layerId)}</strong></div><em>{activeLayer.nodeCount} 节点</em></header>
               <label className="dyson-orbit-control"><span>轨道半径 <strong>{activeLayer.radius.toLocaleString("zh-CN")} m</strong></span><input type="range" min={0} max={Math.max(1, activeLayer.radius)} value={activeLayer.radius} disabled data-native-dyson-action="layer-radius" aria-label="原生壳层轨道半径（只读）" /></label>
               <label className="dyson-orbit-control"><span>轨道倾角 <strong>{activeLayer.inclination}°</strong></span><input type="range" min={-90} max={90} value={activeLayer.inclination} disabled data-native-dyson-action="layer-inclination" aria-label="原生壳层轨道倾角（只读）" /></label>
               <label className="dyson-orbit-control"><span>升交点经度 <strong>{activeLayer.longitude}°</strong></span><input type="range" min={0} max={359} value={activeLayer.longitude} disabled data-native-dyson-action="layer-longitude" aria-label="原生壳层升交点经度（只读）" /></label>
@@ -704,9 +739,9 @@ export function NativeDysonPlannerWorkspace({
                 <div><dt>壳面分配下限</dt><dd><QuantityValue value={activeLayer.shellAllocationFloor} /></dd></div>
               </dl>
               <div className="dyson-layer-actions">
-                <button type="button" disabled data-native-dyson-action="connect-frames"><GitBranch size={14} />闭合框架</button>
-                <button type="button" disabled data-native-dyson-action="plan-shell"><Layers3 size={14} />规划壳面</button>
-                <button type="button" disabled data-native-dyson-action="clear-shell"><X size={14} />清除壳面</button>
+                <button type="button" disabled={commandPending || !projection.technology.programReady || !activeLayerNeedsFrames} onClick={() => onAutoConnect(activeLayer.layerId)} data-native-dyson-action="connect-frames" title="由 Rust 按节点角度闭合缺失框架"><GitBranch size={14} />闭合框架</button>
+                <button type="button" disabled={commandPending || !projection.technology.shellReady || activeRingNodes.length < 3 || !activeLayerNeedsFrames && !activeLayerNeedsShells} onClick={() => onPlanShell(activeLayer.layerId)} data-native-dyson-action="plan-shell" title="由 Rust 补齐框架并规划壳面，不修改已有物料"><Layers3 size={14} />规划壳面</button>
+                <button type="button" disabled={commandPending || !projection.technology.programReady || activeShells.length === 0} onClick={() => onClearShell(activeLayer.layerId)} data-native-dyson-action="clear-shell" title="清除当前层壳面设计，保留已获得的结构点和太阳帆"><X size={14} />清除壳面</button>
               </div>
               <section aria-label="原生戴森结构明细">
                 <div className="dyson-layer-heading"><span>节点明细</span><strong>{activeNodes.length}</strong></div>

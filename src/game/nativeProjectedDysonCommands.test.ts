@@ -1,17 +1,23 @@
 import { describe, expect, it } from "vitest";
 import type {
+  DesktopNativeCoreDysonFrameRow,
   DesktopNativeCoreDysonLayerRow,
+  DesktopNativeCoreDysonNodeRow,
   DesktopNativeCoreDysonOrbitRow,
+  DesktopNativeCoreDysonShellRow,
   DesktopNativeCoreDysonSystemRow,
 } from "../desktop";
 import type { NativeDysonWorkspaceFrame } from "./nativeDysonWorkspaceStore";
 import {
   createNativeProjectedDysonActiveLayerCommand,
   createNativeProjectedDysonActiveOrbitCommand,
+  createNativeProjectedDysonAutoConnectCommand,
+  createNativeProjectedDysonClearShellCommand,
   createNativeProjectedDysonLaunchEnabledCommand,
   createNativeProjectedDysonLaunchModeCommand,
   createNativeProjectedDysonLaunchThrottleCommand,
   createNativeProjectedDysonOrbitGeometryCommand,
+  createNativeProjectedDysonPlanShellCommand,
 } from "./nativeProjectedDysonCommands";
 
 const engineering = {
@@ -81,6 +87,49 @@ function frame(): NativeDysonWorkspaceFrame {
   };
 }
 
+function designFrame({ completeFrames = false, completeShells = false, shellReady = true } = {}): NativeDysonWorkspaceFrame {
+  const current = frame();
+  const layerId = "layer:old";
+  const nodes: DesktopNativeCoreDysonNodeRow[] = [0, 90, 180, 270].map((angle, index) => ({
+    layerId,
+    nodeId: `node-${index}`,
+    angle,
+    requiredStructurePoints: 1,
+    completedStructurePoints: 1,
+  }));
+  const frames: DesktopNativeCoreDysonFrameRow[] = completeFrames ? nodes.map((node, index) => ({
+    layerId,
+    frameId: `frame-${index}`,
+    sourceNodeId: node.nodeId,
+    targetNodeId: nodes[(index + 1) % nodes.length].nodeId,
+    requiredStructurePoints: 2,
+    completedStructurePoints: 0,
+  })) : [];
+  const shells: DesktopNativeCoreDysonShellRow[] = completeShells ? nodes.map((node, index) => ({
+    layerId,
+    shellId: `shell-${index}`,
+    sourceNodeId: node.nodeId,
+    targetNodeId: nodes[(index + 1) % nodes.length].nodeId,
+    boundaryFrameCount: 1,
+    active: false,
+    sailCapacity: 80,
+    absorbedSails: 0,
+  })) : [];
+  return {
+    ...current,
+    projection: {
+      ...current.projection,
+      technology: { programReady: true, shellReady },
+    } as NativeDysonWorkspaceFrame["projection"],
+    nodes,
+    frames,
+    shells,
+    nodesByLayerId: new Map([[layerId, nodes]]),
+    framesByLayerId: new Map([[layerId, frames]]),
+    shellsByLayerId: new Map([[layerId, shells]]),
+  };
+}
+
 describe("native projected Dyson launch commands", () => {
   it("emits only the requested launch leaf from the exact native frame", () => {
     expect(createNativeProjectedDysonLaunchModeCommand(frame(), "sphere")?.topLevelChanges)
@@ -89,6 +138,44 @@ describe("native projected Dyson launch commands", () => {
       .toEqual([{ path: ["dysonEngineering", "launchThrottle"], operation: "set", value: 0.5 }]);
     expect(createNativeProjectedDysonLaunchEnabledCommand(frame(), false)?.topLevelChanges)
       .toEqual([{ path: ["dysonEngineering", "launchEnabled"], operation: "set", value: false }]);
+  });
+
+  it("emits compact semantic layer intents without renderer-authored geometry or counters", () => {
+    const current = designFrame();
+    for (const [kind, command] of [
+      ["auto-connect", createNativeProjectedDysonAutoConnectCommand(current, "layer:old")],
+      ["plan-shell", createNativeProjectedDysonPlanShellCommand(current, "layer:old")],
+    ] as const) {
+      expect(command?.topLevelChanges).toEqual([{
+        path: ["dysonPlans", "intent"],
+        operation: "set",
+        value: { kind, systemId: "sol", layerId: "layer:old" },
+      }]);
+      expect(JSON.stringify(command)).not.toContain("requiredStructurePoints");
+      expect(JSON.stringify(command)).not.toContain("sailCapacity");
+    }
+    const withShells = designFrame({ completeFrames: true, completeShells: true });
+    expect(createNativeProjectedDysonClearShellCommand(withShells, "layer:old")?.topLevelChanges)
+      .toEqual([{
+        path: ["dysonPlans", "intent"],
+        operation: "set",
+        value: { kind: "clear-shell", systemId: "sol", layerId: "layer:old" },
+      }]);
+  });
+
+  it("does not enqueue completed design work and fails closed for missing technology or nodes", () => {
+    const completed = designFrame({ completeFrames: true, completeShells: true });
+    expect(createNativeProjectedDysonAutoConnectCommand(completed, "layer:old")).toBeNull();
+    expect(createNativeProjectedDysonPlanShellCommand(completed, "layer:old")).toBeNull();
+    expect(createNativeProjectedDysonClearShellCommand(designFrame(), "layer:old")).toBeNull();
+    expect(() => createNativeProjectedDysonPlanShellCommand(
+      designFrame({ shellReady: false }),
+      "layer:old",
+    )).toThrow(TypeError);
+    expect(() => createNativeProjectedDysonAutoConnectCommand(frame(), "layer:old"))
+      .toThrow(TypeError);
+    expect(() => createNativeProjectedDysonClearShellCommand(designFrame(), "layer:missing"))
+      .toThrow(TypeError);
   });
 
   it("returns null for unchanged values", () => {

@@ -2249,3 +2249,15 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 4. 最终同一冻结源码重新执行 `npm run test:native-core:serial`：Core `979 passed / 3 ignored / 0 failed`（434.65 秒），Host library `224/224`（31.32 秒），Host main `3/3`（0.02 秒），合计 `1206 passed / 3 explicitly ignored / 0 failed`。3 个 ignored 均为显式手工 release-mode 合成性能项，不计作功能通过，也不是失败隐藏。
 5. 该绿色结果只关闭受控串行组合门禁。24.40 记录的默认 28-thread Windows Core 测试进程 `STATUS_HEAP_CORRUPTION` 仍是独立 No-Go；不能用串行通过改写为已修复。24 小时、多硬件、Win10/11、真实 Defender/磁盘故障、安装/覆盖升级、签名与灰度也仍未执行。
 6. 本节不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；未读取或修改真实玩家存档，未连接生产，未部署、未打包发布、未签名。
+
+### 24.45 戴森框架/壳面 Rust 权威纵切（2026-09-01，开发候选）
+
+本切片一次闭合“薄 UI → 最小语义命令 → Rust 规则推导 → player-authority WAL/checkpoint/ACK → 冷启动重放 → 新 revision 戴森投影”。它开放既有壳层的闭合框架、规划壳面和清除壳面，不开放创建/删除壳层、增删节点、壳层轨道几何或新增/删除太阳帆轨道，因此不能写成戴森完整几何已经迁移。
+
+1. renderer 只提交 `dysonPlans.intent`，正文严格只有 `kind/systemId/layerId`；不提交节点/框架/壳面数组、`nextId`、结构点、吸附帆或容量。TypeScript 在 exact session/run/revision/registry/恒星系投影上先做可用性与 no-op 判断；pending 或 retained old frame 时三个按钮全部锁死，ACK 后等待新投影，不乐观修改 renderer 状态。
+2. Rust 重新验证恒星系目录与解锁、`dyson_sphere_program`/`dyson_shell`、最多 8 层/每层 24 节点、有界框架/壳面目录、全部 opaque UTF-8 ID、节点端点、无向边唯一性、边界框架、半径/角度、结构/壳面计数和 JavaScript safe-integer 边界。MOD/未知/重复/越界/同值/夹带数组、生成 ID 冲突与 `nextId` 溢出全部失败关闭。
+3. 闭合顺序严格按节点角度稳定排序并连接相邻节点及首尾；框架工作量沿用 `ceil(radius/10000 × arc/45)`，最少 1。规划壳面先补框架，再按同一稳定边序生成壳面，容量为对应框架工作量 × 40。ID 严格从权威 `nextId` 依次产生；WAL 只保存原始小意图，在线提交和冷重放都由同一 Rust expansion 重新生成。
+4. 三个命令都调用现有 Rust `reconcile_plan`，只重派生节点/框架完成量与壳面吸附显示；`structurePoints`、`shellSails`、全局火箭/太阳帆及其他物料来源不增加。清除壳面只删除设计行，保留玩家已经获得的结构点和壳面帆总量；没有用“清零显示值”伪装物料守恒。
+5. Host 故障注入停在 WAL 已同步、checkpoint/ACK 尚未完成的边界。日志断言包含 opaque 意图而不含 `required/completedStructurePoints`、`sailCapacity`、`absorbedSails` 或 `nextId`；新进程从旧 checkpoint 重放后，revision、canonical SHA-256、4 个框架、4 个壳面、`nextId=108`、结构点 12 和壳面帆 80 与无故障提交逐字一致；相同 command ID 只返回 duplicate receipt，不执行第二次。
+6. 本轮新鲜验证：Rust Core 戴森相关 `25/25`，其中新增语义命令 `4/4`；Host WAL 冷恢复 `1/1`；TypeScript 通过；组件/命令/App focused Vitest `22/22`；desktop command broker `28/28`；Core+Host all-target strict Clippy `-D warnings`、Rust fmt 和 diff check 通过。完整组合 Rust/Vitest/Server/build/E2E 尚未在本切片冻结后重跑，不能复用 24.44 的数字冒充。
+7. 固定能力百分比暂不因三个按钮上调：戴森仍缺新建/删除层、节点与轨道的完整写面，更大的跨域权威/并行缺口也未改变。GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 和 `authorityEligible=false` 均保持不变；未读取玩家存档，未连接生产，未部署、未打包发布、未签名。

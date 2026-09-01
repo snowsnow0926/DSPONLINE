@@ -328,6 +328,9 @@ function renderNative(overrides: Partial<Parameters<typeof NativeDysonPlannerWor
     onLaunchModeChange: vi.fn(),
     onLaunchThrottleChange: vi.fn(),
     onLaunchEnabledChange: vi.fn(),
+    onAutoConnect: vi.fn(),
+    onPlanShell: vi.fn(),
+    onClearShell: vi.fn(),
     onClose: vi.fn(),
     ...overrides,
   };
@@ -354,7 +357,7 @@ describe("NativeDysonPlannerWorkspace", () => {
     expect(host.querySelector("[data-native-dyson-shell-id='shell:alpha-beta']")).not.toBeNull();
   });
 
-  it("routes safe launch and orbit controls through native callbacks while structural edits stay disabled", () => {
+  it("routes launch, orbit, and certified shell-plan controls through native callbacks", () => {
     const onSelectSystem = vi.fn();
     const onSelectLayer = vi.fn();
     const onSelectOrbit = vi.fn();
@@ -362,6 +365,8 @@ describe("NativeDysonPlannerWorkspace", () => {
     const onLaunchModeChange = vi.fn();
     const onLaunchThrottleChange = vi.fn();
     const onLaunchEnabledChange = vi.fn();
+    const onPlanShell = vi.fn();
+    const onClearShell = vi.fn();
     const onClose = vi.fn();
     renderNative({
       frame: frameWithAlternativeTargets(),
@@ -372,6 +377,8 @@ describe("NativeDysonPlannerWorkspace", () => {
       onLaunchModeChange,
       onLaunchThrottleChange,
       onLaunchEnabledChange,
+      onPlanShell,
+      onClearShell,
       onClose,
     });
 
@@ -415,24 +422,61 @@ describe("NativeDysonPlannerWorkspace", () => {
     });
     expect(onOrbitChange).toHaveBeenCalledWith("orbit:primary", { radius: 30_000 });
 
-    const structuralControls = Array.from(host.querySelectorAll<HTMLButtonElement | HTMLInputElement>("[data-native-dyson-action]"))
+    const planShell = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='plan-shell']")!;
+    const clearShell = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='clear-shell']")!;
+    const autoConnect = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='connect-frames']")!;
+    expect(autoConnect.disabled).toBe(true);
+    expect(planShell.disabled).toBe(false);
+    expect(clearShell.disabled).toBe(false);
+    act(() => planShell.click());
+    act(() => clearShell.click());
+    expect(onPlanShell).toHaveBeenCalledWith("layer:main");
+    expect(onClearShell).toHaveBeenCalledWith("layer:main");
+
+    const remainingReadonlyControls = Array.from(host.querySelectorAll<HTMLButtonElement | HTMLInputElement>("[data-native-dyson-action]"))
       .filter((control) => {
         const action = control.dataset.nativeDysonAction ?? "";
         return action !== "select-layer" && action !== "select-orbit" &&
+          action !== "connect-frames" && action !== "plan-shell" && action !== "clear-shell" &&
           !action.startsWith("launch-") && !action.startsWith("orbit-");
       });
-    expect(structuralControls.length).toBeGreaterThan(5);
-    for (const control of structuralControls) expect(control.disabled).toBe(true);
+    expect(remainingReadonlyControls.length).toBeGreaterThan(5);
+    for (const control of remainingReadonlyControls) expect(control.disabled).toBe(true);
 
     act(() => host.querySelector<HTMLButtonElement>("[aria-label='关闭戴森球规划']")!.click());
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("enables Rust auto-connect only when a ring frame is missing", () => {
+    const emptyFrames = Object.freeze([]) as NativeDysonWorkspaceFrame["frames"];
+    const selected = {
+      ...selectedSystem,
+      totals: { ...selectedSystem.totals, frameCount: 0 },
+    };
+    const systemsWithoutFrames = Object.freeze([selected, modSystem]);
+    const onAutoConnect = vi.fn();
+    renderNative({
+      frame: {
+        ...FRAME,
+        projection: { ...projection, selectedSystem: selected },
+        systems: systemsWithoutFrames,
+        frames: emptyFrames,
+        systemsById: new Map(systemsWithoutFrames.map((system) => [system.systemId, system])),
+        framesByLayerId: new Map([[layer.layerId, emptyFrames]]),
+      },
+      onAutoConnect,
+    });
+    const autoConnect = host.querySelector<HTMLButtonElement>("[data-native-dyson-action='connect-frames']")!;
+    expect(autoConnect.disabled).toBe(false);
+    act(() => autoConnect.click());
+    expect(onAutoConnect).toHaveBeenCalledWith("layer:main");
   });
 
   it("locks native projected controls while a command is pending", () => {
     renderNative({ pending: true });
 
     const projectedControls = host.querySelectorAll<HTMLButtonElement | HTMLInputElement>(
-      "[data-native-dyson-action^='launch-'], [data-native-dyson-action='select-layer'], [data-native-dyson-action='select-orbit'], [data-native-dyson-action^='orbit-']",
+      "[data-native-dyson-action^='launch-'], [data-native-dyson-action='select-layer'], [data-native-dyson-action='select-orbit'], [data-native-dyson-action^='orbit-'], [data-native-dyson-action='connect-frames'], [data-native-dyson-action='plan-shell'], [data-native-dyson-action='clear-shell']",
     );
     expect(projectedControls.length).toBeGreaterThan(6);
     for (const control of projectedControls) expect(control.disabled).toBe(true);
@@ -467,7 +511,7 @@ describe("NativeDysonPlannerWorkspace", () => {
     expect(host.textContent).toContain("正在读取 Rust revision 18");
     expect(host.textContent).toContain("已验证的 revision 17；全部权威写入已锁定");
     const authorityControls = host.querySelectorAll<HTMLButtonElement | HTMLInputElement>(
-      "[data-native-dyson-action^='launch-'], [data-native-dyson-action='select-layer'], [data-native-dyson-action='select-orbit'], [data-native-dyson-action^='orbit-']",
+      "[data-native-dyson-action^='launch-'], [data-native-dyson-action='select-layer'], [data-native-dyson-action='select-orbit'], [data-native-dyson-action^='orbit-'], [data-native-dyson-action='connect-frames'], [data-native-dyson-action='plan-shell'], [data-native-dyson-action='clear-shell']",
     );
     expect(authorityControls.length).toBeGreaterThan(6);
     for (const control of authorityControls) expect(control.disabled).toBe(true);

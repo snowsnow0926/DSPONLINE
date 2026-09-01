@@ -420,7 +420,7 @@ fn shell_active(layer: &Map<String, Value>, shell: &Map<String, Value>) -> bool 
     })
 }
 
-fn reconcile_plan(plan: &mut Map<String, Value>) -> anyhow::Result<()> {
+pub(crate) fn reconcile_plan(plan: &mut Map<String, Value>) -> anyhow::Result<()> {
     let structure_points = finite(plan.get("structurePoints")).floor().max(0.0);
     set_number(plan, "structurePoints", structure_points)?;
     let mut structure_cursor: f64 = 0.0;

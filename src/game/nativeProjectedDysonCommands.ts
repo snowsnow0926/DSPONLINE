@@ -63,6 +63,88 @@ function topLevelCommand(
   };
 }
 
+export type NativeProjectedDysonPlanIntentKind = "auto-connect" | "plan-shell" | "clear-shell";
+
+function sameUndirectedEdge(
+  leftSource: string,
+  leftTarget: string,
+  rightSource: string,
+  rightTarget: string,
+): boolean {
+  return leftSource === rightSource && leftTarget === rightTarget ||
+    leftSource === rightTarget && leftTarget === rightSource;
+}
+
+function createNativeProjectedDysonPlanIntentCommand(
+  frame: NativeDysonWorkspaceFrame,
+  layerId: string,
+  kind: NativeProjectedDysonPlanIntentKind,
+): SimulationCommandPatch | null {
+  const layer = frame.layersById.get(layerId);
+  const programReady = frame.projection.technology?.programReady === true;
+  if (!validFrame(frame) || !validOpaqueId(layerId) || !layer || !programReady ||
+      !["auto-connect", "plan-shell", "clear-shell"].includes(kind)) {
+    throw new TypeError("原生戴森壳层规划投影或目标无效");
+  }
+  const nodes = [...(frame.nodesByLayerId.get(layerId) ?? [])]
+    .sort((left, right) => left.angle - right.angle);
+  const frames = frame.framesByLayerId.get(layerId) ?? [];
+  const shells = frame.shellsByLayerId.get(layerId) ?? [];
+  if (kind !== "clear-shell" && nodes.length < 3) {
+    throw new TypeError("原生戴森壳层至少需要三个节点");
+  }
+  if (kind === "plan-shell" && frame.projection.technology?.shellReady !== true) {
+    throw new TypeError("原生戴森壳面科技尚未解锁");
+  }
+  const missingFrame = nodes.some((node, index) => {
+    const target = nodes[(index + 1) % nodes.length];
+    return !frames.some((candidate) => sameUndirectedEdge(
+      candidate.sourceNodeId,
+      candidate.targetNodeId,
+      node.nodeId,
+      target.nodeId,
+    ));
+  });
+  const missingShell = nodes.some((node, index) => {
+    const target = nodes[(index + 1) % nodes.length];
+    return !shells.some((candidate) => sameUndirectedEdge(
+      candidate.sourceNodeId,
+      candidate.targetNodeId,
+      node.nodeId,
+      target.nodeId,
+    ));
+  });
+  if (kind === "auto-connect" && !missingFrame ||
+      kind === "plan-shell" && !missingFrame && !missingShell ||
+      kind === "clear-shell" && shells.length === 0) return null;
+  return topLevelCommand(frame, [{
+    path: ["dysonPlans", "intent"],
+    operation: "set",
+    value: { kind, systemId: frame.selectedSystemId, layerId },
+  }]);
+}
+
+export function createNativeProjectedDysonAutoConnectCommand(
+  frame: NativeDysonWorkspaceFrame,
+  layerId: string,
+): SimulationCommandPatch | null {
+  return createNativeProjectedDysonPlanIntentCommand(frame, layerId, "auto-connect");
+}
+
+export function createNativeProjectedDysonPlanShellCommand(
+  frame: NativeDysonWorkspaceFrame,
+  layerId: string,
+): SimulationCommandPatch | null {
+  return createNativeProjectedDysonPlanIntentCommand(frame, layerId, "plan-shell");
+}
+
+export function createNativeProjectedDysonClearShellCommand(
+  frame: NativeDysonWorkspaceFrame,
+  layerId: string,
+): SimulationCommandPatch | null {
+  return createNativeProjectedDysonPlanIntentCommand(frame, layerId, "clear-shell");
+}
+
 export function createNativeProjectedDysonLaunchModeCommand(
   frame: NativeDysonWorkspaceFrame,
   target: DysonLaunchMode,

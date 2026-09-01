@@ -24,6 +24,8 @@ const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
 const MACRO_V10_ALGORITHM_VERSION: &str =
     "native-pure-idle-macro-v10-closed-ledger-construction-quantum-v15";
+const OFFLINE_MACRO_V1_ALGORITHM_VERSION: &str =
+    "native-offline-macro-v1-closed-ledger-one-shot-v1";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MICROS_PER_SECOND: i128 = 1_000_000;
 const DYSON_ROCKET_LAUNCH_ENERGY_MICRO_MJ: i128 = 108_000_000;
@@ -198,6 +200,10 @@ struct RenewablePowerGridGrant {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RenewablePowerTailCertificate {
+    /// Offline settlement has no powered time-warp controller. Keeping this
+    /// authority bit inside the runtime-only certificate prevents a disabled
+    /// controller from being mistaken for a reusable live time-warp grant.
+    offline_authority: bool,
     controller_entity_id: String,
     controller_grid: PowerGridKey,
     requested_multiplier: PowerProofScalar,
@@ -575,13 +581,17 @@ fn admission_reason(state: &CoreState, _request: &CoreAdvanceRequest) -> Option<
     if base.get("paused").and_then(Value::as_bool).unwrap_or(false) {
         return Some("pure-idle-state-paused");
     }
-    if !base
+    let time_warp_enabled = base
         .get("timeWarp")
         .and_then(Value::as_object)
         .and_then(|time_warp| time_warp.get("enabled"))
         .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    if _request.advance_mode == CoreAdvanceMode::OfflineMacroV1 {
+        if time_warp_enabled {
+            return Some("offline-macro-time-warp-active");
+        }
+    } else if !time_warp_enabled {
         return Some("pure-idle-time-warp-disabled");
     }
     if number_at(base.get("timeWarp"), &["pendingSimulationSeconds"]).abs() > EPSILON
@@ -609,6 +619,18 @@ fn budget_attestation_reason(
     }
     if request.wall_seconds <= 0.0 {
         return Some("pure-idle-wall-budget-empty");
+    }
+
+    if request.advance_mode == CoreAdvanceMode::OfflineMacroV1 {
+        let tolerance = EPSILON
+            * request
+                .simulation_seconds
+                .max(request.wall_seconds)
+                .max(1.0);
+        if (request.simulation_seconds - request.wall_seconds).abs() > tolerance {
+            return Some("offline-macro-budget-must-match-wall-time");
+        }
+        return None;
     }
 
     let base = state.base_value();
@@ -678,6 +700,7 @@ fn unsupported(
 fn algorithm_version(mode: CoreAdvanceMode) -> &'static str {
     match mode {
         CoreAdvanceMode::PureIdleMacroV10 => MACRO_V10_ALGORITHM_VERSION,
+        CoreAdvanceMode::OfflineMacroV1 => OFFLINE_MACRO_V1_ALGORITHM_VERSION,
         CoreAdvanceMode::Exact | CoreAdvanceMode::PureIdleConservativeV2 => ALGORITHM_VERSION,
     }
 }
@@ -3066,7 +3089,14 @@ fn build_renewable_power_tail_certificate(
     // disposable probe. The three post-exact endpoints are authoritative.
     let observed = &snapshots[1..];
     let reference = &observed[0].renewable_power;
-    if !reference.time_warp_complete || reference.grids.is_empty() {
+    let offline_authority = !state
+        .base_value()
+        .get("timeWarp")
+        .and_then(Value::as_object)
+        .and_then(|time_warp| time_warp.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if (!offline_authority && !reference.time_warp_complete) || reference.grids.is_empty() {
         return Err("renewable power calibration is incomplete".to_owned());
     }
     for candidate in observed
@@ -3074,12 +3104,13 @@ fn build_renewable_power_tail_certificate(
         .skip(1)
         .map(|snapshot| &snapshot.renewable_power)
     {
-        if !candidate.time_warp_complete
-            || candidate.controller_entity_id != reference.controller_entity_id
-            || candidate.requested_multiplier != reference.requested_multiplier
-            || candidate.effective_multiplier != reference.effective_multiplier
-            || candidate.required_power_kw != reference.required_power_kw
-            || candidate.allocated_power_kw != reference.allocated_power_kw
+        if (!offline_authority
+            && (!candidate.time_warp_complete
+                || candidate.controller_entity_id != reference.controller_entity_id
+                || candidate.requested_multiplier != reference.requested_multiplier
+                || candidate.effective_multiplier != reference.effective_multiplier
+                || candidate.required_power_kw != reference.required_power_kw
+                || candidate.allocated_power_kw != reference.allocated_power_kw))
             || candidate.grids.len() != reference.grids.len()
             || reference.grids.iter().any(|(key, grid)| {
                 candidate
@@ -3096,16 +3127,24 @@ fn build_renewable_power_tail_certificate(
     }
     let current = capture_renewable_power_proof_snapshot(state)
         .map_err(|error| format!("current renewable power snapshot failed: {error:#}"))?;
-    if !current.time_warp_complete
-        || current.controller_entity_id != reference.controller_entity_id
-        || current.requested_multiplier != reference.requested_multiplier
-        || current.effective_multiplier != reference.effective_multiplier
-        || current.required_power_kw != reference.required_power_kw
-        || current.allocated_power_kw != reference.allocated_power_kw
+    if !offline_authority
+        && (!current.time_warp_complete
+            || current.controller_entity_id != reference.controller_entity_id
+            || current.requested_multiplier != reference.requested_multiplier
+            || current.effective_multiplier != reference.effective_multiplier
+            || current.required_power_kw != reference.required_power_kw
+            || current.allocated_power_kw != reference.allocated_power_kw)
     {
-        return Err("current time-warp power identity diverged from calibration".to_owned());
+        return Err("current renewable power identity diverged from calibration".to_owned());
     }
-    let controller_grid = controller_power_grid(state, &reference.controller_entity_id)?;
+    let controller_grid = if offline_authority {
+        PowerGridKey {
+            planet_id: String::new(),
+            grid_id: String::new(),
+        }
+    } else {
+        controller_power_grid(state, &reference.controller_entity_id)?
+    };
     let entities = entity_snapshot?;
     let lower_ray_by_grid = conservative_ray_generation_by_grid(state, entities)?;
     let mut grants = BTreeMap::new();
@@ -3181,12 +3220,13 @@ fn build_renewable_power_tail_certificate(
             },
         );
     }
-    if !grants.contains_key(&controller_grid) {
+    if !offline_authority && !grants.contains_key(&controller_grid) {
         return Err("time-warp controller grid has no renewable power grant".to_owned());
     }
     let dyson = capture_dyson_terminal(state.base_value())
         .map_err(|error| format!("Dyson power floor snapshot failed: {error:#}"))?;
     Ok(RenewablePowerTailCertificate {
+        offline_authority,
         controller_entity_id: reference.controller_entity_id.clone(),
         controller_grid,
         requested_multiplier: reference.requested_multiplier,
@@ -3220,19 +3260,37 @@ fn validate_renewable_power_tail_certificate(
 ) -> Result<(), String> {
     let current = capture_renewable_power_proof_snapshot(state)
         .map_err(|error| format!("current renewable power snapshot failed: {error:#}"))?;
-    if !current.time_warp_complete
-        || current.controller_entity_id != certificate.controller_entity_id
-        || current.requested_multiplier != certificate.requested_multiplier
-        || current.effective_multiplier != certificate.effective_multiplier
-        || current.required_power_kw != certificate.required_power_kw
-        || current.allocated_power_kw != certificate.allocated_power_kw
-        || controller_power_grid(state, &current.controller_entity_id)?
-            != certificate.controller_grid
-    {
-        return Err("renewable power certificate no longer matches time-warp authority".to_owned());
-    }
-    if !certificate.grids.contains_key(&certificate.controller_grid) {
-        return Err("renewable power certificate lost its controller-grid grant".to_owned());
+    if certificate.offline_authority {
+        let time_warp = state.base_value().get("timeWarp");
+        if time_warp
+            .and_then(Value::as_object)
+            .and_then(|time_warp| time_warp.get("enabled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || number_at(time_warp, &["pendingSimulationSeconds"]).abs() > EPSILON
+            || number_at(time_warp, &["pendingWallSeconds"]).abs() > EPSILON
+        {
+            return Err(
+                "offline renewable power certificate crossed into time-warp authority".to_owned(),
+            );
+        }
+    } else {
+        if !current.time_warp_complete
+            || current.controller_entity_id != certificate.controller_entity_id
+            || current.requested_multiplier != certificate.requested_multiplier
+            || current.effective_multiplier != certificate.effective_multiplier
+            || current.required_power_kw != certificate.required_power_kw
+            || current.allocated_power_kw != certificate.allocated_power_kw
+            || controller_power_grid(state, &current.controller_entity_id)?
+                != certificate.controller_grid
+        {
+            return Err(
+                "renewable power certificate no longer matches time-warp authority".to_owned(),
+            );
+        }
+        if !certificate.grids.contains_key(&certificate.controller_grid) {
+            return Err("renewable power certificate lost its controller-grid grant".to_owned());
+        }
     }
     for (key, grant) in &certificate.grids {
         let supply = grant.static_generation_floor_kw.get() + grant.ray_generation_floor_kw.get();
@@ -6696,9 +6754,13 @@ fn exact_three_window_probe_with_construction_policy(
     request: &CoreAdvanceRequest,
     isolate_construction_automation: bool,
 ) -> Result<Vec<SettlementProofSnapshot>, String> {
-    let multiplier = finite_number_at(state.base_value().get("timeWarp"), &["effectiveMultiplier"])
-        .filter(|value| *value > 0.0)
-        .ok_or_else(|| "probe multiplier is invalid".to_owned())?;
+    let multiplier = if request.advance_mode == CoreAdvanceMode::OfflineMacroV1 {
+        1.0
+    } else {
+        finite_number_at(state.base_value().get("timeWarp"), &["effectiveMultiplier"])
+            .filter(|value| *value > 0.0)
+            .ok_or_else(|| "probe multiplier is invalid".to_owned())?
+    };
     let mut probe = state.clone();
     // The probe is disposable and must not inherit a stale runtime proof as an
     // input to the exact engine. Clearing it also keeps the clone compact.
@@ -7495,9 +7557,20 @@ fn galactic_export_capacity_seconds(
 }
 
 fn galactic_multiplier_microunits(state: &CoreState) -> Result<i128, String> {
-    let multiplier = finite_number_at(state.base_value().get("timeWarp"), &["effectiveMultiplier"])
-        .filter(|value| *value > 0.0)
-        .ok_or_else(|| "Galactic activity multiplier is invalid".to_owned())?;
+    let time_warp_enabled = state
+        .base_value()
+        .get("timeWarp")
+        .and_then(Value::as_object)
+        .and_then(|time_warp| time_warp.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let multiplier = if time_warp_enabled {
+        finite_number_at(state.base_value().get("timeWarp"), &["effectiveMultiplier"])
+            .filter(|value| *value > 0.0)
+            .ok_or_else(|| "Galactic activity multiplier is invalid".to_owned())?
+    } else {
+        1.0
+    };
     let scaled = multiplier * MICROS_PER_SECOND as f64;
     let rounded = scaled.round();
     if !scaled.is_finite()
@@ -8649,12 +8722,25 @@ pub(crate) fn advance_macro_v10(
     advance_bounded_with_runtime(state, request, true, deterministic_runtime())
 }
 
+/// One-shot desktop offline settlement. It shares MacroV10's closed material
+/// ledger and bounded 3x10-second exact calibration, but it runs at 1x wall
+/// time with time warp disabled and deliberately persists no time-warp session
+/// credit or runtime certificate.
+pub(crate) fn advance_offline_macro_v1(
+    state: &mut CoreState,
+    request: &CoreAdvanceRequest,
+) -> anyhow::Result<CoreAdvanceResult> {
+    advance_bounded_with_runtime(state, request, true, deterministic_runtime())
+}
+
 fn advance_bounded_with_runtime(
     state: &mut CoreState,
     request: &CoreAdvanceRequest,
     macro_v10: bool,
     deterministic_runtime: &DeterministicRuntime,
 ) -> anyhow::Result<CoreAdvanceResult> {
+    let offline_macro = request.advance_mode == CoreAdvanceMode::OfflineMacroV1;
+    let sessioned_macro = macro_v10 && !offline_macro;
     #[cfg(test)]
     let _macro_v10_test_guard = macro_v10.then(macro_v10_test_guard);
 
@@ -8688,22 +8774,26 @@ fn advance_bounded_with_runtime(
             }
         };
 
-    let exact_seconds_used_before = if macro_v10 {
+    let exact_seconds_used_before = if sessioned_macro {
         state.pure_idle_macro_exact_seconds_used()
+    } else if offline_macro {
+        0.0
     } else {
         state.pure_idle_exact_seconds_used()
     };
-    let mut construction_carry_seconds = if macro_v10 {
+    let mut construction_carry_seconds = if sessioned_macro {
         state.pure_idle_macro_construction_carry_seconds()
     } else {
         0
     };
-    let mut construction_quantum_replay_remaining_seconds = if macro_v10 {
+    let mut construction_quantum_replay_remaining_seconds = if sessioned_macro {
         state.pure_idle_macro_construction_quantum_replay_remaining_seconds()
+    } else if offline_macro {
+        PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS
     } else {
         0
     };
-    let mut construction_quantum_pending_credits = if macro_v10 {
+    let mut construction_quantum_pending_credits = if sessioned_macro {
         state
             .pure_idle_macro_construction_quantum_pending_credits()
             .into_iter()
@@ -8713,18 +8803,25 @@ fn advance_bounded_with_runtime(
         MaterialTotals::new()
     };
     let mut macro_runtime = macro_v10.then(|| {
-        state
-            .pure_idle_macro_runtime
-            .as_ref()
-            .filter(|runtime| runtime.last_committed_revision == state.revision)
-            .cloned()
-            .unwrap_or_else(|| {
-                if exact_seconds_used_before <= EPSILON {
-                    PureIdleMacroRuntimeCache::starts_at(state.revision, settlement_before.clone())
-                } else {
-                    PureIdleMacroRuntimeCache::missing_prefix(state.revision)
-                }
-            })
+        if offline_macro {
+            PureIdleMacroRuntimeCache::starts_at(state.revision, settlement_before.clone())
+        } else {
+            state
+                .pure_idle_macro_runtime
+                .as_ref()
+                .filter(|runtime| runtime.last_committed_revision == state.revision)
+                .cloned()
+                .unwrap_or_else(|| {
+                    if exact_seconds_used_before <= EPSILON {
+                        PureIdleMacroRuntimeCache::starts_at(
+                            state.revision,
+                            settlement_before.clone(),
+                        )
+                    } else {
+                        PureIdleMacroRuntimeCache::missing_prefix(state.revision)
+                    }
+                })
+        }
     });
     let exact_seconds_remaining =
         (PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS - exact_seconds_used_before).max(0.0);
@@ -9231,7 +9328,7 @@ fn advance_bounded_with_runtime(
         // The exact debit and its new revision live only on this disposable
         // candidate. Every possible failure below leaves the source session
         // and its full/remaining credit untouched.
-        if macro_v10 {
+        if sessioned_macro {
             let construction_quantum_pending_credits = construction_quantum_pending_credits
                 .into_iter()
                 .map(|(item_id, amount)| {
@@ -9250,15 +9347,17 @@ fn advance_bounded_with_runtime(
                 construction_quantum_replay_remaining_seconds,
                 construction_quantum_pending_credits,
             )?;
-        } else {
+        } else if !offline_macro {
             candidate.install_pure_idle_session_progress(exact_progress)?;
         }
     }
 
-    if let Some(mut runtime) = macro_runtime {
+    if offline_macro {
+        candidate.clear_pure_idle_private_session();
+    } else if sessioned_macro && let Some(mut runtime) = macro_runtime {
         runtime.last_committed_revision = candidate.revision;
         candidate.pure_idle_macro_runtime = Some(runtime);
-    } else if !macro_v10 {
+    } else {
         candidate.pure_idle_macro_runtime = None;
     }
 
@@ -9278,7 +9377,9 @@ fn advance_bounded_with_runtime(
     *state = candidate;
     Ok(CoreAdvanceResult {
         supported: true,
-        exact_scope: if tail_seconds > EPSILON && macro_v10 {
+        exact_scope: if tail_seconds > EPSILON && offline_macro {
+            "offline-macro-v1"
+        } else if tail_seconds > EPSILON && macro_v10 {
             "pure-idle-macro-v10"
         } else if tail_seconds > EPSILON {
             "pure-idle-conservative-v2"
@@ -11376,6 +11477,28 @@ mod tests {
         }
     }
 
+    fn offline_macro_request(revision: u64, seconds: f64) -> CoreAdvanceRequest {
+        CoreAdvanceRequest {
+            base_revision: revision,
+            simulation_seconds: seconds,
+            wall_seconds: seconds,
+            advance_mode: CoreAdvanceMode::OfflineMacroV1,
+            include_diagnostics: false,
+        }
+    }
+
+    fn as_offline_fixture(mut state: CoreState) -> CoreState {
+        let time_warp = state.base_value_mut()["timeWarp"]
+            .as_object_mut()
+            .expect("fixture timeWarp object");
+        time_warp.insert("enabled".to_owned(), json!(false));
+        time_warp.insert("requestedMultiplier".to_owned(), json!(1));
+        time_warp.insert("effectiveMultiplier".to_owned(), json!(1));
+        time_warp.insert("requiredPowerKw".to_owned(), json!(0));
+        time_warp.insert("allocatedPowerKw".to_owned(), json!(0));
+        state
+    }
+
     fn settlement_parallel_entities(entity_count: usize) -> Vec<Value> {
         (0..entity_count)
             .map(|index| {
@@ -12953,6 +13076,143 @@ mod tests {
             &mut loses_power,
             pure_idle_request(revision, 15.0, 1.0),
             "pure-idle-power-snapshot-invalid",
+        );
+    }
+
+    #[test]
+    fn offline_macro_v1_is_productive_at_one_x_without_persisting_time_warp_credit() {
+        for resource_mode in ["finite", "infinite"] {
+            let initial = as_offline_fixture(productive_quantum_macro_fixture(15.0, resource_mode));
+            let before = capture_settlement_snapshot(&initial).unwrap();
+
+            let mut prefix = initial.clone();
+            let revision = prefix.revision;
+            let prefix_result =
+                advance_offline_macro_v1(&mut prefix, &offline_macro_request(revision, 30.0))
+                    .unwrap();
+            assert!(prefix_result.supported, "reason={:?}", prefix_result.reason);
+            assert_eq!(prefix_result.exact_calibration_seconds, Some(30.0));
+            assert_eq!(prefix_result.approximated_seconds, Some(0.0));
+
+            let mut long = initial;
+            let revision = long.revision;
+            let result =
+                advance_offline_macro_v1(&mut long, &offline_macro_request(revision, 600.0))
+                    .unwrap();
+            assert!(result.supported, "reason={:?}", result.reason);
+            assert_eq!(result.exact_scope, "offline-macro-v1");
+            assert_eq!(result.exact_calibration_seconds, Some(30.0));
+            assert_eq!(result.approximated_seconds, Some(570.0));
+            assert!(
+                number_at(long.base_value().get("totalProduced"), &["iron_ore"])
+                    > number_at(prefix.base_value().get("totalProduced"), &["iron_ore"]),
+                "offline tail should credit certified live production"
+            );
+            assert_eq!(long.pure_idle_macro_exact_seconds_used(), 0.0);
+            assert!(long.pure_idle_macro_runtime.is_none());
+            let after = capture_settlement_snapshot(&long).unwrap();
+            validate_settlement_proof(&before, &after, &long.catalog, None).unwrap();
+        }
+    }
+
+    #[test]
+    fn offline_macro_v1_budget_and_clock_authority_fail_atomically() {
+        let mut active_time_warp = productive_quantum_macro_fixture(15.0, "infinite");
+        let source_hash = active_time_warp.summary().unwrap().canonical_sha256;
+        let source_revision = active_time_warp.revision;
+        let result = advance_offline_macro_v1(
+            &mut active_time_warp,
+            &offline_macro_request(source_revision, 600.0),
+        )
+        .unwrap();
+        assert!(!result.supported);
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("offline-macro-time-warp-active")
+        );
+        assert_eq!(active_time_warp.revision, source_revision);
+        assert_eq!(
+            active_time_warp.summary().unwrap().canonical_sha256,
+            source_hash
+        );
+
+        let mut wrong_ratio =
+            as_offline_fixture(productive_quantum_macro_fixture(15.0, "infinite"));
+        let source_hash = wrong_ratio.summary().unwrap().canonical_sha256;
+        let source_revision = wrong_ratio.revision;
+        let request = CoreAdvanceRequest {
+            base_revision: source_revision,
+            simulation_seconds: 600.0,
+            wall_seconds: 40.0,
+            advance_mode: CoreAdvanceMode::OfflineMacroV1,
+            include_diagnostics: false,
+        };
+        let result = advance_offline_macro_v1(&mut wrong_ratio, &request).unwrap();
+        assert!(!result.supported);
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("offline-macro-budget-must-match-wall-time")
+        );
+        assert_eq!(wrong_ratio.revision, source_revision);
+        assert_eq!(wrong_ratio.summary().unwrap().canonical_sha256, source_hash);
+    }
+
+    #[test]
+    fn offline_macro_v1_prefilled_rockets_remain_material_funded() {
+        let initial = as_offline_fixture(productive_rocket_macro_fixture(
+            15.0, "infinite", 2, 1, 10_000,
+        ));
+        let before = capture_settlement_snapshot(&initial).unwrap();
+        let mut settled = initial;
+        let revision = settled.revision;
+        let result =
+            advance_offline_macro_v1(&mut settled, &offline_macro_request(revision, 600.0))
+                .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let after = capture_settlement_snapshot(&settled).unwrap();
+        validate_settlement_proof(&before, &after, &settled.catalog, None).unwrap();
+        let launches = after.dyson.rockets_launched - before.dyson.rockets_launched;
+        let produced = material_delta(&before.produced, &after.produced, TERMINAL_ROCKET_ITEM_ID);
+        let stock_spent = before
+            .owned
+            .get(TERMINAL_ROCKET_ITEM_ID)
+            .copied()
+            .unwrap_or(0)
+            - after
+                .owned
+                .get(TERMINAL_ROCKET_ITEM_ID)
+                .copied()
+                .unwrap_or(0);
+        assert!(launches <= produced + stock_spent);
+        assert_eq!(
+            after.dyson.structure_points - before.dyson.structure_points,
+            launches
+        );
+    }
+
+    #[test]
+    fn offline_macro_v1_construction_uses_real_stock_on_stable_renewable_power() {
+        let initial = as_offline_fixture(productive_construction_macro_fixture(15.0, 1_000));
+        let before = capture_settlement_snapshot(&initial).unwrap();
+        let mut settled = initial;
+        let revision = settled.revision;
+        let result =
+            advance_offline_macro_v1(&mut settled, &offline_macro_request(revision, 600.0))
+                .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let crafted = number_at(
+            settled.base_value().get("constructionAutomation"),
+            &["totalCrafted"],
+        );
+        assert!(crafted > 0.0);
+        assert_eq!(
+            number_at(settled.base_value().get("construction"), &["test_building"]),
+            crafted
+        );
+        let after = capture_settlement_snapshot(&settled).unwrap();
+        assert!(
+            after.owned.get("iron_ore").copied().unwrap_or(0)
+                < before.owned.get("iron_ore").copied().unwrap_or(0)
         );
     }
 
@@ -17250,6 +17510,34 @@ mod tests {
         );
         assert_eq!(replayed.pure_idle_macro_exact_seconds_used(), 30.0);
         assert_eq!(replayed.pure_idle_exact_seconds_used(), 0.0);
+    }
+
+    #[test]
+    fn durable_replay_preserves_offline_macro_mode_without_session_credit() {
+        let initial = as_offline_fixture(productive_quantum_macro_fixture(15.0, "infinite"));
+        let mut expected = initial.clone();
+        let result =
+            advance_offline_macro_v1(&mut expected, &offline_macro_request(7, 600.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+
+        let mut replayed = initial;
+        replayed
+            .replay_operation(
+                7,
+                result.revision,
+                None,
+                600.0,
+                600.0,
+                CoreAdvanceMode::OfflineMacroV1,
+            )
+            .unwrap();
+        assert_eq!(
+            replayed.summary().unwrap().canonical_sha256,
+            expected.summary().unwrap().canonical_sha256
+        );
+        assert_eq!(replayed.pure_idle_macro_exact_seconds_used(), 0.0);
+        assert_eq!(replayed.pure_idle_exact_seconds_used(), 0.0);
+        assert!(replayed.pure_idle_macro_runtime.is_none());
     }
 
     fn exact_station_mode_transition_fixture() -> CoreState {

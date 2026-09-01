@@ -5,9 +5,9 @@ use dsp_native_core::{CoreAdvanceRequest, ProfileOperationPurpose, SimulationCom
 
 use crate::core_runtime::{
     CoreActivatePlayerAuthorityRequest, CoreCheckpointAcknowledgeExactRealtimeRequest,
-    CoreCheckpointExactRealtimeFinalizationRequest, CoreCommitOperationExactRealtimeRequest,
-    CoreCommitOperationRequest, CoreCommitPlayerAuthorityCommandRequest,
-    CoreCommitPlayerAuthorityMacroAdvanceRequest,
+    CoreCheckpointExactRealtimeFinalizationRequest, CoreCommitOfflineSettlementRequest,
+    CoreCommitOperationExactRealtimeRequest, CoreCommitOperationRequest,
+    CoreCommitPlayerAuthorityCommandRequest, CoreCommitPlayerAuthorityMacroAdvanceRequest,
     CoreCommitPlayerAuthorityOperationsSettingCommandRequest,
     CoreCommitPlayerAuthorityOrbitalContractCommandRequest, CoreCommitPlayerAuthorityPauseRequest,
     CoreCommitPlayerAuthoritySystemSpaceStationCommandRequest,
@@ -538,6 +538,10 @@ pub enum ControlRequest {
     CoreCommitOperation {
         session_id: String,
         request: CoreCommitOperationRequest,
+    },
+    CoreCommitOfflineSettlement {
+        session_id: String,
+        request: CoreCommitOfflineSettlementRequest,
     },
     CoreCommitOperationExactRealtime {
         session_id: String,

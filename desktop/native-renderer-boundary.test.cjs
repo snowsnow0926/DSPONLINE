@@ -1003,6 +1003,18 @@ test("save/open/advance/checkpoint/compare receipts fail closed on Host-only fie
   });
   assert.equal(macroAdvanced.exactScope, "pure-idle-macro-v10");
 
+  const offlineAdvanced = normalizeRendererNativeResult("coreAdvance", {
+    supported: true,
+    exactScope: "offline-macro-v1",
+    changed: true,
+    previousRevision: 5,
+    revision: 9,
+    algorithmVersion: "native-offline-macro-v1-closed-ledger-one-shot-v1",
+    exactCalibrationSeconds: 30,
+    approximatedSeconds: 570,
+  });
+  assert.equal(offlineAdvanced.exactScope, "offline-macro-v1");
+
   const checkpoint = {
     checkpoint: saveCommit(2),
     summary: coreSummary(2),

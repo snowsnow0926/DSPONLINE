@@ -4829,6 +4829,21 @@ impl CoreState {
         Ok(())
     }
 
+    /// Drops every runtime/private pure-idle cursor without touching public
+    /// GameState v47. One-shot offline settlement calls this before commit so
+    /// a later powered time-warp session cannot inherit calibration credit,
+    /// construction carry, or quantum replay allowance from another clock
+    /// authority.
+    pub(crate) fn clear_pure_idle_private_session(&mut self) {
+        self.pure_idle_session = None;
+        self.pure_idle_macro_construction_carry_seconds = 0;
+        self.pure_idle_macro_construction_quantum_replay_remaining_seconds =
+            PURE_IDLE_MACRO_CONSTRUCTION_QUANTUM_REPLAY_SECONDS;
+        self.pure_idle_macro_construction_quantum_pending_credits
+            .clear();
+        self.pure_idle_macro_runtime = None;
+    }
+
     pub(crate) fn replace_entity_raw(&mut self, index: usize, value: RawRecord) {
         self.parsed_entity_runtime.clear();
         self.summary_cache.get_mut().take();

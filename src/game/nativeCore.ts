@@ -75,7 +75,7 @@ import type { SaveMode } from "./types";
 
 const MAX_NATIVE_PROJECTION_TRANSFER_BYTES = 1024 * 1024;
 
-export type NativeCoreAdvanceMode = "exact" | "pure-idle-conservative-v2" | "pure-idle-macro-v10";
+export type NativeCoreAdvanceMode = "exact" | "pure-idle-conservative-v2" | "pure-idle-macro-v10" | "offline-macro-v1";
 
 type NativeCoreTransferProjection =
   | DesktopNativeCoreViewportProjectionResult
@@ -290,6 +290,9 @@ export async function advanceNativeCoreSegmented(
     request.wallSeconds,
     request.maxSegmentSeconds,
   );
+  if (request.advanceMode === "offline-macro-v1" && segments.length > 1) {
+    throw new Error("原生离线宏观结算必须作为单个耐久事务提交，不能由渲染层分段重校准");
+  }
   for (const segment of segments) {
     if (request.signal?.aborted) {
       return { supported: true, revision, cancelled: true, advancedSimulationSeconds, advancedWallSeconds };

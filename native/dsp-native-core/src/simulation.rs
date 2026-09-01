@@ -20,6 +20,12 @@ pub enum CoreAdvanceMode {
     /// conservative calibration semantics.
     #[serde(rename = "pure-idle-macro-v10")]
     PureIdleMacroV10,
+    /// One-shot desktop offline settlement. This deliberately has a distinct
+    /// wire identity from powered time warp so durable replay can never
+    /// borrow a multiplier, power grant, or private calibration credit from a
+    /// live PureIdleMacroV10 session.
+    #[serde(rename = "offline-macro-v1")]
+    OfflineMacroV1,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -301,6 +307,9 @@ impl CoreState {
             }
             CoreAdvanceMode::PureIdleMacroV10 => {
                 return crate::pure_idle::advance_macro_v10(self, request);
+            }
+            CoreAdvanceMode::OfflineMacroV1 => {
+                return crate::pure_idle::advance_offline_macro_v1(self, request);
             }
             CoreAdvanceMode::Exact => {}
         }

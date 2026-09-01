@@ -90,6 +90,7 @@ const MAIN_PLAYER_AUTHORITY_OWNER_ID = "main-player-authority";
 const MAX_DURABLE_PLAYER_AUTHORITY_COMMAND_BYTES = 1_750_000;
 const MAX_PLAYER_AUTHORITY_MACRO_BUDGET_MILLISECONDS = 30 * 24 * 60 * 60 * 1_000;
 const NATIVE_V47_STREAM_IMPORT_CAPABILITY = "native-core-v47-stream-import-v1";
+const NATIVE_OFFLINE_MACRO_CAPABILITY = "native-core-offline-macro-v1";
 const NATIVE_HOST_SPAWN_ENVIRONMENT_KEYS = new Set([
   "DSP_NATIVE_CORE_THREADS",
   "DSP_NATIVE_CORE_SYNC_RECORD_DROP",
@@ -764,7 +765,7 @@ function normalizeNativeCoreCommitOperation(value) {
     !Number.isFinite(value.simulationSeconds) || value.simulationSeconds < 0 ||
     !Number.isFinite(value.wallSeconds) || value.wallSeconds < 0 ||
     value.includeDiagnostics !== undefined && typeof value.includeDiagnostics !== "boolean" ||
-    value.advanceMode !== undefined && !["exact", "pure-idle-conservative-v2", "pure-idle-macro-v10"].includes(value.advanceMode)) {
+    value.advanceMode !== undefined && !["exact", "pure-idle-conservative-v2", "pure-idle-macro-v10", "offline-macro-v1"].includes(value.advanceMode)) {
     throw new TypeError("native core authoritative operation is invalid");
   }
   const command = value.command == null ? null : normalizeNativeCoreCommand(value.command);
@@ -2120,7 +2121,7 @@ class NativeCoreSessionRegistry {
       !Number.isFinite(request?.simulationSeconds) || request.simulationSeconds < 0 ||
       !Number.isFinite(request?.wallSeconds) || request.wallSeconds < 0 ||
       request?.includeDiagnostics !== undefined && typeof request.includeDiagnostics !== "boolean" ||
-      request?.advanceMode !== undefined && !["exact", "pure-idle-conservative-v2", "pure-idle-macro-v10"].includes(request.advanceMode)) {
+      request?.advanceMode !== undefined && !["exact", "pure-idle-conservative-v2", "pure-idle-macro-v10", "offline-macro-v1"].includes(request.advanceMode)) {
       throw new TypeError("native core advance request is invalid");
     }
     return this.requestOwned(ownerId, request.sessionId, {
@@ -2143,6 +2144,39 @@ class NativeCoreSessionRegistry {
       sessionId: request.sessionId,
       request: normalizeNativeCoreCommitOperation(request),
     });
+  }
+
+  commitOfflineSettlement(ownerId, request, observedNowMs = Date.now()) {
+    this.assertOwner(ownerId, request?.sessionId);
+    if (!this.client.hello?.capabilities?.includes(NATIVE_OFFLINE_MACRO_CAPABILITY)) {
+      throw new NativeHostError(
+        "native host does not provide one-shot offline macro settlement",
+        "NATIVE_CORE_CAPABILITY_MISSING",
+      );
+    }
+    exactObjectKeys(request, [
+      "sessionId", "expectedGeneration", "expectedRootHash", "expectedRevision",
+      "expectedRegistryFingerprint", "strategy",
+    ], "native offline settlement intent");
+    if (!Number.isSafeInteger(request.expectedGeneration) || request.expectedGeneration < 1 ||
+      typeof request.expectedRootHash !== "string" || !/^[a-f0-9]{64}$/.test(request.expectedRootHash) ||
+      !Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 0 ||
+      !validLogicalId(request.expectedRegistryFingerprint, 256) || request.strategy !== "macro-v1" ||
+      !Number.isSafeInteger(observedNowMs) || observedNowMs < 0) {
+      throw new TypeError("native offline settlement intent is invalid");
+    }
+    return this.requestOwned(ownerId, request.sessionId, {
+      operation: "coreCommitOfflineSettlement",
+      sessionId: request.sessionId,
+      request: {
+        expectedGeneration: request.expectedGeneration,
+        expectedRootHash: request.expectedRootHash,
+        expectedRevision: request.expectedRevision,
+        expectedRegistryFingerprint: request.expectedRegistryFingerprint,
+        observedNowMs,
+        strategy: "macro-v1",
+      },
+    }, 300_000);
   }
 
   commitOperationExactRealtime(ownerId, request) {
@@ -2834,6 +2868,7 @@ module.exports = {
   NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY,
   NATIVE_VIEWPORT_ENTITY_PRESENTATION_CAPABILITY,
   NATIVE_V47_STREAM_IMPORT_CAPABILITY,
+  NATIVE_OFFLINE_MACRO_CAPABILITY,
   NativeHostClient,
   NativeHostError,
   NativeCoreSessionRegistry,

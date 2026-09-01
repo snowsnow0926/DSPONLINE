@@ -582,6 +582,41 @@ pub struct CoreCommitOperationResult {
     pub summary: Option<CoreStateSummary>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CoreOfflineSettlementStrategy {
+    MacroV1,
+}
+
+/// Main-process clock intent for one native offline settlement. The caller
+/// supplies only the verified source identity and a trusted current clock;
+/// Rust derives the simulation/wall budget from the published manifest.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CoreCommitOfflineSettlementRequest {
+    pub expected_generation: u64,
+    pub expected_root_hash: String,
+    pub expected_revision: u64,
+    pub expected_registry_fingerprint: String,
+    pub observed_now_ms: u64,
+    pub strategy: CoreOfflineSettlementStrategy,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoreCommitOfflineSettlementResult {
+    pub settled: bool,
+    pub strategy: &'static str,
+    pub source_saved_at_ms: u64,
+    pub settled_at_ms: u64,
+    pub settled_seconds: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<CoreCommitOperationResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<CoreCheckpointResult>,
+    pub summary: CoreStateSummary,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CoreCheckpointResult {
@@ -4336,6 +4371,143 @@ impl CoreRegistry {
         self.session_mut(session_id)?.advance(request)
     }
 
+    /// Settles a published normal-main checkpoint through one WAL-backed,
+    /// one-shot OfflineMacroV1 operation and immediately publishes the dirty
+    /// native pages. The command identity is derived solely from the source
+    /// checkpoint, so a restart after WAL sync but before checkpoint publish
+    /// reuses the exact persisted budget instead of measuring or paying the
+    /// interval twice.
+    pub fn commit_offline_settlement(
+        &mut self,
+        store: &mut SaveStore,
+        session_id: &str,
+        request: CoreCommitOfflineSettlementRequest,
+    ) -> anyhow::Result<CoreCommitOfflineSettlementResult> {
+        const MAX_OFFLINE_MILLISECONDS: u64 = 30 * 24 * 60 * 60 * 1_000;
+        validate_session_id(session_id)?;
+        if request.strategy != CoreOfflineSettlementStrategy::MacroV1
+            || request.expected_generation == 0
+            || request.expected_generation > MAX_SAFE_INTEGER
+            || request.expected_revision > MAX_SAFE_INTEGER
+            || request.observed_now_ms > MAX_SAFE_INTEGER
+            || request.expected_registry_fingerprint.is_empty()
+            || request.expected_registry_fingerprint.len() > 256
+            || request.expected_root_hash.len() != 64
+            || !request
+                .expected_root_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            bail!("native offline settlement intent is invalid");
+        }
+        self.require_checkpoint_reconciliation_before_mutation(session_id)?;
+        let source = store
+            .recover("normal-main")?
+            .ok_or_else(|| anyhow!("native offline source checkpoint is missing"))?;
+        if source.slot != "normal-main"
+            || source.mode != "normal"
+            || source.state_version != 47
+            || source.generation != request.expected_generation
+            || source.root_hash != request.expected_root_hash
+            || source.revision != request.expected_revision
+            || source.registry_fingerprint != request.expected_registry_fingerprint
+        {
+            bail!("native offline source checkpoint identity changed");
+        }
+        let state = self.session(session_id)?;
+        if state.identity.slot != source.slot
+            || state.identity.mode != source.mode
+            || state.identity.state_version != source.state_version
+            || state.identity.registry_fingerprint != source.registry_fingerprint
+        {
+            bail!("native offline core session identity changed");
+        }
+
+        let command_id = format!(
+            "offline-main-g{}-r{}-s{}",
+            source.generation, source.revision, source.saved_at_ms
+        );
+        let existing = store.find_wal_command(&source.slot, &command_id)?;
+        let settled_seconds = if let Some(entry) = existing.as_ref() {
+            let operation = decode_wal_operation(entry)?;
+            if operation.base_revision != source.revision
+                || operation.registry_fingerprint != source.registry_fingerprint
+                || operation.command.is_some()
+                || operation.advance_mode != CoreAdvanceMode::OfflineMacroV1
+                || operation.simulation_seconds.to_bits() != operation.wall_seconds.to_bits()
+                || operation.simulation_seconds <= 0.0
+                || operation.simulation_seconds.fract().abs() > f64::EPSILON
+                || operation.simulation_seconds > (MAX_OFFLINE_MILLISECONDS / 1_000) as f64
+            {
+                bail!("native offline durable operation conflicts with its source checkpoint");
+            }
+            operation.simulation_seconds as u64
+        } else {
+            if state.revision != source.revision {
+                bail!("native offline settlement requires a clean published checkpoint");
+            }
+            if request.observed_now_ms < source.saved_at_ms {
+                bail!("native offline settlement clock regressed");
+            }
+            request
+                .observed_now_ms
+                .saturating_sub(source.saved_at_ms)
+                .min(MAX_OFFLINE_MILLISECONDS)
+                / 1_000
+        };
+        if settled_seconds == 0 {
+            let summary = self.status(session_id)?;
+            return Ok(CoreCommitOfflineSettlementResult {
+                settled: false,
+                strategy: "macro-v1",
+                source_saved_at_ms: source.saved_at_ms,
+                settled_at_ms: source.saved_at_ms,
+                settled_seconds: 0,
+                commit: None,
+                checkpoint: None,
+                summary,
+            });
+        }
+        let settled_at_ms = source
+            .saved_at_ms
+            .checked_add(
+                settled_seconds
+                    .checked_mul(1_000)
+                    .ok_or_else(|| anyhow!("native offline settlement clock overflowed"))?,
+            )
+            .filter(|value| *value <= MAX_SAFE_INTEGER)
+            .ok_or_else(|| anyhow!("native offline settlement clock overflowed"))?;
+        let commit = self.commit_operation(
+            store,
+            session_id,
+            CoreCommitOperationRequest {
+                command_id,
+                base_revision: source.revision,
+                command: None,
+                simulation_seconds: settled_seconds as f64,
+                wall_seconds: settled_seconds as f64,
+                advance_mode: CoreAdvanceMode::OfflineMacroV1,
+                include_diagnostics: true,
+            },
+        )?;
+        let checkpoint = self.checkpoint(store, session_id, settled_at_ms)?;
+        if checkpoint.checkpoint.revision != commit.revision
+            || checkpoint.summary.revision != commit.revision
+        {
+            bail!("native offline checkpoint differs from its durable operation");
+        }
+        Ok(CoreCommitOfflineSettlementResult {
+            settled: true,
+            strategy: "macro-v1",
+            source_saved_at_ms: source.saved_at_ms,
+            settled_at_ms,
+            settled_seconds,
+            commit: Some(commit),
+            summary: checkpoint.summary.clone(),
+            checkpoint: Some(checkpoint),
+        })
+    }
+
     /// Durably accepts one authoritative operation. The exact command and
     /// simulation budget are preflighted on a transactional state before the
     /// hash-chained WAL is synced. Only then is the prepared state installed.
@@ -7475,6 +7647,44 @@ mod tests {
         player_authority_fixture_from_parts(bytes, player_authority_catalog())
     }
 
+    fn offline_settlement_fixture() -> (
+        tempfile::TempDir,
+        SaveStore,
+        CoreRegistry,
+        CoreImportV47Result,
+        Value,
+    ) {
+        let root = tempdir().unwrap();
+        let mut store = SaveStore::open(root.path()).unwrap();
+        let mut registry = CoreRegistry::default();
+        let bytes = import_envelope();
+        let catalog = import_catalog();
+        let imported = registry
+            .import_v47(
+                &mut store,
+                Cursor::new(bytes.clone()),
+                bytes.len() as u64,
+                "builtin:test",
+                catalog.clone(),
+            )
+            .unwrap();
+        (root, store, registry, imported, catalog)
+    }
+
+    fn offline_settlement_request(
+        source: &crate::save_store::SaveRecoveryResult,
+        observed_now_ms: u64,
+    ) -> CoreCommitOfflineSettlementRequest {
+        CoreCommitOfflineSettlementRequest {
+            expected_generation: source.generation,
+            expected_root_hash: source.root_hash.clone(),
+            expected_revision: source.revision,
+            expected_registry_fingerprint: source.registry_fingerprint.clone(),
+            observed_now_ms,
+            strategy: CoreOfflineSettlementStrategy::MacroV1,
+        }
+    }
+
     fn player_authority_fixture_from_parts(
         bytes: Vec<u8>,
         catalog: Value,
@@ -7631,6 +7841,122 @@ mod tests {
                     presentation["entityId"].as_str() == entity["id"].as_str()
                 })
         );
+    }
+
+    #[test]
+    fn offline_settlement_derives_one_x_budget_and_publishes_one_checkpoint() {
+        let (_root, mut store, mut registry, imported, _catalog) = offline_settlement_fixture();
+        let source = store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(source.saved_at_ms, 42);
+        let result = registry
+            .commit_offline_settlement(
+                &mut store,
+                &imported.session_id,
+                offline_settlement_request(&source, source.saved_at_ms + 600_999),
+            )
+            .unwrap();
+        assert!(result.settled);
+        assert_eq!(result.strategy, "macro-v1");
+        assert_eq!(result.settled_seconds, 600);
+        assert_eq!(result.settled_at_ms, source.saved_at_ms + 600_000);
+        let commit = result.commit.as_ref().unwrap();
+        let checkpoint = result.checkpoint.as_ref().unwrap();
+        assert_eq!(commit.base_revision, source.revision);
+        assert_eq!(commit.revision, checkpoint.checkpoint.revision);
+        assert_eq!(checkpoint.checkpoint.generation, source.generation + 1);
+        let published = store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(published.saved_at_ms, result.settled_at_ms);
+        assert_eq!(published.revision, result.summary.revision);
+        let state = registry
+            .projection(
+                &imported.session_id,
+                &["elapsedSeconds".to_owned()],
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(state["base"]["elapsedSeconds"].as_f64(), Some(602.0));
+    }
+
+    #[test]
+    fn offline_settlement_reuses_a_wal_synced_budget_after_cold_reopen() {
+        let (_root, mut store, mut registry, imported, catalog) = offline_settlement_fixture();
+        let source = store.recover("normal-main").unwrap().unwrap();
+        let command_id = format!(
+            "offline-main-g{}-r{}-s{}",
+            source.generation, source.revision, source.saved_at_ms
+        );
+        let committed = registry
+            .commit_operation(
+                &store,
+                &imported.session_id,
+                CoreCommitOperationRequest {
+                    command_id,
+                    base_revision: source.revision,
+                    command: None,
+                    simulation_seconds: 600.0,
+                    wall_seconds: 600.0,
+                    advance_mode: CoreAdvanceMode::OfflineMacroV1,
+                    include_diagnostics: true,
+                },
+            )
+            .unwrap();
+        let committed_hash = committed.summary.as_ref().unwrap().canonical_sha256.clone();
+        registry.close_all();
+
+        let mut reopened = CoreRegistry::default();
+        let opened = reopened
+            .open(
+                &store,
+                "normal-main",
+                source.generation,
+                &source.root_hash,
+                source.revision,
+                &source.registry_fingerprint,
+                catalog,
+            )
+            .unwrap();
+        assert_eq!(opened.replayed_wal_entries, 1);
+        assert_eq!(opened.summary.canonical_sha256, committed_hash);
+        let recovered = reopened
+            .commit_offline_settlement(
+                &mut store,
+                &opened.session_id,
+                offline_settlement_request(&source, source.saved_at_ms + 601_999),
+            )
+            .unwrap();
+        assert!(recovered.settled);
+        assert_eq!(recovered.settled_seconds, 600);
+        assert_eq!(recovered.settled_at_ms, source.saved_at_ms + 600_000);
+        assert!(recovered.commit.as_ref().unwrap().duplicate);
+        assert_eq!(recovered.summary.canonical_sha256, committed_hash);
+        let published = store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(published.saved_at_ms, source.saved_at_ms + 600_000);
+        assert_eq!(published.revision, committed.revision);
+    }
+
+    #[test]
+    fn offline_settlement_under_one_second_is_a_read_only_noop() {
+        let (_root, mut store, mut registry, imported, _catalog) = offline_settlement_fixture();
+        let source = store.recover("normal-main").unwrap().unwrap();
+        let before = registry.status(&imported.session_id).unwrap();
+        let result = registry
+            .commit_offline_settlement(
+                &mut store,
+                &imported.session_id,
+                offline_settlement_request(&source, source.saved_at_ms + 999),
+            )
+            .unwrap();
+        assert!(!result.settled);
+        assert_eq!(result.settled_seconds, 0);
+        assert!(result.commit.is_none());
+        assert!(result.checkpoint.is_none());
+        assert_eq!(result.summary.canonical_sha256, before.canonical_sha256);
+        let after = store.recover("normal-main").unwrap().unwrap();
+        assert_eq!(after.generation, source.generation);
+        assert_eq!(after.root_hash, source.root_hash);
+        assert_eq!(after.revision, source.revision);
+        assert_eq!(after.saved_at_ms, source.saved_at_ms);
     }
 
     fn player_authority_fixture_with_probe(

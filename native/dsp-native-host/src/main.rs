@@ -148,6 +148,7 @@ fn handle_request(
                     "native-core-checkpoint-v1",
                     "native-core-v47-stream-export-v1",
                     "native-core-v47-stream-import-v1",
+                    "native-core-offline-macro-v1",
                     EXACT_REALTIME_LEASE_CAPABILITY,
                     EXACT_REALTIME_WRITER_FENCE_CAPABILITY,
                     PLAYER_AUTHORITY_GATE_CAPABILITY,
@@ -834,6 +835,10 @@ fn handle_request(
             session_id,
             request,
         } => to_value(cores.commit_operation(store, &session_id, request)?)?,
+        ControlRequest::CoreCommitOfflineSettlement {
+            session_id,
+            request,
+        } => to_value(cores.commit_offline_settlement(store, &session_id, request)?)?,
         ControlRequest::CoreCommitOperationExactRealtime {
             session_id,
             request,

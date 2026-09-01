@@ -1,5 +1,9 @@
 # DSP极简网络项目现状
 
+> **Windows Rust 原生离线宏观结算核心（2026-09-01，开发候选，未发布）**：新增独立 `offline-macro-v1`，只以 1× 运行 30 秒精确校准与闭合物料账本；不继承时间扭曲探针信用，无法证明守恒的尾段冻结。Host 从已发布 `normal-main` 的 `savedAt` 和 Electron main 时钟推导完整离线秒数，renderer 不能提交时间或 command ID；WAL 已落盘而 checkpoint 未发布时，冷启动复用原预算，避免重复离线收益。
+>
+> 当前新鲜 focused 为 pure-idle 模块 `122/1/0`、离线专项 `4/4`、Host 耐久 `3/3`、Node boundary `55/55`、nativeCore Vitest `23/23`；typecheck、strict Clippy 与 Rust fmt 通过。该能力尚未接入 `StartMenu` 的真实启动链，组合全量/build/E2E 也未在最终提交上执行，因此当前统一口径为 `Rust 87% / 薄 UI 97% / O(active) 97% / 并行 75% / 综合开发 91% / 发布成熟度 60%`，`authorityEligible=false` 不变。下一大块是 main-owned 启动接线、匹配检查点流式导出和失败回退。
+
 > **Windows Exact 压缩 revision 逐秒边界收口（2026-09-01，开发候选，未发布）**：Rust player-authority 的一个短时长批量 `Exact` 请求现在与连续 N 次一秒公开调用在所有已覆盖领域保持一致，同时只提交一个 durable revision。差分 oracle 改为比较相同的公开逐秒边界，并保留旧 JavaScript 单次长调用作为兼容诊断；没有放宽 canonical/domain hash，也没有忽略 production history。
 >
 > 实际产品缺陷位于空工厂 quiescent 快路径：旧实现会把 60 秒压成一条历史采样，并产生不同的银河出口滚动窗口锚点。现在对齐、整秒、最多 8 小时的请求会逐个重放轻量时钟/历史边界；小数、未对齐及更长兼容请求仍保留旧外层策略。新增失败原子性用例保证后段历史异常时源 revision、公开字节、canonical 与私有统计 sidecar 均不变化。

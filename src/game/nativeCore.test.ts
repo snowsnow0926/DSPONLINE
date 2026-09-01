@@ -106,6 +106,21 @@ describe("Windows native core segmented advance", () => {
     expect(result).toMatchObject({ supported: true, revision: 23, cancelled: false });
   });
 
+  it("refuses to split the one-shot offline macro into repeated calibration windows", async () => {
+    const advance = vi.fn(async (request: Parameters<NativeCoreAdvanceSegmentExecutor>[0]) => ({
+      supported: true,
+      revision: request.baseRevision + 1,
+    }));
+    await expect(advanceNativeCoreSegmented(advance, {
+      baseRevision: 20,
+      simulationSeconds: 1_201,
+      wallSeconds: 1_201,
+      advanceMode: "offline-macro-v1",
+      maxSegmentSeconds: 600,
+    })).rejects.toThrow(/单个耐久事务/);
+    expect(advance).not.toHaveBeenCalled();
+  });
+
   it("stops at an unsupported boundary and rejects a non-advancing revision", async () => {
     let calls = 0;
     const unsupported = await advanceNativeCoreSegmented(async (request) => {

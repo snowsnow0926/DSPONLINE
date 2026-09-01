@@ -2354,3 +2354,16 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 7. production build 为 2,099 modules；startup 总 gzip `180,781 B`、JavaScript `87,093 B`、CSS `93,688 B`、最大启动 JavaScript `58,974 B`、menu `258,330 B`，forbidden startup modules `0`；Native thin-UI boundary 为 13 个 App bindings / 12 个专用组件文件。
 8. 该修复使 player-authority 的短时 exact catch-up 具备跨领域公开边界确定性，但不自动宣称 Windows 原生离线生命周期、24 小时、多硬件或默认高并行稳定性已经完成。固定口径在本纵切提交后更新为 `Rust 唯一权威约 86% / 完整薄 UI 约 97% / 真正 O(active) 物流约 97% / 全领域确定性原生并行约 75% / 四项目标能力加权综合约 90% / 可放心发布成熟度约 60%`。下一大块把应用关闭期间的离线时间接入 main/Rust 权威结算，而不是回到 renderer Worker。
 9. GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不变；未读取或修改真实玩家存档，未连接生产，未部署、打包发布或签名。
+
+### 24.53 Rust 原生离线宏观结算与耐久检查点纵切（2026-09-01，开发候选）
+
+本纵切完成 Windows 离线结算的核心、Host 和 Node 主进程边界，不再把时间扭曲会话的一秒探针私有信用直接复用于关机离线时间。新增独立 wire mode `offline-macro-v1`：每次只针对一个已经发布的 `normal-main` 检查点执行一次 1× 离线结算，先做 30 秒精确校准，再让闭合物料账本决定可证明收益；无法证明的尾段冻结，不能复制火箭、太阳帆、建筑施工、出口或合同交付。
+
+1. Rust 离线结算要求普通、未暂停、时间扭曲关闭且没有残留时间预算；simulation/wall 必须严格相等。它复用已经验证的生产、手搓、科研、施工、戴森、银河出口与合同闭合账本，但使用独立算法版本，不持久化或继承任何纯挂机时间扭曲校准缓存、session credit 或 multiplier。
+2. 可再生电力证书新增离线权威分支：仍要求每个电网在精确窗口稳定、没有有限燃料和储能来源且供电闭合，只是不再错误要求存在时间扭曲控制器。有限/无限资源、预填火箭、多恒星系目标、可再生供电施工和 durable replay 均有专项。
+3. Host 新增单一原子入口 `coreCommitOfflineSettlement`。调用方只提交已验证的 generation/root/revision/registry identity 和主进程当前时钟；Rust 从已发布 manifest 的 `savedAt` 计算完整秒数，封顶 30 天。renderer 不能自报离线秒数，也不能选择 command ID。
+4. command ID 只由源检查点 generation/revision/savedAt 派生。若进程在 WAL 同步后、检查点发布前退出，冷启动会找到同一 WAL operation 并复用其中冻结的原预算，不重新采时、不重复支付。少于一秒时只返回只读 no-op；成功后只发布一个新的 checkpoint generation。
+5. 当前新鲜 focused 结果为：纯挂机完整模块 `122 passed / 1 explicit ignore / 0 failed`，离线专项目标另为 `4/4`，Host 离线耐久 `3/3`，Node Host/renderer boundary `55/55`，Vitest native core `23/23`；typecheck、workspace all-target/all-feature strict Clippy 与 Rust fmt 已通过。组合全量、production build 和 E2E 仍须在最终冻结提交上重跑，不能复用 24.52 的数字。
+6. 该纵切还不是玩家可见的完整启动链：`StartMenu` 当前仍在原生 session 建立前调用 JavaScript Worker，Electron IPC/preload 也尚未把匹配的 native 主检查点导出并交还启动加载器。下一大块必须完成 main-owned 启动协调、检查点身份匹配、结算结果流式导出、失败回退与重复启动回归；在此之前不得宣称 Windows 客户端已实际使用本算法。
+7. 固定能力口径暂更新为 `Rust 唯一权威约 87% / 完整薄 UI 约 97% / 真正 O(active) 物流约 97% / 全领域确定性原生并行约 75% / 四项目标能力加权综合约 91% / 可放心发布成熟度约 60%`。上调来自一条闭合的离线领域与耐久恢复事务，不来自代码行数；发布成熟度不变，因为产品启动接线、组合全量、24 小时、多硬件、安装/升级、签名与灰度仍未关闭。
+8. GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不变；没有读取或修改真实玩家存档，没有连接生产，没有部署、打包发布或签名。

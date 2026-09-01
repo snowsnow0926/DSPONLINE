@@ -21,6 +21,7 @@ const {
   NATIVE_PLAYER_AUTHORITY_MACRO_ADVANCE_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_STARTUP_RECOVERY_CAPABILITY,
   NATIVE_PLAYER_AUTHORITY_TICK_CAPABILITY,
+  NATIVE_OFFLINE_MACRO_CAPABILITY,
   NATIVE_VIEWPORT_ENTITY_PRESENTATION_CAPABILITY,
   NativeHostClient,
   NativeCoreSessionRegistry,
@@ -32,6 +33,7 @@ const {
   normalizeNativeSaveRecords,
   normalizeNativeCoreOpen,
   normalizeNativeCoreImport,
+  normalizeNativeCoreCommitOperation,
   normalizeNativeHostSpawnEnvironment,
   parseFrames,
 } = require("./native-host.cjs");
@@ -62,6 +64,98 @@ test("native factory inventory capability matches the Rust host contract", () =>
     NATIVE_CONSTRUCTION_STACK_CONTEXT_CAPABILITY,
     "native-core-construction-stack-context-v1",
   );
+  assert.equal(NATIVE_OFFLINE_MACRO_CAPABILITY, "native-core-offline-macro-v1");
+});
+
+test("native host accepts only an explicit one-x offline macro wire request", () => {
+  assert.deepEqual(normalizeNativeCoreCommitOperation({
+    commandId: "offline-main-7-600000",
+    baseRevision: 7,
+    command: null,
+    simulationSeconds: 600,
+    wallSeconds: 600,
+    advanceMode: "offline-macro-v1",
+    includeDiagnostics: true,
+  }), {
+    commandId: "offline-main-7-600000",
+    baseRevision: 7,
+    command: null,
+    simulationSeconds: 600,
+    wallSeconds: 600,
+    advanceMode: "offline-macro-v1",
+    includeDiagnostics: true,
+  });
+  assert.throws(() => normalizeNativeCoreCommitOperation({
+    commandId: "offline-main-7-invalid",
+    baseRevision: 7,
+    simulationSeconds: 600,
+    wallSeconds: 600,
+    advanceMode: "offline-macro-v2",
+  }), /authoritative operation is invalid/);
+});
+
+test("native offline settlement injects the main clock and rejects renderer-owned time", async () => {
+  const calls = [];
+  const client = {
+    hello: { capabilities: [NATIVE_OFFLINE_MACRO_CAPABILITY] },
+    async request(request) {
+      calls.push(request);
+      if (request.operation === "coreOpen") {
+        return { sessionId: "core-offline", authority: "shadow", summary: {} };
+      }
+      return { settled: true };
+    },
+  };
+  const registry = new NativeCoreSessionRegistry(client);
+  const catalog = {
+    protocolVersion: 1,
+    registryFingerprint: "builtin:test",
+    items: [{ id: "iron_ore", kind: "solid" }],
+    buildings: [{
+      id: "mining_machine",
+      kind: "miner",
+      speed: 1,
+      inputCapacity: 0,
+      outputCapacity: 50,
+      powerDemandKw: 1,
+      powerGenerationKw: 0,
+    }],
+    recipes: [],
+    belts: [{ tier: 1, speed: 6 }],
+  };
+  await registry.open(7, {
+    slot: "normal-main",
+    generation: 3,
+    rootHash: "a".repeat(64),
+    revision: 9,
+    registryFingerprint: "builtin:test",
+    catalog,
+  });
+  const intent = {
+    sessionId: "core-offline",
+    expectedGeneration: 3,
+    expectedRootHash: "a".repeat(64),
+    expectedRevision: 9,
+    expectedRegistryFingerprint: "builtin:test",
+    strategy: "macro-v1",
+  };
+  await registry.commitOfflineSettlement(7, intent, 123_456);
+  assert.deepEqual(calls.at(-1), {
+    operation: "coreCommitOfflineSettlement",
+    sessionId: "core-offline",
+    request: {
+      expectedGeneration: 3,
+      expectedRootHash: "a".repeat(64),
+      expectedRevision: 9,
+      expectedRegistryFingerprint: "builtin:test",
+      observedNowMs: 123_456,
+      strategy: "macro-v1",
+    },
+  });
+  assert.throws(() => registry.commitOfflineSettlement(7, {
+    ...intent,
+    observedNowMs: 1,
+  }, 123_456), /offline settlement intent/);
 });
 
 test("native frame codec survives arbitrary stream boundaries", () => {

@@ -3348,13 +3348,13 @@ export interface DesktopNativeCoreAdvanceRequest extends DesktopNativeCoreSessio
   baseRevision: number;
   simulationSeconds: number;
   wallSeconds: number;
-  advanceMode?: "exact" | "pure-idle-conservative-v2" | "pure-idle-macro-v10";
+  advanceMode?: "exact" | "pure-idle-conservative-v2" | "pure-idle-macro-v10" | "offline-macro-v1";
   includeDiagnostics?: boolean;
 }
 
 export interface DesktopNativeCoreAdvanceResult {
   supported: boolean;
-  exactScope: "no-change" | "clock-only" | "simple-factory-v1" | "pure-idle-bounded-exact" | "pure-idle-conservative-v2" | "pure-idle-macro-v10" | "unsupported-domain";
+  exactScope: "no-change" | "clock-only" | "simple-factory-v1" | "pure-idle-bounded-exact" | "pure-idle-conservative-v2" | "pure-idle-macro-v10" | "offline-macro-v1" | "unsupported-domain";
   changed: boolean;
   previousRevision: number;
   revision: number;
@@ -3396,7 +3396,7 @@ export interface DesktopNativeCoreCommitOperationRequest extends DesktopNativeCo
   command?: Record<string, unknown> | null;
   simulationSeconds: number;
   wallSeconds: number;
-  advanceMode?: "exact" | "pure-idle-conservative-v2" | "pure-idle-macro-v10";
+  advanceMode?: "exact" | "pure-idle-conservative-v2" | "pure-idle-macro-v10" | "offline-macro-v1";
   includeDiagnostics?: boolean;
 }
 

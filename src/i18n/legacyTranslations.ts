@@ -364,6 +364,7 @@ const UI_EN: TranslationMap = {
   "输入先入池再输出": "Inputs enter the pool before outputs",
   "共享库存总量": "Total Shared Inventory",
   "精确值": "Exact Value",
+  "管理本系空间站": "Manage This System's Space Station",
   "一键切换本系量子物流站": "Switch This System to Quantum Logistics",
   "上传主存档": "Upload Main Save",
   "立即刷新排名": "Refresh Ranking",

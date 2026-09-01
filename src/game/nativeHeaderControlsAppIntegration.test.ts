@@ -14,8 +14,10 @@ describe("native header controls App integration", () => {
     expect(panels).toMatch(/game \? <>[\s\S]*?data-native-header-status="factory-run-status-v1"/);
   });
 
-  it("hides uncovered legacy destinations and exposes only the durable native pause control", () => {
-    expect(panels).toMatch(/!nativeAuthority \? <button[^>]*header-settings-command/);
+  it("exposes the migrated Operations destination, hides uncovered legacy destinations, and exposes durable native pause", () => {
+    expect(panels).toMatch(/<button[^>]*header-settings-command/);
+    expect(panels).not.toMatch(/!nativeAuthority \? <button[^>]*header-settings-command/);
+    expect(panels).toMatch(/<button type="button" role="menuitem" onClick=\{\(\) => runOverflowAction\(onOpenSettings\)\}/);
     expect(panels).toMatch(/!nativeAuthority \? <button[^>]*activeWorkspace === "galaxy"/);
     expect(panels).toMatch(/!nativeAuthority \? <button[^>]*activeWorkspace === "campaign"/);
     expect(app).toMatch(/pauseControlAvailable=\{!nativePlayerAuthorityOwnsRuntime \|\| \([\s\S]*?setNativePlayerAuthorityPaused[\s\S]*?schemaVersion === 1/);

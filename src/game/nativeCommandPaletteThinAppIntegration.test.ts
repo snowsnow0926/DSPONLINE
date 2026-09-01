@@ -13,7 +13,7 @@ describe("native command palette thin integration", () => {
   });
 
   it("exposes only already-migrated workspaces in native authority mode", () => {
-    expect(palette).toMatch(/nativeWorkspaceIds = new Set\(\["star-map", "statistics", "recipes", "technology", "dyson", "inspector"\]\)/);
+    expect(palette).toMatch(/nativeWorkspaceIds = new Set\(\["star-map", "statistics", "recipes", "technology", "operations", "dyson", "inspector"\]\)/);
     expect(palette).toMatch(/nativeAuthority[\s\S]*?workspaceCommands\.filter/);
   });
 });

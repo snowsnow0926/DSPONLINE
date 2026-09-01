@@ -156,6 +156,60 @@ describe("NativeOperationsWorkspace", () => {
     expect(inputInLabel(host, "生产缓冲").value).toBe("4321");
   });
 
+  it("keeps the same focused input mounted while a newer same-lineage projection is pending", async () => {
+    let resolveRevision8!: (value: DesktopNativeCoreOperationsWorkspaceProjectionResult) => void;
+    const revision8 = new Promise<DesktopNativeCoreOperationsWorkspaceProjectionResult>((resolve) => { resolveRevision8 = resolve; });
+    const fetchProjection = vi.fn((request: Parameters<NonNullable<NativeOperationsWorkspaceProps["fetchProjection"]>>[0]) =>
+      request.expectedRevision === 8 ? revision8 : Promise.resolve(projection()));
+    const value = props({ tab: "settings", fetchProjection });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} />); });
+    const original = inputInLabel(host, "生产缓冲");
+    original.focus();
+    await act(async () => setInputValue(original, "4321"));
+
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value}
+      identity={{ sessionId: "session-1", runId: "run-1", expectedRevision: 8, expectedRegistryFingerprint: "7df8cf3a" }} />); });
+    expect(inputInLabel(host, "生产缓冲")).toBe(original);
+    expect(document.activeElement).toBe(original);
+    expect(original.value).toBe("4321");
+    expect(host.textContent).toContain("当前保持显示已验证的 revision 7");
+
+    await act(async () => resolveRevision8(projection({
+      revision: 8,
+      settings: { ...projection().settings, productionBufferLimit: 9000 },
+    })));
+    expect(inputInLabel(host, "生产缓冲")).toBe(original);
+    expect(document.activeElement).toBe(original);
+    expect(original.value).toBe("4321");
+    expect(host.textContent).toContain("REV 8");
+  });
+
+  it("binds a stale-view intent to the current authority revision and never regresses on a late response", async () => {
+    let resolveRevision8!: (value: DesktopNativeCoreOperationsWorkspaceProjectionResult) => void;
+    const revision8 = new Promise<DesktopNativeCoreOperationsWorkspaceProjectionResult>((resolve) => { resolveRevision8 = resolve; });
+    const commitSetting = vi.fn(async () => ({}));
+    const fetchProjection = vi.fn((request: Parameters<NonNullable<NativeOperationsWorkspaceProps["fetchProjection"]>>[0]) => {
+      if (request.expectedRevision === 8) return revision8;
+      if (request.expectedRevision === 9) return Promise.resolve(projection({ revision: 9 }));
+      return Promise.resolve(projection());
+    });
+    const value = props({ tab: "settings", fetchProjection, commitSetting });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value} />); });
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value}
+      identity={{ sessionId: "session-1", runId: "run-1", expectedRevision: 8, expectedRegistryFingerprint: "7df8cf3a" }} />); });
+
+    const speed = selectInLabel(host, "模拟速度");
+    await act(async () => { speed.value = "2"; speed.dispatchEvent(new Event("change", { bubbles: true })); });
+    expect(commitSetting).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: 8 }));
+
+    await act(async () => { root.render(<NativeOperationsWorkspace {...value}
+      identity={{ sessionId: "session-1", runId: "run-1", expectedRevision: 9, expectedRegistryFingerprint: "7df8cf3a" }} />); });
+    expect(host.textContent).toContain("REV 9");
+    await act(async () => resolveRevision8(projection({ revision: 8 })));
+    expect(host.textContent).toContain("REV 9");
+    expect(host.textContent).not.toContain("REV 8");
+  });
+
   it("keeps a durable ACK locked until a newer projection and rejects consecutive intents", async () => {
     let resolveCommit!: (value: unknown) => void;
     const commitSetting = vi.fn(() => new Promise((resolve) => { resolveCommit = resolve; }));

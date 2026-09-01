@@ -2895,9 +2895,9 @@ export function HeaderControls({
       </div>
       <div className="header-actions">
         <button className="header-action--overflowable" type="button" onClick={onReturnToMenu} title="保存并返回主菜单" aria-label="保存并返回主菜单"><House size={17} /></button>
-        {!nativeAuthority ? <button className={`header-action--overflowable header-settings-command${activeWorkspace === "settings" ? " active" : ""}`} type="button" onClick={onOpenSettings} title={activeWorkspace === "settings" ? "设置已打开，再次点击返回工厂" : "打开设置"} aria-label={activeWorkspace === "settings" ? "设置已打开，再次点击返回工厂" : "打开设置"} aria-pressed={activeWorkspace === "settings"}>
+        <button className={`header-action--overflowable header-settings-command${activeWorkspace === "settings" ? " active" : ""}`} type="button" onClick={onOpenSettings} title={activeWorkspace === "settings" ? "设置已打开，再次点击返回工厂" : "打开设置"} aria-label={activeWorkspace === "settings" ? "设置已打开，再次点击返回工厂" : "打开设置"} aria-pressed={activeWorkspace === "settings"}>
           <Settings size={17} />
-        </button> : null}
+        </button>
         {!nativeAuthority ? <button className={`header-action--overflowable${activeWorkspace === "galaxy" ? " active" : ""}`} type="button" onClick={onOpenGalaxy} title={activeWorkspace === "galaxy" ? "银河网络已打开，再次点击返回工厂" : "打开银河网络"} aria-label={activeWorkspace === "galaxy" ? "银河网络已打开，再次点击返回工厂" : "打开银河网络"} aria-pressed={activeWorkspace === "galaxy"}><Globe2 size={17} /></button> : null}
         {!nativeAuthority ? <button className={`header-action--overflowable${activeWorkspace === "campaign" ? " active" : ""}`} type="button" onClick={onOpenCampaign} title={activeWorkspace === "campaign" ? "主线任务已打开，再次点击返回工厂" : "打开主线任务中心"} aria-label={activeWorkspace === "campaign" ? "主线任务已打开，再次点击返回工厂" : "打开主线任务中心"} aria-pressed={activeWorkspace === "campaign"}><Flag size={17} /></button> : null}
         {showConstructionCenter ? <button className={`header-action--overflowable${activeWorkspace === "construction-center" ? " active" : ""}`} type="button" onClick={onOpenConstructionCenter} disabled={constructionCenterUnavailable} title={constructionCenterUnavailable ? "建筑制造中心当前不可用" : activeWorkspace === "construction-center" ? "建筑制造中心已打开，再次点击返回工厂" : "打开建筑制造中心"} aria-label={constructionCenterUnavailable ? "建筑制造中心当前不可用" : activeWorkspace === "construction-center" ? "建筑制造中心已打开，再次点击返回工厂" : "打开建筑制造中心"} aria-pressed={activeWorkspace === "construction-center"}><Factory size={17} /></button> : null}
@@ -2911,7 +2911,7 @@ export function HeaderControls({
         <button className="header-overflow-command" type="button" onClick={() => setOverflowOpen((open) => !open)} aria-expanded={overflowOpen} title="更多工作区" aria-label="更多工作区"><MoreHorizontal size={18} /></button>
         {overflowOpen ? <div className="header-overflow-menu" role="menu">
           <button type="button" role="menuitem" onClick={() => runOverflowAction(onReturnToMenu)}><House size={15} />主菜单</button>
-          {!nativeAuthority ? <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenSettings)}><Settings size={15} />设置</button> : null}
+          <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenSettings)}><Settings size={15} />设置</button>
           {!nativeAuthority ? <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenGalaxy)}><Globe2 size={15} />银河网络</button> : null}
           {!nativeAuthority ? <button type="button" role="menuitem" onClick={() => runOverflowAction(onOpenCampaign)}><Flag size={15} />主线任务</button> : null}
           {showConstructionCenter ? <button type="button" role="menuitem" disabled={constructionCenterUnavailable} onClick={() => runOverflowAction(onOpenConstructionCenter)}><Factory size={15} />建筑制造中心{constructionCenterUnavailable ? "（当前不可用）" : ""}</button> : null}

@@ -91,6 +91,20 @@ function matchesIdentity(
     projection.registryFingerprint === identity.expectedRegistryFingerprint && projection.truncated === false;
 }
 
+function matchesScope(
+  projection: DesktopNativeCoreOperationsWorkspaceProjectionResult,
+  identity: DesktopNativeCoreOperationsWorkspaceProjectionRequest,
+) {
+  return projection.sessionId === identity.sessionId && projection.runId === identity.runId &&
+    projection.registryFingerprint === identity.expectedRegistryFingerprint && projection.truncated === false;
+}
+
+function identityKey(identity: DesktopNativeCoreOperationsWorkspaceProjectionRequest | null) {
+  return identity
+    ? `${identity.sessionId}\0${identity.runId}\0${identity.expectedRevision}\0${identity.expectedRegistryFingerprint}`
+    : "missing";
+}
+
 function unavailable(identity: NativeOperationsWorkspaceProps["identity"], fetchProjection: NativeOperationsWorkspaceProps["fetchProjection"]) {
   if (!identity) return "原生玩家权威 lineage 尚未就绪；运营中心不会读取旧 renderer GameState。";
   if (!fetchProjection) return "当前 Windows Host 不支持运营中心薄投影；页面已安全关闭。";
@@ -123,12 +137,11 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
   const [message, setMessage] = useState<string | null>(null);
   const [diagnosticStartedAt, setDiagnosticStartedAt] = useState<number | null>(null);
   const [diagnosticSeconds, setDiagnosticSeconds] = useState(0);
-  const requestGeneration = useRef(0);
   const commitGeneration = useRef(0);
   const commitLocked = useRef(false);
-  const identityKey = props.identity
-    ? `${props.identity.sessionId}\0${props.identity.runId}\0${props.identity.expectedRevision}\0${props.identity.expectedRegistryFingerprint}`
-    : "missing";
+  const currentIdentityRef = useRef(props.identity);
+  currentIdentityRef.current = props.identity;
+  const currentIdentityKey = identityKey(props.identity);
   const identityScopeKey = props.identity
     ? `${props.identity.sessionId}\0${props.identity.runId}\0${props.identity.expectedRegistryFingerprint}`
     : "missing";
@@ -143,25 +156,36 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
 
   useEffect(() => {
     if (!props.open) return;
-    const generation = ++requestGeneration.current;
     if (!props.identity || !props.fetchProjection) {
       setStatus({ phase: "unavailable", message: unavailable(props.identity, props.fetchProjection) });
       return;
     }
     const identity = props.identity;
-    setStatus({ phase: "loading" });
+    setStatus((current) => current.phase === "ready" && matchesScope(current.projection, identity)
+      ? current
+      : { phase: "loading" });
     void props.fetchProjection(identity).then((projection) => {
-      if (requestGeneration.current !== generation) return;
-      setStatus(matchesIdentity(projection, identity)
-        ? { phase: "ready", projection }
-        : { phase: "unavailable", message: unavailable(identity, props.fetchProjection) });
-    }).catch(() => {
-      if (requestGeneration.current === generation) {
-        setStatus({ phase: "unavailable", message: unavailable(identity, props.fetchProjection) });
+      const currentIdentity = currentIdentityRef.current;
+      if (!currentIdentity || !matchesScope(projection, currentIdentity) || projection.revision > currentIdentity.expectedRevision) return;
+      if (!matchesIdentity(projection, identity)) {
+        if (identityKey(currentIdentity) !== identityKey(identity)) return;
+        setStatus((current) => current.phase === "ready" && matchesScope(current.projection, currentIdentity)
+          ? current
+          : { phase: "unavailable", message: unavailable(identity, props.fetchProjection) });
+        return;
       }
+      setStatus((current) => current.phase === "ready" && matchesScope(current.projection, currentIdentity) &&
+        current.projection.revision >= projection.revision
+        ? current
+        : { phase: "ready", projection });
+    }).catch(() => {
+      const currentIdentity = currentIdentityRef.current;
+      if (!currentIdentity || identityKey(currentIdentity) !== identityKey(identity)) return;
+      setStatus((current) => current.phase === "ready" && matchesScope(current.projection, currentIdentity)
+        ? current
+        : { phase: "unavailable", message: unavailable(identity, props.fetchProjection) });
     });
-    return () => { if (requestGeneration.current === generation) requestGeneration.current += 1; };
-  }, [identityKey, props.fetchProjection, props.open]);
+  }, [currentIdentityKey, props.fetchProjection, props.open]);
 
   useEffect(() => {
     if (diagnosticStartedAt === null) return;
@@ -175,7 +199,7 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
     return () => window.clearInterval(timer);
   }, [diagnosticStartedAt]);
 
-  const projection = status.phase === "ready" && props.identity && matchesIdentity(status.projection, props.identity)
+  const projection = status.phase === "ready" && props.identity && matchesScope(status.projection, props.identity)
     ? status.projection : null;
   const projectionKey = projection ? projectionIdentityKey(projection) : "missing";
   const projectionScope = projection ? projectionScopeKey(projection) : "missing";
@@ -204,24 +228,25 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
   if (!props.open) return null;
 
   const commit = (intent: DesktopNativeOperationsSettingIntent) => {
-    if (!projection || !props.commitSetting || commitLocked.current) return false;
+    const identity = currentIdentityRef.current;
+    if (!projection || !identity || !matchesScope(projection, identity) || !props.commitSetting || commitLocked.current) return false;
     const token = ++commitGeneration.current;
     const committedProjection = projection;
     commitLocked.current = true;
     setPendingCommit({
       token,
       phase: "committing",
-      sessionId: projection.sessionId,
-      runId: projection.runId,
-      revision: projection.revision,
-      registryFingerprint: projection.registryFingerprint,
+      sessionId: identity.sessionId,
+      runId: identity.runId,
+      revision: identity.expectedRevision,
+      registryFingerprint: identity.expectedRegistryFingerprint,
     });
     setMessage(null);
     void props.commitSetting({
-      expectedSessionId: projection.sessionId,
-      expectedRunId: projection.runId,
-      expectedRevision: projection.revision,
-      expectedRegistryFingerprint: projection.registryFingerprint,
+      expectedSessionId: identity.sessionId,
+      expectedRunId: identity.runId,
+      expectedRevision: identity.expectedRevision,
+      expectedRegistryFingerprint: identity.expectedRegistryFingerprint,
       intent,
     }).then(() => {
       if (commitGeneration.current !== token) return;
@@ -247,6 +272,9 @@ export function NativeOperationsWorkspace(props: NativeOperationsWorkspaceProps)
     <nav className="operations-tabs" aria-label="运营中心页面">
       {TABS.map((item) => <button key={item.id} type="button" className={tab === item.id ? "active" : ""} onClick={() => props.onTabChange(item.id)}>{item.label}</button>)}
     </nav>
+    {projection && props.identity && projection.revision !== props.identity.expectedRevision
+      ? <p role="status" className="operations-notice">正在读取 Rust revision {props.identity.expectedRevision}；当前保持显示已验证的 revision {projection.revision}，不会退回 JavaScript 存档。</p>
+      : null}
     {!projection ? <div className="workspace-loading" role={status.phase === "loading" ? "status" : "alert"}>
       {status.phase === "loading" ? <i /> : <ShieldAlert size={22} />}
       <span>{status.phase === "loading" ? "正在读取同 revision Rust 运营投影…" : status.phase === "unavailable" ? status.message : "投影不可用"}</span>

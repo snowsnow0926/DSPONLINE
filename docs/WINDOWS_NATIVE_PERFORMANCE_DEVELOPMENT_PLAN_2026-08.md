@@ -2193,9 +2193,9 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 
 ### 24.40 Windows 高并行 pure-idle 测试进程稳定化（2026-09-01，测试基础设施）
 
-`5c1b20c` 关闭 24.37 记录的默认并行 Core `STATUS_ACCESS_VIOLATION / STATUS_HEAP_CORRUPTION` 已定位来源，但不把测试进程修复冒充产品性能优化。调查确认默认 28 个 libtest thread 会在一个 Windows 进程内同时运行几十个大型 `pure-idle-macro-v10` 合成结算；每个用例又建立自己的确定性 Rayon runtime，异常落点会随机表现为蓝图/BTree/JSON 等无关受害者。相关产品代码没有 `unsafe`、`static mut` 或环境变量写入，Windows 玩家 authority 本身也不会在同一 session 并行提交多份 pure-idle 候选。
+`5c1b20c` 只隔离了 24.37 记录的默认并行 Core `STATUS_ACCESS_VIOLATION / STATUS_HEAP_CORRUPTION` 的第一个可复现放大器，不能把它写成整个高并行问题已关闭，也不把测试进程修复冒充产品性能优化。调查确认默认 28 个 libtest thread 会在一个 Windows 进程内同时运行几十个大型 `pure-idle-macro-v10` 合成结算；每个用例又建立自己的确定性 Rayon runtime，异常落点会随机表现为蓝图/BTree/JSON 等无关受害者。相关产品代码没有 `unsafe`、`static mut` 或环境变量写入，Windows 玩家 authority 本身也不会在同一 session 并行提交多份 pure-idle 候选。
 
 1. 先后否定了两类表面修复。共享双分片池在默认栈下仍于约 1.4 秒触发 `0xC0000374`；8 MiB 栈曾有两轮通过但第三轮再次 heap corruption；16 MiB 首轮也立即失败。因此不能把扩大栈或复用线程池作为可靠结论，也没有把这些复杂度提交到产品或测试 runtime。
 2. 最小修复只在 `cfg(test)` 下为 `advance_bounded_with_runtime(..., macro_v10=true)` 的完整 settlement baseline、三窗口/证书、候选提交与返回生命周期持有一个进程内 MutexGuard。普通 exact (`macro_v10=false`) 不经过门禁，release/production build 完全没有该字段、锁或分支；`deterministic_runtime.rs` 保持逐字不变。
 3. 原始 per-call `for_test` 建池行为加最小门禁后，无环境变量、28 test threads 的 macro v10 过滤集连续三轮均为 `65/65`、0 失败、0 崩溃，耗时 `61.89 / 61.58 / 61.56` 秒；完整 `pure_idle::tests` 为 `110 passed / 1 ignored / 0 failed`（61.97 秒）。单文件 rustfmt 与 diff check 通过。
-4. 当前证据只证明此前可复现的 pure-idle 高并行测试放大器已被最小隔离。最终组合源码仍需在其他 Rust 纵切冻结后统一运行默认并行完整 Core、发布要求的串行完整 Core、workspace strict clippy 与 fmt；这些结果没有在并发写入中的移动源码上伪造。
+4. 后续冻结点的 bare 默认 28-thread 完整 Core 仍在所有已显示断言通过附近以 `STATUS_HEAP_CORRUPTION` 结束，因此全局门禁继续为红。受控的 `--test-threads=4` 可以稳定进入功能断言，并发现一条与可再生能源 warm-cache 新语义不符的旧测试期望：首轮 Core 为 `962 passed / 1 failed / 3 ignored`；`283b0206` 修正期望后该项 `1/1`、`planet_metric_` 全组 `15/15` 通过。它不抵消默认高并行进程仍崩溃的证据；第二个放大器和最终默认并行/串行 Core、workspace strict clippy 与 fmt 仍需在组合源码冻结后独立闭合。

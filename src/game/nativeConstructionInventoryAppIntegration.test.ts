@@ -20,9 +20,10 @@ describe("native construction inventory App integration", () => {
     expect(app).toMatch(/<NativeConstructionDock[\s\S]*?frame=\{nativeConstructionInventoryFrame\}/);
     expect(app).toMatch(/readVerifiedNativeConstructionPlacementContext\([\s\S]*?desktopBridge,[\s\S]*?identity,[\s\S]*?buildingId/);
     expect(app).toMatch(/commitNativeProjectedCommand\(context\.revision,[\s\S]*?createNativeProjectedOrdinaryBuildingPlacementCommand\(context, position\)/);
-    expect(dock).not.toMatch(/GameState|panelGame|commitGame|gameRef|onCraft|onDelete/);
+    expect(dock).not.toMatch(/GameState|panelGame|commitGame|gameRef|onCraft/);
     expect(dock).toMatch(/frame\?\.rows/);
     expect(dock).toMatch(/data-native-construction-placement="ordinary-single-v1"/);
     expect(dock).toMatch(/knownNonBuilding/);
+    expect(dock).toMatch(/onDeleteConstruction\?\.\(row\.buildingId\)/);
   });
 });

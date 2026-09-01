@@ -86,15 +86,19 @@ describe("native player-authority command App boundary", () => {
     );
   });
 
-  it("fails closed for still-untyped pause and history commands", () => {
+  it("routes native pause and history through main-owned durable commands", () => {
     const app = readFileSync(resolve("src/App.tsx"), "utf8");
-    for (const [start, end] of [
-      ["const togglePause", "const handleTimeWarpEnabledChange"],
-      ["const undoGame", "const redoGame"],
-      ["const redoGame", "const clearHistory"],
+    const pause = app.slice(app.indexOf("const togglePause"), app.indexOf("const handleTimeWarpEnabledChange"));
+    expect(pause).toMatch(/nativePlayerAuthorityOwnsRuntimeRef\.current[\s\S]*?setNativePlayerAuthorityPaused\(\{ paused: targetPaused \}\)/);
+    const nativePause = pause.slice(0, pause.indexOf("if (gameRef.current.paused"));
+    expect(nativePause).not.toMatch(/publishRuntimeGame|gameRef\.current\s*=/);
+
+    for (const [start, end, direction] of [
+      ["const undoGame", "const redoGame", "undo"],
+      ["const redoGame", "const clearHistory", "redo"],
     ] as const) {
       const block = app.slice(app.indexOf(start), app.indexOf(end));
-      expect(block).toMatch(/nativePlayerAuthorityOwnsRuntimeRef\.current[\s\S]*?本次操作未应用[\s\S]*?return;/);
+      expect(block).toMatch(new RegExp(`nativePlayerAuthorityOwnsRuntimeRef\\.current[\\s\\S]*?commitNativeHistory\\("${direction}"\\)[\\s\\S]*?return;`));
     }
   });
 

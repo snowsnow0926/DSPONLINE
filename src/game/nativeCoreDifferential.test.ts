@@ -2904,7 +2904,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         expect(advanced.summary.coverage).toMatchObject({
           contentPacks: true,
           exactSegmentedOffline: true,
-          pureIdleMacro: false,
+          pureIdleMacro: true,
           authorityEligible: false,
         });
         expect(advanced.summary.canonicalFields, `content-pack-${seconds} 顶层字段`).toEqual(canonicalFields(expected));

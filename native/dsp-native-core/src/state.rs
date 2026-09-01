@@ -2632,6 +2632,11 @@ pub struct CoreState {
     pub(crate) belts: SharedArc<BeltColumns>,
     pub(crate) belt_dynamics: SharedArc<BeltDynamicColumns>,
     pub(crate) factory_topology: Arc<FactoryTopology>,
+    /// Runtime-only exact set of entity rows that currently carry material.
+    /// It is independently copy-on-write so advancing one revision never
+    /// clones the much larger immutable factory topology.
+    pub(crate) production_history_inventory_runtime:
+        Arc<crate::production_history::ProductionHistoryInventoryRuntime>,
     coverage: DomainCoverage,
     factory_static_admission_checked: bool,
     factory_static_admission_reason: Option<&'static str>,
@@ -3529,6 +3534,9 @@ impl CoreState {
             belts: BeltColumns::default().into(),
             belt_dynamics: BeltDynamicColumns::default().into(),
             factory_topology: Arc::new(FactoryTopology::default()),
+            production_history_inventory_runtime: Arc::new(
+                crate::production_history::ProductionHistoryInventoryRuntime::default(),
+            ),
             coverage: DomainCoverage::implemented_beta_scope(),
             factory_static_admission_checked: false,
             factory_static_admission_reason: None,
@@ -4743,11 +4751,21 @@ impl CoreState {
             factory_topology.system_space_station_entity_indices = Vec::new();
             factory_topology.system_space_station_full_scan_required = true;
         }
+        // The inventory directory changes as empty rows receive or consume
+        // their first material. Move its startup seed into an independent COW
+        // runtime instead of retaining the same vector twice in topology.
+        let production_history_inventory_runtime =
+            crate::production_history::ProductionHistoryInventoryRuntime::from_parts(
+                std::mem::take(&mut factory_topology.production_history_inventory_indices),
+                factory_topology.production_history_inventory_full_scan_required,
+            );
+        factory_topology.production_history_inventory_full_scan_required = false;
         // These immutable indexes live for the complete native session. Trim
         // geometric growth slack once, after construction, so a large save
         // does not retain several MiB of unreachable topology capacity.
         factory_topology.shrink_to_fit();
         self.factory_topology = Arc::new(factory_topology);
+        self.production_history_inventory_runtime = Arc::new(production_history_inventory_runtime);
         self.prepared_station_mode_transition_runtime = Some(Arc::new(
             crate::system_space_station::ModeTransitionRuntime::from_indices(
                 entity_values.len(),
@@ -5479,6 +5497,8 @@ impl CoreState {
         if writeback_diagnostics.changed_rows != 0 {
             candidate.entity_raw = entity_writeback.into();
         }
+        candidate
+            .update_production_history_inventory_runtime(&entities, &changed_entity_indices)?;
         candidate.last_entity_raw_writeback = writeback_diagnostics;
         if entity_dynamics_changed {
             candidate.entity_dynamics = entity_dynamics.into();
@@ -6956,6 +6976,8 @@ impl CoreState {
             .map(|activity| activity.estimated_bytes())
             .unwrap_or(0);
         let factory_topology_bytes = self.factory_topology.estimated_bytes();
+        let production_history_inventory_runtime_bytes =
+            self.production_history_inventory_runtime.estimated_bytes();
         let topology_index_bytes = prepared_belt_route_bytes
             + prepared_logistics_buffer_bytes
             + prepared_material_delivery_bytes
@@ -6969,10 +6991,11 @@ impl CoreState {
             + prepared_quantum_transition_bytes
             + prepared_interstellar_peer_bytes
             + prepared_interstellar_activity_bytes
-            + factory_topology_bytes;
+            + factory_topology_bytes
+            + production_history_inventory_runtime_bytes;
         if std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some() {
             eprintln!(
-                "DSP_NATIVE_CORE_PROFILE\tmemory-topology-breakdown\tbelts={prepared_belt_route_bytes},buffers={prepared_logistics_buffer_bytes},materialDelivery={prepared_material_delivery_bytes},production={prepared_ordinary_production_bytes},planetMetrics={prepared_planet_metrics_bytes},powerProbes={prepared_power_probe_bytes},local={prepared_local_peer_bytes},quantum={prepared_quantum_logistics_bytes},construction={prepared_construction_runtime_bytes},stationMode={prepared_station_mode_transition_bytes},quantumTransition={prepared_quantum_transition_bytes},interstellar={prepared_interstellar_peer_bytes},activity={prepared_interstellar_activity_bytes},factory={factory_topology_bytes}"
+                "DSP_NATIVE_CORE_PROFILE\tmemory-topology-breakdown\tbelts={prepared_belt_route_bytes},buffers={prepared_logistics_buffer_bytes},materialDelivery={prepared_material_delivery_bytes},production={prepared_ordinary_production_bytes},planetMetrics={prepared_planet_metrics_bytes},powerProbes={prepared_power_probe_bytes},local={prepared_local_peer_bytes},quantum={prepared_quantum_logistics_bytes},construction={prepared_construction_runtime_bytes},stationMode={prepared_station_mode_transition_bytes},quantumTransition={prepared_quantum_transition_bytes},interstellar={prepared_interstellar_peer_bytes},activity={prepared_interstellar_activity_bytes},factory={factory_topology_bytes},historyInventory={production_history_inventory_runtime_bytes}"
             );
         }
         let belt_activity_runtime_bytes = self

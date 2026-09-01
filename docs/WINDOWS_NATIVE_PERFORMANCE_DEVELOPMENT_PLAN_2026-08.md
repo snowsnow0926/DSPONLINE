@@ -2666,3 +2666,16 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 5. `npm run typecheck`、两个 Electron 入口 `node --check`、`git diff --check` 和重新生成后的 `npm run verify:native-coverage` 均通过。
 
 这些只是开发期 focused 证据，不能与 25.6 的完整通过数量合并。下一步在本节冻结提交上执行一次集中矩阵；若发现产品错误，保留首轮失败，修复后产生新的冻结 SHA，并只在最终 SHA 上重跑完整矩阵。
+
+### 26.4 首次集中矩阵失败与冻结修正
+
+首次冻结 SHA `65d798b518e7d2b939b6ac33d35715d92d466fdf` 的 Release Host 构建通过（单 Cargo job，release profile 3 分 32 秒），但开启 long differential 的完整 Vitest 首轮在 63.077 秒失败：394 个文件中 389 通过、5 失败；3,051 项中 2,968 通过、28 条件跳过、55 失败。
+
+失败没有被删除或改写为通过：
+
+1. 生产历史稀疏库存目录只记录启动时已有物料的实体。某行从空 `inputs/outputs` 变为有货后，目录没有随成功 revision 提交更新；10 秒库存刷新因此漏行。前四个差分场景首先产生 `productionHistory` 哈希分叉，测试在断言前未关闭 Host session，随后 45 项形成 `native core session limit has been reached` 级联错误。
+2. 修复增加独立于大型静态 topology 的小型 COW 库存目录：成功提交按严格有序的 changed row 增删；当前未提交长推进把累计 writer rows 与 resident 目录稳定合并；达到 75% 时确定性退化全扫。目录不进入 GameState、checkpoint 或 canonical bytes，也不会因每次 revision 更新而克隆整份工厂 topology。
+3. Rust 生产历史专项修复后为 29/29，strict Clippy 通过；重新构建 Release Host 后，完整 `nativeCoreDifferential.test.ts` 为 50/51，唯一失败是旧测试仍要求 `pureIdleMacro=false`，而波次 A 的机器覆盖清单已正确证明为 true。更新该架构断言后，content-pack 目标用例 1/1 通过。
+4. 其余 6 个首轮失败均为旧静态架构断言仍要求批量线路、库存删除/丢弃、移动端壳、暂停和 undo/redo 被禁用；产品功能已经在波次 B/E 迁入 Rust。断言改为验证新的 Rust batch、main-owned pause/history 和原生移动薄壳，相关 4 个文件最终 23/23。没有为通过测试重新打开旧 JavaScript 写入口。
+
+`65d798b5` 因上述真实回归不再是最终冻结 SHA。修正提交完成后，25.6 全部集中门禁从头在新 SHA 上执行；本节保留首轮失败数量和原因。

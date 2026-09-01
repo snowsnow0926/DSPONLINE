@@ -24,6 +24,97 @@ const MAX_TIERED_HISTORY_SIDECAR_SAMPLES: usize = 32;
 const HISTORY_PROBE_CHUNK_ROWS: usize = 2_048;
 const HISTORY_REPLAY_SHARDS: usize = 32;
 
+/// Runtime-only exact directory for rows that currently carry material in
+/// `inputs` or `outputs`. The immutable factory topology provides the startup
+/// seed, while successful revision commits update this compact set from the
+/// exact changed-row list. It never enters GameState, checkpoints or hashes.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ProductionHistoryInventoryRuntime {
+    indices: Vec<usize>,
+    full_scan_required: bool,
+}
+
+impl ProductionHistoryInventoryRuntime {
+    pub(crate) fn from_parts(indices: Vec<usize>, full_scan_required: bool) -> Self {
+        Self {
+            indices,
+            full_scan_required,
+        }
+    }
+
+    pub(crate) fn indices(&self) -> &[usize] {
+        &self.indices
+    }
+
+    pub(crate) fn full_scan_required(&self) -> bool {
+        self.full_scan_required
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> u64 {
+        (self.indices.capacity() * std::mem::size_of::<usize>()) as u64
+    }
+
+    fn update_changed_rows(
+        &mut self,
+        entities: &[Value],
+        changed_indices: &[usize],
+    ) -> anyhow::Result<()> {
+        if self.full_scan_required || changed_indices.is_empty() {
+            return Ok(());
+        }
+        if changed_indices.windows(2).any(|pair| pair[0] >= pair[1]) {
+            bail!("production history inventory changes are not strictly ordered");
+        }
+        let changed = changed_indices
+            .iter()
+            .copied()
+            .map(|index| {
+                let entity = entities
+                    .get(index)
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| anyhow!("production history inventory row is invalid"))?;
+                let populated = ["inputs", "outputs"].into_iter().any(|key| {
+                    entity
+                        .get(key)
+                        .and_then(Value::as_object)
+                        .is_some_and(|record| !record.is_empty())
+                });
+                Ok((index, populated))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+
+        let mut updated = Vec::with_capacity(
+            self.indices
+                .len()
+                .saturating_add(changed.iter().filter(|(_, populated)| *populated).count()),
+        );
+        let mut existing = self.indices.iter().copied().peekable();
+        for (changed_index, populated) in changed {
+            while existing
+                .peek()
+                .is_some_and(|&existing_index| existing_index < changed_index)
+            {
+                updated.push(existing.next().expect("peeked inventory row"));
+            }
+            if existing.peek().copied() == Some(changed_index) {
+                existing.next();
+            }
+            if populated {
+                updated.push(changed_index);
+            }
+        }
+        updated.extend(existing);
+        if !updated.is_empty()
+            && updated.len().saturating_mul(4) >= entities.len().saturating_mul(3)
+        {
+            updated.clear();
+            self.full_scan_required = true;
+        }
+        self.indices = updated;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct ProductionHistoryBoundary {
     elapsed: f64,
@@ -1052,6 +1143,15 @@ impl TieredProductionHistory {
 }
 
 impl CoreState {
+    pub(crate) fn update_production_history_inventory_runtime(
+        &mut self,
+        entities: &[Value],
+        changed_indices: &[usize],
+    ) -> anyhow::Result<()> {
+        std::sync::Arc::make_mut(&mut self.production_history_inventory_runtime)
+            .update_changed_rows(entities, changed_indices)
+    }
+
     pub(crate) fn record_production_history(&mut self) -> anyhow::Result<()> {
         let entities = self.parse_entities_parallel()?;
         let mut base = std::mem::take(self.base_value_mut());
@@ -1245,10 +1345,31 @@ impl CoreState {
         let rate_index_invalid = rate_indices
             .last()
             .is_some_and(|index| *index >= entities.len());
-        let inventory_indices = &self.factory_topology.production_history_inventory_indices;
+        // The resident directory reflects all previously committed revisions.
+        // The candidate-local writer overlay adds rows that became populated
+        // during this not-yet-committed advance, including earlier internal
+        // seconds of one compressed Exact request.
+        let mut inventory_overlay = Vec::new();
+        let inventory_indices = if refresh
+            && !self
+                .production_history_inventory_runtime
+                .full_scan_required()
+            && let Some(events) = writer_events
+        {
+            inventory_overlay
+                .extend_from_slice(self.production_history_inventory_runtime.indices());
+            inventory_overlay.extend(events.all_rows());
+            inventory_overlay.sort_unstable();
+            inventory_overlay.dedup();
+            inventory_overlay.as_slice()
+        } else {
+            self.production_history_inventory_runtime.indices()
+        };
         let inventory_index_dense = self
-            .factory_topology
-            .production_history_inventory_full_scan_required;
+            .production_history_inventory_runtime
+            .full_scan_required()
+            || (!inventory_indices.is_empty()
+                && inventory_indices.len().saturating_mul(4) >= entities.len().saturating_mul(3));
         let inventory_index_invalid = inventory_indices
             .last()
             .is_some_and(|index| *index >= entities.len());
@@ -1929,6 +2050,26 @@ mod tests {
     use serde_json::json;
     use std::time::Instant;
 
+    #[test]
+    fn inventory_runtime_tracks_empty_to_populated_rows_across_revisions() {
+        let mut runtime = ProductionHistoryInventoryRuntime::from_parts(vec![0, 2], false);
+        let mut entities = vec![
+            json!({ "inputs": { "iron": 1 }, "outputs": {} }),
+            json!({ "inputs": {}, "outputs": {} }),
+            json!({ "inputs": {}, "outputs": { "copper": 2 } }),
+            json!({ "inputs": {}, "outputs": {} }),
+        ];
+        entities[1] = json!({ "inputs": { "coal": 3 }, "outputs": {} });
+        entities[2] = json!({ "inputs": {}, "outputs": {} });
+        runtime.update_changed_rows(&entities, &[1, 2]).unwrap();
+        assert_eq!(runtime.indices(), &[0, 1]);
+
+        entities[1] = json!({ "inputs": {}, "outputs": {} });
+        runtime.update_changed_rows(&entities, &[1]).unwrap();
+        assert_eq!(runtime.indices(), &[0]);
+        assert!(!runtime.full_scan_required());
+    }
+
     fn fixture_checksum(bytes: &[u8]) -> String {
         let mut hash = 0x811c9dc5_u32;
         for byte in bytes {
@@ -2463,20 +2604,21 @@ mod tests {
         let indexed_state = history_fixture_state(&base, &entities);
         assert_eq!(
             indexed_state
-                .factory_topology
-                .production_history_inventory_indices
+                .production_history_inventory_runtime
+                .indices()
                 .len(),
             64
         );
         assert!(
             !indexed_state
-                .factory_topology
-                .production_history_inventory_full_scan_required
+                .production_history_inventory_runtime
+                .full_scan_required()
         );
         let mut oracle_state = indexed_state.clone();
-        let oracle_topology = std::sync::Arc::make_mut(&mut oracle_state.factory_topology);
-        oracle_topology.production_history_inventory_indices.clear();
-        oracle_topology.production_history_inventory_full_scan_required = true;
+        let oracle_runtime =
+            std::sync::Arc::make_mut(&mut oracle_state.production_history_inventory_runtime);
+        oracle_runtime.indices.clear();
+        oracle_runtime.full_scan_required = true;
 
         for workers in [1, 2, 4, 8] {
             let runtime = DeterministicRuntime::for_test(workers);

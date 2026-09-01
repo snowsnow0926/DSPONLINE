@@ -82,47 +82,34 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/useLayoutEffect\(\(\) => \{[\s\S]*?nativeFactoryRouteUnsafe[\s\S]*?abortCanvasGestureLifecycle\(\)/);
     expect(app).not.toMatch(/useLayoutEffect\(\(\) => \{\s*if \(nativeFactoryProjectionPending\) abortCanvasGestureLifecycle/);
     expect(app).toMatch(/if \(canvasWorkspaceHidden \|\| nativeFactoryRouteUnsafe\) stopCanvasPointerMotion\(\)/);
-    expect(app).toMatch(/useLongPress<HTMLElement>\(\{[\s\S]*?disabled: nativePlayerAuthorityOwnsRuntime \|\| nativeFactoryRouteUnsafe,[\s\S]*?resetKey: factoryGestureRouteKey/);
+    expect(app).toMatch(/useLongPress<HTMLElement>\(\{[\s\S]*?disabled: nativeFactoryRouteUnsafe,[\s\S]*?resetKey: factoryGestureRouteKey/);
     expect(app).not.toMatch(/resetKey:[^\n]*(?:factoryThinViewExpectedRevision|acceptedRevision)/);
     expect(app).toMatch(/onPointerUpCapture=\{\(event\) => \{[\s\S]*?longPressBindings\.onPointerUpCapture[\s\S]*?stopCanvasPointerMotion\(\)[\s\S]*?nativeFactoryProjectionPending/);
     expect(app).toMatch(/workspace\.sessionId !== canvas\.sessionId[\s\S]*?workspace\.revision !== canvas\.revision[\s\S]*?nativeFactoryUnpinnedBootstrap\) resetPlanetScopedFactoryUi\(\)[\s\S]*?setNativeFactoryConfirmedProjectionRoute/);
   });
 
-  it("fails closed instead of showing or mutating the old planet through uncovered UI", () => {
+  it("mounts Rust thin UI instead of showing or mutating stale Web factory models", () => {
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeResourceRail[\s\S]*?frame=\{nativeFactoryInventoryFrame\}[\s\S]*?: <StableResourceRail/);
     expect(nativeRail).toMatch(/!frame \? <section[\s\S]*?data-native-authority-unavailable="tray-cargo-v1"/);
     expect(nativeRail).toMatch(/可将普通建筑输入\/输出拖回托盘/);
-    expect(nativeRail).toMatch(/建筑间直拖与永久丢弃仍保持关闭/);
+    expect(nativeRail).toMatch(/永久丢弃需要二次确认并由 Rust 按当前 revision 扣除/);
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeConstructionDock[\s\S]*?frame=\{nativeConstructionInventoryFrame\}[\s\S]*?: <StableConstructionDock/);
     expect(nativeConstructionDock).toMatch(/!frame[\s\S]*?data-native-authority-unavailable="construction-inventory-v1"/);
     expect(nativeConstructionDock).toMatch(/数据型建筑可单栋放置/);
     expect(nativeConstructionDock).toMatch(/已注册线路可单条连接/);
     expect(nativeConstructionDock).toMatch(/连续批量拉线和特殊物流端口使用独立原子命令/);
-    expect(app).toMatch(/enabled=\{nextMobileShell && !nativePlayerAuthorityOwnsRuntime\}/);
-    expect(app).toMatch(/native-mobile-shell-unavailable[\s\S]*?为避免显示旧星球数据/);
-
-    const rejection = app.slice(
-      app.indexOf("const rejectLegacyFactoryInteractionWhileNative"),
-      app.indexOf("useEffect(() => {", app.indexOf("const rejectLegacyFactoryInteractionWhileNative")),
-    );
-    expect(rejection).toMatch(/nativePlayerAuthorityOwnsRuntimeRef\.current[\s\S]*?本次操作未应用，也不会读取旧星球数据/);
-    for (const label of ["建筑放置与扩建", "建筑拖放", "生产区域编辑", "蓝图部署", "蓝图复制", "基础制造", "建筑回收"]) {
-      expect(app, label).toContain(`rejectLegacyFactoryInteractionWhileNative("${label}")`);
-    }
+    expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeMobileGameShell[\s\S]*?enabled=\{nextMobileShell\}/);
+    expect(app).toMatch(/: <MobileGameShell[\s\S]*?enabled=\{nextMobileShell && !nativePlayerAuthorityOwnsRuntime\}/);
     expect(app).toMatch(/const draggable = \(!nativePlayerAuthorityOwnsRuntime \|\| nativeFactoryPositionWriteReady\)[\s\S]*?!placement/);
     expect(app).toMatch(/const commonNodeData = useMemo[\s\S]*?readOnly: nativePlayerAuthorityOwnsRuntime/);
     expect(app).toMatch(/const canvasNodeSemanticRevisionToken = createCanvasNodeSemanticRevisionToken\(\[[\s\S]*?nativePlayerAuthorityOwnsRuntime,[\s\S]*?nativeFactoryPositionWriteReady,[\s\S]*?\]\)/);
     expect(app.match(/previous\.data\.readOnly === commonNodeData\.readOnly/g)).toHaveLength(2);
-    expect(app).toMatch(/const factoryCanvasRegions = useMemo\([\s\S]*?nativePlayerAuthorityOwnsRuntime[\s\S]*?\? \[\]/);
     expect(app).toMatch(/factoryGestureSurfaceKey = `\$\{factoryGestureRouteKey\}:\$\{nativeFactoryRouteUnsafe/);
     expect(app).toMatch(/key=\{`regions:\$\{factoryGestureSurfaceKey\}`\}/);
     expect(app).toMatch(/key=\{`minimap:\$\{factoryGestureSurfaceKey\}`\}/);
-    expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <CanvasSelectionTools/);
-    expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <PendingBlueprintLayer/);
     expect(app).not.toMatch(/!nativePlayerAuthorityOwnsRuntime \? <SelectionToolbar/);
     expect(app).toMatch(/<SelectionToolbar[\s\S]*?unsafeActionsEnabled=\{!nativePlayerAuthorityOwnsRuntime \|\| Boolean\([\s\S]*?nativeAuthoritativeFactoryCanvasFrame/);
     expect(app).toMatch(/<NativeBlueprintWorkspace[\s\S]*?!nativePlayerAuthorityOwnsRuntime && !nativeBlueprintRenamePendingIdentity &&[\s\S]*?!nativeBlueprintTransformPending &&[\s\S]*?!nativeBlueprintRecipeOverridePending &&[\s\S]*?!nativeBlueprintDeletePending &&[\s\S]*?!nativeConstructionQueueCancelPending &&[\s\S]*?!nativeBlueprintEnqueuePending &&[\s\S]*?!nativeBlueprintDirectDeployPending &&[\s\S]*?!nativeBlueprintRenameResolution \? <BlueprintWorkspace/);
-    expect(app).toMatch(/!nativePlayerAuthorityOwnsRuntime \? <RuntimeRenderProfile id="onboarding">/);
     expect(app).toMatch(/nativePlayerAuthorityOwnsRuntime \? <NativeFactoryInspectorPanel[\s\S]*?: <StableInspectorPanel/);
     expect(app).toMatch(/<HeaderControls[\s\S]*?constructionCenterVisible=\{nativePlayerAuthorityOwnsRuntime \|\| game\.entities\.some/);
     expect(app).toMatch(/constructionCenterOpen \? nativePlayerAuthorityOwnsRuntime \? \([\s\S]*?<NativeConstructionCenterWorkspace[\s\S]*?: \([\s\S]*?<ConstructionCenterWorkspace/);
@@ -132,16 +119,8 @@ describe("native planet navigation App integration", () => {
     expect(app).toMatch(/const requestNativeOrdinaryBeltPlacement[\s\S]*?readVerifiedNativeConstructionBeltPlacementContext[\s\S]*?commitNativeProjectedCommand/);
     expect(app).toMatch(/const onConnect = useCallback[\s\S]*?requestNativeOrdinaryBeltPlacement\(connection, lockedTier\)/);
     expect(panels).toMatch(/showConstructionCenter[\s\S]*?disabled=\{constructionCenterUnavailable\}[\s\S]*?打开建筑制造中心/);
-    expect(app).toMatch(/disabled: nativePlayerAuthorityOwnsRuntime \|\| nativeFactoryRouteUnsafe/);
-    expect(app).toMatch(/const confirmBatchConnection = useCallback\(\(\) => \{[\s\S]*?nativePlayerAuthorityOwnsRuntimeRef\.current \|\| nativeFactoryProjectionPendingRef\.current[\s\S]*?clearConnectionPreview\(false\)/);
-    expect(app).toMatch(/batchConnectionModeRef\.current && event\.key === "Enter"[\s\S]*?nativePlayerAuthorityOwnsRuntimeRef\.current \|\| nativeFactoryProjectionPendingRef\.current[\s\S]*?cancelBatchConnectionRef\.current\(\)/);
-    expect(app).toMatch(/useLayoutEffect\(\(\) => \{[\s\S]*?if \(!nativePlayerAuthorityOwnsRuntime\) return;[\s\S]*?batchConnectionModeRef\.current = false[\s\S]*?window\.clearInterval\(miningTimerRef\.current\)[\s\S]*?miningTimerRef\.current = null[\s\S]*?setMiningEntityId\(null\)/);
-    expect(app).toMatch(/const mobileActionEntity = useMemo\(\(\) => !nativePlayerAuthorityOwnsRuntime/);
-    expect(app).toMatch(/mobileActionEntity && !nativePlayerAuthorityOwnsRuntime \? <div className="mobile-action-backdrop"/);
-    expect(app).toMatch(/rejectLegacyFactoryInteractionWhileNative\("建筑升级"\)/);
-    for (const label of ["微型黑洞启停", "蓝图施工订单取消", "系统空间站输出口设置", "轨道空间站操作", "旧版游戏规则设置"]) {
-      expect(app, label).toContain(`rejectLegacyFactoryInteractionWhileNative("${label}")`);
-    }
+    expect(app).toMatch(/const confirmBatchConnection = useCallback\(\(\) => \{[\s\S]*?createNativeFactoryBeltBatchCommand/);
+    expect(app).toContain('rejectLegacyFactoryInteractionWhileNative("旧版游戏规则设置")');
     expect(app).toMatch(/systemSpaceStationOpen && systemSpaceStationId \? nativePlayerAuthorityOwnsRuntime \? <NativeSystemSpaceStationWorkspace/);
     expect(app).toMatch(/<NativeSystemSpaceStationWorkspace[\s\S]*?identity=\{nativeSystemSpaceStationIdentity\}[\s\S]*?fetchProjection=\{nativeSystemSpaceStationFetchProjection\}[\s\S]*?: <SystemSpaceStationWorkspace/);
     expect(app).toMatch(/getNativeCoreSystemSpaceStationWorkspaceProjection/);

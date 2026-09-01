@@ -368,6 +368,7 @@ impl CoreState {
             let logistics_buffer_runtime = prepared.logistics_buffer_runtime.clone();
             let material_delivery_runtime = prepared.material_delivery_runtime.clone();
             let ordinary_production_runtime = prepared.ordinary_production_runtime.clone();
+            let planet_metrics_runtime = prepared.planet_metrics_runtime.clone();
             let local_peer_directory = prepared.local_peer_directory.clone();
             let quantum_logistics_directory = prepared.quantum_logistics_directory.clone();
             let construction_runtime = prepared.construction_runtime.clone();
@@ -408,6 +409,7 @@ impl CoreState {
             self.install_prepared_logistics_buffer_runtime(logistics_buffer_runtime);
             self.install_prepared_material_delivery_runtime(material_delivery_runtime);
             self.install_prepared_ordinary_production_runtime(ordinary_production_runtime);
+            self.install_prepared_planet_metrics_runtime(planet_metrics_runtime);
             self.install_prepared_local_peer_directory(local_peer_directory);
             self.install_prepared_quantum_logistics_directory(quantum_logistics_directory);
             self.install_prepared_construction_runtime(construction_runtime);

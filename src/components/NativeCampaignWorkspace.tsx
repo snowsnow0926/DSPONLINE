@@ -8,7 +8,7 @@ import {
   ShieldAlert,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   DesktopNativeCampaignLocator,
   DesktopNativeCoreCampaignWorkspaceProjectionRequest,
@@ -44,6 +44,21 @@ function identityMatches(
     projection.registryFingerprint === identity.expectedRegistryFingerprint;
 }
 
+function scopeMatches(
+  projection: DesktopNativeCoreCampaignWorkspaceProjectionResult,
+  identity: DesktopNativeCoreCampaignWorkspaceProjectionRequest,
+): boolean {
+  return projection.sessionId === identity.sessionId &&
+    projection.runId === identity.runId &&
+    projection.registryFingerprint === identity.expectedRegistryFingerprint;
+}
+
+function campaignIdentityKey(identity: DesktopNativeCoreCampaignWorkspaceProjectionRequest | null): string {
+  return identity
+    ? `${identity.sessionId}\u0000${identity.runId}\u0000${identity.expectedRevision}\u0000${identity.expectedRegistryFingerprint}`
+    : "missing";
+}
+
 function catalogMatches(projection: DesktopNativeCoreCampaignWorkspaceProjectionResult): boolean {
   if (projection.truncated || projection.counts.chapters !== CAMPAIGN_CHAPTERS.length ||
       projection.counts.tasks !== CAMPAIGN_TASKS.length ||
@@ -76,9 +91,9 @@ export function NativeCampaignWorkspace({
 }: NativeCampaignWorkspaceProps) {
   const [status, setStatus] = useState<NativeCampaignStatus>({ phase: "loading" });
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
-  const identityKey = identity
-    ? `${identity.sessionId}\u0000${identity.runId}\u0000${identity.expectedRevision}\u0000${identity.expectedRegistryFingerprint}`
-    : "missing";
+  const currentIdentityRef = useRef(identity);
+  currentIdentityRef.current = identity;
+  const identityKey = campaignIdentityKey(identity);
 
   useEffect(() => {
     if (!open) return;
@@ -86,23 +101,34 @@ export function NativeCampaignWorkspace({
       setStatus({ phase: "unavailable", message: unavailableMessage(identity, fetchProjection) });
       return;
     }
-    let active = true;
-    setStatus({ phase: "loading" });
+    setStatus((current) => current.phase === "ready" && scopeMatches(current.projection, identity) && catalogMatches(current.projection)
+      ? current
+      : { phase: "loading" });
     void fetchProjection(identity).then((projection) => {
-      if (!active) return;
+      const currentIdentity = currentIdentityRef.current;
       if (!identityMatches(projection, identity) || !catalogMatches(projection)) {
-        setStatus({ phase: "unavailable", message: unavailableMessage(identity, fetchProjection) });
+        if (!currentIdentity || campaignIdentityKey(currentIdentity) !== campaignIdentityKey(identity)) return;
+        setStatus((current) => current.phase === "ready" && scopeMatches(current.projection, currentIdentity) && catalogMatches(current.projection)
+          ? current
+          : { phase: "unavailable", message: unavailableMessage(identity, fetchProjection) });
         return;
       }
-      setStatus({ phase: "ready", projection });
+      if (!currentIdentity || !scopeMatches(projection, currentIdentity) || projection.revision > currentIdentity.expectedRevision) return;
+      setStatus((current) => current.phase === "ready" && scopeMatches(current.projection, currentIdentity) &&
+        catalogMatches(current.projection) && current.projection.revision >= projection.revision
+        ? current
+        : { phase: "ready", projection });
     }).catch(() => {
-      if (active) setStatus({ phase: "unavailable", message: unavailableMessage(identity, fetchProjection) });
+      const currentIdentity = currentIdentityRef.current;
+      if (!currentIdentity || campaignIdentityKey(currentIdentity) !== campaignIdentityKey(identity)) return;
+      setStatus((current) => current.phase === "ready" && scopeMatches(current.projection, currentIdentity) && catalogMatches(current.projection)
+        ? current
+        : { phase: "unavailable", message: unavailableMessage(identity, fetchProjection) });
     });
-    return () => { active = false; };
   }, [fetchProjection, identityKey, open]);
 
   const projection = status.phase === "ready" && identity &&
-    identityMatches(status.projection, identity) && catalogMatches(status.projection)
+    scopeMatches(status.projection, identity) && catalogMatches(status.projection)
     ? status.projection
     : null;
   const activeChapter = useMemo(() => projection?.chapters.find((chapter) => chapter.id === projection.activeChapterId)
@@ -137,6 +163,9 @@ export function NativeCampaignWorkspace({
         </div>
         <button className="campaign-close" type="button" onClick={onClose} aria-label="关闭任务中心"><X size={18} /></button>
       </header>
+      {identity && projection.revision !== identity.expectedRevision
+        ? <p role="status" className="operations-notice">正在读取 Rust revision {identity.expectedRevision}；当前保持显示已验证的 revision {projection.revision}。</p>
+        : null}
       <div className="campaign-progress-overview">
         <div><span>当前章节</span><strong>{activeChapter ? CHAPTER_BY_ID.get(activeChapter.id as never)?.name : "全部完成"}</strong><small>{activeChapter ? CHAPTER_BY_ID.get(activeChapter.id as never)?.summary : "生产网络可以继续自由扩展。"}</small></div>
         <div className="campaign-progress-meter" role="progressbar" aria-label="任务完成度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(completion)}><i><b style={{ width: `${completion}%` }} /></i><span>{Math.round(completion)}% 完成</span></div>

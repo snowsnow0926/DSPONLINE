@@ -18,7 +18,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest,
   DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult,
@@ -59,6 +59,20 @@ function identityMatches(
     projection.truncated === false;
 }
 
+function scopeMatches(
+  projection: DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult,
+  identity: DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest,
+): boolean {
+  return projection.sessionId === identity.sessionId && projection.runId === identity.runId &&
+    projection.registryFingerprint === identity.expectedRegistryFingerprint && projection.truncated === false;
+}
+
+function galaxyIdentityKey(identity: DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest | null): string {
+  return identity
+    ? `${identity.sessionId}\u0000${identity.runId}\u0000${identity.expectedRevision}\u0000${identity.expectedRegistryFingerprint}`
+    : "missing";
+}
+
 function compactDecimal(value: string): string {
   const normalized = value.replace(/^0+(?=\d)/, "");
   if (normalized.length <= 15) {
@@ -96,9 +110,9 @@ export function NativeGalaxyWorkspace({
   const [cloudMessage, setCloudMessage] = useState<string | null>(null);
   const account = getActiveAccount(accountState);
   const accounts = Object.values(accountState.accounts).slice(0, 32);
-  const identityKey = identity
-    ? `${identity.sessionId}\u0000${identity.runId}\u0000${identity.expectedRevision}\u0000${identity.expectedRegistryFingerprint}`
-    : "missing";
+  const currentIdentityRef = useRef(identity);
+  currentIdentityRef.current = identity;
+  const identityKey = galaxyIdentityKey(identity);
 
   useEffect(() => {
     if (!open) return;
@@ -113,22 +127,33 @@ export function NativeGalaxyWorkspace({
       setStatus({ phase: "unavailable", message: projectionUnavailable(identity, fetchProjection) });
       return;
     }
-    let active = true;
-    setStatus({ phase: "loading" });
+    setStatus((current) => current.phase === "ready" && scopeMatches(current.projection, identity)
+      ? current
+      : { phase: "loading" });
     void fetchProjection(identity).then((projection) => {
-      if (!active) return;
+      const currentIdentity = currentIdentityRef.current;
       if (!identityMatches(projection, identity)) {
-        setStatus({ phase: "unavailable", message: projectionUnavailable(identity, fetchProjection) });
+        if (!currentIdentity || galaxyIdentityKey(currentIdentity) !== galaxyIdentityKey(identity)) return;
+        setStatus((current) => current.phase === "ready" && scopeMatches(current.projection, currentIdentity)
+          ? current
+          : { phase: "unavailable", message: projectionUnavailable(identity, fetchProjection) });
         return;
       }
-      setStatus({ phase: "ready", projection });
+      if (!currentIdentity || !scopeMatches(projection, currentIdentity) || projection.revision > currentIdentity.expectedRevision) return;
+      setStatus((current) => current.phase === "ready" && scopeMatches(current.projection, currentIdentity) &&
+        current.projection.revision >= projection.revision
+        ? current
+        : { phase: "ready", projection });
     }).catch(() => {
-      if (active) setStatus({ phase: "unavailable", message: projectionUnavailable(identity, fetchProjection) });
+      const currentIdentity = currentIdentityRef.current;
+      if (!currentIdentity || galaxyIdentityKey(currentIdentity) !== galaxyIdentityKey(identity)) return;
+      setStatus((current) => current.phase === "ready" && scopeMatches(current.projection, currentIdentity)
+        ? current
+        : { phase: "unavailable", message: projectionUnavailable(identity, fetchProjection) });
     });
-    return () => { active = false; };
   }, [fetchProjection, identityKey, open]);
 
-  const projection = status.phase === "ready" && identity && identityMatches(status.projection, identity)
+  const projection = status.phase === "ready" && identity && scopeMatches(status.projection, identity)
     ? status.projection
     : null;
   useEffect(() => {
@@ -211,6 +236,9 @@ export function NativeGalaxyWorkspace({
       <div className="galaxy-active-account"><span className="galaxy-avatar galaxy-avatar--small">{account.profile.avatar}</span><span><small>当前本地身份</small><strong>{account.profile.displayName}</strong></span></div>
       <button className="galaxy-close" type="button" onClick={onClose} aria-label="关闭银河网络"><X size={18} /></button>
     </header>
+    {identity && projection.revision !== identity.expectedRevision
+      ? <p role="status" className="operations-notice">正在读取 Rust revision {identity.expectedRevision}；当前保持显示已验证的 revision {projection.revision}。</p>
+      : null}
     <nav className="galaxy-tabs" aria-label="银河页面">
       <button className={tab === "overview" ? "active" : ""} type="button" onClick={() => setTab("overview")}><Activity size={14} />原生摘要</button>
       <button className={tab === "account" ? "active" : ""} type="button" onClick={() => setTab("account")}><UserRound size={14} />本地身份</button>

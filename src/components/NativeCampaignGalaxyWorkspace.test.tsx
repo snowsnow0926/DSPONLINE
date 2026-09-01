@@ -4,7 +4,9 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
+  DesktopNativeCoreCampaignWorkspaceProjectionRequest,
   DesktopNativeCoreCampaignWorkspaceProjectionResult,
+  DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest,
   DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult,
 } from "../desktop";
 import { CAMPAIGN_CHAPTERS, CAMPAIGN_TASKS } from "../game/campaign";
@@ -210,6 +212,32 @@ describe("native Campaign and Galaxy thin workspaces", () => {
     expect(host.textContent).not.toContain("采集第一份矿石");
   });
 
+  it("keeps the same focused campaign control mounted across a pending same-lineage revision", async () => {
+    const pending = deferred<DesktopNativeCoreCampaignWorkspaceProjectionResult>();
+    const fetchProjection = vi.fn((request: DesktopNativeCoreCampaignWorkspaceProjectionRequest) => request.expectedRevision === 13
+      ? pending.promise
+      : Promise.resolve(campaignProjection()));
+    await act(async () => {
+      root.render(<NativeCampaignWorkspace open identity={identity} fetchProjection={fetchProjection} onClose={() => undefined} onNavigate={() => undefined} />);
+      await Promise.resolve();
+    });
+    const locate = [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("定位目标"))!;
+    locate.focus();
+    const nextIdentity = { ...identity, expectedRevision: 13 };
+    await act(async () => {
+      root.render(<NativeCampaignWorkspace open identity={nextIdentity} fetchProjection={fetchProjection} onClose={() => undefined} onNavigate={() => undefined} />);
+      await Promise.resolve();
+    });
+    expect([...host.querySelectorAll("button")].find((button) => button.textContent?.includes("定位目标"))).toBe(locate);
+    expect(document.activeElement).toBe(locate);
+    expect(host.textContent).toContain("当前保持显示已验证的 revision 12");
+
+    await act(async () => pending.resolve({ ...campaignProjection(), revision: 13 }));
+    expect([...host.querySelectorAll("button")].find((button) => button.textContent?.includes("定位目标"))).toBe(locate);
+    expect(document.activeElement).toBe(locate);
+    expect(host.textContent).toContain("REV 13");
+  });
+
   it("renders Rust game summary beside account-only controls and no main-save action", async () => {
     await act(async () => {
       root.render(<NativeGalaxyWorkspace open accountState={accountState} identity={identity} fetchProjection={async () => galaxyProjection()} onClose={() => undefined} onUpdateProfile={() => undefined} onUpdateCloudBinding={() => true} onCreateAccount={() => undefined} onSwitchAccount={() => undefined} />);
@@ -244,6 +272,35 @@ describe("native Campaign and Galaxy thin workspaces", () => {
       await Promise.resolve();
     });
     expect(host.textContent).not.toContain("测试工程师");
+  });
+
+  it("preserves the focused account draft while a newer same-lineage Galaxy projection is pending", async () => {
+    const pending = deferred<DesktopNativeCoreGalaxyAccountWorkspaceProjectionResult>();
+    const fetchProjection = vi.fn((request: DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest) => request.expectedRevision === 13
+      ? pending.promise
+      : Promise.resolve(galaxyProjection()));
+    const render = (currentIdentity: DesktopNativeCoreGalaxyAccountWorkspaceProjectionRequest) => root.render(<NativeGalaxyWorkspace
+      open focusTab="account" accountState={accountState} identity={currentIdentity} fetchProjection={fetchProjection}
+      onClose={() => undefined} onUpdateProfile={() => undefined} onUpdateCloudBinding={() => true}
+      onCreateAccount={() => undefined} onSwitchAccount={() => undefined}
+    />);
+    await act(async () => { render(identity); await Promise.resolve(); });
+    const draft = host.querySelector<HTMLInputElement>(".galaxy-name-field input")!;
+    draft.focus();
+    await act(async () => setInputValue(draft, "未提交的名字"));
+
+    const nextIdentity = { ...identity, expectedRevision: 13 };
+    await act(async () => { render(nextIdentity); await Promise.resolve(); });
+    expect(host.querySelector<HTMLInputElement>(".galaxy-name-field input")).toBe(draft);
+    expect(document.activeElement).toBe(draft);
+    expect(draft.value).toBe("未提交的名字");
+    expect(host.textContent).toContain("当前保持显示已验证的 revision 12");
+
+    await act(async () => pending.resolve({ ...galaxyProjection(), revision: 13 }));
+    expect(host.querySelector<HTMLInputElement>(".galaxy-name-field input")).toBe(draft);
+    expect(document.activeElement).toBe(draft);
+    expect(draft.value).toBe("未提交的名字");
+    expect(host.textContent).toContain("REV 13");
   });
 
   it("keeps a completed cloud login session but refuses to bind a newly active local account", async () => {

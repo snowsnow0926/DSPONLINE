@@ -14,12 +14,14 @@ describe("native header controls App integration", () => {
     expect(panels).toMatch(/game \? <>[\s\S]*?data-native-header-status="factory-run-status-v1"/);
   });
 
-  it("exposes the migrated Operations destination, hides uncovered legacy destinations, and exposes durable native pause", () => {
+  it("exposes migrated Operations, Galaxy and Campaign destinations plus durable native pause", () => {
     expect(panels).toMatch(/<button[^>]*header-settings-command/);
     expect(panels).not.toMatch(/!nativeAuthority \? <button[^>]*header-settings-command/);
     expect(panels).toMatch(/<button type="button" role="menuitem" onClick=\{\(\) => runOverflowAction\(onOpenSettings\)\}/);
-    expect(panels).toMatch(/!nativeAuthority \? <button[^>]*activeWorkspace === "galaxy"/);
-    expect(panels).toMatch(/!nativeAuthority \? <button[^>]*activeWorkspace === "campaign"/);
+    expect(panels).not.toMatch(/!nativeAuthority \? <button[^>]*activeWorkspace === "galaxy"/);
+    expect(panels).not.toMatch(/!nativeAuthority \? <button[^>]*activeWorkspace === "campaign"/);
+    expect(panels).toMatch(/<button[^>]*activeWorkspace === "galaxy"/);
+    expect(panels).toMatch(/<button[^>]*activeWorkspace === "campaign"/);
     expect(app).toMatch(/pauseControlAvailable=\{!nativePlayerAuthorityOwnsRuntime \|\| \([\s\S]*?setNativePlayerAuthorityPaused[\s\S]*?schemaVersion === 1/);
     expect(panels).toMatch(/pauseControlAvailable = true[\s\S]*?disabled=\{!pauseControlAvailable\}/);
     expect(panels).not.toMatch(/disabled=\{nativeAuthority\}[\s\S]*?Windows 原生暂停命令尚未接入/);

@@ -14314,16 +14314,122 @@ mod tests {
         assert_eq!(state.pure_idle_macro_exact_seconds_used(), before_credit);
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct FixedMacroHashRun {
+        public_bytes: Vec<u8>,
+        canonical: String,
+        domain: String,
+        conservation: String,
+        public_without_history: String,
+        production_history: String,
+        report: Vec<u8>,
+    }
+
+    fn run_fixed_macro_hash_fixture(
+        fixture: fn(f64) -> CoreState,
+        worker_count: usize,
+        exercise_parallel_threshold: bool,
+    ) -> FixedMacroHashRun {
+        let runtime = DeterministicRuntime::for_test(worker_count);
+        let mut state = fixture(15.0);
+        if exercise_parallel_threshold {
+            state = pad_parallel_certificate_fixture(state);
+            assert_eq!(
+                runtime.worker_count_for_items(state.parse_entities_parallel().unwrap().len()),
+                worker_count,
+                "padded fixed fixture must exercise the requested worker count"
+            );
+        }
+        let revision = state.revision;
+        let result = advance_bounded_with_runtime(
+            &mut state,
+            &pure_idle_macro_request(revision, 600.0, 40.0),
+            true,
+            &runtime,
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+
+        let public = state.materialize().unwrap();
+        assert_eq!(public["historyRecordedAt"].as_f64(), Some(30.0));
+        let history = public["productionHistory"].as_array().unwrap();
+        assert_eq!(history.len(), 30);
+        assert!(history.iter().enumerate().all(|(index, sample)| {
+            sample["elapsedSeconds"].as_f64() == Some((index + 1) as f64)
+                && sample["sampleDurationSeconds"].as_f64() == Some(1.0)
+        }));
+
+        let mut public_without_history = public.clone();
+        public_without_history
+            .as_object_mut()
+            .unwrap()
+            .remove("productionHistory");
+        FixedMacroHashRun {
+            public_bytes: serde_json::to_vec(&public).unwrap(),
+            canonical: state.canonical_sha256().unwrap(),
+            domain: state.domain_sha256().unwrap(),
+            conservation: parallel_certificate_conservation_sha256(&state),
+            public_without_history: crate::canonical::canonical_sha256(&public_without_history),
+            production_history: crate::canonical::canonical_sha256(&public["productionHistory"]),
+            report: serde_json::to_vec(&result).unwrap(),
+        }
+    }
+
+    fn assert_fixed_macro_hash_at_one_two_four_eight_workers(
+        fixture: fn(f64) -> CoreState,
+        expected_canonical: &str,
+        expected_domain: &str,
+        expected_conservation: &str,
+        expected_public_without_history: &str,
+        expected_production_history: &str,
+    ) {
+        let expected = run_fixed_macro_hash_fixture(fixture, 1, false);
+        assert_eq!(expected.canonical, expected_canonical);
+        assert_eq!(expected.domain, expected_domain);
+        assert_eq!(expected.conservation, expected_conservation);
+        assert_eq!(
+            expected.public_without_history,
+            expected_public_without_history
+        );
+        assert_eq!(expected.production_history, expected_production_history);
+        for worker_count in [2, 4, 8, 8] {
+            assert_eq!(
+                run_fixed_macro_hash_fixture(fixture, worker_count, false),
+                expected,
+                "fixed macro fixture diverged at {worker_count} workers"
+            );
+        }
+
+        // The compact fixture alone is below the scheduler threshold. Repeat
+        // the complete state/report/conservation comparison with inert rows so
+        // 1/2/4/8 are real selected worker counts rather than configuration
+        // labels that all silently take the serial path.
+        let parallel_expected = run_fixed_macro_hash_fixture(fixture, 1, true);
+        for worker_count in [2, 4, 8, 8] {
+            assert_eq!(
+                run_fixed_macro_hash_fixture(fixture, worker_count, true),
+                parallel_expected,
+                "padded fixed macro fixture diverged at {worker_count} workers"
+            );
+        }
+    }
+
     #[test]
     fn macro_v10_recipe_dag_has_a_fixed_cross_thread_hash() {
-        let mut state = productive_closed_recipe_dag_macro_fixture(15.0);
-        let revision = state.revision;
-        let result =
-            advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 600.0, 40.0)).unwrap();
-        assert!(result.supported, "reason={:?}", result.reason);
-        assert_eq!(
-            state.summary().unwrap().canonical_sha256,
-            "568a15dba5cb059a34a2d6e40263b1a2ab134ebe9d011fc96446e82982d7bc9b"
+        // `06dc1651` intentionally replaced three 10-second history buckets
+        // with the same thirty one-second public boundaries produced by
+        // 30x1s Exact calls. Bisection proved that the complete public state
+        // excluding only `productionHistory`, the simulation-domain hash and
+        // the material-conservation projection all retained their pre-change
+        // hashes. Keep those proofs beside the new canonical baseline so a
+        // future unexplained gameplay drift cannot be accepted as "history".
+        assert_fixed_macro_hash_at_one_two_four_eight_workers(
+            productive_closed_recipe_dag_macro_fixture,
+            "a3fb35709924370c720f2dcd9df64394b19cdb8b1bff6892059ae513c9d47cba",
+            "0e225ed562017b92c73b53c83c8191d42c95c67064835a123d0df81bf456b918",
+            "6a42519ebeb092f4580ce9eaefccc26e5f6456bf387051199eb3dbc60462daf6",
+            "aae0e08fc018ea32ff5df9a9fa31e01946c859e4aac9ed8944d407c19567fcac",
+            "5942eebc0800e86aa919e66520701cbf0a6fde7ad01297b552240ee4c5d30888",
         );
     }
 
@@ -14454,14 +14560,13 @@ mod tests {
 
     #[test]
     fn macro_v10_closed_recipe_has_a_fixed_cross_thread_hash() {
-        let mut state = productive_closed_recipe_macro_fixture(15.0);
-        let revision = state.revision;
-        let result =
-            advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 600.0, 40.0)).unwrap();
-        assert!(result.supported, "reason={:?}", result.reason);
-        assert_eq!(
-            state.summary().unwrap().canonical_sha256,
-            "9b46a6889b8636fee6555037219168c40041064091a20f50062c6b40aee789aa"
+        assert_fixed_macro_hash_at_one_two_four_eight_workers(
+            productive_closed_recipe_macro_fixture,
+            "d536aac5b0b425b1f358cf1e3d1ef0e132544e2cd99a2a37be4dd9c32b61f4a6",
+            "e2ce7700859fc0321532bee4351f3b3d365180a68980cffa478e483a99ed8e42",
+            "f9a4439bfcb9a337868933db93ad18f71c09c5a327583abf6304ae38be17b78f",
+            "0d1d41bcab8958166f540dfbd5d0e51b074d51e98682df846bb169d097e7aae8",
+            "1b80a5f072bf58beb7a058770b9aba569fda1632f4fd0cd7f5e5cd99990c5e2a",
         );
     }
 

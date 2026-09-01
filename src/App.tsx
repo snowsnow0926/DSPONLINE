@@ -608,6 +608,13 @@ import {
   createNativePlayerAuthorityDysonWorkspaceSource,
   selectNativeDysonWorkspaceFrame,
 } from "./game/nativeDysonWorkspaceStore";
+import {
+  NativeStatisticsWorkspaceStore,
+  createNativePlayerAuthorityStatisticsWorkspaceSource,
+  selectNativeStatisticsWorkspaceAuthorityFrames,
+  selectNativeStatisticsWorkspaceFrame,
+  type NativeStatisticsWorkspaceIdentity,
+} from "./game/nativeStatisticsWorkspaceStore";
 import type {
   NativeSystemSpaceStationWorkspaceFetchProjection,
   NativeSystemSpaceStationWorkspaceIdentity,
@@ -2960,7 +2967,74 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     nativeRecipeWorkspaceStore.getSnapshot,
     nativeRecipeWorkspaceStore.getSnapshot,
   );
+  const nativeStatisticsWorkspaceStoreRef = useRef<NativeStatisticsWorkspaceStore | null>(null);
+  if (nativeStatisticsWorkspaceStoreRef.current === null) {
+    nativeStatisticsWorkspaceStoreRef.current = new NativeStatisticsWorkspaceStore();
+  }
+  const nativeStatisticsWorkspaceStore = nativeStatisticsWorkspaceStoreRef.current;
+  const nativeStatisticsWorkspaceSnapshot = useSyncExternalStore(
+    nativeStatisticsWorkspaceStore.subscribe,
+    nativeStatisticsWorkspaceStore.getSnapshot,
+    nativeStatisticsWorkspaceStore.getSnapshot,
+  );
   const recipeWorkspaceRegistryFingerprint = contentPackRuntimeSnapshotRef.current.fingerprint;
+  const nativeStatisticsWorkspaceAuthorityFrames = useMemo(
+    () => selectNativeStatisticsWorkspaceAuthorityFrames(
+      nativePlayerAuthorityClockSnapshot,
+      nativePlayerAuthoritySessionId,
+    ),
+    [nativePlayerAuthorityClockSnapshot, nativePlayerAuthoritySessionId],
+  );
+  const nativeStatisticsWorkspaceIdentity = useMemo<NativeStatisticsWorkspaceIdentity | null>(() => {
+    const frame = nativeStatisticsWorkspaceAuthorityFrames.displayFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+        })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeStatisticsWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeStatisticsWorkspaceReadIdentity = useMemo<NativeStatisticsWorkspaceIdentity | null>(() => {
+    const frame = nativeStatisticsWorkspaceAuthorityFrames.readFrame;
+    return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null
+      ? Object.freeze({
+          sessionId: frame.sessionId,
+          runId: frame.runId,
+          revision: frame.revision,
+          registryFingerprint: recipeWorkspaceRegistryFingerprint,
+        })
+      : null;
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeStatisticsWorkspaceAuthorityFrames,
+    recipeWorkspaceRegistryFingerprint,
+  ]);
+  const nativeStatisticsWorkspaceSource = useMemo(() => nativeStatisticsWorkspaceReadIdentity
+    ? createNativePlayerAuthorityStatisticsWorkspaceSource(desktopBridge, nativeStatisticsWorkspaceReadIdentity)
+    : null, [desktopBridge, nativeStatisticsWorkspaceReadIdentity]);
+  const nativeStatisticsWorkspaceFrame = useMemo(() => nativeStatisticsWorkspaceIdentity
+    ? selectNativeStatisticsWorkspaceFrame(nativeStatisticsWorkspaceSnapshot, nativeStatisticsWorkspaceIdentity)
+    : null, [nativeStatisticsWorkspaceIdentity, nativeStatisticsWorkspaceSnapshot]);
+  const nativeStatisticsWorkspaceReadStatus = nativeStatisticsWorkspaceFrame &&
+      nativeStatisticsWorkspaceIdentity && nativeStatisticsWorkspaceSnapshot.status === "ready" &&
+      nativeStatisticsWorkspaceFrame.revision === nativeStatisticsWorkspaceIdentity.revision
+    ? "ready" as const
+    : nativeStatisticsWorkspaceFrame
+      ? nativeStatisticsWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : "loading" as const
+      : !nativeStatisticsWorkspaceIdentity ||
+          nativeStatisticsWorkspaceSnapshot.status === "unavailable"
+        ? "unavailable" as const
+        : nativeStatisticsWorkspaceSnapshot.status === "empty"
+          ? "empty" as const
+          : "loading" as const;
   const nativeSystemSpaceStationIdentity = useMemo<NativeSystemSpaceStationWorkspaceIdentity | null>(() => {
     const frame = nativePlayerAuthorityActiveFrame;
     return nativePlayerAuthorityOwnsRuntime && frame?.sessionId && frame.runId && frame.revision !== null && systemSpaceStationId ? Object.freeze({
@@ -4267,6 +4341,28 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     recipeWorkspaceRegistryFingerprint,
     recipeWorkspaceSelector,
     recipesOpen,
+  ]);
+  useEffect(() => {
+    if (!statisticsOpen || !nativePlayerAuthorityOwnsRuntime ||
+        !nativeStatisticsWorkspaceIdentity) {
+      nativeStatisticsWorkspaceStore.close();
+      return;
+    }
+    // The runtime publishes a successful tick before clearing its operation.
+    // Keep the mounted old read-only frame, but wait for a settled clock before
+    // issuing the next exact-lineage broker read.
+    if (!nativeStatisticsWorkspaceReadIdentity || !nativeStatisticsWorkspaceSource) return;
+    void nativeStatisticsWorkspaceStore.refresh(
+      nativeStatisticsWorkspaceSource,
+      nativeStatisticsWorkspaceReadIdentity,
+    ).catch(() => undefined);
+  }, [
+    nativePlayerAuthorityOwnsRuntime,
+    nativeStatisticsWorkspaceIdentity,
+    nativeStatisticsWorkspaceReadIdentity,
+    nativeStatisticsWorkspaceSource,
+    nativeStatisticsWorkspaceStore,
+    statisticsOpen,
   ]);
   useEffect(() => {
     if (!starMapOpen || !nativePlayerAuthorityBoundFrame || !nativeStellarProjectionIdentity ||
@@ -5878,12 +5974,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [requestAuthoritativeDeferredTopLevelProjection]);
 
   const requestAuthoritativeStatisticsHistory = useCallback(async (): Promise<StatisticsHistoryReadModel> => {
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      throw new Error("Rust 玩家权威生产历史必须通过 identity-bound workspace store 读取");
+    }
     const expectedRevision = simulationStateRevisionRef.current;
     const nativeProjection = await windowsNativeCoreBetaControllerRef.current?.readVerifiedStatisticsProjection({
       minElapsedSeconds: 0,
-      maxElapsedSeconds: nativePlayerAuthorityOwnsRuntimeRef.current
-        ? Number.MAX_SAFE_INTEGER
-        : Math.max(0, gameRef.current.elapsedSeconds),
+      maxElapsedSeconds: Math.max(0, gameRef.current.elapsedSeconds),
       cursor: 0,
       limit: 512,
     }, expectedRevision);
@@ -5896,10 +5993,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         samples: nativeProjection.samples,
       };
     }
-    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
-      throw new Error("Rust 权威生产历史未通过当前 revision 校验");
-    }
-
     const existing = statisticsReadModelRequestRef.current;
     if (existing) return existing.promise;
     const worker = simulationWorkerRef.current;
@@ -5937,11 +6030,9 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   // is intentionally excluded from the default factory projection. Keep the
   // open workspace live through its narrow read model; this replaces the old
   // full-top-level publication without freezing the chart at open time.
-  const statisticsHistoryRefreshToken = nativePlayerAuthorityOwnsRuntime
-    ? factoryThinViewExpectedRevision
-    : game.historyRecordedAt;
+  const statisticsHistoryRefreshToken = game.historyRecordedAt;
   useEffect(() => {
-    if (!statisticsOpen || authorityWorkspaceSync === "statistics") return;
+    if (nativePlayerAuthorityOwnsRuntime || !statisticsOpen || authorityWorkspaceSync === "statistics") return;
     if (statisticsHistoryRecordedAtRef.current === statisticsHistoryRefreshToken) return;
     const authoritySyncId = authorityWorkspaceSyncIdRef.current;
     const requestedHistoryRecordedAt = statisticsHistoryRefreshToken;
@@ -5960,7 +6051,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     return () => {
       cancelled = true;
     };
-  }, [authorityWorkspaceSync, requestAuthoritativeStatisticsHistory, statisticsHistoryRefreshToken, statisticsOpen]);
+  }, [authorityWorkspaceSync, nativePlayerAuthorityOwnsRuntime, requestAuthoritativeStatisticsHistory, statisticsHistoryRefreshToken, statisticsOpen]);
 
   /** Replace the live simulation Worker from the exact terminal state that
    * was just persisted (pure-idle handoff). This uses the existing durable
@@ -13105,10 +13196,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     closeAllWorkspaces();
     const authoritySyncId = authorityWorkspaceSyncIdRef.current + 1;
     authorityWorkspaceSyncIdRef.current = authoritySyncId;
-    const requiresAuthoritySync = workspace === "statistics" || workspace === "dyson";
+    const requiresAuthoritySync = workspace === "dyson" ||
+      (workspace === "statistics" && !nativePlayerAuthorityOwnsRuntimeRef.current);
     setCommandPaletteOpen(false);
     setAuthorityWorkspaceSync(requiresAuthoritySync ? workspace : null);
-    if (workspace === "statistics") setNotice("正在读取权威生产历史…");
+    if (workspace === "statistics") setNotice(nativePlayerAuthorityOwnsRuntimeRef.current
+      ? null
+      : "正在读取权威生产历史…");
     else if (workspace === "dyson") setNotice("正在从模拟 Worker 同步权威戴森规划…");
     setMobilePanel(null);
     if (workspace === "inspector" || workspace === "resources") {
@@ -13161,9 +13255,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     if (requiresAuthoritySync) {
       try {
         if (workspace === "statistics") {
-          const requestedHistoryRecordedAt = nativePlayerAuthorityOwnsRuntimeRef.current
-            ? simulationStateRevisionRef.current
-            : gameRef.current.historyRecordedAt;
+          const requestedHistoryRecordedAt = gameRef.current.historyRecordedAt;
           const readModel = await requestAuthoritativeStatisticsHistory();
           if (authorityWorkspaceSyncIdRef.current === authoritySyncId) {
             statisticsHistoryRecordedAtRef.current = requestedHistoryRecordedAt;
@@ -21863,12 +21955,16 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             }}
           />
         ) : <WorkspaceLoading label="正在同步权威科研状态…" />) : null}
-        {statisticsOpen ? (authorityWorkspaceSync === "statistics" ? <WorkspaceLoading label="正在同步权威生产历史…" /> : nativePlayerAuthorityOwnsRuntime ? <NativeStatisticsWorkspace
+        {statisticsOpen ? (nativePlayerAuthorityOwnsRuntime ? <NativeStatisticsWorkspace
+          key={nativeStatisticsWorkspaceIdentity
+            ? `${nativeStatisticsWorkspaceIdentity.sessionId}\u0000${nativeStatisticsWorkspaceIdentity.runId}\u0000${nativeStatisticsWorkspaceIdentity.registryFingerprint}`
+            : "native-statistics-unbound"}
           open
-          revision={factoryThinViewExpectedRevision}
-          samples={statisticsHistory ?? []}
+          frame={nativeStatisticsWorkspaceFrame}
+          latestIdentity={nativeStatisticsWorkspaceIdentity}
+          status={nativeStatisticsWorkspaceReadStatus}
           onClose={() => nextMobileShell ? mobileNavigation.requestBack() : setStatisticsOpen(false)}
-        /> : <StatisticsWorkspace
+        /> : authorityWorkspaceSync === "statistics" ? <WorkspaceLoading label="正在同步权威生产历史…" /> : <StatisticsWorkspace
           open
           game={game}
           productionHistory={statisticsHistory ?? game.productionHistory}

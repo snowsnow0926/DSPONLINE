@@ -374,6 +374,7 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
   } };
   const registry = new NativeCoreSessionRegistry(client);
   await registry.open(7, { slot: "normal-main", generation: 1, rootHash: "a".repeat(64), revision: 1, registryFingerprint: "builtin:test", catalog });
+  assert.equal(registry.inspectSession(7, "core-1").registryFingerprint, "builtin:test");
   assert.throws(() => registry.status(8, "core-1"), /not owned/);
   await registry.status(7, "core-1");
   assert.throws(() => registry.advance(7, { sessionId: "core-1", baseRevision: 1, simulationSeconds: -1, wallSeconds: 1 }), /advance/);
@@ -745,6 +746,50 @@ test("core registry validates bounded catalogs and binds shadow sessions to one 
   });
 });
 
+test("statistics projection accepts the exact host window bound with player-authority lineage metadata", async () => {
+  const calls = [];
+  const client = { request(request) {
+    calls.push(request);
+    return Promise.resolve({ schemaVersion: 1, projectionType: "statistics-v1", revision: 17 });
+  } };
+  const registry = new NativeCoreSessionRegistry(client);
+  registry.sessions.set("core-main-1", {
+    ownerId: "main-player-authority",
+    slot: "normal-main",
+    registryFingerprint: "7df8cf3a",
+    ownerEpoch: 2,
+    state: "owned",
+    inFlight: 0,
+  });
+  const maximumElapsedSeconds = 30 * 24 * 60 * 60 * 10_000;
+  await registry.statisticsProjection("main-player-authority", {
+    sessionId: "core-main-1",
+    runId: "run-1",
+    expectedRevision: 17,
+    expectedRegistryFingerprint: "7df8cf3a",
+    minElapsedSeconds: 0,
+    maxElapsedSeconds: maximumElapsedSeconds,
+    cursor: 0,
+    limit: 512,
+  });
+  assert.deepEqual(calls, [{
+    operation: "coreStatisticsProjection",
+    sessionId: "core-main-1",
+    minElapsedSeconds: 0,
+    maxElapsedSeconds: maximumElapsedSeconds,
+    cursor: 0,
+    limit: 512,
+  }]);
+  assert.throws(() => registry.statisticsProjection("main-player-authority", {
+    sessionId: "core-main-1",
+    expectedRevision: 17,
+    minElapsedSeconds: 0,
+    maxElapsedSeconds: maximumElapsedSeconds + 1,
+    cursor: 0,
+    limit: 512,
+  }), /statistics projection request is invalid/);
+});
+
 test("viewport v2 entity presentation is capability-gated and forwarded only when requested", async () => {
   const catalog = {
     protocolVersion: 1,
@@ -1096,6 +1141,7 @@ test("v47 import keeps the selected path outside the renderer request and owner-
   const registry = new NativeCoreSessionRegistry(client);
   const imported = await registry.importV47(7, { registryFingerprint: "builtin:test", catalog }, sourcePath);
   assert.equal(imported.sessionId, "core-import-1");
+  assert.equal(registry.inspectSession(7, "core-import-1").registryFingerprint, "builtin:test");
   assert.equal(calls[0].sourcePath, sourcePath);
   assert.throws(() => registry.status(8, "core-import-1"), /not owned/);
   await registry.close(7, "core-import-1");
@@ -1466,6 +1512,7 @@ test("startup recovery receipt is strictly adopted once as a main-owned Rust ses
   });
   const owned = registry.inspectSession("main-player-authority", "core-restarted-1");
   assert.equal(owned.slot, "normal-main");
+  assert.equal(owned.registryFingerprint, "builtin:test");
   assert.equal(owned.ownerEpoch, 1);
   assert.equal(owned.inFlight, 0);
   assert.throws(

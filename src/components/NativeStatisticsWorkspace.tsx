@@ -1,15 +1,22 @@
-import { BarChart3, Search, ShieldCheck, TrendingUp, X } from "lucide-react";
+import { BarChart3, LockKeyhole, Search, ShieldCheck, TrendingUp, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { ITEMS } from "../game/content";
+import type {
+  NativeStatisticsWorkspaceFrame,
+  NativeStatisticsWorkspaceIdentity,
+} from "../game/nativeStatisticsWorkspaceStore";
 import { formatQuantityCompact, formatQuantityExact } from "../game/quantityFormat";
 import type { ItemId, ProductionHistorySample } from "../game/types";
 import { QuantityValue } from "./QuantityValue";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 
-interface NativeStatisticsWorkspaceProps {
+export type NativeStatisticsWorkspaceReadStatus = "empty" | "loading" | "ready" | "unavailable";
+
+export interface NativeStatisticsWorkspaceProps {
   open: boolean;
-  revision: number;
-  samples: readonly ProductionHistorySample[];
+  frame: NativeStatisticsWorkspaceFrame | null;
+  latestIdentity: NativeStatisticsWorkspaceIdentity | null;
+  status: NativeStatisticsWorkspaceReadStatus;
   onClose: () => void;
 }
 
@@ -48,12 +55,27 @@ function trendPoints(values: readonly number[], maximum: number): string {
  */
 export function NativeStatisticsWorkspace({
   open,
-  revision,
-  samples,
+  frame: candidateFrame,
+  latestIdentity,
+  status,
   onClose,
 }: NativeStatisticsWorkspaceProps) {
   const [query, setQuery] = useState("");
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
+  const frameMatchesScope = Boolean(candidateFrame && latestIdentity &&
+    candidateFrame.sessionId === latestIdentity.sessionId &&
+    candidateFrame.runId === latestIdentity.runId &&
+    candidateFrame.registryFingerprint === latestIdentity.registryFingerprint &&
+    candidateFrame.revision <= latestIdentity.revision);
+  const frame = frameMatchesScope && candidateFrame && latestIdentity &&
+      (candidateFrame.revision === latestIdentity.revision
+        ? status === "ready"
+        : status === "loading" || status === "unavailable")
+    ? candidateFrame
+    : null;
+  const exactFrame = Boolean(frame && latestIdentity && status === "ready" &&
+    frame.revision === latestIdentity.revision);
+  const samples: readonly ProductionHistorySample[] = frame?.samples ?? [];
   const latest = samples.at(-1) ?? null;
   const rows = useMemo<NativeItemRow[]>(() => {
     if (!latest) return [];
@@ -90,22 +112,51 @@ export function NativeStatisticsWorkspace({
   const totalProduction = rows.reduce((total, row) => total + Math.max(0, row.productionPerMinute), 0);
   const totalConsumption = rows.reduce((total, row) => total + Math.max(0, row.consumptionPerMinute), 0);
 
+  if (!frame) {
+    const loading = status === "empty" || status === "loading";
+    return <WorkspaceFrame
+      open={open}
+      className="statistics-workspace native-statistics-workspace"
+      ariaLabel="Windows 原生生产统计"
+      onRequestClose={onClose}
+      data-native-statistics="history-v1"
+      data-native-statistics-status={loading ? "loading" : "unavailable"}
+    >
+      <header className="statistics-header">
+        <div className="statistics-title">
+          <i><BarChart3 size={20} /></i>
+          <div><span>Rust 玩家权威 · 只读投影</span><strong>生产统计</strong></div>
+        </div>
+        <div className="statistics-headline"><span>权威数据 <strong>{loading ? "同步中" : "暂不可用"}</strong></span></div>
+        <button className="statistics-close" type="button" onClick={onClose} title="关闭生产统计" aria-label="关闭生产统计"><X size={18} /></button>
+      </header>
+      <div className="statistics-content statistics-production">
+        <div className="statistics-empty" role={loading ? "status" : "alert"}>
+          <span>{loading ? "正在读取当前 revision 的 Rust 生产历史" : "当前 revision 的 Rust 生产历史不可用；不会回退到旧网页存档"}</span>
+        </div>
+      </div>
+    </WorkspaceFrame>;
+  }
+
   return <WorkspaceFrame
     open={open}
     className="statistics-workspace native-statistics-workspace"
     ariaLabel="Windows 原生生产统计"
     onRequestClose={onClose}
     data-native-statistics="history-v1"
+    data-native-statistics-status={exactFrame ? "ready" : status === "unavailable" ? "unavailable" : "loading"}
+    data-native-statistics-revision={frame.revision}
+    data-native-statistics-display-stale={exactFrame ? undefined : "true"}
   >
     <header className="statistics-header">
       <div className="statistics-title">
         <i><BarChart3 size={20} /></i>
-        <div><span>Rust 权威 · revision {revision}</span><strong>生产统计</strong></div>
+        <div><span>Rust 权威 · revision {frame.revision}</span><strong>生产统计</strong></div>
       </div>
       <div className="statistics-headline">
         <span>生产 <strong>+{rateLabel(totalProduction)}</strong></span>
         <span>消耗 <strong>-{rateLabel(totalConsumption)}</strong></span>
-        <span><ShieldCheck size={14} />同版本采样</span>
+        <span><ShieldCheck size={14} />{exactFrame ? "同版本采样" : "已验证只读旧帧"}</span>
       </div>
       <button className="statistics-close" type="button" onClick={onClose} title="关闭生产统计" aria-label="关闭生产统计"><X size={18} /></button>
     </header>
@@ -116,6 +167,13 @@ export function NativeStatisticsWorkspace({
     </nav>
 
     <div className="statistics-content statistics-production">
+      {!exactFrame && latestIdentity ? <div className="dyson-planner-lock" role="status">
+        <LockKeyhole size={16} />
+        <strong>{status === "unavailable"
+          ? `Rust revision ${latestIdentity.revision} 暂不可用`
+          : `正在读取 Rust revision ${latestIdentity.revision}`}</strong>
+        <span>继续显示已验证的 revision {frame.revision}；本工作区没有游戏权威写面。</span>
+      </div> : null}
       <div className="statistics-toolbar">
         <label className="statistics-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="筛选物品或 MOD ID" aria-label="筛选原生统计物品" /></label>
         <small>{samples.length} 个有界采样 · 最新模拟时间 {latest ? latest.elapsedSeconds.toFixed(1) : "-"} 秒</small>

@@ -1017,6 +1017,7 @@ class NativeCoreSessionRegistry {
       this.sessions.set(receipt.sessionId, {
         ownerId: MAIN_PLAYER_AUTHORITY_OWNER_ID,
         slot: "normal-main",
+        registryFingerprint: receipt.registryFingerprint,
         ownerEpoch: 1,
         state: "owned",
         inFlight: 0,
@@ -1040,13 +1041,15 @@ class NativeCoreSessionRegistry {
   }
 
   async open(ownerId, request) {
-    const value = await this.client.request(normalizeNativeCoreOpen(request));
+    const hostRequest = normalizeNativeCoreOpen(request);
+    const value = await this.client.request(hostRequest);
     if (!validLogicalId(value?.sessionId, 128) || this.sessions.has(value.sessionId) || value?.authority !== "shadow") {
       throw new NativeHostError("native host returned an invalid core session", "NATIVE_PROTOCOL_INVALID");
     }
     this.sessions.set(value.sessionId, {
       ownerId,
-      slot: request.slot,
+      slot: hostRequest.slot,
+      registryFingerprint: hostRequest.registryFingerprint,
       ownerEpoch: 1,
       state: "owned",
       inFlight: 0,
@@ -1061,7 +1064,8 @@ class NativeCoreSessionRegistry {
         "NATIVE_CORE_V47_IMPORT_UNAVAILABLE",
       );
     }
-    const value = await this.client.request(normalizeNativeCoreImport(request, sourcePath), 300_000);
+    const hostRequest = normalizeNativeCoreImport(request, sourcePath);
+    const value = await this.client.request(hostRequest, 300_000);
     if (!validLogicalId(value?.sessionId, 128) || this.sessions.has(value.sessionId) ||
       value?.authority !== "shadow" || !value?.checkpoint || !value?.import || !value?.summary ||
       !["normal", "speedrun"].includes(value.import.mode) || value.summary.mode !== value.import.mode) {
@@ -1073,6 +1077,7 @@ class NativeCoreSessionRegistry {
     this.sessions.set(value.sessionId, {
       ownerId,
       slot: value.import.mode === "speedrun" ? "speedrun-main" : "normal-main",
+      registryFingerprint: hostRequest.registryFingerprint,
       ownerEpoch: 1,
       state: "owned",
       inFlight: 0,
@@ -2646,6 +2651,7 @@ class NativeCoreSessionRegistry {
       sessionId,
       ownerId: session.ownerId,
       slot: session.slot,
+      registryFingerprint: session.registryFingerprint,
       ownerEpoch: session.ownerEpoch,
       state: session.state,
       inFlight: session.inFlight,

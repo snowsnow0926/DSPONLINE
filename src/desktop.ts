@@ -1810,7 +1810,11 @@ export interface DesktopNativeCoreConstructionStackContextResult {
 }
 
 export interface DesktopNativeCoreStatisticsProjectionRequest extends DesktopNativeCoreSessionRequest {
+  /** Present together only for a main-owned player-authority read. */
+  runId?: string;
   expectedRevision: number;
+  /** Present together with runId; JS shadow reads omit both lineage tags. */
+  expectedRegistryFingerprint?: string;
   minElapsedSeconds: number;
   maxElapsedSeconds: number;
   cursor?: number;

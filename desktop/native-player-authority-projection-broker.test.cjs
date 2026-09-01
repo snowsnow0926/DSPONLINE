@@ -19,8 +19,26 @@ function fixture(initialSnapshot = {}) {
     inFlight: false,
     ...initialSnapshot,
   };
+  let session = {
+    kind: "native-core-session-owner-state-v1",
+    sessionId: "core-main-1",
+    ownerId: "main-player-authority",
+    slot: "normal-main",
+    registryFingerprint: "7df8cf3a",
+    ownerEpoch: 2,
+    state: "owned",
+    inFlight: 0,
+  };
   const calls = [];
   const registry = {
+    inspectSession(ownerId, sessionId) {
+      if (ownerId !== session.ownerId || sessionId !== session.sessionId) {
+        const error = new Error("native core session is not owned by this caller");
+        error.code = "NATIVE_CORE_SESSION_INVALID";
+        throw error;
+      }
+      return Object.freeze({ ...session });
+    },
     async viewportProjectionV2(ownerId, request) {
       calls.push(["viewport-v2", ownerId, request]);
       return { projectionType: "viewport-v2", schemaVersion: 2, revision: request.expectedRevision };
@@ -190,6 +208,7 @@ function fixture(initialSnapshot = {}) {
     calls,
     registry,
     setRendererTrusted(value) { rendererTrusted = value; },
+    setSession(value) { session = { ...session, ...value }; },
     setSnapshot(value) { snapshot = { ...snapshot, ...value }; },
     setNow(value) { now = value; },
   };
@@ -198,7 +217,18 @@ function fixture(initialSnapshot = {}) {
 test("active same-session same-revision reads use only the main owner identity", async () => {
   const value = fixture();
   for (const projectionType of ["viewport-v2", "factory-read-model-v1", "factory-inventory-v1", "construction-inventory-v1", "construction-placement-context-v1", "construction-belt-placement-context-v1", "construction-belt-lane-context-v1", "construction-belt-removal-context-v1", "construction-removal-context-v1", "construction-stack-context-v1", "statistics-v1", "technology-v1", "recipe-workspace-v1", "blueprint-workspace-v1", "blueprint-capture-context-v1", "blueprint-import-context-v1", "blueprint-export-context-v1", "blueprint-enqueue-context-v1", "blueprint-direct-deploy-context-v1", "command-palette-entity-search-v1", "star-map-overview-v1", "star-map-catalog-v1", "stellar-industry-v1", "stellar-industry-v2", "stellar-quantum-v1", "dyson-workspace-v1", "system-space-station-workspace-v1", "orbital-contract-workspace-v1", "campaign-workspace-v1", "operations-workspace-v1", "galaxy-account-workspace-v1"]) {
-    const request = ["orbital-contract-workspace-v1", "campaign-workspace-v1", "operations-workspace-v1", "galaxy-account-workspace-v1"].includes(projectionType)
+    const request = projectionType === "statistics-v1"
+      ? {
+          sessionId: "core-main-1",
+          runId: "run-1",
+          expectedRevision: 17,
+          expectedRegistryFingerprint: "7df8cf3a",
+          minElapsedSeconds: 0,
+          maxElapsedSeconds: 100,
+          cursor: 0,
+          limit: 32,
+        }
+      : ["orbital-contract-workspace-v1", "campaign-workspace-v1", "operations-workspace-v1", "galaxy-account-workspace-v1"].includes(projectionType)
       ? {
           sessionId: "core-main-1",
           runId: "run-1",
@@ -351,6 +381,84 @@ test("campaign, Operations, and Galaxy exact-lineage reads reject same-revision 
   }
 });
 
+test("statistics player-authority reads reject old runs before and after an asynchronous read", async () => {
+  const request = {
+    sessionId: "core-main-1",
+    runId: "run-1",
+    expectedRevision: 17,
+    expectedRegistryFingerprint: "7df8cf3a",
+    minElapsedSeconds: 0,
+    maxElapsedSeconds: 100,
+    cursor: 0,
+    limit: 32,
+  };
+  const stale = fixture({ runId: "run-2" });
+  await assert.rejects(stale.broker.read(23, "statistics-v1", request),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RUN_MISMATCH");
+  assert.equal(stale.calls.length, 0);
+
+  const raced = fixture();
+  raced.registry.statisticsProjection = async (ownerId, input) => {
+    raced.calls.push(["statistics-v1", ownerId, input]);
+    raced.setSnapshot({ runId: "run-2" });
+    return { projectionType: "statistics-v1", schemaVersion: 1, revision: 17 };
+  };
+  await assert.rejects(raced.broker.read(23, "statistics-v1", request),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_RUN_MISMATCH");
+});
+
+test("statistics player-authority reads bind registry and owner epoch across delivery", async () => {
+  const request = {
+    sessionId: "core-main-1",
+    runId: "run-1",
+    expectedRevision: 17,
+    expectedRegistryFingerprint: "7df8cf3a",
+    minElapsedSeconds: 0,
+    maxElapsedSeconds: 100,
+    cursor: 0,
+    limit: 32,
+  };
+  const wrongRegistry = fixture();
+  wrongRegistry.setSession({ registryFingerprint: "ffffffff" });
+  await assert.rejects(wrongRegistry.broker.read(23, "statistics-v1", request),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_REGISTRY_MISMATCH");
+  assert.equal(wrongRegistry.calls.length, 0);
+
+  const registryRace = fixture();
+  registryRace.registry.statisticsProjection = async (_ownerId, input) => {
+    registryRace.setSession({ registryFingerprint: "ffffffff" });
+    return { projectionType: "statistics-v1", schemaVersion: 1, revision: input.expectedRevision };
+  };
+  await assert.rejects(registryRace.broker.read(23, "statistics-v1", request),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_REGISTRY_MISMATCH");
+
+  const handoffRace = fixture();
+  handoffRace.registry.statisticsProjection = async (_ownerId, input) => {
+    handoffRace.setSession({ ownerEpoch: 3 });
+    return { projectionType: "statistics-v1", schemaVersion: 1, revision: input.expectedRevision };
+  };
+  await assert.rejects(handoffRace.broker.read(23, "statistics-v1", request),
+    (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_LINEAGE_MISMATCH");
+});
+
+test("statistics requires both player-authority lineage tags while preserving untagged shadow compatibility", async () => {
+  const value = fixture();
+  await assert.rejects(value.broker.read(23, "statistics-v1", {
+    sessionId: "core-main-1", runId: "run-1", expectedRevision: 17,
+  }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_REQUEST_INVALID");
+  await assert.rejects(value.broker.read(23, "statistics-v1", {
+    sessionId: "core-main-1", expectedRevision: 17, expectedRegistryFingerprint: "7df8cf3a",
+  }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_REQUEST_INVALID");
+  await assert.rejects(value.broker.read(23, "statistics-v1", {
+    sessionId: "core-main-1", runId: "run-1", expectedRevision: 17,
+    expectedRegistryFingerprint: "7df8cf3a", unexpected: true,
+  }), (error) => error.code === "NATIVE_PLAYER_AUTHORITY_PROJECTION_REQUEST_INVALID");
+
+  await assert.doesNotReject(value.broker.read(23, "statistics-v1", {
+    sessionId: "core-main-1", expectedRevision: 17,
+  }));
+});
+
 test("untrusted renderer, unsupported projections, wrong sessions, and old revisions fail closed", async () => {
   const value = fixture();
   await assert.rejects(value.broker.read(99, "viewport-v2", {
@@ -427,6 +535,14 @@ test("main routes matching authority reads and keeps identity-bearing control ou
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "factory-inventory-v1", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?"construction-inventory-v1",[\s\S]*?request/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "statistics-v1", request\)/);
+  const statisticsHandler = main.slice(
+    main.indexOf('ipcMain.handle("desktop:native-core-statistics-projection"'),
+    main.indexOf('ipcMain.handle("desktop:native-core-technology-projection"'),
+  );
+  assert.match(statisticsHandler, /hasPlayerAuthorityLineage \|\| nativePlayerAuthorityProjectionBroker\?\.ownsSession/);
+  assert.ok(statisticsHandler.indexOf('nativePlayerAuthorityProjectionBroker.read(ownerId, "statistics-v1", request)') <
+    statisticsHandler.indexOf("nativeCoreSessions.statisticsProjection(ownerId, request)"));
+  assert.match(main, /nativeStatisticsProjectionHasPlayerAuthorityLineage[\s\S]*?Object\.hasOwn\(request, "runId"\)[\s\S]*?Object\.hasOwn\(request, "expectedRegistryFingerprint"\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "technology-v1", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?nativePlayerAuthorityProjectionBroker\.read\(ownerId, "recipe-workspace-v1", request\)/);
   assert.match(main, /nativePlayerAuthorityProjectionBroker\?\.ownsSession\(request\?\.sessionId\)[\s\S]*?"command-palette-entity-search-v1",[\s\S]*?request/);

@@ -74,6 +74,7 @@ const {
 } = require("./native-player-authority-macro-broker.cjs");
 const {
   NativePlayerAuthorityProjectionBroker,
+  NativePlayerAuthorityProjectionBrokerError,
 } = require("./native-player-authority-projection-broker.cjs");
 const {
   NativePlayerAuthorityPersistenceBroker,
@@ -1246,6 +1247,11 @@ function nativeStatisticsProjectionResultContext(request) {
   };
 }
 
+function nativeStatisticsProjectionHasPlayerAuthorityLineage(request) {
+  return request !== null && typeof request === "object" && !Array.isArray(request) &&
+    (Object.hasOwn(request, "runId") || Object.hasOwn(request, "expectedRegistryFingerprint"));
+}
+
 function nativeTechnologyProjectionResultContext(request) {
   return {
     sessionId: request?.sessionId,
@@ -2256,7 +2262,14 @@ ipcMain.handle("desktop:native-core-statistics-projection", async (event, reques
     resultContext: nativeStatisticsProjectionResultContext(request),
   }, async () => {
     const ownerId = requireTrustedNativeSender(event);
-    if (nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+    const hasPlayerAuthorityLineage = nativeStatisticsProjectionHasPlayerAuthorityLineage(request);
+    if (hasPlayerAuthorityLineage || nativePlayerAuthorityProjectionBroker?.ownsSession(request?.sessionId)) {
+      if (!nativePlayerAuthorityProjectionBroker) {
+        throw new NativePlayerAuthorityProjectionBrokerError(
+          "native player-authority statistics projection broker is unavailable",
+          "NATIVE_PLAYER_AUTHORITY_PROJECTION_UNAVAILABLE",
+        );
+      }
       return await nativePlayerAuthorityProjectionBroker.read(ownerId, "statistics-v1", request);
     }
     return await nativeCoreSessions.statisticsProjection(ownerId, request);

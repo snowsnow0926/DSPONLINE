@@ -103,7 +103,7 @@ function OpenCommandPalette({
       workspace("inspector", "打开设备检查器", "查看当前选中设备", <Wrench size={16} />, "inspector"),
       workspace("resources", "打开物资托盘", "库存与跨星球物资", <PackageOpen size={16} />, "resources"),
     ];
-    const nativeWorkspaceIds = new Set(["star-map", "galaxy", "statistics", "recipes", "technology", "operations", "campaign", "dyson", "inspector"]);
+    const nativeWorkspaceIds = new Set(["star-map", "galaxy", "statistics", "recipes", "technology", "operations", "campaign", "blueprints", "dyson", "inspector"]);
     const base: PaletteCommand[] = nativeAuthority
       ? workspaceCommands.filter((command) => nativeWorkspaceIds.has(command.id))
       : [

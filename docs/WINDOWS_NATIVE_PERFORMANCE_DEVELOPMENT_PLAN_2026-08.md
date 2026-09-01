@@ -2199,3 +2199,14 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 2. 最小修复只在 `cfg(test)` 下为 `advance_bounded_with_runtime(..., macro_v10=true)` 的完整 settlement baseline、三窗口/证书、候选提交与返回生命周期持有一个进程内 MutexGuard。普通 exact (`macro_v10=false`) 不经过门禁，release/production build 完全没有该字段、锁或分支；`deterministic_runtime.rs` 保持逐字不变。
 3. 原始 per-call `for_test` 建池行为加最小门禁后，无环境变量、28 test threads 的 macro v10 过滤集连续三轮均为 `65/65`、0 失败、0 崩溃，耗时 `61.89 / 61.58 / 61.56` 秒；完整 `pure_idle::tests` 为 `110 passed / 1 ignored / 0 failed`（61.97 秒）。单文件 rustfmt 与 diff check 通过。
 4. 后续冻结点的 bare 默认 28-thread 完整 Core 仍在所有已显示断言通过附近以 `STATUS_HEAP_CORRUPTION` 结束，因此全局门禁继续为红。受控的 `--test-threads=4` 可以稳定进入功能断言，并发现一条与可再生能源 warm-cache 新语义不符的旧测试期望：首轮 Core 为 `962 passed / 1 failed / 3 ignored`；`283b0206` 修正期望后该项 `1/1`、`planet_metric_` 全组 `15/15` 通过。它不抵消默认高并行进程仍崩溃的证据；第二个放大器和最终默认并行/串行 Core、workspace strict clippy 与 fmt 仍需在组合源码冻结后独立闭合。
+
+### 24.41 薄 UI 权威读取路由与 lineage 竞态闭合（2026-09-01，开发候选）
+
+`e1d1e172`、`f4cea0c0` 与 `09a09cd9` 把 Factory、Construction、Blueprint、Star/Stellar、Quantum、Command Palette 和 System Space Station 的直接读取统一收口到 main-owned Rust player-authority broker。这是权威边界修复，不改模拟公式，也不把 renderer 已经完全不持有 `GameState` 写成既成事实。
+
+1. 首轮独立审查发现 9 个 direct IPC 只在 `broker.ownsSession(sessionId)` 为真时走权威路由。一个已携带 `runId` 的请求如果恰逢 handoff，就可能退回 renderer-owned shadow。`f4cea0c0` 抽出 `routeNativeProjectionRead`：只要存在 player-authority `runId`，即使 `ownsSession=false`、broker 不可用或 lineage 失配，也只能失败关闭，shadow 调用数必须为零；无 `runId` 的旧 JavaScript 请求继续兼容。
+2. 横向二次审查没有停在“9/9 已接线”，又找到第 10 条同类遗漏：System Space Station 的 TypeScript 请求强制携带 `runId`，main 却仍只查 `ownsSession`，而且该 capability 没有进入 owner-lineage/registry-result fence。`09a09cd9` 将它接入同一 helper，并对 session/run、owner epoch 和 result registry 进行读前读后双重校验。全量枚举后没有第 11 条 tagged+shadow 直读遗漏。
+3. 行为回归不只检查源码字符串：它实际注入 `ownsSession=false`、broker undefined/throw、读取中 owner epoch 从 1 变 2、结果 run/registry 漂移与 untagged legacy shadow，逐项断言 broker/shadow 调用数和拒绝语义。修复后独立范围审查为 `P0=0 / P1=0 / GO`。
+4. 当前组合源码的新鲜前端完整测试为 `368 files passed / 13 skipped`、`2947 passed / 29 skipped / 0 failed`；修复第 10 条后的完整 native Node 边界为 `534 tests / 533 passed / 1 privilege-dependent skipped / 0 failed`。TypeScript 通过；production build 处理 `2097 modules`，startup 总 gzip `180777 B`、JavaScript `87089 B`、CSS `93688 B`、最大启动 JavaScript `58974 B`、menu `258325 B`、forbidden startup module `0`；薄 UI 自动门禁通过 `13` 个 App binding 和 `12` 个独立组件文件。最终 Rust/E2E/长跑仍必须在所有并发纵切冻结后统一执行。
+
+本切片不改变 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 `authorityEligible=false`；未读取玩家存档，未连接生产，未部署、打包或签名。

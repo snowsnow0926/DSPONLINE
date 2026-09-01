@@ -1,6 +1,4 @@
-#[cfg(test)]
-use std::collections::HashSet;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::io::Write as IoWrite;
 use std::mem::size_of;
@@ -207,6 +205,11 @@ pub(crate) struct SharedArc<T: Clone>(Arc<T>);
 impl<T: Clone> SharedArc<T> {
     fn new(value: T) -> Self {
         Self(Arc::new(value))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
@@ -1272,32 +1275,32 @@ pub(crate) type RawRecord = Arc<str>;
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EntityColumns {
     pub ids: ExactRowIds,
-    pub kinds: Vec<u32>,
-    pub planets: Vec<u32>,
-    pub buildings: Vec<u32>,
-    pub recipes: Vec<u32>,
-    pub resources: Vec<u32>,
-    pub stored_items: Vec<u32>,
-    pub machine_counts: Vec<f64>,
-    pub miner_counts: Vec<f64>,
-    pub position_x: Vec<f64>,
-    pub position_y: Vec<f64>,
+    pub kinds: SharedArc<Vec<u32>>,
+    pub planets: SharedArc<Vec<u32>>,
+    pub buildings: SharedArc<Vec<u32>>,
+    pub recipes: SharedArc<Vec<u32>>,
+    pub resources: SharedArc<Vec<u32>>,
+    pub stored_items: SharedArc<Vec<u32>>,
+    pub machine_counts: SharedArc<Vec<f64>>,
+    pub miner_counts: SharedArc<Vec<f64>>,
+    pub position_x: SharedArc<Vec<f64>>,
+    pub position_y: SharedArc<Vec<f64>>,
 }
 
 impl EntityColumns {
     fn with_capacity(rows: usize) -> Self {
         Self {
             ids: ExactRowIds::default(),
-            kinds: Vec::with_capacity(rows),
-            planets: Vec::with_capacity(rows),
-            buildings: Vec::with_capacity(rows),
-            recipes: Vec::with_capacity(rows),
-            resources: Vec::with_capacity(rows),
-            stored_items: Vec::with_capacity(rows),
-            machine_counts: Vec::with_capacity(rows),
-            miner_counts: Vec::with_capacity(rows),
-            position_x: Vec::with_capacity(rows),
-            position_y: Vec::with_capacity(rows),
+            kinds: Vec::with_capacity(rows).into(),
+            planets: Vec::with_capacity(rows).into(),
+            buildings: Vec::with_capacity(rows).into(),
+            recipes: Vec::with_capacity(rows).into(),
+            resources: Vec::with_capacity(rows).into(),
+            stored_items: Vec::with_capacity(rows).into(),
+            machine_counts: Vec::with_capacity(rows).into(),
+            miner_counts: Vec::with_capacity(rows).into(),
+            position_x: Vec::with_capacity(rows).into(),
+            position_y: Vec::with_capacity(rows).into(),
         }
     }
 }
@@ -4119,6 +4122,114 @@ impl CoreState {
         self.rebuild_indexes_from_parsed_entities(&entities)?;
         if !sync_record_drop_enabled() {
             self.install_parsed_entity_runtime(entities);
+        }
+        Ok(())
+    }
+
+    /// Refreshes the only resident indexes affected by a position-only player
+    /// command. Entity IDs, symbols, planet membership, belt topology and all
+    /// simulation-domain directories remain byte-for-byte valid, so parsing
+    /// every entity and every belt here would turn a one-row drag into an
+    /// O(E+B) operation on large Windows saves.
+    ///
+    /// Callers must invoke this only after the raw replacement records have
+    /// been installed on a disposable candidate. Every row is re-read and
+    /// checked against the immutable topology before either the SoA position
+    /// columns or the per-planet viewport index is published.
+    pub(crate) fn refresh_entity_position_indexes(
+        &mut self,
+        entity_ids: &[String],
+    ) -> anyhow::Result<()> {
+        if entity_ids.is_empty() {
+            bail!("native position index refresh has no entity rows");
+        }
+
+        let mut seen = HashSet::<&str>::with_capacity(entity_ids.len());
+        let mut updates = Vec::<(usize, usize, f64, f64)>::with_capacity(entity_ids.len());
+        let mut affected_planets = Vec::<usize>::new();
+        for entity_id in entity_ids {
+            if !seen.insert(entity_id.as_str()) {
+                bail!("native position index refresh repeats an entity row");
+            }
+            let entity_index = *self
+                .entity_index
+                .get(entity_id)
+                .ok_or_else(|| anyhow!("native position index refresh entity is missing"))?;
+            let entity = self.parse_entity(entity_index)?;
+            let object = entity
+                .as_object()
+                .ok_or_else(|| anyhow!("native position index refresh entity is invalid"))?;
+            if object_string(object, "id") != Some(entity_id.as_str()) {
+                bail!("native position index refresh entity ID drifted");
+            }
+            let planet_id = object_string(object, "planetId")
+                .ok_or_else(|| anyhow!("native position index refresh planet is missing"))?;
+            let planet_index = self
+                .catalog
+                .planets
+                .iter()
+                .position(|planet| planet.id == planet_id)
+                .ok_or_else(|| anyhow!("native position index refresh planet is unknown"))?;
+            if self
+                .factory_topology
+                .entity_planet_indices
+                .get(entity_index)
+                .copied()
+                != Some(planet_index)
+                || self.symbols.resolve(self.entities.planets[entity_index]) != Some(planet_id)
+            {
+                bail!("native position index refresh changed entity topology");
+            }
+            let position = object
+                .get("position")
+                .and_then(Value::as_object)
+                .filter(|position| {
+                    position.len() == 2 && position.contains_key("x") && position.contains_key("y")
+                })
+                .ok_or_else(|| anyhow!("native position index refresh position is invalid"))?;
+            let x = position
+                .get("x")
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| anyhow!("native position index refresh X is invalid"))?;
+            let y = position
+                .get("y")
+                .and_then(Value::as_f64)
+                .filter(|value| value.is_finite())
+                .ok_or_else(|| anyhow!("native position index refresh Y is invalid"))?;
+            updates.push((entity_index, planet_index, x, y));
+            affected_planets.push(planet_index);
+        }
+
+        // Clone the compact position table once, regardless of how many rows
+        // a semantic layout intent moved.
+        for &(entity_index, _, x, y) in &updates {
+            self.entities.position_x[entity_index] = x;
+            self.entities.position_y[entity_index] = y;
+        }
+
+        affected_planets.sort_unstable();
+        affected_planets.dedup();
+        let rebuilt = affected_planets
+            .iter()
+            .map(|&planet_index| {
+                let rows = self
+                    .factory_topology
+                    .entities_by_planet
+                    .get(planet_index)
+                    .ok_or_else(|| anyhow!("native position viewport planet is invalid"))?;
+                Ok((
+                    planet_index,
+                    PlanetViewportIndex::build(rows, &self.entities)?,
+                ))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let topology = Arc::make_mut(&mut self.factory_topology);
+        for (planet_index, viewport) in rebuilt {
+            *topology
+                .planet_viewport_indexes
+                .get_mut(planet_index)
+                .ok_or_else(|| anyhow!("native position viewport index is missing"))? = viewport;
         }
         Ok(())
     }

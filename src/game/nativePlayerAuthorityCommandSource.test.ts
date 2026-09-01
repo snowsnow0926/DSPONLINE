@@ -27,6 +27,7 @@ import {
 import { createNativeProjectedManualMineCommand } from "./nativeProjectedManualMiningCommands";
 import { createNativeBlueprintRenameIntentCommand } from "./nativeBlueprintRenameIntentCommands";
 import { createNativeBlueprintTransformIntentCommand } from "./nativeBlueprintTransformIntentCommands";
+import { createNativeFactoryAutoLayoutCommand } from "./nativeFactoryAutoLayoutCommands";
 
 function activeFrame(
   revision = 10,
@@ -237,6 +238,25 @@ function stationSlotPatchFixture() {
 }
 
 describe("native player-authority command source", () => {
+  it("accepts the bounded topology-only receipt for Rust-derived factory layout", async () => {
+    const patch = createNativeFactoryAutoLayoutCommand(10, ["smelter-a", "模组:建筑/甲"]);
+    const receipt = receiptForPatch(patch, true);
+    await expect(sourceHarness(patch, { receipt, topologyDirty: true }).source.applyCommand(patch))
+      .resolves.toMatchObject({
+        previousRevision: 10,
+        revision: 11,
+        changedEntityIds: [],
+        changedBeltIds: [],
+        topologyDirty: true,
+      });
+    await expect(sourceHarness(patch, {
+      receipt: { ...receipt, changedEntityIds: ["smelter-a"] },
+      topologyDirty: true,
+    }).source.applyCommand(patch)).rejects.toMatchObject({
+      code: "NATIVE_PLAYER_AUTHORITY_COMMAND_RECEIPT_INVALID",
+    });
+  });
+
   it("accepts only the compact receipt for a Rust-derived special input port transition", async () => {
     const patch: SimulationCommandPatch = {
       protocolVersion: 1,

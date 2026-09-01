@@ -106,12 +106,12 @@ describe("native planet navigation App integration", () => {
       app.indexOf("useEffect(() => {", app.indexOf("const rejectLegacyFactoryInteractionWhileNative")),
     );
     expect(rejection).toMatch(/nativePlayerAuthorityOwnsRuntimeRef\.current[\s\S]*?本次操作未应用，也不会读取旧星球数据/);
-    for (const label of ["建筑放置与扩建", "建筑拖放", "建筑位置编辑", "生产区域编辑", "蓝图部署", "蓝图复制", "基础制造", "建筑回收"]) {
+    for (const label of ["建筑放置与扩建", "建筑拖放", "生产区域编辑", "蓝图部署", "蓝图复制", "基础制造", "建筑回收"]) {
       expect(app, label).toContain(`rejectLegacyFactoryInteractionWhileNative("${label}")`);
     }
-    expect(app).toMatch(/const draggable = !nativePlayerAuthorityOwnsRuntime && !placement/);
+    expect(app).toMatch(/const draggable = \(!nativePlayerAuthorityOwnsRuntime \|\| nativeFactoryPositionWriteReady\)[\s\S]*?!placement/);
     expect(app).toMatch(/const commonNodeData = useMemo[\s\S]*?readOnly: nativePlayerAuthorityOwnsRuntime/);
-    expect(app).toMatch(/const canvasNodeSemanticRevisionToken = createCanvasNodeSemanticRevisionToken\(\[[\s\S]*?nativePlayerAuthorityOwnsRuntime,[\s\S]*?\]\)/);
+    expect(app).toMatch(/const canvasNodeSemanticRevisionToken = createCanvasNodeSemanticRevisionToken\(\[[\s\S]*?nativePlayerAuthorityOwnsRuntime,[\s\S]*?nativeFactoryPositionWriteReady,[\s\S]*?\]\)/);
     expect(app.match(/previous\.data\.readOnly === commonNodeData\.readOnly/g)).toHaveLength(2);
     expect(app).toMatch(/const factoryCanvasRegions = useMemo\([\s\S]*?nativePlayerAuthorityOwnsRuntime[\s\S]*?\? \[\]/);
     expect(app).toMatch(/factoryGestureSurfaceKey = `\$\{factoryGestureRouteKey\}:\$\{nativeFactoryRouteUnsafe/);

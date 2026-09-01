@@ -1,5 +1,9 @@
 # 系统架构
 
+> **Windows Rust 权威自动布局与位置增量索引（2026-09-02，开发候选，未发布）**：原生权威接管后，“整理当前行星”和“整理所选设备”不再从 renderer 的旧 `GameState` 计算坐标。renderer 只提交绑定当前 session/run/revision 的 `{kind:"apply",scope,entityIds}` 短意图；Rust 从活动行星、持久实体顺序和 resident belt columns 重新推导拓扑层级、碰撞和坐标。WAL 保留短意图而不是最多 65,536 行坐标，live ACK 与冷恢复统一返回空 ID 集加 `topologyDirty=true`，由下一次有界视口投影刷新画布。内置目录以稳定 UTF-8 字节序计算；未知/MOD 目录、跨行星选择、重复/超限 ID、锁定或不可移动的空选择、畸形位置和任何额外字段均在 durable stage 前失败关闭。
+>
+> 普通拖动和自动布局展开后的纯位置命令不再执行全量 `rebuild_indexes()`。实体标量列改为 `Arc<Vec<_>>` 写时复制；事务候选只复制位置 X/Y 紧凑列、解析被修改的实体行，并只重建受影响行星的 viewport spatial index。实体 ID/planet/kind/building 列、全局 entity/belt map、symbol table、belt columns/dynamics 及生产/物流静态目录继续共享原 `Arc`，因此单建筑拖动不再重新解析全部建筑和全部线路。失败候选仍不发布任何列或索引；GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不变。Web/PWA 继续使用既有 JavaScript 布局和撤销路径；原生撤销仍显式关闭，等待独立 durable undo 设计。
+
 > **Windows 原生离线启动候选边界（2026-09-02，开发候选，未发布）**：离线启动采用三段式只读事务。renderer 先用当前 primary v47 构造 canonical/domain proof；Electron main 在固定 `normal-main` native root 恢复同 `savedAt`、零 WAL 的 checkpoint，并独占单调墙钟、一次性 export ID 和文件路径；Rust Host 从同一已发布 generation 建立 shadow 候选、推进 `offline-macro-v1` 并直接流式导出 envelope。源 checkpoint/session 在全流程中不写入、不前推，候选只有在 renderer 完成 envelope、state/FNV/SHA、revision、registry、时间、elapsedSeconds 和 source/candidate summary 全链验证，且 source session 明确关闭后才进入既有公开保存 finalizer。
 >
 > main→preload 的 MessagePort 合同固定为最多 256 MiB、1 MiB 分块、连续 offset ACK 和最终 SHA-256 ACK；零正文也必须终态 ACK。preload 预分配一个正文缓冲并增量哈希，不能积累 chunks；Electron context bridge 仍可能为最终 ArrayBuffer 做一次结构化克隆，所以该设计只声称内存有界，不声称零拷贝。renderer 请求不能包含 wall clock、offline duration、path 或 export ID。任何 capability、identity、WAL、Host result、chunk 顺序、hash、envelope、状态证明、关闭 ACK 或取消门禁失败，都丢弃候选并从原 `DeferredLoadedGame` 进入旧 Worker；不得从部分验证状态继续。

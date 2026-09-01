@@ -8105,7 +8105,7 @@ fn validate_planet_viewport_command(
     Ok(())
 }
 
-fn validate_player_position_command(
+pub(crate) fn validate_player_position_command(
     state: &CoreState,
     command: &SimulationCommandPatch,
 ) -> anyhow::Result<()> {
@@ -8534,6 +8534,9 @@ impl CoreState {
         if crate::manual_mining::command_contains_intent(command) {
             return crate::manual_mining::validate_command(self, command);
         }
+        if crate::factory_layout_command::command_contains_intent(command) {
+            return crate::factory_layout_command::validate_command(self, command);
+        }
         if crate::blueprint_command::command_contains_intent(command) {
             return crate::blueprint_command::validate_command(self, command);
         }
@@ -8808,6 +8811,16 @@ impl CoreState {
         revision: u64,
     ) -> anyhow::Result<CommandApplyResult> {
         let mut result = command.deterministic_apply_result(previous_revision, revision)?;
+        if crate::factory_layout_command::command_contains_intent(command) {
+            crate::factory_layout_command::validate_resume_marker(command)?;
+            // The compact semantic WAL marker intentionally does not retain a
+            // potentially 65k-row renderer invalidation list. Live apply and
+            // cold recovery both request one bounded topology refresh.
+            result.changed_entity_ids.clear();
+            result.changed_belt_ids.clear();
+            result.topology_dirty = true;
+            return Ok(result);
+        }
         if crate::recipe_command::command_contains_intent(command) {
             let entity_id = crate::recipe_command::validate_resume_marker(command)?;
             result.changed_entity_ids.push(entity_id);
@@ -8909,6 +8922,32 @@ impl CoreState {
         &mut self,
         command: &SimulationCommandPatch,
     ) -> anyhow::Result<CommandApplyResult> {
+        // Factory auto-layout is expensive enough to deserve a single
+        // semantic expansion per live application: it reads the active
+        // planet plus resident belt topology and derives every coordinate.
+        // `expand_intent()` already proves the complete marker and validates
+        // the resulting ordinary position command, while `apply_command()`
+        // rechecks protocol/revision and applies that expanded command
+        // transactionally. Avoid routing the marker through the generic
+        // player validator first, which would calculate the same layout twice
+        // before changing one byte of authoritative state.
+        if crate::factory_layout_command::command_contains_intent(command) {
+            if command.protocol_version != crate::CORE_PROTOCOL_VERSION {
+                bail!("native player-authority command protocol version is unsupported")
+            }
+            if command.base_revision != self.revision {
+                bail!("native player-authority command base revision is not current")
+            }
+            let expanded = crate::factory_layout_command::expand_intent(self, command)?;
+            let mut result = self.apply_command(&expanded)?;
+            // The durable WAL keeps the compact semantic marker rather than a
+            // potentially 65k-row coordinate patch. Match its cold-resume
+            // receipt and make the renderer request one bounded projection.
+            result.changed_entity_ids.clear();
+            result.changed_belt_ids.clear();
+            result.topology_dirty = true;
+            return Ok(result);
+        }
         self.validate_player_authority_command(command)?;
         if !command_contains_station_slot_mode(command)
             && !command_contains_station_slot_item(command)
@@ -9016,13 +9055,20 @@ impl CoreState {
         let expanded_dyson_orbit_intent;
         let expanded_special_input_port_intent;
         let expanded_galactic_export_intent;
+        let expanded_factory_layout_intent;
         let mut compact_entity_recipe_receipt_id = None;
         let mut compact_special_input_port_receipt_id = None;
         let mut compact_galactic_export_receipt = None;
         let mut blueprint_workspace_refresh = false;
         let mut blueprint_intent = None;
         let mut construction_queue_intent = None;
-        let applied_command = if command_contains_active_planet_intent(command) {
+        let mut factory_layout_refresh = false;
+        let applied_command = if crate::factory_layout_command::command_contains_intent(command) {
+            expanded_factory_layout_intent =
+                crate::factory_layout_command::expand_intent(self, command)?;
+            factory_layout_refresh = true;
+            &expanded_factory_layout_intent
+        } else if command_contains_active_planet_intent(command) {
             expanded_active_planet_intent = expand_active_planet_intent(self, command)?;
             &expanded_active_planet_intent
         } else if command_contains_player_research_transition_intent(command) {
@@ -9261,10 +9307,36 @@ impl CoreState {
             || !applied_command.changed_belts.is_empty()
             || !applied_command.added_belts.is_empty()
             || !applied_command.removed_belt_ids.is_empty();
+        let only_positions_changed = records_changed
+            && applied_command.top_level_changes.is_empty()
+            && applied_command.added_entities.is_empty()
+            && applied_command.removed_entity_ids.is_empty()
+            && applied_command.changed_belts.is_empty()
+            && applied_command.added_belts.is_empty()
+            && applied_command.removed_belt_ids.is_empty()
+            && applied_command.changed_entities.iter().all(|record| {
+                !record.changes.is_empty()
+                    && record.changes.iter().all(|change| {
+                        matches!(
+                            change.path.as_slice(),
+                            [PathSegment::Key(position), PathSegment::Key(axis)]
+                                if position == "position" && matches!(axis.as_str(), "x" | "y")
+                        )
+                    })
+            });
         if records_changed {
-            next.rebuild_indexes()?;
+            if only_positions_changed {
+                let entity_ids = applied_command
+                    .changed_entities
+                    .iter()
+                    .map(|record| record.id.clone())
+                    .collect::<Vec<_>>();
+                next.refresh_entity_position_indexes(&entity_ids)?;
+            } else {
+                next.rebuild_indexes()?;
+            }
         }
-        if only_pause_changed {
+        if only_pause_changed || only_positions_changed {
             next.rebind_prepared_planet_metrics_runtime_revision();
         } else {
             next.invalidate_factory_static_admission();
@@ -9321,6 +9393,14 @@ impl CoreState {
                 result.changed_entity_ids.clear();
                 result.changed_belt_ids.clear();
             }
+            result.topology_dirty = true;
+        }
+        if factory_layout_refresh {
+            // Keep the live receipt byte-for-byte compatible with recovery of
+            // the compact marker. The next bounded viewport projection owns
+            // every moved row and belt redraw.
+            result.changed_entity_ids.clear();
+            result.changed_belt_ids.clear();
             result.topology_dirty = true;
         }
         *self = next;
@@ -12232,6 +12312,23 @@ mod tests {
             added_belts: Vec::new(),
             removed_belt_ids: Vec::new(),
         }
+    }
+
+    fn factory_auto_layout_command(revision: u64, entity_ids: &[&str]) -> SimulationCommandPatch {
+        let mut command = empty_player_command(revision);
+        command.top_level_changes = vec![ValuePatch {
+            path: vec![
+                PathSegment::Key("factoryAutoLayout".to_owned()),
+                PathSegment::Key("intent".to_owned()),
+            ],
+            operation: "set".to_owned(),
+            value: Some(serde_json::json!({
+                "kind": "apply",
+                "scope": if entity_ids.is_empty() { "all" } else { "selection" },
+                "entityIds": entity_ids,
+            })),
+        }];
+        command
     }
 
     fn ordinary_placement_command(revision: u64) -> SimulationCommandPatch {
@@ -18565,6 +18662,188 @@ mod tests {
         let before = rejected.canonical_sha256().unwrap();
         assert!(rejected.apply_player_authority_command(&target).is_err());
         assert_eq!(rejected.canonical_sha256().unwrap(), before);
+    }
+
+    #[test]
+    fn player_authority_factory_layout_is_rust_derived_bounded_and_replay_deterministic() {
+        let command = factory_auto_layout_command(9, &[]);
+        let durable = serde_json::to_string(&command).unwrap();
+        assert!(durable.contains("factoryAutoLayout"));
+        assert!(!durable.contains("\"position\""));
+        let replayed: SimulationCommandPatch = serde_json::from_str(&durable).unwrap();
+
+        let mut live = player_command_state();
+        let mut replay = live.clone();
+        let before_positions = (0..3)
+            .map(|index| live.parse_entity(index).unwrap()["position"].clone())
+            .collect::<Vec<_>>();
+        let live_receipt = live.apply_player_authority_command(&command).unwrap();
+        let replay_receipt = replay.apply_command(&replayed).unwrap();
+
+        assert_eq!(live_receipt, replay_receipt);
+        assert_eq!(live_receipt.previous_revision, 9);
+        assert_eq!(live_receipt.revision, 10);
+        assert!(live_receipt.changed_entity_ids.is_empty());
+        assert!(live_receipt.changed_belt_ids.is_empty());
+        assert!(live_receipt.topology_dirty);
+        assert!(live.base_value().get("factoryAutoLayout").is_none());
+        let after_positions = (0..3)
+            .map(|index| live.parse_entity(index).unwrap()["position"].clone())
+            .collect::<Vec<_>>();
+        assert_ne!(after_positions, before_positions);
+        assert_eq!(
+            after_positions,
+            [
+                serde_json::json!({ "x": 0.0, "y": 0.0 }),
+                serde_json::json!({ "x": 0.0, "y": 480.0 }),
+                serde_json::json!({ "x": 340.0, "y": 960.0 }),
+            ]
+        );
+        assert_eq!(
+            live.canonical_sha256().unwrap(),
+            replay.canonical_sha256().unwrap()
+        );
+        assert_eq!(
+            live.deterministic_player_authority_resume_result(&replayed, 9, 10)
+                .unwrap(),
+            live_receipt
+        );
+    }
+
+    #[test]
+    fn player_authority_position_commands_refresh_only_the_affected_viewport_index() {
+        let mut state = player_command_state();
+        let kinds_before = state.entities.kinds.clone();
+        let planets_before = state.entities.planets.clone();
+        let buildings_before = state.entities.buildings.clone();
+        let position_x_before = state.entities.position_x.clone();
+        let position_y_before = state.entities.position_y.clone();
+        let entity_index_before = state.entity_index.clone();
+        let belt_index_before = state.belt_index.clone();
+        let symbols_before = state.symbols.clone();
+        let belts_before = state.belts.clone();
+        let belt_dynamics_before = state.belt_dynamics.clone();
+        let mut position = empty_player_command(state.revision);
+        position.changed_entities = vec![RecordPatch {
+            id: "smelter-a".to_owned(),
+            changes: vec![
+                ValuePatch {
+                    path: vec![
+                        PathSegment::Key("position".to_owned()),
+                        PathSegment::Key("x".to_owned()),
+                    ],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from(8_000)),
+                },
+                ValuePatch {
+                    path: vec![
+                        PathSegment::Key("position".to_owned()),
+                        PathSegment::Key("y".to_owned()),
+                    ],
+                    operation: "set".to_owned(),
+                    value: Some(Value::from(8_000)),
+                },
+            ],
+        }];
+        state.apply_player_authority_command(&position).unwrap();
+
+        assert!(state.entities.kinds.ptr_eq(&kinds_before));
+        assert!(state.entities.planets.ptr_eq(&planets_before));
+        assert!(state.entities.buildings.ptr_eq(&buildings_before));
+        assert!(!state.entities.position_x.ptr_eq(&position_x_before));
+        assert!(!state.entities.position_y.ptr_eq(&position_y_before));
+        assert!(state.entity_index.ptr_eq(&entity_index_before));
+        assert!(state.belt_index.ptr_eq(&belt_index_before));
+        assert!(state.symbols.ptr_eq(&symbols_before));
+        assert!(state.belts.ptr_eq(&belts_before));
+        assert!(state.belt_dynamics.ptr_eq(&belt_dynamics_before));
+
+        let old = state
+            .viewport_projection_v2(
+                &[],
+                "home",
+                -10.0,
+                -10.0,
+                10.0,
+                10.0,
+                0,
+                32,
+                0,
+                32,
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert!(
+            old["entities"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entity| entity["id"] != "smelter-a")
+        );
+        let moved = state
+            .viewport_projection_v2(
+                &[],
+                "home",
+                7_990.0,
+                7_990.0,
+                8_010.0,
+                8_010.0,
+                0,
+                32,
+                0,
+                32,
+                &[],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(moved["entities"][0]["id"], "smelter-a");
+    }
+
+    #[test]
+    fn player_authority_factory_layout_rejects_forged_scopes_without_mutating_source() {
+        let mut duplicate = factory_auto_layout_command(9, &["smelter-a", "ejector-a"]);
+        duplicate.top_level_changes[0].value.as_mut().unwrap()["entityIds"] =
+            serde_json::json!(["smelter-a", "smelter-a"]);
+        let mut extra = factory_auto_layout_command(9, &["smelter-a"]);
+        extra.top_level_changes[0].value.as_mut().unwrap()["coordinates"] =
+            serde_json::json!({ "x": 99, "y": 99 });
+        let cases = [
+            factory_auto_layout_command(9, &["missing"]),
+            duplicate,
+            extra,
+        ];
+        for command in cases {
+            let mut state = player_command_state();
+            let before = state.canonical_sha256().unwrap();
+            assert!(state.apply_player_authority_command(&command).is_err());
+            assert_eq!(state.revision, 9);
+            assert_eq!(state.canonical_sha256().unwrap(), before);
+        }
+
+        let mut modded = player_command_state_for_registry("modded-layout");
+        let before = modded.canonical_sha256().unwrap();
+        assert!(
+            modded
+                .apply_player_authority_command(&factory_auto_layout_command(9, &[]))
+                .is_err()
+        );
+        assert_eq!(modded.revision, 9);
+        assert_eq!(modded.canonical_sha256().unwrap(), before);
+
+        let mut locked = player_command_state();
+        locked
+            .apply_command(&entity_leaf_command(
+                locked.revision,
+                "smelter-a",
+                "interactionLocked",
+                Value::from(true),
+            ))
+            .unwrap();
+        let before = locked.canonical_sha256().unwrap();
+        let command = factory_auto_layout_command(locked.revision, &["smelter-a"]);
+        assert!(locked.apply_player_authority_command(&command).is_err());
+        assert_eq!(locked.canonical_sha256().unwrap(), before);
     }
 
     #[test]

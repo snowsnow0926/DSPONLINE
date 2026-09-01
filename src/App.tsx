@@ -289,6 +289,8 @@ import type { CanvasLineEndpoint } from "./game/canvasLineBatch";
 import { createCanvasRenderSnapshot, reconcileCanvasRenderSnapshot, type CanvasRenderSnapshot } from "./game/canvasRenderSnapshot";
 import { createCanvasNodeSemanticRevisionToken, isCanvasNodeSemanticRevisionApplied } from "./game/canvasNodeSemanticRevision";
 import { planFactoryAutoLayout } from "./game/layout";
+import { createNativeFactoryAutoLayoutCommand } from "./game/nativeFactoryAutoLayoutCommands";
+import { createNativeFactoryPositionCommand } from "./game/nativeFactoryPositionCommands";
 import { createProductionPlan, removeProductionPlan, setProductionPlanRecipe, updateProductionPlan } from "./game/planning";
 import { getProductionLineLocations, type ProductionLineLocation } from "./game/productionLocator";
 import { getCampaignTask, getCampaignTaskRequirements, selectCampaignTask, syncCampaignProgress, type CampaignNavigation } from "./game/campaign";
@@ -2274,6 +2276,12 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     primaryId: string;
     primaryPosition: { x: number; y: number };
     members: Array<{ id: string; position: { x: number; y: number } }>;
+    nativeIdentity: null | {
+      sessionId: string;
+      runId: string;
+      planetId: PlanetId;
+      revision: number;
+    };
   } | null>(null);
   const canvasNodeLayoutFrameRef = useRef<number | null>(null);
   const [highlightedTaskId, setHighlightedTaskId] = useState<CampaignTaskId | null>(null);
@@ -4083,6 +4091,13 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
   }, [nativeAuthoritativeFactoryCanvasFrame, nativeFactoryInventoryFrame]);
   const nativeAuthoritativeFactoryCanvasFrameRef = useRef(nativeAuthoritativeFactoryCanvasFrame);
   nativeAuthoritativeFactoryCanvasFrameRef.current = nativeAuthoritativeFactoryCanvasFrame;
+  const nativeFactoryPositionWriteReady = Boolean(
+    nativePlayerAuthorityOwnsRuntime && !nativePlayerAuthorityCommandPending &&
+    nativePlayerAuthorityCommandSource && nativeAuthoritativeFactoryCanvasFrame &&
+    nativeAuthoritativeFactoryCanvasFrame.sessionId === nativePlayerAuthorityCommandSource.sessionId &&
+    nativeAuthoritativeFactoryCanvasFrame.runId === nativePlayerAuthorityCommandSource.runId &&
+    nativeAuthoritativeFactoryCanvasFrame.revision === nativePlayerAuthorityCommandSource.baseRevision,
+  );
   const nativeAuthoritativeFactoryInteractionRows = useMemo(
     () => selectNativeAuthoritativeFactoryInteractionRows(nativeAuthoritativeFactoryCanvasFrame, {
       enabled: nativeFactoryThinViewMode === "native-authoritative" && nativeFactoryProjectionRouteReady,
@@ -14347,7 +14362,27 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
 
   const autoLayoutEntities = useCallback((entityIds?: readonly string[]) => {
     if (nativePlayerAuthorityOwnsRuntimeRef.current) {
-      setNotice("Windows 原生权威暂未开放自动布局写入；本次操作未应用");
+      const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+      const binding = nativePlayerAuthorityCommandBindingRef.current;
+      if (!frame || !binding ||
+          frame.sessionId !== binding.source.sessionId ||
+          frame.runId !== binding.source.runId ||
+          frame.revision !== binding.source.baseRevision) {
+        setNotice("Windows 原生建筑画面正在刷新；请在当前权威 revision 就绪后重试");
+        return;
+      }
+      const selection = entityIds?.length ? [...entityIds] : undefined;
+      const accepted = commitNativeProjectedCommand(
+        frame.revision,
+        (baseRevision) => createNativeFactoryAutoLayoutCommand(baseRevision, selection),
+        () => {
+          setAutoLayoutUndo(null);
+          setNotice(selection
+            ? `Rust 已按权威物流拓扑整理所选 ${selection.length} 个设备；正在刷新画布`
+            : "Rust 已按权威物流拓扑整理当前行星；正在刷新画布");
+        },
+      );
+      if (accepted) setNotice("Rust 正在按当前权威物流拓扑计算并提交自动布局…");
       return;
     }
     const current = gameRef.current;
@@ -14371,7 +14406,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     commitGame((current) => moveEntities(current, moves));
     setNotice(`已按物流上下游整理 ${moves.length} 个设备`);
     window.requestAnimationFrame(() => void fitView({ padding: 0.2, minZoom: canvasMinimumZoom, duration: gameRef.current.settings.reducedMotion ? 0 : 280 }));
-  }, [canvasMinimumZoom, commitGame, fitView, setNodes]);
+  }, [canvasMinimumZoom, commitGame, commitNativeProjectedCommand, fitView, setNodes]);
 
   const undoAutoLayout = useCallback(() => {
     if (nativePlayerAuthorityOwnsRuntimeRef.current) {
@@ -16086,6 +16121,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     effectiveUiFontScale,
     extremeVisualsActive,
     nativePlayerAuthorityOwnsRuntime,
+    nativeFactoryPositionWriteReady,
     nativeOrdinaryBeltConnectionEnabled,
   ]);
   const appliedCanvasNodeSemanticRevisionTokenRef = useRef<string | null>(null);
@@ -16121,7 +16157,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
           const selected = selectedEntityIdSet.has(entity.id);
           const interactionProtected = fullDetailCanvasNodeIds.has(entity.id);
           const alertActive = activeAlertEntityIds.has(entity.id);
-          const draggable = !nativePlayerAuthorityOwnsRuntime && !placement && !blueprintPlacementId && !entity.interactionLocked;
+          const draggable = (!nativePlayerAuthorityOwnsRuntime || nativeFactoryPositionWriteReady) &&
+            !placement && !blueprintPlacementId && !entity.interactionLocked;
           const presentationVisible = canvasNodeIntersectsWorldRectangle({
             id: entity.id,
             x: entity.position.x,
@@ -16604,7 +16641,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       });
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasNodeSemanticRevisionToken, canvasPresentationDetailStage, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, effectiveUiFontScale, factoryCanvasRows.nodePresentationByEntityId, factoryCanvasRows.revision, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nativePlayerAuthorityOwnsRuntime, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
+  }, [activeAlertEntityIds, activeCriticalAlertEntityIds, activeConnectionViewportBounds, activeLogisticsEntityIdSet, activePlanetEntities, beltNodeIndex.connectedInputsByTarget, beltNodeIndex.occupancy.input, beltNodeIndex.occupancy.output, blueprintPlacementId, canvasConnectedEntityIds, canvasDetailPreference, canvasDisplayLookup, canvasGame, canvasNodeSemanticRevisionToken, canvasPresentationDetailStage, canvasRenderSnapshot.runtimeRevision, canvasStackGrouping.byNodeId, canvasTopology.targetPortItemsByEntity, commonNodeData, connectExpandAll, connectionCandidateNodeId, connectionDraft, denseNodeLodActive, effectiveUiFontScale, factoryCanvasRows.nodePresentationByEntityId, factoryCanvasRows.revision, focusedBeltNetwork, focusedNetworkEntityIds, fullDetailCanvasNodeIds, highlightedTaskId, lineFindDownstreamEntityIds, lineFindTrace, lineFindUpstreamEntityIds, locatedProductionEntityIds, nativeFactoryPositionWriteReady, nativePlayerAuthorityOwnsRuntime, nextMobileShell, performanceMonitor.isActive, performanceMonitor.recordCanvas, placement, productionLineFocus, selectedEntityIdSet, selectedEntityIds.length, setNodes, taskHighlight.entityIds, viewportZoom]);
 
   useLayoutEffect(() => {
     const startedAt = canvasNodeCommitStartedAtRef.current;
@@ -20743,18 +20780,38 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     console.warn(`[React Flow ${code}] ${message}`);
   }, []);
   const handleFactoryNodeDragStart = useCallback<OnNodeDrag<FactoryFlowNode>>((_event, node) => {
-    if (rejectLegacyFactoryInteractionWhileNative("建筑位置编辑")) return;
     if (blockCanvasTouchRef.current) return;
     const selectedIds = selectedEntityIdsRef.current.includes(node.id) ? selectedEntityIdsRef.current : [node.id];
     const members = collectCanvasDragMembers(activeEntityById, selectedIds);
+    let nativeIdentity: NonNullable<typeof multiDragStartRef.current>["nativeIdentity"] = null;
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+      const binding = nativePlayerAuthorityCommandBindingRef.current;
+      if (!frame || !binding || nativePlayerAuthorityCommandInFlightRef.current ||
+          frame.sessionId !== binding.source.sessionId || frame.runId !== binding.source.runId ||
+          frame.revision !== binding.source.baseRevision || frame.planetId !== factoryCanvasPlanetId ||
+          members.length < 1 || members.some((member) => {
+            const entity = frame.entityById.get(member.id);
+            return !entity || entity.planetId !== frame.planetId || entity.interactionLocked;
+          })) {
+        setNotice("Windows 原生建筑位置投影正在刷新；本次拖动未提交");
+        return;
+      }
+      nativeIdentity = {
+        sessionId: frame.sessionId,
+        runId: frame.runId,
+        planetId: frame.planetId,
+        revision: frame.revision,
+      };
+    }
     const primary = members.find((member) => member.id === node.id) ?? { id: node.id, position: { ...node.position } };
-    multiDragStartRef.current = { primaryId: node.id, primaryPosition: primary.position, members };
+    multiDragStartRef.current = { primaryId: node.id, primaryPosition: primary.position, members, nativeIdentity };
     setDraggedEntityIds([node.id, ...members.map((member) => member.id).filter((id) => id !== node.id)]);
     if (factoryCanvasRef.current) factoryCanvasRef.current.dataset.dragActiveCount = String(Math.max(1, members.length));
     nodeDragActiveRef.current = true;
     nodeDragGestureEpochRef.current = factoryGestureEpochRef.current;
     dragAlignmentSpatialIndexRef.current = alignmentSpatialIndexRef.current ?? alignmentSpatialIndex;
-  }, [activeEntityById, alignmentSpatialIndex, rejectLegacyFactoryInteractionWhileNative]);
+  }, [activeEntityById, alignmentSpatialIndex, factoryCanvasPlanetId]);
   const handleFactoryNodeDragStop = useCallback<OnNodeDrag<FactoryFlowNode>>((_event, node, draggedNodes) => {
     const dragGestureEpoch = nodeDragGestureEpochRef.current;
     nodeDragGestureEpochRef.current = null;
@@ -20764,11 +20821,6 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     setCanvasGeometryRevision((revision) => revision + 1);
     setAlignmentGuides({ x: null, y: null });
     if (dragGestureEpoch === null || dragGestureEpoch !== factoryGestureEpochRef.current) {
-      multiDragStartRef.current = null;
-      restoreCanvasEntityPositions();
-      return;
-    }
-    if (rejectLegacyFactoryInteractionWhileNative("建筑位置编辑")) {
       multiDragStartRef.current = null;
       restoreCanvasEntityPositions();
       return;
@@ -20798,6 +20850,50 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
       factoryCanvasRef.current.dataset.dragStopCount = String(++canvasDragStopCountRef.current);
       factoryCanvasRef.current.dataset.dragMovedNodeCount = String(positions.length);
     }
+    if (nativePlayerAuthorityOwnsRuntimeRef.current) {
+      const frame = nativeAuthoritativeFactoryCanvasFrameRef.current;
+      const binding = nativePlayerAuthorityCommandBindingRef.current;
+      const identity = multiDrag?.nativeIdentity;
+      const sourceRowsUnchanged = Boolean(frame && multiDrag && multiDrag.members.every((member) => {
+        const entity = frame.entityById.get(member.id);
+        return entity && !entity.interactionLocked && entity.planetId === frame.planetId &&
+          entity.position.x === member.position.x && entity.position.y === member.position.y;
+      }));
+      if (!frame || !binding || !identity || !sourceRowsUnchanged ||
+          frame.sessionId !== identity.sessionId || frame.runId !== identity.runId ||
+          frame.planetId !== identity.planetId || frame.revision < identity.revision ||
+          frame.sessionId !== binding.source.sessionId || frame.runId !== binding.source.runId ||
+          frame.revision !== binding.source.baseRevision) {
+        restoreCanvasEntityPositions();
+        setNotice("拖动期间 Rust 权威投影已变化；位置未提交，请重试");
+        return;
+      }
+      const hasChange = positions.some((target) => {
+        const entity = frame.entityById.get(target.id);
+        return entity && (entity.position.x !== target.position.x || entity.position.y !== target.position.y);
+      });
+      if (!hasChange) {
+        restoreCanvasEntityPositions();
+        return;
+      }
+      const accepted = commitNativeProjectedCommand(
+        frame.revision,
+        (baseRevision) => createNativeFactoryPositionCommand(frame, baseRevision, positions),
+        () => {
+          setNotice(`Rust 已确认 ${positions.length} 个建筑的新位置；画布已刷新`);
+          window.requestAnimationFrame(() => {
+            connectionHandleSpatialIndexRef.current = buildConnectionHandleSpatialIndex(viewportRef.current);
+          });
+        },
+        () => setNotice("Rust 未确认本次建筑位置；画布已恢复到权威坐标"),
+      );
+      // React Flow owns transient pointer motion only. Never let those local
+      // coordinates become an optimistic second authority while WAL/ACK is in
+      // flight; the next bounded Rust projection installs the durable result.
+      restoreCanvasEntityPositions();
+      if (accepted) setNotice(`正在由 Rust 提交 ${positions.length} 个建筑的位置…`);
+      return;
+    }
     if (!blueprintAllowOverlap && hasExactEntityPositionOverlap(gameRef.current, positions)) {
       if (factoryCanvasRef.current) factoryCanvasRef.current.dataset.dragOverlapBlocked = "true";
       restoreCanvasEntityPositions();
@@ -20813,7 +20909,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
     window.requestAnimationFrame(() => {
       connectionHandleSpatialIndexRef.current = buildConnectionHandleSpatialIndex(viewportRef.current);
     });
-  }, [blueprintAllowOverlap, commitGame, isEnglish, playTone, rejectLegacyFactoryInteractionWhileNative, restoreCanvasEntityPositions]);
+  }, [blueprintAllowOverlap, commitGame, commitNativeProjectedCommand, isEnglish, playTone, restoreCanvasEntityPositions]);
   const handleFactoryFlowMove = useCallback<OnMove>((_event, viewport) => {
     viewportRef.current = viewport;
     if (connectionHandleSpatialIndexRef.current) connectionHandleSpatialIndexRef.current.viewport = viewport;
@@ -21678,7 +21774,8 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
             selectionKeyCode={null}
             multiSelectionKeyCode="Shift"
             elementsSelectable={!(coarsePointer && selectionMode)}
-            nodesDraggable={!nativePlayerAuthorityOwnsRuntime && (nextMobileShell ? mobileCanvasMode === "layout" : !(coarsePointer && selectionMode))}
+            nodesDraggable={(!nativePlayerAuthorityOwnsRuntime || nativeFactoryPositionWriteReady) &&
+              (nextMobileShell ? mobileCanvasMode === "layout" : !(coarsePointer && selectionMode))}
             zoomOnDoubleClick={false}
             deleteKeyCode={null}
             fitViewOptions={factoryFlowFitViewOptions}

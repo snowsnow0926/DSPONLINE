@@ -8504,6 +8504,37 @@ mod tests {
         }
     }
 
+    fn player_authority_factory_layout_command(
+        base_revision: u64,
+        command_id: &str,
+    ) -> CoreCommitPlayerAuthorityCommandRequest {
+        CoreCommitPlayerAuthorityCommandRequest {
+            run_id: "player-authority-run".to_owned(),
+            command_id: command_id.to_owned(),
+            base_revision,
+            command: serde_json::from_value(json!({
+                "protocolVersion": 1,
+                "baseRevision": base_revision,
+                "topLevelChanges": [{
+                    "path": ["factoryAutoLayout", "intent"],
+                    "operation": "set",
+                    "value": {
+                        "kind": "apply",
+                        "scope": "all",
+                        "entityIds": []
+                    }
+                }],
+                "changedEntities": [],
+                "addedEntities": [],
+                "removedEntityIds": [],
+                "changedBelts": [],
+                "addedBelts": [],
+                "removedBeltIds": []
+            }))
+            .unwrap(),
+        }
+    }
+
     fn player_authority_fuel_item_command(
         base_revision: u64,
         command_id: &str,
@@ -10261,6 +10292,87 @@ mod tests {
             committed.changed_belt_ids
         );
         assert_eq!(restarted_duplicate.topology_dirty, committed.topology_dirty);
+    }
+
+    #[test]
+    fn player_authority_factory_layout_recovers_compact_wal_and_exact_coordinates() {
+        let (root, mut store, mut registry, session_id, entry_checkpoint) =
+            player_authority_recipe_fixture();
+        let source_hash = registry.status(&session_id).unwrap().canonical_sha256;
+        let request = || {
+            player_authority_factory_layout_command(
+                entry_checkpoint.revision,
+                "factory-layout-command-1",
+            )
+        };
+
+        let lost_response = registry
+            .commit_player_authority_command_internal(
+                &mut store,
+                &session_id,
+                request(),
+                PlayerAuthorityCommandKind::Gameplay,
+                PlayerAuthorityCommandFault::AfterStage,
+            )
+            .unwrap_err();
+        assert!(format!("{lost_response:#}").contains("lost response"));
+        assert_eq!(
+            registry.status(&session_id).unwrap().canonical_sha256,
+            source_hash
+        );
+        let lease = store.require_exact_realtime_lease().unwrap();
+        let pending = lease.pending_command.as_ref().unwrap();
+        let durable = serde_json::to_string(&pending.command).unwrap();
+        assert!(durable.contains("factoryAutoLayout"));
+        assert!(!durable.contains("position"));
+        assert!(durable.len() < 1_024);
+        drop(registry);
+        drop(store);
+
+        let mut reopened_store = SaveStore::open(root.path()).unwrap();
+        let mut reopened_registry = resumable_player_authority_registry_for_test();
+        let recovered = reopened_registry
+            .recover_player_authority_pending_command_on_startup(&mut reopened_store)
+            .unwrap()
+            .expect("factory layout must recover from its compact durable marker");
+        assert_eq!(
+            recovered.command_id.as_deref(),
+            Some("factory-layout-command-1")
+        );
+        assert_eq!(recovered.revision, entry_checkpoint.revision + 1);
+        assert!(recovered.changed_entity_ids.is_empty());
+        assert!(recovered.changed_belt_ids.is_empty());
+        assert!(recovered.topology_dirty);
+        let recovered_hash = recovered.summary.canonical_sha256.clone();
+
+        reopened_registry
+            .export_v47(
+                &reopened_store,
+                &recovered.session_id,
+                "factory-layout-recovered",
+                recovered.settled_deadline_ms,
+            )
+            .unwrap();
+        let envelope: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("exports/factory-layout-recovered.json")).unwrap(),
+        )
+        .unwrap();
+        let smelter = envelope["state"]["entities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entity| entity["id"] == "smelter-recipe-host")
+            .unwrap();
+        assert_eq!(smelter["position"], json!({ "x": 0.0, "y": 480.0 }));
+
+        let duplicate = reopened_registry
+            .commit_player_authority_command(&mut reopened_store, &recovered.session_id, request())
+            .unwrap();
+        assert!(duplicate.duplicate);
+        assert_eq!(duplicate.summary.canonical_sha256, recovered_hash);
+        assert!(duplicate.changed_entity_ids.is_empty());
+        assert!(duplicate.changed_belt_ids.is_empty());
+        assert!(duplicate.topology_dirty);
     }
 
     #[test]

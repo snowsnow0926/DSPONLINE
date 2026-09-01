@@ -1,5 +1,11 @@
 # DSP极简网络项目现状
 
+> **Windows Rust 权威工厂布局与位置写入（2026-09-02，开发候选，未发布）**：原生权威模式下，“整理当前行星/所选设备”和普通建筑拖动已经脱离 renderer 旧 `GameState` 写路径。自动布局只提交 `{kind:"apply",scope,entityIds}` 短意图，Rust 按活动行星、持久实体顺序与线路拓扑确定性生成坐标；WAL 不保存展开后的海量位置。拖动只提交绑定 exact session/run/revision 的有界位置补丁，界面立即撤销临时画布坐标，等待 durable Rust 投影回显，因此没有第二份乐观权威。
+>
+> 位置事务不再全量 `rebuild_indexes()`：实体标量列改为 `Arc<Vec<_>>` 写时复制，仅复制 X/Y、解析变化行并重建受影响行星的 viewport index；实体/线路映射、符号表、线路列和模拟静态目录继续共享。当前新鲜门禁为完整 fast Vitest `3002 passed / 29 skipped / 0 failed`、Rust workspace 串行 `1274 passed / 3 explicitly ignored / 0 failed`（Core `1034/3/0`、Host library `237/0/0`、Host binary `3/0/0`）、native/desktop `567 passed / 1 Windows symlink privilege skip / 0 failed`，以及 typecheck、strict Clippy、Rust fmt、production build、startup budget、薄 UI 边界和 diff check。首次完整 Vitest 的唯一失败是旧测试仍断言 native 拖动必须关闭，更新为新权威合同后全量通过。
+>
+> 统一能力口径更新为 `Rust 90% / 薄 UI 98% / O(active) 97% / 并行 75% / 综合开发 93% / 发布成熟度 60%`。原生 durable undo/redo、线路批量编辑、MOD 自动布局、位置重叠偏好在 Rust 侧的全行星证明，以及 24 小时、多硬件、安装/升级、签名与灰度仍未关闭；`authorityEligible=false` 保持关闭。未读取玩家存档，未连接生产，未部署、打包发布或签名。
+
 > **Windows 主进程权威离线启动采用（2026-09-02，开发候选，未发布）**：24.53 的 Rust `offline-macro-v1` 已接入真实 StartMenu 快速结算链。普通主档必须与固定 native checkpoint 的 generation/root/revision/registry/`savedAt`/canonical/domain/实体线路摘要及零 WAL 完全一致；renderer 只发 8 个身份字段，main 独占墙钟、临时 export ID 与文件路径。候选以 1 MiB MessagePort 分块、逐块 ACK、最终 SHA-256 ACK 和 256 MiB 总上限传输，preload 只保留一个精确大小缓冲；空候选也完成终态 ACK。候选正文再次通过 envelope、checksum、canonical/domain、revision、时间与 elapsedSeconds 校验，source session 安全关闭后才采用；否则原始存档无损回退 JavaScript Worker。
 >
 > 同批修正原生离线封顶为游戏公开规则“基础 7 天 + `continuum_simulation` 每级 1 天，最多 30 天”，而非所有存档固定 30 天。取消、流损坏、Host ID 漂移、候选冻结和关闭结果不确定均不提交源检查点；returning reward 仍只由既有 finalizer 添加一次。当前新鲜门禁为完整 fast Vitest `2989/29/0`、native/desktop `567/1/0`、Rust workspace 串行 `1270/3/0`（Core `1031/3/0`、Host library `236/0/0`、Host binary `3/0/0`）、启动传输专项 `10/10`、fresh Release Host 候选集成 `1/1`，typecheck、strict Clippy、fmt、production build、startup budget 与薄 UI 边界通过；E2E、安装、24 小时、多硬件、签名和灰度仍按实际结果单列。

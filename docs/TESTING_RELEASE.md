@@ -1,5 +1,13 @@
 # 测试与发布基线
 
+> **Windows Rust 权威自动布局/拖动门禁（2026-09-02，开发候选）**：自动布局请求必须绑定 exact session/run/revision，只允许 `all` 或最多 4,096 个唯一实体 ID 的 `selection`，并由 Rust 从活动行星、内置目录和 resident belt topology 重新生成坐标。MOD/未知目录、跨行星、重复/超长 ID、空的可移动选择、锁定实体、畸形坐标、额外字段或旧 revision 必须在 durable stage 前原子拒绝。live 与 AfterStage/WAL 冷恢复必须得到逐字一致的位置、canonical hash 与紧凑 receipt；WAL marker 不得包含展开后的 `position`，并须保持小于 1 KiB。
+>
+> 普通拖动必须证明 renderer 只发送有界位置补丁，拖动期间 revision 前进时仅在同 session/run/planet 且所有源位置/锁定状态未变时重基；提交后立即恢复临时 React Flow 坐标并等待 Rust 投影。Rust 纯位置候选只允许 COW X/Y 与受影响行星 viewport index 变化，实体 ID/planet/kind/building 列、entity/belt map、symbol table、belt columns/dynamics 和模拟静态目录须继续共享；失败候选不得发布任何列、索引或 revision。
+>
+> 本轮冻结源码的新鲜结果：Rust focused 自动布局 `2/2`、位置 COW `1/1`、Host durable layout `1/1`；完整 Rust workspace 串行 `1274 passed / 3 explicitly ignored / 0 failed`（Core `1034/3/0`、Host library `237/0/0`、Host binary `3/0/0`）；最终完整 fast Vitest 为 376 files 通过、13 files 条件跳过，`3002 passed / 29 skipped / 0 failed`；native/desktop `567 passed / 1 Windows symlink privilege skip / 0 failed`。typecheck、workspace all-target/all-feature strict Clippy `-D warnings`、Rust fmt、production build、startup budget、Native thin-UI boundary 与 diff check 通过。production build 为 2,102 modules，startup gzip `180,782 B`（JavaScript `87,094 B`、CSS `93,688 B`），最大 startup JS `58,974 B`、menu `258,715 B`、forbidden startup modules `0`，薄 UI 边界为 13 个 App bindings / 12 个专用组件文件。
+>
+> 失败史必须保留：本轮首次完整 fast Vitest 为 `3001 passed / 29 skipped / 1 failed`，唯一失败是 `nativePlanetNavigationAppIntegration.test.ts` 仍保存旧合同“native 建筑不可拖动”；产品代码已经迁移为 Rust 权威拖动，故只更新该架构断言，最终全量如上。按用户要求，本轮以后停止“每完成一个小块就重复全量”；开发阶段只跑必要定向红绿与静态门禁，全部剩余代码冻结后再集中执行完整 Rust/Vitest/native/server/E2E/打包矩阵。
+
 > **Windows 原生离线启动采用门禁（2026-09-02，开发候选）**：必须用合成 v47 primary/native checkpoint 同时证明成功采用和所有无损回退。成功链要求 normal-main primary、同 generation/root/revision/registry/`savedAt`、零 WAL、canonical/domain/活动行星/实体线路/elapsed 摘要一致；结果要求 main-owned wall clock/export ID/path、游戏 7～30 天科研封顶、1 MiB 连续分块、逐块 ACK、最终 SHA-256 ACK、FNV transfer checksum、可信 envelope、候选 revision/time/elapsed 闭合，以及 source session 明确关闭后才调用一次既有 finalizer。StartMenu 只允许快速模式尝试，显式精确、速通、暂停、非 v47、非 primary 和不足一秒保持旧路径。
 >
 > 失败矩阵必须覆盖：renderer 夹带时间/path/export ID、capability 缺失、checkpoint/`savedAt`/registry/WAL 漂移、Host export ID 或 proof 漂移、乱序/超限/损坏 chunk、最终 hash 不符、envelope/state/canonical/domain/revision/elapsed 不符、取消、close false/throw。每项都必须证明源存档对象、源 checkpoint、WAL、revision 和公开字节未变，并回退原 JavaScript Worker；不得从候选的半成品继续。零正文 unavailable 路径也必须终态 ACK，避免端口关闭竞态。

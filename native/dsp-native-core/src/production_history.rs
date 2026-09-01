@@ -1079,6 +1079,29 @@ impl CoreState {
         )
     }
 
+    /// Records one public history boundary from a disposable exact-simulation
+    /// candidate. Campaign synchronization remains an outer commit concern;
+    /// supplying an already-prepared sentinel preserves the same sparse
+    /// history scan selected by a one-second public advance without repeating
+    /// the separate campaign aggregate on every internal second.
+    pub(crate) fn record_production_history_for_exact_step(
+        &self,
+        base: &mut Map<String, Value>,
+        entities: &[Value],
+        prepared_belt_flow: PreparedBeltFlow,
+        runtime: &DeterministicRuntime,
+    ) -> anyhow::Result<()> {
+        let campaign_metrics_prepared = crate::campaign::CampaignFactoryMetrics::default();
+        self.record_production_history_with_records_and_runtime(
+            base,
+            entities,
+            Some(prepared_belt_flow),
+            Some(&campaign_metrics_prepared),
+            runtime,
+        )
+        .map(|_| ())
+    }
+
     fn record_production_history_with_records_and_runtime(
         &self,
         base: &mut Map<String, Value>,

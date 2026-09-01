@@ -7881,6 +7881,21 @@ pub(crate) fn prepare_advance(
     )
 }
 
+fn should_record_internal_exact_seconds(
+    base: &Map<String, Value>,
+    total: f64,
+    step_size: f64,
+) -> bool {
+    let history_clock_aligned = (finite_number(base.get("elapsedSeconds"))
+        - finite_number(base.get("historyRecordedAt")))
+    .abs()
+        <= EPSILON;
+    total > EPSILON
+        && (total - total.round()).abs() <= EPSILON
+        && step_size <= 1.0 + EPSILON
+        && history_clock_aligned
+}
+
 fn prepare_advance_with_runtime(
     state: &CoreState,
     simulation_seconds: f64,
@@ -8109,6 +8124,13 @@ fn prepare_advance_with_runtime_options(
         debug_assert!(matches!(override_seconds, 1.0 | 10.0 | 30.0));
         step_size = override_seconds;
     }
+    // A whole-second public Exact request must be observationally identical
+    // to the same request split into one-second commits. Preserve the legacy
+    // single-boundary behavior for fractional/unaligned calls and for the
+    // established >8h 10/30-second stepping policy; those paths require a
+    // separate admission decision rather than a silent semantic rewrite.
+    let record_internal_exact_seconds =
+        should_record_internal_exact_seconds(&base, total, step_size);
     let mut remaining = total;
     let mut remaining_wall = wall_seconds.max(0.0);
     let wall_per_simulation_second = if total > EPSILON {
@@ -8127,6 +8149,14 @@ fn prepare_advance_with_runtime_options(
     let mut campaign_metric_writer_indices = Some(Vec::<usize>::new());
     while remaining > EPSILON {
         let mut step = remaining.min(step_size);
+        if record_internal_exact_seconds {
+            let elapsed = finite_number(base.get("elapsedSeconds"));
+            let recorded = finite_number(base.get("historyRecordedAt"));
+            let until_history_boundary = recorded + 1.0 - elapsed;
+            if until_history_boundary > EPSILON && until_history_boundary < step - EPSILON {
+                step = until_history_boundary;
+            }
+        }
         if wall_per_simulation_second > EPSILON
             && let Some(activity) = base
                 .get("endgame")
@@ -8214,6 +8244,16 @@ fn prepare_advance_with_runtime_options(
                 )?;
             }
             crate::speedrun::advance_clock(state, &mut base, wall_step)?;
+        }
+        if record_internal_exact_seconds {
+            let flow_requirement = crate::production_history::belt_flow_requirement(&base)?;
+            let prepared_belt_flow = belt_runtime.prepared_flow(flow_requirement)?;
+            state.record_production_history_for_exact_step(
+                &mut base,
+                &entities,
+                prepared_belt_flow,
+                deterministic_runtime,
+            )?;
         }
         remaining = (remaining - step).max(0.0);
         remaining_wall = (remaining_wall - wall_step).max(0.0);
@@ -9981,6 +10021,369 @@ pub(crate) mod tests {
             state.domain_sha256().unwrap(),
             synthetic_conservation_sha256(state),
         )
+    }
+
+    fn advance_exact_public_seconds(state: &mut CoreState, seconds: f64) {
+        let result = state
+            .advance(&CoreAdvanceRequest {
+                base_revision: state.revision,
+                simulation_seconds: seconds,
+                wall_seconds: seconds,
+                advance_mode: CoreAdvanceMode::Exact,
+                include_diagnostics: false,
+            })
+            .unwrap();
+        assert!(result.supported, "exact {seconds}s advance was unsupported");
+    }
+
+    fn production_history_segmentation_fixture() -> CoreState {
+        let mut state = ordinary_belt_wake_fixture();
+        // Keep this a production-history gate. These three unrelated campaign
+        // tasks are already satisfied by the synthetic storage/power/machine
+        // topology and otherwise complete in call-boundary order.
+        state.base_value_mut()["campaign"]["completedTaskIds"] =
+            json!(["smelt_iron", "side_storage", "side_stable_power"]);
+        state.base_value_mut()["campaign"]["rewardedTaskIds"] =
+            json!(["smelt_iron", "side_storage", "side_stable_power"]);
+        state
+    }
+
+    fn reload_exact_history_checkpoint(state: &CoreState) -> CoreState {
+        let mut records = BTreeMap::<String, Vec<u8>>::new();
+        state
+            .visit_internal_checkpoint_records(123, |key, value| {
+                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let sidecar = state.production_history_sidecar();
+        let mut identity = state.identity.clone();
+        identity.generation += 1;
+        identity.revision = state.revision;
+        let mut reopened =
+            CoreState::from_internal_records(identity, &records, state.catalog.as_ref().clone())
+                .unwrap();
+        if let Some(sidecar) = sidecar {
+            reopened
+                .restore_production_history_sidecar(sidecar)
+                .unwrap();
+        }
+        reopened
+    }
+
+    fn assert_public_exact_state_equal_except_revision(
+        batched: &CoreState,
+        segmented: &CoreState,
+        expected_revision_delta: u64,
+        context: &str,
+    ) {
+        assert_eq!(
+            batched.revision + expected_revision_delta,
+            segmented.revision,
+            "{context}: only the number of host commits may change revision metadata"
+        );
+        let batched_public = batched.materialize().unwrap();
+        let segmented_public = segmented.materialize().unwrap();
+        let differing_top_level_fields = batched_public
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter_map(|(key, value)| {
+                (segmented_public.get(key) != Some(value)).then_some(key.as_str())
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            differing_top_level_fields.is_empty(),
+            "{context}: public v47 top-level differences: {differing_top_level_fields:?}"
+        );
+        let batched_public_bytes = serde_json::to_vec(&batched_public).unwrap();
+        let segmented_public_bytes = serde_json::to_vec(&segmented_public).unwrap();
+        assert_eq!(
+            batched_public_bytes, segmented_public_bytes,
+            "{context}: public v47 bytes must be identical before any revision normalization"
+        );
+        assert_eq!(
+            batched.canonical_sha256().unwrap(),
+            segmented.canonical_sha256().unwrap(),
+            "{context}: public canonical hash"
+        );
+        assert_eq!(
+            synthetic_conservation_sha256(batched),
+            synthetic_conservation_sha256(segmented),
+            "{context}: conservation hash"
+        );
+        let mut normalized_batched = batched.clone();
+        normalized_batched.revision = segmented.revision;
+        let batched_fingerprint = material_delivery_state_fingerprint(&normalized_batched);
+        let segmented_fingerprint = material_delivery_state_fingerprint(segmented);
+        if batched_fingerprint.0 != segmented_fingerprint.0 {
+            let first_difference = batched_fingerprint
+                .0
+                .iter()
+                .zip(&segmented_fingerprint.0)
+                .position(|(left, right)| left != right)
+                .unwrap_or_else(|| {
+                    batched_fingerprint
+                        .0
+                        .len()
+                        .min(segmented_fingerprint.0.len())
+                });
+            let start = first_difference.saturating_sub(80);
+            let batched_end = (first_difference + 80).min(batched_fingerprint.0.len());
+            let segmented_end = (first_difference + 80).min(segmented_fingerprint.0.len());
+            panic!(
+                "{context}: normalized public v47 bytes differ at {first_difference}; batched=`{}` segmented=`{}`",
+                String::from_utf8_lossy(&batched_fingerprint.0[start..batched_end]),
+                String::from_utf8_lossy(&segmented_fingerprint.0[start..segmented_end]),
+            );
+        }
+        assert_eq!(
+            (
+                &batched_fingerprint.1,
+                &batched_fingerprint.2,
+                &batched_fingerprint.3,
+            ),
+            (
+                &segmented_fingerprint.1,
+                &segmented_fingerprint.2,
+                &segmented_fingerprint.3,
+            ),
+            "{context}: canonical/domain hashes and conservation must all be identical after normalizing only host revision metadata"
+        );
+    }
+
+    #[test]
+    fn exact_multi_second_advance_matches_one_second_public_history_and_state() {
+        for seconds in [2_u64, 5, 30] {
+            let mut batched = production_history_segmentation_fixture();
+            let mut segmented = batched.clone();
+
+            advance_exact_public_seconds(&mut batched, seconds as f64);
+            for _ in 0..seconds {
+                advance_exact_public_seconds(&mut segmented, 1.0);
+            }
+
+            assert_eq!(
+                batched.base_value()["productionHistory"],
+                segmented.base_value()["productionHistory"],
+                "{seconds}s exact batching must retain every public one-second production-history sample"
+            );
+            assert_public_exact_state_equal_except_revision(
+                &batched,
+                &segmented,
+                seconds - 1,
+                &format!("{seconds}s batch vs {seconds} one-second commits"),
+            );
+
+            let history = batched.base_value()["productionHistory"]
+                .as_array()
+                .unwrap();
+            assert_eq!(history.len(), seconds as usize, "{seconds}s history");
+            assert!(history.iter().enumerate().all(|(index, sample)| {
+                sample["elapsedSeconds"].as_f64() == Some((index + 1) as f64)
+                    && sample["sampleDurationSeconds"].as_f64() == Some(1.0)
+            }));
+            if seconds == 30 {
+                assert_ne!(
+                    history[8]["inventory"], history[9]["inventory"],
+                    "the 10-second refresh must observe candidate inventory changes"
+                );
+                assert_ne!(
+                    history[8]["logisticsEfficiency"], history[9]["logisticsEfficiency"],
+                    "the 10-second refresh must observe candidate belt-flow changes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exact_one_second_public_history_keeps_the_legacy_single_sample_bytes() {
+        let mut state = production_history_segmentation_fixture();
+        advance_exact_public_seconds(&mut state, 1.0);
+
+        let expected = json!([{
+            "elapsedSeconds": 1.0,
+            "sampleDurationSeconds": 1.0,
+            "productionPerMinute": { "iron_ingot": 0.0 },
+            "consumptionPerMinute": { "iron_ore": 0.0 },
+            "planetProductionPerMinute": { "home": { "iron_ingot": 0.0 } },
+            "planetConsumptionPerMinute": { "home": { "iron_ore": 0.0 } },
+            "inventory": { "iron_ingot": 300.0, "iron_ore": 110.0 },
+            "generationKw": 300.0,
+            "demandKw": 0.0,
+            "machineEfficiency": 0.0,
+            "logisticsEfficiency": 0.5,
+            "powerEfficiency": 1.0,
+            "activeMachines": 0.0,
+            "blockedMachines": 33.0,
+        }]);
+        assert_eq!(
+            serde_json::to_vec(&state.base_value()["productionHistory"]).unwrap(),
+            serde_json::to_vec(&expected).unwrap(),
+            "the inner sample must replace, not duplicate or alter, the established one-second outer sample"
+        );
+        assert_eq!(state.base_value()["historyRecordedAt"].as_f64(), Some(1.0));
+    }
+
+    #[test]
+    fn fractional_unaligned_and_long_step_history_keep_the_legacy_outer_policy() {
+        let base = construction_isolation_base();
+        let base = base.as_object().unwrap();
+        assert!(should_record_internal_exact_seconds(base, 1.0, 1.0));
+        assert!(should_record_internal_exact_seconds(base, 30.0, 1.0));
+        assert!(!should_record_internal_exact_seconds(base, 1.5, 1.0));
+        assert!(!should_record_internal_exact_seconds(base, 28_801.0, 10.0));
+        assert!(!should_record_internal_exact_seconds(base, 86_400.0, 30.0));
+
+        let mut unaligned = production_history_segmentation_fixture();
+        advance_exact_public_seconds(&mut unaligned, 0.5);
+        assert!(
+            unaligned.base_value()["productionHistory"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        advance_exact_public_seconds(&mut unaligned, 1.0);
+        let history = unaligned.base_value()["productionHistory"]
+            .as_array()
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["elapsedSeconds"].as_f64(), Some(1.5));
+        assert_eq!(history[0]["sampleDurationSeconds"].as_f64(), Some(1.5));
+
+        let mut direct_fractional = production_history_segmentation_fixture();
+        advance_exact_public_seconds(&mut direct_fractional, 1.5);
+        let history = direct_fractional.base_value()["productionHistory"]
+            .as_array()
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0]["elapsedSeconds"].as_f64(), Some(1.5));
+        assert_eq!(history[0]["sampleDurationSeconds"].as_f64(), Some(1.5));
+    }
+
+    #[test]
+    fn exact_multi_second_history_survives_checkpoint_reload_and_statistics_projection() {
+        let mut batched = production_history_segmentation_fixture();
+        let mut segmented = batched.clone();
+        advance_exact_public_seconds(&mut batched, 30.0);
+        for _ in 0..30 {
+            advance_exact_public_seconds(&mut segmented, 1.0);
+        }
+
+        let mut reopened_batched = reload_exact_history_checkpoint(&batched);
+        let reopened_segmented = reload_exact_history_checkpoint(&segmented);
+        assert_public_exact_state_equal_except_revision(
+            &reopened_batched,
+            &reopened_segmented,
+            29,
+            "checkpoint-reopened 30s batch",
+        );
+        let mut batched_projection = reopened_batched
+            .statistics_projection(0.0, 30.0, 0, 64, Some("home"), Some("iron_ingot"))
+            .unwrap();
+        let segmented_projection = reopened_segmented
+            .statistics_projection(0.0, 30.0, 0, 64, Some("home"), Some("iron_ingot"))
+            .unwrap();
+        batched_projection["revision"] = segmented_projection["revision"].clone();
+        assert_eq!(
+            serde_json::to_vec(&batched_projection).unwrap(),
+            serde_json::to_vec(&segmented_projection).unwrap(),
+            "tiered statistics must expose the same reloaded samples after normalizing only host revision metadata"
+        );
+        assert_eq!(
+            reopened_batched.production_history_sidecar(),
+            reopened_segmented.production_history_sidecar()
+        );
+
+        advance_exact_public_seconds(&mut reopened_batched, 5.0);
+        let mut reopened_segmented = reopened_segmented;
+        advance_exact_public_seconds(&mut reopened_segmented, 5.0);
+        assert_public_exact_state_equal_except_revision(
+            &reopened_batched,
+            &reopened_segmented,
+            29,
+            "continued exact advance after checkpoint reload",
+        );
+    }
+
+    fn advance_exact_with_worker_count(
+        mut state: CoreState,
+        seconds: f64,
+        worker_count: usize,
+    ) -> CoreState {
+        let prepared = prepare_advance_with_runtime(
+            &state,
+            seconds,
+            seconds,
+            false,
+            &DeterministicRuntime::for_test(worker_count),
+        )
+        .unwrap();
+        commit_and_install_factory_test_state(&mut state, prepared);
+        state
+    }
+
+    #[test]
+    fn exact_multi_second_history_is_identical_on_1_2_4_8_worker_runtimes() {
+        let source = ordinary_oactive_fixture(4_163);
+        let expected = advance_exact_with_worker_count(source.clone(), 30.0, 1);
+        assert_eq!(
+            expected.base_value()["productionHistory"]
+                .as_array()
+                .unwrap()
+                .len(),
+            30
+        );
+        for worker_count in [2, 4, 8] {
+            let observed = advance_exact_with_worker_count(source.clone(), 30.0, worker_count);
+            assert_public_exact_state_equal_except_revision(
+                &observed,
+                &expected,
+                0,
+                &format!("30s exact history with {worker_count} workers"),
+            );
+            assert_eq!(
+                observed
+                    .statistics_projection(0.0, 30.0, 0, 64, None, None)
+                    .unwrap(),
+                expected
+                    .statistics_projection(0.0, 30.0, 0, 64, None, None)
+                    .unwrap(),
+                "statistics projection with {worker_count} workers"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_multi_second_history_candidate_failure_keeps_source_atomic() {
+        let mut state = production_history_segmentation_fixture();
+        state.base_value_mut().remove("campaign");
+        let source_revision = state.revision;
+        let source_public = serde_json::to_vec(&state.materialize().unwrap()).unwrap();
+        let source_canonical = state.canonical_sha256().unwrap();
+        let source_domain = state.domain_sha256().unwrap();
+        let source_conservation = synthetic_conservation_sha256(&state);
+        let source_sidecar = state.production_history_sidecar();
+
+        let error = state
+            .advance(&CoreAdvanceRequest {
+                base_revision: source_revision,
+                simulation_seconds: 5.0,
+                wall_seconds: 5.0,
+                advance_mode: CoreAdvanceMode::Exact,
+                include_diagnostics: false,
+            })
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("native campaign state is missing"));
+        assert_eq!(state.revision, source_revision);
+        assert_eq!(
+            serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+            source_public
+        );
+        assert_eq!(state.canonical_sha256().unwrap(), source_canonical);
+        assert_eq!(state.domain_sha256().unwrap(), source_domain);
+        assert_eq!(synthetic_conservation_sha256(&state), source_conservation);
+        assert_eq!(state.production_history_sidecar(), source_sidecar);
     }
 
     fn assert_material_delivery_state_equal_except_revision(

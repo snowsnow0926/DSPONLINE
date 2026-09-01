@@ -1502,6 +1502,36 @@ impl BeltRuntime {
         self.into_patches_with_runtime(state, flow_requirement, deterministic_runtime())
     }
 
+    /// Reads the candidate's authoritative `lastFlow` columns without
+    /// consuming the runtime. Production history calls this at an internal
+    /// one-second boundary before the complete multi-second candidate is
+    /// sealed. The persisted row order is observable through IEEE-754
+    /// addition and therefore must remain identical to final write-back.
+    pub(crate) fn prepared_flow(
+        &self,
+        flow_requirement: BeltFlowRequirement,
+    ) -> anyhow::Result<PreparedBeltFlow> {
+        let prepared_flow = match flow_requirement {
+            BeltFlowRequirement::NotRequired => PreparedBeltFlow::NotRequired,
+            BeltFlowRequirement::ExactOriginalOrder => {
+                let mut flow = 0.0;
+                for last_flow in &self.last_flow {
+                    flow += last_flow.max(0.0);
+                }
+                PreparedBeltFlow::Exact(BeltFlowAggregate {
+                    capacity: self.belt_capacity,
+                    flow,
+                })
+            }
+        };
+        if !self.belt_capacity.is_finite()
+            || matches!(prepared_flow, PreparedBeltFlow::Exact(aggregate) if !aggregate.flow.is_finite())
+        {
+            bail!("native belt aggregate is non-finite");
+        }
+        Ok(prepared_flow)
+    }
+
     fn into_patches_with_runtime(
         mut self,
         state: &CoreState,
@@ -1532,20 +1562,10 @@ impl BeltRuntime {
         // diagnostics refresh boundary. Never replace the historical fold
         // with an incrementally maintained float: original row order is part
         // of JavaScript bitwise compatibility whenever the value is observed.
-        let prepared_flow = match flow_requirement {
-            BeltFlowRequirement::NotRequired => PreparedBeltFlow::NotRequired,
-            BeltFlowRequirement::ExactOriginalOrder => {
-                let mut flow = 0.0;
-                for last_flow in &self.last_flow {
-                    flow += last_flow.max(0.0);
-                }
-                self.diagnostics.write_back_flow_checks = belt_count;
-                PreparedBeltFlow::Exact(BeltFlowAggregate {
-                    capacity: self.belt_capacity,
-                    flow,
-                })
-            }
-        };
+        let prepared_flow = self.prepared_flow(flow_requirement)?;
+        if matches!(flow_requirement, BeltFlowRequirement::ExactOriginalOrder) {
+            self.diagnostics.write_back_flow_checks = belt_count;
+        }
 
         let mut changed_count = 0_usize;
         let mut number_mask = state.belt_dynamics.number_mask.clone();
@@ -1640,11 +1660,6 @@ impl BeltRuntime {
                 patches
             }
         };
-        if !self.belt_capacity.is_finite()
-            || matches!(prepared_flow, PreparedBeltFlow::Exact(aggregate) if !aggregate.flow.is_finite())
-        {
-            bail!("native belt aggregate is non-finite");
-        }
         self.diagnostics.changed_belt_records = changed_count;
         self.diagnostics.write_back_patch_records = patches.len();
         self.diagnostics.write_back_workers = plan.worker_count;

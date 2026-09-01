@@ -103,6 +103,81 @@ fn bool_at(value: Option<&Value>, keys: &[&str]) -> bool {
     current.and_then(Value::as_bool).unwrap_or(false)
 }
 
+fn should_replay_exact_public_seconds(base: &Map<String, Value>, total: f64) -> bool {
+    let elapsed = base
+        .get("elapsedSeconds")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let recorded = base
+        .get("historyRecordedAt")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    total > EPSILON
+        && total <= 8.0 * 60.0 * 60.0
+        && (total - total.round()).abs() <= EPSILON
+        && (elapsed - recorded).abs() <= EPSILON
+}
+
+fn advance_quiescent_clock_boundary(
+    base: &mut Map<String, Value>,
+    simulation_seconds: f64,
+) -> anyhow::Result<()> {
+    let elapsed_before = base
+        .get("elapsedSeconds")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let elapsed_after = rounded(elapsed_before + simulation_seconds, 4);
+    base.insert("elapsedSeconds".to_owned(), Value::from(elapsed_after));
+
+    if let Some(endgame) = base.get_mut("endgame").and_then(Value::as_object_mut) {
+        let mut started = endgame
+            .get("exportWindowStartedAt")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        if started <= 0.0 {
+            started = elapsed_before;
+            endgame.insert("exportWindowStartedAt".to_owned(), Value::from(started));
+        }
+        let window = elapsed_after - started;
+        if window >= 10.0 - EPSILON {
+            let amount = endgame
+                .get("exportWindowAmount")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0);
+            endgame.insert(
+                "exportedLastMinute".to_owned(),
+                Value::from(rounded(amount * 60.0 / window, 2)),
+            );
+            endgame.insert("exportWindowAmount".to_owned(), Value::from(0));
+            let step_size: f64 = if simulation_seconds >= 24.0 * 60.0 * 60.0 {
+                30.0
+            } else if simulation_seconds > 8.0 * 60.0 * 60.0 {
+                10.0
+            } else {
+                1.0
+            };
+            endgame.insert(
+                "exportWindowStartedAt".to_owned(),
+                Value::from((elapsed_after - step_size.min(simulation_seconds)).max(0.0)),
+            );
+        }
+    }
+    let active_planet = base
+        .get("activePlanetId")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("native core active planet is missing"))?;
+    if let Some(metrics) = base
+        .get("planetMetrics")
+        .and_then(Value::as_object)
+        .and_then(|metrics| metrics.get(&active_planet))
+        .cloned()
+    {
+        base.insert("metrics".to_owned(), metrics);
+    }
+    Ok(())
+}
+
 fn clock_only_reason(state: &CoreState) -> Option<&'static str> {
     if !state.entity_index.is_empty() || !state.belt_index.is_empty() {
         return Some("factory-records-active");
@@ -464,74 +539,32 @@ impl CoreState {
         let mut next = self.clone();
         profile_last!("clone-state");
 
-        // The predicate above is deliberately stricter than the JS fast path.
-        // Once admitted, only global clock/diagnostic fields can change and
-        // this implementation mirrors fastForwardQuiescentState exactly.
-        let base = next.base_value_mut();
-        let elapsed_before = base
-            .get("elapsedSeconds")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0);
-        let elapsed_after = rounded(elapsed_before + simulation_seconds, 4);
-        base.insert("elapsedSeconds".to_owned(), Value::from(elapsed_after));
-
-        if let Some(endgame) = base.get_mut("endgame").and_then(Value::as_object_mut) {
-            let mut started = endgame
-                .get("exportWindowStartedAt")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0);
-            if started <= 0.0 {
-                started = elapsed_before;
-                endgame.insert("exportWindowStartedAt".to_owned(), Value::from(started));
+        // A compressed player-authority Exact batch must preserve every
+        // public one-second boundary, including diagnostics. Quiescent states
+        // skip the factory loop, so replay those cheap clock/history
+        // boundaries here instead of collapsing the whole batch to one
+        // observation. Fractional, unaligned and >8h legacy requests retain
+        // their established one-call shape.
+        if should_replay_exact_public_seconds(next.base_value(), simulation_seconds) {
+            for _ in 0..simulation_seconds.round() as u64 {
+                advance_quiescent_clock_boundary(next.base_value_mut(), 1.0)?;
+                next.record_production_history()?;
+                next.refresh_production_history_tiers();
             }
-            let window = elapsed_after - started;
-            if window >= 10.0 - EPSILON {
-                let amount = endgame
-                    .get("exportWindowAmount")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0);
-                endgame.insert(
-                    "exportedLastMinute".to_owned(),
-                    Value::from(rounded(amount * 60.0 / window, 2)),
-                );
-                endgame.insert("exportWindowAmount".to_owned(), Value::from(0));
-                let step_size: f64 = if simulation_seconds >= 24.0 * 60.0 * 60.0 {
-                    30.0
-                } else if simulation_seconds > 8.0 * 60.0 * 60.0 {
-                    10.0
-                } else {
-                    1.0
-                };
-                endgame.insert(
-                    "exportWindowStartedAt".to_owned(),
-                    Value::from((elapsed_after - step_size.min(simulation_seconds)).max(0.0)),
-                );
-            }
-        }
-        let active_planet = base
-            .get("activePlanetId")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| anyhow!("native core active planet is missing"))?;
-        if let Some(metrics) = base
-            .get("planetMetrics")
-            .and_then(Value::as_object)
-            .and_then(|metrics| metrics.get(&active_planet))
-            .cloned()
-        {
-            base.insert("metrics".to_owned(), metrics);
+        } else {
+            advance_quiescent_clock_boundary(next.base_value_mut(), simulation_seconds)?;
+            next.record_production_history()?;
+            next.refresh_production_history_tiers();
         }
         // Normal-mode quiescent state has no speedrun wall clock. The budget
         // is accepted solely to prove segmentation equivalence.
         let _ = wall_seconds;
-        next.record_production_history()?;
         next.revision += 1;
         let summary = request
             .include_diagnostics
             .then(|| next.summary())
             .transpose()?;
         *self = next;
-        self.refresh_production_history_tiers();
         Ok(CoreAdvanceResult {
             supported: true,
             exact_scope: "clock-only",

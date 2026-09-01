@@ -1,5 +1,11 @@
 # DSP极简网络项目现状
 
+> **Windows Exact 压缩 revision 逐秒边界收口（2026-09-01，开发候选，未发布）**：Rust player-authority 的一个短时长批量 `Exact` 请求现在与连续 N 次一秒公开调用在所有已覆盖领域保持一致，同时只提交一个 durable revision。差分 oracle 改为比较相同的公开逐秒边界，并保留旧 JavaScript 单次长调用作为兼容诊断；没有放宽 canonical/domain hash，也没有忽略 production history。
+>
+> 实际产品缺陷位于空工厂 quiescent 快路径：旧实现会把 60 秒压成一条历史采样，并产生不同的银河出口滚动窗口锚点。现在对齐、整秒、最多 8 小时的请求会逐个重放轻量时钟/历史边界；小数、未对齐及更长兼容请求仍保留旧外层策略。新增失败原子性用例保证后段历史异常时源 revision、公开字节、canonical 与私有统计 sidecar 均不变化。
+>
+> 当前最终门禁为：差分矩阵 `50/1/0`，完整 fast Vitest `2981/29/0`，Rust Core 串行 `1026/3/0`，Host `230/0/0` 加 binary `3/0/0`，native/desktop `551/1/0`；typecheck、strict Clippy、fmt、diff check 与 production build 全部通过。构建为 2,099 modules，startup gzip `180,781 B`、forbidden startup module `0`。24.51 首轮 `2933/29/48` 失败仍作为发现证据保留。统一进度更新为 `Rust 86% / 薄 UI 97% / O(active) 97% / 并行 75% / 综合开发 90% / 发布成熟度 60%`；下一大块是 main/Rust 权威的 Windows 离线结算。GameState v47、envelope v2、cloud v8、SQLite v3、package 1.2.3 与 `authorityEligible=false` 不变；未读取玩家存档，未连接生产，未部署、打包或签名。
+
 > **Windows 纯挂机时间预算主进程权威纵切（2026-09-01，开发候选，未发布）**：原生纯挂机不再接受 renderer 提交的 simulation/wall 时间。UI 只在启动时提交当前 revision 与倍率，后续为无参数推进；Electron main 以 durable `nextDeadlineMs` 和同一单调时钟计算真实可结算墙钟，封顶 30 天，并独占 macro session/operation ID、active multiplier 与 uncertain/startup recovery 的原预算。伪造预算、额外字段、时钟回退和不完整恢复均失败关闭。
 >
 > 当前新鲜专项为 Node `121/121`、controller Vitest `21/21`、native/desktop `551 passed / 1 symlink privilege skip / 0 failed`；typecheck 与 production build 通过，3 天 1 Hz 合成序列完成 `259,200` 次无漂移推进。完整 fast Vitest 首轮为 `2933/29/48`，48 个失败全部位于既有 Rust/JavaScript 精确差分矩阵；重建 Host 后仍可复现。诊断证明下一 P0 不是旧二进制或本次 IPC 修改，而是 Rust 单次长 Exact 与连续 1 秒公开调用在 research/power/construction/logistics 等领域的边界语义尚未完全一致。诊断 oracle 改动已撤销，不能用放宽测试冒充通过。

@@ -14,7 +14,7 @@ import {
   type ContentPackRuntimeSnapshot,
 } from "./contentPacks";
 import {
-  advanceSimulationBudget,
+  advanceSimulationBudget as advanceSimulationBudgetSingleCall,
   advanceSimulationSession,
   attachInterstellarStationToQuantumNetwork,
   completeSimulationAdvanceSession,
@@ -41,6 +41,59 @@ import {
 } from "./systemSpaceStation";
 import { validateContentPack } from "./mods";
 import type { GameState } from "./types";
+
+/**
+ * Player-authority Exact catch-up is durably capped at 30 seconds per Host
+ * revision, but Core deliberately preserves one-second public boundaries for
+ * every aligned whole-second request that still uses the one-second engine
+ * policy (up to eight hours). The differential oracle must therefore compare
+ * a compressed native revision with the same sequence of JavaScript public
+ * boundaries, not with the legacy one-call sampling shape.
+ */
+function usesCompressedExactPublicSeconds(state: GameState, simulationSeconds: number): boolean {
+  return Number.isInteger(simulationSeconds) && simulationSeconds > 0 &&
+    simulationSeconds <= 8 * 60 * 60 &&
+    Math.abs(state.elapsedSeconds - state.historyRecordedAt) <= 0.0001;
+}
+
+function advanceSimulationBudget(
+  state: GameState,
+  simulationSeconds: number,
+  wallSeconds: number,
+): GameState {
+  if (!usesCompressedExactPublicSeconds(state, simulationSeconds)) {
+    return advanceSimulationBudgetSingleCall(state, simulationSeconds, wallSeconds);
+  }
+  let next = state;
+  const wallPerSimulationSecond = wallSeconds / simulationSeconds;
+  for (let second = 0; second < simulationSeconds; second += 1) {
+    next = advanceSimulationBudgetSingleCall(next, 1, wallPerSimulationSecond);
+  }
+  return next;
+}
+
+function advanceUnindexedExactOracle(
+  state: GameState,
+  simulationSeconds: number,
+  wallSeconds: number,
+  options: { forceFlatRouteOracle?: boolean; profiler?: ReturnType<typeof createSimulationProfiler> } = {},
+): GameState {
+  const durations = usesCompressedExactPublicSeconds(state, simulationSeconds)
+    ? Array.from({ length: simulationSeconds }, () => ({ simulation: 1, wall: wallSeconds / simulationSeconds }))
+    : [{ simulation: simulationSeconds, wall: wallSeconds }];
+  let next = state;
+  for (const duration of durations) {
+    const session = createSimulationAdvanceSession(next, duration.simulation, {
+      wallSeconds: duration.wall,
+      indexedLogistics: false,
+      forceFlatRouteOracle: options.forceFlatRouteOracle,
+      profiler: options.profiler,
+    });
+    advanceSimulationSession(session, Number.MAX_SAFE_INTEGER);
+    next = completeSimulationAdvanceSession(session);
+  }
+  return next;
+}
 
 const require = createRequire(import.meta.url);
 const { NativeHostClient, NativeSaveSessionRegistry } = require("../../desktop/native-host.cjs") as {
@@ -917,14 +970,10 @@ function forcedFullLogisticsAdvance(
   seconds: number,
   profiler?: ReturnType<typeof createSimulationProfiler>,
 ): GameState {
-  const session = createSimulationAdvanceSession(state, seconds, {
-    wallSeconds: seconds,
-    indexedLogistics: false,
+  return advanceUnindexedExactOracle(state, seconds, seconds, {
     forceFlatRouteOracle: true,
     profiler,
   });
-  advanceSimulationSession(session, Number.MAX_SAFE_INTEGER);
-  return completeSimulationAdvanceSession(session);
 }
 
 function exactInventoryAmount(value: unknown): bigint {
@@ -2386,6 +2435,17 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
         request: { baseRevision: checkpoint.revision, simulationSeconds: seconds, wallSeconds: seconds },
       });
       expect(advanced.supported, `${seconds} 秒 native support`).toBe(true);
+      const projection = await client.request({
+        operation: "coreProjection", sessionId: opened.sessionId,
+        entityIds: [], beltIds: [],
+        baseFields: ["endgame", "productionHistory", "powerGridMetrics", "research"],
+      });
+      expect(projection.base.endgame, `${seconds} 秒终局边界`).toEqual(JSON.parse(JSON.stringify(expected.endgame)));
+      expect(projection.base.powerGridMetrics, `${seconds} 秒电网指标边界`)
+        .toEqual(JSON.parse(JSON.stringify(expected.powerGridMetrics)));
+      expect(projection.base.research, `${seconds} 秒科研边界`).toEqual(JSON.parse(JSON.stringify(expected.research)));
+      expect(projection.base.productionHistory, `${seconds} 秒生产历史边界`)
+        .toEqual(JSON.parse(JSON.stringify(expected.productionHistory)));
       expect(advanced.summary.canonicalFields, `${seconds} 秒顶层字段`).toEqual(canonicalFields(expected));
       expect(advanced.summary.canonicalSha256, `${seconds} 秒完整哈希`).toBe(canonicalSha256(expected));
       expect(advanced.summary.domainSha256, `${seconds} 秒领域哈希`).toBe(
@@ -3813,12 +3873,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     for (const seconds of [1, 5, 60]) {
       const opened = await open(checkpoint);
       const expected = advanceSimulationBudget(initial, seconds, seconds);
-      const fullScanSession = createSimulationAdvanceSession(initial, seconds, {
-        wallSeconds: seconds,
-        indexedLogistics: false,
-      });
-      advanceSimulationSession(fullScanSession, Number.MAX_SAFE_INTEGER);
-      const fullScan = completeSimulationAdvanceSession(fullScanSession);
+      const fullScan = advanceUnindexedExactOracle(initial, seconds, seconds);
       expect(canonicalSha256(expected), `dormant-wake-${seconds} JS active/full scan`).toBe(canonicalSha256(fullScan));
       const advanced = await client.request({
         operation: "coreAdvance", sessionId: opened.sessionId,
@@ -3856,12 +3911,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     for (const seconds of [1, 5, 60]) {
       const opened = await open(checkpoint);
       const expected = advanceSimulationBudget(initial, seconds, seconds);
-      const fullScanSession = createSimulationAdvanceSession(initial, seconds, {
-        wallSeconds: seconds,
-        indexedLogistics: false,
-      });
-      advanceSimulationSession(fullScanSession, Number.MAX_SAFE_INTEGER);
-      const fullScan = completeSimulationAdvanceSession(fullScanSession);
+      const fullScan = advanceUnindexedExactOracle(initial, seconds, seconds);
       expect(canonicalSha256(expected), `ordinary-wake-${seconds} JS active/full scan`)
         .toBe(canonicalSha256(fullScan));
       const advanced = await client.request({
@@ -3904,12 +3954,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       let advanced: any = null;
       for (const seconds of sequence.steps) {
         expected = advanceSimulationBudget(expected, seconds, seconds);
-        const fullScanSession = createSimulationAdvanceSession(fullScanExpected, seconds, {
-          wallSeconds: seconds,
-          indexedLogistics: false,
-        });
-        advanceSimulationSession(fullScanSession, Number.MAX_SAFE_INTEGER);
-        fullScanExpected = completeSimulationAdvanceSession(fullScanSession);
+        fullScanExpected = advanceUnindexedExactOracle(fullScanExpected, seconds, seconds);
         advanced = await client.request({
           operation: "coreAdvance", sessionId: opened.sessionId,
           request: { baseRevision: revision, simulationSeconds: seconds, wallSeconds: seconds },
@@ -4876,7 +4921,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     expect(beforeBoundaryStation.quantumTransition?.boundarySecond,
       "attachment owns the exact five-second settlement boundary").toBe(5);
 
-    const boundaryOneShotExpected = advanceSimulationBudget(initial, 5, 5);
+    const boundaryOneShotExpected = advanceSimulationBudgetSingleCall(initial, 5, 5);
     let boundarySegmentedExpected = initial;
     for (let index = 0; index < 5; index += 1) {
       boundarySegmentedExpected = advanceSimulationBudget(boundarySegmentedExpected, 1, 1);
@@ -4964,9 +5009,9 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     expect(oneShotBoundary.supported,
       `quantum-transition one-shot boundary: ${oneShotBoundary.reason ?? ""}`).toBe(true);
     expect(oneShotBoundary.summary.canonicalFields, "quantum-transition one-shot boundary fields")
-      .toEqual(canonicalFields(boundaryOneShotExpected));
+      .toEqual(canonicalFields(boundarySegmentedExpected));
     expect(oneShotBoundary.summary.canonicalSha256, "quantum-transition one-shot boundary hash")
-      .toBe(canonicalSha256(boundaryOneShotExpected));
+      .toBe(canonicalSha256(boundarySegmentedExpected));
     const oneShotSteady = await client.request({
       operation: "coreAdvance", sessionId: oneShotOpened.sessionId,
       request: {
@@ -4979,11 +5024,11 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       `quantum-transition one-shot steady: ${oneShotSteady.reason ?? ""}`).toBe(true);
     assertSteadyQuantumScheduler("quantum-transition one-shot steady", oneShotSteady);
     expect(oneShotSteady.summary.canonicalFields, "quantum-transition one-shot final fields")
-      .toEqual(canonicalFields(finalOneShotExpected));
+      .toEqual(canonicalFields(finalSegmentedExpected));
     expect(oneShotSteady.summary.canonicalSha256, "quantum-transition one-shot final hash")
-      .toBe(canonicalSha256(finalOneShotExpected));
+      .toBe(canonicalSha256(finalSegmentedExpected));
     expect(oneShotSteady.summary.domainSha256, "quantum-transition one-shot final domain")
-      .toBe(nativeCoreDomainSha256(finalOneShotExpected, oneShotSteady.revision));
+      .toBe(nativeCoreDomainSha256(finalSegmentedExpected, oneShotSteady.revision));
     const oneShotProjection = await client.request({
       operation: "coreProjection", sessionId: oneShotOpened.sessionId,
       entityIds: boundedEntityIds,
@@ -4992,13 +5037,13 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     });
     expect(oneShotProjection.entities, "quantum-transition one-shot bounded entities")
       .toEqual(rendererProjectedEntities(boundedEntityIds.map((entityId) =>
-        finalOneShotExpected.entities.find((entity) => entity.id === entityId)!)));
+        finalSegmentedExpected.entities.find((entity) => entity.id === entityId)!)));
     expect(oneShotProjection.belts, "quantum-transition one-shot bounded belts")
       .toEqual(JSON.parse(JSON.stringify(boundedBeltIds.map((beltId) =>
-        finalOneShotExpected.belts.find((belt) => belt.id === beltId)!))));
+        finalSegmentedExpected.belts.find((belt) => belt.id === beltId)!))));
     expect(oneShotProjection.base.quantumLogisticsNetwork,
       "quantum-transition one-shot quantum network")
-      .toEqual(JSON.parse(JSON.stringify(finalOneShotExpected.quantumLogisticsNetwork)));
+      .toEqual(JSON.parse(JSON.stringify(finalSegmentedExpected.quantumLogisticsNetwork)));
     await client.request({ operation: "coreClose", sessionId: oneShotOpened.sessionId });
 
     const segmentedOpened = await open(checkpoint);
@@ -5026,7 +5071,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       oneShotBoundary.summary.canonicalFields[field] !==
         segmentedBoundary.summary.canonicalFields[field]),
     "quantum-transition native one-shot/segmented boundary fields")
-      .toEqual(["productionHistory"]);
+      .toEqual([]);
     expect(segmentedExpected.entities.find((entity) => entity.id === transitionStationId),
       "quantum-transition segmented session reaches quantum mode")
       .toMatchObject({ quantumMode: "quantum", quantumTransition: null });
@@ -5049,7 +5094,7 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
     expect(Object.keys(oneShotSteady.summary.canonicalFields).filter((field) =>
       oneShotSteady.summary.canonicalFields[field] !== segmentedSteady.summary.canonicalFields[field]),
     "quantum-transition native one-shot/segmented final fields")
-      .toEqual(["productionHistory"]);
+      .toEqual([]);
     expect(segmentedSteady.summary.domainSha256, "quantum-transition segmented final domain")
       .toBe(nativeCoreDomainSha256(segmentedExpected, segmentedSteady.revision));
     const segmentedProjection = await client.request({
@@ -5181,8 +5226,8 @@ describe.skipIf(!fs.existsSync(binaryPath))("native core differential oracle", (
       .toBe(canonicalSha256(semanticState(oneShot.expected)));
     expect(Object.keys(oneShot.steady.summary.canonicalFields).filter((field) =>
       oneShot.steady.summary.canonicalFields[field] !== segmented.steady.summary.canonicalFields[field]),
-    "elevator-transition one-shot/segmented fields differ only by sampling history")
-      .toEqual(["productionHistory"]);
+    "elevator-transition compressed and segmented public fields are identical")
+      .toEqual([]);
     expect(segmented.steady.beltScheduler,
       "elevator-transition next-revision scheduler is segmentation invariant")
       .toEqual(oneShot.steady.beltScheduler);

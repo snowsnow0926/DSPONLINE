@@ -10200,6 +10200,14 @@ pub(crate) mod tests {
         state
     }
 
+    fn quiescent_segmentation_fixture() -> CoreState {
+        let mut base = construction_isolation_base();
+        base["constructionAutomation"]["enabled"] = Value::from(false);
+        base["constructionAutomation"]["targetStock"] = json!({});
+        base["research"]["completedTechIds"] = json!([]);
+        fixture_state_from_base(base, &[])
+    }
+
     fn campaign_reward_consumption_segmentation_fixture() -> CoreState {
         const REGISTRY_FINGERPRINT: &str = "campaign-reward-segmentation";
         let source = construction_isolation_fixture();
@@ -10604,6 +10612,67 @@ pub(crate) mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn exact_quiescent_batch_replays_public_clock_and_history_boundaries() {
+        for seconds in [2_u64, 30, 60] {
+            let mut batched = quiescent_segmentation_fixture();
+            let mut segmented = batched.clone();
+
+            advance_exact_public_seconds(&mut batched, seconds as f64);
+            for _ in 0..seconds {
+                advance_exact_public_seconds(&mut segmented, 1.0);
+            }
+
+            assert_public_exact_state_equal_except_revision(
+                &batched,
+                &segmented,
+                seconds - 1,
+                &format!("{seconds}s quiescent batch vs public one-second boundaries"),
+            );
+            assert_eq!(
+                batched.base_value()["productionHistory"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                seconds as usize,
+                "every quiescent public second must retain one history sample"
+            );
+            assert_eq!(
+                batched.production_history_sidecar(),
+                segmented.production_history_sidecar(),
+                "quiescent compression must retain the same cold history tiers"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_quiescent_batch_failure_keeps_source_atomic() {
+        let mut state = quiescent_segmentation_fixture();
+        state.base_value_mut()["productionHistory"] = Value::from("invalid-history");
+        let source_revision = state.revision;
+        let source_public = serde_json::to_vec(&state.materialize().unwrap()).unwrap();
+        let source_canonical = state.canonical_sha256().unwrap();
+        let source_sidecar = state.production_history_sidecar();
+
+        let error = state
+            .advance(&CoreAdvanceRequest {
+                base_revision: source_revision,
+                simulation_seconds: 30.0,
+                wall_seconds: 30.0,
+                advance_mode: CoreAdvanceMode::Exact,
+                include_diagnostics: false,
+            })
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("production history"));
+        assert_eq!(state.revision, source_revision);
+        assert_eq!(
+            serde_json::to_vec(&state.materialize().unwrap()).unwrap(),
+            source_public
+        );
+        assert_eq!(state.canonical_sha256().unwrap(), source_canonical);
+        assert_eq!(state.production_history_sidecar(), source_sidecar);
     }
 
     #[test]

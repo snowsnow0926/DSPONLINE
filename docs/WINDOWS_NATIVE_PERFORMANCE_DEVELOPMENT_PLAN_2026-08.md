@@ -2340,3 +2340,17 @@ GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3
 6. 完整 fast Vitest 首轮必须保留为 No-Go：`2933 passed / 29 skipped / 48 failed`。48 个失败均集中在既有 `nativeCoreDifferential.test.ts`；本纵切没有修改该文件、Rust 模拟或 JavaScript 精确模拟。重新构建 release Host 后结果不变，排除了旧二进制。诊断把 JavaScript oracle 改成逐秒边界时，该文件为 `21 passed / 29 failed / 1 skipped`，其中 ordinary mining 与 handcraft 两个 focused 为 `2/2`，但 quiescent/research/power/construction/logistics 等仍证明 Rust 一次长 Exact 调用与连续 1 秒公开调用存在跨领域边界差异。诊断改动已完整撤销，没有靠修改 oracle 掩盖产品问题。
 7. 下一大块固定为“完整领域 Exact 批次公开边界确定性”：先建立 `1 × 60s == 60 × 1s` 的红测矩阵，再把科研、全局进度/手搓、power metrics、Campaign、施工、量子、物流补给和托盘同步等每秒公开边界收进 Rust 的同一内部 helper。既有代码注释和 24.43 合同已经要求小于等于 8 小时的整秒 Exact 与逐秒提交一致，因此不允许通过放宽差分测试、丢弃字段或只改固定哈希来关闭该门禁。
 8. 本切片不新增持久字段，不升级 GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 或 Host/renderer 协议；`authorityEligible=false` 继续关闭。固定四目标百分比暂不因控制面收口上调，productive pure-idle/offline/time-warp 仍须在下一大块确定性门禁通过后才能计入完成。未读取或修改真实玩家存档，未连接生产，未部署、打包发布或签名。
+
+### 24.52 Exact 压缩 revision 公开逐秒边界确定性收口（2026-09-01，开发候选）
+
+本纵切关闭 24.51 留下的 P0：一个 Rust `Exact` 长请求虽然只产生一个 durable revision，但在小于等于 8 小时的对齐整秒范围内，公开玩法结果必须与连续 N 次一秒调用完全一致。此次没有通过放宽哈希或忽略历史字段来消除失败；先修正差分 oracle 的比较对象，再修复真实存在的 quiescent 快路径缺口。
+
+1. 差分 oracle 现在明确区分两种语义：旧 JavaScript 单次长调用继续保留为兼容诊断；原生 player-authority 压缩 revision 则与同样的 N 个 JavaScript 一秒公开边界比较。强制 full-scan 对照也按相同边界运行，因此活动索引和原生实现不能借由不同采样频率互相掩盖。
+2. 生产/科研/电力/施工/Campaign/量子/本地与星际物流等非空工厂路径此前已经在 Rust 内部按逐秒公开边界执行。最终定位到的产品缺陷位于空工厂 quiescent 快路径：一次 60 秒调用只写一条生产历史，并把银河出口滚动窗口锚点写成与 60 次一秒调用不同的值。
+3. quiescent 路径现把原有时钟、银河出口窗口与活动行星指标更新抽成单个公开边界 helper。满足“历史时钟对齐、正整数、最多 8 小时”的 `Exact` 请求会重放 N 个轻量一秒边界，并在每个边界记录公开 production history 与刷新私有分层统计；revision 仍只在所有边界和校验成功后增加一次。小数、未对齐和大于 8 小时的兼容请求继续使用旧 1/10/30 秒外层采样策略。
+4. 新增 quiescent `2/30/60` 秒一批与逐秒的公开字节、canonical、守恒、revision、分层历史一致性回归；畸形历史导致后段失败时，源 revision、公开字节、canonical 与 sidecar 必须全部不变。差分矩阵另直接核对 endgame、productionHistory、powerGridMetrics 与 research 投影。
+5. 最终 `nativeCoreDifferential.test.ts` 为 `50 passed / 1 opt-in long test skipped / 0 failed`；完整 fast Vitest 为 371 files（358 通过、13 条件跳过）、`2981 passed / 29 skipped / 0 failed`。24.51 首轮 `2933/29/48` 仍保留为发现问题的失败证据，不被最终绿色覆盖。
+6. Rust focused 新回归 `2/2`；workspace 串行全量为 Core `1026 passed / 3 explicitly ignored / 0 failed`、Host library `230/230`、Host binary `3/3`。三个 ignored 均为既有手工 release 性能项。Windows native/desktop 为 `551 passed / 1 Windows symlink privilege skip / 0 failed`；typecheck、workspace all-target/all-feature strict Clippy、Rust fmt、diff check 均通过。
+7. production build 为 2,099 modules；startup 总 gzip `180,781 B`、JavaScript `87,093 B`、CSS `93,688 B`、最大启动 JavaScript `58,974 B`、menu `258,330 B`，forbidden startup modules `0`；Native thin-UI boundary 为 13 个 App bindings / 12 个专用组件文件。
+8. 该修复使 player-authority 的短时 exact catch-up 具备跨领域公开边界确定性，但不自动宣称 Windows 原生离线生命周期、24 小时、多硬件或默认高并行稳定性已经完成。固定口径在本纵切提交后更新为 `Rust 唯一权威约 86% / 完整薄 UI 约 97% / 真正 O(active) 物流约 97% / 全领域确定性原生并行约 75% / 四项目标能力加权综合约 90% / 可放心发布成熟度约 60%`。下一大块把应用关闭期间的离线时间接入 main/Rust 权威结算，而不是回到 renderer Worker。
+9. GameState v47、envelope v2、cloud schema v8、SQLite layout v3、package 1.2.3 与 `authorityEligible=false` 均不变；未读取或修改真实玩家存档，未连接生产，未部署、打包发布或签名。

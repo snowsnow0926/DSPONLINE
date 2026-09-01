@@ -1057,6 +1057,7 @@ impl CoreState {
             base,
             entities,
             prepared_belt_flow,
+            None,
             deterministic_runtime(),
         )
         .map(|_| ())
@@ -1067,11 +1068,13 @@ impl CoreState {
         base: &mut Map<String, Value>,
         entities: &[Value],
         prepared_belt_flow: Option<PreparedBeltFlow>,
+        prepared_campaign_metrics: Option<&crate::campaign::CampaignFactoryMetrics>,
     ) -> anyhow::Result<Option<crate::campaign::CampaignFactoryMetrics>> {
         self.record_production_history_with_records_and_runtime(
             base,
             entities,
             prepared_belt_flow,
+            prepared_campaign_metrics,
             deterministic_runtime(),
         )
     }
@@ -1081,6 +1084,7 @@ impl CoreState {
         base: &mut Map<String, Value>,
         entities: &[Value],
         prepared_belt_flow: Option<PreparedBeltFlow>,
+        prepared_campaign_metrics: Option<&crate::campaign::CampaignFactoryMetrics>,
         runtime: &DeterministicRuntime,
     ) -> anyhow::Result<Option<crate::campaign::CampaignFactoryMetrics>> {
         let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
@@ -1167,8 +1171,10 @@ impl CoreState {
         // read-only and use the same persisted entity order, so collect them
         // here and hand the finished probe to the fixed-order campaign commit.
         // Completed campaigns pay no extra per-entity work.
-        let mut campaign_factory_metrics = crate::campaign::factory_metrics_needed(base)
-            .then(crate::campaign::CampaignFactoryMetrics::default);
+        let campaign_metrics_needed = crate::campaign::factory_metrics_needed(base);
+        let mut campaign_factory_metrics = (campaign_metrics_needed
+            && prepared_campaign_metrics.is_none())
+        .then(crate::campaign::CampaignFactoryMetrics::default);
         let rate_indices = &self.factory_topology.production_history_rate_indices;
         let rate_index_dense = self
             .factory_topology
@@ -2302,6 +2308,7 @@ mod tests {
                     Some(PreparedBeltFlow::Exact(
                         crate::belts::BeltFlowAggregate::default(),
                     )),
+                    None,
                     &runtime,
                 )
                 .unwrap();
@@ -2357,6 +2364,7 @@ mod tests {
                     Some(PreparedBeltFlow::Exact(
                         crate::belts::BeltFlowAggregate::default(),
                     )),
+                    None,
                     &runtime,
                 )
                 .unwrap();
@@ -2368,6 +2376,7 @@ mod tests {
                     Some(PreparedBeltFlow::Exact(
                         crate::belts::BeltFlowAggregate::default(),
                     )),
+                    None,
                     &runtime,
                 )
                 .unwrap();
@@ -2420,6 +2429,7 @@ mod tests {
                     Some(PreparedBeltFlow::Exact(
                         crate::belts::BeltFlowAggregate::default(),
                     )),
+                    None,
                     &runtime,
                 )
                 .unwrap()
@@ -2508,6 +2518,7 @@ mod tests {
                 &mut indexed,
                 &entities,
                 Some(PreparedBeltFlow::NotRequired),
+                None,
                 &DeterministicRuntime::for_test(8),
             )
             .unwrap();
@@ -2519,6 +2530,7 @@ mod tests {
                 &mut oracle,
                 &entities,
                 Some(PreparedBeltFlow::NotRequired),
+                None,
                 &DeterministicRuntime::for_test(1),
             )
             .unwrap();
@@ -2580,6 +2592,7 @@ mod tests {
                     Some(PreparedBeltFlow::Exact(
                         crate::belts::BeltFlowAggregate::default(),
                     )),
+                    None,
                     &runtime,
                 )
                 .unwrap()
@@ -2626,6 +2639,93 @@ mod tests {
                 Some(&json!(["mine_first_ore", "smelt_iron"]))
             );
         }
+    }
+
+    #[test]
+    fn prepared_campaign_metrics_keep_non_refresh_history_on_the_sparse_rate_path() {
+        let (mut state, mut base, mut entities, _) = history_parallel_fixture();
+        base.insert("elapsedSeconds".to_owned(), Value::from(11));
+        base.insert("historyRecordedAt".to_owned(), Value::from(10));
+        base.insert(
+            "productionHistory".to_owned(),
+            Value::Array(vec![history_sample(10.0, 1.0, 10.0)]),
+        );
+        base.insert("manualMined".to_owned(), Value::from(1));
+        base.insert("totalProduced".to_owned(), json!({ "iron_ingot": 4 }));
+        base.insert(
+            "campaign".to_owned(),
+            json!({
+                "activeChapterId": "foundation",
+                "activeTaskId": "mine_first_ore",
+                "completedTaskIds": [],
+                "rewardedTaskIds": []
+            }),
+        );
+        for entity in entities.iter_mut().skip(2) {
+            entity
+                .as_object_mut()
+                .expect("fixture entity")
+                .insert("productionRate".to_owned(), Value::from(0));
+        }
+        let topology = std::sync::Arc::make_mut(&mut state.factory_topology);
+        topology.production_history_rate_indices = vec![1];
+        topology.production_history_rate_full_scan_required = false;
+
+        let prepared_metrics = crate::campaign::CampaignFactoryMetrics::collect(&state, &entities);
+        let mut sparse = base.clone();
+        let reused = state
+            .record_production_history_with_records_and_runtime(
+                &mut sparse,
+                &entities,
+                Some(PreparedBeltFlow::NotRequired),
+                Some(&prepared_metrics),
+                &DeterministicRuntime::for_test(8),
+            )
+            .unwrap();
+        assert!(
+            reused.is_none(),
+            "a prepared campaign snapshot must suppress the duplicate factory collector"
+        );
+
+        let mut oracle = base;
+        let collected_metrics = state
+            .record_production_history_with_records_and_runtime(
+                &mut oracle,
+                &entities,
+                Some(PreparedBeltFlow::NotRequired),
+                None,
+                &DeterministicRuntime::for_test(1),
+            )
+            .unwrap()
+            .expect("the legacy pending-campaign path collects a full probe");
+        assert_eq!(prepared_metrics, collected_metrics);
+        assert_eq!(
+            serde_json::to_vec(&sparse).unwrap(),
+            serde_json::to_vec(&oracle).unwrap(),
+            "reusing campaign metrics must not change production-history bytes"
+        );
+
+        let mut sparse_campaign = sparse;
+        let mut oracle_campaign = oracle;
+        crate::campaign::synchronize_with_factory_metrics(
+            &state,
+            &mut sparse_campaign,
+            &entities,
+            Some(prepared_metrics),
+        )
+        .unwrap();
+        crate::campaign::synchronize_with_factory_metrics(
+            &state,
+            &mut oracle_campaign,
+            &entities,
+            Some(collected_metrics),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(&sparse_campaign).unwrap(),
+            serde_json::to_vec(&oracle_campaign).unwrap()
+        );
+        assert_eq!(state.factory_topology.production_history_rate_indices, [1]);
     }
 
     #[test]

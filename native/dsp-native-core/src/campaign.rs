@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::mem::size_of;
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{anyhow, bail};
 use serde_json::{Map, Value};
@@ -424,18 +426,181 @@ fn number_in_record(base: &Map<String, Value>, record: &str, key: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct CampaignBuildingMetrics {
     count: f64,
     station_trips: f64,
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct CampaignFactoryMetrics {
     buildings: HashMap<String, CampaignBuildingMetrics>,
     miner_count: f64,
     belt_counts_by_minimum_tier: HashMap<u8, f64>,
     spray_coater_installed: bool,
+}
+
+const CAMPAIGN_METRIC_MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CampaignMetricContribution {
+    building_symbol: u32,
+    building_count: u64,
+    station_trips: u64,
+    miner_count: u64,
+    spray_coater_installed: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct CachedCampaignBuildingMetrics {
+    count: u64,
+    station_trips: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CampaignProjectionLineage {
+    slot: String,
+    generation: u64,
+    root_hash: String,
+    checkpoint_revision: u64,
+    state_version: u16,
+    mode: String,
+    registry_fingerprint: String,
+    catalog_sha256: String,
+    base_primary_checksum: String,
+    entity_count: usize,
+    belt_count: usize,
+}
+
+impl CampaignProjectionLineage {
+    fn capture(state: &CoreState) -> Self {
+        Self {
+            slot: state.identity.slot.clone(),
+            generation: state.identity.generation,
+            root_hash: state.identity.root_hash.clone(),
+            checkpoint_revision: state.identity.revision,
+            state_version: state.identity.state_version,
+            mode: state.identity.mode.clone(),
+            registry_fingerprint: state.identity.registry_fingerprint.clone(),
+            catalog_sha256: state.catalog.fingerprint.clone(),
+            base_primary_checksum: state.identity.base_primary_checksum.clone(),
+            entity_count: state.entities.ids.len(),
+            belt_count: state.belts.ids.len(),
+        }
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        u64::try_from(
+            size_of::<Self>()
+                .saturating_add(self.slot.capacity())
+                .saturating_add(self.root_hash.capacity())
+                .saturating_add(self.mode.capacity())
+                .saturating_add(self.registry_fingerprint.capacity())
+                .saturating_add(self.catalog_sha256.capacity())
+                .saturating_add(self.base_primary_checksum.capacity()),
+        )
+        .unwrap_or(u64::MAX)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CampaignMetricCache {
+    lineage: CampaignProjectionLineage,
+    revision: u64,
+    contributions: Vec<CampaignMetricContribution>,
+    buildings: HashMap<u32, CachedCampaignBuildingMetrics>,
+    miner_count: u64,
+    belt_counts_by_minimum_tier: HashMap<u8, u64>,
+    spray_coater_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CampaignProjectionDiagnostics {
+    pub mode: &'static str,
+    pub entity_rows_visited: usize,
+    pub belt_rows_visited: usize,
+    pub selected_worker_count: usize,
+}
+
+#[derive(Debug, Default)]
+struct CampaignProjectionRuntimeState {
+    cache: Option<CampaignMetricCache>,
+    /// A lineage-scoped negative cache. Fractional/MOD metric rows are valid
+    /// under the legacy f64 collector but cannot be patched with the exact
+    /// integer ledger. Remember that proof failure so every exact revision
+    /// does not perform another doomed O(all entities) rebuild attempt.
+    unsupported_lineage: Option<CampaignProjectionLineage>,
+    diagnostics: CampaignProjectionDiagnostics,
+}
+
+/// Session-only campaign metric cache. It never enters GameState, checkpoint,
+/// WAL or canonical hashes. Transactional CoreState clones start empty so an
+/// abandoned candidate cannot publish a read-model update into its source.
+#[derive(Debug, Default)]
+pub(crate) struct CampaignProjectionRuntime(Mutex<CampaignProjectionRuntimeState>);
+
+impl Clone for CampaignProjectionRuntime {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+#[derive(Debug)]
+struct PreparedCampaignMetricChange {
+    index: usize,
+    contribution: CampaignMetricContribution,
+}
+
+#[derive(Debug)]
+enum PreparedCampaignProjectionUpdateInner {
+    Reset,
+    Unsupported {
+        lineage: CampaignProjectionLineage,
+        entity_rows_visited: usize,
+        selected_worker_count: usize,
+    },
+    Rebuild {
+        cache: CampaignMetricCache,
+        entity_rows_visited: usize,
+        belt_rows_visited: usize,
+        selected_worker_count: usize,
+    },
+    Incremental {
+        expected_revision: u64,
+        revision: u64,
+        lineage: CampaignProjectionLineage,
+        changes: Vec<PreparedCampaignMetricChange>,
+        buildings: HashMap<u32, CachedCampaignBuildingMetrics>,
+        miner_count: u64,
+        belt_counts_by_minimum_tier: HashMap<u8, u64>,
+        spray_coater_count: u64,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedCampaignProjectionUpdate(PreparedCampaignProjectionUpdateInner);
+
+impl PreparedCampaignProjectionUpdate {
+    pub(crate) fn factory_metrics(&self, state: &CoreState) -> Option<CampaignFactoryMetrics> {
+        match &self.0 {
+            PreparedCampaignProjectionUpdateInner::Reset
+            | PreparedCampaignProjectionUpdateInner::Unsupported { .. } => None,
+            PreparedCampaignProjectionUpdateInner::Rebuild { cache, .. } => cache.metrics(state),
+            PreparedCampaignProjectionUpdateInner::Incremental {
+                buildings,
+                miner_count,
+                belt_counts_by_minimum_tier,
+                spray_coater_count,
+                ..
+            } => campaign_metrics_from_totals(
+                state,
+                buildings,
+                *miner_count,
+                belt_counts_by_minimum_tier,
+                *spray_coater_count,
+            ),
+        }
+    }
 }
 
 struct CampaignEntityMetricProbe {
@@ -599,6 +764,549 @@ impl CampaignFactoryMetrics {
         }
         metrics.observe_belts(belt_tiers);
         metrics
+    }
+}
+
+fn campaign_safe_integer(value: f64) -> Option<u64> {
+    (value.is_finite()
+        && value >= 0.0
+        && value.fract() == 0.0
+        && value <= CAMPAIGN_METRIC_MAX_SAFE_INTEGER as f64)
+        .then_some(value as u64)
+}
+
+fn campaign_cached_contribution(
+    state: &CoreState,
+    index: usize,
+    entity: &Value,
+) -> Option<CampaignMetricContribution> {
+    let Some(entity) = entity.as_object() else {
+        return Some(CampaignMetricContribution {
+            building_symbol: u32::MAX,
+            ..CampaignMetricContribution::default()
+        });
+    };
+    let miner_count = campaign_safe_integer(finite_number(entity.get("minerCount")))?;
+    let machine_count = campaign_safe_integer(finite_number(entity.get("machineCount")))?;
+    let station_trips = campaign_safe_integer(finite_number(entity.get("stationTrips")))?;
+    let building_symbol = match string_at(entity, "buildingId") {
+        Some(building_id) => state.symbols.lookup(building_id)?,
+        None => u32::MAX,
+    };
+    let building_count = if building_symbol == u32::MAX {
+        0
+    } else {
+        (if machine_count != 0 {
+            machine_count
+        } else {
+            miner_count
+        })
+        .max(1)
+    };
+    debug_assert!(index < state.entities.ids.len());
+    Some(CampaignMetricContribution {
+        building_symbol,
+        building_count,
+        station_trips: if building_symbol == u32::MAX {
+            0
+        } else {
+            station_trips
+        },
+        miner_count,
+        spray_coater_installed: entity
+            .get("sprayCoaterInstalled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn campaign_checked_add(value: &mut u64, amount: u64) -> Option<()> {
+    *value = value.checked_add(amount)?;
+    (*value <= CAMPAIGN_METRIC_MAX_SAFE_INTEGER).then_some(())
+}
+
+fn campaign_checked_sub(value: &mut u64, amount: u64) -> Option<()> {
+    *value = value.checked_sub(amount)?;
+    Some(())
+}
+
+fn apply_cached_contribution(
+    buildings: &mut HashMap<u32, CachedCampaignBuildingMetrics>,
+    miner_count: &mut u64,
+    spray_coater_count: &mut u64,
+    contribution: CampaignMetricContribution,
+    add: bool,
+) -> Option<()> {
+    let update = |value: &mut u64, amount: u64| {
+        if add {
+            campaign_checked_add(value, amount)
+        } else {
+            campaign_checked_sub(value, amount)
+        }
+    };
+    update(miner_count, contribution.miner_count)?;
+    update(
+        spray_coater_count,
+        u64::from(contribution.spray_coater_installed),
+    )?;
+    if contribution.building_symbol != u32::MAX {
+        let building = buildings.entry(contribution.building_symbol).or_default();
+        update(&mut building.count, contribution.building_count)?;
+        update(&mut building.station_trips, contribution.station_trips)?;
+        if !add && building.count == 0 && building.station_trips == 0 {
+            buildings.remove(&contribution.building_symbol);
+        }
+    }
+    Some(())
+}
+
+fn campaign_metrics_from_totals(
+    state: &CoreState,
+    cached_buildings: &HashMap<u32, CachedCampaignBuildingMetrics>,
+    miner_count: u64,
+    belt_counts_by_minimum_tier: &HashMap<u8, u64>,
+    spray_coater_count: u64,
+) -> Option<CampaignFactoryMetrics> {
+    let mut buildings = HashMap::with_capacity(cached_buildings.len());
+    for (&symbol, cached) in cached_buildings {
+        let building_id = state.symbols.resolve(symbol)?;
+        buildings.insert(
+            building_id.to_owned(),
+            CampaignBuildingMetrics {
+                count: cached.count as f64,
+                station_trips: cached.station_trips as f64,
+            },
+        );
+    }
+    Some(CampaignFactoryMetrics {
+        buildings,
+        miner_count: miner_count as f64,
+        belt_counts_by_minimum_tier: belt_counts_by_minimum_tier
+            .iter()
+            .map(|(&tier, &count)| (tier, count as f64))
+            .collect(),
+        spray_coater_installed: spray_coater_count != 0,
+    })
+}
+
+impl CampaignMetricCache {
+    fn build(
+        state: &CoreState,
+        entities: &[Value],
+        runtime: &DeterministicRuntime,
+    ) -> Option<Self> {
+        if entities.len() != state.entities.ids.len() {
+            return None;
+        }
+        let contributions = if runtime.worker_count_for_items(entities.len()) == 1 {
+            entities
+                .iter()
+                .enumerate()
+                .map(|(index, entity)| campaign_cached_contribution(state, index, entity))
+                .collect::<Option<Vec<_>>>()?
+        } else {
+            runtime
+                .indexed_map(entities, |index, entity| {
+                    campaign_cached_contribution(state, index, entity)
+                })
+                .into_iter()
+                .collect::<Option<Vec<_>>>()?
+        };
+        let mut buildings = HashMap::new();
+        let mut miner_count = 0;
+        let mut spray_coater_count = 0;
+        for contribution in contributions.iter().copied() {
+            apply_cached_contribution(
+                &mut buildings,
+                &mut miner_count,
+                &mut spray_coater_count,
+                contribution,
+                true,
+            )?;
+        }
+        let minimum_belt_tiers = TASKS
+            .iter()
+            .filter_map(|task| match task.metric {
+                Metric::Belt { minimum_tier, .. } => Some(minimum_tier),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let mut belt_counts_by_minimum_tier = HashMap::<u8, u64>::new();
+        for &tier in &state.belts.tiers {
+            for &minimum_tier in &minimum_belt_tiers {
+                if minimum_tier == 0 || tier >= minimum_tier {
+                    let count = belt_counts_by_minimum_tier.entry(minimum_tier).or_default();
+                    campaign_checked_add(count, 1)?;
+                }
+            }
+        }
+        Some(Self {
+            lineage: CampaignProjectionLineage::capture(state),
+            revision: state.revision,
+            contributions,
+            buildings,
+            miner_count,
+            belt_counts_by_minimum_tier,
+            spray_coater_count,
+        })
+    }
+
+    fn metrics(&self, state: &CoreState) -> Option<CampaignFactoryMetrics> {
+        campaign_metrics_from_totals(
+            state,
+            &self.buildings,
+            self.miner_count,
+            &self.belt_counts_by_minimum_tier,
+            self.spray_coater_count,
+        )
+    }
+
+    fn estimated_bytes(&self) -> u64 {
+        u64::try_from(
+            size_of::<Self>()
+                .saturating_add(
+                    self.contributions.capacity() * size_of::<CampaignMetricContribution>(),
+                )
+                .saturating_add(
+                    self.buildings.capacity()
+                        * (size_of::<u32>() + size_of::<CachedCampaignBuildingMetrics>()),
+                )
+                .saturating_add(
+                    self.belt_counts_by_minimum_tier.capacity()
+                        * (size_of::<u8>() + size_of::<u64>()),
+                )
+                .saturating_add(
+                    usize::try_from(self.lineage.estimated_bytes())
+                        .unwrap_or(usize::MAX)
+                        .saturating_sub(size_of::<CampaignProjectionLineage>()),
+                ),
+        )
+        .unwrap_or(u64::MAX)
+    }
+}
+
+impl CampaignProjectionRuntime {
+    fn lock(&self) -> MutexGuard<'_, CampaignProjectionRuntimeState> {
+        self.0.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    pub(crate) fn seed_from_records(
+        &self,
+        state: &CoreState,
+        entities: &[Value],
+        runtime: &DeterministicRuntime,
+    ) {
+        let selected_worker_count = runtime.worker_count_for_items(entities.len());
+        let lineage = CampaignProjectionLineage::capture(state);
+        let cache = CampaignMetricCache::build(state, entities, runtime);
+        let mut runtime_state = self.lock();
+        runtime_state.unsupported_lineage = cache.is_none().then_some(lineage);
+        runtime_state.cache = cache;
+        runtime_state.diagnostics = CampaignProjectionDiagnostics {
+            mode: if runtime_state.cache.is_some() {
+                "opened-seed"
+            } else {
+                "opened-unsupported"
+            },
+            entity_rows_visited: entities.len(),
+            belt_rows_visited: state.belts.ids.len(),
+            selected_worker_count,
+        };
+    }
+
+    fn snapshot(
+        &self,
+        state: &CoreState,
+        runtime: &DeterministicRuntime,
+    ) -> anyhow::Result<CampaignFactoryMetrics> {
+        let lineage = CampaignProjectionLineage::capture(state);
+        {
+            let mut runtime_state = self.lock();
+            if let Some(metrics) = runtime_state
+                .cache
+                .as_ref()
+                .filter(|cache| {
+                    cache.revision == state.revision
+                        && cache.lineage == lineage
+                        && cache.contributions.len() == state.entities.ids.len()
+                })
+                .and_then(|cache| cache.metrics(state))
+            {
+                runtime_state.diagnostics = CampaignProjectionDiagnostics {
+                    mode: "same-revision-cache",
+                    entity_rows_visited: 0,
+                    belt_rows_visited: 0,
+                    selected_worker_count: 0,
+                };
+                return Ok(metrics);
+            }
+        }
+        let entities = state.parse_entities_parallel()?;
+        let selected_worker_count = runtime.worker_count_for_items(entities.len());
+        if let Some(cache) = CampaignMetricCache::build(state, &entities, runtime) {
+            let metrics = cache
+                .metrics(state)
+                .ok_or_else(|| anyhow!("native campaign cache symbol is stale"))?;
+            let mut runtime_state = self.lock();
+            runtime_state.cache = Some(cache);
+            runtime_state.unsupported_lineage = None;
+            runtime_state.diagnostics = CampaignProjectionDiagnostics {
+                mode: "flat-full-cached",
+                entity_rows_visited: entities.len(),
+                belt_rows_visited: state.belts.ids.len(),
+                selected_worker_count,
+            };
+            return Ok(metrics);
+        }
+        let metrics =
+            CampaignFactoryMetrics::collect_with_runtime(runtime, &state.belts.tiers, &entities);
+        let mut runtime_state = self.lock();
+        runtime_state.cache = None;
+        runtime_state.unsupported_lineage = Some(lineage);
+        runtime_state.diagnostics = CampaignProjectionDiagnostics {
+            mode: "flat-full-unsupported",
+            entity_rows_visited: entities.len(),
+            belt_rows_visited: state.belts.ids.len(),
+            selected_worker_count,
+        };
+        Ok(metrics)
+    }
+
+    pub(crate) fn prepare_simulation_update(
+        &self,
+        state: &CoreState,
+        next_entities: &[Value],
+        writer_indices: Option<&[usize]>,
+        next_revision: u64,
+    ) -> PreparedCampaignProjectionUpdate {
+        let Some(changed_indices) = writer_indices else {
+            return PreparedCampaignProjectionUpdate(PreparedCampaignProjectionUpdateInner::Reset);
+        };
+        if next_entities.len() != state.entities.ids.len() {
+            return PreparedCampaignProjectionUpdate(PreparedCampaignProjectionUpdateInner::Reset);
+        }
+        let lineage = CampaignProjectionLineage::capture(state);
+        let runtime_state = self.lock();
+        let cache = runtime_state.cache.as_ref().filter(|cache| {
+            cache.revision == state.revision
+                && cache.lineage == lineage
+                && cache.contributions.len() == state.entities.ids.len()
+        });
+        if cache.is_none() {
+            if runtime_state.unsupported_lineage.as_ref() == Some(&lineage) {
+                return PreparedCampaignProjectionUpdate(
+                    PreparedCampaignProjectionUpdateInner::Unsupported {
+                        lineage,
+                        entity_rows_visited: 0,
+                        selected_worker_count: 0,
+                    },
+                );
+            }
+            if !factory_metrics_needed(state.base_value()) {
+                return PreparedCampaignProjectionUpdate(
+                    PreparedCampaignProjectionUpdateInner::Reset,
+                );
+            }
+            drop(runtime_state);
+            let runtime = deterministic_runtime();
+            let selected_worker_count = runtime.worker_count_for_items(next_entities.len());
+            let Some(mut cache) = CampaignMetricCache::build(state, next_entities, runtime) else {
+                return PreparedCampaignProjectionUpdate(
+                    PreparedCampaignProjectionUpdateInner::Unsupported {
+                        lineage,
+                        entity_rows_visited: next_entities.len(),
+                        selected_worker_count,
+                    },
+                );
+            };
+            cache.revision = next_revision;
+            return PreparedCampaignProjectionUpdate(
+                PreparedCampaignProjectionUpdateInner::Rebuild {
+                    cache,
+                    entity_rows_visited: next_entities.len(),
+                    belt_rows_visited: state.belts.ids.len(),
+                    selected_worker_count,
+                },
+            );
+        };
+        let cache = cache.expect("campaign cache was checked above");
+        let mut buildings = cache.buildings.clone();
+        let mut miner_count = cache.miner_count;
+        let mut spray_coater_count = cache.spray_coater_count;
+        let mut changes = Vec::with_capacity(changed_indices.len());
+        let mut previous = None;
+        for &index in changed_indices {
+            if index >= next_entities.len() || previous.is_some_and(|value| value >= index) {
+                return PreparedCampaignProjectionUpdate(
+                    PreparedCampaignProjectionUpdateInner::Reset,
+                );
+            }
+            previous = Some(index);
+            let Some(contribution) =
+                campaign_cached_contribution(state, index, &next_entities[index])
+            else {
+                return PreparedCampaignProjectionUpdate(
+                    PreparedCampaignProjectionUpdateInner::Unsupported {
+                        lineage,
+                        entity_rows_visited: changes.len() + 1,
+                        selected_worker_count: 0,
+                    },
+                );
+            };
+            if apply_cached_contribution(
+                &mut buildings,
+                &mut miner_count,
+                &mut spray_coater_count,
+                cache.contributions[index],
+                false,
+            )
+            .is_none()
+                || apply_cached_contribution(
+                    &mut buildings,
+                    &mut miner_count,
+                    &mut spray_coater_count,
+                    contribution,
+                    true,
+                )
+                .is_none()
+            {
+                return PreparedCampaignProjectionUpdate(
+                    PreparedCampaignProjectionUpdateInner::Unsupported {
+                        lineage,
+                        entity_rows_visited: changes.len() + 1,
+                        selected_worker_count: 0,
+                    },
+                );
+            }
+            changes.push(PreparedCampaignMetricChange {
+                index,
+                contribution,
+            });
+        }
+        PreparedCampaignProjectionUpdate(PreparedCampaignProjectionUpdateInner::Incremental {
+            expected_revision: state.revision,
+            revision: next_revision,
+            lineage,
+            changes,
+            buildings,
+            miner_count,
+            belt_counts_by_minimum_tier: cache.belt_counts_by_minimum_tier.clone(),
+            spray_coater_count,
+        })
+    }
+
+    pub(crate) fn install_simulation_update(&self, update: PreparedCampaignProjectionUpdate) {
+        let mut runtime_state = self.lock();
+        match update.0 {
+            PreparedCampaignProjectionUpdateInner::Reset => {
+                runtime_state.cache = None;
+                runtime_state.unsupported_lineage = None;
+                runtime_state.diagnostics = CampaignProjectionDiagnostics {
+                    mode: "invalidated",
+                    ..CampaignProjectionDiagnostics::default()
+                };
+            }
+            PreparedCampaignProjectionUpdateInner::Unsupported {
+                lineage,
+                entity_rows_visited,
+                selected_worker_count,
+            } => {
+                runtime_state.cache = None;
+                runtime_state.unsupported_lineage = Some(lineage);
+                runtime_state.diagnostics = CampaignProjectionDiagnostics {
+                    mode: if entity_rows_visited == 0 {
+                        "unsupported-fast-path"
+                    } else {
+                        "revision-unsupported"
+                    },
+                    entity_rows_visited,
+                    belt_rows_visited: 0,
+                    selected_worker_count,
+                };
+            }
+            PreparedCampaignProjectionUpdateInner::Rebuild {
+                cache,
+                entity_rows_visited,
+                belt_rows_visited,
+                selected_worker_count,
+            } => {
+                runtime_state.cache = Some(cache);
+                runtime_state.unsupported_lineage = None;
+                runtime_state.diagnostics = CampaignProjectionDiagnostics {
+                    mode: "revision-rebuild",
+                    entity_rows_visited,
+                    belt_rows_visited,
+                    selected_worker_count,
+                };
+            }
+            PreparedCampaignProjectionUpdateInner::Incremental {
+                expected_revision,
+                revision,
+                lineage,
+                changes,
+                buildings,
+                miner_count,
+                belt_counts_by_minimum_tier,
+                spray_coater_count,
+            } => {
+                let Some(cache) = runtime_state.cache.as_mut().filter(|cache| {
+                    cache.revision == expected_revision && cache.lineage == lineage
+                }) else {
+                    runtime_state.cache = None;
+                    runtime_state.unsupported_lineage = None;
+                    runtime_state.diagnostics = CampaignProjectionDiagnostics {
+                        mode: "invalidated",
+                        ..CampaignProjectionDiagnostics::default()
+                    };
+                    return;
+                };
+                for change in &changes {
+                    cache.contributions[change.index] = change.contribution;
+                }
+                cache.revision = revision;
+                cache.buildings = buildings;
+                cache.miner_count = miner_count;
+                cache.belt_counts_by_minimum_tier = belt_counts_by_minimum_tier;
+                cache.spray_coater_count = spray_coater_count;
+                runtime_state.unsupported_lineage = None;
+                runtime_state.diagnostics = CampaignProjectionDiagnostics {
+                    mode: "incremental-update",
+                    entity_rows_visited: changes.len(),
+                    belt_rows_visited: 0,
+                    selected_worker_count: 0,
+                };
+            }
+        }
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> u64 {
+        let state = self.lock();
+        state
+            .cache
+            .as_ref()
+            .map(CampaignMetricCache::estimated_bytes)
+            .or_else(|| {
+                state
+                    .unsupported_lineage
+                    .as_ref()
+                    .map(CampaignProjectionLineage::estimated_bytes)
+            })
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn diagnostics(&self) -> CampaignProjectionDiagnostics {
+        self.lock().diagnostics
+    }
+
+    pub(crate) fn invalidate(&self) {
+        let mut state = self.lock();
+        state.cache = None;
+        state.unsupported_lineage = None;
+        state.diagnostics = CampaignProjectionDiagnostics {
+            mode: "invalidated",
+            ..CampaignProjectionDiagnostics::default()
+        };
     }
 }
 
@@ -816,8 +1524,9 @@ impl CoreState {
             .filter(|id| CHAPTERS.contains(id))
             .or_else(|| active_task_id.and_then(task_by_id).map(|task| task.chapter));
 
-        let entities = self.parse_entities_parallel()?;
-        let factory = CampaignFactoryMetrics::collect(self, &entities);
+        let factory = self
+            .campaign_projection_runtime
+            .snapshot(self, deterministic_runtime())?;
         let mut projected_task_count = 0usize;
         let mut completed_task_count = 0usize;
         let mut chapters = Vec::with_capacity(CHAPTERS.len().min(MAX_CAMPAIGN_WORKSPACE_CHAPTERS));
@@ -1166,6 +1875,7 @@ pub(crate) fn validate_state(base: &Map<String, Value>) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::deterministic_runtime::PARALLEL_MIN_ITEMS;
+    use crate::simulation::{CoreAdvanceMode, CoreAdvanceRequest};
     use serde_json::json;
     use std::time::Instant;
 
@@ -1256,6 +1966,84 @@ mod tests {
     }
 
     #[test]
+    fn completed_campaign_does_not_preload_factory_cache_until_workspace_open() {
+        let completed_ids = TASKS.iter().map(|task| task.id).collect::<Vec<_>>();
+        let mut base = crate::simple_factory::tests::construction_isolation_base();
+        base["campaign"] = json!({
+            "activeChapterId": "endgame",
+            "activeTaskId": null,
+            "completedTaskIds": completed_ids.clone(),
+            "rewardedTaskIds": completed_ids
+        });
+        let mut state = crate::simple_factory::tests::fixture_state_from_base(base, &[]);
+        assert_eq!(state.campaign_projection_runtime.estimated_bytes(), 0);
+
+        let entities = state.parse_entities_parallel().unwrap();
+        let cold_revision = state.revision + 1;
+        let cold_update = state.campaign_projection_runtime.prepare_simulation_update(
+            &state,
+            &entities,
+            Some(&[]),
+            cold_revision,
+        );
+        assert!(cold_update.factory_metrics(&state).is_none());
+        state
+            .campaign_projection_runtime
+            .install_simulation_update(cold_update);
+        state.revision = cold_revision;
+        assert_eq!(state.campaign_projection_runtime.estimated_bytes(), 0);
+        assert_eq!(
+            state.campaign_projection_runtime.diagnostics(),
+            CampaignProjectionDiagnostics {
+                mode: "invalidated",
+                entity_rows_visited: 0,
+                belt_rows_visited: 0,
+                selected_worker_count: 0,
+            }
+        );
+
+        state
+            .campaign_workspace_projection(
+                "authority-complete",
+                "run-complete",
+                state.revision,
+                "machine-e3",
+            )
+            .unwrap();
+        assert!(state.campaign_projection_runtime.estimated_bytes() > 0);
+        assert_eq!(
+            state.campaign_projection_runtime.diagnostics().mode,
+            "flat-full-cached"
+        );
+        let warm_bytes = state.campaign_projection_runtime.estimated_bytes();
+        let warm_revision = state.revision + 1;
+        let warm_update = state.campaign_projection_runtime.prepare_simulation_update(
+            &state,
+            &entities,
+            Some(&[]),
+            warm_revision,
+        );
+        assert!(warm_update.factory_metrics(&state).is_some());
+        state
+            .campaign_projection_runtime
+            .install_simulation_update(warm_update);
+        state.revision = warm_revision;
+        assert_eq!(
+            state.campaign_projection_runtime.estimated_bytes(),
+            warm_bytes
+        );
+        assert_eq!(
+            state.campaign_projection_runtime.diagnostics(),
+            CampaignProjectionDiagnostics {
+                mode: "incremental-update",
+                entity_rows_visited: 0,
+                belt_rows_visited: 0,
+                selected_worker_count: 0,
+            }
+        );
+    }
+
+    #[test]
     fn campaign_workspace_projection_is_bound_bounded_and_read_only() {
         let mut state = crate::simple_factory::tests::fixture_state(&[]);
         state.base_value_mut().insert(
@@ -1268,9 +2056,33 @@ mod tests {
             }),
         );
         let before = state.canonical_sha256().unwrap();
+        let memory_before = state.summary().unwrap().memory.estimated_runtime_bytes;
         let projection = state
             .campaign_workspace_projection("authority-1", "run-1", state.revision, "machine-e3")
             .unwrap();
+        assert_eq!(
+            state.campaign_projection_runtime.diagnostics().mode,
+            "flat-full-cached"
+        );
+        let memory_after = state.summary().unwrap().memory.estimated_runtime_bytes;
+        assert!(memory_after > memory_before);
+        assert!(state.campaign_projection_runtime.estimated_bytes() > 0);
+        let cloned = state.clone();
+        assert_eq!(cloned.campaign_projection_runtime.estimated_bytes(), 0);
+        assert!(state.campaign_projection_runtime.estimated_bytes() > 0);
+        let cached_projection = state
+            .campaign_workspace_projection("authority-1", "run-1", state.revision, "machine-e3")
+            .unwrap();
+        assert_eq!(cached_projection, projection);
+        assert_eq!(
+            state.campaign_projection_runtime.diagnostics(),
+            CampaignProjectionDiagnostics {
+                mode: "same-revision-cache",
+                entity_rows_visited: 0,
+                belt_rows_visited: 0,
+                selected_worker_count: 0,
+            }
+        );
         assert_eq!(projection["projectionType"], "campaign-workspace-v1");
         assert_eq!(projection["sessionId"], "authority-1");
         assert_eq!(projection["runId"], "run-1");
@@ -1308,5 +2120,272 @@ mod tests {
                 .campaign_workspace_projection("authority-1", "run-1", state.revision, "stale")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn campaign_projection_sparse_revisions_match_the_flat_oracle_at_1_5_and_60_seconds() {
+        let source_entities = (0..257)
+            .map(|index| {
+                if index == 0 {
+                    json!({
+                        "id": "campaign-active-machine",
+                        "kind": "machine",
+                        "planetId": "home",
+                        "powerGridId": "grid-a",
+                        "buildingId": "arc_smelter",
+                        "recipeId": "iron_ingot",
+                        "machineCount": 1,
+                        "minerCount": 0,
+                        "inputs": { "iron_ore": 1000, "proliferator_mk1": 0 },
+                        "outputs": { "iron_ingot": 0 },
+                        "progress": 0,
+                        "utilization": 0,
+                        "productionRate": 0,
+                        "routingCursor": 0,
+                        "proliferatorBonusProgress": {}
+                    })
+                } else {
+                    json!({
+                        "id": format!("campaign-cold-storage-{index:04}"),
+                        "kind": "storage",
+                        "planetId": "home",
+                        "powerGridId": "grid-a",
+                        "buildingId": "storage_mk1",
+                        "recipeId": null,
+                        "storedItemId": "iron_ingot",
+                        "machineCount": 1,
+                        "minerCount": 0,
+                        "inputs": {},
+                        "outputs": {},
+                        "progress": 0,
+                        "utilization": 0,
+                        "productionRate": 0,
+                        "routingCursor": 0,
+                        "stationTrips": 0
+                    })
+                }
+            })
+            .collect::<Vec<_>>();
+        for seconds in [1.0, 5.0, 60.0] {
+            let mut state = crate::simple_factory::tests::fixture_state_from_base(
+                crate::simple_factory::tests::construction_isolation_base(),
+                &source_entities,
+            );
+            state
+                .campaign_workspace_projection(
+                    "authority-sparse",
+                    "run-sparse",
+                    state.revision,
+                    "machine-e3",
+                )
+                .unwrap();
+            let previous_revision = state.revision;
+            let result = state
+                .advance(&CoreAdvanceRequest {
+                    base_revision: previous_revision,
+                    simulation_seconds: seconds,
+                    wall_seconds: seconds,
+                    advance_mode: CoreAdvanceMode::Exact,
+                    include_diagnostics: false,
+                })
+                .unwrap();
+            assert!(result.supported, "{seconds}s: {:?}", result.reason);
+            assert!(state.revision > previous_revision);
+            let update = state.campaign_projection_runtime.diagnostics();
+            assert_eq!(update.mode, "incremental-update", "{seconds}s");
+            assert!(
+                update.entity_rows_visited < source_entities.len(),
+                "{seconds}s visited {} of {} rows",
+                update.entity_rows_visited,
+                source_entities.len()
+            );
+            assert_eq!(update.belt_rows_visited, 0);
+
+            let flat = state.clone();
+            let incremental_projection = state
+                .campaign_workspace_projection(
+                    "authority-sparse",
+                    "run-sparse",
+                    state.revision,
+                    "machine-e3",
+                )
+                .unwrap();
+            let flat_projection = flat
+                .campaign_workspace_projection(
+                    "authority-sparse",
+                    "run-sparse",
+                    flat.revision,
+                    "machine-e3",
+                )
+                .unwrap();
+            assert_eq!(
+                serde_json::to_vec(&incremental_projection).unwrap(),
+                serde_json::to_vec(&flat_projection).unwrap(),
+                "{seconds}s"
+            );
+            assert_eq!(
+                state.canonical_sha256().unwrap(),
+                flat.canonical_sha256().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn campaign_station_trip_writers_patch_only_the_reported_rows_and_topology_fails_closed() {
+        let station = |id: &str, trips: u64| {
+            json!({
+                "id": id,
+                "kind": "station",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "interstellar_logistics_station",
+                "machineCount": 1,
+                "minerCount": 0,
+                "stationTrips": trips,
+                "inputs": {},
+                "outputs": {},
+                "stationRoutes": []
+            })
+        };
+        let mut state = crate::simple_factory::tests::fixture_state(&[
+            station("campaign-station-a", 10),
+            station("campaign-station-b", 20),
+            json!({
+                "id": "campaign-unrelated-storage",
+                "kind": "storage",
+                "planetId": "home",
+                "buildingId": "storage_mk1",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": {},
+                "outputs": {}
+            }),
+        ]);
+        state.base_value_mut().insert(
+            "campaign".to_owned(),
+            json!({
+                "activeChapterId": "foundation",
+                "activeTaskId": "mine_first_ore",
+                "completedTaskIds": [],
+                "rewardedTaskIds": []
+            }),
+        );
+        state
+            .campaign_workspace_projection(
+                "authority-writer",
+                "run-writer",
+                state.revision,
+                "machine-e3",
+            )
+            .unwrap();
+        let mut next_entities = state.parse_entities_parallel().unwrap();
+        next_entities[0]["stationTrips"] = Value::from(11);
+        next_entities[1]["stationTrips"] = Value::from(22);
+        let next_revision = state.revision + 1;
+        let update = state.campaign_projection_runtime.prepare_simulation_update(
+            &state,
+            &next_entities,
+            Some(&[0, 1]),
+            next_revision,
+        );
+        state
+            .campaign_projection_runtime
+            .install_simulation_update(update);
+        assert_eq!(
+            state.campaign_projection_runtime.diagnostics(),
+            CampaignProjectionDiagnostics {
+                mode: "incremental-update",
+                entity_rows_visited: 2,
+                belt_rows_visited: 0,
+                selected_worker_count: 0,
+            }
+        );
+        state.revision = next_revision;
+        let indexed = state
+            .campaign_projection_runtime
+            .snapshot(&state, &DeterministicRuntime::for_test(1))
+            .unwrap();
+        let flat = CampaignFactoryMetrics::collect(&state, &next_entities);
+        assert_eq!(indexed, flat);
+        assert_eq!(
+            metric_value(
+                state.base_value(),
+                &indexed,
+                Metric::StationTrips("interstellar_logistics_station", 1.0),
+            ),
+            33.0
+        );
+
+        let reset = state.campaign_projection_runtime.prepare_simulation_update(
+            &state,
+            &next_entities,
+            None,
+            state.revision + 1,
+        );
+        state
+            .campaign_projection_runtime
+            .install_simulation_update(reset);
+        assert_eq!(
+            state.campaign_projection_runtime.diagnostics().mode,
+            "invalidated"
+        );
+        assert_eq!(state.campaign_projection_runtime.estimated_bytes(), 0);
+    }
+
+    #[test]
+    fn unsupported_fractional_metric_lineage_skips_repeated_revision_rebuilds() {
+        let mut base = crate::simple_factory::tests::construction_isolation_base();
+        base["campaign"] = json!({
+            "activeChapterId": "foundation",
+            "activeTaskId": "mine_first_ore",
+            "completedTaskIds": [],
+            "rewardedTaskIds": []
+        });
+        let mut state = crate::simple_factory::tests::fixture_state_from_base(
+            base,
+            &[json!({
+                "id": "campaign-fractional-mod-station",
+                "kind": "station",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "interstellar_logistics_station",
+                "machineCount": 1,
+                "minerCount": 0,
+                "stationTrips": 0.5,
+                "inputs": {},
+                "outputs": {},
+                "stationRoutes": []
+            })],
+        );
+        assert_eq!(
+            state.campaign_projection_runtime.diagnostics().mode,
+            "opened-unsupported"
+        );
+        assert!(state.campaign_projection_runtime.estimated_bytes() > 0);
+        let entities = state.parse_entities_parallel().unwrap();
+
+        for _ in 0..2 {
+            let next_revision = state.revision + 1;
+            let update = state.campaign_projection_runtime.prepare_simulation_update(
+                &state,
+                &entities,
+                Some(&[]),
+                next_revision,
+            );
+            assert!(update.factory_metrics(&state).is_none());
+            state
+                .campaign_projection_runtime
+                .install_simulation_update(update);
+            assert_eq!(
+                state.campaign_projection_runtime.diagnostics(),
+                CampaignProjectionDiagnostics {
+                    mode: "unsupported-fast-path",
+                    entity_rows_visited: 0,
+                    belt_rows_visited: 0,
+                    selected_worker_count: 0,
+                }
+            );
+            state.revision = next_revision;
+        }
     }
 }

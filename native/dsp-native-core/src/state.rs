@@ -2643,12 +2643,17 @@ pub struct CoreState {
     /// the live cache only after every candidate proof has succeeded.
     pub(crate) operations_projection_runtime:
         crate::operations_workspace::OperationsProjectionRuntime,
+    /// Session-only Campaign factory-metric cache. The first projection scans
+    /// the factory; committed simulation revisions patch only changed rows.
+    /// It is disposable and excluded from every persistent/canonical surface.
+    pub(crate) campaign_projection_runtime: crate::campaign::CampaignProjectionRuntime,
 }
 
 #[derive(Debug, Clone)]
 struct CachedCoreStateSummary {
     revision: u64,
     operations_projection_runtime_bytes: u64,
+    campaign_projection_runtime_bytes: u64,
     summary: CoreStateSummary,
 }
 
@@ -3370,6 +3375,7 @@ impl CoreState {
             production_history_tiers: production_history_tiers.into(),
             operations_projection_runtime:
                 crate::operations_workspace::OperationsProjectionRuntime::default(),
+            campaign_projection_runtime: crate::campaign::CampaignProjectionRuntime::default(),
         };
         // Entity records remain shared by startup admission, route preparation
         // and the canonical proof. Belt records are intentionally decoded one
@@ -3378,6 +3384,17 @@ impl CoreState {
         let parsed_entities = state.parse_entities_parallel()?;
         state.rebuild_indexes_from_parsed_entities(&parsed_entities)?;
         state.refresh_factory_static_admission_with_entities(&parsed_entities)?;
+        // Pending campaign tasks consult factory topology every simulation
+        // revision, so seed their disposable metric ledger from the entity
+        // records already parsed for startup admission. Completed campaigns
+        // pay no resident cache cost unless the player opens the workspace.
+        if crate::campaign::factory_metrics_needed(&state.base) {
+            state.campaign_projection_runtime.seed_from_records(
+                &state,
+                &parsed_entities,
+                crate::deterministic_runtime::runtime(),
+            );
+        }
         if state.factory_static_admission_reason.is_none() {
             let prepared = crate::simple_factory::prepare_factory_domains_with_runtime(
                 &state,
@@ -3424,6 +3441,7 @@ impl CoreState {
             operations_projection_runtime_bytes: state
                 .operations_projection_runtime
                 .estimated_bytes(),
+            campaign_projection_runtime_bytes: state.campaign_projection_runtime.estimated_bytes(),
             summary,
         }));
         Ok(state)
@@ -4554,6 +4572,7 @@ impl CoreState {
         self.summary_cache.get_mut().take();
         self.production_history_tiers.invalidate();
         self.operations_projection_runtime.invalidate();
+        self.campaign_projection_runtime.invalidate();
         &mut self.base
     }
 
@@ -4564,6 +4583,7 @@ impl CoreState {
     pub(crate) fn take_base_for_command(&mut self) -> Map<String, Value> {
         self.summary_cache.get_mut().take();
         self.operations_projection_runtime.invalidate();
+        self.campaign_projection_runtime.invalidate();
         std::mem::take(&mut self.base)
     }
 
@@ -4573,6 +4593,7 @@ impl CoreState {
         rebuild_production_history: bool,
     ) {
         self.operations_projection_runtime.invalidate();
+        self.campaign_projection_runtime.invalidate();
         self.base = base;
         if rebuild_production_history {
             self.rebuild_production_history_tiers();
@@ -4744,6 +4765,7 @@ impl CoreState {
         self.summary_cache.get_mut().take();
         self.last_entity_raw_writeback = EntityRawWritebackDiagnostics::default();
         self.operations_projection_runtime.invalidate();
+        self.campaign_projection_runtime.invalidate();
         self.entity_raw[index] = value;
         self.save_dirty.mark_entity(index);
     }
@@ -4751,6 +4773,7 @@ impl CoreState {
     pub(crate) fn replace_belt_raw(&mut self, index: usize, value: RawRecord) {
         self.summary_cache.get_mut().take();
         self.operations_projection_runtime.invalidate();
+        self.campaign_projection_runtime.invalidate();
         self.belt_raw[index] = value;
         self.save_dirty.mark_belt(index);
     }
@@ -4761,12 +4784,14 @@ impl CoreState {
         self.save_dirty.mark_entity_topology();
         self.last_entity_raw_writeback = EntityRawWritebackDiagnostics::default();
         self.operations_projection_runtime.invalidate();
+        self.campaign_projection_runtime.invalidate();
         &mut self.entity_raw
     }
 
     pub(crate) fn belt_raw_mut_topology(&mut self) -> &mut Vec<RawRecord> {
         self.summary_cache.get_mut().take();
         self.operations_projection_runtime.invalidate();
+        self.campaign_projection_runtime.invalidate();
         self.save_dirty.mark_belt_topology();
         &mut self.belt_raw
     }
@@ -4778,6 +4803,51 @@ impl CoreState {
         belt_commit: crate::belts::BeltCommitBatch,
         next_revision: u64,
         populate_summary_cache: bool,
+    ) -> anyhow::Result<Option<CoreStateSummary>> {
+        self.commit_simulated_state_with_campaign_writers(
+            base,
+            entities,
+            belt_commit,
+            next_revision,
+            populate_summary_cache,
+            None,
+        )
+    }
+
+    pub(crate) fn commit_simulated_state_with_campaign_writers(
+        &mut self,
+        base: Map<String, Value>,
+        entities: Vec<Value>,
+        belt_commit: crate::belts::BeltCommitBatch,
+        next_revision: u64,
+        populate_summary_cache: bool,
+        campaign_metric_writer_indices: Option<&[usize]>,
+    ) -> anyhow::Result<Option<CoreStateSummary>> {
+        let campaign_projection_update =
+            self.campaign_projection_runtime.prepare_simulation_update(
+                self,
+                &entities,
+                campaign_metric_writer_indices,
+                next_revision,
+            );
+        self.commit_simulated_state_with_campaign_projection_update(
+            base,
+            entities,
+            belt_commit,
+            next_revision,
+            populate_summary_cache,
+            campaign_projection_update,
+        )
+    }
+
+    pub(crate) fn commit_simulated_state_with_campaign_projection_update(
+        &mut self,
+        base: Map<String, Value>,
+        entities: Vec<Value>,
+        belt_commit: crate::belts::BeltCommitBatch,
+        next_revision: u64,
+        populate_summary_cache: bool,
+        campaign_projection_update: crate::campaign::PreparedCampaignProjectionUpdate,
     ) -> anyhow::Result<Option<CoreStateSummary>> {
         let profile_enabled = std::env::var_os("DSP_NATIVE_CORE_PROFILE").is_some();
         let mut profile_checkpoint = std::time::Instant::now();
@@ -4912,6 +4982,9 @@ impl CoreState {
         let operations_projection_runtime = std::mem::take(&mut self.operations_projection_runtime);
         operations_projection_runtime.install_simulation_update(operations_projection_update);
         candidate.operations_projection_runtime = operations_projection_runtime;
+        let campaign_projection_runtime = std::mem::take(&mut self.campaign_projection_runtime);
+        campaign_projection_runtime.install_simulation_update(campaign_projection_update);
+        candidate.campaign_projection_runtime = campaign_projection_runtime;
         if let Some(value) = summary.as_mut() {
             value.memory = candidate.memory_estimate();
             candidate
@@ -4920,6 +4993,9 @@ impl CoreState {
                     revision: candidate.revision,
                     operations_projection_runtime_bytes: candidate
                         .operations_projection_runtime
+                        .estimated_bytes(),
+                    campaign_projection_runtime_bytes: candidate
+                        .campaign_projection_runtime
                         .estimated_bytes(),
                     summary: value.clone(),
                 }));
@@ -6356,6 +6432,7 @@ impl CoreState {
             self.parsed_entity_runtime.estimated_bytes(raw_entity_bytes);
         let operations_projection_runtime_bytes =
             self.operations_projection_runtime.estimated_bytes();
+        let campaign_projection_runtime_bytes = self.campaign_projection_runtime.estimated_bytes();
         let estimated_runtime_bytes = raw_record_bytes
             + indexed_string_bytes
             + numeric_columns
@@ -6366,6 +6443,7 @@ impl CoreState {
             + belt_activity_runtime_bytes
             + parsed_entity_runtime_bytes
             + operations_projection_runtime_bytes
+            + campaign_projection_runtime_bytes
             + serde_json::to_vec(&self.base)
                 .map(|bytes| bytes.len() as u64)
                 .unwrap_or(0);
@@ -6424,6 +6502,7 @@ impl CoreState {
     pub fn summary(&self) -> anyhow::Result<CoreStateSummary> {
         let operations_projection_runtime_bytes =
             self.operations_projection_runtime.estimated_bytes();
+        let campaign_projection_runtime_bytes = self.campaign_projection_runtime.estimated_bytes();
         if let Some(summary) = self
             .summary_cache
             .borrow()
@@ -6432,6 +6511,7 @@ impl CoreState {
                 cached.revision == self.revision
                     && cached.operations_projection_runtime_bytes
                         == operations_projection_runtime_bytes
+                    && cached.campaign_projection_runtime_bytes == campaign_projection_runtime_bytes
             })
             .map(|cached| cached.summary.clone())
         {
@@ -6442,6 +6522,7 @@ impl CoreState {
         self.summary_cache.replace(Some(CachedCoreStateSummary {
             revision: self.revision,
             operations_projection_runtime_bytes,
+            campaign_projection_runtime_bytes,
             summary: summary.clone(),
         }));
         Ok(summary)
@@ -7243,15 +7324,47 @@ mod tests {
         );
         assert_eq!(
             state.factory_topology.estimated_bytes(),
-            (state.factory_topology.vein_indices.len()
-                + state.factory_topology.production_history_rate_indices.len()
-                + state.factory_topology.non_station_indices.len()
+            (state.factory_topology.station_indices.capacity()
+                + state.factory_topology.orbital_collector_indices.capacity()
+                + state.factory_topology.quantum_endpoint_indices.capacity()
+                + state
+                    .factory_topology
+                    .construction_center_indices
+                    .capacity()
+                + state.factory_topology.time_warp_indices.capacity()
+                + state.factory_topology.logistics_buffer_indices.capacity()
+                + state
+                    .factory_topology
+                    .material_delivery_hub_indices
+                    .capacity()
+                + state
+                    .factory_topology
+                    .orbital_cargo_terminal_indices
+                    .capacity()
+                + state
+                    .factory_topology
+                    .galactic_material_exporter_indices
+                    .capacity()
+                + state
+                    .factory_topology
+                    .space_station_launcher_indices
+                    .capacity()
                 + state
                     .factory_topology
                     .system_space_station_entity_indices
-                    .len()
-                + state.factory_topology.entity_planet_indices.len()
-                + state.factory_topology.entity_grid_indices.len()) as u64
+                    .capacity()
+                + state.factory_topology.ray_receiver_indices.capacity()
+                + state.factory_topology.power_source_indices.capacity()
+                + state.factory_topology.vein_indices.capacity()
+                + state.factory_topology.ordinary_machine_indices.capacity()
+                + state
+                    .factory_topology
+                    .production_history_rate_indices
+                    .capacity()
+                + state.factory_topology.non_station_indices.capacity()
+                + state.factory_topology.research_entity_indices.capacity()
+                + state.factory_topology.entity_planet_indices.capacity()
+                + state.factory_topology.entity_grid_indices.capacity()) as u64
                 * size_of::<usize>() as u64
                 + (state.factory_topology.entities_by_planet[0].len() * size_of::<u32>()) as u64
                 + (state.factory_topology.belt_counts_by_planet.capacity() * size_of::<u32>())
@@ -7265,6 +7378,7 @@ mod tests {
                     .factory_topology
                     .entity_belt_adjacency
                     .estimated_bytes()
+                + state.factory_topology.catalog_sha256.capacity() as u64
         );
         assert_eq!(
             state.memory_estimate().topology_index_bytes,

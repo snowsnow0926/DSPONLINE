@@ -377,32 +377,49 @@ impl CoreState {
             let interstellar_peer_directory = prepared.interstellar_peer_directory.clone();
             let interstellar_route_activity = prepared.interstellar_route_activity.clone();
             profile_mark!("simulate");
-            let campaign_factory_metrics = self.record_production_history_with_campaign_metrics(
-                &mut prepared.base,
-                &prepared.entities,
-                Some(prepared.belt_flow),
-            )?;
+            let next_revision = previous_revision
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("native core revision exhausted"))?;
+            let campaign_metric_writer_indices = prepared.campaign_metric_writer_indices.take();
+            let campaign_projection_update =
+                self.campaign_projection_runtime.prepare_simulation_update(
+                    self,
+                    &prepared.entities,
+                    campaign_metric_writer_indices.as_deref(),
+                    next_revision,
+                );
+            let cached_campaign_factory_metrics =
+                if crate::campaign::factory_metrics_needed(&prepared.base) {
+                    campaign_projection_update.factory_metrics(self)
+                } else {
+                    None
+                };
+            let sampled_campaign_factory_metrics = self
+                .record_production_history_with_campaign_metrics(
+                    &mut prepared.base,
+                    &prepared.entities,
+                    Some(prepared.belt_flow),
+                    cached_campaign_factory_metrics.as_ref(),
+                )?;
             profile_mark!("production-history");
             crate::campaign::synchronize_with_factory_metrics(
                 self,
                 &mut prepared.base,
                 &prepared.entities,
-                campaign_factory_metrics,
+                cached_campaign_factory_metrics.or(sampled_campaign_factory_metrics),
             )?;
             crate::campaign::synchronize_orbital_station_eligibility(&mut prepared.base)?;
             profile_mark!("campaign");
             crate::speedrun::evaluate(self, &mut prepared.base)?;
             profile_mark!("speedrun");
             let belt_scheduler = prepared.belt_scheduler.clone();
-            let next_revision = previous_revision
-                .checked_add(1)
-                .ok_or_else(|| anyhow!("native core revision exhausted"))?;
-            let summary = self.commit_simulated_state(
+            let summary = self.commit_simulated_state_with_campaign_projection_update(
                 prepared.base,
                 prepared.entities,
                 prepared.belt_commit,
                 next_revision,
                 request.include_diagnostics,
+                campaign_projection_update,
             )?;
             self.install_prepared_belt_routes(belt_routes);
             self.install_prepared_belt_activity(belt_activity);

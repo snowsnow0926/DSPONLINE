@@ -4885,6 +4885,11 @@ fn refresh_station_mode_dependent_directories(
 
 // Keep each mutable runtime dependency explicit at the candidate boundary;
 // bundling them would obscure which wake cache is committed only on success.
+struct SimulateStepOutcome {
+    station_mode_topology_changed: bool,
+    campaign_metric_writer_indices: Vec<usize>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn simulate_step(
     state: &CoreState,
@@ -4922,10 +4927,11 @@ fn simulate_step(
     runtime: &DeterministicRuntime,
     seconds: f64,
     isolate_construction_automation: bool,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<SimulateStepOutcome> {
     let profile_enabled = crate::profile_evidence::profile_environment_enabled();
     let mut profile_checkpoint = profile_enabled.then(std::time::Instant::now);
     let mut planet_metric_writer_indices = Vec::<usize>::new();
+    let mut campaign_metric_writer_indices = Vec::<usize>::new();
     let mut planet_metric_directory_fallback = false;
     macro_rules! profile_mark {
         ($label:literal) => {
@@ -6684,6 +6690,11 @@ fn simulate_step(
     )?;
     std::sync::Arc::make_mut(planet_metrics_runtime)
         .wake_entity_indices(&remote_route_changed_station_indices);
+    // `stationTrips` is the only Campaign factory metric written by an exact
+    // simulation step. Both route domains return their writer-closed active
+    // station rows, including source/target owners and deterministic peers.
+    campaign_metric_writer_indices.extend_from_slice(&local_route_changed_station_indices);
+    campaign_metric_writer_indices.extend_from_slice(&remote_route_changed_station_indices);
     crate::interstellar_logistics::wake_dispatch_from_changed_stations(
         &local_route_changed_station_indices,
         interstellar_peer_directory,
@@ -7071,7 +7082,12 @@ fn simulate_step(
         }
     }
     profile_mark!("metrics-and-global-finalize");
-    Ok(station_mode_topology_changed)
+    campaign_metric_writer_indices.sort_unstable();
+    campaign_metric_writer_indices.dedup();
+    Ok(SimulateStepOutcome {
+        station_mode_topology_changed,
+        campaign_metric_writer_indices,
+    })
 }
 
 pub(crate) struct PreparedFactoryDomains {
@@ -7307,6 +7323,9 @@ pub(crate) struct PreparedFactoryAdvance {
         std::sync::Arc<crate::interstellar_logistics::InterstellarPeerDirectory>,
     pub interstellar_route_activity:
         std::sync::Arc<crate::interstellar_logistics::InterstellarRouteActivity>,
+    /// `Some` is the writer-closed persisted-order set for Campaign metrics;
+    /// `None` means a topology transition requires lazy flat reconstruction.
+    pub campaign_metric_writer_indices: Option<Vec<usize>>,
 }
 
 pub(crate) fn prepare_advance(
@@ -7539,6 +7558,7 @@ fn prepare_advance_with_runtime_options(
         .map(|activity| finite_number(activity.get("activityClockMs")))
         .unwrap_or(0.0);
     let mut advanced_wall = 0.0;
+    let mut campaign_metric_writer_indices = Some(Vec::<usize>::new());
     while remaining > EPSILON {
         let mut step = remaining.min(step_size);
         if wall_per_simulation_second > EPSILON
@@ -7565,7 +7585,7 @@ fn prepare_advance_with_runtime_options(
                 }
             }
         }
-        let station_mode_topology_changed = simulate_step(
+        let step_outcome = simulate_step(
             state,
             &mut base,
             &mut entities,
@@ -7589,7 +7609,8 @@ fn prepare_advance_with_runtime_options(
             isolate_construction_automation,
         )
         .context("advance native simple factory step")?;
-        if station_mode_topology_changed {
+        if step_outcome.station_mode_topology_changed {
+            campaign_metric_writer_indices = None;
             let rebuilt_belt_routes = std::sync::Arc::new(
                 crate::belts::prepare_routes_from_state(state, &entities)
                     .context("rebuild native belt routes after station mode transition")?,
@@ -7598,6 +7619,8 @@ fn prepare_advance_with_runtime_options(
                 .rebuild_activity_for_routes(state, &entities, &belt_routes, &rebuilt_belt_routes)
                 .context("rebuild native belt activity after station mode transition")?;
             belt_routes = rebuilt_belt_routes;
+        } else if let Some(indices) = campaign_metric_writer_indices.as_mut() {
+            indices.extend(step_outcome.campaign_metric_writer_indices);
         }
         let wall_step = remaining_wall.min(step * wall_per_simulation_second);
         if wall_step > 0.0 {
@@ -7649,6 +7672,10 @@ fn prepare_advance_with_runtime_options(
             )?;
         }
         crate::speedrun::advance_clock(state, &mut base, remaining_wall)?;
+    }
+    if let Some(indices) = campaign_metric_writer_indices.as_mut() {
+        indices.sort_unstable();
+        indices.dedup();
     }
     profile_mark!("simulate-steps");
     let belt_activity = belt_runtime.activity_snapshot(&belt_routes);
@@ -7720,6 +7747,7 @@ fn prepare_advance_with_runtime_options(
         quantum_transition_runtime,
         interstellar_peer_directory,
         interstellar_route_activity,
+        campaign_metric_writer_indices,
     })
 }
 
@@ -8195,7 +8223,7 @@ pub(crate) mod tests {
         .unwrap()
     }
 
-    fn fixture_state_from_base(base: Value, entities: &[Value]) -> CoreState {
+    pub(crate) fn fixture_state_from_base(base: Value, entities: &[Value]) -> CoreState {
         fixture_state_from_base_with_registry(base, entities, "machine-e3")
     }
 
@@ -8203,7 +8231,7 @@ pub(crate) mod tests {
         fixture_state_from_base(fixture_base(), entities)
     }
 
-    fn construction_isolation_base() -> Value {
+    pub(crate) fn construction_isolation_base() -> Value {
         const SYSTEM_IDS: [&str; 8] = [
             "helios",
             "borealis",

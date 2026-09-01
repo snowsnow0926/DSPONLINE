@@ -3554,6 +3554,12 @@ fn target_consumes(
     if string_at(target, "buildingId") == Some("orbital_cargo_terminal") {
         return crate::orbital_station::terminal_accepts(state, target, item_id, target_port_index);
     }
+    if string_at(target, "buildingId") == Some("galactic_material_exporter") {
+        return matches!(
+            item_id,
+            "universe_matrix" | "solar_sail" | "small_carrier_rocket" | "antimatter_fuel_rod"
+        );
+    }
     if matches!(
         string_at(target, "buildingId"),
         Some("micro_black_hole_connector" | "material_delivery_hub")

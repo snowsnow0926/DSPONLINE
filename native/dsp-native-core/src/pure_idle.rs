@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use anyhow::{anyhow, bail};
+use num_bigint::BigUint;
+use num_traits::ToPrimitive;
 use serde_json::{Map, Number, Value};
 
 use crate::construction::ConstructionRunReceipt;
@@ -21,7 +23,7 @@ use crate::state::{
 const ALGORITHM_VERSION: &str =
     "native-pure-idle-conservative-v4-session-bounded-30s-settlement-proof-v1";
 const MACRO_V10_ALGORITHM_VERSION: &str =
-    "native-pure-idle-macro-v10-closed-ledger-construction-quantum-v14";
+    "native-pure-idle-macro-v10-closed-ledger-construction-quantum-v15";
 const MACRO_V10_CALIBRATION_WINDOW_SECONDS: f64 = 10.0;
 const MICROS_PER_SECOND: i128 = 1_000_000;
 const DYSON_ROCKET_LAUNCH_ENERGY_MICRO_MJ: i128 = 108_000_000;
@@ -249,6 +251,11 @@ struct SettlementProofSnapshot {
     renewable_power: RenewablePowerProofSnapshot,
     research: ResearchProofSnapshot,
     finite_veins: BTreeMap<String, FiniteVeinProofSnapshot>,
+    /// Runtime-only terminal endpoints. Malformed or older optional terminal
+    /// state does not make an otherwise loadable v47 save invalid; it simply
+    /// cannot earn a productive macro-tail certificate.
+    galactic_export: Option<crate::galactic_exports::CertifiedPureIdleExportEndpoint>,
+    orbital_contracts: Option<crate::orbital_station::PureIdleContractEndpoint>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -329,6 +336,35 @@ struct DysonSailSinkCertificate {
     expected: DysonTerminalSnapshot,
 }
 
+/// A physical Galactic export sink funded exclusively by production observed
+/// inside the same exact calibration windows. Construction-activity personal
+/// totals and pending batches are mirrors/outbox state, never a second sink or
+/// an owned inventory source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GalacticExportSinkCertificate {
+    consumed_units_per_second: MaterialTotals,
+    expected: crate::galactic_exports::CertifiedPureIdleExportEndpoint,
+}
+
+/// An accepted orbital-contract sink. The endpoint binds accepted-array and
+/// requirement order; its helper rejects source-restricted/quantum channels
+/// and clips one unit before the first claimable/reward boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OrbitalContractSinkCertificate {
+    consumed_units_per_second: MaterialTotals,
+    requirement_rates: Vec<OrbitalContractRequirementRate>,
+    expected: crate::orbital_station::PureIdleContractEndpoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OrbitalContractRequirementRate {
+    contract_index: usize,
+    contract_id: String,
+    requirement_index: usize,
+    item_id: String,
+    units_per_second: i128,
+}
+
 /// Per-vein depletion receipt for a stable finite source. The current public
 /// v47 fields remain the ledger: no new persisted format or hidden material
 /// balance is introduced.
@@ -373,6 +409,12 @@ struct OrdinaryFlowCertificate {
     /// is extrapolated; orbit decay and shell absorption are advanced by the
     /// native Dyson lifecycle from the committed endpoint.
     dyson_sail: Option<DysonSailSinkCertificate>,
+    /// Optional activity-bounded building export terminal. Its activity
+    /// reporting rows are non-material mirrors of this physical sink.
+    galactic_export: Option<GalacticExportSinkCertificate>,
+    /// Optional accepted-contract terminal funded by the same closed gross
+    /// production vector as every other ordinary sink.
+    orbital_contracts: Option<OrbitalContractSinkCertificate>,
     /// Runtime-only, per-grid lower-bound proof. It is present only when a
     /// solar-sail lifecycle shares power authority with dynamic ray receivers.
     renewable_power: Option<RenewablePowerTailCertificate>,
@@ -383,6 +425,8 @@ struct OrdinaryTerminalCertificates {
     research: Option<ResearchSinkCertificate>,
     dyson_rocket: Option<DysonRocketSinkCertificate>,
     dyson_sail: Option<DysonSailSinkCertificate>,
+    galactic_export: Option<GalacticExportSinkCertificate>,
+    orbital_contracts: Option<OrbitalContractSinkCertificate>,
     renewable_power: Option<RenewablePowerTailCertificate>,
 }
 
@@ -657,6 +701,12 @@ struct PrefixBudget {
     exact_simulation_seconds: f64,
     exact_wall_seconds: f64,
     frozen_tail_seconds: f64,
+    /// Wall-clock share paired with the frozen simulated tail. Material
+    /// terminals normally ignore wall time, but an activity-scoped export
+    /// certificate must stop at its persisted half-open start/end boundary.
+    /// Keeping the remainder explicit also makes one long request and any
+    /// ordered segmentation advance that boundary by the same total amount.
+    frozen_tail_wall_seconds: f64,
 }
 
 fn prefix_budget(
@@ -674,6 +724,7 @@ fn prefix_budget(
         exact_simulation_seconds,
         exact_wall_seconds,
         frozen_tail_seconds: (simulation_seconds - exact_simulation_seconds).max(0.0),
+        frozen_tail_wall_seconds: (wall_seconds - exact_wall_seconds).max(0.0),
     }
 }
 
@@ -1628,6 +1679,9 @@ fn capture_settlement_snapshot_with_runtime(
         renewable_power: capture_renewable_power_proof_snapshot(state)?,
         research: capture_research_proof_snapshot(state)?,
         finite_veins: capture_finite_veins(state)?,
+        galactic_export: crate::galactic_exports::capture_certified_pure_idle_export_endpoint(base)
+            .ok(),
+        orbital_contracts: crate::orbital_station::capture_pure_idle_contract_endpoint(state).ok(),
         ..SettlementProofSnapshot::default()
     };
 
@@ -1882,48 +1936,10 @@ fn capture_settlement_snapshot_with_runtime(
         }
     }
 
-    if let Some(activity) = base
-        .get("endgame")
-        .and_then(Value::as_object)
-        .and_then(|endgame| endgame.get("constructionActivity"))
-    {
-        add_nested_store(
-            &mut snapshot.consumed,
-            Some(activity),
-            &["personalDelivered"],
-            "endgame.constructionActivity.personalDelivered",
-        )?;
-        if let Some(batches) = activity
-            .as_object()
-            .and_then(|activity| activity.get("pendingBatches"))
-            && !batches.is_null()
-        {
-            let batches = batches.as_object().ok_or_else(|| {
-                anyhow!("endgame.constructionActivity.pendingBatches is not an object")
-            })?;
-            for (batch_id, batch) in batches {
-                if batch.is_null() {
-                    continue;
-                }
-                let batch = batch.as_object().ok_or_else(|| {
-                    anyhow!("constructionActivity.pendingBatches.{batch_id} is not an object")
-                })?;
-                let item_id = batch
-                    .get("itemId")
-                    .and_then(Value::as_str)
-                    .unwrap_or(batch_id);
-                add_material_amount(
-                    &mut snapshot.owned,
-                    item_id,
-                    proof_counter(
-                        batch.get("amount"),
-                        &format!("constructionActivity.pendingBatches.{batch_id}.amount"),
-                    )?,
-                    &format!("constructionActivity.pendingBatches.{batch_id}"),
-                )?;
-            }
-        }
-    }
+    // constructionActivity.personalDelivered and pendingBatches are two
+    // reporting views of the same physical Galactic delivery represented by
+    // exportProjects.*.totalDelivered below. Counting either as material would
+    // double-consume or re-mint an outbox row as owned stock.
 
     const GALACTIC_EXPORT_ITEMS: [(&str, &str); 4] = [
         ("universe_archive", "universe_matrix"),
@@ -4293,7 +4309,11 @@ fn collection_has_entries(value: Option<&Value>) -> bool {
     })
 }
 
-fn active_recipe_tail_exclusion_reason(state: &CoreState) -> Option<String> {
+fn active_recipe_tail_exclusion_reason(
+    state: &CoreState,
+    allow_certified_galactic_export: bool,
+    allow_certified_orbital_contracts: bool,
+) -> Option<String> {
     let base = state.base_value();
     let endgame = base.get("endgame").and_then(Value::as_object);
     if collection_has_entries(base.get("handcraftQueue"))
@@ -4301,11 +4321,11 @@ fn active_recipe_tail_exclusion_reason(state: &CoreState) -> Option<String> {
     {
         return Some("handcraft or construction work is active".to_owned());
     }
-    if endgame
-        .and_then(|endgame| endgame.get("autoDispatch"))
-        .and_then(Value::as_bool)
-        == Some(true)
-        || endgame
+    if !allow_certified_galactic_export {
+        let input_mode = endgame
+            .and_then(|endgame| endgame.get("exportInputMode"))
+            .and_then(Value::as_str);
+        let enabled_project = endgame
             .and_then(|endgame| endgame.get("exportProjects"))
             .and_then(Value::as_object)
             .is_some_and(|projects| {
@@ -4315,28 +4335,49 @@ fn active_recipe_tail_exclusion_reason(state: &CoreState) -> Option<String> {
                         .and_then(Value::as_bool)
                         .unwrap_or(false)
                 })
-            })
-    {
-        return Some("galactic export is active".to_owned());
+            });
+        let legacy_dispatch_can_consume = input_mode == Some("legacy-network")
+            && enabled_project
+            && endgame
+                .and_then(|endgame| endgame.get("autoDispatch"))
+                .and_then(Value::as_bool)
+                == Some(true);
+        let activity_can_consume = input_mode == Some("building")
+            && endgame
+                .and_then(|endgame| endgame.get("constructionActivity"))
+                .and_then(Value::as_object)
+                .is_some_and(|activity| {
+                    let counter = |key: &str| {
+                        activity
+                            .get(key)
+                            .and_then(Value::as_f64)
+                            .filter(|value| value.is_finite())
+                            .unwrap_or(0.0)
+                    };
+                    activity
+                        .get("activityId")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| !id.is_empty())
+                        && counter("activityClockMs") < counter("endsAtMs")
+                });
+        if legacy_dispatch_can_consume || activity_can_consume {
+            return Some("galactic export can consume material".to_owned());
+        }
     }
-    if let Some(activity) = endgame
-        .and_then(|endgame| endgame.get("constructionActivity"))
-        .and_then(Value::as_object)
-        && (activity
-            .get("activityId")
-            .and_then(Value::as_str)
-            .is_some_and(|id| !id.is_empty())
-            || collection_has_entries(activity.get("pendingBatches")))
-    {
-        return Some("galactic construction delivery is active".to_owned());
-    }
-    if collection_has_entries(
-        base.get("orbitalStation")
+    if !allow_certified_orbital_contracts
+        && base
+            .get("orbitalStation")
             .and_then(Value::as_object)
             .and_then(|station| station.get("contractBoard"))
             .and_then(Value::as_object)
-            .and_then(|board| board.get("accepted")),
-    ) {
+            .and_then(|board| board.get("accepted"))
+            .and_then(Value::as_array)
+            .is_some_and(|accepted| {
+                accepted.iter().any(|contract| {
+                    contract.get("status").and_then(Value::as_str) == Some("accepted")
+                })
+            })
+    {
         return Some("orbital station contract delivery is active".to_owned());
     }
     None
@@ -4347,8 +4388,14 @@ fn active_ordinary_recipe_ids(
     allow_certified_rocket_terminal: bool,
     allow_certified_sail_terminal: bool,
     allow_certified_ray_power_terminal: bool,
+    allow_certified_galactic_export: bool,
+    allow_certified_orbital_contracts: bool,
 ) -> Result<Vec<String>, String> {
-    if let Some(reason) = active_recipe_tail_exclusion_reason(state) {
+    if let Some(reason) = active_recipe_tail_exclusion_reason(
+        state,
+        allow_certified_galactic_export,
+        allow_certified_orbital_contracts,
+    ) {
         return Err(format!("ordinary recipe tail is excluded while {reason}"));
     }
     let mut recipe_ids = Vec::new();
@@ -4532,6 +4579,7 @@ fn capture_ordinary_window_flow(
     before: &SettlementProofSnapshot,
     after: &SettlementProofSnapshot,
     allow_certified_dyson_terminal: bool,
+    certified_physical_terminal_consumed: &MaterialTotals,
 ) -> Result<OrdinaryWindowFlow, String> {
     if !allow_certified_dyson_terminal && before.dyson != after.dyson {
         return Err("Dyson rocket, sail or structure state changed during calibration".to_owned());
@@ -4554,6 +4602,7 @@ fn capture_ordinary_window_flow(
         &after.consumed,
         &before.granted,
         &after.granted,
+        certified_physical_terminal_consumed,
     ]) {
         let produced =
             checked_material_delta(&before.produced, &after.produced, &item_id, "produced")?;
@@ -4570,9 +4619,13 @@ fn capture_ordinary_window_flow(
                 "{item_id} cumulative calibration counter regressed"
             ));
         }
-        if terminal_consumed != 0 {
+        let certified_terminal_consumed = certified_physical_terminal_consumed
+            .get(&item_id)
+            .copied()
+            .unwrap_or(0);
+        if terminal_consumed != certified_terminal_consumed {
             return Err(format!(
-                "{item_id} had terminal export, destruction or delivery consumption"
+                "{item_id} terminal consumption {terminal_consumed} does not match certified physical delivery {certified_terminal_consumed}"
             ));
         }
         if granted != 0 {
@@ -4586,6 +4639,11 @@ fn capture_ordinary_window_flow(
                 -net_owned
             ));
         }
+        // `produced - net owned` is the total item sink: ordinary recipe use
+        // plus the certified physical terminal exactly once. The certificate
+        // builder independently reconstructs those components and compares
+        // their sum with this observed total, so mirrors/outboxes cannot be
+        // charged twice and an unmodelled sink cannot hide inside the delta.
         let ordinary_consumed = produced
             .checked_sub(net_owned)
             .ok_or_else(|| format!("{item_id} ordinary consumption overflowed"))?;
@@ -4594,10 +4652,17 @@ fn capture_ordinary_window_flow(
                 "{item_id} owned growth {net_owned} exceeds production {produced}"
             ));
         }
+        if ordinary_consumed < certified_terminal_consumed {
+            return Err(format!(
+                "{item_id} total consumption {ordinary_consumed} is below certified physical terminal consumption {certified_terminal_consumed}"
+            ));
+        }
+        let internal_consumed = ordinary_consumed - certified_terminal_consumed;
         let window_seconds = MACRO_V10_CALIBRATION_WINDOW_SECONDS as i128;
         for (label, value) in [
             ("produced", produced),
             ("consumed", ordinary_consumed),
+            ("internalConsumed", internal_consumed),
             ("owned", net_owned),
         ] {
             if value % window_seconds != 0 {
@@ -4742,6 +4807,328 @@ fn stable_window_rate(deltas: &[i128], label: &str) -> Result<i128, String> {
         ));
     }
     Ok(deltas[0] / window_seconds)
+}
+
+fn stable_window_material_rates(
+    windows: &[MaterialTotals],
+    label: &str,
+) -> Result<MaterialTotals, String> {
+    if windows.len() != 3 {
+        return Err(format!(
+            "{label} requires three calibration windows, observed {}",
+            windows.len()
+        ));
+    }
+    let mut rates = MaterialTotals::new();
+    for item_id in material_ids(windows.iter()) {
+        let deltas = windows
+            .iter()
+            .map(|window| window.get(&item_id).copied().unwrap_or(0))
+            .collect::<Vec<_>>();
+        let rate = stable_window_rate(&deltas, &format!("{label} {item_id}"))?;
+        if rate > 0 {
+            rates.insert(item_id, rate);
+        }
+    }
+    Ok(rates)
+}
+
+fn biguint_material_totals(
+    values: &BTreeMap<String, BigUint>,
+    label: &str,
+) -> Result<MaterialTotals, String> {
+    values
+        .iter()
+        .map(|(item_id, amount)| {
+            amount
+                .to_i128()
+                .filter(|amount| *amount <= MAX_SAFE_INTEGER as i128)
+                .map(|amount| (item_id.clone(), amount))
+                .ok_or_else(|| format!("{label} {item_id} exceeds the proof ledger"))
+        })
+        .collect()
+}
+
+fn build_galactic_export_sink_certificate(
+    state: &CoreState,
+    snapshots: &[SettlementProofSnapshot],
+) -> Result<Option<GalacticExportSinkCertificate>, String> {
+    let endpoints = snapshots
+        .iter()
+        .map(|snapshot| snapshot.galactic_export.as_ref())
+        .collect::<Option<Vec<_>>>();
+    let Some(endpoints) = endpoints else {
+        if snapshots
+            .iter()
+            .all(|snapshot| snapshot.galactic_export.is_none())
+        {
+            return Ok(None);
+        }
+        return Err(
+            "Galactic export endpoint was malformed or disappeared during calibration".to_owned(),
+        );
+    };
+    let mut windows = Vec::with_capacity(3);
+    for pair in endpoints.windows(2) {
+        let delta =
+            crate::galactic_exports::delta_certified_pure_idle_export_endpoints(pair[0], pair[1])
+                .map_err(|error| format!("Galactic export calibration rejected: {error:#}"))?;
+        if delta.pending_activity_batches_are_owned_inventory {
+            return Err("Galactic activity outbox was misclassified as owned inventory".to_owned());
+        }
+        if delta
+            .level_boundaries
+            .values()
+            .any(|boundary| boundary.level_before != boundary.level_after)
+        {
+            return Err(
+                "Galactic export crossed a level/reward boundary during calibration".to_owned(),
+            );
+        }
+        windows.push(delta.physical_consumed_by_item);
+    }
+    let consumed_units_per_second = stable_window_material_rates(&windows, "Galactic export")?;
+    if consumed_units_per_second.is_empty() {
+        return Ok(None);
+    }
+    let current =
+        crate::galactic_exports::capture_certified_pure_idle_export_endpoint(state.base_value())
+            .map_err(|error| format!("current Galactic export endpoint is invalid: {error:#}"))?;
+    if current != *endpoints[0]
+        && current
+            != **endpoints
+                .last()
+                .expect("four terminal snapshots own a final endpoint")
+    {
+        return Err(
+            "Galactic export endpoint is neither the probe start nor committed endpoint".to_owned(),
+        );
+    }
+    let expected = current;
+    if expected.input_mode != crate::galactic_exports::CertifiedPureIdleExportInputMode::Building
+        || expected.auto_dispatch
+        || expected.activity.phase
+            != crate::galactic_exports::CertifiedPureIdleExportActivityPhase::Active
+    {
+        return Err("Galactic export is not an activity-bounded building terminal".to_owned());
+    }
+    Ok(Some(GalacticExportSinkCertificate {
+        consumed_units_per_second,
+        expected,
+    }))
+}
+
+fn build_orbital_contract_sink_certificate(
+    state: &CoreState,
+    snapshots: &[SettlementProofSnapshot],
+) -> Result<Option<OrbitalContractSinkCertificate>, String> {
+    let endpoints = snapshots
+        .iter()
+        .map(|snapshot| snapshot.orbital_contracts.as_ref())
+        .collect::<Option<Vec<_>>>();
+    let Some(endpoints) = endpoints else {
+        if snapshots
+            .iter()
+            .all(|snapshot| snapshot.orbital_contracts.is_none())
+        {
+            return Ok(None);
+        }
+        return Err(
+            "orbital contract endpoint was malformed or disappeared during calibration".to_owned(),
+        );
+    };
+    let mut receipts = Vec::with_capacity(3);
+    for pair in endpoints.windows(2) {
+        let receipt =
+            crate::orbital_station::pure_idle_contract_consumption_between(pair[0], pair[1])
+                .map_err(|error| format!("orbital contract calibration rejected: {error:#}"))?;
+        if !receipt.claimable_contract_ids.is_empty() {
+            return Err(
+                "orbital contract crossed a claimable/reward boundary during calibration"
+                    .to_owned(),
+            );
+        }
+        receipts.push(receipt);
+    }
+    let first_rows = receipts
+        .first()
+        .map(|receipt| receipt.requirement_deltas.as_slice())
+        .ok_or_else(|| "orbital contract produced no interval receipts".to_owned())?;
+    if receipts
+        .iter()
+        .any(|receipt| receipt.requirement_deltas.len() != first_rows.len())
+    {
+        return Err("orbital contract requirement shape changed between windows".to_owned());
+    }
+    let mut consumed_units_per_second = MaterialTotals::new();
+    let mut requirement_rates = Vec::new();
+    for (row_index, first) in first_rows.iter().enumerate() {
+        let rows = receipts
+            .iter()
+            .map(|receipt| &receipt.requirement_deltas[row_index])
+            .collect::<Vec<_>>();
+        if rows.iter().any(|row| {
+            row.contract_index != first.contract_index
+                || row.contract_id != first.contract_id
+                || row.requirement_index != first.requirement_index
+                || row.item_id != first.item_id
+        }) {
+            return Err(format!(
+                "orbital contract requirement row {row_index} changed identity between windows"
+            ));
+        }
+        let deltas = rows
+            .iter()
+            .map(|row| {
+                row.delivered.to_i128().ok_or_else(|| {
+                    format!(
+                        "orbital contract requirement {}/{} exceeds the proof ledger",
+                        row.contract_id, row.requirement_index
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let rate = stable_window_rate(
+            &deltas,
+            &format!(
+                "orbital contract requirement {}/{}",
+                first.contract_id, first.requirement_index
+            ),
+        )?;
+        if rate > 0 {
+            let current = consumed_units_per_second
+                .get(&first.item_id)
+                .copied()
+                .unwrap_or(0);
+            consumed_units_per_second.insert(
+                first.item_id.clone(),
+                current
+                    .checked_add(rate)
+                    .ok_or_else(|| format!("orbital contract {} rate overflowed", first.item_id))?,
+            );
+            requirement_rates.push(OrbitalContractRequirementRate {
+                contract_index: first.contract_index,
+                contract_id: first.contract_id.clone(),
+                requirement_index: first.requirement_index,
+                item_id: first.item_id.clone(),
+                units_per_second: rate,
+            });
+        }
+    }
+    let aggregate_windows = receipts
+        .iter()
+        .map(|receipt| {
+            biguint_material_totals(
+                &receipt.consumed_by_item,
+                "orbital contract aggregate consumption",
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if stable_window_material_rates(&aggregate_windows, "orbital contract aggregate")?
+        != consumed_units_per_second
+    {
+        return Err("orbital contract requirement and aggregate rates disagree".to_owned());
+    }
+    if consumed_units_per_second.is_empty() {
+        return Ok(None);
+    }
+    let current = crate::orbital_station::capture_pure_idle_contract_endpoint(state)
+        .map_err(|error| format!("current orbital contract endpoint is invalid: {error:#}"))?;
+    if current != *endpoints[0]
+        && current
+            != **endpoints
+                .last()
+                .expect("four terminal snapshots own a final endpoint")
+    {
+        return Err(
+            "orbital contract endpoint is neither the probe start nor committed endpoint"
+                .to_owned(),
+        );
+    }
+    let expected = current;
+    let (one_second_budget, one_second_steps) =
+        orbital_contract_schedule(&expected, &requirement_rates, 1)?;
+    let plan = crate::orbital_station::plan_certified_pure_idle_contract_delivery_steps(
+        &expected,
+        &one_second_budget,
+        &one_second_steps,
+    )
+    .map_err(|error| format!("orbital contract terminal is not certifiable: {error:#}"))?;
+    if plan.planned_consumed_by_item != one_second_budget {
+        return Err(
+            "orbital contract has less than one whole certified second before its boundary"
+                .to_owned(),
+        );
+    }
+    Ok(Some(OrbitalContractSinkCertificate {
+        consumed_units_per_second,
+        requirement_rates,
+        expected,
+    }))
+}
+
+fn orbital_contract_schedule(
+    endpoint: &crate::orbital_station::PureIdleContractEndpoint,
+    rates: &[OrbitalContractRequirementRate],
+    seconds: i128,
+) -> Result<
+    (
+        BTreeMap<String, BigUint>,
+        Vec<crate::orbital_station::PureIdleContractDeliveryStep>,
+    ),
+    String,
+> {
+    if seconds < 0 {
+        return Err("orbital contract schedule regressed".to_owned());
+    }
+    let mut budget = BTreeMap::<String, BigUint>::new();
+    let mut steps = Vec::new();
+    for rate in rates {
+        if rate.units_per_second <= 0 {
+            return Err(format!(
+                "orbital contract {}/{} has a non-positive rate",
+                rate.contract_id, rate.requirement_index
+            ));
+        }
+        let contract = endpoint
+            .accepted
+            .get(rate.contract_index)
+            .filter(|contract| contract.config.id == rate.contract_id)
+            .ok_or_else(|| {
+                format!(
+                    "orbital contract target {} disappeared from persisted index {}",
+                    rate.contract_id, rate.contract_index
+                )
+            })?;
+        let requirement = contract
+            .requirements
+            .get(rate.requirement_index)
+            .filter(|requirement| requirement.config.item_id == rate.item_id)
+            .ok_or_else(|| {
+                format!(
+                    "orbital contract target {}/{} changed item identity",
+                    rate.contract_id, rate.requirement_index
+                )
+            })?;
+        let amount = rate
+            .units_per_second
+            .checked_mul(seconds)
+            .ok_or_else(|| "orbital contract schedule overflowed".to_owned())?;
+        if amount == 0 {
+            continue;
+        }
+        let amount = BigUint::from(amount as u128);
+        *budget.entry(rate.item_id.clone()).or_default() += &amount;
+        steps.push(crate::orbital_station::PureIdleContractDeliveryStep {
+            contract_index: rate.contract_index,
+            contract_id: rate.contract_id.clone(),
+            requirement_index: rate.requirement_index,
+            item_id: rate.item_id.clone(),
+            expected_delivered: requirement.delivered.clone(),
+            amount,
+        });
+    }
+    Ok((budget, steps))
 }
 
 fn dyson_sail_state_unchanged(
@@ -5498,6 +5885,8 @@ fn build_closed_recipe_certificate(
         research,
         dyson_rocket,
         dyson_sail,
+        galactic_export,
+        orbital_contracts,
         renewable_power,
     } = terminals;
     let recipe_ids = active_ordinary_recipe_ids(
@@ -5505,11 +5894,18 @@ fn build_closed_recipe_certificate(
         dyson_rocket.is_some(),
         dyson_sail.is_some(),
         renewable_power.is_some(),
+        galactic_export.is_some(),
+        orbital_contracts.is_some(),
     )?;
-    if recipe_ids.is_empty() && research.is_none() && dyson_rocket.is_none() && dyson_sail.is_none()
+    if recipe_ids.is_empty()
+        && research.is_none()
+        && dyson_rocket.is_none()
+        && dyson_sail.is_none()
+        && galactic_export.is_none()
+        && orbital_contracts.is_none()
     {
         return Err(
-            "no active ordinary recipe, research sink or Dyson terminal sink is available"
+            "no active ordinary recipe, research, Dyson, export or contract sink is available"
                 .to_owned(),
         );
     }
@@ -5620,6 +6016,46 @@ fn build_closed_recipe_certificate(
         .iter()
         .flat_map(|inputs| inputs.keys().cloned())
         .collect::<BTreeSet<_>>();
+    // v15 keeps terminal routing deliberately unambiguous. A material may
+    // feed ordinary recipe inputs and one terminal, but it may not be split
+    // between two independently stateful terminals until a persisted,
+    // deterministic per-sink allocator exists.
+    let mut terminal_owner = BTreeMap::<String, &'static str>::new();
+    let mut claim_terminal_items =
+        |owner: &'static str, rates: &MaterialTotals| -> Result<(), String> {
+            for item_id in rates.keys() {
+                if let Some(previous) = terminal_owner.insert(item_id.clone(), owner) {
+                    return Err(format!(
+                        "terminal material {item_id} is shared by {previous} and {owner}"
+                    ));
+                }
+            }
+            Ok(())
+        };
+    if let Some(research) = &research {
+        claim_terminal_items("research", &research.consumed_units_per_second)?;
+    }
+    if let Some(rocket) = &dyson_rocket {
+        claim_terminal_items(
+            "Dyson rocket",
+            &MaterialTotals::from([(
+                TERMINAL_ROCKET_ITEM_ID.to_owned(),
+                rocket.launches_per_second,
+            )]),
+        )?;
+    }
+    if let Some(sail) = &dyson_sail {
+        claim_terminal_items(
+            "Dyson sail",
+            &MaterialTotals::from([(TERMINAL_SAIL_ITEM_ID.to_owned(), sail.launches_per_second)]),
+        )?;
+    }
+    if let Some(export) = &galactic_export {
+        claim_terminal_items("Galactic export", &export.consumed_units_per_second)?;
+    }
+    if let Some(contracts) = &orbital_contracts {
+        claim_terminal_items("orbital contract", &contracts.consumed_units_per_second)?;
+    }
     if let Some(research) = &research {
         for item_id in research.consumed_units_per_second.keys() {
             if !sources.contains(item_id) && !output_producer.contains_key(item_id) {
@@ -5651,6 +6087,35 @@ fn build_closed_recipe_certificate(
         allowed_consumption.insert(TERMINAL_SAIL_ITEM_ID.to_owned());
         if sail.launches_per_second <= 0 {
             return Err("Dyson solar-sail sink has a non-positive launch rate".to_owned());
+        }
+    }
+    for (terminal, label) in [
+        (
+            galactic_export
+                .as_ref()
+                .map(|terminal| &terminal.consumed_units_per_second),
+            "Galactic export",
+        ),
+        (
+            orbital_contracts
+                .as_ref()
+                .map(|terminal| &terminal.consumed_units_per_second),
+            "orbital contract",
+        ),
+    ] {
+        let Some(terminal) = terminal else {
+            continue;
+        };
+        for (item_id, rate) in terminal {
+            if *rate <= 0 {
+                return Err(format!("{label} {item_id} has a non-positive rate"));
+            }
+            if !sources.contains(item_id) && !output_producer.contains_key(item_id) {
+                return Err(format!(
+                    "{label} input {item_id} has no certified vein source or active producer"
+                ));
+            }
+            allowed_consumption.insert(item_id.clone());
         }
     }
     for item_id in flow.produced_per_second.keys() {
@@ -5730,6 +6195,33 @@ fn build_closed_recipe_certificate(
                 .ok_or_else(|| "Dyson solar-sail consumption rate overflowed".to_owned())?,
         );
     }
+    for (terminal, label) in [
+        (
+            galactic_export
+                .as_ref()
+                .map(|terminal| &terminal.consumed_units_per_second),
+            "Galactic export",
+        ),
+        (
+            orbital_contracts
+                .as_ref()
+                .map(|terminal| &terminal.consumed_units_per_second),
+            "orbital contract",
+        ),
+    ] {
+        let Some(terminal) = terminal else {
+            continue;
+        };
+        for (item_id, rate) in terminal {
+            let current = expected_consumption.get(item_id).copied().unwrap_or(0);
+            expected_consumption.insert(
+                item_id.clone(),
+                current
+                    .checked_add(*rate)
+                    .ok_or_else(|| format!("{label} {item_id} consumption rate overflowed"))?,
+            );
+        }
+    }
     for (recipe_index, inputs) in recipe_inputs.iter().enumerate() {
         for (item_id, input_amount) in inputs {
             let consumed = input_amount
@@ -5756,8 +6248,11 @@ fn build_closed_recipe_certificate(
         &flow.net_owned_per_second,
         &expected_consumption,
     ]);
-    let mut has_terminal_product =
-        research.is_some() || dyson_rocket.is_some() || dyson_sail.is_some();
+    let mut has_terminal_product = research.is_some()
+        || dyson_rocket.is_some()
+        || dyson_sail.is_some()
+        || galactic_export.is_some()
+        || orbital_contracts.is_some();
     for item_id in ledger_items {
         if !allowed_production.contains(&item_id) && !allowed_consumption.contains(&item_id) {
             return Err(format!(
@@ -5799,20 +6294,31 @@ fn build_closed_recipe_certificate(
         research,
         dyson_rocket,
         dyson_sail,
+        galactic_export,
+        orbital_contracts,
         renewable_power,
     })
 }
 
 fn capture_stable_ordinary_window_flow(
     snapshots: &[SettlementProofSnapshot],
-    terminal_consumption: bool,
+    allow_certified_dyson_terminal: bool,
+    certified_terminal_windows: &[MaterialTotals],
 ) -> Result<OrdinaryWindowFlow, String> {
+    if certified_terminal_windows.len() != 3 {
+        return Err(format!(
+            "terminal ledger requires three calibration windows, observed {}",
+            certified_terminal_windows.len()
+        ));
+    }
     let mut windows = Vec::with_capacity(3);
-    for window in snapshots.windows(2) {
+    for (window, certified_terminal) in snapshots.windows(2).zip(certified_terminal_windows.iter())
+    {
         windows.push(capture_ordinary_window_flow(
             &window[0],
             &window[1],
-            terminal_consumption,
+            allow_certified_dyson_terminal,
+            certified_terminal,
         )?);
     }
     let flow = windows
@@ -5908,8 +6414,48 @@ fn prepare_ordinary_flow_certificate_with_runtime(
         wave_one_started.elapsed(),
     );
 
-    let terminal_consumption = matches!(&dyson_sail, Ok(Some(_)))
+    // Terminal endpoint proofs are compact (four projects / at most three
+    // accepted contracts) and intentionally run after every exact worker has
+    // joined. They never scan entities or stock and therefore cannot turn a
+    // prefilled terminal buffer into a renewable production source.
+    let galactic_export = build_galactic_export_sink_certificate(state, snapshots);
+    let orbital_contracts = build_orbital_contract_sink_certificate(state, snapshots);
+    let allow_certified_dyson_terminal = matches!(&dyson_sail, Ok(Some(_)))
         || matches!((&dyson_sail, &dyson_rocket), (Ok(None), Ok(Some(_))));
+    let mut certified_terminal_rate = MaterialTotals::new();
+    for terminal in [
+        galactic_export
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .map(|terminal| &terminal.consumed_units_per_second),
+        orbital_contracts
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .map(|terminal| &terminal.consumed_units_per_second),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        for (item_id, rate) in terminal {
+            let current = certified_terminal_rate.get(item_id).copied().unwrap_or(0);
+            certified_terminal_rate.insert(
+                item_id.clone(),
+                current.checked_add(*rate).unwrap_or(i128::MAX),
+            );
+        }
+    }
+    let certified_terminal_window = certified_terminal_rate
+        .iter()
+        .map(|(item_id, rate)| {
+            rate.checked_mul(MACRO_V10_CALIBRATION_WINDOW_SECONDS as i128)
+                .map(|amount| (item_id.clone(), amount))
+                .ok_or_else(|| format!("{item_id} terminal calibration rate overflowed"))
+        })
+        .collect::<Result<MaterialTotals, _>>();
+    let certified_terminal_windows =
+        certified_terminal_window.map(|window| vec![window.clone(), window.clone(), window]);
     let dynamic_ray_power = match &dyson_sail {
         Ok(Some(_)) => has_dynamic_ray_power_source(state),
         Ok(None) => Ok(false),
@@ -5955,7 +6501,14 @@ fn prepare_ordinary_flow_certificate_with_runtime(
             Ok(false) => Ok(None),
             Err(reason) => Err(reason.clone()),
         },
-        || capture_stable_ordinary_window_flow(snapshots, terminal_consumption),
+        || match &certified_terminal_windows {
+            Ok(windows) => capture_stable_ordinary_window_flow(
+                snapshots,
+                allow_certified_dyson_terminal,
+                windows,
+            ),
+            Err(reason) => Err(reason.clone()),
+        },
         || (),
     );
     profile_certificate_prepare(
@@ -5977,6 +6530,8 @@ fn prepare_ordinary_flow_certificate_with_runtime(
         } else {
             None
         };
+        let galactic_export = galactic_export?;
+        let orbital_contracts = orbital_contracts?;
         let recipe_rejection = (|| {
             let flow = flow?;
             validate_finite_source_rates(
@@ -5994,6 +6549,8 @@ fn prepare_ordinary_flow_certificate_with_runtime(
                     research: research.clone(),
                     dyson_rocket: dyson_rocket.clone(),
                     dyson_sail: dyson_sail.clone(),
+                    galactic_export: galactic_export.clone(),
+                    orbital_contracts: orbital_contracts.clone(),
                     renewable_power: renewable_power.clone(),
                 },
             )
@@ -6010,11 +6567,15 @@ fn prepare_ordinary_flow_certificate_with_runtime(
             dyson_rocket.is_some(),
             dyson_sail.is_some(),
             renewable_power.is_some(),
+            galactic_export.is_some(),
+            orbital_contracts.is_some(),
         )?
         .is_empty()
             || research.is_some()
             || dyson_rocket.is_some()
             || dyson_sail.is_some()
+            || galactic_export.is_some()
+            || orbital_contracts.is_some()
         {
             return Err(recipe_rejection);
         }
@@ -6095,6 +6656,8 @@ fn prepare_ordinary_flow_certificate_with_runtime(
             research: None,
             dyson_rocket: None,
             dyson_sail: None,
+            galactic_export: None,
+            orbital_contracts: None,
             renewable_power: None,
         })
     })();
@@ -6205,6 +6768,11 @@ struct OrdinaryFlowApplication {
     research_certified: bool,
     rocket_certified: bool,
     sail_certified: bool,
+    galactic_export_certified: bool,
+    orbital_contract_certified: bool,
+    galactic_exported: i128,
+    orbital_contract_delivered: i128,
+    terminal_boundary_limited: bool,
     rockets_launched: i128,
     sails_launched: i128,
     sails_expired: i128,
@@ -6909,6 +7477,182 @@ fn finite_vein_capacity_seconds(
     Ok(horizon)
 }
 
+fn galactic_export_capacity_seconds(
+    terminal: &GalacticExportSinkCertificate,
+) -> Result<i128, String> {
+    for (item_id, rate) in &terminal.consumed_units_per_second {
+        if *rate <= 0 {
+            return Err(format!(
+                "Galactic export {item_id} has a non-positive certified rate"
+            ));
+        }
+    }
+    crate::galactic_exports::certified_pure_idle_export_capacity_seconds(
+        &terminal.expected,
+        &terminal.consumed_units_per_second,
+    )
+    .map_err(|error| format!("Galactic export capacity failed: {error:#}"))
+}
+
+fn galactic_multiplier_microunits(state: &CoreState) -> Result<i128, String> {
+    let multiplier = finite_number_at(state.base_value().get("timeWarp"), &["effectiveMultiplier"])
+        .filter(|value| *value > 0.0)
+        .ok_or_else(|| "Galactic activity multiplier is invalid".to_owned())?;
+    let scaled = multiplier * MICROS_PER_SECOND as f64;
+    let rounded = scaled.round();
+    if !scaled.is_finite()
+        || rounded < 1.0
+        || rounded > i128::MAX as f64
+        || (scaled - rounded).abs() > 1e-6
+    {
+        return Err("Galactic activity multiplier is not exactly representable".to_owned());
+    }
+    Ok(rounded as i128)
+}
+
+/// Map the public absolute simulation clock onto an integer wall-millisecond
+/// coordinate. Subtracting two absolute coordinates retains the fractional
+/// phase across calls without adding a public save field: long, segmented and
+/// cold-reloaded macro settlement therefore choose the same millisecond delta.
+fn galactic_wall_millis_at(
+    elapsed_micros: i128,
+    multiplier_microunits: i128,
+) -> Result<i128, String> {
+    if elapsed_micros < 0 || multiplier_microunits <= 0 {
+        return Err("Galactic activity wall coordinate is invalid".to_owned());
+    }
+    elapsed_micros
+        .checked_mul(1_000)
+        .and_then(|scaled| scaled.checked_div(multiplier_microunits))
+        .ok_or_else(|| "Galactic activity wall coordinate overflowed".to_owned())
+}
+
+fn galactic_wall_millis_between(
+    elapsed_before_micros: i128,
+    elapsed_after_micros: i128,
+    multiplier_microunits: i128,
+) -> Result<i128, String> {
+    if elapsed_after_micros < elapsed_before_micros {
+        return Err("Galactic activity simulation clock regressed".to_owned());
+    }
+    galactic_wall_millis_at(elapsed_after_micros, multiplier_microunits)?
+        .checked_sub(galactic_wall_millis_at(
+            elapsed_before_micros,
+            multiplier_microunits,
+        )?)
+        .ok_or_else(|| "Galactic activity wall delta overflowed".to_owned())
+}
+
+fn galactic_activity_capacity_seconds(
+    terminal: &GalacticExportSinkCertificate,
+    elapsed_before_micros: i128,
+    scheduled_seconds: i128,
+    multiplier_microunits: i128,
+) -> Result<i128, String> {
+    if scheduled_seconds <= 0 {
+        return Ok(0);
+    }
+    let activity = &terminal.expected.activity;
+    if activity.phase != crate::galactic_exports::CertifiedPureIdleExportActivityPhase::Active
+        || activity.ends_at_ms <= activity.activity_clock_ms
+    {
+        return Ok(0);
+    }
+    let mut low = 0_i128;
+    let mut high = scheduled_seconds;
+    while low < high {
+        let midpoint = low + (high - low + 1) / 2;
+        let elapsed_after_micros = midpoint
+            .checked_mul(MICROS_PER_SECOND)
+            .and_then(|delta| elapsed_before_micros.checked_add(delta))
+            .ok_or_else(|| "Galactic activity simulation horizon overflowed".to_owned())?;
+        let wall_millis = galactic_wall_millis_between(
+            elapsed_before_micros,
+            elapsed_after_micros,
+            multiplier_microunits,
+        )?;
+        let delivery_clock = activity.activity_clock_ms.saturating_add(wall_millis);
+        if delivery_clock < activity.ends_at_ms {
+            low = midpoint;
+        } else {
+            high = midpoint - 1;
+        }
+    }
+    Ok(low)
+}
+
+fn galactic_activity_commit_clocks(
+    terminal: &GalacticExportSinkCertificate,
+    accepted_seconds: i128,
+    elapsed_before_micros: i128,
+    elapsed_after_micros: i128,
+    multiplier_microunits: i128,
+) -> Result<(i128, i128), String> {
+    let activity = &terminal.expected.activity;
+    if accepted_seconds < 0 {
+        return Err("Galactic activity commit budget is invalid".to_owned());
+    }
+    let advanced_millis = galactic_wall_millis_between(
+        elapsed_before_micros,
+        elapsed_after_micros,
+        multiplier_microunits,
+    )?;
+    let clock_after = activity
+        .activity_clock_ms
+        .saturating_add(advanced_millis)
+        .min(activity.ends_at_ms)
+        .max(activity.activity_clock_ms);
+    let delivery_after_micros = accepted_seconds
+        .checked_mul(MICROS_PER_SECOND)
+        .and_then(|delta| elapsed_before_micros.checked_add(delta))
+        .ok_or_else(|| "Galactic activity delivery clock overflowed".to_owned())?;
+    let delivery_millis = galactic_wall_millis_between(
+        elapsed_before_micros,
+        delivery_after_micros,
+        multiplier_microunits,
+    )?;
+    let last_delivery_at_ms = if accepted_seconds == 0 {
+        activity.activity_clock_ms
+    } else {
+        activity
+            .activity_clock_ms
+            .saturating_add(delivery_millis)
+            .min(clock_after)
+            .min(activity.ends_at_ms.saturating_sub(1))
+            .max(activity.activity_clock_ms)
+    };
+    Ok((clock_after, last_delivery_at_ms))
+}
+
+fn orbital_contract_capacity_seconds(
+    terminal: &OrbitalContractSinkCertificate,
+    scheduled_seconds: i128,
+) -> Result<i128, String> {
+    if scheduled_seconds <= 0 {
+        return Ok(0);
+    }
+    let mut low = 0_i128;
+    let mut high = scheduled_seconds;
+    while low < high {
+        let midpoint = low + (high - low + 1) / 2;
+        let (budget, steps) =
+            orbital_contract_schedule(&terminal.expected, &terminal.requirement_rates, midpoint)?;
+        let plan = crate::orbital_station::plan_certified_pure_idle_contract_delivery_steps(
+            &terminal.expected,
+            &budget,
+            &steps,
+        )
+        .map_err(|error| format!("orbital contract horizon rejected: {error:#}"))?;
+        let fully_consumed = plan.planned_consumed_by_item == budget;
+        if fully_consumed {
+            low = midpoint;
+        } else {
+            high = midpoint - 1;
+        }
+    }
+    Ok(low)
+}
+
 fn apply_finite_vein_debits(
     state: &mut CoreState,
     certificates: &mut [FiniteVeinCertificate],
@@ -7027,6 +7771,8 @@ fn apply_source_only_flow_certificate(
         || !certificate.consumed_units_per_second.is_empty()
         || certificate.dyson_rocket.is_some()
         || certificate.dyson_sail.is_some()
+        || certificate.galactic_export.is_some()
+        || certificate.orbital_contracts.is_some()
     {
         return Err("source-only certificate has an invalid closed-flow identity".to_owned());
     }
@@ -7144,16 +7890,35 @@ fn apply_source_only_flow_certificate(
     Ok(application)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn apply_ordinary_flow_certificate(
     state: &mut CoreState,
     certificate: &mut OrdinaryFlowCertificate,
     elapsed_before: f64,
     elapsed_after: f64,
 ) -> Result<OrdinaryFlowApplication, String> {
+    apply_ordinary_flow_certificate_with_wall(
+        state,
+        certificate,
+        elapsed_before,
+        elapsed_after,
+        0.0,
+    )
+}
+
+fn apply_ordinary_flow_certificate_with_wall(
+    state: &mut CoreState,
+    certificate: &mut OrdinaryFlowCertificate,
+    elapsed_before: f64,
+    elapsed_after: f64,
+    wall_tail_seconds: f64,
+) -> Result<OrdinaryFlowApplication, String> {
     if certificate.recipe_ids.is_empty()
         && certificate.research.is_none()
         && certificate.dyson_rocket.is_none()
         && certificate.dyson_sail.is_none()
+        && certificate.galactic_export.is_none()
+        && certificate.orbital_contracts.is_none()
         && certificate.finite_veins.is_empty()
     {
         return apply_source_only_flow_certificate(
@@ -7170,6 +7935,9 @@ fn apply_ordinary_flow_certificate(
     let after_micros = elapsed_micros(elapsed_after)?;
     if after_micros < before_micros {
         return Err("elapsed clock regressed during ordinary-flow settlement".to_owned());
+    }
+    if !wall_tail_seconds.is_finite() || wall_tail_seconds < 0.0 {
+        return Err("ordinary-flow wall-clock budget is invalid".to_owned());
     }
     // Whole-second settlement keeps the three integer vectors exactly closed:
     // produced - consumed == net owned. Absolute floor boundaries make a long
@@ -7249,6 +8017,12 @@ fn apply_ordinary_flow_certificate(
     let research = certificate.research.clone();
     let dyson_rocket = certificate.dyson_rocket.clone();
     let dyson_sail = certificate.dyson_sail.clone();
+    let galactic_export = certificate.galactic_export.clone();
+    let orbital_contracts = certificate.orbital_contracts.clone();
+    let galactic_multiplier_microunits = galactic_export
+        .as_ref()
+        .map(|_| galactic_multiplier_microunits(state))
+        .transpose()?;
     if let Some(research) = &research {
         let current = capture_research_proof_snapshot(state)
             .map_err(|error| format!("research sink state is invalid: {error:#}"))?;
@@ -7305,6 +8079,26 @@ fn apply_ordinary_flow_certificate(
             return Err(
                 "Dyson solar-sail sink is no longer funded by the closed ordinary-flow ledger"
                     .to_owned(),
+            );
+        }
+    }
+    if let Some(export) = &galactic_export {
+        let current = crate::galactic_exports::capture_certified_pure_idle_export_endpoint(
+            state.base_value(),
+        )
+        .map_err(|error| format!("Galactic export sink state is invalid: {error:#}"))?;
+        if current != export.expected {
+            return Err(
+                "Galactic export sink state diverged from its certified endpoint".to_owned(),
+            );
+        }
+    }
+    if let Some(contracts) = &orbital_contracts {
+        let current = crate::orbital_station::capture_pure_idle_contract_endpoint(state)
+            .map_err(|error| format!("orbital contract sink state is invalid: {error:#}"))?;
+        if current != contracts.expected {
+            return Err(
+                "orbital contract sink state diverged from its certified endpoint".to_owned(),
             );
         }
     }
@@ -7374,6 +8168,21 @@ fn apply_ordinary_flow_certificate(
         .map_err(|error| format!("Dyson solar-sail capacity proof failed: {error:#}"))?;
         accepted_seconds = accepted_seconds.min(dyson_horizon);
     }
+    if let Some(export) = &galactic_export {
+        accepted_seconds = accepted_seconds.min(galactic_export_capacity_seconds(export)?);
+        accepted_seconds = accepted_seconds.min(galactic_activity_capacity_seconds(
+            export,
+            before_micros,
+            scheduled_seconds,
+            galactic_multiplier_microunits.expect("Galactic terminal owns a validated multiplier"),
+        )?);
+    }
+    if let Some(contracts) = &orbital_contracts {
+        accepted_seconds = accepted_seconds.min(orbital_contract_capacity_seconds(
+            contracts,
+            scheduled_seconds,
+        )?);
+    }
     let mut inventory_baselines = MaterialTotals::new();
     for (item_id, rate) in &certificate.units_per_second {
         if *rate <= 0 {
@@ -7427,6 +8236,8 @@ fn apply_ordinary_flow_certificate(
         research_certified: research.is_some(),
         rocket_certified: dyson_rocket.is_some(),
         sail_certified: dyson_sail.is_some(),
+        galactic_export_certified: galactic_export.is_some(),
+        orbital_contract_certified: orbital_contracts.is_some(),
         capacity_limited: accepted_seconds < scheduled_seconds,
         ..OrdinaryFlowApplication::default()
     };
@@ -7474,6 +8285,110 @@ fn apply_ordinary_flow_certificate(
             .consumed_units
             .checked_add(consumed)
             .ok_or_else(|| "ordinary-flow consumed-unit total overflowed".to_owned())?;
+    }
+
+    // Stateful material terminals consume their fixed shares before the
+    // ordinary ledger is written. Every helper operates on an isolated clone
+    // and the caller itself owns a disposable CoreState candidate, so any
+    // mismatch below discards the whole settlement without advancing cache,
+    // revision, production, inventory, or terminal counters.
+    if accepted_seconds > 0
+        && let Some(contracts) = orbital_contracts
+    {
+        let (budget, steps) = orbital_contract_schedule(
+            &contracts.expected,
+            &contracts.requirement_rates,
+            accepted_seconds,
+        )?;
+        let plan = crate::orbital_station::plan_certified_pure_idle_contract_delivery_steps(
+            &contracts.expected,
+            &budget,
+            &steps,
+        )
+        .map_err(|error| format!("orbital contract plan failed: {error:#}"))?;
+        if plan.planned_consumed_by_item != budget
+            || !plan.unused_budget_by_item.is_empty()
+            || !plan.export_limited_by_item.is_empty()
+        {
+            return Err(
+                "orbital contract plan did not consume its complete whole-second budget".to_owned(),
+            );
+        }
+        let receipt =
+            crate::orbital_station::apply_certified_pure_idle_contract_delivery(state, &plan)
+                .map_err(|error| format!("orbital contract commit failed: {error:#}"))?;
+        if receipt.consumed_by_item != budget
+            || !receipt.unused_budget_by_item.is_empty()
+            || !receipt.export_limited_by_item.is_empty()
+        {
+            return Err(
+                "orbital contract commit did not consume its complete whole-second budget"
+                    .to_owned(),
+            );
+        }
+        application.orbital_contract_delivered = receipt
+            .consumed_by_item
+            .values()
+            .try_fold(0_i128, |total, amount| {
+                amount
+                    .to_i128()
+                    .and_then(|amount| total.checked_add(amount))
+            })
+            .ok_or_else(|| "orbital contract receipt total overflowed".to_owned())?;
+        application.terminal_boundary_limited |= receipt.boundary_limited;
+        certificate
+            .orbital_contracts
+            .as_mut()
+            .expect("cloned orbital contract certificate remains installed")
+            .expected = receipt.endpoint_after;
+    }
+    if let Some(export) = galactic_export {
+        let budgets = export
+            .consumed_units_per_second
+            .iter()
+            .map(|(item_id, rate)| {
+                rate.checked_mul(accepted_seconds)
+                    .map(|amount| (item_id.clone(), amount))
+                    .ok_or_else(|| format!("Galactic export {item_id} budget overflowed"))
+            })
+            .collect::<Result<MaterialTotals, _>>()?;
+        let (activity_clock_after_ms, last_delivery_at_ms) = galactic_activity_commit_clocks(
+            &export,
+            accepted_seconds,
+            before_micros,
+            after_micros,
+            galactic_multiplier_microunits.expect("Galactic terminal owns a validated multiplier"),
+        )?;
+        let receipt = crate::galactic_exports::apply_certified_pure_idle_export_budget(
+            state.base_value_mut(),
+            &export.expected,
+            &budgets,
+            activity_clock_after_ms,
+            last_delivery_at_ms,
+        )
+        .map_err(|error| format!("Galactic export commit failed: {error:#}"))?;
+        let requested = budgets
+            .iter()
+            .filter(|(_, amount)| **amount > 0)
+            .map(|(item_id, amount)| (item_id.clone(), *amount))
+            .collect::<MaterialTotals>();
+        if receipt.consumed_by_item != requested || receipt.clipped {
+            return Err(
+                "Galactic export commit did not consume its complete whole-second budget"
+                    .to_owned(),
+            );
+        }
+        application.galactic_exported = receipt
+            .consumed_by_item
+            .values()
+            .try_fold(0_i128, |total, amount| total.checked_add(*amount))
+            .ok_or_else(|| "Galactic export receipt total overflowed".to_owned())?;
+        application.terminal_boundary_limited |= receipt.boundary_limited;
+        certificate
+            .galactic_export
+            .as_mut()
+            .expect("cloned Galactic export certificate remains installed")
+            .expected = receipt.endpoint_after;
     }
 
     {
@@ -8067,11 +8982,12 @@ fn advance_bounded_with_runtime(
                 } else {
                     None
                 };
-                let ordinary_application = match apply_ordinary_flow_certificate(
+                let ordinary_application = match apply_ordinary_flow_certificate_with_wall(
                     &mut candidate,
                     certificate,
                     current_elapsed,
                     elapsed,
+                    budget.frozen_tail_wall_seconds,
                 ) {
                     Ok(application) => application,
                     Err(reason) => {
@@ -8123,6 +9039,8 @@ fn advance_bounded_with_runtime(
                     if ordinary_application.deposited_units > 0
                         || ordinary_application.rockets_launched > 0
                         || ordinary_application.sails_launched > 0
+                        || ordinary_application.galactic_exported > 0
+                        || ordinary_application.orbital_contract_delivered > 0
                     {
                         let scope = if ordinary_application.recipe_certified {
                             "acyclic closed ordinary recipe"
@@ -8149,14 +9067,41 @@ fn advance_bounded_with_runtime(
                         } else {
                             " Dyson rocket and sail terminals remained frozen;".to_owned()
                         };
+                        let terminal_scope = match (
+                            ordinary_application.galactic_export_certified,
+                            ordinary_application.orbital_contract_certified,
+                        ) {
+                            (true, true) => format!(
+                                " {} unit(s) entered the certified galactic export and {} unit(s) entered fixed orbital contract requirements;",
+                                ordinary_application.galactic_exported,
+                                ordinary_application.orbital_contract_delivered,
+                            ),
+                            (true, false) => format!(
+                                " {} unit(s) entered the certified galactic export; orbital contract delivery remained frozen;",
+                                ordinary_application.galactic_exported,
+                            ),
+                            (false, true) => format!(
+                                " {} unit(s) entered fixed certified orbital contract requirements; galactic export remained frozen;",
+                                ordinary_application.orbital_contract_delivered,
+                            ),
+                            (false, false) => {
+                                " galactic export and orbital contract delivery remained frozen;"
+                                    .to_owned()
+                            }
+                        };
                         format!(
-                            "certified {} {scope} item(s) deposited {} net unit(s) into bounded quantum inventory from {} gross production and {} internal consumption;{dyson_scope}{research_scope} construction and other terminal tails remained frozen{}",
+                            "certified {} {scope} item(s) deposited {} net unit(s) into bounded quantum inventory from {} gross production and {} internal consumption;{dyson_scope}{research_scope}{terminal_scope} construction remained frozen{}{}",
                             ordinary_application.certified_items,
                             ordinary_application.deposited_units,
                             ordinary_application.produced_units,
                             ordinary_application.consumed_units,
                             if ordinary_application.capacity_limited {
                                 " at the proven capacity horizon"
+                            } else {
+                                ""
+                            },
+                            if ordinary_application.terminal_boundary_limited {
+                                " before the certified terminal boundary"
                             } else {
                                 ""
                             }
@@ -8547,6 +9492,36 @@ mod tests {
                         input_capacity: 0.0,
                         output_capacity: 0.0,
                         power_demand_kw: 0.0,
+                        power_generation_kw: 0.0,
+                        power_charge_kw: 0.0,
+                        energy_capacity_mj: 0.0,
+                        fuel_item_ids: Vec::new(),
+                        fuel_efficiency: 1.0,
+                        family: None,
+                        accepts: None,
+                    },
+                    BuildingDefinition {
+                        id: "galactic_material_exporter".into(),
+                        kind: "machine".into(),
+                        speed: 1.0,
+                        input_capacity: 1_000_000.0,
+                        output_capacity: 0.0,
+                        power_demand_kw: 1.0,
+                        power_generation_kw: 0.0,
+                        power_charge_kw: 0.0,
+                        energy_capacity_mj: 0.0,
+                        fuel_item_ids: Vec::new(),
+                        fuel_efficiency: 1.0,
+                        family: None,
+                        accepts: None,
+                    },
+                    BuildingDefinition {
+                        id: "orbital_cargo_terminal".into(),
+                        kind: "storage".into(),
+                        speed: 1.0,
+                        input_capacity: 1_000_000.0,
+                        output_capacity: 0.0,
+                        power_demand_kw: 1.0,
                         power_generation_kw: 0.0,
                         power_charge_kw: 0.0,
                         energy_capacity_mj: 0.0,
@@ -9408,6 +10383,248 @@ mod tests {
 
     fn productive_closed_recipe_macro_fixture(multiplier: f64) -> CoreState {
         productive_single_recipe_macro_fixture(multiplier, "iron_ingot", "iron_ingot", false, false)
+    }
+
+    fn rebuild_fixture_with_terminal(
+        state: CoreState,
+        terminal: Value,
+        terminal_belt: Value,
+    ) -> CoreState {
+        let mut public = state.materialize().unwrap();
+        let public = public.as_object_mut().unwrap();
+        let mut entities = public
+            .remove("entities")
+            .and_then(|value| value.as_array().cloned())
+            .unwrap();
+        let mut belts = public
+            .remove("belts")
+            .and_then(|value| value.as_array().cloned())
+            .unwrap();
+        entities.push(terminal);
+        belts.push(terminal_belt);
+        fixture_state_from_parts_with_belts(Value::Object(public.clone()), entities, belts)
+    }
+
+    fn checkpoint_reload_fixture(state: &CoreState) -> CoreState {
+        let mut records = BTreeMap::<String, Vec<u8>>::new();
+        state
+            .visit_internal_checkpoint_records(42, |key, value| {
+                records.insert(key.to_owned(), value.as_bytes().to_vec());
+                Ok(())
+            })
+            .unwrap();
+        let mut identity = state.identity.clone();
+        identity.revision = state.revision;
+        CoreState::from_internal_records(identity, &records, (*state.catalog).clone()).unwrap()
+    }
+
+    fn install_certified_galactic_activity(base: &mut Map<String, Value>) {
+        base.get_mut("research")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert("completedTechIds".to_owned(), json!(["universe_matrix"]));
+        let endgame = base
+            .get_mut("endgame")
+            .and_then(Value::as_object_mut)
+            .unwrap();
+        for (project_id, project) in endgame
+            .get_mut("exportProjects")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+        {
+            project
+                .as_object_mut()
+                .unwrap()
+                .insert("id".to_owned(), Value::from(project_id.clone()));
+        }
+        endgame.insert("exportInputMode".to_owned(), json!("building"));
+        endgame.insert("autoDispatch".to_owned(), json!(false));
+        endgame.insert(
+            "constructionActivity".to_owned(),
+            json!({
+                "activityId": "macro-certified-activity",
+                "participantId": "macro-certified-participant",
+                "configRevision": "macro-certified-config",
+                "startsAtMs": 0,
+                "endsAtMs": 1_000_000_000,
+                "serverTimeAnchorMs": 0,
+                "activityClockMs": 0,
+                "personalTargets": {
+                    "universe_matrix": 1_000_000_000,
+                    "solar_sail": 1_000_000_000,
+                    "small_carrier_rocket": 1_000_000_000,
+                    "antimatter_fuel_rod": 1_000_000_000
+                },
+                "globalTargets": {
+                    "universe_matrix": 1_000_000_000,
+                    "solar_sail": 1_000_000_000,
+                    "small_carrier_rocket": 1_000_000_000,
+                    "antimatter_fuel_rod": 1_000_000_000
+                },
+                "personalDelivered": {
+                    "universe_matrix": 0,
+                    "solar_sail": 0,
+                    "small_carrier_rocket": 0,
+                    "antimatter_fuel_rod": 0
+                },
+                "pendingBatches": {},
+                "nextBatchSequence": 0
+            }),
+        );
+    }
+
+    fn productive_galactic_export_macro_fixture(multiplier: f64, prefilled: i64) -> CoreState {
+        let mut state = productive_solar_sail_product_macro_fixture(multiplier);
+        install_certified_galactic_activity(state.base_value_mut());
+        rebuild_fixture_with_terminal(
+            state,
+            json!({
+                "id": "galactic-exporter",
+                "kind": "machine",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "galactic_material_exporter",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": { "solar_sail": prefilled },
+                "outputs": {},
+                "galacticExporterPaused": false,
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            }),
+            json!({
+                "id": "sail-export-feed",
+                "planetId": "home",
+                "source": "smelter",
+                "target": "galactic-exporter",
+                "itemId": "solar_sail",
+                "lanes": 1,
+                "tier": 1,
+                "priority": 1,
+                "progress": 0,
+                "lastFlow": 0,
+                "totalTransferred": 0
+            }),
+        )
+    }
+
+    fn prime_galactic_sail_level_boundary(state: &mut CoreState, delivered: i64) {
+        let endgame = state.base_value_mut()["endgame"].as_object_mut().unwrap();
+        let project = endgame["exportProjects"]["solar_sail_array"]
+            .as_object_mut()
+            .unwrap();
+        project.insert("delivered".to_owned(), Value::from(delivered));
+        project.insert("totalDelivered".to_owned(), Value::from(delivered));
+        endgame.insert("totalExported".to_owned(), Value::from(delivered));
+        endgame.insert(
+            "galacticCredits".to_owned(),
+            Value::from(delivered.saturating_mul(3)),
+        );
+        endgame.insert(
+            "galacticScore".to_owned(),
+            Value::from(delivered.saturating_mul(3)),
+        );
+        endgame["constructionActivity"]["personalDelivered"]["solar_sail"] = Value::from(delivered);
+    }
+
+    fn orbital_contract_fixture(slot: u64, amount: i64, delivered: i64) -> Value {
+        json!({
+            "id": format!("station-contract-v1-7-100-{slot}-single"),
+            "templateId": "single",
+            "slot": slot,
+            "title": format!("contract {slot}"),
+            "summary": "pure idle terminal fixture",
+            "taskDay": 100,
+            "expiresAtTaskDay": 103,
+            "special": false,
+            "difficulty": "P1",
+            "status": "accepted",
+            "requirements": [{
+                "itemId": "solar_sail",
+                "amount": amount.to_string(),
+                "delivered": delivered.to_string(),
+                "channel": "any",
+                "weight": 1
+            }],
+            "rewards": {
+                "baseMarks": "45",
+                "baseReputation": "30",
+                "completionMarks": "20",
+                "completionReputation": "15"
+            },
+            "acceptedAtTaskDay": 100
+        })
+    }
+
+    fn productive_orbital_contract_macro_fixture(
+        multiplier: f64,
+        prefilled: i64,
+        contracts: Vec<Value>,
+        bound_slot: u64,
+    ) -> CoreState {
+        let mut state = productive_solar_sail_product_macro_fixture(multiplier);
+        state.base_value_mut()["galaxy"]["seed"] = json!(7);
+        state.base_value_mut().insert(
+            "orbitalStation".to_owned(),
+            json!({
+                "status": "operational",
+                "construction": { "stageRequirements": [] },
+                "contractBoard": {
+                    "rulesVersion": 1,
+                    "taskDay": 100,
+                    "lastConfirmedWallClockMs": 8_640_000_000_u64,
+                    "offers": [],
+                    "accepted": contracts,
+                    "history": [],
+                    "settledIds": [],
+                    "featuredContractId": null
+                },
+                "totals": { "completedContracts": 0, "exportedByItem": {} },
+                "economy": { "orbitalMarks": "0", "stationReputation": "0" }
+            }),
+        );
+        let contract_id = format!("station-contract-v1-7-100-{bound_slot}-single");
+        rebuild_fixture_with_terminal(
+            state,
+            json!({
+                "id": "orbital-terminal",
+                "kind": "storage",
+                "planetId": "home",
+                "powerGridId": "grid-a",
+                "buildingId": "orbital_cargo_terminal",
+                "machineCount": 1,
+                "minerCount": 0,
+                "inputs": { "solar_sail": prefilled },
+                "outputs": {},
+                "powerFactor": 1,
+                "orbitalCargoBinding": {
+                    "kind": "contract",
+                    "contractId": contract_id
+                },
+                "orbitalCargoPortItems": ["solar_sail", null, null, null],
+                "orbitalCargoProgress": 0,
+                "orbitalCargoTotalUploaded": "0",
+                "progress": 0,
+                "routingCursor": 0,
+                "utilization": 0,
+                "productionRate": 0
+            }),
+            json!({
+                "id": "sail-contract-feed",
+                "planetId": "home",
+                "source": "smelter",
+                "target": "orbital-terminal",
+                "itemId": "solar_sail",
+                "lanes": 1,
+                "tier": 1,
+                "priority": 1,
+                "progress": 0,
+                "lastFlow": 0,
+                "totalTransferred": 0
+            }),
+        )
     }
 
     fn productive_solar_sail_product_macro_fixture(multiplier: f64) -> CoreState {
@@ -10402,10 +11619,11 @@ mod tests {
 
         // 10 active tray + 20 other planet + 3 construction + 4 portable +
         // 14 cargo + 5 quantum + 6 job WIP + 7 direct quantum + 8/9 queue +
-        // 11/12 system station + 13 activity + 100 source output + 2 input.
+        // 11/12 system station + 100 source output + 2 input. The 13-unit
+        // activity pending batch is a non-owned submission outbox mirror.
         // The active planet duplicate is skipped and route cargo replaces its
         // source reservation, so neither adds another 10/30.
-        assert_eq!(snapshot.owned.get("iron_ore"), Some(&224));
+        assert_eq!(snapshot.owned.get("iron_ore"), Some(&211));
     }
 
     #[test]
@@ -14060,7 +15278,10 @@ mod tests {
         let snapshots = exact_three_window_probe(&state, &request).unwrap();
         let flows = snapshots
             .windows(2)
-            .map(|window| capture_ordinary_window_flow(&window[0], &window[1], false).unwrap())
+            .map(|window| {
+                capture_ordinary_window_flow(&window[0], &window[1], false, &MaterialTotals::new())
+                    .unwrap()
+            })
             .collect::<Vec<_>>();
         assert!(flows.iter().skip(1).all(|flow| flow == &flows[0]));
         let mut cycle = state.clone();
@@ -14559,6 +15780,392 @@ mod tests {
     }
 
     #[test]
+    fn macro_v10_galactic_export_certifies_the_exact_prefix_and_productive_tail() {
+        let initial = productive_galactic_export_macro_fixture(15.0, 0);
+        let mut prefix = initial.clone();
+        let revision = prefix.revision;
+        let prefix_result =
+            advance_macro_v10(&mut prefix, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
+        assert!(prefix_result.supported, "reason={:?}", prefix_result.reason);
+        let prefix_delivery = proof_counter(
+            prefix.base_value()["endgame"]["exportProjects"]["solar_sail_array"]
+                .get("totalDelivered"),
+            "prefix galactic delivery",
+        )
+        .unwrap();
+        assert!(prefix_delivery > 0);
+
+        let mut long = initial;
+        let revision = long.revision;
+        let result =
+            advance_macro_v10(&mut long, &pure_idle_macro_request(revision, 600.0, 40.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let delivered = proof_counter(
+            long.base_value()["endgame"]["exportProjects"]["solar_sail_array"]
+                .get("totalDelivered"),
+            "long galactic delivery",
+        )
+        .unwrap();
+        assert!(delivered > prefix_delivery, "reason={:?}", result.reason);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("galactic export")),
+            "reason={:?}",
+            result.reason
+        );
+        assert_eq!(
+            proof_counter(
+                long.base_value()["endgame"]["constructionActivity"]["personalDelivered"]
+                    .get("solar_sail"),
+                "long activity delivery mirror",
+            )
+            .unwrap(),
+            delivered
+        );
+        assert_eq!(
+            proof_counter(
+                long.base_value()["totalProduced"].get("solar_sail"),
+                "long produced sails",
+            )
+            .unwrap(),
+            delivered
+                + proof_counter(
+                    long.base_value()["quantumLogisticsNetwork"]["inventory"].get("solar_sail"),
+                    "long retained sails",
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn macro_v10_orbital_contract_keeps_the_certified_requirement_target() {
+        let first = orbital_contract_fixture(0, 10_000, 0);
+        let second = orbital_contract_fixture(1, 10_000, 0);
+        // One unit primes the exact terminal/belt ordering. The certificate
+        // still spends only same-window production in the macro tail; a
+        // separate regression below covers a genuinely prefilled buffer.
+        let initial =
+            productive_orbital_contract_macro_fixture(15.0, 1, vec![first.clone(), second], 1);
+        let mut long = initial;
+        let revision = long.revision;
+        let result =
+            advance_macro_v10(&mut long, &pure_idle_macro_request(revision, 600.0, 40.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert!(
+            result
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("orbital contract")),
+            "reason={:?}",
+            result.reason
+        );
+        assert_eq!(
+            long.base_value()["orbitalStation"]["contractBoard"]["accepted"][0],
+            first,
+            "the earlier same-item contract must remain byte-for-byte unchanged"
+        );
+        let delivered = proof_counter(
+            long.base_value()["orbitalStation"]["contractBoard"]["accepted"][1]["requirements"][0]
+                .get("delivered"),
+            "orbital delivered",
+        )
+        .unwrap();
+        assert!(delivered > 30, "reason={:?}", result.reason);
+        assert_eq!(
+            proof_counter(
+                long.base_value()["orbitalStation"]["totals"]["exportedByItem"].get("solar_sail"),
+                "orbital exported total",
+            )
+            .unwrap(),
+            delivered
+        );
+    }
+
+    #[test]
+    fn macro_v10_galactic_boundary_is_segment_and_empty_tail_invariant() {
+        let mut initial = productive_galactic_export_macro_fixture(15.0, 0);
+        prime_galactic_sail_level_boundary(&mut initial, 4_900);
+
+        let mut long = initial.clone();
+        let revision = long.revision;
+        let result =
+            advance_macro_v10(&mut long, &pure_idle_macro_request(revision, 600.0, 40.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(
+            proof_counter(
+                long.base_value()["endgame"]["exportProjects"]["solar_sail_array"].get("delivered"),
+                "long boundary delivery",
+            )
+            .unwrap(),
+            4_999,
+        );
+
+        let mut segmented = initial;
+        for seconds in [30.0, 100.0, 100.0, 100.0, 100.0, 100.0, 70.0] {
+            let revision = segmented.revision;
+            let result = advance_macro_v10(
+                &mut segmented,
+                &pure_idle_macro_request(revision, seconds, seconds / 15.0),
+            )
+            .unwrap();
+            assert!(
+                result.supported,
+                "segment={seconds} reason={:?}",
+                result.reason
+            );
+        }
+        assert_eq!(
+            segmented.summary().unwrap().canonical_sha256,
+            long.summary().unwrap().canonical_sha256,
+        );
+        assert_eq!(
+            crate::galactic_exports::capture_certified_pure_idle_export_endpoint(
+                segmented.base_value(),
+            )
+            .unwrap(),
+            crate::galactic_exports::capture_certified_pure_idle_export_endpoint(
+                long.base_value(),
+            )
+            .unwrap(),
+        );
+
+        let delivered_before = proof_counter(
+            segmented.base_value()["endgame"]["exportProjects"]["solar_sail_array"]
+                .get("totalDelivered"),
+            "exhausted delivery",
+        )
+        .unwrap();
+        let clock_before = proof_counter(
+            segmented.base_value()["endgame"]["constructionActivity"].get("activityClockMs"),
+            "activity clock before empty tail",
+        )
+        .unwrap();
+        let revision = segmented.revision;
+        let result = advance_macro_v10(
+            &mut segmented,
+            &pure_idle_macro_request(revision, 15.0, 1.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(
+            proof_counter(
+                segmented.base_value()["endgame"]["exportProjects"]["solar_sail_array"]
+                    .get("totalDelivered"),
+                "empty-tail delivery",
+            )
+            .unwrap(),
+            delivered_before,
+        );
+        assert_eq!(
+            proof_counter(
+                segmented.base_value()["endgame"]["constructionActivity"].get("activityClockMs"),
+                "activity clock after empty tail",
+            )
+            .unwrap(),
+            clock_before + 1_000,
+        );
+    }
+
+    #[test]
+    fn macro_v10_terminal_prefill_is_consumed_only_by_the_exact_prefix() {
+        let mut galactic_prefix = productive_galactic_export_macro_fixture(15.0, 1_000);
+        let revision = galactic_prefix.revision;
+        advance_macro_v10(
+            &mut galactic_prefix,
+            &pure_idle_macro_request(revision, 30.0, 2.0),
+        )
+        .unwrap();
+        let galactic_prefix_delivery = proof_counter(
+            galactic_prefix.base_value()["endgame"]["exportProjects"]["solar_sail_array"]
+                .get("totalDelivered"),
+            "prefilled galactic prefix",
+        )
+        .unwrap();
+        assert!(galactic_prefix_delivery > 1_000);
+        let mut galactic_long = productive_galactic_export_macro_fixture(15.0, 1_000);
+        let revision = galactic_long.revision;
+        let result = advance_macro_v10(
+            &mut galactic_long,
+            &pure_idle_macro_request(revision, 600.0, 40.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(
+            proof_counter(
+                galactic_long.base_value()["endgame"]["exportProjects"]["solar_sail_array"]
+                    .get("totalDelivered"),
+                "prefilled galactic long",
+            )
+            .unwrap(),
+            galactic_prefix_delivery,
+            "old exporter input must not become a renewable tail budget",
+        );
+
+        let contracts = vec![orbital_contract_fixture(0, 100_000, 0)];
+        let mut orbital_prefix =
+            productive_orbital_contract_macro_fixture(15.0, 1_000, contracts.clone(), 0);
+        let revision = orbital_prefix.revision;
+        advance_macro_v10(
+            &mut orbital_prefix,
+            &pure_idle_macro_request(revision, 30.0, 2.0),
+        )
+        .unwrap();
+        let orbital_prefix_delivery = proof_counter(
+            orbital_prefix.base_value()["orbitalStation"]["contractBoard"]["accepted"][0]
+                ["requirements"][0]
+                .get("delivered"),
+            "prefilled orbital prefix",
+        )
+        .unwrap();
+        assert!(orbital_prefix_delivery > 30);
+        let mut orbital_long = productive_orbital_contract_macro_fixture(15.0, 1_000, contracts, 0);
+        let revision = orbital_long.revision;
+        let result = advance_macro_v10(
+            &mut orbital_long,
+            &pure_idle_macro_request(revision, 600.0, 40.0),
+        )
+        .unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        assert_eq!(
+            proof_counter(
+                orbital_long.base_value()["orbitalStation"]["contractBoard"]["accepted"][0]
+                    ["requirements"][0]
+                    .get("delivered"),
+                "prefilled orbital long",
+            )
+            .unwrap(),
+            orbital_prefix_delivery,
+            "old cargo-terminal input must not become a renewable tail budget",
+        );
+    }
+
+    #[test]
+    fn macro_v10_terminal_certificates_rebuild_after_private_checkpoint_reload() {
+        let fixtures = [
+            productive_galactic_export_macro_fixture(15.0, 0),
+            productive_orbital_contract_macro_fixture(
+                15.0,
+                1,
+                vec![orbital_contract_fixture(0, 10_000, 0)],
+                0,
+            ),
+        ];
+        for initial in fixtures {
+            let mut calibrated = initial;
+            let revision = calibrated.revision;
+            let result = advance_macro_v10(
+                &mut calibrated,
+                &pure_idle_macro_request(revision, 30.0, 2.0),
+            )
+            .unwrap();
+            assert!(result.supported, "calibration reason={:?}", result.reason);
+
+            let mut continuous = calibrated.clone();
+            let mut reloaded = checkpoint_reload_fixture(&calibrated);
+            assert!(reloaded.pure_idle_macro_runtime.is_none());
+            for state in [&mut continuous, &mut reloaded] {
+                let revision = state.revision;
+                let result =
+                    advance_macro_v10(state, &pure_idle_macro_request(revision, 570.0, 38.0))
+                        .unwrap();
+                assert!(result.supported, "reload reason={:?}", result.reason);
+            }
+            assert_eq!(
+                reloaded.summary().unwrap().canonical_sha256,
+                continuous.summary().unwrap().canonical_sha256,
+            );
+        }
+    }
+
+    #[test]
+    fn macro_v10_terminal_tails_are_segment_invariant_at_supported_multipliers() {
+        for multiplier in [8.0, 12.0, 15.0, 16.0] {
+            let fixtures = [
+                productive_galactic_export_macro_fixture(multiplier, 0),
+                productive_orbital_contract_macro_fixture(
+                    multiplier,
+                    1,
+                    vec![orbital_contract_fixture(0, 10_000, 0)],
+                    0,
+                ),
+            ];
+            for (terminal_index, initial) in fixtures.into_iter().enumerate() {
+                let mut long = initial.clone();
+                let revision = long.revision;
+                let result = advance_macro_v10(
+                    &mut long,
+                    &pure_idle_macro_request(revision, 600.0, 600.0 / multiplier),
+                )
+                .unwrap();
+                assert!(
+                    result.supported,
+                    "{multiplier}x terminal={terminal_index} long: {:?}",
+                    result.reason
+                );
+
+                let mut segmented = initial;
+                for seconds in [30.0, 190.0, 190.0, 190.0] {
+                    let revision = segmented.revision;
+                    let result = advance_macro_v10(
+                        &mut segmented,
+                        &pure_idle_macro_request(revision, seconds, seconds / multiplier),
+                    )
+                    .unwrap();
+                    assert!(
+                        result.supported,
+                        "{multiplier}x terminal={terminal_index} segment={seconds}: {:?}",
+                        result.reason
+                    );
+                }
+                assert_eq!(
+                    segmented.summary().unwrap().canonical_sha256,
+                    long.summary().unwrap().canonical_sha256,
+                    "{multiplier}x terminal={terminal_index}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn macro_v10_terminal_late_failure_preserves_source_hash_revision_and_runtime() {
+        let mut state = productive_galactic_export_macro_fixture(15.0, 0);
+        let revision = state.revision;
+        let result =
+            advance_macro_v10(&mut state, &pure_idle_macro_request(revision, 30.0, 2.0)).unwrap();
+        assert!(result.supported, "reason={:?}", result.reason);
+        let certificate = state
+            .pure_idle_macro_runtime
+            .as_mut()
+            .and_then(|runtime| runtime.certificate.as_mut())
+            .expect("Galactic terminal certificate");
+        certificate
+            .galactic_export
+            .as_mut()
+            .expect("Galactic sink")
+            .consumed_units_per_second
+            .insert("solar_sail".to_owned(), i128::MAX);
+        let before_revision = state.revision;
+        let before_hash = state.summary().unwrap().canonical_sha256;
+        let before_credit = state.pure_idle_macro_exact_seconds_used();
+        let before_runtime = format!("{:#?}", state.pure_idle_macro_runtime);
+        let result = advance_macro_v10(
+            &mut state,
+            &pure_idle_macro_request(before_revision, 15.0, 1.0),
+        )
+        .unwrap();
+        assert!(!result.supported);
+        assert_eq!(state.revision, before_revision);
+        assert_eq!(state.summary().unwrap().canonical_sha256, before_hash);
+        assert_eq!(state.pure_idle_macro_exact_seconds_used(), before_credit);
+        assert_eq!(
+            format!("{:#?}", state.pure_idle_macro_runtime),
+            before_runtime
+        );
+    }
+
+    #[test]
     fn macro_v10_closed_recipe_has_a_fixed_cross_thread_hash() {
         assert_fixed_macro_hash_at_one_two_four_eight_workers(
             productive_closed_recipe_macro_fixture,
@@ -14597,7 +16204,10 @@ mod tests {
             build_ordinary_flow_certificate(&construction, &snapshots).unwrap();
         assert_eq!(construction_certificate.recipe_ids, ["iron_ingot"]);
         let mut export = state.clone();
+        export.base_value_mut()["endgame"]["exportInputMode"] = json!("legacy-network");
         export.base_value_mut()["endgame"]["autoDispatch"] = json!(true);
+        export.base_value_mut()["endgame"]["exportProjects"]["universe_archive"]["enabled"] =
+            json!(true);
         assert_domain_rejected("export", export);
 
         let mut terminal = snapshots.clone();
@@ -15197,6 +16807,8 @@ mod tests {
                 research: None,
                 dyson_rocket: None,
                 dyson_sail: None,
+                galactic_export: None,
+                orbital_contracts: None,
                 renewable_power: None,
             });
         let before_revision = state.revision;
@@ -15366,6 +16978,12 @@ mod tests {
                 budget.frozen_tail_seconds,
                 simulation_seconds - PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS
             );
+            assert!(
+                (budget.frozen_tail_wall_seconds
+                    - (wall_seconds - PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS / multiplier))
+                    .abs()
+                    <= EPSILON
+            );
         }
     }
 
@@ -15378,6 +16996,7 @@ mod tests {
                 exact_simulation_seconds: 20.0,
                 exact_wall_seconds: 2.0,
                 frozen_tail_seconds: 0.0,
+                frozen_tail_wall_seconds: 0.0,
             }
         );
     }
@@ -15396,16 +17015,22 @@ mod tests {
             let mut remaining_credit = PURE_IDLE_SESSION_EXACT_CREDIT_SECONDS;
             let mut segmented_exact = 0.0;
             let mut segmented_tail = 0.0;
+            let mut segmented_exact_wall = 0.0;
+            let mut segmented_tail_wall = 0.0;
             for wall_seconds in [3.0, 7.0, 11.0, 9.0] {
                 let simulation_seconds = wall_seconds * multiplier;
                 let budget = prefix_budget(simulation_seconds, wall_seconds, remaining_credit);
                 segmented_exact += budget.exact_simulation_seconds;
                 segmented_tail += budget.frozen_tail_seconds;
+                segmented_exact_wall += budget.exact_wall_seconds;
+                segmented_tail_wall += budget.frozen_tail_wall_seconds;
                 remaining_credit = (remaining_credit - budget.exact_simulation_seconds).max(0.0);
             }
 
             assert!((segmented_exact - long.exact_simulation_seconds).abs() <= EPSILON);
             assert!((segmented_tail - long.frozen_tail_seconds).abs() <= EPSILON);
+            assert!((segmented_exact_wall - long.exact_wall_seconds).abs() <= EPSILON);
+            assert!((segmented_tail_wall - long.frozen_tail_wall_seconds).abs() <= EPSILON);
             assert!(remaining_credit <= EPSILON);
         }
     }

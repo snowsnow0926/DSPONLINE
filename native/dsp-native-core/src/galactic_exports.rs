@@ -1196,6 +1196,86 @@ fn certified_delivery_counter_capacity(
     capacity.max(0)
 }
 
+/// Compute one shared whole-second horizon for the complete certified rate
+/// vector. Global counters are divided by their aggregate per-second demand;
+/// calculating them item-by-item would incorrectly authorize the same final
+/// safe-integer slots more than once when several projects run together.
+pub(crate) fn certified_pure_idle_export_capacity_seconds(
+    endpoint: &CertifiedPureIdleExportEndpoint,
+    rates_by_item: &BTreeMap<String, i128>,
+) -> anyhow::Result<i128> {
+    let mut horizon = i128::MAX;
+    let mut aggregate_items_per_second = 0_i128;
+    let mut aggregate_rewards_per_second = 0_i128;
+    let activity_eligible = endpoint.input_mode == CertifiedPureIdleExportInputMode::Building
+        && endpoint.activity.phase == CertifiedPureIdleExportActivityPhase::Active;
+    let mut new_activity_batches = 0_i128;
+
+    for (item_id, rate) in rates_by_item {
+        if *rate <= 0 {
+            bail!("native certified export rate is not positive")
+        }
+        let definition = DEFINITIONS
+            .iter()
+            .copied()
+            .find(|definition| definition.item_id == item_id)
+            .ok_or_else(|| anyhow!("native certified export item is unsupported"))?;
+        let project = endpoint
+            .projects
+            .get(definition.id)
+            .ok_or_else(|| anyhow!("native certified export project disappeared"))?;
+        horizon = horizon
+            .min(project.units_until_level_reward.saturating_sub(1) / rate)
+            .min(MAX_SAFE_INTEGER.saturating_sub(project.total_delivered) / rate);
+        aggregate_items_per_second = aggregate_items_per_second
+            .checked_add(*rate)
+            .ok_or_else(|| anyhow!("native certified export aggregate rate overflowed"))?;
+        aggregate_rewards_per_second = aggregate_rewards_per_second
+            .checked_add(
+                rate.checked_mul(definition.credits_per_item as i128)
+                    .ok_or_else(|| anyhow!("native certified export reward rate overflowed"))?,
+            )
+            .ok_or_else(|| anyhow!("native certified export reward rate overflowed"))?;
+        if activity_eligible {
+            let personal = endpoint
+                .activity
+                .personal_delivered
+                .get(item_id)
+                .copied()
+                .unwrap_or(0);
+            horizon = horizon.min(MAX_SAFE_INTEGER.saturating_sub(personal) / rate);
+            if let Some(batch) = endpoint.activity.pending_batches.get(item_id) {
+                horizon = horizon.min(MAX_SAFE_INTEGER.saturating_sub(batch.amount) / rate);
+            } else {
+                new_activity_batches = new_activity_batches.saturating_add(1);
+            }
+        }
+    }
+    if aggregate_items_per_second > 0 {
+        horizon = horizon.min(
+            MAX_SAFE_INTEGER.saturating_sub(endpoint.total_exported) / aggregate_items_per_second,
+        );
+    }
+    if aggregate_rewards_per_second > 0 {
+        horizon = horizon
+            .min(
+                MAX_SAFE_INTEGER.saturating_sub(endpoint.galactic_credits)
+                    / aggregate_rewards_per_second,
+            )
+            .min(
+                MAX_SAFE_INTEGER.saturating_sub(endpoint.galactic_score)
+                    / aggregate_rewards_per_second,
+            );
+    }
+    if activity_eligible
+        && new_activity_batches
+            > MAX_SAFE_INTEGER.saturating_sub(endpoint.activity.next_batch_sequence)
+    {
+        horizon = 0;
+    }
+    Ok(horizon.max(0))
+}
+
 /// Atomically spends only caller-certified, newly-produced export budgets.
 ///
 /// The current endpoint must exactly match `expected`; no tray, entity,
@@ -1225,13 +1305,15 @@ pub(crate) fn apply_certified_pure_idle_export_budget(
     }
     let activity_eligible = match expected.input_mode {
         CertifiedPureIdleExportInputMode::Building => {
-            if expected.activity.phase != CertifiedPureIdleExportActivityPhase::Active {
+            if has_requested_export
+                && expected.activity.phase != CertifiedPureIdleExportActivityPhase::Active
+            {
                 bail!("native certified building export is outside its activity boundary");
             }
             if expected.auto_dispatch {
                 bail!("native certified building export requires legacy auto-dispatch to be off");
             }
-            true
+            expected.activity.phase == CertifiedPureIdleExportActivityPhase::Active
         }
         CertifiedPureIdleExportInputMode::LegacyNetwork => {
             if has_requested_export {
@@ -1240,13 +1322,19 @@ pub(crate) fn apply_certified_pure_idle_export_budget(
             false
         }
     };
-    if !(expected.activity.activity_clock_ms..=expected.activity.ends_at_ms)
+    let activity_clock_valid = (expected.activity.activity_clock_ms..=expected.activity.ends_at_ms)
         .contains(&activity_clock_after_ms)
-        || !(expected.activity.activity_clock_ms..=activity_clock_after_ms)
+        && activity_clock_after_ms <= MAX_SAFE_INTEGER;
+    let delivery_clock_valid = if has_requested_export {
+        (expected.activity.activity_clock_ms..=activity_clock_after_ms)
             .contains(&last_delivery_at_ms)
-        || last_delivery_at_ms >= expected.activity.ends_at_ms
-        || activity_clock_after_ms > MAX_SAFE_INTEGER
-    {
+            && last_delivery_at_ms < expected.activity.ends_at_ms
+    } else {
+        // Empty-budget calls advance only the public activity clock. The
+        // sentinel proves no pending-batch delivery timestamp may move.
+        last_delivery_at_ms == expected.activity.activity_clock_ms
+    };
+    if !activity_clock_valid || !delivery_clock_valid {
         bail!("native certified export activity clock request crosses its safe boundary");
     }
 
@@ -2342,6 +2430,76 @@ mod tests {
                 "small_carrier_rocket",
                 "solar_sail",
             ]
+        );
+    }
+
+    #[test]
+    fn empty_certified_budget_advances_and_then_stabilizes_the_activity_clock() {
+        let mut base = certified_base();
+        let expected = capture_certified_pure_idle_export_endpoint(&base).unwrap();
+        let material_before = (
+            expected.total_exported,
+            expected.galactic_credits,
+            expected.galactic_score,
+            expected.projects.clone(),
+        );
+        let receipt = apply_certified_pure_idle_export_budget(
+            &mut base,
+            &expected,
+            &BTreeMap::new(),
+            expected.activity.ends_at_ms,
+            expected.activity.activity_clock_ms,
+        )
+        .unwrap();
+        assert!(receipt.consumed_by_item.is_empty());
+        assert_eq!(
+            receipt.endpoint_after.activity.phase,
+            CertifiedPureIdleExportActivityPhase::Ended
+        );
+        assert_eq!(
+            (
+                receipt.endpoint_after.total_exported,
+                receipt.endpoint_after.galactic_credits,
+                receipt.endpoint_after.galactic_score,
+                receipt.endpoint_after.projects.clone(),
+            ),
+            material_before,
+        );
+
+        let ended = receipt.endpoint_after;
+        let second = apply_certified_pure_idle_export_budget(
+            &mut base,
+            &ended,
+            &BTreeMap::new(),
+            ended.activity.ends_at_ms,
+            ended.activity.activity_clock_ms,
+        )
+        .unwrap();
+        assert_eq!(second.endpoint_after, ended);
+    }
+
+    #[test]
+    fn aggregate_capacity_does_not_reuse_global_counter_slots_per_project() {
+        let mut base = certified_base();
+        base["endgame"]["totalExported"] =
+            Value::from(i64::try_from(MAX_SAFE_INTEGER - 100).unwrap());
+        let endpoint = capture_certified_pure_idle_export_endpoint(&base).unwrap();
+        let rates = BTreeMap::from([
+            ("universe_matrix".to_owned(), 1),
+            ("solar_sail".to_owned(), 1),
+        ]);
+        assert_eq!(
+            certified_pure_idle_export_capacity_seconds(&endpoint, &rates).unwrap(),
+            50,
+        );
+
+        base["endgame"]["constructionActivity"]["nextBatchSequence"] =
+            Value::from(i64::try_from(MAX_SAFE_INTEGER - 1).unwrap());
+        let endpoint = capture_certified_pure_idle_export_endpoint(&base).unwrap();
+        assert_eq!(
+            certified_pure_idle_export_capacity_seconds(&endpoint, &rates).unwrap(),
+            0,
+            "two first-time item batches cannot share the final sequence slot",
         );
     }
 

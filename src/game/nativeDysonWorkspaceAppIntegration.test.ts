@@ -10,6 +10,7 @@ describe("native Dyson workspace App integration", () => {
     expect(app).toMatch(/nativeDysonWorkspaceIdentity = useMemo\(\(\) => nativeStellarProjectionIdentity[\s\S]*?selectedSystemId: nativeDysonEffectiveSystemId/);
     expect(app).toMatch(/createNativePlayerAuthorityDysonWorkspaceSource\(desktopBridge, nativeDysonWorkspaceIdentity\)/);
     expect(app).toMatch(/selectNativeDysonWorkspaceFrame\(nativeDysonWorkspaceSnapshot, nativeDysonWorkspaceIdentity\)/);
+    expect(app).toMatch(/<NativeDysonPlannerWorkspace[\s\S]*?latestIdentity=\{nativeDysonWorkspaceIdentity\}/);
   });
 
   it("refreshes only while the native authority workspace is open and otherwise clears old pages", () => {

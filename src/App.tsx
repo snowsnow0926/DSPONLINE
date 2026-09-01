@@ -22099,6 +22099,7 @@ export function FactoryGame({ initialLoad, onReturnToMenu, onOpenReleaseNotes, o
         {dysonPlannerOpen ? nativePlayerAuthorityBoundFrame ? (
           <NativeDysonPlannerWorkspace
             frame={nativeDysonWorkspaceFrame}
+            latestIdentity={nativeDysonWorkspaceIdentity}
             status={nativeDysonWorkspaceReadStatus}
             selectedSystemId={nativeDysonEffectiveSystemId}
             pending={nativePlayerAuthorityCommandPending}

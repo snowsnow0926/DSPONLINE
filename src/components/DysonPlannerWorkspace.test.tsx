@@ -229,6 +229,18 @@ const FRAME: NativeDysonWorkspaceFrame = Object.freeze({
   shellsByLayerId: new Map([[layer.layerId, shells]]),
 });
 
+function frameAtRevision(revision: number): NativeDysonWorkspaceFrame {
+  return {
+    ...FRAME,
+    revision,
+    projection: {
+      ...FRAME.projection,
+      revision,
+      request: { ...FRAME.projection.request, expectedRevision: revision },
+    },
+  };
+}
+
 function frameWithAlternativeTargets(): NativeDysonWorkspaceFrame {
   const alternateLayer = {
     ...layer,
@@ -432,6 +444,54 @@ describe("NativeDysonPlannerWorkspace", () => {
     expect(host.textContent).toContain("正在同步原生权威戴森球投影");
     expect(host.textContent).not.toContain("原生赫利俄斯");
     expect(host.querySelector("[data-native-dyson-node-id]")).toBeNull();
+  });
+
+  it("keeps a verified same-scope frame mounted during revision refresh and locks every authority command", () => {
+    const props = renderNative();
+    const systemButton = host.querySelector<HTMLButtonElement>("[data-native-dyson-system-id='helios']")!;
+    act(() => systemButton.focus());
+
+    const revision18 = {
+      sessionId: "native-dyson-session",
+      revision: 18,
+      registryFingerprint: "builtin:test",
+      selectedSystemId: "helios",
+    } as const;
+    renderNative({ ...props, frame: null, status: "loading", latestIdentity: revision18 });
+
+    expect(host.querySelector<HTMLButtonElement>("[data-native-dyson-system-id='helios']")).toBe(systemButton);
+    expect(document.activeElement).toBe(systemButton);
+    expect(host.querySelector("[data-native-dyson-read-status='loading'][data-native-dyson-display-stale='true']")).not.toBeNull();
+    expect(host.textContent).toContain("正在读取 Rust revision 18");
+    expect(host.textContent).toContain("已验证的 revision 17；全部权威写入已锁定");
+    const authorityControls = host.querySelectorAll<HTMLButtonElement | HTMLInputElement>(
+      "[data-native-dyson-action^='launch-'], [data-native-dyson-action='select-layer'], [data-native-dyson-action='select-orbit'], [data-native-dyson-action^='orbit-']",
+    );
+    expect(authorityControls.length).toBeGreaterThan(6);
+    for (const control of authorityControls) expect(control.disabled).toBe(true);
+    act(() => host.querySelector<HTMLButtonElement>("[data-native-dyson-action='launch-enabled']")!.click());
+    expect(props.onLaunchEnabledChange).not.toHaveBeenCalled();
+
+    renderNative({ ...props, frame: frameAtRevision(18), status: "ready", latestIdentity: revision18 });
+    expect(host.querySelector<HTMLButtonElement>("[data-native-dyson-system-id='helios']")).toBe(systemButton);
+    expect(document.activeElement).toBe(systemButton);
+    expect(host.querySelector("[data-native-dyson-revision='18'][data-native-dyson-read-status='ready']")).not.toBeNull();
+    expect(host.querySelector<HTMLButtonElement>("[data-native-dyson-action='launch-enabled']")?.disabled).toBe(false);
+
+    renderNative({
+      ...props,
+      frame: null,
+      status: "loading",
+      selectedSystemId: "mod:system/Ω🚀",
+      latestIdentity: { ...revision18, revision: 19, selectedSystemId: "mod:system/Ω🚀" },
+    });
+    expect(host.textContent).not.toContain("原生主壳层");
+    expect(host.querySelector("[data-native-dyson-node-id]")).toBeNull();
+
+    renderNative({ ...props, frame: frameAtRevision(18), status: "ready", latestIdentity: revision18 });
+    renderNative({ ...props, frame: null, status: "unavailable", latestIdentity: revision18 });
+    expect(host.textContent).not.toContain("原生主壳层");
+    expect(host.textContent).toContain("不会读取或显示 JavaScript 存档中的旧戴森数据");
   });
 
   it.each(["empty", "unavailable"] as const)("fails %s closed without legacy Dyson data", (status) => {

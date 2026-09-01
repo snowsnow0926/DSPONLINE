@@ -8,7 +8,7 @@ import { QuantityValue } from "./QuantityValue";
 import { PowerValue } from "./PowerValue";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { formatQuantityCompact, formatQuantityExact } from "../game/quantityFormat";
-import type { NativeDysonWorkspaceFrame } from "../game/nativeDysonWorkspaceStore";
+import type { NativeDysonWorkspaceFrame, NativeDysonWorkspaceIdentity } from "../game/nativeDysonWorkspaceStore";
 
 const VIEW_CENTER = 300;
 
@@ -412,7 +412,8 @@ function NativeDysonUnavailable({
  * stays unavailable here.
  */
 export function NativeDysonPlannerWorkspace({
-  frame,
+  frame: candidateFrame,
+  latestIdentity,
   status,
   selectedSystemId,
   pending,
@@ -426,6 +427,7 @@ export function NativeDysonPlannerWorkspace({
   onClose,
 }: {
   frame: NativeDysonWorkspaceFrame | null;
+  latestIdentity?: NativeDysonWorkspaceIdentity | null;
   status: NativeDysonWorkspaceReadStatus;
   selectedSystemId: string | null;
   pending: boolean;
@@ -438,11 +440,59 @@ export function NativeDysonPlannerWorkspace({
   onLaunchEnabledChange: (enabled: boolean) => void;
   onClose: () => void;
 }) {
-  if (!nativeDysonFrameIsComplete(frame, status, selectedSystemId)) {
+  const exactFrame = nativeDysonFrameIsComplete(candidateFrame, status, selectedSystemId)
+    ? candidateFrame
+    : null;
+  const resolvedLatestIdentity = latestIdentity === undefined
+    ? exactFrame ? {
+      sessionId: exactFrame.sessionId,
+      revision: exactFrame.revision,
+      registryFingerprint: exactFrame.registryFingerprint,
+      selectedSystemId: exactFrame.selectedSystemId,
+    } : null
+    : latestIdentity;
+  const [cachedFrame, setCachedFrame] = useState<NativeDysonWorkspaceFrame | null>(exactFrame);
+  const cachedFrameMatchesScope = Boolean(status === "loading" && cachedFrame && resolvedLatestIdentity &&
+    cachedFrame.sessionId === resolvedLatestIdentity.sessionId &&
+    cachedFrame.registryFingerprint === resolvedLatestIdentity.registryFingerprint &&
+    cachedFrame.selectedSystemId === resolvedLatestIdentity.selectedSystemId &&
+    cachedFrame.selectedSystemId === selectedSystemId &&
+    cachedFrame.revision <= resolvedLatestIdentity.revision &&
+    nativeDysonFrameIsComplete(cachedFrame, "ready", selectedSystemId));
+  const displayFrame = exactFrame ?? (cachedFrameMatchesScope ? cachedFrame : null);
+
+  useEffect(() => {
+    if (exactFrame) {
+      setCachedFrame(exactFrame);
+      return;
+    }
+    if (status !== "loading" || !resolvedLatestIdentity) setCachedFrame(null);
+    else setCachedFrame((current) => current &&
+      current.sessionId === resolvedLatestIdentity.sessionId &&
+      current.registryFingerprint === resolvedLatestIdentity.registryFingerprint &&
+      current.selectedSystemId === resolvedLatestIdentity.selectedSystemId &&
+      current.selectedSystemId === selectedSystemId &&
+      current.revision <= resolvedLatestIdentity.revision &&
+      nativeDysonFrameIsComplete(current, "ready", selectedSystemId)
+      ? current
+      : null);
+  }, [
+    exactFrame,
+    resolvedLatestIdentity?.registryFingerprint,
+    resolvedLatestIdentity?.revision,
+    resolvedLatestIdentity?.selectedSystemId,
+    resolvedLatestIdentity?.sessionId,
+    selectedSystemId,
+    status,
+  ]);
+
+  if (!displayFrame) {
     const unavailableStatus = status === "loading" || status === "empty" ? status : "unavailable";
     return <NativeDysonUnavailable status={unavailableStatus} onClose={onClose} />;
   }
 
+  const frame = displayFrame;
+  const commandPending = pending || exactFrame === null;
   const { projection } = frame;
   const selectedSystem = frame.systems.find((system) => system.systemId === selectedSystemId)!;
   const selectedSystemName = nativeDysonLabel(selectedSystem.displayName, selectedSystem.systemId);
@@ -473,8 +523,9 @@ export function NativeDysonPlannerWorkspace({
       className="dyson-planner-workspace"
       ariaLabel="原生戴森球规划"
       onRequestClose={onClose}
-      data-native-dyson-read-status="ready"
+      data-native-dyson-read-status={exactFrame ? "ready" : "loading"}
       data-native-dyson-revision={frame.revision}
+      data-native-dyson-display-stale={exactFrame ? undefined : "true"}
     >
       <header className="dyson-planner-header">
         <div className="dyson-planner-title"><i><Orbit size={20} /></i><div><span>Rust 玩家权威 · revision {frame.revision}</span><strong>戴森球规划</strong></div></div>
@@ -490,6 +541,12 @@ export function NativeDysonPlannerWorkspace({
           <button type="button" onClick={onClose} title="关闭戴森球规划" aria-label="关闭戴森球规划"><X size={18} /><span>关闭</span></button>
         </div>
       </header>
+
+      {!exactFrame && resolvedLatestIdentity ? <div className="dyson-planner-lock" role="status">
+        <Orbit size={16} />
+        <strong>正在读取 Rust revision {resolvedLatestIdentity.revision}</strong>
+        <span>继续显示已验证的 revision {frame.revision}；全部权威写入已锁定。</span>
+      </div> : null}
 
       <div className="dyson-planner-layout">
         <aside className="dyson-plan-sidebar">
@@ -522,7 +579,7 @@ export function NativeDysonPlannerWorkspace({
                 className={activeLayer?.layerId === layer.layerId ? "active" : ""}
                 type="button"
                 key={layer.layerId}
-                disabled={pending || activeLayer?.layerId === layer.layerId}
+                disabled={commandPending || activeLayer?.layerId === layer.layerId}
                 onClick={() => onSelectLayer(layer.layerId)}
                 data-native-dyson-action="select-layer"
                 title={`切换到 ${nativeDysonLabel(layer.name, layer.layerId)}（${layer.layerId}）`}
@@ -545,7 +602,7 @@ export function NativeDysonPlannerWorkspace({
                 className={activeOrbit?.orbitId === orbit.orbitId ? "active" : ""}
                 type="button"
                 key={orbit.orbitId}
-                disabled={pending || activeOrbit?.orbitId === orbit.orbitId}
+                disabled={commandPending || activeOrbit?.orbitId === orbit.orbitId}
                 onClick={() => onSelectOrbit(orbit.orbitId)}
                 data-native-dyson-action="select-orbit"
                 title={`切换到 ${nativeDysonLabel(orbit.name, orbit.orbitId)}（${orbit.orbitId}）`}
@@ -672,20 +729,20 @@ export function NativeDysonPlannerWorkspace({
           {activeOrbit ? (
             <section className="dyson-swarm-orbit-inspector" aria-label="原生太阳帆轨道参数">
               <header><i><Sun size={15} /></i><span><small>太阳帆轨道 · Rust 权威</small><strong>{nativeDysonLabel(activeOrbit.name, activeOrbit.orbitId)}</strong></span><em><QuantityValue value={activeOrbit.sailsInOrbit} unit="帆" /></em></header>
-              <label className="dyson-orbit-control"><span>轨道半径 <strong>{activeOrbit.radius.toLocaleString("zh-CN")} m</strong></span><input type="range" min={5000} max={50000} step={500} value={activeOrbit.radius} disabled={pending} onChange={(event) => onOrbitChange(activeOrbit.orbitId, { radius: Number(event.target.value) })} data-native-dyson-action="orbit-radius" aria-label="调整原生太阳帆轨道半径" /></label>
-              <label className="dyson-orbit-control"><span>轨道倾角 <strong>{activeOrbit.inclination}°</strong></span><input type="range" min={-90} max={90} step={1} value={activeOrbit.inclination} disabled={pending} onChange={(event) => onOrbitChange(activeOrbit.orbitId, { inclination: Number(event.target.value) })} data-native-dyson-action="orbit-inclination" aria-label="调整原生太阳帆轨道倾角" /></label>
-              <label className="dyson-orbit-control"><span>升交点经度 <strong>{activeOrbit.longitude}°</strong></span><input type="range" min={0} max={359} step={1} value={activeOrbit.longitude} disabled={pending} onChange={(event) => onOrbitChange(activeOrbit.orbitId, { longitude: Number(event.target.value) })} data-native-dyson-action="orbit-longitude" aria-label="调整原生太阳帆轨道升交点经度" /></label>
+              <label className="dyson-orbit-control"><span>轨道半径 <strong>{activeOrbit.radius.toLocaleString("zh-CN")} m</strong></span><input type="range" min={5000} max={50000} step={500} value={activeOrbit.radius} disabled={commandPending} onChange={(event) => onOrbitChange(activeOrbit.orbitId, { radius: Number(event.target.value) })} data-native-dyson-action="orbit-radius" aria-label="调整原生太阳帆轨道半径" /></label>
+              <label className="dyson-orbit-control"><span>轨道倾角 <strong>{activeOrbit.inclination}°</strong></span><input type="range" min={-90} max={90} step={1} value={activeOrbit.inclination} disabled={commandPending} onChange={(event) => onOrbitChange(activeOrbit.orbitId, { inclination: Number(event.target.value) })} data-native-dyson-action="orbit-inclination" aria-label="调整原生太阳帆轨道倾角" /></label>
+              <label className="dyson-orbit-control"><span>升交点经度 <strong>{activeOrbit.longitude}°</strong></span><input type="range" min={0} max={359} step={1} value={activeOrbit.longitude} disabled={commandPending} onChange={(event) => onOrbitChange(activeOrbit.orbitId, { longitude: Number(event.target.value) })} data-native-dyson-action="orbit-longitude" aria-label="调整原生太阳帆轨道升交点经度" /></label>
               <div className="dyson-swarm-orbit-stats"><span>发射 <QuantityValue value={activeOrbit.totalLaunched} /></span><span>衰减 <QuantityValue value={activeOrbit.totalExpired} /></span><span><PowerValue valueKw={activeOrbit.generationKw} /></span></div>
               <button type="button" disabled data-native-dyson-action="remove-orbit"><Trash2 size={13} />删除轨道</button>
             </section>
           ) : null}
           <section className="dyson-launch-console" aria-label="原生戴森发射调度">
-            <header><span><RadioTower size={14} />发射调度 · Rust 权威</span><button type="button" className={selectedSystem.engineering.launchEnabled ? "active" : ""} disabled={pending} onClick={() => onLaunchEnabledChange(!selectedSystem.engineering.launchEnabled)} data-native-dyson-action="launch-enabled" aria-label="切换原生戴森发射开关">{selectedSystem.engineering.launchEnabled ? <Pause size={13} /> : <Play size={13} />}</button></header>
+            <header><span><RadioTower size={14} />发射调度 · Rust 权威</span><button type="button" className={selectedSystem.engineering.launchEnabled ? "active" : ""} disabled={commandPending} onClick={() => onLaunchEnabledChange(!selectedSystem.engineering.launchEnabled)} data-native-dyson-action="launch-enabled" aria-label="切换原生戴森发射开关">{selectedSystem.engineering.launchEnabled ? <Pause size={13} /> : <Play size={13} />}</button></header>
             <div className="dyson-launch-mode" role="group" aria-label="原生发射优先级">
-              {(["balanced", "swarm", "sphere"] as const).map((mode) => <button type="button" className={selectedSystem.engineering.launchMode === mode ? "active" : ""} disabled={pending || selectedSystem.engineering.launchMode === mode} onClick={() => onLaunchModeChange(mode)} data-native-dyson-action={`launch-mode-${mode}`} key={mode}>{launchModeLabel[mode]}</button>)}
+              {(["balanced", "swarm", "sphere"] as const).map((mode) => <button type="button" className={selectedSystem.engineering.launchMode === mode ? "active" : ""} disabled={commandPending || selectedSystem.engineering.launchMode === mode} onClick={() => onLaunchModeChange(mode)} data-native-dyson-action={`launch-mode-${mode}`} key={mode}>{launchModeLabel[mode]}</button>)}
             </div>
             <div className="dyson-launch-throttle" role="group" aria-label="原生发射节流">
-              {([0.25, 0.5, 0.75, 1] as const).map((throttle) => <button type="button" className={selectedSystem.engineering.launchThrottle === throttle ? "active" : ""} disabled={pending || selectedSystem.engineering.launchThrottle === throttle} onClick={() => onLaunchThrottleChange(throttle)} data-native-dyson-action={`launch-throttle-${throttle}`} key={throttle}>{Math.round(throttle * 100)}%</button>)}
+              {([0.25, 0.5, 0.75, 1] as const).map((throttle) => <button type="button" className={selectedSystem.engineering.launchThrottle === throttle ? "active" : ""} disabled={commandPending || selectedSystem.engineering.launchThrottle === throttle} onClick={() => onLaunchThrottleChange(throttle)} data-native-dyson-action={`launch-throttle-${throttle}`} key={throttle}>{Math.round(throttle * 100)}%</button>)}
             </div>
             <dl className="metric-ledger dyson-engineering-ledger">
               <div><dt>太阳帆队列</dt><dd><QuantityValue value={selectedSystem.engineering.queuedSails} /> · {selectedSystem.engineering.sailLaunchesPerMinute.toLocaleString("zh-CN")}/min</dd></div>

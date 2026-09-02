@@ -2050,11 +2050,14 @@ function normalizeFactoryStationConfiguration(value, label, entity) {
 }
 
 function normalizeFactorySelectedEntity(value, label) {
-  const source = exactObject(value, [
+  const source = objectWithKeys(value, [
     "entityId", "planetId", "kind", "position", "interactionLocked", "buildingId",
     "resourceId", "recipeId", "storedItemId", "fuelItemId", "machineCount", "minerCount",
     "progress", "utilization", "productionRate", "powerFactor", "inputItems", "outputItems",
     "stationConfiguration",
+  ], [
+    "buildingName", "upgradeTargetId", "sprayCoaterInstalled", "quantumMode",
+    "quantumTransitionActive", "stationTier", "orbitalYieldItemIds",
   ], label);
   const result = {
     entityId: opaqueId(source.entityId, `${label}.entityId`),
@@ -2081,6 +2084,39 @@ function normalizeFactorySelectedEntity(value, label) {
     `${label}.stationConfiguration`,
     result,
   );
+  if (source.buildingName !== undefined) {
+    result.buildingName = source.buildingName === null
+      ? null
+      : boundedReadModelText(source.buildingName, `${label}.buildingName`, 256, 1);
+  }
+  if (source.upgradeTargetId !== undefined) {
+    result.upgradeTargetId = nullableReadModelId(source.upgradeTargetId, `${label}.upgradeTargetId`);
+  }
+  if (source.sprayCoaterInstalled !== undefined) {
+    result.sprayCoaterInstalled = boolean(source.sprayCoaterInstalled, `${label}.sprayCoaterInstalled`);
+  }
+  if (source.quantumMode !== undefined) {
+    result.quantumMode = oneOf(source.quantumMode, ["legacy", "transitioning", "quantum"], `${label}.quantumMode`);
+  }
+  if (source.quantumTransitionActive !== undefined) {
+    result.quantumTransitionActive = boolean(source.quantumTransitionActive, `${label}.quantumTransitionActive`);
+  }
+  if (source.stationTier !== undefined) {
+    result.stationTier = finiteNumber(source.stationTier, `${label}.stationTier`);
+  }
+  if (source.orbitalYieldItemIds !== undefined) {
+    if (!Array.isArray(source.orbitalYieldItemIds) || source.orbitalYieldItemIds.length > 256) {
+      throw protocolError(`${label}.orbitalYieldItemIds`);
+    }
+    result.orbitalYieldItemIds = source.orbitalYieldItemIds.map(
+      (itemId, index) => opaqueId(itemId, `${label}.orbitalYieldItemIds[${index}]`),
+    );
+    for (let index = 1; index < result.orbitalYieldItemIds.length; index += 1) {
+      if (result.orbitalYieldItemIds[index - 1].localeCompare(result.orbitalYieldItemIds[index]) >= 0) {
+        throw protocolError(`${label}.orbitalYieldItemIds order`);
+      }
+    }
+  }
   return result;
 }
 
@@ -2446,10 +2482,148 @@ function normalizeFactoryConstruction(value, activePlanetId) {
   };
 }
 
-function normalizeCoreFactoryReadModelProjection(value, context) {
+function normalizeNativeWorkspaceActionReadModel(value, activePlanetId) {
   const source = exactObject(value, [
+    "schema", "activePlanetId", "regions", "bookmarks", "handcraftQueue", "handcraftRecipes",
+  ], "native workspace actions");
+  if (source.schema !== "workspace-actions-v1" ||
+      opaqueId(source.activePlanetId, "native workspace active planet") !== activePlanetId) {
+    throw protocolError("native workspace identity");
+  }
+
+  const requireUnique = (rows, key, label) => {
+    const ids = new Set();
+    for (const row of rows) {
+      if (ids.has(row[key])) throw protocolError(`${label} duplicate ID`);
+      ids.add(row[key]);
+    }
+  };
+  const finiteWorkspaceNumber = (entry, label) => finiteNumber(entry, label, -Number.MAX_VALUE);
+  const color = (entry, label) => {
+    const normalized = boundedReadModelText(entry, label, 7, 7);
+    if (!/^#[0-9a-f]{6}$/i.test(normalized)) throw protocolError(label);
+    return normalized;
+  };
+
+  const regions = normalizeReadModelRows(source.regions, "native workspace regions", 48, (row, label) => {
+    const entry = exactObject(row, [
+      "id", "name", "planetId", "x", "y", "width", "height", "fillColor", "borderColor",
+    ], label);
+    return {
+      id: opaqueId(entry.id, `${label}.id`),
+      name: boundedReadModelText(entry.name, `${label}.name`, 256, 1),
+      planetId: opaqueId(entry.planetId, `${label}.planetId`),
+      x: finiteWorkspaceNumber(entry.x, `${label}.x`),
+      y: finiteWorkspaceNumber(entry.y, `${label}.y`),
+      width: finiteNumber(entry.width, `${label}.width`, 40),
+      height: finiteNumber(entry.height, `${label}.height`, 40),
+      fillColor: color(entry.fillColor, `${label}.fillColor`),
+      borderColor: color(entry.borderColor, `${label}.borderColor`),
+    };
+  });
+  if (regions.truncated) throw protocolError("native workspace regions truncation");
+  requireUnique(regions.rows, "id", "native workspace regions");
+
+  const bookmarks = normalizeReadModelRows(source.bookmarks, "native workspace bookmarks", 24, (row, label) => {
+    const entry = exactObject(row, ["id", "name", "planetId", "viewport", "createdAtSeconds"], label);
+    const viewport = exactObject(entry.viewport, ["x", "y", "zoom"], `${label}.viewport`);
+    const zoom = finiteNumber(viewport.zoom, `${label}.viewport.zoom`, 0.1);
+    if (zoom > 2.5) throw protocolError(`${label}.viewport.zoom`);
+    return {
+      id: opaqueId(entry.id, `${label}.id`),
+      name: boundedReadModelText(entry.name, `${label}.name`, 256, 1),
+      planetId: opaqueId(entry.planetId, `${label}.planetId`),
+      viewport: {
+        x: finiteWorkspaceNumber(viewport.x, `${label}.viewport.x`),
+        y: finiteWorkspaceNumber(viewport.y, `${label}.viewport.y`),
+        zoom,
+      },
+      createdAtSeconds: finiteNumber(entry.createdAtSeconds, `${label}.createdAtSeconds`),
+    };
+  });
+  if (bookmarks.truncated) throw protocolError("native workspace bookmarks truncation");
+  requireUnique(bookmarks.rows, "id", "native workspace bookmarks");
+
+  const handcraftQueue = normalizeReadModelRows(
+    source.handcraftQueue,
+    "native workspace handcraft queue",
+    20,
+    (row, label) => {
+      const entry = exactObject(row, [
+        "entryId", "recipeId", "recipeName", "outputItemId", "outputItemName", "planetId",
+        "batchesTotal", "batchesRemaining", "progress", "queuedAt",
+      ], label);
+      const batchesTotal = safeInteger(entry.batchesTotal, `${label}.batchesTotal`, 1);
+      const batchesRemaining = safeInteger(entry.batchesRemaining, `${label}.batchesRemaining`);
+      const progress = finiteNumber(entry.progress, `${label}.progress`);
+      if (batchesRemaining > batchesTotal || progress > 1) throw protocolError(`${label} progress binding`);
+      return {
+        entryId: opaqueId(entry.entryId, `${label}.entryId`),
+        recipeId: opaqueId(entry.recipeId, `${label}.recipeId`),
+        recipeName: boundedReadModelText(entry.recipeName, `${label}.recipeName`, 256, 1),
+        outputItemId: opaqueId(entry.outputItemId, `${label}.outputItemId`),
+        outputItemName: boundedReadModelText(entry.outputItemName, `${label}.outputItemName`, 256, 1),
+        planetId: opaqueId(entry.planetId, `${label}.planetId`),
+        batchesTotal,
+        batchesRemaining,
+        progress,
+        queuedAt: finiteNumber(entry.queuedAt, `${label}.queuedAt`),
+      };
+    },
+  );
+  if (handcraftQueue.truncated) throw protocolError("native workspace handcraft queue truncation");
+  requireUnique(handcraftQueue.rows, "entryId", "native workspace handcraft queue");
+
+  const recipeItems = (value, label) => {
+    if (!Array.isArray(value) || value.length < 1 || value.length > 256) throw protocolError(label);
+    return value.map((row, index) => {
+      const rowLabel = `${label}[${index}]`;
+      const entry = exactObject(row, ["itemId", "name", "amount"], rowLabel);
+      return {
+        itemId: opaqueId(entry.itemId, `${rowLabel}.itemId`),
+        name: boundedReadModelText(entry.name, `${rowLabel}.name`, 256, 1),
+        amount: finiteNumber(entry.amount, `${rowLabel}.amount`, Number.EPSILON),
+      };
+    });
+  };
+  const handcraftRecipes = normalizeReadModelRows(
+    source.handcraftRecipes,
+    "native workspace handcraft recipes",
+    256,
+    (row, label) => {
+      const entry = exactObject(row, [
+        "recipeId", "name", "buildingId", "buildingName", "duration", "unlocked",
+        "requiredTechId", "inputs", "outputs",
+      ], label);
+      return {
+        recipeId: opaqueId(entry.recipeId, `${label}.recipeId`),
+        name: boundedReadModelText(entry.name, `${label}.name`, 256, 1),
+        buildingId: opaqueId(entry.buildingId, `${label}.buildingId`),
+        buildingName: boundedReadModelText(entry.buildingName, `${label}.buildingName`, 256, 1),
+        duration: finiteNumber(entry.duration, `${label}.duration`, Number.EPSILON),
+        unlocked: boolean(entry.unlocked, `${label}.unlocked`),
+        requiredTechId: nullableReadModelId(entry.requiredTechId, `${label}.requiredTechId`),
+        inputs: recipeItems(entry.inputs, `${label}.inputs`),
+        outputs: recipeItems(entry.outputs, `${label}.outputs`),
+      };
+    },
+  );
+  requireUnique(handcraftRecipes.rows, "recipeId", "native workspace handcraft recipes");
+
+  return {
+    schema: "workspace-actions-v1",
+    activePlanetId,
+    regions,
+    bookmarks,
+    handcraftQueue,
+    handcraftRecipes,
+  };
+}
+
+function normalizeCoreFactoryReadModelProjection(value, context) {
+  const source = objectWithKeys(value, [
     "schemaVersion", "projectionType", "revision", "shell", "planetNavigation", "selection", "construction",
-  ], "native factory read-model projection");
+  ], ["workspace"], "native factory read-model projection");
   if (source.schemaVersion !== 1 || source.projectionType !== "factory-read-model-v1") {
     throw protocolError("native factory read-model identity");
   }
@@ -2463,6 +2637,9 @@ function normalizeCoreFactoryReadModelProjection(value, context) {
   const planetNavigation = normalizeFactoryPlanetNavigation(source.planetNavigation, shell.activePlanetId);
   const selection = normalizeFactorySelection(source.selection, shell.activePlanetId, projectionContext);
   const construction = normalizeFactoryConstruction(source.construction, shell.activePlanetId);
+  const workspace = source.workspace === undefined
+    ? undefined
+    : normalizeNativeWorkspaceActionReadModel(source.workspace, shell.activePlanetId);
   if (construction.queue.totalCount !== shell.constructionQueueCount) {
     throw protocolError("native factory construction queue binding");
   }
@@ -2484,6 +2661,7 @@ function normalizeCoreFactoryReadModelProjection(value, context) {
     planetNavigation,
     selection,
     construction,
+    ...(workspace === undefined ? {} : { workspace }),
   };
 }
 

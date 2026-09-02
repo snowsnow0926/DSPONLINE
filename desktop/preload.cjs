@@ -785,7 +785,10 @@ contextBridge.exposeInMainWorld("dspDesktop", {
   prepareNativeOfflineStartup,
   getRuntimeDiagnostics: () => ipcRenderer.invoke("desktop:runtime-diagnostics"),
   getNativeProjectionSubscriptionDiagnostics: () =>
-    ipcRenderer.invoke("desktop:native-projection-subscription-diagnostics"),
+    invokeNative("desktop:native-projection-subscription-diagnostics", {
+      fallbackCode: "NATIVE_CORE_PROJECTION_FAILED",
+      message: "无法读取原生投影订阅诊断",
+    }),
   getNativePerformancePolicy: () => invokeNative("desktop:native-performance-policy", { fallbackCode: "NATIVE_PERFORMANCE_POLICY_READ_FAILED", message: "无法读取 Windows 原生性能策略" }),
   setNativePerformancePolicy: (request) => invokeNative("desktop:set-native-performance-policy", { fallbackCode: "NATIVE_PERFORMANCE_POLICY_WRITE_FAILED", message: "无法保存 Windows 原生性能策略" }, request),
   beginNativeSave: (request) => invokeNative("desktop:native-save-begin", { fallbackCode: "NATIVE_SAVE_BEGIN_FAILED", message: "原生存档事务启动失败，请重试" }, request),

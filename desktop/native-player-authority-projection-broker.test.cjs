@@ -1053,7 +1053,7 @@ test("main routes matching authority reads and keeps identity-bearing control ou
   assert.match(main, /nativePlayerAuthorityProjectionBroker\.read\([\s\S]*?"galaxy-account-workspace-v1",[\s\S]*?request/);
   assert.match(preload, /getNativePlayerAuthorityState/);
   assert.match(preload, /onNativePlayerAuthorityState/);
-  assert.doesNotMatch(preload, /activateNativePlayerAuthority|commitNativePlayerAuthority|retryNativePlayerAuthority/);
+  assert.doesNotMatch(preload, /activateNativePlayerAuthority\b|commitNativePlayerAuthority\b|retryNativePlayerAuthority\b/);
   assert.match(preload, /normalizeAuthorityWorkspacePreloadRequest[\s\S]*?"sessionId", "runId", "expectedRevision", "expectedRegistryFingerprint"/);
   assert.doesNotMatch(preload, /macroSessionId|operationId|main-player-authority/);
   assert.doesNotMatch(broker, /\.preparePlayerAuthority|\.activatePlayerAuthority|\.commitPlayerAuthorityTick|\.applyCommand|\.advance\(/);

@@ -1415,6 +1415,77 @@ test("factory read model is strictly bounded and revision-bound before renderer 
   assert.deepEqual(normalized.shell.timeWarp, projection.shell.timeWarp);
   assert.equal(normalized.selection.entityRows.rows[0].inputItems.rows[0].itemId, "MOD-物品/Ω");
 
+  const workspaceRows = (entries, totalCount = entries.length) => ({
+    rows: entries,
+    totalCount,
+    truncated: totalCount > entries.length,
+  });
+  const currentProjection = structuredClone(projection);
+  Object.assign(currentProjection.selection.entityRows.rows[0], {
+    buildingName: "MOD 仓库 Ω",
+    upgradeTargetId: null,
+    sprayCoaterInstalled: false,
+    quantumMode: "legacy",
+    quantumTransitionActive: false,
+    stationTier: 0,
+    orbitalYieldItemIds: ["deuterium", "hydrogen"],
+  });
+  currentProjection.workspace = {
+    schema: "workspace-actions-v1",
+    activePlanetId: "MOD-星球",
+    regions: workspaceRows([{
+      id: "region-1",
+      name: "主工厂",
+      planetId: "MOD-星球",
+      x: -100,
+      y: 50,
+      width: 400,
+      height: 300,
+      fillColor: "#102030",
+      borderColor: "#abcdef",
+    }]),
+    bookmarks: workspaceRows([{
+      id: "bookmark-1",
+      name: "总线视角",
+      planetId: "MOD-星球",
+      viewport: { x: -20, y: 30, zoom: 1.25 },
+      createdAtSeconds: 120,
+    }]),
+    handcraftQueue: workspaceRows([{
+      entryId: "handcraft-1",
+      recipeId: "iron_ingot",
+      recipeName: "铁块",
+      outputItemId: "iron_ingot",
+      outputItemName: "铁块",
+      planetId: "MOD-星球",
+      batchesTotal: 10,
+      batchesRemaining: 4,
+      progress: 0.5,
+      queuedAt: 100,
+    }]),
+    handcraftRecipes: workspaceRows([{
+      recipeId: "iron_ingot",
+      name: "铁块",
+      buildingId: "arc_smelter",
+      buildingName: "电弧熔炉",
+      duration: 1,
+      unlocked: true,
+      requiredTechId: null,
+      inputs: [{ itemId: "iron_ore", name: "铁矿石", amount: 1 }],
+      outputs: [{ itemId: "iron_ingot", name: "铁块", amount: 1 }],
+    }]),
+  };
+  const normalizedCurrent = normalizeRendererNativeResult(
+    "coreFactoryReadModelProjection",
+    currentProjection,
+    context,
+  );
+  assert.deepEqual(normalizedCurrent.workspace, currentProjection.workspace);
+  assert.deepEqual(
+    normalizedCurrent.selection.entityRows.rows[0].orbitalYieldItemIds,
+    ["deuterium", "hydrogen"],
+  );
+
   const stationSlots = Array.from({ length: 5 }, (_, slotIndex) => ({
     slotIndex,
     itemId: slotIndex === 2 ? "iron_ore" : null,
@@ -1572,6 +1643,18 @@ test("factory read model is strictly bounded and revision-bound before renderer 
   rejects({ ...projection, shell: { ...projection.shell, timeWarp: { ...projection.shell.timeWarp, effectiveMultiplier: 4.5 } } });
   rejects({ ...projection, shell: { ...projection.shell, timeWarp: { ...projection.shell.timeWarp, allocatedPowerKw: 1e14 } } });
   rejects({ ...projection, shell: { ...projection.shell, path: SECRET_PATH } });
+  for (const mutate of [
+    (value) => { value.workspace.activePlanetId = "other"; },
+    (value) => { value.workspace.regions.rows[0].privatePath = SECRET_PATH; },
+    (value) => { value.workspace.bookmarks.rows[0].viewport.zoom = 3; },
+    (value) => { value.workspace.handcraftRecipes.rows[0].inputs = []; },
+    (value) => { value.selection.entityRows.rows[0].quantumMode = "forged"; },
+    (value) => { value.selection.entityRows.rows[0].orbitalYieldItemIds.reverse(); },
+  ]) {
+    const malformed = structuredClone(currentProjection);
+    mutate(malformed);
+    rejects(malformed);
+  }
   for (const mutate of [
     (workspace) => { workspace.registryFingerprint = "MOD/forged"; },
     (workspace) => { delete workspace.writeAvailable; },
@@ -1886,9 +1969,9 @@ test("Electron main uses the dedicated native renderer boundary", () => {
 
   const mainChannels = [...source.matchAll(/ipcMain\.handle\("(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  const preloadChannels = [...preload.matchAll(/invokeNative\("(desktop:(?:native|set-native)[^"]+)"/g)]
+  const preloadChannels = [...preload.matchAll(/invokeNative\(\s*"(desktop:(?:native|set-native)[^"]+)"/g)]
     .map((match) => match[1]);
-  assert.equal(mainChannels.length, 66);
+  assert.equal(mainChannels.length, 71);
   assert.ok(mainChannels.includes("desktop:native-core-reconcile-command"));
   assert.ok(preloadChannels.includes("desktop:native-core-reconcile-command"));
   assert.ok(mainChannels.includes("desktop:native-player-authority-set-paused"));

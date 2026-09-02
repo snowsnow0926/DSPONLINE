@@ -685,6 +685,34 @@ function addRocketConservationFixture(state: GameState, prefilledRockets = 1_000
   });
 }
 
+function addSolarSailConservationFixture(state: GameState, prefilledSails = 1_000): void {
+  addWindGeneration(state, 1_000_000_000_000_000);
+  if (!state.research.completedTechIds.includes("dyson_swarm")) {
+    state.research.completedTechIds.push("dyson_swarm");
+  }
+  state.dysonEngineering.launchEnabled = true;
+  state.dysonEngineering.launchMode = "swarm";
+  state.dysonEngineering.launchThrottle = 1;
+  state.entities.push({
+    id: "prefilled-sail-ejector",
+    kind: "machine",
+    planetId: "home",
+    position: { x: 300, y: 0 },
+    interactionLocked: false,
+    buildingId: "em_rail_ejector",
+    recipeId: "solar_sail_launch",
+    machineCount: 1_000,
+    minerCount: 0,
+    inputs: { solar_sail: prefilledSails },
+    outputs: {},
+    progress: 0,
+    routingCursor: 0,
+    utilization: 0,
+    productionRate: 0,
+    targetDysonOrbitId: "dyson_orbit_helios_1",
+  });
+}
+
 function addSecondRocketSystemFixture(state: GameState, prefilledRockets = 1_000_000): void {
   const wind = state.entities.find((entity) => entity.id.startsWith("pure-idle-wind-"));
   const producer = state.entities.find((entity) => entity.id === "slow-rocket-producer");
@@ -2069,6 +2097,34 @@ describe("pure idle macro session", () => {
     expect(launches).toBe(exactPrefixLaunches);
     expect(launches).toBeLessThanOrEqual(produced + initialRockets - endingRockets);
     expect(validatePureIdleTerminalMaterialConservation(source, finalized)).toBeNull();
+    expect(hashGameState(source)).toBe(sourceHash);
+  });
+
+  it("does not affine-extrapolate prefilled solar-sail launches in the generic pure-idle path", () => {
+    const source = pureIdleState();
+    source.settings.simulationSpeed = 4;
+    source.timeWarp.requestedMultiplier = 15;
+    addSolarSailConservationFixture(source);
+    const sourceHash = hashGameState(source);
+    const initialSails = source.entities.find((entity) => entity.id === "prefilled-sail-ejector")!
+      .inputs.solar_sail ?? 0;
+    const session = createPureIdleMacroSession(structuredClone(source), "stable");
+    const exactPrefixLaunches = session.calibrationCheckpoint!.candidate.dysonSwarm.totalLaunched -
+      source.dysonSwarm.totalLaunched;
+
+    advancePureIdleMacroSession(session, 60);
+    const launches = session.candidate.dysonSwarm.totalLaunched - source.dysonSwarm.totalLaunched;
+    const endingSails = session.candidate.entities.find((entity) => entity.id === "prefilled-sail-ejector")!
+      .inputs.solar_sail ?? 0;
+
+    expect(session.conservativeOnly).toBe(false);
+    expect(exactPrefixLaunches).toBeGreaterThan(0);
+    // The exact prefix may consume known stock; the unproven affine tail must
+    // not copy the sampled ejector result a second time.
+    expect(launches).toBe(exactPrefixLaunches);
+    expect(launches).toBeLessThanOrEqual(initialSails - endingSails);
+    expect(session.degradedReason).toBeUndefined();
+    expect(validatePureIdleTerminalMaterialConservation(source, session.candidate)).toBeNull();
     expect(hashGameState(source)).toBe(sourceHash);
   });
 
